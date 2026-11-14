@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-12 14:00'
+updated_date: '2026-11-14 21:13'
 labels:
   - bug
   - ci
@@ -34,3 +35,9 @@ Main CI run 43231642989 (26241e965, TASK-380's fix, which touches no script), jo
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-14, coordinator: again on main 3a01ee0ab (run 43627290622, test (clippy scripts)): test_host.Drivers.test_a_migration_restores_on_the_second_run_what_the_first_left.
+<!-- SECTION:NOTES:END -->

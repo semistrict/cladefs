@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-13 21:06'
+updated_date: '2026-11-14 21:13'
 labels:
   - testing
   - flaky
@@ -33,3 +34,9 @@ Seen 2026-11-13 in scripts/test.sh's workspace part on t3/395-integrated (the pe
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-14, coordinator: again on GitHub's macOS workspace job, main 3a01ee0ab (run 43627290622): store.rs commits_reopen_from_their_logs (1, false, 2) != (1, true, 2), failed on both tries. Keeps main's CI red with TASK-385's test_a_migration_restores_on_the_second_run_what_the_first_left (same run).
+<!-- SECTION:NOTES:END -->
