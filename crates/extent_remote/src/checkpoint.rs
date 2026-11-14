@@ -16,14 +16,19 @@ use storage_device::ExtentId;
 
 pub use extent_frame::table::BLOCK;
 
-/// The checkpoint of `state`: fxdax: in the clear, until its writers hold their branches' keys
-/// (TASK-411.3).
+/// The checkpoint of `state`, in the clear.
 pub fn encode(state: &State) -> Vec<u8> {
+    encode_under(state, None)
+}
+
+/// fxdax: the checkpoint of `state`, authenticated, not sealed, under the DEK `sealing` gives, if
+/// it gives one: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
+pub fn encode_under(state: &State, sealing: layout::Sealing<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter()).map(|(extent, location)| {
         ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
     });
-    table::encode(entries, layout::encode(&rest), None)
+    table::encode(entries, layout::encode(&rest), sealing)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -31,10 +36,17 @@ fn located(entry: Entry) -> (ExtentId, Location) {
     (ExtentId::new(branch, sequence), Location { key, offset, len })
 }
 
-/// The state a checkpoint holds: read by a reader holding no key, which reads none of a sealed
-/// one's (TASK-411.2).
+/// The state a checkpoint holds: read by a reader holding no key, which reads an authenticated
+/// one's, checking its CRCs alone, as the collector does (TASK-411.3).
 pub fn decode(bytes: &[u8]) -> Result<State, Error> {
-    let (footer, entries) = table::decode(bytes, &extent_frame::NoKeys)?;
+    decode_under(bytes, &extent_frame::NoKeys)
+}
+
+/// fxdax: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
+/// and MACs if they hold its key, and refused in the clear if they hold its branch sealed
+/// (TASK-411.3).
+pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
+    let (footer, entries) = table::decode(bytes, keys)?;
     let mut state: State = layout::decode(&footer.rest)?;
     state.extents.extend(entries.into_iter().map(located));
     Ok(state)

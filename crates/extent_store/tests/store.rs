@@ -62,7 +62,8 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
     let last = state.last_commit;
     let fenced = Fenced { recovered: last, last_commit: last, chain };
-    let opening = Opening { state, fenced: Some(fenced), cache: None };
+    let keys = extent_remote::keys::Ring::clear();
+    let opening = Opening { state, fenced: Some(fenced), cache: None, keys };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
@@ -1319,7 +1320,9 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.write(extent(1), 0, &data).unwrap();
     let before = extent_store::written();
     store.commit(None).unwrap();
-    let framed = extent_frame::framed(&data, &[], None);
+    // fxdax: its footer names it (TASK-411.3).
+    let footer = extent_remote::layout::encode(&extent(1));
+    let framed = extent_frame::framed(&data, &footer, None);
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1532,7 +1535,8 @@ fn compressible_large_extents_are_framed_in_copies() {
         store.write(extent(sequence), 0, data).unwrap();
         let before = extent_store::written();
         store.commit(None).unwrap();
-        let framed = extent_frame::framed(data, &[], None);
+        let footer = extent_remote::layout::encode(&extent(sequence));
+        let framed = extent_frame::framed(data, &footer, None);
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -2066,6 +2070,10 @@ impl Dir for Counting {
 
     fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
         self.dir.rename(from, to)
+    }
+
+    fn replace(&self, from: &str, to: &str) -> std::io::Result<()> {
+        self.dir.replace(from, to)
     }
 
     fn link(&self, from: &str, to: &str) -> std::io::Result<()> {

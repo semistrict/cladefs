@@ -22,6 +22,7 @@ use crate::timings::{self, Timing, durable, framing as framing_phase};
 use crate::wal::{log_header, log_salt, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
+use extent_remote::keys::Ring;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -243,6 +244,8 @@ pub(crate) struct Segments<F> {
     preparing: bool,
     /// fxdax: what the salts of the logs this opening of the branch makes are of ([`new_salt`]).
     lifetime: u64,
+    /// fxdax: the store's keys, which its segments are framed and read under (TASK-411.3).
+    keys: Arc<Ring>,
 }
 
 /// fxdax: how many spare logs a branch keeps ([`Segments::spare`]).
@@ -258,12 +261,12 @@ impl<F: File> Segments<F> {
     /// `tracked`, each with the bytes of extents' data it holds, whose files must be there; and
     /// another, open, `next`, past them, whose raw file and log are made, their entries durable.
     /// Its footer, and those after it, `chain` stamps. At most `open_files` of their files stay
-    /// open between reads.
+    /// open between reads. fxdax: framed and read under `keys`, the store's (TASK-411.3).
     pub fn open<D: Dir<File = F>>(
         dir: &D,
         (branch, tracked): (u64, BTreeMap<SegmentId, u64>),
         (epoch, next, chain): (u64, u64, Chain),
-        open_files: usize,
+        (open_files, keys): (usize, Arc<Ring>),
     ) -> Result<Self, Error> {
         let mut segments = BTreeMap::new();
         for (id, live) in tracked {
@@ -271,8 +274,8 @@ impl<F: File> Segments<F> {
             let path = segment_path(id);
             let file = dir.open(&path, true).with_context(|| format!("segment {path}"))?;
             // fxdax: its trailer and table, a block, not its footer (TASK-92.16).
-            let parts =
-                read_parts(&file)?.ok_or_else(|| anyhow!("{path} is not a whole framed file"))?;
+            let parts = read_parts(&file, &keys.of(branch))?
+                .ok_or_else(|| anyhow!("{path} is not a whole framed file"))?;
             let segment = Segment {
                 len: parts.frame.data_len,
                 size: parts.frame.size(),
@@ -320,6 +323,7 @@ impl<F: File> Segments<F> {
             prepared: None,
             preparing: false,
             lifetime,
+            keys,
         })
     }
 
@@ -749,7 +753,7 @@ impl<F: File> Segments<F> {
             self.closed_unsynced.push(raw.clone());
         }
         self.closed_since = true;
-        Unframed { number, raw, len, footer, quiet }
+        Unframed { number, raw, len, footer, quiet, keys: self.keys.clone() }
     }
 
     /// fxdax: the open segment, full, takes no more writes, which go to the next, opened in `dir`
@@ -1081,7 +1085,8 @@ impl<F: File> Segments<F> {
             return Ok(Source::Framed(framed));
         }
         let path = segment_path(number);
-        let framed = Arc::new(Framed::open(dir.open(&path, true)?, &path)?);
+        let keys = self.keys.of(number.branch);
+        let framed = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
         Ok(Source::Framed(self.files.insert(number, framed)))
     }
 
@@ -1211,6 +1216,9 @@ pub(crate) struct Unframed<F> {
     /// fxdax: whether no write was in progress in it as it closed, none to come: what framing it
     /// in place needs, which leaves its data where it is (TASK-310).
     quiet: bool,
+    /// fxdax: the store's keys, whose newest DEK of its branch it is sealed under, if any
+    /// (TASK-411.3).
+    keys: Arc<Ring>,
 }
 
 impl<F: File> Unframed<F> {
@@ -1247,7 +1255,14 @@ impl<F: File> Unframed<F> {
         let footer = self.footer.encode();
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
         let raw = (raw_path.as_str(), &self.raw);
-        let framed = frame_segment(dir, &path, raw, (self.len, self.quiet), &footer, &mut timing)?;
+        let framed = frame_segment(
+            dir,
+            &path,
+            raw,
+            (self.len, self.quiet),
+            (&footer, self.keys.sealing()),
+            &mut timing,
+        )?;
         timings::framed(self.number, timing.end());
         Ok(framed)
     }
@@ -1344,21 +1359,22 @@ pub(crate) const WRITTEN_BACK: usize = 1 << 20;
 /// ([`Dir::link`]), its data written once, as its guest wrote it (TASK-310). A segment's data was
 /// written twice, raw, which the host's disk wrote back as the guest wrote it, and framed: as much
 /// again as its guest wrote, the disk's other writers waiting behind it, on a disk VMs share. Or
-/// else in a file of its own, as before.
+/// else in a file of its own, as before. fxdax: sealed, if `sealing` gives a DEK, its branch's
+/// newest, never in place, as a sealed object's bytes are never its data (TASK-411.3).
 fn frame_segment<D: Dir>(
     dir: &D,
     path: &str,
     (raw_path, raw): (&str, &Arc<D::File>),
     (len, quiet): (u64, bool),
-    footer: &[u8],
+    (footer, sealing): (&[u8], extent_remote::layout::Sealing<'_>),
     timing: &mut Timing<4>,
 ) -> Result<Arc<Framed<D::File>>, Error> {
     let started = Instant::now();
     // fxdax: its parts read, each in a buffer kept for the framings after; checksummed and looked
     // at if it may be framed in place (TASK-336).
-    // fxdax: in the clear, until the store holds its branch's key (TASK-411.3); sealed, framed in
-    // a copy, never in place, as a sealed object's bytes are never its data (TASK-411.2).
-    let mut packer = extent_frame::Packer::new(None);
+    // fxdax: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
+    // data (TASK-411.2, TASK-411.3).
+    let mut packer = extent_frame::Packer::new(sealing);
     let in_place_maybe = quiet && len > 0 && packer.key().is_none();
     let parts = framing::read(&**raw, len, in_place_maybe)?;
     timing.took(framing_phase::READ);
@@ -1814,7 +1830,13 @@ mod tests {
     fn opened(dir: &MemDir, open_files: usize) -> Segments<MemFile> {
         create_branch_dirs(dir, BRANCH.id).unwrap();
         let chain = Chain::new(BRANCH, 0, 0, None, 0);
-        Segments::open(dir, (BRANCH.id, BTreeMap::new()), (0, 0, chain), open_files).unwrap()
+        Segments::open(
+            dir,
+            (BRANCH.id, BTreeMap::new()),
+            (0, 0, chain),
+            (open_files, Ring::clear()),
+        )
+        .unwrap()
     }
 
     /// `unframed`, framed and made durable, as a store's framings make it ([`make_durable`]).
@@ -1921,7 +1943,8 @@ mod tests {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         let chain = Chain::new(BRANCH, 3, 5, Some((4, 3)), 100);
-        let segments = Segments::open(&dir, (BRANCH.id, BTreeMap::new()), (0, 2, chain), 64);
+        let segments =
+            Segments::open(&dir, (BRANCH.id, BTreeMap::new()), (0, 2, chain), (64, Ring::clear()));
         let mut segments = segments.unwrap();
         assert_eq!(segments.open_segment(), segment(2));
         let close = |segments: &mut Segments<MemFile>, epoch| {

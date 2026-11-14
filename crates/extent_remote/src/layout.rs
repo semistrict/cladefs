@@ -33,8 +33,12 @@ pub use extent_frame::segment::{
 /// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`gc_lease`],
 /// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's lease
-/// were at the bucket's root.
-pub const FORMAT: u32 = 9;
+/// were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in a
+/// KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
+/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, sealed under their branch's DEK or
+/// in the clear, own extents' footers naming their extents, and moves' the object they are the
+/// moves of; nothing reads 9's.
+pub const FORMAT: u32 = 10;
 
 /// fxdax: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -604,9 +608,11 @@ impl Marked {
 }
 
 /// The footer of a compacted object's moves: where in the moves each extent the object held, live,
-/// now is.
+/// now is. fxdax: and the key of the object they are the moves of, which a reader checks against
+/// theirs: a whole moves copied to another's key is no moves of it (TASK-411.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Moves {
+    pub of: String,
     pub extents: Vec<(ExtentId, Location)>,
 }
 
@@ -620,27 +626,63 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
+/// How a writer seals what it frames: under its branch's DEK, the newest, and which it is, or in
+/// the clear ([`crate::keys::Ring::sealing`], TASK-411.3).
+pub type Sealing<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
+
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
 /// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. fxdax: in the
-/// clear, until its writers hold their branches' keys (TASK-411.3).
+/// clear: tests', and the collector's moves until it compacts sealed objects (TASK-411.6).
 pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer), None)
+    with_footer_under(data, footer, None)
+}
+
+/// fxdax: the bytes of an object of `data` and `footer`, as [`with_footer`], sealed as `sealing`
+/// says (TASK-411.3).
+pub fn with_footer_under<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
+    extent_frame::framed(data, &encode(footer), sealing)
+}
+
+/// fxdax: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
+/// copied to another key, sealed, is refused (TASK-411.3), sealed as `sealing` says.
+pub fn own_extent(extent: ExtentId, data: &[u8], sealing: Sealing<'_>) -> Vec<u8> {
+    with_footer_under(data, &extent, sealing)
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs: by a reader holding
 /// no key, which reads none of a sealed object's ([`crate::Error::NoKey`], TASK-411.2).
 pub fn data(bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
-    Ok(extent_frame::data(bytes, &extent_frame::NoKeys)?)
+    data_under(bytes, &extent_frame::NoKeys)
+}
+
+/// fxdax: the data of a whole object, as [`data`], by a reader holding `keys` (TASK-411.3).
+pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>, crate::Error> {
+    Ok(extent_frame::data(bytes, keys)?)
 }
 
 /// The footer of a whole object [`with_footer`] made, checked against its CRC.
 pub fn footer<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
-    decode(extent_frame::footer(bytes, &extent_frame::NoKeys)?)
+    footer_under(bytes, &extent_frame::NoKeys)
+}
+
+/// fxdax: the footer of a whole object, as [`footer`], by a reader holding `keys`: checked
+/// against its MAC too, if it holds the object's key, and refused as `extent_frame` refuses it
+/// (TASK-411.3).
+pub fn footer_under<T: DeserializeOwned>(
+    bytes: &[u8],
+    keys: &dyn extent_frame::Keys,
+) -> Result<T, crate::Error> {
+    decode(extent_frame::footer(bytes, keys)?)
 }
 
 impl Segment {
     pub fn encode(&self) -> Vec<u8> {
-        with_footer(&self.data, &self.footer)
+        self.encode_under(None)
+    }
+
+    /// fxdax: its object, sealed as `sealing` says (TASK-411.3).
+    pub fn encode_under(&self, sealing: Sealing<'_>) -> Vec<u8> {
+        with_footer_under(&self.data, &self.footer, sealing)
     }
 
     /// The footer of a segment's object.

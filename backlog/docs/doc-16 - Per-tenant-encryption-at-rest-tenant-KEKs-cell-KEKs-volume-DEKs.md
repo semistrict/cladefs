@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 22:02'
+updated_date: '2026-11-14 23:05'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. Nothing implemented. The user's decisions of that day are marked *(decided)*.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2) and TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) are implemented.
 
 ## Goals
 
@@ -69,7 +69,10 @@ GCM's authentication key. A salt per object makes every subkey new.
   subkey. A whole object copied to another key of its branch is caught by its footer where the
   footer names its place (segments: branch, number, epoch), and by TASK-411.3 for the others.
 - **Footers, tables, trailers, checkpoints, moves' maps, records, cell objects, leases:** in the
-  clear, as now, plus a MAC under a key derived from the DEK, which key-holding readers check (a
+  clear, as now, plus a MAC under a key derived from the DEK (*TASK-411.3*: a checkpoint is framed
+  `Seal::Authenticated`, kind 2: its parts, the table's entries, in the clear, each tagged with a
+  GMAC under the object's parts subkey, its footer and table MACed, so that the collector reads it
+  holding no key and a key-holding reader checks every byte), which key-holding readers check (a
   frame's footer and its table, which covers the trailer's seal and the footer's MAC, each have an
   HMAC-SHA256 under `dek.derive(salt, ["fxdax frame mac"])` in the trailer; restamping a footer
   needs the key and keeps the salt). The
@@ -148,3 +151,54 @@ dropped with its pool, never written out unwrapped.
 - **aws-lc-rs** *(decided)* for AES-256-GCM, AES-256-XTS (if it has XTS; `storage_xts` otherwise)
   and HKDF: already in the lock file, Apache-2.0 and ISC, AES-NI and ARMv8 AES.
 - **Real KMS backends later** *(decided)*: a trait and a local fake first.
+
+## What TASK-411.3 made
+
+- **Formats.** `layout::FORMAT` 10 (9 refused by name, no migration). A cell's object gains
+  `keks: Vec<Kek { generation, wrapped }>`, its KEK's generations wrapped by the tenant's KEK in
+  the KMS, oldest first; none: a cell in the clear. A record gains `deks: Vec<Dek { generation,
+  kek, wrapped }>`, each generation of the branch's DEK wrapped by the cell's KEK of generation
+  `kek`, with AES-KW under `HKDF(cell KEK, info = "fxdax dek wrap" || tenant || cell || branch ||
+  generation)`: a wrapped DEK copied to another record, or relabelled, fails AES-KW. `Record` is no
+  longer `Copy`. An own extent's footer is its `ExtentId`, a moves' footer names the key it is the
+  moves of (`Moves::of`): a whole object copied to another key of its branch is refused there, its
+  footer under the MAC.
+- **The KMS and how a cell chooses.** `FXDAX_KMS=local:///DIR` (a `LocalKms` directory, the only
+  backend; `extent_keys::kms::from_url`), read by every process that opens stores through
+  `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl. `fxdax-gc` needs none
+  (marking keyless; compaction of sealed objects is refused, TASK-411.6). A cell is made sealed iff
+  the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear, any
+  other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
+  cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
+  wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
+- **Taking a cell** unwraps its KEK once per taking (`keys::Kms`, keyed by cell, generation and
+  the taking's epoch and holder; a writer's recovery, which reads before it holds the cell,
+  predicts the taking it makes, `CellKeys::to_hold`), however many volumes open: a test counts one
+  unwrap for three. A cell the host made unwraps nothing. Branch DEKs are unwrapped locally.
+- **Rings.** Opening a store builds a `keys::Ring`: its branch's DEK generations (the newest seals
+  new objects) and its ancestors' along their origins, read from their records and unwrapped under
+  the cell's KEK. An ancestor of another cell with DEKs is refused (`Error::Inherited`, `ENOTSUP`):
+  forks across cells of sealed branches wait for TASK-411.4's rewrap, and fxdax refuses them
+  before anything is made. A branch's first writer gives its record its first DEK by a conditional
+  update (`keys::with_dek`): records written by a parent's writers for a fork name none, so that
+  they stay the same whoever writes them. Points have none. Every writer and reader of the store
+  holds the ring: the writer (fences sealed, checkpoints authenticated, recovery checked), the
+  store (segments and own extents sealed, local files read under it), and the host's fetchers,
+  which open tails and parts under the union of the rings of the stores the host serves
+  (`keys::HostRing`, in `fetch::Memory`), a tail opened once the host holds its key, `NoKey`
+  never kept; peers are served stored bytes, needing none.
+- **Downgrades.** A reader holding a branch sealed (`Keys::sealed`) refuses its objects in the
+  clear (`Error::Downgrade`, naming the object) and authenticated ones under keys it lacks.
+- **Generations and rotation.** `keys::add_generation` appends a DEK generation by a conditional
+  update; stores opened after seal under it, the older still read. `keys::rotate` adds a cell KEK
+  generation (conditional on the holder holding the cell), then rewraps every record's DEKs under
+  it, each by a conditional update. Older KEK generations stay in the cell's object: a writer that
+  read the cell before the rotation may wrap a new DEK under the generation it read after the
+  rotation listed the records, so dropping them needs that fenced first (follow-up).
+- **Local disk.** `wal::whole_footer` checks a framed segment whole by the keyless check
+  (`extent_frame::check`), sealed or not; a segment a recovery closes again is framed in the clear
+  (WAL recovery runs before the store's keys are known) and sealed as the store opens
+  (`wal::reseal`, by `Dir::replace`, atomic).
+- **Not yet:** open segments and large extents' raw files are in the clear until sealed
+  (TASK-411.5); collector compaction of sealed objects (TASK-411.6); forks across cells
+  (TASK-411.4).

@@ -485,7 +485,14 @@ mod tests {
     }
 
     fn sweep(at_once: usize) -> Sweep {
-        Sweep { options: NOW, mode: Mode::Delete, at_once, lease: LEASE, slowest: 3, spawned: false }
+        Sweep {
+            options: NOW,
+            mode: Mode::Delete,
+            at_once,
+            lease: LEASE,
+            slowest: 3,
+            spawned: false,
+        }
     }
 
     /// Two processes sweeping one bucket at once split its cells: each cell passed over once, by
@@ -765,8 +772,7 @@ mod tests {
         let before = block_on(sizes(&*bucket));
         let counted = bucket.stats();
         let compacting = Options { compact_below: 0.5, grace: 0 };
-        let sweep =
-            Sweep { options: compacting, at_once: 4, ..sweep(1) };
+        let sweep = Sweep { options: compacting, at_once: 4, ..sweep(1) };
         let mut passes = Vec::new();
         let swept = block_on(sweep.run(&bucket, |passed| passes.push(passed.clone())));
         let stats = bucket.stats();

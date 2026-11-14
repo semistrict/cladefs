@@ -22,6 +22,8 @@ pub struct Closed<F> {
     pub file: Arc<F>,
     pub own: Vec<(String, Arc<F>)>,
     pub restamped: bool,
+    /// fxdax: the store's keys, which a sealed segment is restamped under (TASK-411.3).
+    pub keys: std::sync::Arc<extent_remote::keys::Ring>,
 }
 
 impl<F: File> Closed<F> {
@@ -33,8 +35,7 @@ impl<F: File> Closed<F> {
         if !self.restamped {
             return Ok(object);
         }
-        // fxdax: holding no key, until the store holds its branch's (TASK-411.3).
-        let keys = &extent_frame::NoKeys;
+        let keys = &self.keys.of(self.footer.branch.id);
         extent_frame::restamp(&object, &self.footer.encode(), keys).map_err(io::Error::other)
     }
 

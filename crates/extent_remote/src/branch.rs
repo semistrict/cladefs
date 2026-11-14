@@ -100,7 +100,7 @@ fn owner(owner: u64) -> u64 {
 pub async fn create(bucket: &impl Bucket, branch: Branch, owner: u64) -> Result<(), Error> {
     let record = Kind::Root.of(self::owner(owner));
     change(bucket, branch, Start::Create, |found| match found {
-        None => Ok(Step::Write(record, ())),
+        None => Ok(Step::Write(record.clone(), ())),
         Some(_) => Err(Error::Corrupt(format!("branch {branch} exists"))),
     })
     .await
@@ -113,8 +113,31 @@ pub async fn create(bucket: &impl Bucket, branch: Branch, owner: u64) -> Result<
 pub async fn create_forked(bucket: &impl Bucket, child: Branch, owner: u64) -> Result<(), Error> {
     let record = Kind::Own.of(self::owner(owner));
     change(bucket, child, Start::Create, |found| match found {
-        None => Ok(Step::Write(record, ())),
+        None => Ok(Step::Write(record.clone(), ())),
         Some(_) => Err(Error::IdTaken(child)),
+    })
+    .await
+}
+
+/// fxdax: gives `branch`'s record the DEKs `deks` says it should have, given what it finds there,
+/// by a conditional update ([`transition`]); none, it is left as it is (TASK-411.3,
+/// [`crate::keys`]). The writer's of the branch alone, holding its cell. Returns the record as it
+/// left it: [`Error::NoBranch`] if it has none, [`Error::Deleted`] if it was deleted.
+pub async fn give_deks(
+    bucket: &impl Bucket,
+    branch: Branch,
+    mut deks: impl FnMut(&Record) -> Option<Vec<crate::keys::Dek>>,
+) -> Result<Record, Error> {
+    change(bucket, branch, Start::Read, |found| match found {
+        None => Err(Error::NoBranch),
+        Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) => match deks(&found) {
+            Some(deks) => {
+                let given = Record { deks, ..found };
+                Ok(Step::Write(given.clone(), given))
+            }
+            None => Ok(Step::Stop(found)),
+        },
     })
     .await
 }
@@ -296,7 +319,7 @@ pub async fn record_fork(bucket: &impl Bucket, child: Child, origin: Origin) -> 
     }
     // A record there: the fork's, made since the read, or deleted, or another's.
     let found = change(bucket, child.branch, start, |found| match found {
-        None => Ok(Step::Write(record, None)),
+        None => Ok(Step::Write(record.clone(), None)),
         Some(found) => Ok(Step::Stop(Some(found))),
     })
     .await?;
@@ -358,7 +381,7 @@ pub async fn fork_point(
     // A record found that refused the fork.
     let mut refused = None;
     let making = change(bucket, child, Start::Create, |found| match found {
-        None => Ok(Step::Write(record, true)),
+        None => Ok(Step::Write(record.clone(), true)),
         Some(found) if found.deleted => {
             refused = Some(found);
             Err(Error::Deleted)
@@ -402,7 +425,7 @@ pub async fn finish_point_fork(
     let tenant = child.cell.tenant;
     if rules().forks_check_points || point.cell.tenant != tenant {
         let found = record(bucket, point).await?;
-        if rules().forks_check_points && !found.is_some_and(|record| !record.deleted) {
+        if rules().forks_check_points && !found.as_ref().is_some_and(|record| !record.deleted) {
             return Err(Error::Deleted);
         }
         if !found.is_some_and(|record| record.may_fork_into(point, tenant)) {
@@ -477,7 +500,7 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: Branch) -> Result<Recor
         Some(found) if found.deleted || found.forking().is_none() => Ok(Step::Stop(found)),
         Some(found) => {
             let abandoned = Record { deleted: true, ..found };
-            Ok(Step::Write(abandoned, abandoned))
+            Ok(Step::Write(abandoned.clone(), abandoned))
         }
     })
     .await
@@ -586,7 +609,7 @@ pub async fn delete(
     // record came meanwhile. Its owner the deletion's, which no other's is.
     let deleted = Record { deleted: true, ..Kind::Own.of(owner(holder)) };
     let found = change(bucket, branch, Start::Read, |found| match found {
-        None => Ok(Step::Write(deleted, None)),
+        None => Ok(Step::Write(deleted.clone(), None)),
         Some(found) => Ok(Step::Stop(Some(found))),
     })
     .await?;
@@ -658,7 +681,8 @@ pub async fn delete(
 /// go of what it needs (TASK-183).
 async fn fence_deleted(bucket: &impl Bucket, recovered: Recovered) -> Result<State, Error> {
     let Recovered { mut state, mut end, .. } = recovered;
-    while recovery::fence(bucket, &mut state, Lease::FINAL, end).await?.is_some() {
+    let clear = crate::keys::Ring::clear();
+    while recovery::fence((bucket, &clear), &mut state, Lease::FINAL, end).await?.is_some() {
         end += 1;
     }
     Ok(state)
@@ -802,7 +826,7 @@ pub async fn delete_fork(
     };
     let record = Record { deleted: !live, ..kind.of(owner) };
     let taken = change(bucket, child, Start::Create, |taken| match taken {
-        None => Ok(Step::Write(record, None)),
+        None => Ok(Step::Write(record.clone(), None)),
         Some(taken) => Ok(Step::Stop(Some(taken))),
     })
     .await?;
@@ -963,7 +987,7 @@ mod tests {
             Ok(false)
         );
         let taken = Kind::Own.of(0x21);
-        assert_eq!(block_on(record(&bucket, test_branch(2))), Ok(Some(taken)));
+        assert_eq!(block_on(record(&bucket, test_branch(2))), Ok(Some(taken.clone())));
         assert_eq!(block_on(delete_fork(&bucket, test_branch(2), Kind::Own, 0x21, 9, 0)), Ok(true));
         assert_eq!(
             block_on(record(&bucket, test_branch(2))),

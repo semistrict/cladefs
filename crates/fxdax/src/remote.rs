@@ -6,9 +6,16 @@
 //! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its stores' uploaders and
 //! fetches run on and their budgets ([`runtime`], [`Fetcher`]), and the errno of each failure
 //! ([`errno`]). The uploader is extent_store's (`extent_store::upload`, TASK-165.9).
+//!
+//! fxdax: and its KMS ([`kms`], TASK-411.3), `FXDAX_KMS`, which every process of the host's
+//! opening stores reads, the extent daemon, the fxdax CLI's mounts and `fxdaxctl` alike: a
+//! `local:///DIR` alone, a directory of tenants' KEKs (`extent_keys::kms::LocalKms`), until real
+//! KMSes come (doc-16). A cell is made encrypted iff the host has a KMS and the cell's tenant has a
+//! KEK there; a host without one makes its cells in the clear, and opens no sealed one.
 
 use extent_remote::cache::Cache;
 use extent_remote::fetch::{self, Budget, Limits, Priority};
+use extent_remote::keys;
 use extent_remote::layout::Location;
 use extent_remote::store::Store as Bucket;
 use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
@@ -85,12 +92,22 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Remote(Error::IdTaken(_) | Error::VolumeExists(_)) => Some(Errno::EEXIST),
         Failure::Remote(Error::VolumeName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
         Failure::Remote(Error::NotShared(_)) => Some(Errno::EACCES),
+        // fxdax: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
+        // open no more until it is given back (TASK-411.3).
+        Failure::Remote(Error::Kms(_)) => Some(Errno::EACCES),
+        // fxdax: a fork across cells of a sealed branch, which TASK-411.4 makes.
+        Failure::Remote(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
         // The collector's alone (TASK-395.5). fxdax: data sealed under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
         Failure::Remote(
-            Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
+            Error::Lost(_)
+            | Error::Corrupt(_)
+            | Error::Read(_)
+            | Error::Left(_)
+            | Error::NoKey(_)
+            | Error::Downgrade(_),
         )
         | Failure::Local(_) => None,
     }
@@ -102,9 +119,67 @@ impl From<crate::faults::Failpoint> for Failure {
     }
 }
 
-/// The runtime the host's stores' uploaders run on, and the budget of their uploads.
+/// The runtime the host's stores' uploaders run on, and the budget of their uploads; fxdax: and the
+/// host's keys, its KMS and those its fetchers share (TASK-411.3).
 pub fn runtime() -> Runtime {
-    Runtime { handle: RUNTIME.handle().clone(), uploads: UPLOADS.clone() }
+    let keys = keys::Host { kms: kms(), ring: MEMORY.keys().clone() };
+    Runtime { handle: RUNTIME.handle().clone(), uploads: UPLOADS.clone(), keys }
+}
+
+/// fxdax: the host's KMS, as `FXDAX_KMS` names it the first time it is asked for, or [`set_kms`]
+/// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
+/// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
+/// or in the clear, rather than make in the clear what its tenants have it seal.
+pub fn kms() -> Option<Arc<keys::Kms>> {
+    KMS.get_or_init(|| match std::env::var("FXDAX_KMS") {
+        Ok(url) if !url.is_empty() => {
+            let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
+                log::error!("fxdax: FXDAX_KMS: {why}");
+                Arc::new(Unreached(why))
+            });
+            Some(keys::Kms::new(kms))
+        }
+        _ => None,
+    })
+    .clone()
+}
+
+/// fxdax: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
+pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
+    KMS.set(Some(keys::Kms::new(kms))).map_err(|_| "the host's KMS is set already".to_owned())
+}
+
+/// fxdax: the host's KMS ([`kms`]).
+static KMS: std::sync::OnceLock<Option<Arc<keys::Kms>>> = std::sync::OnceLock::new();
+
+/// fxdax: a KMS `FXDAX_KMS` names that can't be had: every call refused, saying why.
+struct Unreached(String);
+
+impl extent_keys::kms::Kms for Unreached {
+    fn wrap(
+        &self,
+        tenant: u64,
+        _: &extent_keys::Secret,
+    ) -> impl std::future::Future<Output = Result<extent_keys::Wrapped, extent_keys::kms::Error>> + Send
+    {
+        std::future::ready(Err(self.refusal(tenant)))
+    }
+
+    fn unwrap(
+        &self,
+        tenant: u64,
+        _: &extent_keys::Wrapped,
+    ) -> impl std::future::Future<Output = Result<extent_keys::Secret, extent_keys::kms::Error>> + Send
+    {
+        std::future::ready(Err(self.refusal(tenant)))
+    }
+}
+
+impl Unreached {
+    fn refusal(&self, tenant: u64) -> extent_keys::kms::Error {
+        let source = std::io::Error::other(format!("FXDAX_KMS: {}", self.0));
+        extent_keys::kms::Error::Io { tenant, source }
+    }
 }
 
 /// fxdax: how many stores' uploaders run in this process, as it changes: what an extent daemon's

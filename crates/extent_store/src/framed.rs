@@ -7,8 +7,8 @@
 
 use crate::dir::File;
 use crate::sync::Mutex;
-use anyhow::{Error, bail};
-use extent_frame::{ALIGN, Corrupt, Encoding, Frame, NoKeys, PART, Parts, Stored, TRAILER};
+use anyhow::{Context as _, Error, bail};
+use extent_frame::{ALIGN, Corrupt, Encoding, Frame, Keys, PART, Parts, Stored, TRAILER};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::io;
@@ -86,10 +86,27 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// fxdax: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
+/// their checks: refused if it is in the clear and `keys` hold its branch sealed, a downgrade
+/// (TASK-411.3).
+fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
+    match Parts::of_suffix(suffix, keys) {
+        Ok(parts) => Ok(Some(parts)),
+        Err(extent_frame::Error::Clear) => {
+            let named = extent_remote::Error::Downgrade("a framed file of the store's".into());
+            Err(Error::new(named))
+        }
+        Err(_) => Ok(None),
+    }
+}
+
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
-/// footer pass their checks. Its parts are checked as they are read. fxdax: by a reader holding no
-/// key, until the store holds its branch's (TASK-411.2, TASK-411.3).
-pub(crate) fn read_frame<F: File>(file: &F) -> Result<Option<(Parts, Vec<u8>)>, Error> {
+/// footer pass their checks. Its parts are checked as they are read. fxdax: by a reader holding
+/// `keys`, the store's branch's (TASK-411.3).
+pub(crate) fn read_frame<F: File>(
+    file: &F,
+    keys: &dyn Keys,
+) -> Result<Option<(Parts, Vec<u8>)>, Error> {
     let size = file.size()?;
     let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
     let trailer = read_aligned(file, at, TRAILER as usize)?;
@@ -99,7 +116,7 @@ pub(crate) fn read_frame<F: File>(file: &F) -> Result<Option<(Parts, Vec<u8>)>, 
     }
     let tail = read_aligned(file, frame.stored_len, (size - frame.stored_len) as usize)?;
     let tail = tail.as_slice();
-    let Ok(parts) = Parts::of_suffix(tail, &NoKeys) else { return Ok(None) };
+    let Some(parts) = parts_of(tail, keys)? else { return Ok(None) };
     let Ok(footer) = parts.check_footer(&tail[..frame.footer_len as usize]) else {
         return Ok(None);
     };
@@ -110,9 +127,8 @@ pub(crate) fn read_frame<F: File>(file: &F) -> Result<Option<(Parts, Vec<u8>)>, 
 /// fxdax: the parts of the framed file `file`, if its trailer and table pass their checks: read
 /// from the blocks they are in alone, the last, but for a table that begins before them, and not
 /// its footer, which reading its data needs not (TASK-92.2). Its parts are checked as they are
-/// read. fxdax: by a reader holding no key, until the store holds its branch's (TASK-411.2,
-/// TASK-411.3).
-pub(crate) fn read_parts<F: File>(file: &F) -> Result<Option<Parts>, Error> {
+/// read. fxdax: by a reader holding `keys`, the store's branch's (TASK-411.3).
+pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     let size = file.size()?;
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
     let last = trailer / ALIGN * ALIGN;
@@ -124,8 +140,7 @@ pub(crate) fn read_parts<F: File>(file: &F) -> Result<Option<Parts>, Error> {
     let table = frame.table().start;
     let suffix =
         if table >= last { suffix } else { read_aligned(file, table, (size - table) as usize)? };
-    let Ok(parts) = Parts::of_suffix(suffix.as_slice(), &NoKeys) else { return Ok(None) };
-    Ok(Some(parts))
+    parts_of(suffix.as_slice(), keys)
 }
 
 /// Numbers the framed files opened, for the parts unpacked to name them by.
@@ -145,9 +160,9 @@ impl<F: File> Framed<F> {
     }
 
     /// The framed file `file`, which must be whole, as far as its trailer and table say; `path`
-    /// names it.
-    pub(crate) fn open(file: F, path: &str) -> Result<Self, Error> {
-        match read_parts(&file)? {
+    /// names it. fxdax: read holding `keys`, the store's branch's (TASK-411.3).
+    pub(crate) fn open(file: F, path: &str, keys: &dyn Keys) -> Result<Self, Error> {
+        match read_parts(&file, keys).with_context(|| path.to_owned())? {
             Some(parts) => Ok(Self::new(Arc::new(file), parts)),
             None => bail!("{path} is not a whole framed file"),
         }
@@ -474,7 +489,7 @@ mod tests {
         let file = dir.create("framed", true).unwrap();
         let bytes = extent_frame::framed(&[7; 4096], &[], None);
         file.write_at(&bytes, 0).unwrap();
-        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &NoKeys).unwrap());
+        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
         let source = Source::Framed(Arc::new(framed));
         let mut parts = Vec::new();
         let corrupt = source.locate(2 * PART, 4096, &Unpacked::default(), &mut parts).unwrap_err();
@@ -499,7 +514,7 @@ mod tests {
             let file = dir.create(&made.get().to_string(), true).unwrap();
             let bytes = extent_frame::framed(&[key as u8; 4096], &[], None);
             file.write_at(&bytes, 0).unwrap();
-            Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &NoKeys).unwrap()))
+            Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))
         };
         let open = |files: &Files<u64, _>| {
             let mut open: Vec<u64> = files.files.keys().copied().collect();

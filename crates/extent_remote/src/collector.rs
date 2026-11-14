@@ -713,7 +713,7 @@ impl Remembered {
             for (branch, read, key) in reads {
                 let Some((version, record)) = read? else { continue };
                 match version {
-                    Some(version) => self.records.insert(key, (version, record)),
+                    Some(version) => self.records.insert(key, (version, record.clone())),
                     None => self.records.remove(&key),
                 };
                 records.insert(branch, record);
@@ -855,7 +855,7 @@ async fn abandon(
         }
         let record = match writes {
             Writes::Some => branch::abandon(bucket, child).await?,
-            Writes::None => Record { deleted: true, ..records[&child] },
+            Writes::None => Record { deleted: true, ..records[&child].clone() },
         };
         records.insert(child, record);
     }
@@ -881,7 +881,7 @@ async fn read_record(
         && let Some((version, record)) = known.get(&meta.key)
         && version == listed
     {
-        return Ok(Some((Some(version.clone()), *record)));
+        return Ok(Some((Some(version.clone()), record.clone())));
     }
     let Some(object) = bucket::get(bucket, &meta.key).await else { return Ok(None) };
     Ok(Some((object.meta.version.e_tag, Record::decode(branch, &object.bytes)?)))
@@ -1432,7 +1432,7 @@ async fn compact_object(
         data.extend_from_slice(bytes);
     }
     // Another pass's moves of it, if there are some, stand.
-    let bytes = layout::with_footer(&data, &Moves { extents: entries });
+    let bytes = layout::with_footer(&data, &Moves { of: key.to_owned(), extents: entries });
     let size = match bucket::create(bucket, &moves, bytes.clone()).await {
         Created::Created => bytes.len() as u64,
         Created::Exists(stood) => stood.meta.size,
@@ -2310,7 +2310,14 @@ mod tests {
         branch::delete(&*bucket, test_branch(1), 11, u64::MAX).await.unwrap();
         collect(&*bucket, 1, &KEEP).await.unwrap();
         assert!(!keys(&*bucket).await.contains(&layout::lease(test_branch(1))));
-        let taken = Writer::open_recovered(bucket.clone(), record, before, 12, 0).await;
+        let taken = Writer::open_recovered(
+            bucket.clone(),
+            record,
+            before,
+            (12, 0),
+            crate::keys::Ring::clear(),
+        )
+        .await;
         assert_eq!(taken.err(), Some(Error::Deleted));
         assert_eq!(
             branch::lease_epoch(&*bucket, &layout::lease(test_branch(1))).await,

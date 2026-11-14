@@ -34,7 +34,13 @@
 //! number and epoch, `segment::Footer`).
 //!
 //! A branch's checkpoints, locally and in object storage, are such objects: tables of where its
-//! extents are ([`table`]).
+//! extents are ([`table`]). fxdax: authenticated, not sealed, under their branch's DEK (TASK-411.3,
+//! [`Seal::Authenticated`]): metadata, which the collector reads holding no key (doc-16, What is
+//! encrypted), each part's tag a GMAC of its stored bytes, which a reader holding the key checks.
+//!
+//! fxdax: a reader of a branch whose objects are sealed refuses one in the clear ([`Keys::sealed`],
+//! [`Error::Clear`], TASK-411.3): its trailer's seal is not authenticated, and one who can write the
+//! bucket could otherwise zero an object's seal, MACs and tags, and have it read as its branch's.
 
 pub mod segment;
 pub mod spent;
@@ -153,6 +159,11 @@ pub enum Error {
         .0.generation
     )]
     NoKey(KeyId),
+    /// fxdax: an object in the clear, of a branch whose objects its reader holds sealed
+    /// ([`Keys::sealed`], TASK-411.3): a downgrade, its seal, MACs and tags zeroed by one who can
+    /// write where it is, or another's object put there.
+    #[error("an object in the clear, of a branch whose objects are sealed")]
+    Clear,
 }
 
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
@@ -168,6 +179,15 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 /// their CRCs, and checks its parts' stored bytes, but unpacks none of them ([`Error::NoKey`]).
 pub trait Keys {
     fn dek(&self, id: KeyId) -> Option<&Secret>;
+
+    /// fxdax: whether its reader holds the objects it reads sealed, or authenticated, under their
+    /// branch's DEK, as a reader of a branch whose record has a DEK does (TASK-411.3): one in the
+    /// clear is refused ([`Error::Clear`]), and one authenticated under a key it doesn't hold
+    /// unread ([`Error::NoKey`]). None by default: a reader of objects in the clear, or of
+    /// metadata alone, as the collector is.
+    fn sealed(&self) -> bool {
+        false
+    }
 }
 
 /// fxdax: no keys: a reader of objects in the clear, or of objects' metadata alone, as the
@@ -196,6 +216,29 @@ pub enum Seal {
     /// Its parts sealed with AES-256-GCM, its footer and table authenticated with HMAC-SHA256,
     /// under subkeys HKDF-SHA256 derives from the DEK `key` names and `salt`.
     Sealed { key: KeyId, salt: Salt },
+    /// fxdax: its parts in the clear, as stored, each tagged with AES-256-GCM's GMAC of them, its
+    /// footer and table authenticated as a sealed object's are (TASK-411.3): metadata, a branch's
+    /// checkpoints, which a reader holding no key reads, checked against their CRCs, as the
+    /// collector does, and one holding the key checks against their tags and MACs.
+    Authenticated { key: KeyId, salt: Salt },
+}
+
+impl Seal {
+    /// The key its subkeys came from, and its salt, unless it is in the clear.
+    pub fn keyed(&self) -> Option<(KeyId, Salt)> {
+        match *self {
+            Self::Clear => None,
+            Self::Sealed { key, salt } | Self::Authenticated { key, salt } => Some((key, salt)),
+        }
+    }
+}
+
+/// fxdax: how a writer frames an object under its branch's DEK, the key it names (TASK-411.3):
+/// its parts sealed, as data is, or authenticated alone, as metadata the collector reads is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Keyed {
+    Sealed,
+    Authenticated,
 }
 
 /// What HKDF derives an object's subkey that seals its parts with, as its info.
@@ -212,18 +255,29 @@ const MAC_INFO: &[u8] = b"fxdax frame mac";
 pub struct ObjectKey {
     id: KeyId,
     salt: Salt,
+    /// fxdax: whether its parts are sealed, or authenticated alone (TASK-411.3).
+    keyed: Keyed,
     parts: Aead,
     mac: Secret,
 }
 
 impl ObjectKey {
-    fn new(dek: &Secret, id: KeyId, salt: Salt) -> Self {
+    fn new(dek: &Secret, id: KeyId, salt: Salt, keyed: Keyed) -> Self {
         let parts = Aead::new(&dek.derive(&salt, &[PARTS_INFO]));
-        Self { id, salt, parts, mac: dek.derive(&salt, &[MAC_INFO]) }
+        Self { id, salt, keyed, parts, mac: dek.derive(&salt, &[MAC_INFO]) }
     }
 
     fn seal(&self) -> Seal {
-        Seal::Sealed { key: self.id, salt: self.salt }
+        let (key, salt) = (self.id, self.salt);
+        match self.keyed {
+            Keyed::Sealed => Seal::Sealed { key, salt },
+            Keyed::Authenticated => Seal::Authenticated { key, salt },
+        }
+    }
+
+    /// fxdax: whether its parts are sealed, not authenticated alone.
+    fn seals(&self) -> bool {
+        self.keyed == Keyed::Sealed
     }
 
     /// The associated data of part `index` of `len` bytes, stored `encoding`, its stored bytes
@@ -244,6 +298,27 @@ impl ObjectKey {
         self.parts.seal(index, &aad, bytes)
     }
 
+    /// fxdax: the tag of `bytes`, part `index`, of `len` bytes, packed `encoding`, authenticated
+    /// alone: AES-256-GCM's GMAC, of nothing sealed, its associated data the part's and its bytes
+    /// (TASK-411.3).
+    fn tag_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &[u8]) -> Tag {
+        let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
+        self.parts.seal(index, &aad, &mut [])
+    }
+
+    /// fxdax: checks `bytes` against `tag`, what [`ObjectKey::tag_part`] gave them.
+    fn check_part(
+        &self,
+        index: u64,
+        encoding: Encoding,
+        len: u64,
+        bytes: &[u8],
+        tag: &Tag,
+    ) -> Result<(), Corrupt> {
+        let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
+        (self.parts.open(index, &aad, &mut [], tag)).map_err(|_| corrupt("part, by its tag"))
+    }
+
     /// Opens in place what [`ObjectKey::seal_part`] sealed, given its tag.
     fn open_part(
         &self,
@@ -260,7 +335,8 @@ impl ObjectKey {
 
 impl std::fmt::Debug for ObjectKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ObjectKey").field("id", &self.id).field("salt", &self.salt).finish()
+        let mut debug = f.debug_struct("ObjectKey");
+        debug.field("id", &self.id).field("salt", &self.salt).field("keyed", &self.keyed).finish()
     }
 }
 
@@ -269,29 +345,43 @@ impl std::fmt::Debug for ObjectKey {
 enum Opening {
     /// The object is in the clear.
     Clear,
-    /// It is sealed, under a key the reader holds: its subkeys.
+    /// It is sealed, or authenticated, under a key the reader holds: its subkeys.
     Open(Arc<ObjectKey>),
     /// It is sealed under a key the reader doesn't hold: its parts are checked, not opened.
     Locked(KeyId),
+    /// fxdax: it is authenticated under a key the reader doesn't hold, which holds none sealed
+    /// ([`Keys::sealed`]): its parts are read as they are stored, checked against their CRCs alone,
+    /// as the collector reads a checkpoint (TASK-411.3).
+    Unchecked(KeyId),
 }
 
 impl Opening {
-    /// How a reader holding `keys` opens an object sealed as `seal` says.
-    fn of(seal: Seal, keys: &dyn Keys) -> Self {
-        match seal {
+    /// How a reader holding `keys` opens an object sealed as `seal` says: refused, if it is in
+    /// the clear, or authenticated under a key the reader doesn't hold, and the reader holds its
+    /// objects sealed (TASK-411.3).
+    fn of(seal: Seal, keys: &dyn Keys) -> Result<Self, Error> {
+        Ok(match seal {
+            Seal::Clear if keys.sealed() => return Err(Error::Clear),
             Seal::Clear => Self::Clear,
             Seal::Sealed { key, salt } => match keys.dek(key) {
-                Some(dek) => Self::Open(Arc::new(ObjectKey::new(dek, key, salt))),
+                Some(dek) => Self::Open(Arc::new(ObjectKey::new(dek, key, salt, Keyed::Sealed))),
                 None => Self::Locked(key),
             },
-        }
+            Seal::Authenticated { key, salt } => match keys.dek(key) {
+                Some(dek) => {
+                    Self::Open(Arc::new(ObjectKey::new(dek, key, salt, Keyed::Authenticated)))
+                }
+                None if keys.sealed() => return Err(Error::NoKey(key)),
+                None => Self::Unchecked(key),
+            },
+        })
     }
 
     /// The object's subkeys, if the reader holds them.
     fn key(&self) -> Option<&ObjectKey> {
         match self {
             Self::Open(key) => Some(key),
-            Self::Clear | Self::Locked(_) => None,
+            Self::Clear | Self::Locked(_) | Self::Unchecked(_) => None,
         }
     }
 }
@@ -301,8 +391,11 @@ impl PartialEq for Opening {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Clear, Self::Clear) => true,
-            (Self::Open(one), Self::Open(other)) => (one.id, one.salt) == (other.id, other.salt),
+            (Self::Open(one), Self::Open(other)) => {
+                (one.id, one.salt, one.keyed) == (other.id, other.salt, other.keyed)
+            }
             (Self::Locked(one), Self::Locked(other)) => one == other,
+            (Self::Unchecked(one), Self::Unchecked(other)) => one == other,
             _ => false,
         }
     }
@@ -391,19 +484,27 @@ impl Part {
         self.len() == 0
     }
 
-    /// Whether its stored bytes are its data, as they are: stored raw, in the clear.
+    /// Whether its stored bytes are its data, as they are, its reader having nothing to check:
+    /// stored raw, in the clear; fxdax: or authenticated under a key its reader doesn't hold
+    /// (TASK-411.3).
     pub fn as_is(&self) -> bool {
-        self.stored.encoding == Encoding::Raw && self.opening == Opening::Clear
+        self.stored.encoding == Encoding::Raw
+            && matches!(self.opening, Opening::Clear | Opening::Unchecked(_))
     }
 
-    /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is sealed.
+    /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is sealed; fxdax:
+    /// checks them against its tag, if it is authenticated under a key its reader holds
+    /// (TASK-411.3).
     fn open_in_place(&self, bytes: &mut [u8]) -> Result<(), Error> {
+        let (index, encoding) = (self.index, self.stored.encoding);
         match &self.opening {
-            Opening::Clear => Ok(()),
+            Opening::Clear | Opening::Unchecked(_) => Ok(()),
             Opening::Locked(key) => Err(Error::NoKey(*key)),
-            Opening::Open(key) => {
-                let (index, encoding) = (self.index, self.stored.encoding);
+            Opening::Open(key) if key.seals() => {
                 Ok(key.open_part(index, encoding, self.len(), bytes, &self.tag)?)
+            }
+            Opening::Open(key) => {
+                Ok(key.check_part(index, encoding, self.len(), bytes, &self.tag)?)
             }
         }
     }
@@ -433,7 +534,14 @@ impl Part {
         let mut out = vec![0; self.len() as usize];
         let checked = self.stored.check(stored)?;
         match (&self.opening, self.stored.encoding) {
-            (Opening::Clear, encoding) => decode(encoding, checked, &mut out)?,
+            (Opening::Clear | Opening::Unchecked(_), encoding) => {
+                decode(encoding, checked, &mut out)?
+            }
+            // fxdax: checked where it is, then unpacked (TASK-411.3).
+            (Opening::Open(key), encoding) if !key.seals() => {
+                key.check_part(self.index, encoding, self.len(), checked, &self.tag)?;
+                decode(encoding, checked, &mut out)?;
+            }
             // Opened where it is unpacked to.
             (_, Encoding::Raw) => {
                 if checked.len() != out.len() {
@@ -474,7 +582,8 @@ pub struct PackedPart {
     stored: Option<Vec<u8>>,
     crc: u32,
     tag: Tag,
-    sealed: bool,
+    /// fxdax: how its object is keyed, if it is (TASK-411.3).
+    keyed: Option<Keyed>,
 }
 
 impl PackedPart {
@@ -515,21 +624,27 @@ impl PartPacker {
     }
 
     /// `part`, part `index` of an object's data, packed, as [`Packer::push`] packs it: sealed under
-    /// `key`, its object's ([`Packer::key`]), if it is sealed (TASK-411.2).
+    /// `key`, its object's ([`Packer::key`]), if it is sealed (TASK-411.2); fxdax: tagged under it,
+    /// if it is authenticated (TASK-411.3).
     pub fn pack(&mut self, index: u64, part: &[u8], key: Option<&ObjectKey>) -> PackedPart {
         let compressed =
             self.compressor.as_mut().and_then(|compressor| pack_part(part, compressor));
         let encoding = if compressed.is_some() { Encoding::Zstd } else { Encoding::Raw };
+        let len = part.len() as u64;
         let (stored, tag) = match key {
             None => (compressed, [0; TAG_LEN]),
-            Some(key) => {
+            Some(key) if key.seals() => {
                 let mut stored = compressed.unwrap_or_else(|| part.to_vec());
-                let tag = key.seal_part(index, encoding, part.len() as u64, &mut stored);
+                let tag = key.seal_part(index, encoding, len, &mut stored);
                 (Some(stored), tag)
+            }
+            Some(key) => {
+                let tag = key.tag_part(index, encoding, len, compressed.as_deref().unwrap_or(part));
+                (compressed, tag)
             }
         };
         let crc = crc(stored.as_deref().unwrap_or(part));
-        PackedPart { index, encoding, stored, crc, tag, sealed: key.is_some() }
+        PackedPart { index, encoding, stored, crc, tag, keyed: key.map(|key| key.keyed) }
     }
 
     /// fxdax: the bytes `part`, a part of an object's data, or a piece of one, is stored in:
@@ -586,7 +701,14 @@ impl Packer {
     /// A packer of an object in the clear, or, given its branch's DEK and which it is, `seal`,
     /// sealed under subkeys of the DEK from a salt drawn for it alone (TASK-411.2).
     pub fn new(seal: Option<(&Secret, KeyId)>) -> Self {
-        let key = seal.map(|(dek, id)| ObjectKey::new(dek, id, Salt::random()));
+        Self::keyed(seal.map(|(dek, id)| (dek, id, Keyed::Sealed)))
+    }
+
+    /// fxdax: a packer of an object in the clear, or, given its branch's DEK, which it is, and
+    /// how, `keyed` under subkeys of the DEK from a salt drawn for it alone: sealed, or
+    /// authenticated alone (TASK-411.3).
+    pub fn keyed(keyed: Option<(&Secret, KeyId, Keyed)>) -> Self {
+        let key = keyed.map(|(dek, id, keyed)| ObjectKey::new(dek, id, Salt::random(), keyed));
         Self { stored: Vec::new(), tags: Vec::new(), data_len: 0, end: 0, key }
     }
 
@@ -658,7 +780,8 @@ impl Packer {
     pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
         assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
         assert_eq!(packed.index, self.next_part(), "a part packed as the object's next");
-        assert_eq!(packed.sealed, self.key.is_some(), "a part sealed as its object is");
+        let keyed = self.key.as_ref().map(|key| key.keyed);
+        assert_eq!(packed.keyed, keyed, "a part sealed as its object is");
         let offset = self.end.next_multiple_of(ALIGN);
         bytes.resize(bytes.len() + (offset - self.end) as usize, 0);
         let stored = packed.stored(part);
@@ -719,7 +842,10 @@ fn tail(
     bytes.extend_from_slice(&crc(footer).to_le_bytes());
     let mut seal = [0; SEAL_LEN];
     if let Some(key) = key {
-        seal[0] = 1;
+        seal[0] = match key.keyed {
+            Keyed::Sealed => 1,
+            Keyed::Authenticated => 2,
+        };
         seal[1..9].copy_from_slice(&key.id.branch.to_le_bytes());
         seal[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
         seal[13..].copy_from_slice(&key.salt.0);
@@ -740,11 +866,12 @@ fn tail(
 /// a takeover (doc-14, Opening a store; TASK-165.9). Fails if `object` is not a whole object. A
 /// sealed object's new footer and table are authenticated under its own subkeys, from its salt,
 /// which its parts stay sealed under: so `keys` must hold its DEK, its table checked against its
-/// MAC first, or it fails ([`Error::NoKey`], TASK-411.2).
+/// MAC first, or it fails ([`Error::NoKey`], TASK-411.2); fxdax: an authenticated one's alike
+/// (TASK-411.3).
 pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
     let parts = Parts::of(object, keys)?;
     let key = match &parts.opening {
-        Opening::Locked(key) => return Err(Error::NoKey(*key)),
+        Opening::Locked(key) | Opening::Unchecked(key) => return Err(Error::NoKey(*key)),
         opening => opening.key(),
     };
     let (frame, table) = (parts.frame, Table { stored: &parts.stored, tags: &parts.tags });
@@ -756,7 +883,13 @@ pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>,
 /// The bytes of an object of `data` and `footer`: sealed, if `seal` gives a DEK and which it is
 /// ([`Packer::new`]).
 pub fn framed(data: &[u8], footer: &[u8], seal: Option<(&Secret, KeyId)>) -> Vec<u8> {
-    let mut packer = Packer::new(seal);
+    framed_keyed(data, footer, seal.map(|(dek, id)| (dek, id, Keyed::Sealed)))
+}
+
+/// fxdax: the bytes of an object of `data` and `footer`: keyed as `keyed` says, if it gives a DEK,
+/// which it is, and how ([`Packer::keyed`], TASK-411.3).
+pub fn framed_keyed(data: &[u8], footer: &[u8], keyed: Option<(&Secret, KeyId, Keyed)>) -> Vec<u8> {
+    let mut packer = Packer::keyed(keyed);
     let mut bytes = packer.push(data);
     bytes.extend_from_slice(&packer.finish(footer));
     bytes
@@ -825,10 +958,14 @@ impl Frame {
         match seal[0] {
             0 if seal[1..].iter().all(|&byte| byte == 0) => Ok(Seal::Clear),
             0 => Err(corrupt("trailer: a seal in the clear naming a key")),
-            1 => Ok(Seal::Sealed {
-                key: KeyId { branch: u64_at(seal, 1), generation: u32_at(seal, 9) },
-                salt: Salt(seal[13..].try_into().unwrap()),
-            }),
+            kind @ (1 | 2) => {
+                let key = KeyId { branch: u64_at(seal, 1), generation: u32_at(seal, 9) };
+                let salt = Salt(seal[13..].try_into().unwrap());
+                Ok(match kind {
+                    1 => Seal::Sealed { key, salt },
+                    _ => Seal::Authenticated { key, salt },
+                })
+            }
             kind => Err(corrupt(format_args!("trailer: a seal of kind {kind}"))),
         }
     }
@@ -881,9 +1018,9 @@ impl Frame {
     /// The footer in `bytes`, checked against its CRC; and against its MAC, if the object is
     /// sealed under a key `keys` holds (TASK-411.2). A footer read with its trailer alone, not its
     /// table, is checked so: its MAC, under the object's subkeys, says the object's writer wrote it
-    /// with that trailer.
-    pub fn check_footer<'a>(&self, bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Corrupt> {
-        self.check_footer_opened(bytes, &Opening::of(self.seal, keys))
+    /// with that trailer. fxdax: refused as [`Opening`] refuses an object (TASK-411.3).
+    pub fn check_footer<'a>(&self, bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Error> {
+        Ok(self.check_footer_opened(bytes, &Opening::of(self.seal, keys)?)?)
     }
 
     /// The footer in `bytes`, checked against its CRC, and its MAC, if `opening` opens it.
@@ -965,19 +1102,20 @@ pub struct Parts {
 impl Parts {
     /// The parts of the object whose last bytes are `suffix`, which must hold its table, read by a
     /// reader holding `keys`: its table checked against its CRC, and against its MAC if it is
-    /// sealed under a key `keys` holds (TASK-411.2).
-    pub fn of_suffix(suffix: &[u8], keys: &dyn Keys) -> Result<Self, Corrupt> {
+    /// sealed under a key `keys` holds (TASK-411.2). fxdax: refused if it is in the clear and its
+    /// reader holds its objects sealed ([`Error::Clear`], TASK-411.3).
+    pub fn of_suffix(suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         Self::in_suffix(Frame::of_trailer(suffix)?, suffix, keys)
     }
 
     /// The parts of a whole object, read by a reader holding `keys`, as [`Parts::of_suffix`].
-    pub fn of(bytes: &[u8], keys: &dyn Keys) -> Result<Self, Corrupt> {
+    pub fn of(bytes: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         Self::in_suffix(Frame::of(bytes)?, bytes, keys)
     }
 
-    fn in_suffix(frame: Frame, suffix: &[u8], keys: &dyn Keys) -> Result<Self, Corrupt> {
+    fn in_suffix(frame: Frame, suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         let (stored, tags, table) = frame.stored_in(suffix)?;
-        let opening = Opening::of(frame.seal, keys);
+        let opening = Opening::of(frame.seal, keys)?;
         if let Some(key) = opening.key() {
             let trailer = suffix.len() - TRAILER as usize;
             let authenticated = &suffix[table..trailer + at::MAC];
@@ -1044,9 +1182,13 @@ pub fn data(bytes: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
 /// Checks a whole object [`framed`]: its trailer, table and footer, and each part's stored bytes
 /// against its CRC, unpacking none. fxdax: what a host checks of an object it sends on as it is,
 /// as an uploader does a store's closed segments (TASK-153.11). With no key: a sealed object's
-/// MACs and tags are its readers' to check (TASK-411.2).
+/// MACs and tags are its readers' to check (TASK-411.2); and what tells a whole object from one
+/// cut short, sealed or not, as a store's recovery of its write-ahead log does (TASK-411.3).
 pub fn check(bytes: &[u8]) -> Result<(), Corrupt> {
-    let parts = Parts::of(bytes, &NoKeys)?;
+    let parts = Parts::of(bytes, &NoKeys).map_err(|err| match err {
+        Error::Corrupt(corrupt) => corrupt,
+        Error::NoKey(_) | Error::Clear => unreachable!("a reader holding no key refuses nothing"),
+    })?;
     let footer = parts.frame.footer();
     parts.check_footer(&bytes[footer.start as usize..footer.end as usize])?;
     for stored in &parts.stored {
@@ -1057,10 +1199,10 @@ pub fn check(bytes: &[u8]) -> Result<(), Corrupt> {
 
 /// The footer of a whole object [`framed`], checked against its CRC, and its MAC if it is sealed
 /// under a key `keys` holds.
-pub fn footer<'a>(bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Corrupt> {
+pub fn footer<'a>(bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Error> {
     let parts = Parts::of(bytes, keys)?;
     let footer = parts.frame.footer();
-    parts.check_footer(&bytes[footer.start as usize..footer.end as usize])
+    Ok(parts.check_footer(&bytes[footer.start as usize..footer.end as usize])?)
 }
 
 #[cfg(test)]
@@ -1101,7 +1243,7 @@ mod tests {
     /// A packer of an object sealed under [`dek`] with `salt`, as no packer outside the tests is:
     /// so that two pack alike.
     fn sealed_with(salt: Salt) -> Packer {
-        Packer { key: Some(ObjectKey::new(&dek(), ID, salt)), ..Packer::new(None) }
+        Packer { key: Some(ObjectKey::new(&dek(), ID, salt, Keyed::Sealed)), ..Packer::new(None) }
     }
 
     /// Recomputes the CRCs of `bytes`, an object's, its footer's and its table's, as one who
@@ -1114,6 +1256,14 @@ mod tests {
         bytes[trailer + at::FOOTER_CRC..][..4].copy_from_slice(&footer_crc.to_le_bytes());
         let table_crc = crc(&bytes[footer.end..trailer + at::TABLE_CRC]);
         bytes[trailer + at::TABLE_CRC..][..4].copy_from_slice(&table_crc.to_le_bytes());
+    }
+
+    /// The corruption `result` failed with, if it failed so: what tests of corrupt objects expect.
+    fn corrupt_of<T>(result: Result<T, Error>) -> Result<T, Corrupt> {
+        result.map_err(|err| match err {
+            Error::Corrupt(corrupt) => corrupt,
+            err => panic!("not corrupt: {err}"),
+        })
     }
 
     /// Where part `part`'s entry is in the object of `frame`.
@@ -1360,14 +1510,15 @@ mod tests {
         // Another key under its key's name.
         let wrong = holding(Secret::from_bytes(&[0xa5; extent_keys::KEY_LEN]));
         let by_mac = Corrupt("an object's table, by its MAC".into());
-        assert_eq!(Parts::of(&bytes, &wrong), Err(by_mac.clone()));
+        assert_eq!(corrupt_of(Parts::of(&bytes, &wrong)), Err(by_mac.clone()));
         assert_eq!(super::data(&bytes, &wrong), Err(by_mac.clone().into()));
-        assert_eq!(footer(&bytes, &wrong), Err(by_mac.clone()));
+        assert_eq!(corrupt_of(footer(&bytes, &wrong)), Err(by_mac.clone()));
         assert_eq!(restamp(&bytes, b"another", &wrong), Err(by_mac.into()));
         let Seal::Sealed { salt, .. } = locked.frame.seal else { panic!("sealed") };
         let keys = holding(dek());
         let opened = Parts::of(&bytes, &keys).unwrap();
-        let wrong_key = Opening::Open(Arc::new(ObjectKey::new(&wrong[&ID], ID, salt)));
+        let wrong_key =
+            Opening::Open(Arc::new(ObjectKey::new(&wrong[&ID], ID, salt, Keyed::Sealed)));
         let by_tag = Error::Corrupt(Corrupt("an object's part, by its tag".into()));
         for index in 0..2 {
             let part = Part { opening: wrong_key.clone(), ..opened.part(index).unwrap() };
@@ -1378,7 +1529,118 @@ mod tests {
         let footer_bytes = &bytes[frame.footer().start as usize..frame.footer().end as usize];
         assert_eq!(frame.check_footer(footer_bytes, &holding(dek())), Ok(&b"footer"[..]));
         let by_footer_mac = Err(Corrupt("an object's footer, by its MAC".into()));
-        assert_eq!(frame.check_footer(footer_bytes, &wrong), by_footer_mac);
+        assert_eq!(corrupt_of(frame.check_footer(footer_bytes, &wrong)), by_footer_mac);
+    }
+
+    /// A reader holding `keys`, which holds the objects it reads sealed: a reader of a branch whose
+    /// record has a DEK (TASK-411.3).
+    struct Sealing(HashMap<KeyId, Secret>);
+
+    impl Keys for Sealing {
+        fn dek(&self, id: KeyId) -> Option<&Secret> {
+            self.0.get(&id)
+        }
+
+        fn sealed(&self) -> bool {
+            true
+        }
+    }
+
+    /// TASK-411.3: an authenticated object holds its parts as its twin in the clear stores them,
+    /// tagged: read alike by a reader holding no key, which checks their CRCs alone, as the
+    /// collector reads a checkpoint, and by one holding its key, which checks their tags and its
+    /// MACs too, and refuses a part changed, its CRC made to match. Restamped under its key alone.
+    #[test]
+    fn authenticated_objects_read_keyless_and_check_under_their_key() {
+        let data = [pattern(PART + 3), random(PART / 2)].concat();
+        let keys = holding(dek());
+        let bytes = framed_keyed(&data, b"footer", Some((&dek(), ID, Keyed::Authenticated)));
+        let clear = framed(&data, b"footer", None);
+        let parts = Parts::of(&bytes, &keys).unwrap();
+        assert!(matches!(parts.frame.seal, Seal::Authenticated { key: ID, .. }));
+        let stored_len = parts.frame.stored_len as usize;
+        assert_eq!(&bytes[..stored_len], &clear[..stored_len]);
+        assert_eq!(super::data(&bytes, &keys).unwrap(), data);
+        assert_eq!(super::data(&bytes, &NoKeys).unwrap(), data);
+        assert_eq!(footer(&bytes, &NoKeys).unwrap(), b"footer");
+        assert_eq!(footer(&bytes, &keys).unwrap(), b"footer");
+        assert_eq!(check(&bytes), Ok(()));
+        assert!(!parts.part(1).unwrap().as_is(), "its tag is checked");
+        assert!(Parts::of(&bytes, &NoKeys).unwrap().part(1).unwrap().as_is());
+
+        // Part 1's stored bytes changed, their CRC made to match.
+        let part = parts.part(1).unwrap();
+        let mut changed =
+            bytes[part.stored.range().start as usize..][..part.stored.len as usize].to_vec();
+        changed[10] ^= 1;
+        let matching =
+            Part { stored: Stored { crc: crc(&changed), ..part.stored }, ..part.clone() };
+        let by_tag = Error::Corrupt(Corrupt("an object's part, by its tag".into()));
+        assert_eq!(matching.unpack(&changed), Err(by_tag.clone()));
+        let mut opened = changed.clone();
+        assert_eq!(matching.open(&mut opened), Err(by_tag));
+        let unchecked = Parts::of(&bytes, &NoKeys).unwrap().part(1).unwrap();
+        let unchecked = Part { stored: matching.stored, ..unchecked };
+        assert_eq!(
+            unchecked.unpack(&changed).map(|unpacked| unpacked.len()),
+            Ok(PART as usize / 2 + 3)
+        );
+
+        // Restamped under its key, as a sealed one is; by no reader not holding it.
+        let restamped = restamp(&bytes, b"another", &keys).unwrap();
+        assert_eq!(footer(&restamped, &keys).unwrap(), b"another");
+        assert_eq!(super::data(&restamped, &keys).unwrap(), data);
+        assert_eq!(restamp(&bytes, b"another", &NoKeys), Err(Error::NoKey(ID)));
+    }
+
+    /// TASK-411.3: a reader holding the objects it reads sealed refuses one in the clear, whole,
+    /// by its suffix, by its footer alone, its data or a restamping of it; and one authenticated
+    /// under a key it doesn't hold. One sealed or authenticated under a key it holds it reads.
+    #[test]
+    fn readers_holding_objects_sealed_refuse_them_in_the_clear() {
+        let data = pattern(PART + 1);
+        let sealing = Sealing(HashMap::from([(ID, dek())]));
+        let clear = framed(&data, b"footer", None);
+        assert_eq!(Parts::of(&clear, &sealing), Err(Error::Clear));
+        let suffix = &clear[Frame::of(&clear).unwrap().table().start as usize..];
+        assert_eq!(Parts::of_suffix(suffix, &sealing), Err(Error::Clear));
+        assert_eq!(super::data(&clear, &sealing), Err(Error::Clear));
+        assert_eq!(footer(&clear, &sealing), Err(Error::Clear));
+        assert_eq!(restamp(&clear, b"another", &sealing), Err(Error::Clear));
+        let frame = Frame::of(&clear).unwrap();
+        let footer_bytes = &clear[frame.footer().start as usize..frame.footer().end as usize];
+        assert_eq!(frame.check_footer(footer_bytes, &sealing), Err(Error::Clear));
+        assert_eq!(
+            Error::Clear.to_string(),
+            "an object in the clear, of a branch whose objects are sealed"
+        );
+
+        let sealed = framed(&data, b"footer", Some((&dek(), ID)));
+        assert_eq!(super::data(&sealed, &sealing).unwrap(), data);
+
+        // A downgrade: a sealed object's seal, MACs and tags zeroed, its CRCs made to match, as
+        // one who can write the bucket, holding no key, would: refused by the branch's readers;
+        // a reader holding no key, as the collector, finds its parts no zstd: ciphertext.
+        let mut zeroed = sealed.clone();
+        let frame = Frame::of(&zeroed).unwrap();
+        let trailer = zeroed.len() - TRAILER as usize;
+        zeroed[trailer + at::SEAL..trailer + at::TABLE_CRC].fill(0);
+        for part in 0..frame.parts() {
+            let tag = entry(&frame, part) + 17;
+            zeroed[tag..tag + TAG_LEN].fill(0);
+        }
+        recrc(&mut zeroed);
+        assert_eq!(Frame::of(&zeroed).unwrap().seal, Seal::Clear);
+        assert_eq!(check(&zeroed), Ok(()));
+        assert_eq!(Parts::of(&zeroed, &sealing), Err(Error::Clear));
+        assert_eq!(super::data(&zeroed, &sealing), Err(Error::Clear));
+        let ciphertext = corrupt("part, by zstd: Unknown frame descriptor");
+        assert_eq!(super::data(&zeroed, &NoKeys), Err(ciphertext.into()));
+        let other = KeyId { generation: 9, ..ID };
+        let authenticated =
+            framed_keyed(&data, b"footer", Some((&dek(), other, Keyed::Authenticated)));
+        assert_eq!(super::data(&authenticated, &sealing), Err(Error::NoKey(other)));
+        assert_eq!(super::data(&authenticated, &NoKeys).unwrap(), data);
     }
 
     /// TASK-411.2: a sealed part changed, its CRC with it or not, its tag changed, or moved to
@@ -1421,11 +1683,11 @@ mod tests {
         let mut tampered = bytes.clone();
         tampered[entry(&parts.frame, 1) + 17 + 5] ^= 1;
         assert_eq!(
-            Parts::of(&tampered, &keys),
+            corrupt_of(Parts::of(&tampered, &keys)),
             Err(Corrupt("an object's table, by its CRC".into()))
         );
         recrc(&mut tampered);
-        assert_eq!(Parts::of(&tampered, &keys), Err(by_mac.clone()));
+        assert_eq!(corrupt_of(Parts::of(&tampered, &keys)), Err(by_mac.clone()));
 
         // Part 2, of the same length, at index 1, its tag with it.
         let other = parts.part(2).unwrap();
@@ -1485,8 +1747,8 @@ mod tests {
             let footer_changed = changed(frame.footer().start as usize);
             let table_changed = changed(entry(&frame, 0) + 12);
             let salt_changed = changed(trailer + at::FOOTER_MAC - 1);
-            let read = |bytes: &[u8]| Parts::of(bytes, &holding(dek())).map(|_| ());
-            let unread = |bytes: &[u8]| Parts::of(bytes, &NoKeys).map(|_| ());
+            let read = |bytes: &[u8]| corrupt_of(Parts::of(bytes, &holding(dek())).map(|_| ()));
+            let unread = |bytes: &[u8]| corrupt_of(Parts::of(bytes, &NoKeys).map(|_| ()));
             let by_mac = Err(Corrupt("an object's table, by its MAC".into()));
             let named =
                 Err(Corrupt("an object's trailer: a seal in the clear naming a key".into()));
@@ -1509,7 +1771,7 @@ mod tests {
         let frame = Frame::of(&bytes).unwrap();
         let tampered = Frame { footer_crc: crc(b"Footer"), ..frame };
         let by_mac = Err(Corrupt("an object's footer, by its MAC".into()));
-        assert_eq!(tampered.check_footer(b"Footer", &holding(dek())), by_mac);
+        assert_eq!(corrupt_of(tampered.check_footer(b"Footer", &holding(dek()))), by_mac);
         assert_eq!(tampered.check_footer(b"Footer", &NoKeys), Ok(&b"Footer"[..]));
     }
 
@@ -1630,11 +1892,11 @@ mod tests {
         *newer.last_mut().unwrap() = b'0' + FORMAT + 1;
         let refused =
             "an object's trailer: a frame of format 3, which a reader of format 2 doesn't read";
-        assert_eq!(Parts::of(&newer, &NoKeys), Err(Corrupt(refused.into())));
+        assert_eq!(corrupt_of(Parts::of(&newer, &NoKeys)), Err(Corrupt(refused.into())));
         assert_eq!(check(&newer), Err(Corrupt(refused.into())));
         *newer.last_mut().unwrap() = b'x';
         assert_eq!(
-            Parts::of(&newer, &NoKeys),
+            corrupt_of(Parts::of(&newer, &NoKeys)),
             Err(Corrupt("an object's trailer, by its magic".into()))
         );
 
@@ -1661,11 +1923,16 @@ mod tests {
             "an object's trailer: a frame of format 1, which a reader of format 2 doesn't read";
         let refused = Corrupt(refused.into());
         for old in [format_1(&random(4096), b"footer"), format_1(&[], b"")] {
-            assert_eq!(Parts::of(&old, &NoKeys), Err(refused.clone()), "{} bytes", old.len());
+            assert_eq!(
+                corrupt_of(Parts::of(&old, &NoKeys)),
+                Err(refused.clone()),
+                "{} bytes",
+                old.len()
+            );
             assert_eq!(Frame::of_trailer(&old), Err(refused.clone()));
             assert_eq!(check(&old), Err(refused.clone()));
             assert_eq!(super::data(&old, &holding(dek())), Err(refused.clone().into()));
-            assert_eq!(footer(&old, &NoKeys), Err(refused.clone()));
+            assert_eq!(corrupt_of(footer(&old, &NoKeys)), Err(refused.clone()));
         }
         assert_eq!(format_1(&[], b"").len(), 40);
     }
@@ -1680,10 +1947,10 @@ mod tests {
             let mut changed = bytes.clone();
             changed[at] = value;
             recrc(&mut changed);
-            Parts::of(&changed, &NoKeys).map(|_| ())
+            corrupt_of(Parts::of(&changed, &NoKeys).map(|_| ()))
         };
         let corrupt = |what: &str| Err(Corrupt(format!("an object's {what}")));
-        assert_eq!(refused(trailer + at::SEAL, 2), corrupt("trailer: a seal of kind 2"));
+        assert_eq!(refused(trailer + at::SEAL, 3), corrupt("trailer: a seal of kind 3"));
         assert_eq!(
             refused(trailer + at::SEAL + 3, 1),
             corrupt("trailer: a seal in the clear naming a key")

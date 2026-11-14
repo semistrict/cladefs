@@ -5,11 +5,13 @@
 //! Tables of where a branch's extents are, which its checkpoints are, locally and in object
 //! storage (doc-7, Checkpoints): entries sorted by extent ID, in blocks of [`BLOCK`] bytes, each
 //! with a CRC32C; after them, a footer of the rest of the state, the keys of the objects the
-//! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]), sealed as
-//! they are (TASK-411.2). A reader after every extent reads the table whole; one after a single
-//! extent reads the footer, and one block.
+//! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]). A reader
+//! after every extent reads the table whole; one after a single extent reads the footer, and one
+//! block. fxdax: under its branch's DEK, if it has one, authenticated, not sealed
+//! ([`crate::Seal::Authenticated`], TASK-411.3): metadata, which the collector reads holding no
+//! key (doc-16, What is encrypted).
 
-use crate::{Corrupt, Error, KeyId, Keys, Secret, crc};
+use crate::{Corrupt, Error, KeyId, Keyed, Keys, Secret, crc};
 use serde::{Deserialize, Serialize};
 
 /// The most bytes of entries a block holds.
@@ -53,12 +55,12 @@ pub struct Block {
     pub crc: u32,
 }
 
-/// The table of `entries`, which are in their IDs' order, and `rest`: sealed, if `seal` gives a
-/// DEK and which it is ([`crate::Packer::new`]).
+/// The table of `entries`, which are in their IDs' order, and `rest`: fxdax: authenticated, if
+/// `key` gives a DEK and which it is ([`crate::Packer::keyed`], TASK-411.3).
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (Id, &'a str, u64, u64)>,
     rest: Vec<u8>,
-    seal: Option<(&Secret, KeyId)>,
+    key: Option<(&Secret, KeyId)>,
 ) -> Vec<u8> {
     let mut keys = Vec::new();
     let mut indexes = std::collections::HashMap::new();
@@ -90,7 +92,7 @@ pub fn encode<'a>(
     }
     flush(&mut block, &mut first, &mut data);
     let footer = bincode::serialize(&Footer { rest, keys, blocks }).expect("footers serialize");
-    crate::framed(&data, &footer, seal)
+    crate::framed_keyed(&data, &footer, key.map(|(dek, id)| (dek, id, Keyed::Authenticated)))
 }
 
 /// fxdax: keys stored front-coded: each as the length of what it shares with the one before it, and
@@ -201,34 +203,68 @@ mod tests {
         sealed(entries, None)
     }
 
-    /// The table of `entries`, sealed under `seal` if given.
-    fn sealed(entries: &[Entry], seal: Option<(&Secret, KeyId)>) -> Vec<u8> {
+    /// The table of `entries`, authenticated under `key` if given.
+    fn sealed(entries: &[Entry], key: Option<(&Secret, KeyId)>) -> Vec<u8> {
         let rows =
             entries.iter().map(|entry| (entry.id, entry.key.as_str(), entry.offset, entry.len));
-        encode(rows, b"rest".to_vec(), seal)
+        encode(rows, b"rest".to_vec(), key)
+    }
+
+    /// A reader holding `keys`, which holds its objects sealed: a reader of a branch with a DEK.
+    struct Holding<'a>(&'a std::collections::HashMap<KeyId, Secret>);
+
+    impl Keys for Holding<'_> {
+        fn dek(&self, id: KeyId) -> Option<&Secret> {
+            self.0.get(&id)
+        }
+
+        fn sealed(&self) -> bool {
+            true
+        }
     }
 
     /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; fxdax:
-    /// in the clear, and sealed, read under their key alone (TASK-411.2).
+    /// in the clear, and under a key, authenticated, read alike by readers holding it or none, and
+    /// refused, changed, by one holding it; one in the clear refused by a reader holding its
+    /// objects sealed (TASK-411.3).
     #[test]
     fn tables_hold_their_entries() {
         let id = KeyId { branch: 3, generation: 0 };
         let keys = std::collections::HashMap::from([(id, Secret::from_bytes(&[1; 32]))]);
-        for seal in [None, Some((&keys[&id], id))] {
+        for key in [None, Some((&keys[&id], id))] {
             for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
                 let entries = entries(count);
-                let (footer, decoded) = decode(&sealed(&entries, seal), &keys).unwrap();
-                assert_eq!((footer.rest.as_slice(), decoded), (&b"rest"[..], entries), "{count}");
+                let bytes = sealed(&entries, key);
+                let (footer, decoded) = decode(&bytes, &keys).unwrap();
+                assert_eq!((footer.rest.as_slice(), &decoded), (&b"rest"[..], &entries), "{count}");
+                assert_eq!(decode(&bytes, &crate::NoKeys), Ok((footer.clone(), entries)));
                 let firsts: Vec<Id> = footer.blocks.iter().map(|block| block.first).collect();
                 let expected: Vec<Id> = (0..blocks).map(|block| (3, block * 1820)).collect();
                 assert_eq!(firsts, expected, "{count}");
             }
-            let mut bytes = sealed(&entries(3000), seal);
+            let mut bytes = sealed(&entries(3000), key);
             bytes[100] ^= 1;
             assert!(decode(&bytes, &keys).is_err());
         }
+        // Authenticated: its entries in the clear, as stored; a part's tag changed, its table's
+        // CRC made to match, read by a reader holding no key, refused by one holding it.
         let bytes = sealed(&entries(10), Some((&keys[&id], id)));
-        assert_eq!(decode(&bytes, &crate::NoKeys), Err(Error::NoKey(id)));
+        let frame = crate::Frame::of(&bytes).unwrap();
+        assert!(matches!(frame.seal, crate::Seal::Authenticated { key, .. } if key == id));
+        let mut tampered = bytes.clone();
+        tampered[(frame.table().start + 17) as usize] ^= 1;
+        let trailer = tampered.len() - crate::TRAILER as usize;
+        let table_crc = crc(&tampered[frame.footer().end as usize..trailer + crate::at::TABLE_CRC]);
+        tampered[trailer + crate::at::TABLE_CRC..][..4].copy_from_slice(&table_crc.to_le_bytes());
+        assert!(decode(&tampered, &crate::NoKeys).is_ok());
+        assert_eq!(
+            decode(&tampered, &keys).map(|_| ()),
+            Err(Corrupt("an object's table, by its MAC".into()).into())
+        );
+        // In the clear, refused by a reader holding its objects sealed.
+        let clear = sealed(&entries(10), None);
+        assert_eq!(decode(&clear, &Holding(&keys)).map(|_| ()), Err(Error::Clear));
+        assert_eq!(decode(&bytes, &Holding(&keys)).map(|(_, entries)| entries), Ok(entries(10)));
     }
 
     /// fxdax: a footer's keys read back as they were, whatever they share, a character split or

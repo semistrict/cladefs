@@ -48,6 +48,7 @@ use crate::{Dir, DirHold, File, Opening, Recovering, Store, read_object};
 use event_listener::{Event, Listener as _};
 use extent_remote::cache::Cache;
 use extent_remote::fetch::Budget;
+use extent_remote::keys::{self, CellKeys, Ring, RingHold};
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
@@ -91,10 +92,14 @@ macro_rules! failing {
 /// the PUTs of objects they upload, each holding its object's bytes while it goes, bounded in
 /// bytes, [`UPLOAD_BYTES`], so that a host whose stores are far behind holds no more than these
 /// at once, whatever their number (TASK-79.19), and in number.
+///
+/// fxdax: and the keys it seals and reads under (TASK-411.3): its KMS, if it has one, and the keys
+/// its fetchers share, which each store's are held in while it is open.
 #[derive(Clone)]
 pub struct Runtime {
     pub handle: tokio::runtime::Handle,
     pub uploads: Arc<Budget>,
+    pub keys: keys::Host,
 }
 
 /// How many stores' uploaders run in this process ([`open`]): until each, its store dropped, has
@@ -250,7 +255,7 @@ pub fn open<D: Dir>(
     runtime: &Runtime,
 ) -> Result<(Arc<Store<D>>, Remote<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
-    let shared = Shared::new(options, runtime.uploads.clone(), sleep);
+    let shared = Shared::new(options, runtime.uploads.clone(), sleep).keyed(runtime.keys.clone());
     let (started, start) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
@@ -323,6 +328,10 @@ pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = Bucket> {
     /// The holders of its takings after the first, and the owners of what it makes: from the
     /// first taking's holder on ([`Shared::holder`]).
     holders: Mutex<Holders>,
+    /// fxdax: the host's keys ([`Runtime::keys`], TASK-411.3).
+    keys: keys::Host,
+    /// fxdax: the store's keys, held among the host's for as long as the uploader lives.
+    held: Mutex<Option<RingHold>>,
 }
 
 /// The holders an uploader's takings of its branch's lease after the first take, and the owners of
@@ -671,6 +680,41 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             uploads,
             clock,
             holders: Mutex::default(),
+            keys: keys::Host::default(),
+            held: Mutex::default(),
+        })
+    }
+
+    /// fxdax: the uploader, sealing and reading under `keys`, the host's (TASK-411.3). Before it
+    /// starts.
+    pub(crate) fn keyed(self: Arc<Self>, keys: keys::Host) -> Arc<Self> {
+        let mut shared = Arc::into_inner(self).expect("an uploader not started");
+        shared.keys = keys;
+        Arc::new(shared)
+    }
+
+    /// fxdax: holds `ring`, the store's keys, among the host's, which its fetchers read under,
+    /// from now on.
+    fn hold_ring(&self, ring: &Arc<Ring>) {
+        *self.held.lock().unwrap() = Some(self.keys.ring.hold(ring.clone()));
+    }
+
+    /// fxdax: the keys of `cell` as read now, to be held by `placement` next
+    /// ([`CellKeys::to_hold`]), if the host has a KMS: none read otherwise, no request made.
+    async fn cell_keys(
+        &self,
+        bucket: &B,
+        cell: extent_remote::layout::Cell,
+        placement: Option<u64>,
+    ) -> Result<CellKeys, Failure> {
+        let kms = self.keys.kms.clone();
+        if kms.is_none() {
+            return Ok(CellKeys::none(cell, None));
+        }
+        Ok(match (cell::read(bucket, cell).await?, placement) {
+            (Some(object), Some(placement)) => CellKeys::to_hold(cell, &object, kms, placement),
+            (Some(object), None) => CellKeys::of(cell, &object, kms),
+            (None, _) => CellKeys::none(cell, kms),
         })
     }
 
@@ -939,6 +983,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     ) -> Result<Option<Arc<Writer<B>>>, Failure> {
         let branch = recovering.branch();
         let cache = self.options.cache.clone();
+        let placement = recovering.token().unwrap_or(self.options.token);
         // The record, and the lease the writer takes after recovering the branch, at once: the
         // taking goes on from this read of it, a round trip less (TASK-165.11).
         let lease = extent_remote::layout::lease(branch);
@@ -950,23 +995,36 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None if recovering.base().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
-            None => {
-                failing!("remote::create_branch");
-                branch::create(&**bucket, branch, self.holder()).await?;
-                None
-            }
+            // fxdax: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
+            None => None,
             Some(record) if record.is_point() => {
-                let state = self.point(bucket, branch, record).await?;
-                let opening = Opening { state, fenced: None, cache };
+                let (state, keys) = self.point(bucket, branch, record).await?;
+                let opening = Opening { state, fenced: None, cache, keys: keys.clone() };
                 let store = blocking(|| recovering.open(options, opening))?;
                 let _ = self.store.set(Arc::new(store));
+                self.hold_ring(&keys);
                 let mut progress = self.progress.lock().unwrap();
                 progress.uploaded_through(u64::MAX);
                 progress.forked_through(u64::MAX);
                 return Ok(None);
             }
             Some(record) => {
-                let recovered = extent_remote::recover(&**bucket, branch, record.origin()).await?;
+                // fxdax: recovered under its keys, if its record says it is sealed: its cell's,
+                // as this placement holds it next, unwrapped once for that taking (TASK-411.3).
+                let before = match record.deks.is_empty() {
+                    true => Ring::clear(),
+                    false => {
+                        let keys = self.cell_keys(bucket, branch.cell, Some(placement)).await?;
+                        keys::ring(&**bucket, &keys, branch, &record, true).await?
+                    }
+                };
+                let recovered = extent_remote::recovery::recover_under(
+                    &**bucket,
+                    branch,
+                    record.origin(),
+                    &before,
+                )
+                .await?;
                 let last = recovered.state.last_commit;
                 // Where the writer's chain would go: the log's restamping, not looked at here.
                 let chain = Chain::new(branch, 0, recovered.end, recovered.state.last_segment, 0);
@@ -974,11 +1032,11 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 if !recovering.follows(&found) {
                     return Err(extent_remote::Error::Diverged.into());
                 }
-                Some((record, recovered))
+                Some((record, recovered, before))
             }
         };
         // fxdax: a branch deleted takes no writer, whatever placement holds its cell.
-        if let Some((record, _)) = &found
+        if let Some((record, ..)) = &found
             && record.deleted
         {
             return Err(extent_remote::Error::Deleted.into());
@@ -989,29 +1047,95 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         // no writer (`Deleted`). The store, a volume of its cell, is one of its volumes from now
         // on, under the name its description gives it unless the cell names its branch already:
         // all in one compare-and-swap of the cell's object, a read alone when nothing changes. Not
-        // a point's, which no writer takes, and any number of hosts open at once.
-        let placement = recovering.token().unwrap_or(self.options.token);
+        // a point's, which no writer takes, and any number of hosts open at once. fxdax: a cell
+        // made gets a KEK, wrapped by its tenant's ahead, if the host has a KMS and the tenant a
+        // KEK there; one of a branch with DEKs is there already (TASK-411.3).
         let volume = recovering.volume().map(|volume| {
             (volume.name.as_str(), cell::Volume { branch: branch.id, kind: volume.kind })
         });
-        let holding = cell::hold(&**bucket, branch.cell, (placement, placement), true, volume);
-        let (held, _) = holding.await?;
+        let kms = self.keys.kms.as_ref();
+        let kek = match &found {
+            Some((record, ..)) if !record.deks.is_empty() => None,
+            _ => keys::new_cell_kek(kms, branch.cell.tenant).await?,
+        };
+        let making = (true, kek.as_ref().map(|(_, kek)| kek));
+        let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, volume);
+        let (held, object) = match holding.await {
+            Ok(held) => held,
+            Err(err) => {
+                if let (Some(kms), Some((secret, kek))) = (kms, kek) {
+                    kms.give_back(branch.cell.tenant, (secret, kek.wrapped));
+                }
+                return Err(err.into());
+            }
+        };
+        let cell_keys = keys::held(kms, branch.cell, object, kek);
         let token = held.epoch;
-        // Its state, once it holds the lease, recovered on from what was found before.
+        // Its state, once it holds the lease, recovered on from what was found before. fxdax:
+        // under its keys, its DEK given it first if its cell is sealed and it has none: a new
+        // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
+        // under them (TASK-411.3).
+        let keyed = |record| self.ring_of(bucket, &cell_keys, branch, record);
         let writer = match found {
-            None => Writer::open(bucket.clone(), branch, holder, token).await?,
-            Some((record, recovered)) => {
-                let found = (recovered, lease);
-                Writer::open_recovered_from(bucket.clone(), record, found, holder, token).await?
+            None => {
+                failing!("remote::create_branch");
+                branch::create(&**bucket, branch, self.holder()).await?;
+                let keys = keyed(None).await?;
+                Writer::open_keyed(bucket.clone(), branch, (holder, token), keys).await?
+            }
+            Some((record, recovered, before)) => {
+                let keys = keyed(Some(record.clone())).await?;
+                match before.is_empty() && !keys.is_empty() {
+                    true => {
+                        Writer::open_keyed(bucket.clone(), branch, (holder, token), keys).await?
+                    }
+                    false => {
+                        let found = (recovered, lease);
+                        let taking = (holder, token);
+                        Writer::open_recovered_from(bucket.clone(), record, found, taking, keys)
+                            .await?
+                    }
+                }
             }
         };
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
-        let opening = Opening { state: writer.state(), fenced: Some(writer.fenced()), cache };
+        let keys = writer.keys().clone();
+        let opening = Opening {
+            state: writer.state(),
+            fenced: Some(writer.fenced()),
+            cache,
+            keys: keys.clone(),
+        };
         let store = blocking(|| recovering.open(options, opening))?;
         let _ = self.store.set(Arc::new(store));
+        self.hold_ring(&keys);
         let _ = self.token.set(token);
         self.took(&writer, token);
         Ok(Some(writer))
+    }
+
+    /// fxdax: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's: its
+    /// record's DEKs, given it its first if its cell is sealed and it has none, and its
+    /// ancestors' (`keys::with_dek`, `keys::ring`, TASK-411.3). Its record is `record`, if read,
+    /// or read now if its cell is sealed.
+    async fn ring_of(
+        &self,
+        bucket: &Arc<B>,
+        cell_keys: &CellKeys,
+        branch: extent_remote::layout::Branch,
+        record: Option<Record>,
+    ) -> Result<Arc<Ring>, Failure> {
+        if !cell_keys.sealed() && !cell_keys.has_kms() {
+            return Ok(Ring::clear());
+        }
+        let record = match record {
+            Some(record) => record,
+            None => {
+                branch::record(&**bucket, branch).await?.ok_or(extent_remote::Error::NoBranch)?
+            }
+        };
+        let record = keys::with_dek(&**bucket, cell_keys, branch, record).await?;
+        Ok(keys::ring(&**bucket, cell_keys, branch, &record, true).await?)
     }
 
     /// `writer` took the branch, with the fencing token `token`: the store names what it reads in
@@ -1059,11 +1183,16 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let store = self.store().clone();
         let branch = store.description().branch;
         let record = record(&**bucket, branch).await?.ok_or(extent_remote::Error::NoBranch)?;
-        let recovered = extent_remote::recover(&**bucket, branch, record.origin()).await?;
+        // fxdax: under the keys its writer before held (TASK-411.3).
+        let keys = self.writer().map_or_else(Ring::clear, |writer| writer.keys().clone());
+        let origin = record.origin();
+        let recovered =
+            extent_remote::recovery::recover_under(&**bucket, branch, origin, &keys).await?;
         let token = *self.token.get().expect("a writer took the branch before");
         let holder = self.holder();
+        let taking = (holder, token);
         let writer =
-            Writer::open_recovered(bucket.clone(), record, recovered, holder, token).await?;
+            Writer::open_recovered(bucket.clone(), record, recovered, taking, keys).await?;
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let fenced = writer.fenced();
         blocking(|| store.rebase(&fenced))?;
@@ -1074,21 +1203,27 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
     /// changes. No lease: nothing the store does goes to the bucket but its forks' records.
+    /// fxdax: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
+    /// (TASK-411.3).
     async fn point(
         &self,
         bucket: &Arc<B>,
         branch: Branch,
         record: Record,
-    ) -> Result<extent_remote::State, Failure> {
+    ) -> Result<(extent_remote::State, Arc<Ring>), Failure> {
         if record.deleted {
             return Err(Failure::PointDeleted);
         }
         let Kind::Point(origin) = record.kind else {
             return Err(Failure::msg(format!("branch {branch} is no point")));
         };
-        let state = extent_remote::recover(&**bucket, branch, Some(origin)).await?.state;
+        let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
+        let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
+        let recovering =
+            extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
+        let state = recovering.await?.state;
         let _ = self.point.set(Point { branch, origin });
-        Ok(state)
+        Ok((state, keys))
     }
 
     /// Adds the segments of the store's write-ahead log whose commits are durable to the writer, to
@@ -1291,6 +1426,9 @@ impl InFlight {
 }
 
 #[cfg(test)]
+mod encrypted;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Description, MemDir};
@@ -1325,8 +1463,11 @@ mod tests {
     #[test]
     fn stores_take_their_cells_and_are_fenced_with_them() {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let host =
-            Runtime { handle: runtime.handle().clone(), uploads: Budget::new(Limits::UNBOUNDED) };
+        let host = Runtime {
+            handle: runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: Default::default(),
+        };
         let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch: BRANCH };
@@ -1352,7 +1493,8 @@ mod tests {
         // Another placement takes the cell, and its writer the branch with the cell's epoch,
         // fencing it (TASK-371).
         let taken = runtime.block_on(async {
-            let (held, _) = cell::hold(&*bucket, BRANCH.cell, (6, 6), false, None).await.unwrap();
+            let (held, _) =
+                cell::hold(&*bucket, BRANCH.cell, (6, 6), (false, None), None).await.unwrap();
             drop(
                 extent_remote::Writer::open(bucket.clone(), BRANCH, 0x66, held.epoch)
                     .await
@@ -1365,7 +1507,7 @@ mod tests {
         store.commit(None).unwrap();
         let fenced = remote.wait_uploaded(store.epoch().unwrap());
         assert!(matches!(fenced, Err(Failure::Remote(extent_remote::Error::Fenced))), "{fenced:?}");
-        let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), false, None));
+        let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), (false, None), None));
         assert_eq!(back.map(|(held, _)| held), Err(extent_remote::Error::Stale));
     }
 
@@ -1374,8 +1516,11 @@ mod tests {
     #[test]
     fn gathers_take_what_may_upload_at_once() {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let host =
-            Runtime { handle: runtime.handle().clone(), uploads: Budget::new(Limits::UNBOUNDED) };
+        let host = Runtime {
+            handle: runtime.handle().clone(),
+            uploads: Budget::new(Limits::UNBOUNDED),
+            keys: Default::default(),
+        };
         let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch: BRANCH };

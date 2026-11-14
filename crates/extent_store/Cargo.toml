@@ -34,6 +34,8 @@ extent_store = { path = ".", features = ["audit"] }
 fail = { version = "0.5.1", features = ["failpoints"] }
 object_store.workspace = true
 tempfile.workspace = true
+# A KMS counting its calls, for tests of sealed stores (TASK-411.3).
+extent_keys = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

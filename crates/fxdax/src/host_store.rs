@@ -79,6 +79,20 @@ pub(crate) fn may_fork_into(
     Err(Error::new(anyhow::Error::new(Errno::EACCES).context(refused)))
 }
 
+/// fxdax: whether `store` may fork to `child`: `ENOTSUP` if it holds keys, its branch or an ancestor
+/// of it sealed, and `child` is of another cell (TASK-411.3). Its DEKs, wrapped under its own cell's
+/// KEK, the child's cell doesn't hold: forks into other cells rewrap them under the child's cell
+/// KEK, which TASK-411.4 makes. Until then, refused before anything is made, rather than make a
+/// child that reads nothing it inherits.
+pub(crate) fn sealed_fork_into(store: &Store<HostDir>, child: Branch) -> Result<(), Error> {
+    let parent = store.description().branch;
+    if child.cell == parent.cell || store.keys().is_empty() {
+        return Ok(());
+    }
+    let refused = extent_remote::Error::Inherited { branch: child, from: parent };
+    Err(Error::new(anyhow::Error::new(Errno::ENOTSUP).context(refused.to_string())))
+}
+
 /// A new branch of `cell`, of `bucket`: its ID one no other branch of the bucket has, nor will
 /// (`extent_remote::objectid`), so that stores made apart, and the forks of one, mint extent IDs
 /// of their own (backlog doc-4), which a host's cache of extents keys them by (TASK-364).
@@ -410,6 +424,7 @@ pub(crate) fn fork<H>(
     held: H,
 ) -> Result<(), Error> {
     may_fork_into(store.description().branch, remote, child.branch.cell)?;
+    sealed_fork_into(store, child.branch)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))

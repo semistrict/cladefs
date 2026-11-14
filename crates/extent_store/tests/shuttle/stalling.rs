@@ -111,6 +111,10 @@ impl Dir for Stalling {
         self.dir.rename(from, to)
     }
 
+    fn replace(&self, from: &str, to: &str) -> io::Result<()> {
+        self.dir.replace(from, to)
+    }
+
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
         self.dir.link(from, to)
     }
