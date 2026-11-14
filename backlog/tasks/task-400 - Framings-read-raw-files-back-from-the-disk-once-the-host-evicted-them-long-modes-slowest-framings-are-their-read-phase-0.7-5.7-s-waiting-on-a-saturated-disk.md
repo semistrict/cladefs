@@ -4,9 +4,11 @@ title: >-
   Framings read raw files back from the disk once the host evicted them: long
   mode's slowest framings are their read phase, 0.7-5.7 s, waiting on a
   saturated disk
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-13 15:12'
+updated_date: '2026-11-14 18:41'
 labels:
   - perf
   - extentd

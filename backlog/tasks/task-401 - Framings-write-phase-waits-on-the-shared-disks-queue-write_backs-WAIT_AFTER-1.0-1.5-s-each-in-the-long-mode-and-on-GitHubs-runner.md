@@ -3,9 +3,11 @@ id: TASK-401
 title: >-
   Framings' write phase waits on the shared disk's queue: write_back's
   WAIT_AFTER 1.0-1.5 s each in the long mode and on GitHub's runner
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-13 15:12'
+updated_date: '2026-11-14 18:41'
 labels:
   - perf
   - extentd
