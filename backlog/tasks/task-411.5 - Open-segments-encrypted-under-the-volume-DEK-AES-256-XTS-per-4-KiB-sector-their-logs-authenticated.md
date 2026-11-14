@@ -6,10 +6,10 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:51'
+updated_date: '2026-11-14 19:07'
 labels: []
 dependencies:
-  - TASK-411.3
+  - TASK-411.8
 documentation:
   - >-
     backlog/docs/doc-16 -
@@ -30,7 +30,6 @@ The open segment holds raw guest writes on local disk until it is framed, read b
 - [ ] #1 An open segment file holds no plaintext of written data: a test writes known content and searches the file
 - [ ] #2 Reads of sealed extents from the open segment and its framing on close give the written data
 - [ ] #3 Recovery after a crash with an open segment gives the same state as before
-- [ ] #4 The store refuses a write to the open segment that is not whole 4 KiB sectors, and extent_store's simulation writes 4 KiB blocks
 <!-- AC:END -->
 
 ## Definition of Done

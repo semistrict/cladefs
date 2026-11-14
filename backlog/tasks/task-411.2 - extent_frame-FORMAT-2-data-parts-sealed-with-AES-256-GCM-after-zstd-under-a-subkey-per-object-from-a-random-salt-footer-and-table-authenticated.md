@@ -3,10 +3,11 @@ id: TASK-411.2
 title: >-
   extent_frame FORMAT 2: data parts sealed with AES-256-GCM after zstd, under a
   subkey per object from a random salt; footer and table authenticated
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 18:51'
+updated_date: '2026-11-14 19:07'
 labels: []
 dependencies:
   - TASK-411.1
