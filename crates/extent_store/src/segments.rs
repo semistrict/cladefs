@@ -1333,8 +1333,16 @@ pub(crate) fn make_durable<D: Dir>(
         opened.sync_dirs(dir)?;
     }
     timing.took(durable::ENTRIES);
+    // fxdax: each written back a piece at a time, waiting for each, then synced: so that its
+    // sync, and the syncs of the daemon's turns, which the host's journal makes wait for what was
+    // begun before them, find little of it to write at once, as a framed segment's 32 MiB synced
+    // at once kept them waiting up to a second (GCE r728, TASK-165.9). Its framing waited for
+    // each piece itself, 1.0-2.7 s a framing behind a disk VMs share (TASK-401), and the uploader
+    // waited for the framing: it reads the framed file through the host's page cache now, which
+    // holds what the framing wrote ([`crate::read_object`]).
     let mut syncs = Syncs::default();
     for (_, framed) in framed {
+        write_back_by_pieces(&*framed.file)?;
         syncs.file(framed.file.clone());
     }
     syncs.dir(branch_dir(SEGMENTS, branch));
@@ -1348,6 +1356,17 @@ pub(crate) fn make_durable<D: Dir>(
     dir.barrier()?;
     timing.took(durable::DIRS);
     timings::made_durable(branch, framed.len(), timing.end());
+    Ok(())
+}
+
+/// fxdax: writes `file`, a framed file, back to the host's disk a piece of [`WRITTEN_BACK`] bytes
+/// at a time, waiting for each ([`make_durable`]): what of it is written back already, an in-place
+/// framing's raw data, the guest's writes wrote back, it waits for no more.
+fn write_back_by_pieces<F: File>(file: &F) -> io::Result<()> {
+    let size = file.size()?;
+    for at in (0..size).step_by(WRITTEN_BACK as usize) {
+        file.write_back(at, (size - at).min(WRITTEN_BACK))?;
+    }
     Ok(())
 }
 
@@ -1377,9 +1396,10 @@ pub(crate) struct Behind<F> {
     pub wait: Option<(u64, u64)>,
 }
 
-/// fxdax: the bytes of a framed file a framing writes back at a time ([`File::write_back`]): what
-/// a sync behind it, a daemon's turn's, waits for at most, as the host's disk writes them.
-pub(crate) const WRITTEN_BACK: usize = 1 << 20;
+/// fxdax: the bytes of a framed file [`make_durable`] writes back at a time, waiting for each,
+/// before it syncs it ([`File::write_back`]): what a sync behind it, a daemon's turn's, waits for at
+/// most, as the host's disk writes them.
+pub(crate) const WRITTEN_BACK: u64 = 1 << 20;
 
 /// fxdax: what a segment's looks ahead at its parts saw as it filled, for its framing, which reads
 /// them no more if it frames the segment in place (TASK-400): of each part, the bytes of it written,
@@ -1496,11 +1516,10 @@ fn frame_segment<D: Dir>(
             // framing ends, which its store says ([`Store::framing`](crate::Store::framing),
             // TASK-189).
             fail::fail_point!("segments::framing");
-            // fxdax: a piece at a time, each written back before the next (TASK-165.9).
-            for (piece, written) in packed.chunks(WRITTEN_BACK).enumerate() {
-                write_back(&file, written, (piece * WRITTEN_BACK) as u64)?;
-            }
-            write_back(&file, &tail, end)?;
+            // fxdax: written, its writing back left to the making durable after, which writes
+            // it back a piece at a time before it syncs it ([`make_durable`], TASK-401).
+            write_framed(&file, &packed, 0)?;
+            write_framed(&file, &tail, end)?;
             Framed::new(Arc::new(file), parts)
         }
     };
@@ -1527,17 +1546,18 @@ impl std::fmt::Display for How {
     }
 }
 
-/// fxdax: writes `bytes` at `offset` in `file`, a segment's framed file, and writes them back,
-/// waiting: counted, as framed ([`crate::written`]).
-fn write_back<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> {
+/// fxdax: writes `bytes` at `offset` in `file`, a segment's framed file, or its tail: counted, as
+/// framed ([`crate::written`]).
+fn write_framed<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> {
     file.write_at(bytes, offset)?;
     crate::written::wrote(crate::written::Kind::Framed, bytes.len());
-    file.write_back(offset, bytes.len() as u64)
+    Ok(())
 }
 
 /// fxdax: frames a segment's data, `raw`, its raw file at `raw_path`, its parts stored raw, in
-/// place ([`frame_segment`]): `tail` appended at `end`, the end of its data, and
-/// the file linked at `path`, its framed file's. Its
+/// place ([`frame_segment`]): `tail` appended at `end`, the end of its data, which the making
+/// durable after writes back (TASK-401: written back here, a tail of a few KiB waited 1.5 s
+/// behind the disk's queue); and the file linked at `path`, its framed file's. Its
 /// raw path goes once the commits its footer names are durable, as a raw file does
 /// ([`Segments::raw`]): an opening finding the framed file torn closes the segment again from its
 /// raw file and log, as one framed in a copy. None if `dir` links no files.
@@ -1548,7 +1568,7 @@ fn frame_in_place<D: Dir>(
     end: u64,
     tail: &[u8],
 ) -> Result<Option<Arc<D::File>>, Error> {
-    write_back(&**raw, tail, end)?;
+    write_framed(&**raw, tail, end)?;
     match dir.link(raw_path, path) {
         Ok(()) => {}
         Err(err) if err.kind() == io::ErrorKind::Unsupported => return Ok(None),

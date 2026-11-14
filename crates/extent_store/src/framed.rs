@@ -78,9 +78,14 @@ pub fn read_whole<F: File>(file: &F) -> io::Result<Vec<u8>> {
 
 /// fxdax: the whole of the framed file `file`, checked: its frame, and each part's stored bytes
 /// against its CRC ([`extent_frame::check`]). What a host sends on as it is, as its uploader does
-/// the segments its store closed, goes so, or not at all (TASK-153.11).
+/// the segments its store closed, goes so, or not at all (TASK-153.11). Read through the host's
+/// page cache ([`File::read_cached`]), which holds what a framing wrote, its writing back left to
+/// the making durable after (`segments::make_durable`): a read around the cache waited for the
+/// host's disk to write it first, behind a disk VMs share, and read back from the disk what the
+/// cache held (TASK-401).
 pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
-    let bytes = read_whole(file)?;
+    let mut bytes = vec![0; file.size()? as usize];
+    file.read_cached(&mut bytes, 0)?;
     extent_frame::check(&bytes)
         .map_err(|corrupt| io::Error::new(io::ErrorKind::InvalidData, corrupt))?;
     Ok(bytes)

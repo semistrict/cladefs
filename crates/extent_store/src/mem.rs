@@ -74,6 +74,9 @@ pub struct Io {
     /// fxdax: the most bytes a file held written, but neither written back ([`File::write_back`])
     /// nor synced since, at any time: what a sync of it would have had to write (TASK-165.9).
     pub most_unwritten: u64,
+    /// fxdax: the most bytes a sync of a file found written, but neither written back nor synced
+    /// since: what it wrote at once (TASK-401).
+    pub most_synced_unwritten: u64,
     /// fxdax: the syncs of directories, and of files (TASK-369, TASK-333).
     pub synced_dirs: u64,
     pub synced_files: u64,
@@ -418,8 +421,9 @@ impl File for MemFile {
         let inode = fs.inodes.get_mut(&self.inode).unwrap();
         inode.durable = inode.data.clone();
         inode.writes.clear();
-        inode.unwritten = 0;
+        let unwritten = std::mem::take(&mut inode.unwritten);
         fs.io.synced_files += 1;
+        fs.io.most_synced_unwritten = fs.io.most_synced_unwritten.max(unwritten);
         Ok(())
     }
 
