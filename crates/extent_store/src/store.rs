@@ -1494,20 +1494,34 @@ impl<D: Dir> Store<D> {
     /// (`Segments::prepared`, TASK-384): the commits made in the segment, opened, then wait for no
     /// sync of the directories of raw files and logs, which each segment's opening cost the next
     /// flush, a commit of the host's journal a durable commit waited for. Here, holding it, as
-    /// before, if the directory does one thing at a time, or the host refuses the thread.
+    /// before, if the directory does one thing at a time, or the host refuses the thread. fxdax:
+    /// the segment opened meanwhile, as a commit filling it opens it, the preparation goes on with
+    /// the next's (`Preparing::Again`, `Segments::placed_synced`), as no other began meanwhile:
+    /// ended, it left the next segment nothing prepared, as `Store::prepared` finds it, until a
+    /// flush or closing after it began another (TASK-404).
     fn prepare_next(&self, state: &mut State<D::File>) {
         let Some(preparation) = state.segments.to_prepare() else { return };
         let preparation = match self.dir.concurrent() {
             true => {
                 let opener = self.framer();
                 let prepare = move |preparation: Preparation| {
-                    let prepared = preparation.prepare(&*opener.dir);
-                    let preparing = opener.lock().segments.prepared(&*opener.dir, prepared);
-                    if let Preparing::Placed(segment) = preparing {
-                        let synced = sync_entries(&*opener.dir, segment.branch);
-                        opener.lock().segments.placed_synced(segment, synced);
-                    } else if let Preparing::Ended(stale) = preparing {
-                        remove_spare(&*opener.dir, stale);
+                    let dir = &*opener.dir;
+                    let mut next = Some(preparation);
+                    while let Some(preparation) = next {
+                        let prepared = preparation.prepare(dir);
+                        // Bound, the state's lock let go before the entries' sync.
+                        let preparing = opener.lock().segments.prepared(dir, prepared);
+                        next = match preparing {
+                            Preparing::Placed(segment) => {
+                                let synced = sync_entries(dir, segment.branch);
+                                opener.lock().segments.placed_synced(segment, synced)
+                            }
+                            Preparing::Again(preparation) => Some(preparation),
+                            Preparing::Ended(stale) => {
+                                remove_spare(dir, stale);
+                                None
+                            }
+                        };
                     }
                     opener.idle.notify_all();
                 };
@@ -1518,13 +1532,20 @@ impl<D: Dir> Store<D> {
             }
             false => preparation,
         };
-        let prepared = preparation.prepare(&*self.dir);
-        match state.segments.prepared(&*self.dir, prepared) {
-            Preparing::Placed(segment) => {
-                let synced = sync_entries(&*self.dir, segment.branch);
-                state.segments.placed_synced(segment, synced);
-            }
-            Preparing::Ended(stale) => remove_spare(&*self.dir, stale),
+        let mut next = Some(preparation);
+        while let Some(preparation) = next {
+            let prepared = preparation.prepare(&*self.dir);
+            next = match state.segments.prepared(&*self.dir, prepared) {
+                Preparing::Placed(segment) => {
+                    let synced = sync_entries(&*self.dir, segment.branch);
+                    state.segments.placed_synced(segment, synced)
+                }
+                Preparing::Again(preparation) => Some(preparation),
+                Preparing::Ended(stale) => {
+                    remove_spare(&*self.dir, stale);
+                    None
+                }
+            };
         }
     }
 

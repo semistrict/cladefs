@@ -1833,6 +1833,44 @@ fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
     }
 }
 
+/// fxdax: a preparation of the next segment's log whose segment opened before it was placed, with
+/// a log of its own, goes on as the next's: no opening, nor flush, began another while it ran, and
+/// ended there it left the next segment nothing placed, as `Store::prepared` found it, until a
+/// flush or closing after it began one (TASK-404: commits_reopen_from_their_logs's (1, false, 2)
+/// on loaded hosts, the last flush having found a preparation running). Red so with it ending.
+#[test]
+fn preparations_overtaken_go_on_as_the_next_segments() {
+    use std::sync::Mutex;
+    use std::sync::mpsc::channel;
+    let dir = MemDir::new();
+    let store = create(dir.clone(), 64 << 20);
+    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    settled(&store);
+    store.prepared().unwrap();
+    let next = store.placed().expect("the next segment placed");
+    // The preparation of the segment after it held, as a loaded host's opener thread is, while
+    // commits open it and the one after.
+    let (go, gone) = channel::<()>();
+    let gone = Mutex::new(gone);
+    let held = fail::FailGuard::with_callback("segments::preparing", move || {
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    for sequence in 2..4 {
+        store.close_segment().unwrap();
+        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
+        store.commit(None).unwrap();
+    }
+    drop((go, held));
+    store.prepared().unwrap();
+    assert_eq!(store.placed(), Some(next + 2), "the segment after the open one, placed");
+    settled(&store);
+    for sequence in 1..4 {
+        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+    }
+}
+
 /// fxdax: a store prepares the next segment's log once a flush made commits durable, a store that
 /// writes, not as it opens (TASK-333): one that only reads, as a fork a daemon serves, prepares
 /// none, nor holds a file open for it, its flushes making nothing durable. Every fork the daemon
