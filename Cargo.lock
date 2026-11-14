@@ -936,6 +936,7 @@ dependencies = [
  "bincode",
  "event-listener",
  "extent_frame",
+ "extent_keys",
  "extent_remote",
  "extent_store",
  "fail",

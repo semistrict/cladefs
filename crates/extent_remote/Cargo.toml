@@ -39,6 +39,8 @@ hyper = { version = "1.12.0", features = ["server", "http1"] }
 hyper-util = { version = "0.1.21", features = ["tokio"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+# A KMS counting its calls (TASK-411.3).
+extent_keys = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

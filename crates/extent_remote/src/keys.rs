@@ -712,3 +712,174 @@ pub struct Host {
     pub kms: Option<Arc<Kms>>,
     pub ring: Arc<HostRing>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::{self, Kind as Volume};
+    use crate::layout::{Origin, TEST_CELL, test_branch};
+    use crate::record::Kind;
+    use crate::testing::{Direct, SimBucket};
+    use extent_keys::kms::LocalKms;
+    use extent_keys::testing::Counted;
+    use futures::executor::block_on;
+
+    /// A KMS holding tenant 1's KEK, counting its calls, and the host's over it.
+    fn kms() -> (tempfile::TempDir, Arc<Counted<LocalKms>>, Arc<Kms>) {
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalKms::open(dir.path().join("kms")).unwrap();
+        local.create(TEST_CELL.tenant).unwrap();
+        let counted = Arc::new(Counted::new(local));
+        let shared: kms::Shared = counted.clone();
+        (dir, counted, Kms::new(shared))
+    }
+
+    /// A DEK wrapped under a cell's KEK unwraps for its place alone: another branch's, of the
+    /// same cell, or another generation, fails AES-KW's check, a wrapped DEK copied there.
+    #[test]
+    fn deks_unwrap_at_their_place_alone() {
+        let (kek, dek) = (Secret::random(), Secret::random());
+        let wrapped = wrap_dek((&kek, 1), test_branch(7), 2, &dek);
+        assert_eq!((wrapped.generation, wrapped.kek), (2, 1));
+        assert_eq!(unwrap_dek(&kek, test_branch(7), &wrapped).unwrap().expose(), dek.expose());
+        let refused = |branch: Branch, wrapped: &Dek| {
+            unwrap_dek(&kek, branch, wrapped).map(|_| ()).unwrap_err().to_string()
+        };
+        assert_eq!(
+            refused(test_branch(8), &wrapped),
+            "corrupt: branch 1/1/8's DEK of generation 2: not authentic: a wrapped key, by its \
+             integrity check"
+        );
+        let relabelled = Dek { generation: 3, ..wrapped.clone() };
+        assert_eq!(
+            refused(test_branch(7), &relabelled),
+            "corrupt: branch 1/1/7's DEK of generation 3: not authentic: a wrapped key, by its \
+             integrity check"
+        );
+        let other_cell = Branch { cell: Cell { tenant: 1, id: 2 }, id: 7 };
+        assert!(unwrap_dek(&kek, other_cell, &wrapped).is_err());
+    }
+
+    /// A ring's keys, as a reader of one branch holds them: that branch's DEKs alone, its objects
+    /// sealed if it has any; a branch of none, in the clear. A host's ring is the union of its
+    /// stores', each held while its store is open.
+    #[test]
+    fn rings_hold_each_branchs_keys_for_its_objects_alone() {
+        let one = KeyId { branch: 7, generation: 1 };
+        let other = KeyId { branch: 8, generation: 1 };
+        let ring = Ring::sealing_for_tests(7, 1, Secret::random(), [(other, Secret::random())]);
+        assert!(ring.of(7).dek(one).is_some() && ring.of(8).dek(other).is_some());
+        assert!(ring.of(7).dek(other).is_none() && ring.of(8).dek(one).is_none());
+        assert!(ring.of(7).sealed() && ring.of(8).sealed() && !ring.of(9).sealed());
+        assert_eq!(ring.sealing().map(|(_, id)| id), Some(one));
+        assert_eq!(of_key(&ring, &layout::segment(test_branch(8), 3)).sealed(), true);
+        let moves = layout::moves(&layout::segment(test_branch(7), 3)).unwrap();
+        assert_eq!(branch_of(&moves), Some(7));
+        assert_eq!(of_key(&ring, &layout::cell(TEST_CELL)).sealed(), false);
+
+        let host = HostRing::new();
+        assert!(host.ring().is_empty());
+        let held = host.hold(ring.clone());
+        let another = Ring::sealing_for_tests(9, 2, Secret::random(), []);
+        let also = host.hold(another);
+        assert_eq!(host.ring().branches(), BTreeSet::from([7, 8, 9]));
+        assert_eq!(host.ring().generations(9), [2]);
+        drop(held);
+        assert_eq!(host.ring().branches(), BTreeSet::from([9]));
+        drop(also);
+        assert!(host.ring().is_empty());
+        drop(host.hold(Ring::clear()));
+    }
+
+    /// A cell made with a KEK from the host's pool keeps it wrapped; a taking of it by another
+    /// host unwraps it once, however many of its branches it opens at once, and a taking after
+    /// that once more; a fork's child of the cell and a point there read their parent's DEK, of
+    /// the cell's, a fork into another cell of a sealed branch none.
+    #[test]
+    fn cell_keys_unwrap_once_a_taking_and_rings_follow_origins() {
+        let (_dir, counted, kms) = kms();
+        let bucket = Direct(SimBucket::new());
+        let kek = block_on(new_cell_kek(Some(&kms), TEST_CELL.tenant)).unwrap();
+        let (secret, wrapped) = kek.as_ref().map(|(secret, kek)| (secret.expose(), kek)).unwrap();
+        let making = (true, Some(wrapped));
+        let volume = Some(("root", cell::Volume { branch: 7, kind: Volume::Fxfs }));
+        let (_, object) = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), making, volume)).unwrap();
+        assert_eq!(&object.keks, std::slice::from_ref(wrapped));
+        assert!(!holds(&crate::layout::encode(&object), secret));
+        let made = held(Some(&kms), TEST_CELL, object.clone(), kek);
+        assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
+
+        // Branches: 7, a root; 8 its fork's child; 9 a point of it; with DEKs given by writers.
+        let origin = Origin { parent: test_branch(7), at: 3 };
+        block_on(branch::create(&bucket, test_branch(7), 1)).unwrap();
+        let child = crate::layout::Child { branch: test_branch(8), owner: 2, point: false };
+        block_on(branch::record_fork(&bucket, child, origin)).unwrap();
+        let point = crate::layout::Child { branch: test_branch(9), owner: 3, point: true };
+        block_on(branch::record_fork(&bucket, point, origin)).unwrap();
+        let record = |id| block_on(branch::record(&bucket, test_branch(id))).unwrap().unwrap();
+        for id in [7, 8] {
+            block_on(with_dek(&bucket, &made, test_branch(id), record(id))).unwrap();
+        }
+        let again = block_on(with_dek(&bucket, &made, test_branch(7), record(7))).unwrap();
+        assert_eq!(again, record(7));
+        assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
+
+        // Another host takes the cell: one unwrap for the three.
+        counted.reset();
+        let (_, other) = kms_over(&counted);
+        let (_, taken) =
+            block_on(cell::hold(&bucket, TEST_CELL, (6, 6), (false, None), None)).unwrap();
+        let keys = CellKeys::of(TEST_CELL, &taken, Some(other.clone()));
+        let rings: Vec<_> = [(7, true), (8, true), (9, false)]
+            .into_iter()
+            .map(|(id, writes)| {
+                block_on(ring(&bucket, &keys, test_branch(id), &record(id), writes))
+            })
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
+        assert_eq!(rings[0].branches(), BTreeSet::from([7]));
+        assert_eq!(rings[1].branches(), BTreeSet::from([7, 8]));
+        assert_eq!(rings[1].sealing().map(|(_, id)| id), Some(KeyId { branch: 8, generation: 1 }));
+        assert_eq!(rings[2].branches(), BTreeSet::from([7]));
+        assert_eq!(rings[2].sealing().map(|(_, id)| id), None);
+        let (dek, _) = rings[0].sealing().unwrap();
+        assert_eq!(
+            rings[1].of(7).dek(KeyId { branch: 7, generation: 1 }).unwrap().expose(),
+            dek.expose()
+        );
+        // Read before it is held by placement 6 again, as a writer's recovery reads: the same
+        // taking, no unwrap more; a taking by another, one more.
+        let early = CellKeys::to_hold(TEST_CELL, &taken, Some(other.clone()), 6);
+        block_on(ring(&bucket, &early, test_branch(7), &record(7), true)).unwrap();
+        assert_eq!(counted.unwraps(), 1);
+        let next = CellKeys::to_hold(TEST_CELL, &taken, Some(other.clone()), 7);
+        block_on(ring(&bucket, &next, test_branch(7), &record(7), true)).unwrap();
+        assert_eq!(counted.unwraps(), 2);
+
+        // A fork of 8 into another cell of the tenant's.
+        let elsewhere = Branch { cell: Cell { tenant: 1, id: 2 }, id: 10 };
+        let child = crate::layout::Child { branch: elsewhere, owner: 4, point: false };
+        let origin = Origin { parent: test_branch(8), at: 1 };
+        block_on(branch::create(&bucket, test_branch(8), 1)).ok();
+        block_on(branch::record_fork(&bucket, child, origin)).ok();
+        let forked = Kind::Fork(origin).of(4);
+        let none = CellKeys::none(elsewhere.cell, Some(other));
+        let refused = block_on(ring(&bucket, &none, elsewhere, &forked, true));
+        assert_eq!(
+            refused.map(|_| ()),
+            Err(Error::Inherited { branch: elsewhere, from: test_branch(8) })
+        );
+    }
+
+    /// A host's KMS over `counted`, unwrapping anew.
+    fn kms_over(counted: &Arc<Counted<LocalKms>>) -> ((), Arc<Kms>) {
+        let shared: kms::Shared = counted.clone();
+        ((), Kms::new(shared))
+    }
+
+    /// Whether `bytes` hold `piece` anywhere.
+    fn holds(bytes: &[u8], piece: &[u8]) -> bool {
+        bytes.windows(piece.len()).any(|window| window == piece)
+    }
+}

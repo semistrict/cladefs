@@ -1617,6 +1617,25 @@ mod tests {
 
         let sealed = framed(&data, b"footer", Some((&dek(), ID)));
         assert_eq!(super::data(&sealed, &sealing).unwrap(), data);
+
+        // A downgrade: a sealed object's seal, MACs and tags zeroed, its CRCs made to match, as
+        // one who can write the bucket, holding no key, would: refused by the branch's readers;
+        // a reader holding no key, as the collector, finds its parts no zstd: ciphertext.
+        let mut zeroed = sealed.clone();
+        let frame = Frame::of(&zeroed).unwrap();
+        let trailer = zeroed.len() - TRAILER as usize;
+        zeroed[trailer + at::SEAL..trailer + at::TABLE_CRC].fill(0);
+        for part in 0..frame.parts() {
+            let tag = entry(&frame, part) + 17;
+            zeroed[tag..tag + TAG_LEN].fill(0);
+        }
+        recrc(&mut zeroed);
+        assert_eq!(Frame::of(&zeroed).unwrap().seal, Seal::Clear);
+        assert_eq!(check(&zeroed), Ok(()));
+        assert_eq!(Parts::of(&zeroed, &sealing), Err(Error::Clear));
+        assert_eq!(super::data(&zeroed, &sealing), Err(Error::Clear));
+        let ciphertext = corrupt("part, by zstd: Unknown frame descriptor");
+        assert_eq!(super::data(&zeroed, &NoKeys), Err(ciphertext.into()));
         let other = KeyId { generation: 9, ..ID };
         let authenticated =
             framed_keyed(&data, b"footer", Some((&dek(), other, Keyed::Authenticated)));

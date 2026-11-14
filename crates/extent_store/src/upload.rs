@@ -1426,6 +1426,9 @@ impl InFlight {
 }
 
 #[cfg(test)]
+mod encrypted;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Description, MemDir};
