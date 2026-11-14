@@ -1,11 +1,11 @@
 ---
 id: TASK-395.19
 title: A pass lists a branch's checkpoints once more for each point it was forked at
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 15:48'
-updated_date: '2026-11-14 17:00'
+updated_date: '2026-11-14 18:33'
 labels:
   - collector
   - performance
@@ -23,14 +23,14 @@ Found measuring TASK-395.12: a pass over a cell whose branch was forked at N poi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A pass over a cell whose branch was forked at many points lists its checkpoints as many times as with one, shown by a request-counting test that goes red with the change undone
+- [x] #1 A pass over a cell whose branch was forked at many points lists its checkpoints as many times as with one, shown by a request-counting test that goes red with the change undone
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -47,4 +47,12 @@ Found measuring TASK-395.12: a pass over a cell whose branch was forked at N poi
 Found measuring TASK-395.12 (list 104 for 100 fork points, 5 for one). Safe by TASK-395.16's argument: a state as of a segment is the same from any checkpoint up to there; one found gone, or a segment missing, starts the recovery over with a fresh listing; what the pass deletes it listed, so a checkpoint made since the listing stays. Test passes_list_a_branchs_checkpoints_once_however_many_points_it_was_forked_at: (1, [1]) and (1, [1;6]); with state_at listing under (branch, None) it fails (2, [1]). Spec unchanged, as TASK-395.16's (Bucket.tla's pass reads each fork point's state as of then). Blind spot: TASK-395.16's test pinned LISTs only for cells without fork points; this one adds them. 100-point pass: list 104 -> 4.
 
 First cut served every state_at by (branch, at), in-cell origins too: children_restored_from_points_keeping_their_origins_need_recoveries_by_origins then passed with its rule off, as the origin's recovery read the cell's listing (no checkpoint yet) and kept segments 0..3 rather than reading the checkpoint made mid-pass. Safe (keeps more) but the mutation test lost its scenario, so only kept fork points (recover_at) get their own listing. extent_remote 307/307 after.
+
+macOS: cargo clippy --workspace --tests, cargo nextest run -p extent_remote 307/307, scripts/test.sh (all parts; firecracker.lock updated for rustc-hash); Linux cross-check compiles; ubu1 run t39512h at 8eadcf0c2: workspace 2652/2652, guest tests pass, scripts' tests 8 failures all TASK-410 (main's TMPDIR, fixed after, test_host 60/60); upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The cell's listing serves each kept fork point's first checkpoint listing (state_at's kept, recover_at): LISTs of a 100-point pass 104 -> 4. Test passes_list_a_branchs_checkpoints_once_however_many_points_it_was_forked_at, red with kept off; doc-7 updated.
+<!-- SECTION:FINAL_SUMMARY:END -->
