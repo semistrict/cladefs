@@ -11,7 +11,8 @@
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
 use crate::framed::{Files, Framed, Source, read_parts};
-use crate::framing::{self, Look, Seen};
+use crate::framing::{self, Look, Looked, Seen};
+use crate::held::Hold;
 use crate::layout::{
     Change, Data, EXTENTS, Extents, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId,
     branch_dir, extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number,
@@ -441,31 +442,33 @@ impl<F: File> Segments<F> {
     }
 
     /// fxdax: segment `number`'s raw file, to look at a part of ahead of its framing, if its
-    /// framing is yet to take its parts' looks (TASK-400).
-    pub fn see(&self, number: SegmentId) -> Option<Arc<F>> {
-        let segment = self.tracked.get(&number).filter(|segment| segment.ahead.is_some())?;
+    /// framing is yet to take its parts' looks (TASK-400); and the look at its parts seen so far,
+    /// which says whether to pack the next ahead too ([`framing::see`]).
+    pub fn see(&self, number: SegmentId) -> Option<(Arc<F>, Look)> {
+        let segment = self.tracked.get(&number)?;
+        let look = segment.ahead.as_ref()?.look;
         match &segment.phase {
             Phase::Open { raw, .. } | Phase::Full { raw, .. } | Phase::Framing { raw, .. } => {
-                Some(raw.clone())
+                Some((raw.clone(), look))
             }
             Phase::Failed { .. } | Phase::Closed => None,
         }
     }
 
-    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, which its framing takes
-    /// ([`Segments::take_seen`]), if it is yet to.
-    pub fn saw(&mut self, number: SegmentId, part: u64, seen: Seen) {
+    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, and packed it, `held`, if
+    /// it did: for its framing, which takes them ([`Segments::take_seen`]), if it is yet to.
+    pub fn saw(&mut self, number: SegmentId, part: u64, seen: Seen, held: Option<Hold>) {
         let ahead = self.tracked.get_mut(&number).and_then(|segment| segment.ahead.as_mut());
         if let Some(ahead) = ahead {
-            ahead.saw(part, seen);
+            ahead.saw(part, seen, held);
         }
     }
 
-    /// fxdax: what the looks ahead at segment `number`'s parts saw, by part, which its framing
+    /// fxdax: what the looks ahead at segment `number`'s parts took, by part, which its framing
     /// takes as it begins: none are taken after (TASK-400).
-    pub fn take_seen(&mut self, number: SegmentId) -> Vec<Option<Seen>> {
+    pub fn take_seen(&mut self, number: SegmentId) -> Vec<Option<Looked>> {
         let segment = self.tracked.get_mut(&number);
-        segment.and_then(|segment| segment.ahead.take()).map_or_else(Vec::new, |ahead| ahead.seen)
+        segment.and_then(|segment| segment.ahead.take()).map_or_else(Vec::new, |ahead| ahead.looked)
     }
 
     /// fxdax: segment `number`, closed, is acknowledged in the bucket, its object there at `key`
@@ -1277,12 +1280,12 @@ impl<F: File> Unframed<F> {
     /// its entry, together with others framed meanwhile, syncing nothing itself (TASK-310). Its raw
     /// file may go once it is, and the commits its footer names are too. fxdax: the files of the
     /// extents stored on their own its footer names are durable first, so that a framed file a
-    /// crash leaves whole names none torn (TASK-165.9). `seen`, what looks ahead at its parts saw,
-    /// by part, as it filled ([`Segments::take_seen`], TASK-400).
+    /// crash leaves whole names none torn (TASK-165.9). `ahead`, what looks ahead at its parts
+    /// took, by part, as it filled ([`Segments::take_seen`], TASK-400).
     pub fn frame<D: Dir<File = F>>(
         self,
         dir: &D,
-        seen: &[Option<Seen>],
+        ahead: Vec<Option<Looked>>,
     ) -> Result<Arc<Framed<F>>, Error> {
         // fxdax: timed, phase by phase (TASK-165.9), with its waits to run (TASK-336).
         let mut timing = Timing::since(Instant::now());
@@ -1300,7 +1303,7 @@ impl<F: File> Unframed<F> {
         let footer = self.footer.encode();
         let (path, raw_path) = (framing_path(self.number), open_segment_path(self.number));
         let raw = (raw_path.as_str(), &self.raw);
-        let data = (self.len, self.quiet, seen);
+        let data = (self.len, self.quiet, ahead);
         let (framed, how) = frame_segment(dir, &path, raw, data, &footer, &mut timing)?;
         timings::framed(self.number, how, timing.end());
         Ok(framed)
@@ -1409,13 +1412,16 @@ pub(crate) struct Behind<F> {
 /// most, as the host's disk writes them.
 pub(crate) const WRITTEN_BACK: u64 = 1 << 20;
 
-/// fxdax: what a segment's looks ahead at its parts saw as it filled, for its framing, which reads
-/// them no more if it frames the segment in place (TASK-400): of each part, the bytes of it written,
-/// each by a write ended or an append, and once all are, what a look at it saw, if one did.
+/// fxdax: what a segment's looks ahead at its parts took as it filled, for its framing, which reads
+/// them no more if it frames the segment in place, or holds them packed (TASK-400): of each part,
+/// the bytes of it written, each by a write ended or an append, and once all are, what a look at it
+/// took, if one did; and the look at all of those seen, which says whether the segment will be
+/// framed in place, as its framing's does ([`Look::saves_little`]).
 #[derive(Default)]
 struct Ahead {
     written: Vec<u64>,
-    seen: Vec<Option<Seen>>,
+    looked: Vec<Option<Looked>>,
+    look: Look,
 }
 
 impl Ahead {
@@ -1439,13 +1445,23 @@ impl Ahead {
         whole.into_iter()
     }
 
-    /// A look at part `part` saw `seen`.
-    fn saw(&mut self, part: u64, seen: Seen) {
+    /// A look at part `part` saw `seen`, and packed it, `held`, if it did. Once the parts seen
+    /// say the segment will be framed in place, it holds none of them packed: its framing reads
+    /// them not, nor any part, but for those not seen ahead.
+    fn saw(&mut self, part: u64, seen: Seen, held: Option<Hold>) {
         let part = part as usize;
-        if self.seen.len() <= part {
-            self.seen.resize(part + 1, None);
+        if self.looked.len() <= part {
+            self.looked.resize_with(part + 1, || None);
         }
-        self.seen[part] = Some(seen);
+        self.look = self.look.plus(seen.look);
+        let held = match self.look.saves_little() {
+            true => {
+                self.looked.iter_mut().flatten().for_each(|looked| looked.held = None);
+                None
+            }
+            false => held,
+        };
+        self.looked[part] = Some(Looked { seen, held });
     }
 }
 
@@ -1459,30 +1475,34 @@ impl Ahead {
 /// guest wrote it (TASK-310). A segment's data was written twice, raw, which the host's disk wrote
 /// back as the guest wrote it, and framed: as much again as its guest wrote, the disk's other
 /// writers waiting behind it, on a disk VMs share. Or else in a file of its own, as before. Its
-/// parts `seen`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a copy
-/// (TASK-400).
+/// parts looked at `ahead`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a
+/// copy, and not those packed then, held still (TASK-400).
 fn frame_segment<D: Dir>(
     dir: &D,
     path: &str,
     (raw_path, raw): (&str, &Arc<D::File>),
-    (len, quiet, seen): (u64, bool, &[Option<Seen>]),
+    (len, quiet, ahead): (u64, bool, Vec<Option<Looked>>),
     footer: &[u8],
     timing: &mut Timing<4>,
 ) -> Result<(Arc<Framed<D::File>>, How), Error> {
     let started = Instant::now();
     // fxdax: its parts read, each in a buffer kept for the framings after; checksummed and looked
-    // at if it may be framed in place (TASK-336), but for those seen ahead (TASK-400).
-    let mut parts = framing::read(&**raw, len, quiet, seen)?;
+    // at if it may be framed in place (TASK-336), but for those seen ahead, and those packed then
+    // (TASK-400).
+    let mut parts = framing::read(&**raw, len, quiet, ahead)?;
     // fxdax: in place at once if a look at its parts says compressing them saves too little,
     // compressing no more of them: compressing every part to tell was most of what framings took
-    // with eight VMs framing at once, up to 0.9 s each; else by them all (TASK-310).
+    // with eight VMs framing at once, up to 0.9 s each; else by them all (TASK-310). The parts
+    // packed ahead, held, held no more either way.
     let look = parts.iter().fold(Look::default(), |look, part| look.plus(part.seen.look));
     let sampled = quiet && len > 0 && look.saves_little();
     if !sampled {
-        framing::read_rest(&**raw, len, &mut parts)?;
+        framing::fill(&**raw, len, &mut parts)?;
     }
-    let read = parts.iter().filter_map(|part| part.data.as_ref()).map(|data| data.len() as u64);
-    let read = read.sum();
+    let bytes = |of: fn(&framing::Read) -> bool| -> u64 {
+        parts.iter().filter(|part| of(part)).map(|part| part.len).sum()
+    };
+    let (read, held) = (bytes(|part| part.data.is_some()), bytes(|part| part.packed.is_some()));
     FRAMING_READ.fetch_add(read, std::sync::atomic::Ordering::Relaxed);
     timing.took(framing_phase::READ);
     let mut packer = extent_frame::Packer::new();
@@ -1490,10 +1510,11 @@ fn frame_segment<D: Dir>(
     if !sampled {
         // On threads of their own, whose waits to run count in this one's stead.
         let handing = timing.waits.handing();
-        let (each, waited) = framing::pack(&parts);
+        let waited = framing::pack(&mut parts);
         timing.waits.handed(handing, waited);
-        for (part, each) in parts.iter().zip(&each) {
-            packer.push_part(&mut packed, part.data(), each);
+        for part in &parts {
+            let (stored, how) = part.stored();
+            packer.push_stored(&mut packed, part.len, stored, how);
         }
     }
     let in_place =
@@ -1515,7 +1536,7 @@ fn frame_segment<D: Dir>(
         true => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
         false => None,
     };
-    let how = How { in_place: framed.is_some(), len, read };
+    let how = How { in_place: framed.is_some(), len, read, held };
     let framed = match framed {
         Some(file) => Framed::new(file, parts),
         None => {
@@ -1539,18 +1560,21 @@ fn frame_segment<D: Dir>(
 }
 
 /// fxdax: how a segment was framed, as its framing's warning says it (TASK-400): in place or in a
-/// copy, of how many bytes of data, and how many of them it read, those a look ahead saw not.
+/// copy, of how many bytes of data, and how many of them it read, those a look ahead saw not; and
+/// how many it took packed ahead, held.
 pub(crate) struct How {
     in_place: bool,
     len: u64,
     read: u64,
+    held: u64,
 }
 
 impl std::fmt::Display for How {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let mib = |bytes: u64| bytes as f64 / (1 << 20) as f64;
         let how = if self.in_place { "in place" } else { "in a copy" };
-        write!(f, "{how}, {:.1} MiB, {:.1} MiB read", mib(self.len), mib(self.read))
+        let (len, read, held) = (mib(self.len), mib(self.read), mib(self.held));
+        write!(f, "{how}, {len:.1} MiB, {read:.1} MiB read, {held:.1} MiB held")
     }
 }
 
@@ -1956,7 +1980,7 @@ mod tests {
     use crate::dir::read_file;
     use crate::framed::read_whole;
     use crate::layout::create_branch_dirs;
-    use crate::{MemDir, MemFile};
+    use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = 4096;
     const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
@@ -1975,7 +1999,7 @@ mod tests {
     /// `unframed`, framed and made durable, as a store's framings make it ([`make_durable`]).
     fn framed_durably(dir: &MemDir, unframed: Unframed<MemFile>) -> Arc<Framed<MemFile>> {
         let number = unframed.number();
-        let framed = unframed.frame(dir, &[]).unwrap();
+        let framed = unframed.frame(dir, Vec::new()).unwrap();
         make_durable(dir, BRANCH.id, (&[(number, framed.clone())], false), Instant::now()).unwrap();
         framed
     }
@@ -1989,6 +2013,20 @@ mod tests {
     }
 
     /// Segment `number`'s data, as its file holds it.
+    /// TASK-400: looks ahead at `seeing`, parts of segments written whole, as the store's framer
+    /// does, holding in `held` those it packs.
+    fn look_ahead(
+        segments: &mut Segments<MemFile>,
+        held: &Arc<HeldParts>,
+        seeing: Vec<(SegmentId, u64)>,
+    ) {
+        for (number, part) in seeing {
+            let (raw, look) = segments.see(number).expect("a part to look at");
+            let (seen, packed) = framing::see(&*raw, part, look).unwrap();
+            segments.saw(number, part, seen, packed.map(|packed| held.hold(packed)));
+        }
+    }
+
     fn data(segments: &mut Segments<MemFile>, dir: &MemDir, number: SegmentId) -> Vec<u8> {
         match segments.source(dir, number).unwrap() {
             Source::Raw(file) => read_file(&*file).unwrap(),
@@ -2050,6 +2088,42 @@ mod tests {
         drop(unframed);
     }
 
+    /// fxdax: TASK-400: a segment's parts packed ahead are held while the parts seen say it will be
+    /// framed in a copy, and let go of all at once when they say it will be framed in place: a part
+    /// of text held, then, noise outweighing it, none, nor any after; its framing takes no hold.
+    #[test]
+    fn parts_held_go_once_the_segment_looks_in_place() {
+        let dir = MemDir::new();
+        let mut segments = opened(&dir, 64);
+        let held = HeldParts::new();
+        let bytes = |seed: u64, text: bool| -> Vec<u8> {
+            let mut state = (seed + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+            let words = (0..PART / 8).map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state
+            });
+            let noise = words.flat_map(u64::to_le_bytes);
+            noise.map(|byte| if text { b'a' + byte % 16 } else { byte }).collect()
+        };
+        let mut held_bytes = Vec::new();
+        for part in 0..12 {
+            let (number, file, at) = segments.reserve(PART);
+            file.write_at(&bytes(part, part == 0), at).unwrap();
+            segments.held(number, (at, PART));
+            let seeing = segments.take_seeing();
+            look_ahead(&mut segments, &held, seeing);
+            held_bytes.push(held.bytes());
+        }
+        assert!(held_bytes[0] > 0 && held_bytes[0] < PART, "the text, compressed: {held_bytes:?}");
+        assert!(held_bytes[6] > held_bytes[0], "noise held raw, the parts seen saving enough");
+        assert_eq!(held_bytes[11], 0, "{held_bytes:?}");
+        let ahead = segments.take_seen(segment(0));
+        assert_eq!(ahead.len(), 12);
+        assert!(ahead.iter().flatten().all(|looked| looked.held.is_none()));
+    }
+
     /// fxdax: TASK-400: each part of a segment is looked at ahead once its last write ended, the
     /// writes to it ending in any order, or appended; its framing takes what was seen, after which
     /// nothing is, and frames it in place reading only the parts not seen, its last, part written,
@@ -2092,10 +2166,9 @@ mod tests {
         segments.held(last.0, (last.1, last.2));
         let seeing = segments.take_seeing();
         assert_eq!(seeing, [(segment(0), 0), (segment(0), 1), (segment(0), 2)]);
-        for (number, part) in seeing {
-            let raw = segments.see(number).expect("a part to look at");
-            segments.saw(number, part, framing::see(&*raw, part).unwrap());
-        }
+        let held = HeldParts::new();
+        look_ahead(&mut segments, &held, seeing);
+        assert_eq!(held.bytes(), 0, "noise, framed in place, held not");
         let unframed = segments.close(&dir, 1, 0).unwrap();
         let raw_data = data(&mut segments, &dir, segment(0));
         let seen = segments.take_seen(segment(0));
@@ -2103,7 +2176,7 @@ mod tests {
         assert!(segments.see(segment(0)).is_none(), "its framing took what was seen");
         // What the framing read, not the audit's reading again of what was seen (`framing::read`).
         let before = (framing_reads().0, segments_framed_in_place());
-        let framed = unframed.frame(&dir, &seen).unwrap();
+        let framed = unframed.frame(&dir, seen).unwrap();
         assert_eq!(framing_reads().0 - before.0, BLOCK, "the last part alone read");
         assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
         make_durable(&dir, BRANCH.id, (&[(segment(0), framed.clone())], false), Instant::now())

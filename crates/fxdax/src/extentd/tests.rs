@@ -360,6 +360,18 @@ fn keeps_object_storage_and_follower_stats() {
         "seen_ahead_bytes",
     ];
     expected.extend(once.map(str::to_owned));
+    // And the parts held, packed ahead of their framings (TASK-400).
+    let held = [
+        "bytes",
+        "peak_bytes",
+        "held_bytes",
+        "taken_bytes",
+        "evicted_bytes",
+        "evicted",
+        "late",
+        "skipped",
+    ];
+    expected.extend(held.map(|name| format!("held_parts_{name}")));
     expected.extend(["io_write_bytes", "io_cancelled_write_bytes"].map(str::to_owned));
     assert_eq!(names, expected, "{kept}");
     assert_eq!(count(&daemon, "durable_lag_count"), Some(3), "{kept}");
@@ -5097,6 +5109,61 @@ fn the_governor_shares_memory_by_weight() {
     super::memory::govern(4 * CHUNK);
     let held = |name| super::memory::shrink(Some(name), u64::MAX).unwrap();
     assert_eq!((held("heavy"), held("light")), (3 * CHUNK, CHUNK));
+}
+
+/// TASK-400: the governor, the host's memory running low, lets go of the parts of segments the
+/// daemon's stores hold packed, newest first, before any tenant's pages: they are derived, their
+/// framings reading them back; then, none left, it evicts tenants' pages as before.
+#[test]
+fn the_governor_lets_parts_held_go_before_tenants_pages() {
+    use super::wire::*;
+    const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let tenant_dir = dir.path().join("cached");
+    std::fs::create_dir(&tenant_dir).unwrap();
+    let tenant = super::server::Tenant::new("cached", 1, &tenant_dir).unwrap();
+    let socket = tenant_dir.join("extentd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
+    let (sender, mut receiver, _stream, branch) =
+        raw_connection(&socket, &tenant_dir.join("store"), 1 << 26);
+    let mut served = |header: Header, payload: &[u8]| {
+        let reply = call(&sender, &mut receiver, header, payload);
+        assert_eq!(reply.header.status, 0, "request {}", header.kind);
+        reply
+    };
+    // Noise, which its store's looks ahead hold none of, its segment looking framed in place.
+    let noise = |seed: u64| -> Vec<u8> {
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
+        let words = (0..CHUNK / 8).map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        });
+        words.flat_map(u64::to_le_bytes).collect()
+    };
+    for sequence in 1..=4 {
+        let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
+        served(written, &noise(sequence));
+    }
+    served(Header::new(COMMIT, 5).with_flags(COMMIT_DURABLE), &[]);
+    for sequence in 1..=4 {
+        let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
+        assert!(served(read, &[]).payload == noise(sequence), "extent {sequence}");
+    }
+    let cached = || super::memory::shrink(Some("cached"), u64::MAX).unwrap();
+    assert_eq!(cached(), 4 * CHUNK);
+    let parts = super::memory::held_parts();
+    let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
+    assert_eq!(super::memory::governed_bytes(), 4 * CHUNK + 2 * CHUNK);
+    super::memory::govern(4 * CHUNK + CHUNK);
+    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, CHUNK), "the last two let go");
+    super::memory::govern(4 * CHUNK);
+    assert_eq!((cached(), parts.bytes()), (4 * CHUNK, 0), "every part let go, no page");
+    super::memory::govern(3 * CHUNK);
+    assert_eq!((cached(), parts.bytes()), (3 * CHUNK, 0), "then pages");
 }
 
 /// TASK-79.35: the daemon's metrics are served on through a failure to accept a scrape's

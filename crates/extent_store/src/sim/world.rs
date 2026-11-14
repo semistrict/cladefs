@@ -288,12 +288,17 @@ struct Host {
     /// (`extent_store::upload`): a few at once, so that uploads wait for each other's to be done,
     /// and are woken as they are (TASK-149.32).
     uploads: Arc<Budget>,
+    /// What holds the parts its stores pack as their segments fill, which they share, as a
+    /// daemon's do (`crate::held`, TASK-400).
+    held: Arc<crate::HeldParts>,
 }
 
 impl Default for Host {
     fn default() -> Self {
         let limits = Limits { requests: UPLOADS_AT_ONCE, bytes: u64::MAX };
-        Self { disks: HashMap::new(), sessions: BTreeMap::new(), uploads: Budget::new(limits) }
+        let (disks, sessions) = (HashMap::new(), BTreeMap::new());
+        let held = crate::HeldParts::new();
+        Self { disks, sessions, uploads: Budget::new(limits), held }
     }
 }
 
@@ -874,6 +879,7 @@ impl World {
             max_lag: u64::MAX,
             max_lag_bytes: u64::MAX,
             cache: None,
+            held: Some(self.hosts[host].held.clone()),
             token,
             checkpoint_every: upload::CHECKPOINT_EVERY,
             // The interval closes a segment filled at once, as the first full one closed between

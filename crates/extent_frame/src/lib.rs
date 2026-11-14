@@ -296,18 +296,39 @@ impl Packer {
     /// says, appending the object's next bytes to `bytes` (TASK-336). A whole part, but for the
     /// object's last.
     pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
+        let stored = packed.compressed.as_deref().unwrap_or(part);
+        self.push_stored(bytes, part.len() as u64, stored, packed);
+    }
+
+    /// fxdax: [`Packer::push_part`], of a part of `len` bytes of data given by its bytes as
+    /// stored, `stored`: compressed if `packed` is, else the part's own. So that a store packs a
+    /// part as its segment fills, and holds it compressed, its data gone, until the segment's
+    /// framing (TASK-400).
+    pub fn push_stored(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        len: u64,
+        stored: &[u8],
+        packed: &PackedPart,
+    ) {
         assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
+        let encoding = match &packed.compressed {
+            Some(compressed) => {
+                debug_assert!(compressed[..] == *stored, "a part compressed, stored so");
+                Encoding::Zstd
+            }
+            None => {
+                assert_eq!(stored.len() as u64, len, "a raw part, stored as it is");
+                Encoding::Raw
+            }
+        };
         let offset = self.end.next_multiple_of(ALIGN);
         bytes.resize(bytes.len() + (offset - self.end) as usize, 0);
-        let (stored, encoding) = match &packed.compressed {
-            Some(compressed) => (&compressed[..], Encoding::Zstd),
-            None => (part, Encoding::Raw),
-        };
         bytes.extend_from_slice(stored);
-        let len = stored.len() as u64;
-        self.stored.push(Stored { offset, len, crc: packed.crc, encoding });
-        self.data_len += part.len() as u64;
-        self.end = offset + len;
+        let stored_len = stored.len() as u64;
+        self.stored.push(Stored { offset, len: stored_len, crc: packed.crc, encoding });
+        self.data_len += len;
+        self.end = offset + stored_len;
     }
 
     /// The object's last bytes, which follow those [`Packer::push`] returned: `footer`, the table,

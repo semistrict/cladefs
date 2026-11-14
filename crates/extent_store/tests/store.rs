@@ -62,7 +62,7 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
     let last = state.last_commit;
     let fenced = Fenced { recovered: last, last_commit: last, chain };
-    let opening = Opening { state, fenced: Some(fenced), cache: None };
+    let opening = Opening { state, fenced: Some(fenced), cache: None, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
@@ -1480,6 +1480,97 @@ fn segments_of_noise_then_holes_are_framed_compressed() {
     for sequence in 1..=6 {
         assert!(read(&reopened, extent(sequence), 0, MIB) == expect(sequence), "{sequence}");
     }
+}
+
+/// fxdax TASK-400: a segment that compresses has its parts packed as they are written whole, held
+/// in memory, and its framing in a copy reads none of them back, but its last part, never whole;
+/// one whose parts were let go of to make room, as a daemon's governor lets them go, reads them
+/// back and packs them as before: framed alike, byte for byte, either way. Held parts are derived:
+/// a crash as a closing between commits frames it, before its framed file is durable, keeps the
+/// commits in the raw file and log, as before, whatever was held. Before, a framing in a copy read its whole raw file back as it closed, seconds
+/// after the guest wrote it, from a disk eight VMs keep busy once the host had let its pages go.
+#[test]
+fn segments_framed_in_copies_take_their_parts_held() {
+    use extent_store::HeldParts;
+    use std::sync::Mutex;
+    const MIB: usize = 1 << 20;
+    let options = Options {
+        max_extent: 8 * MIB as u64,
+        segment_size: 8 * MIB as u64,
+        large_extent: 8 * MIB as u64,
+        ..OPTIONS
+    };
+    // Letters at random, sixteen of them: compresses by about half, as a build's files do.
+    let text = |seed: u64, len: usize| -> Vec<u8> {
+        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
+    };
+    let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { BLOCK });
+    let framed = |evicted: bool, dir: MemDir| {
+        let description =
+            Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+        Store::make(&dir, description, None, None).unwrap();
+        let held = HeldParts::new();
+        let opening = Opening { held: Some(held.clone()), ..Opening::new(BRANCH) };
+        let store = Store::recover_unmade(dir.clone()).unwrap().open(options, opening).unwrap();
+        store.made().unwrap();
+        assert!(Arc::ptr_eq(store.held_parts(), &held));
+        for sequence in 1..=7 {
+            store.write(extent(sequence), 0, &data(sequence)).unwrap();
+        }
+        store.commit(None).unwrap();
+        let holding = held.counts();
+        if evicted {
+            assert_eq!(held.evict_to(0), holding.bytes);
+        }
+        // Crashes as the framed file is written, not yet durable.
+        let crashes = Arc::new(Mutex::new(Vec::new()));
+        let guard = {
+            let (crashes, dir) = (crashes.clone(), dir.clone());
+            fail::FailGuard::with_callback("segments::making_durable", move || {
+                crashes.lock().unwrap().extend((0..4).map(|seed| dir.crash(seed)));
+            })
+            .unwrap()
+        };
+        let before = extent_store::framing_reads().0;
+        assert!(store.close_now().unwrap(), "closed between commits");
+        settled(&store);
+        drop(guard);
+        let read_back = extent_store::framing_reads().0 - before;
+        for sequence in 1..=7 {
+            assert!(read(&store, extent(sequence), 0, data(sequence).len()) == data(sequence));
+        }
+        let segments = names(&dir, "segments");
+        assert_eq!(segments.len(), 1, "{segments:?}");
+        let path = format!("{}/{}", of("segments", BRANCH.id), segments[0]);
+        let bytes = extent_store::read_whole(&dir.open(&path, true).unwrap()).unwrap();
+        assert!(bytes.len() < 4 * MIB, "a copy, compressed: {} bytes", bytes.len());
+        drop(store);
+        let crashes = std::mem::take(&mut *crashes.lock().unwrap());
+        assert_eq!(crashes.len(), 4);
+        for (seed, crashed) in crashes.into_iter().enumerate() {
+            let reopened = Store::open(crashed, options).unwrap();
+            assert_eq!(reopened.epoch().unwrap(), 1, "seed {seed}");
+            for sequence in 1..=7 {
+                let read = read(&reopened, extent(sequence), 0, data(sequence).len());
+                assert!(read == data(sequence), "seed {seed}, evicted {evicted}, {sequence}");
+            }
+        }
+        (bytes, read_back, holding, held.counts())
+    };
+    let (bytes, read_back, holding, after) = framed(false, MemDir::serial());
+    assert_eq!(read_back, BLOCK as u64, "the last part alone read");
+    assert!(holding.bytes > 2 * MIB as u64 && holding.bytes < 4 * MIB as u64, "{holding:?}");
+    assert_eq!((after.bytes, after.taken, after.evicted), (0, holding.held, 0));
+    let (evicted_bytes, evicted_read_back, _, evicted_after) = framed(true, MemDir::serial());
+    assert_eq!(evicted_read_back, 6 * MIB as u64 + BLOCK as u64, "every part read back");
+    assert_eq!((evicted_after.evicted_parts, evicted_after.taken), (6, 0));
+    assert!(bytes == evicted_bytes, "framed otherwise, held or not");
+    // A directory whose I/O runs on the store's threads: its parts packed ahead on threads of
+    // their own, at the host's lowest priority, held as they are packed, or read and packed by the
+    // framing, if not yet: framed alike whichever.
+    let (concurrent_bytes, _, _, concurrent_after) = framed(false, MemDir::new());
+    assert!(bytes == concurrent_bytes, "framed otherwise, packed ahead on threads");
+    assert_eq!(concurrent_after.bytes, 0, "{concurrent_after:?}");
 }
 
 /// fxdax: extents not one run in a segment filled since the last commit, written in pieces

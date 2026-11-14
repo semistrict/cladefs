@@ -11,7 +11,7 @@
 //!
 //! Its anonymous memory's budget ([`AnonBudget`]) is the sum of what the daemon holds by design,
 //! each part bounded where it is held (doc-7, Memory): its uploads', its framings', its fetches',
-//! its tenants' rooms' and its own. A sample past it is memory none of those holds: a copy no
+//! its tenants' rooms', the parts its stores pack ahead of their framings, held, and its own. A sample past it is memory none of those holds: a copy no
 //! budget counts (TASK-317's per-try copy of each upload), what the allocator kept of what was
 //! freed (TASK-317's glibc arenas), a leak. Each sample is weighed against the budget as of then,
 //! [`over-budget`](Sample::over_budget) counting those past it; a soak's or a test's assertion
@@ -56,6 +56,10 @@ pub struct AnonBudget {
     /// their VM processes held at once, so far (`super::memory::InFlight`), each tenant's within
     /// its room, as the protocol bounds it (TASK-149.35).
     pub rooms: u64,
+    /// The parts of segments its stores packed as they filled, held until their framings: the most
+    /// held at once so far, which the memory governor bounds, letting them go before any tenant's
+    /// pages as the host's memory runs short (`super::memory::held_parts`, TASK-400).
+    pub held: u64,
     /// Its own: [`OWN`].
     pub own: u64,
 }
@@ -63,7 +67,7 @@ pub struct AnonBudget {
 impl AnonBudget {
     /// Its parts together: the budget.
     pub fn total(&self) -> u64 {
-        self.uploads + self.framings + self.fetches + self.rooms + self.own
+        self.uploads + self.framings + self.fetches + self.rooms + self.held + self.own
     }
 }
 
@@ -135,6 +139,7 @@ fn budget(state: &mut State) -> AnonBudget {
         framings: state.writers * FRAMING,
         fetches: FETCHES,
         rooms: state.rooms,
+        held: super::memory::held_parts().counts().peak,
         own: OWN,
     }
 }
@@ -237,13 +242,15 @@ mod tests {
     }
 
     /// The budget's parts as the design has them: a store's framing two segments and their
-    /// extents, an extent and two chunks; the host's fetches 192 MiB.
+    /// extents, an extent and two chunks; the host's fetches 192 MiB; the parts held, counted.
     #[test]
     fn the_budgets_parts_are_the_designs() {
         assert_eq!(FRAMING, 2 * (96 << 20) + (64 << 20) + (32 << 20));
         assert_eq!(FETCHES, 192 << 20);
         let (uploads, framings) = (512 << 20, 2 * FRAMING);
-        let budget = AnonBudget { uploads, framings, fetches: FETCHES, rooms: 0, own: OWN };
-        assert_eq!(budget.total(), (512 << 20) + 2 * FRAMING + (192 << 20) + (64 << 20));
+        let (rooms, held) = (0, 40 << 20);
+        let budget = AnonBudget { uploads, framings, fetches: FETCHES, rooms, held, own: OWN };
+        let total = (512 << 20) + 2 * FRAMING + (192 << 20) + (40 << 20) + (64 << 20);
+        assert_eq!(budget.total(), total);
     }
 }

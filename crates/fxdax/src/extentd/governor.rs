@@ -13,7 +13,9 @@
 //! memory to grow into between looks and for the host ([`headroom`]). It sets the limit on every
 //! tenant's memory together to that ([`super::memory::govern`]); held past it, the daemon evicts at
 //! once, each tenant first down to its share of it by weight ([`shares`]), then any, least recently
-//! used first.
+//! used first. fxdax: what it holds counts the parts of segments its stores pack as they fill,
+//! held until their framings, which it lets go of first, before any tenant's page: derived, their
+//! framings read them back (`super::memory::held_parts`, TASK-400).
 //!
 //! A daemon given its memory's size (`fxdax-extentd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
@@ -178,7 +180,7 @@ pub fn start() -> Result<(), String> {
         .spawn(move || {
             loop {
                 match host_memory() {
-                    Ok(host) => memory::govern(allowance(physmem::arenas_bytes(), host, headroom)),
+                    Ok(host) => memory::govern(allowance(memory::governed_bytes(), host, headroom)),
                     Err(err) => log::error!("extentd: reading the host's memory: {err}"),
                 }
                 std::thread::sleep(INTERVAL);
