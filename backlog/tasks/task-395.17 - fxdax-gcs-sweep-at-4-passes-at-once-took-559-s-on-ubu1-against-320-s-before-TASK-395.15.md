@@ -3,9 +3,11 @@ id: TASK-395.17
 title: >-
   fxdax-gc's sweep at 4 passes at once took 559 s on ubu1, against 320 s before
   TASK-395.15
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-14 03:12'
+updated_date: '2026-11-14 15:37'
 labels:
   - collector
   - performance
@@ -33,3 +35,12 @@ ubu1 run t395sweep2 (main 79c8249e1, docs/measurements/ubu1-gc-sweep-2026-11-14T
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. scripts/gc-sweep.sh: sides (SIDE=TREE, own targets and buckets), rounds with the sides' order turned each round, FXDAX_GC_SWEEPS=1 for first sweeps alone, a median/least/most table; gc-sweep-host.sh takes SIDE=COMMITs.
+2. ubu1, one fxjob --bench job: old=c9b5ba549 new=main, 4 at once, 4 rounds, first sweeps only.
+3. If new is slower beyond the spread: profile (workers, lock stripes, blocking pool), fix, re-measure.
+4. Record in docs/measurements.
+<!-- SECTION:PLAN:END -->
