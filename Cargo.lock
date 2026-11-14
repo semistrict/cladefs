@@ -884,8 +884,11 @@ dependencies = [
 name = "extent_keys"
 version = "0.1.0"
 dependencies = [
+ "assert_matches",
  "aws-lc-rs",
+ "futures",
  "serde",
+ "tempfile",
  "thiserror",
  "zeroize",
 ]

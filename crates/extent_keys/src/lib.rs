@@ -16,6 +16,11 @@ use aws_lc_rs::{hkdf, hmac, rand};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
+pub mod kms;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
 /// The bytes of a key: AES-256's, HMAC-SHA256's, HKDF-SHA256's output.
 pub const KEY_LEN: usize = 32;
 
