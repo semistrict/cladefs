@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-12 10:51'
-updated_date: '2026-11-14 18:30'
+updated_date: '2026-11-14 18:31'
 labels:
   - bug
   - ubu1
@@ -63,4 +63,6 @@ DoD #1: macOS workspace 2369 passed. ubu1 under the new fxjob (tmp on ext4): 136
 Note: fxdax-work.slice held 2044M shmem before any of this with only t407's job running: probably old fxjob's leftovers (tmpfs files of ended jobs); not touched.
 
 2026-11-14 13:30 EST: queue idle; ran ubu1's step 146 on its own (sudo system-setup.d/146-fxdax_cgroups.sh, not system-setup.sh, which would also run others' pending steps: vscode, cliproxy, fxdax_tla, user_tweaks). /usr/local/bin/fxjob = origin/main 2eda3972 (md5 02aab1a0...; the step said replaced nothing: it was already that). fxjob-check.sh against the installed fxjob: all passed. Remaining for DoD #1: the full Linux workspace suite under the new fxjob (~30 min; cut at 1365/2651, 0 failed).
+
+2026-11-14 13:35 EST, coordinator: ubu1 /tmp held a 2.2G /tmp/fxdax-tla.CnSEeW (BucketForks states, 12:17, no TLC running), scripts/check-tla.sh's work dir: its EXIT trap does not run when the script is killed. Removed; /tmp 2.8G -> 698M, swap 6.9G -> 5.1G. Covered by this task when TLC runs under fxjob (its TMPDIR is reaped); TLC runs on the Mac now anyway.
 <!-- SECTION:NOTES:END -->
