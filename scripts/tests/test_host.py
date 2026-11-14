@@ -49,6 +49,9 @@ DIR = f"/mnt/fxdax-scratch/fxdax-host/{RUN}"
 BASE = [
     f"PATH={HOST_HOME}/.cargo/bin:/usr/bin:/bin",
     f"HOME={HOST_HOME}",
+    # The job's own, fxjob's (TASK-379): sudo passes none, so host_command names it, /tmp outside a
+    # job.
+    "TMPDIR=/tmp",
     "CARGO_BUILD_JOBS=4",
     "NEXTEST_TEST_THREADS=4",
     "GIT_CONFIG_COUNT=1",
