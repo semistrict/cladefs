@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 23:05'
+updated_date: '2026-11-14 23:48'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -196,9 +196,15 @@ dropped with its pool, never written out unwrapped.
   read the cell before the rotation may wrap a new DEK under the generation it read after the
   rotation listed the records, so dropping them needs that fenced first (follow-up).
 - **Local disk.** `wal::whole_footer` checks a framed segment whole by the keyless check
-  (`extent_frame::check`), sealed or not; a segment a recovery closes again is framed in the clear
-  (WAL recovery runs before the store's keys are known) and sealed as the store opens
-  (`wal::reseal`, by `Dir::replace`, atomic).
+  (`extent_frame::check`), sealed or not. *(TASK-411.9)* WAL recovery runs before the store's keys
+  are known and frames nothing: a segment it closes again keeps its raw file and log, its footer
+  folded and stamped provisionally as before (`Recovered::closing`), and is framed as the store
+  opens, holding its ring, first of all (`Recovered::close`, from `Recovering::open`): sealed if the
+  ring seals, in the clear otherwise, the raw file and log removed once the framed file and its
+  entry are durable. A crash before leaves them, which the next recovery closes again alike;
+  `drop_wal` removes them durably. (TASK-411.3 framed it in the clear and resealed it as the store
+  opened, its data on the host's disk in the clear meanwhile, and for good if the host died
+  between; `wal::reseal` and `Dir::replace` went.)
 - **Not yet:** open segments and large extents' raw files are in the clear until sealed
   (TASK-411.5); collector compaction of sealed objects (TASK-411.6); forks across cells
   (TASK-411.4).

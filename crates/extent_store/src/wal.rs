@@ -42,7 +42,9 @@
 //! durable commit, and goes. A log may lack its segment's last
 //! commits, those not durable, as flushes append records in their commits' order: the next segment
 //! holding commits then follows commits it lacks, which no later segment holds durable, and those
-//! after it go, durably, before it is closed again. The store's commits are numbered one after
+//! after it go, durably, before it is closed again. fxdax: closed again, it is framed once the
+//! store's keys are known, not by recovery, which holds none yet ([`Recovered::close`],
+//! TASK-411.9). The store's commits are numbered one after
 //! another, and the segments a crash left torn are all of the last opening's, which numbered them
 //! alike: one closed again is whole if the next segment holding commits holds the next commit first
 //! (TASK-165.9's crash rounds, cutting openings, and its Shuttle tests, a crash bringing back a
@@ -54,10 +56,10 @@ use crate::dir::{Dir, File, not_found, read_file};
 use crate::framed::{read_frame, read_whole};
 use crate::layout::{
     FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, branch_dir, decode, encode, extent_path,
-    framing_path, list_numbers, log_path, open_segment_path, segment_path,
+    list_numbers, log_path, open_segment_path, segment_path,
 };
 use crate::segments::{fold, footer_last, segment_footer};
-use anyhow::{Context as _, Error};
+use anyhow::{Context as _, Error, ensure};
 use extent_frame::segment::{Branch, Chain, Contents, Footer, epoch_of, writer_of};
 use extent_remote::wal::Fenced;
 use serde::{Deserialize, Serialize};
@@ -339,12 +341,83 @@ impl<F: File> SegmentLog<F> {
 
 /// A store's WAL as its directory holds it, recovered ([`recover`]): its base; its segments,
 /// footers by their numbers, in order; and the number of the next segment, past every one the
-/// directory held.
+/// directory held. fxdax: of those, the ones closed again, not yet framed, by their numbers, with
+/// the records of their logs their footers fold, their raw files and logs still there: framed once
+/// the store's keys are known ([`Recovered::close`], TASK-411.9).
 pub(crate) struct Recovered {
     pub base: Option<u64>,
     pub base_file: BaseFile,
     pub segments: Vec<(Footer, u64)>,
     pub next: u64,
+    pub closing: BTreeMap<u64, Vec<Contents>>,
+}
+
+impl Recovered {
+    /// fxdax: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
+    /// `branch`, holding `keys`, the store's: sealed under its branch's newest DEK if they seal, else
+    /// in the clear; each from its raw data and its log's records read again, which must still be
+    /// those recovery kept, with the footer recovery folded them into, and synced; then the
+    /// directory of framed files synced, and their raw files and logs removed, as the commits they
+    /// hold are durable in the framed files then. Recovery frames nothing itself: it holds no key
+    /// yet, and a sealed branch's segment framed in the clear and resealed later left its data on
+    /// the host's disk in the clear meanwhile, and for good if the host died between (TASK-411.9).
+    /// A crash before leaves the raw files and logs, which the next recovery closes again alike.
+    pub fn close<D: Dir>(
+        &mut self,
+        dir: &D,
+        branch: Branch,
+        keys: &extent_remote::keys::Ring,
+    ) -> Result<(), Error> {
+        if self.closing.is_empty() {
+            return Ok(());
+        }
+        let sealing = keys.sealing();
+        for (footer, number) in &self.segments {
+            let Some(kept) = self.closing.get(number) else { continue };
+            let segment = SegmentId { branch: branch.id, number: *number };
+            let (records, data, _) = log_records(dir, segment)?;
+            ensure!(
+                records.get(..kept.len()) == Some(&kept[..]),
+                "{segment:?}'s log changed since its recovery"
+            );
+            // fxdax: to the end of its last run: past it, nothing the records name, as a framing
+            // in place cut short leaves the raw file with its tail, torn (TASK-310).
+            let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
+            let data = &data[..(end.unwrap_or(0) as usize).min(data.len())];
+            let framed = extent_frame::framed(data, &footer.encode(), sealing);
+            let path = segment_path(segment);
+            remove(dir, &path)?;
+            let file = dir.create(&path, true)?;
+            file.write_at(&framed, 0)?;
+            crate::written::wrote(crate::written::Kind::Framed, framed.len());
+            file.sync()?;
+        }
+        dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
+        dir.barrier()?;
+        for number in std::mem::take(&mut self.closing).into_keys() {
+            let segment = SegmentId { branch: branch.id, number };
+            remove(dir, &open_segment_path(segment))?;
+            remove(dir, &log_path(segment))?;
+        }
+        Ok(())
+    }
+
+    /// fxdax: drops what it holds of the segments closed again, not yet framed: their raw files
+    /// and logs, durably, so that no recovery closes them again (`Recovering::drop_wal`).
+    pub fn drop_closing<D: Dir>(&mut self, dir: &D, branch: Branch) -> Result<(), Error> {
+        if self.closing.is_empty() {
+            return Ok(());
+        }
+        for number in std::mem::take(&mut self.closing).into_keys() {
+            let segment = SegmentId { branch: branch.id, number };
+            remove(dir, &open_segment_path(segment))?;
+            remove(dir, &log_path(segment))?;
+        }
+        for kind in [OPEN_SEGMENTS, LOGS] {
+            dir.sync_dir(&branch_dir(kind, branch.id))?;
+        }
+        Ok(())
+    }
 }
 
 /// Recovers the WAL of `branch` in `dir` (see the module's docs): each segment whose framed file
@@ -442,15 +515,15 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             true => whole_footer(dir, segment, left(number))?,
             false => None,
         };
-        let (records, data) = match (&footer, raw.contains(&number)) {
+        let records = match (&footer, raw.contains(&number)) {
             (None, true) => {
-                let (records, data, refused) = log_records(dir, segment)?;
+                let (records, _, refused) = log_records(dir, segment)?;
                 if refused {
                     refusing.insert(number);
                 }
-                (records, data)
+                records
             }
-            _ => (Vec::new(), Vec::new()),
+            _ => Vec::new(),
         };
         // Not whole, and not one the base acknowledged, whose removal a crash undid: one whose
         // raw file or log is gone was durable, as they go only then.
@@ -466,7 +539,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                 .is_some_and(|footer| base.is_none_or(|base| footer_last(footer) > epoch_of(base)));
         found.push(match footer {
             Some(footer) => (number, Found::Whole(footer)),
-            None if after_base(&records) => (number, Found::Torn(records, data)),
+            None if after_base(&records) => (number, Found::Torn(records)),
             None => (number, Found::Nothing),
         });
     }
@@ -500,6 +573,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     // segment after it ends is the last, closed again without it, from its raw data and log, which
     // stay until the commit is durable: the commit is not.
     let mut segments: Vec<(Footer, u64)> = Vec::new();
+    let mut closing = BTreeMap::new();
     for (at, (number, found_here)) in found.iter().enumerate() {
         let number = *number;
         let segment = SegmentId { branch: branch.id, number };
@@ -522,13 +596,13 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             gone(found[from].0)?;
             synced()
         };
-        let (mut records, data, unended) = match found_here {
+        let (mut records, unended) = match found_here {
             // One the base acknowledged, whose files' removal a crash undid, goes below: its
             // commit is the bucket's, whole, whatever is left of the segments after it.
             Found::Whole(footer) => match &footer.contents.continued {
                 Some(continued) if !acknowledged(footer) && !ended(at, continued.commit) => {
-                    let (records, data, _) = log_records(dir, segment)?;
-                    (records, data, true)
+                    let (records, _, _) = log_records(dir, segment)?;
+                    (records, true)
                 }
                 _ => {
                     settled(number)?;
@@ -548,7 +622,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                 gone(number)?;
                 continue;
             }
-            Found::Torn(records, data) => {
+            Found::Torn(records) => {
                 // fxdax: its log goes on from the last commit kept, the base's or a segment's, or
                 // it and those after go, durably: a flush appends its commits' records to the logs
                 // of their segments at once, and a crash may keep a later commit's record, in this
@@ -564,7 +638,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                 }
                 let continued = records.last().and_then(|record| record.continued.as_ref());
                 let unended = continued.is_some_and(|continued| !ended(at, continued.commit));
-                (records.clone(), data.clone(), unended)
+                (records.clone(), unended)
             }
         };
         let goes_on = !unended && records.last().is_some_and(continues);
@@ -586,10 +660,11 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         if framed.contains(&number) {
             remove(dir, &segment_path(segment))?;
         }
+        // fxdax: framed once the store's keys are known, its raw file and log kept until then
+        // (`Recovered::close`, TASK-411.9).
         let previous = segments.last().map(|(footer, _)| footer);
-        let footer = close_again(dir, branch, segment, previous, &records, &data)?;
-        settled(number)?;
-        segments.push((footer, number));
+        segments.push((closed_again(branch, previous, &records)?, number));
+        closing.insert(number, records);
         if !whole {
             break;
         }
@@ -605,7 +680,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         }
     }
     let next = (framed.iter().chain(&raw).chain(&logs)).max().map_or(0, |last| last + 1);
-    Ok(Recovered { base, base_file, segments, next })
+    Ok(Recovered { base, base_file, segments, next, closing })
 }
 
 /// The footer of `segment`'s framed file, if it is whole: checked whole, data and all, if `left`,
@@ -658,11 +733,11 @@ fn first_epoch(records: &[Contents]) -> Option<u64> {
 }
 
 /// What recovery finds of a segment: its framed file whole; or not, and the records of its log,
-/// holding commits after the WAL's base, and its raw data, to close it again from; or nothing
+/// holding commits after the WAL's base, to close it again from, with its raw data; or nothing
 /// durable.
 enum Found {
     Whole(Footer),
-    Torn(Vec<Contents>, Vec<u8>),
+    Torn(Vec<Contents>),
     Nothing,
 }
 
@@ -673,7 +748,7 @@ impl Found {
     fn goes_on(&self, commit: u64) -> Option<bool> {
         let first = match self {
             Found::Whole(footer) => &footer.contents,
-            Found::Torn(records, _) => records.first()?,
+            Found::Torn(records) => records.first()?,
             Found::Nothing => return None,
         };
         match (first.ends(commit), first.continues(commit)) {
@@ -687,7 +762,7 @@ impl Found {
     fn first_commit(&self) -> Option<u64> {
         let first = match self {
             Found::Whole(footer) => footer.contents.commits.first(),
-            Found::Torn(records, _) => records.iter().find_map(|record| record.commits.first()),
+            Found::Torn(records) => records.iter().find_map(|record| record.commits.first()),
             Found::Nothing => None,
         };
         first.copied().map(epoch_of)
@@ -717,17 +792,14 @@ fn log_records<D: Dir>(
     Ok((records, data, refused))
 }
 
-/// Closes `segment` again, left open, or framed part way, from its raw data, `data`, and the
-/// records of its log that are whole, which hold a commit at least: framed with a footer of their
-/// contents folded, stamped provisionally as `branch`'s, after `last`, the footer before it, if
-/// any, and made durable. Returns its footer.
-fn close_again<D: Dir>(
-    dir: &D,
+/// The footer of a segment closed again, left open, or framed part way, from the records of its
+/// log that are whole, which hold a commit at least: their contents folded, stamped provisionally
+/// as `branch`'s, after `last`, the footer before it, if any. fxdax: framed with it once the store's
+/// keys are known ([`Recovered::close`], TASK-411.9).
+fn closed_again(
     branch: Branch,
-    segment: SegmentId,
     last: Option<&Footer>,
     records: &[Contents],
-    data: &[u8],
 ) -> Result<Footer, Error> {
     let first = records.first().and_then(last_commit);
     let first = first.context("a log closed again holds a commit")?;
@@ -738,62 +810,7 @@ fn close_again<D: Dir>(
         }
         None => Chain::new(branch, writer_of(first), 0, None, 0),
     };
-    let footer = chain.close(fold(segment.branch, records));
-    let path = segment_path(segment);
-    remove(dir, &path)?;
-    let file = dir.create(&path, true)?;
-    // fxdax: to the end of its last run: past it, nothing the records name, as a framing in place
-    // cut short leaves the raw file with its tail, torn (TASK-310).
-    let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max().unwrap_or(0);
-    let data = &data[..(end as usize).min(data.len())];
-    // fxdax: in the clear, a recovery holding no key yet: sealed as the store opens holding its
-    // branch's ([`reseal`], TASK-411.3).
-    let framed = extent_frame::framed(data, &footer.encode(), None);
-    file.write_at(&framed, 0)?;
-    crate::written::wrote(crate::written::Kind::Framed, framed.len());
-    file.sync()?;
-    Ok(footer)
-}
-
-/// fxdax: seals the framed files of `branch`'s segments `numbers`, of its write-ahead log, that are
-/// in the clear, as a recovery holding no key closed them again ([`close_again`]), under the newest
-/// of `keys`' DEKs of the branch, which its readers hold sealed (TASK-411.3): each framed anew
-/// under its framing's name ([`framing_path`]), synced, then renamed its segment's, its directory
-/// synced. A crash between leaves it in the clear, sealed by the next opening, or the framing's
-/// file, which the next recovery removes.
-pub(crate) fn reseal<D: Dir>(
-    dir: &D,
-    branch: Branch,
-    numbers: impl IntoIterator<Item = u64>,
-    keys: &extent_remote::keys::Ring,
-) -> Result<(), Error> {
-    let sealing = keys.sealing().context("a sealed branch's keys seal under its DEK")?;
-    let mut sealed = false;
-    for number in numbers {
-        let segment = SegmentId { branch: branch.id, number };
-        let path = segment_path(segment);
-        let bytes = read_whole(&dir.open(&path, true)?)?;
-        let frame = extent_frame::Frame::of(&bytes)?;
-        if frame.seal != extent_frame::Seal::Clear {
-            continue;
-        }
-        let keyless = &extent_frame::NoKeys;
-        let data = extent_frame::data(&bytes, keyless)?;
-        let framed =
-            extent_frame::framed(&data, extent_frame::footer(&bytes, keyless)?, Some(sealing));
-        let staged = framing_path(segment);
-        let file = dir.create(&staged, true)?;
-        file.write_at(&framed, 0)?;
-        crate::written::wrote(crate::written::Kind::Framed, framed.len());
-        file.sync()?;
-        dir.replace(&staged, &path)?;
-        sealed = true;
-    }
-    if sealed {
-        dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
-        dir.barrier()?;
-    }
-    Ok(())
+    Ok(chain.close(fold(branch.id, records)))
 }
 
 /// fxdax: the last commit `record`, a log's record, holds of: the one it goes on with past its
@@ -995,6 +1012,14 @@ mod tests {
         log.append(records.iter().map(Vec::as_slice)).unwrap();
     }
 
+    /// fxdax: the WAL in `dir` recovered, and the segments it closed again framed, in the clear, as
+    /// a store of no keys opens it (TASK-411.9).
+    fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
+        let mut recovered = recover(dir, BRANCH)?;
+        recovered.close(dir, BRANCH, &extent_remote::keys::Ring::clear())?;
+        Ok(recovered)
+    }
+
     fn files(dir: &MemDir, kind: &'static str) -> Vec<u64> {
         list_numbers(dir, &branch_dir(kind, BRANCH.id)).unwrap()
     }
@@ -1028,7 +1053,7 @@ mod tests {
         let log = dir.open(&log_path(segment(3)), false).unwrap();
         log.write_at(&[1; 7], log.size().unwrap()).unwrap();
         left_open(&dir, 4, 1, &[]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let [(footer, 3)] = &recovered.segments[..] else {
             panic!("recovered {:?}", recovered.segments)
         };
@@ -1042,7 +1067,7 @@ mod tests {
         let object = read_whole(&dir.open(&segment_path(segment(3)), true).unwrap()).unwrap();
         assert_eq!(extent_frame::data(&object, &extent_frame::NoKeys).unwrap(), vec![3; 2 * 4096]);
         // Recovered again, it holds the same.
-        let again = recover(&dir, BRANCH).unwrap();
+        let again = recover_closing(&dir).unwrap();
         assert_eq!(again.segments, recovered.segments);
     }
 
@@ -1053,13 +1078,13 @@ mod tests {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let footer = recover(&dir, BRANCH).unwrap().segments.remove(0).0;
+        let footer = recover_closing(&dir).unwrap().segments.remove(0).0;
         // Framed whole, its raw data and log still there.
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
         let torn = dir.create(&segment_path(segment(1)), true).unwrap();
         torn.write_at(&[9; 100], 0).unwrap();
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let numbers: Vec<u64> = recovered.segments.iter().map(|(_, number)| *number).collect();
         assert_eq!(numbers, [0, 1]);
         assert_eq!(recovered.segments[0].0, footer);
@@ -1067,22 +1092,30 @@ mod tests {
         assert_eq!(recovered.segments[1].0.contents.commits, [tag(2, 2)]);
     }
 
-    /// TASK-411.3: a sealed segment's framed file, whole, its raw data and log still there, is
-    /// whole to a recovery holding no key, as one's in the clear is: checked by its CRCs, never
-    /// closed again from its raw data, in the clear; and a recovery's closing again, in the clear,
-    /// is sealed as the store opens holding its branch's key ([`reseal`]), its data as it was.
+    /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,
+    /// no framed file, until the store's keys frame it, sealed under its branch's DEK, never in the
+    /// clear, its data as it was. TASK-411.3: a sealed segment's framed file, whole, its raw data
+    /// and log still there, is whole to a recovery holding no key, as one's in the clear is:
+    /// checked by its CRCs, never closed again from its raw data.
     #[test]
-    fn sealed_segments_framed_whole_are_whole_holding_no_key() {
+    fn segments_closed_again_are_framed_under_the_keys_alone() {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let footer = recover(&dir, BRANCH).unwrap().segments.remove(0).0;
-        let path = segment_path(segment(0));
-        let read = || read_whole(&dir.open(&path, true).unwrap()).unwrap();
-        assert_eq!(extent_frame::Frame::of(&read()).unwrap().seal, extent_frame::Seal::Clear);
+        let mut recovered = recover(&dir, BRANCH).unwrap();
+        let footer = recovered.segments[0].0.clone();
+        assert_eq!(recovered.closing.keys().copied().collect::<Vec<_>>(), [0]);
+        assert_eq!(files(&dir, SEGMENTS), Vec::<u64>::new());
+        assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![0], vec![0]));
+        // Recovered again before it is framed, it holds the same.
+        assert_eq!(recover(&dir, BRANCH).unwrap().segments, recovered.segments);
         let dek = extent_frame::Secret::from_bytes(&[3; 32]);
         let keys = extent_remote::keys::Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
-        reseal(&dir, BRANCH, [0], &keys).unwrap();
+        recovered.close(&dir, BRANCH, &keys).unwrap();
+        assert!(recovered.closing.is_empty());
+        assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
+        let path = segment_path(segment(0));
+        let read = || read_whole(&dir.open(&path, true).unwrap()).unwrap();
         let sealed = read();
         let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
         assert!(matches!(
@@ -1094,13 +1127,11 @@ mod tests {
             extent_frame::data(&sealed, &extent_frame::NoKeys),
             Err(extent_frame::Error::NoKey(key))
         );
-        // Sealed again, it stays as it is.
-        reseal(&dir, BRANCH, [0], &keys).unwrap();
-        assert_eq!(read(), sealed);
         // Framed whole, sealed, its raw data and log still there.
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         let recovered = recover(&dir, BRANCH).unwrap();
         assert_eq!(recovered.segments, [(footer, 0)]);
+        assert!(recovered.closing.is_empty());
         assert_eq!(read(), sealed);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
@@ -1114,16 +1145,16 @@ mod tests {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        recover(&dir, BRANCH).unwrap();
+        recover_closing(&dir).unwrap();
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
-        let framed = recover(&dir, BRANCH).unwrap().segments;
+        let framed = recover_closing(&dir).unwrap().segments;
         assert_eq!(framed.iter().map(|(_, number)| *number).collect::<Vec<_>>(), [0, 1]);
         // Segment 0 acknowledged: the base names its commit, and its framed file went; a crash
         // brought back its raw data and log, whose removals were not durable.
         BaseFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 1))).unwrap();
         dir.remove(&segment_path(segment(0))).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         assert_eq!(recovered.segments, framed[1..]);
         assert_eq!(files(&dir, SEGMENTS), [1]);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
@@ -1139,7 +1170,7 @@ mod tests {
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
-        let framed = recover(&dir, BRANCH).unwrap().segments;
+        let framed = recover_closing(&dir).unwrap().segments;
         assert_eq!(framed.iter().map(|(_, number)| *number).collect::<Vec<_>>(), [0, 1]);
         // Segment 1's framed file torn, its trailer, table and footer whole but not its data; its
         // raw data and log back, the log holding no record durable.
@@ -1150,13 +1181,13 @@ mod tests {
         for kind in [SEGMENTS, OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&branch_dir(kind, BRANCH.id)).unwrap();
         }
-        assert_eq!(recover(&dir, BRANCH).unwrap().segments, framed[..1]);
+        assert_eq!(recover_closing(&dir).unwrap().segments, framed[..1]);
         // The opening makes its next open segment, whose raw data and log it makes durable.
         for kind in [OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&branch_dir(kind, BRANCH.id)).unwrap();
         }
         for seed in 0..64 {
-            let recovered = recover(&dir.crash(seed), BRANCH).unwrap();
+            let recovered = recover_closing(&dir.crash(seed)).unwrap();
             assert_eq!(recovered.segments, framed[..1], "seed {seed}");
         }
     }
@@ -1183,7 +1214,7 @@ mod tests {
         let dir = MemDir::new();
         ended(&dir);
         left_open(&dir, 2, 1, &[commit(2, 4, 0), commit(3, 5, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap().segments;
+        let recovered = recover_closing(&dir).unwrap().segments;
         let place = |(footer, number): &(Footer, u64)| {
             let continued = footer.contents.continued.as_ref().map(|continued| continued.commit);
             (*number, footer.contents.commits.clone(), continued)
@@ -1195,12 +1226,12 @@ mod tests {
             (2, vec![tag(2, 3)], None),
         ];
         assert_eq!(places, expected);
-        assert_eq!(recover(&dir, BRANCH).unwrap().segments, recovered, "recovered again");
+        assert_eq!(recover_closing(&dir).unwrap().segments, recovered, "recovered again");
 
         let dir = MemDir::new();
         ended(&dir);
         left_open(&dir, 2, 1, &[]);
-        let recovered = recover(&dir, BRANCH).unwrap().segments;
+        let recovered = recover_closing(&dir).unwrap().segments;
         assert_eq!(recovered.iter().map(place).collect::<Vec<_>>(), [(0, vec![tag(2, 1)], None)]);
         assert_eq!(files(&dir, SEGMENTS), [0]);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
@@ -1208,13 +1239,13 @@ mod tests {
         let dir = MemDir::new();
         ended(&dir);
         left_open(&dir, 2, 1, &[commit(2, 4, 0)]);
-        let framed = recover(&dir, BRANCH).unwrap().segments;
+        let framed = recover_closing(&dir).unwrap().segments;
         assert_eq!(framed.len(), 3);
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
         left_open(&dir, 1, 1, &[continuing(2, 3, 0)]);
         dir.remove(&segment_path(segment(2))).unwrap();
         left_open(&dir, 2, 1, &[]);
-        let recovered = recover(&dir, BRANCH).unwrap().segments;
+        let recovered = recover_closing(&dir).unwrap().segments;
         assert_eq!(recovered.iter().map(place).collect::<Vec<_>>(), [(0, vec![tag(2, 1)], None)]);
     }
 
@@ -1229,13 +1260,13 @@ mod tests {
         create_branch_dirs(&dir, BRANCH.id).unwrap();
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
         left_open(&dir, 1, 1, &[commit(2, 3, 0)]);
-        assert_eq!(recover(&dir, BRANCH).unwrap().segments.len(), 2);
+        assert_eq!(recover_closing(&dir).unwrap().segments.len(), 2);
         BaseFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 2))).unwrap();
         dir.remove(&segment_path(segment(1))).unwrap();
         // Its log's removal undone too, not its raw data's.
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
         dir.remove(&open_segment_path(segment(0))).unwrap();
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         assert_eq!(recovered.segments, []);
         assert_eq!(files(&dir, SEGMENTS), Vec::<u64>::new());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
@@ -1249,7 +1280,7 @@ mod tests {
         left_open(dir, 0, 1, &[commit(1, 1, 0), commit(2, 2, 0)]);
         left_open(dir, 1, 1, &[commit(3, 3, 0)]);
         left_open(dir, 2, 1, &[commit(4, 4, 0)]);
-        let recovered = recover(dir, BRANCH).unwrap().segments;
+        let recovered = recover_closing(dir).unwrap().segments;
         let last: Vec<u64> = recovered.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [2, 3, 4]);
         recovered
@@ -1269,7 +1300,7 @@ mod tests {
             let raw = dir.create(&open_segment_path(segment(number)), true).unwrap();
             raw.write_at(&[number as u8; 4096], 0).unwrap();
         }
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let numbers: Vec<u64> = recovered.segments.iter().map(|(_, number)| *number).collect();
         assert_eq!(numbers, [0, 1, 2]);
         assert_eq!(recovered.segments[1..], framed[1..]);
@@ -1291,7 +1322,7 @@ mod tests {
         dir.remove(&segment_path(segment(1))).unwrap();
         left_open(&dir, 1, 1, &[]);
         left_open(&dir, 2, 1, &[]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let numbers: Vec<u64> = recovered.segments.iter().map(|(_, number)| *number).collect();
         assert_eq!(numbers, [0]);
         assert_eq!(footer_last(&recovered.segments[0].0), 2);
@@ -1310,7 +1341,7 @@ mod tests {
         framed_three(&dir);
         left_open(&dir, 3, 1, &[]);
         left_open(&dir, 4, 1, &[commit(6, 6, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let last: Vec<u64> =
             recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [2, 3, 4]);
@@ -1350,7 +1381,7 @@ mod tests {
     fn commits_whose_runs_a_log_refuses_go() {
         let dir = MemDir::new();
         refusing_two(&dir);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let last: Vec<u64> =
             recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [2, 3, 4]);
@@ -1369,10 +1400,10 @@ mod tests {
             let dir = MemDir::serial();
             refusing_two(&dir);
             dir.fail_after(Some(operations));
-            let stopped = recover(&dir, BRANCH).is_err();
+            let stopped = recover_closing(&dir).is_err();
             dir.fail_after(None);
             for seed in 0..8 {
-                let recovered = recover(&dir.crash(seed), BRANCH).unwrap();
+                let recovered = recover_closing(&dir.crash(seed)).unwrap();
                 let last: Vec<u64> =
                     recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
                 assert_eq!(last, [2, 3, 4], "stopped after {operations} operations, seed {seed}");
@@ -1396,7 +1427,7 @@ mod tests {
         dir.create(&open_segment_path(segment(0)), true).unwrap();
         // Segment 2's commit after its framing, its raw file and log not gone yet.
         left_open(&dir, 2, 1, &[]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         assert_eq!(recovered.segments, framed[1..]);
     }
 
@@ -1412,7 +1443,7 @@ mod tests {
         let raw = dir.create(&open_segment_path(segment(3)), true).unwrap();
         raw.write_at(&[3; 4096], 0).unwrap();
         logged(&dir, 3, 6, &[commit(5, 5, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let last: Vec<u64> =
             recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [2, 3, 4]);
@@ -1439,7 +1470,7 @@ mod tests {
             raw.write_at(&[number as u8; 4096], 0).unwrap();
             logged(&dir, number, of, &[]);
         }
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let last: Vec<u64> =
             recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [3, 4]);
@@ -1459,7 +1490,7 @@ mod tests {
         base.write(&dir, Some(tag(2, 4))).unwrap();
         dir.remove(&segment_path(segment(2))).unwrap();
         left_open(&dir, 3, 1, &[commit(5, 5, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let last: Vec<u64> =
             recovered.segments.iter().map(|(footer, _)| footer_last(footer)).collect();
         assert_eq!(last, [5]);
@@ -1475,7 +1506,7 @@ mod tests {
         framed_three(&dir);
         dir.remove(&segment_path(segment(0))).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         let [(footer, 0)] = &recovered.segments[..] else {
             panic!("recovered {:?}", recovered.segments)
         };
@@ -1494,7 +1525,7 @@ mod tests {
         let framed = framed_three(&dir);
         let torn = dir.create(&segment_path(segment(3)), true).unwrap();
         torn.write_at(&[9; 100], 0).unwrap();
-        let recovered = recover(&dir, BRANCH).unwrap();
+        let recovered = recover_closing(&dir).unwrap();
         assert_eq!(recovered.segments, framed);
         assert_eq!(files(&dir, SEGMENTS), [0, 1, 2]);
     }

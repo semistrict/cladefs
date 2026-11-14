@@ -122,16 +122,27 @@ fn open_on(
     host: &Host,
     dir: &MemDir,
 ) -> Result<(Arc<Store<MemDir>>, Remote<MemDir>), Failure> {
+    open_with(world, host, dir, Options { checkpoint_every: 1, ..Options::default() })
+}
+
+/// The store in `dir`, opened by `host` as [`open_on`] opens it, its uploader's options `options`
+/// but for its placement's token, `host`'s.
+fn open_with(
+    world: &World,
+    host: &Host,
+    dir: &MemDir,
+    options: Options,
+) -> Result<(Arc<Store<MemDir>>, Remote<MemDir>), Failure> {
     let recovering = match Store::recover(dir.clone()) {
         Ok(recovering) => recovering,
         Err(err) if err.is::<crate::Unmade>() => Store::recover_unmade(dir.clone())?,
         Err(err) => return Err(err.into()),
     };
-    let options = Options { token: host.token, checkpoint_every: 1, ..Options::default() };
+    let options = Options { token: host.token, ..options };
     let holding = (rand::random(), options);
     let opened =
         open(recovering, crate::Options::default(), world.bucket.clone(), holding, &host.runtime)?;
-    opened.0.made().unwrap();
+    opened.0.made()?;
     Ok(opened)
 }
 
@@ -574,4 +585,70 @@ fn forks_and_points_within_a_sealed_cell_read_what_they_inherit() {
          across cells of sealed branches are not made yet (TASK-411.4)"
     );
     assert_eq!(refused, Failure::Remote(inherits));
+}
+
+/// The paths of the files of `dir` that hold any of `data`'s sectors' first 32 bytes: data the
+/// store wrote, in the clear. fxdax: but for open segments' raw files and logs, and large extents'
+/// raw files, which hold it until TASK-411.5 encrypts them.
+fn clear_files(dir: &MemDir, data: &[u8]) -> Vec<String> {
+    let pieces: Vec<&[u8]> = data.chunks(4096).map(|sector| &sector[..32]).collect();
+    let raw = |path: &str| {
+        ["open-segments/", "logs/", "open-extents/"].iter().any(|kind| path.starts_with(kind))
+    };
+    (dir.files().into_iter())
+        .filter(|(path, bytes)| !raw(path) && pieces.iter().any(|piece| holds(bytes, piece)))
+        .map(|(path, _)| path)
+        .collect()
+}
+
+/// TASK-411.9, AC #2: a sealed store crashed with its open segment holding a durable commit,
+/// which its next opening closes again, reopened with its directory failing after each of the
+/// opening's operations in turn, as a crash stops it, until one opens: no file of the directory
+/// holds the commit's data in the clear at any point of any of them; the store opened reads it,
+/// and its segment closed again is sealed, in its directory and in the bucket.
+#[test]
+fn segments_closed_again_are_never_in_the_clear() {
+    let world = World::new();
+    let host = world.host(5);
+    let branch = test_branch(7);
+    let dir = made(branch, "a");
+    // No closing between commits: the open segment holds the commit as the crash leaves it.
+    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let extent = ExtentId::new(branch.id, 1);
+    let data = noise(1, 8 * 4096);
+    let crashed = {
+        let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
+        store.write(extent, 0, &data).unwrap();
+        store.commit(None).unwrap();
+        let crashed = dir.crash(0);
+        remote.cut_short()();
+        crashed
+    };
+    assert_eq!(clear_files(&crashed, &data), Vec::<String>::new());
+    let mut attempts = 0;
+    let (store, remote) = loop {
+        let attempt = crashed.crash(0);
+        attempt.fail_after(Some(attempts));
+        let opened = open_with(&world, &host, &attempt, quiet.clone());
+        assert_eq!(clear_files(&attempt, &data), Vec::<String>::new(), "budget {attempts}");
+        match opened {
+            Ok(opened) if !attempt.has_failed() => break opened,
+            Ok((_, remote)) => remote.cut_short()(),
+            Err(_) => {}
+        }
+        attempts += 1;
+    };
+    assert!(attempts > 10, "the opening took {attempts} operations");
+    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
+    remote.wait_uploaded(store.epoch().unwrap()).unwrap();
+    let mut segments = 0;
+    for (key, bytes) in world.objects() {
+        assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
+        if let layout::Kind::Segment { .. } = layout::kind(&key) {
+            let seal = extent_frame::Frame::of(&bytes).unwrap().seal;
+            assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+            segments += 1;
+        }
+    }
+    assert!(segments > 0);
 }

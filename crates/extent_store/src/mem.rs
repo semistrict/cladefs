@@ -94,9 +94,8 @@ struct Inode {
 enum DirChange {
     Add(String, u64),
     Remove(String),
-    /// fxdax: a file renamed, at once ([`Dir::rename`]); in place of one there, if it says so
-    /// ([`Dir::replace`]).
-    Rename(String, String, u64, bool),
+    /// fxdax: a file renamed, at once ([`Dir::rename`]).
+    Rename(String, String, u64),
 }
 
 fn not_found(path: &str) -> io::Error {
@@ -147,10 +146,10 @@ impl Fs {
             DirChange::Remove(name) => {
                 entries.remove(name).ok_or_else(|| not_found(path))?;
             }
-            DirChange::Rename(_, to, _, false) if entries.contains_key(to) => {
+            DirChange::Rename(_, to, _) if entries.contains_key(to) => {
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} exists")));
             }
-            DirChange::Rename(from, to, inode, _) => {
+            DirChange::Rename(from, to, inode) => {
                 entries.remove(from).ok_or_else(|| not_found(path))?;
                 entries.insert(to.clone(), *inode);
             }
@@ -208,6 +207,20 @@ impl MemDir {
         fs.failed_on.is_some() && fs.failed_on != fs.limited_on
     }
 
+    /// fxdax: every file in it, by its path, with what it holds now, durable or not: what tests
+    /// search for bytes that must be in no file of a host's (TASK-411.9).
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let fs = self.fs.lock().unwrap();
+        let mut files = Vec::new();
+        for (dir, entries) in &fs.dirs {
+            for (name, inode) in entries {
+                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+                files.push((path, fs.inodes[inode].data.clone()));
+            }
+        }
+        files
+    }
+
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
     /// chosen at random by an RNG seeded with `seed`. See the module docs.
     pub fn crash(&self, seed: u64) -> MemDir {
@@ -225,7 +238,7 @@ impl MemDir {
                         DirChange::Remove(name) => {
                             entries.remove(name);
                         }
-                        DirChange::Rename(from, to, inode, _) => {
+                        DirChange::Rename(from, to, inode) => {
                             if entries.remove(from).is_some() {
                                 entries.insert(to.clone(), *inode);
                             }
@@ -309,7 +322,7 @@ impl Dir for MemDir {
         fs.spend()?;
         let inode = fs.lookup(from)?;
         if dir == to_dir {
-            let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode, false);
+            let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode);
             return fs.change_dir(from, rename);
         }
         // Nothing changes if `to` is there.
@@ -318,19 +331,6 @@ impl Dir for MemDir {
         }
         fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))?;
         fs.change_dir(from, DirChange::Remove(from_name.to_owned()))
-    }
-
-    /// fxdax: within a directory alone, at once (TASK-411.3).
-    fn replace(&self, from: &str, to: &str) -> io::Result<()> {
-        let ((dir, from_name), (to_dir, to_name)) = (split(from), split(to));
-        if dir != to_dir {
-            return Err(io::Error::from(io::ErrorKind::Unsupported));
-        }
-        let mut fs = self.fs.lock().unwrap();
-        fs.spend()?;
-        let inode = fs.lookup(from)?;
-        let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode, true);
-        fs.change_dir(from, rename)
     }
 
     /// fxdax: `to`'s entry, of `from`'s file, durable as its directory is synced (TASK-310).

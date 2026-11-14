@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-14 00:34'
+updated_date: '2026-11-14 23:48'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -183,6 +183,9 @@ the commits in turn.
 3. **Close the open segment** if one was left: its data and the whole records of its log (up to the
    first torn one) give its contents; it is framed from its raw file, as `close_left_open` does now,
    and stamped by the new chain. Writes after the last durable commit are dropped, as now.
+   *(TASK-411.9)* The WAL's recovery (`Store::recover`) decides this before the store's keys are
+   known, and frames nothing: the segment keeps its raw file and log until `Recovering::open`,
+   holding the store's keys (doc-16), frames it first of all, sealed if the branch is.
 4. **Put the WAL after the branch's end** (`extent_remote::wal::rebase`, new), by commits, as the
    branch is after the fence (`wal_after_fence`: the fence may have applied the WAL's own segments,
    landed since recovery found the end). The WAL keeps its **base**, the commit its first segment

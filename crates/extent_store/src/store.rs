@@ -699,6 +699,8 @@ impl<D: Dir> Recovering<D> {
     pub fn drop_wal(&mut self) -> Result<(), Error> {
         let dir = &*self.dir;
         let branch = self.file.branch;
+        // fxdax: those closed again, not framed, their raw files and logs going (TASK-411.9).
+        self.wal.drop_closing(dir, branch)?;
         for (footer, number) in std::mem::take(&mut self.wal.segments) {
             let segment = SegmentId { branch: branch.id, number };
             self.remove_files([segment_path(segment)], &footer);
@@ -732,10 +734,13 @@ impl<D: Dir> Recovering<D> {
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
-        let Self { dir, taken, claim, file, wal: recovered } = self;
+        let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
         let Opening { state, fenced, cache, keys } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
+        // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
+        // before them is (TASK-411.9).
+        recovered.close(&*dir, branch, &keys)?;
         // fxdax: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
@@ -849,11 +854,6 @@ impl<D: Dir> Recovering<D> {
                 }
                 Data::Remote(_) => {}
             }
-        }
-        // fxdax: those a recovery closed again, in the clear, sealed (TASK-411.3).
-        if keys.is_sealed(branch.id) {
-            let numbers = wal.segments().map(|(_, number)| *number);
-            crate::wal::reseal(&*dir, branch, numbers, &keys)?;
         }
         let opened = (epoch, recovered.next, chain);
         let files = (options.open_files, keys.clone());
