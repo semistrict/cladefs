@@ -11,6 +11,7 @@ async-trait.workspace = true
 bincode.workspace = true
 bytes = "1.12.1"
 extent_frame.workspace = true
+extent_keys.workspace = true
 fail = "0.5.1"
 futures.workspace = true
 humantime = "2.4.0"

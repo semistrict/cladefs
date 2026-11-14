@@ -99,6 +99,7 @@ impl Host {
         let runtime = Runtime {
             handle: self.runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
+            keys: Default::default(),
         };
         // Checkpoints often, so that the collector's passes find segments recoveries no longer read,
         // which they compact.

@@ -94,6 +94,15 @@ pub trait Dir: Send + Sync + 'static {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
+    /// fxdax: renames the file at `from` to `to`, in the same directory, in place of the file
+    /// there, if any, at once: a crash leaves either at `to`, as `sync_dir` makes durable. What a
+    /// segment of the write-ahead log a recovery closed again in the clear is sealed by, never gone
+    /// meanwhile (`wal::reseal`, TASK-411.3). By default, unsupported.
+    fn replace(&self, from: &str, to: &str) -> io::Result<()> {
+        let _ = (from, to);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+
     /// fxdax: makes `to`, which is not there, another name of the file at `from`, which keeps its
     /// own (a hard link): `to`'s entry durable once its directory is synced. What a segment framed
     /// in place is put among framed ones by, its raw file then its framed file, the raw name going
@@ -279,6 +288,10 @@ impl Dir for HostDir {
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        std::fs::rename(self.path.join(from), self.path.join(to))
+    }
+
+    fn replace(&self, from: &str, to: &str) -> io::Result<()> {
         std::fs::rename(self.path.join(from), self.path.join(to))
     }
 

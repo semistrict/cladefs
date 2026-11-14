@@ -57,6 +57,7 @@ pub mod client;
 pub mod collector;
 pub mod faults;
 pub mod fetch;
+pub mod keys;
 pub mod layout;
 pub mod local;
 pub mod marks;
@@ -131,6 +132,23 @@ pub enum Error {
     /// sealed, until it compacts them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
+    /// fxdax: an object in the clear, of a branch whose record has a DEK, its objects sealed: a
+    /// downgrade, its seal, MACs and tags zeroed by one who can write the bucket, or another's
+    /// object put there (TASK-411.3). It names the object.
+    #[error("{0}: in the clear, of a branch whose objects are sealed")]
+    Downgrade(String),
+    /// fxdax: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
+    /// revoked or destroyed, none there, or the KMS failed.
+    #[error("{0}")]
+    Kms(String),
+    /// fxdax: `branch` inherits from `from`, of another cell, whose objects are sealed under its
+    /// own cell's key, which `branch`'s doesn't hold: forks into other cells rewrap the DEKs they
+    /// inherit under the child's cell KEK, which TASK-411.4 makes; until then, none is made.
+    #[error(
+        "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed: \
+         forks across cells of sealed branches are not made yet (TASK-411.4)"
+    )]
+    Inherited { branch: layout::Branch, from: layout::Branch },
     /// The branch's record says its objects are of another format than this one's, newer or
     /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
     #[error(
@@ -196,6 +214,17 @@ impl From<extent_frame::Error> for Error {
         match error {
             extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
             extent_frame::Error::NoKey(key) => Self::NoKey(key),
+            extent_frame::Error::Clear => Self::Downgrade("an object".into()),
+        }
+    }
+}
+
+impl Error {
+    /// fxdax: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
+    pub fn reading(self, key: &str) -> Self {
+        match self {
+            Self::Downgrade(_) => Self::Downgrade(key.to_owned()),
+            error => error,
         }
     }
 }

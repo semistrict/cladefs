@@ -1095,14 +1095,20 @@ pub(crate) struct OwnFiles<F> {
     /// Their directory, the branch's, and whether its entries changed since the last commit.
     dir: String,
     written: bool,
+    /// fxdax: the store's keys, which its files are read under (TASK-411.3).
+    keys: Arc<extent_remote::keys::Ring>,
 }
 
 impl<F: File> OwnFiles<F> {
-    /// `branch`'s, whose files take `sizes`, of which `limit` stay open.
-    pub fn new(branch: u64, sizes: HashMap<ExtentId, u64>, limit: usize) -> Self {
+    /// `branch`'s, whose files take `sizes`, of which `limit` stay open, read under `keys`.
+    pub fn new(
+        branch: u64,
+        sizes: HashMap<ExtentId, u64>,
+        (limit, keys): (usize, Arc<extent_remote::keys::Ring>),
+    ) -> Self {
         let (dir, open, unsynced) =
             (branch_dir(EXTENTS, branch), Files::new(limit), BTreeMap::new());
-        Self { open, sizes, unsynced, dir, written: false }
+        Self { open, sizes, unsynced, dir, written: false, keys }
     }
 
     /// `extent`'s file, opened in `dir` if it isn't.
@@ -1115,7 +1121,8 @@ impl<F: File> OwnFiles<F> {
             return Ok(file);
         }
         let path = extent_path(extent);
-        let file = Arc::new(Framed::open(dir.open(&path, true)?, &path)?);
+        let keys = self.keys.of(extent.branch);
+        let file = Arc::new(Framed::open(dir.open(&path, true)?, &path, &keys)?);
         Ok(self.open.insert(extent, file))
     }
 

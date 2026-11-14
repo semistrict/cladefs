@@ -20,8 +20,13 @@
 //! The collector deletes what no reader starting now needs, segments only once a checkpoint covers
 //! them. A reader that finds a segment missing checks that no checkpoint newer than the one it
 //! started from has come: if one has, the segment may be one it covers, gone, and it starts again.
+//!
+//! fxdax: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
+//! checkpoints are checked against their MACs under the keys it holds, and those of a branch it
+//! holds sealed refused in the clear. The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Created, Meta, Version};
+use crate::keys::Ring;
 use crate::layout::{self, Branch, Cell, Chain, Contents, Footer, Fork, Location, Origin, Segment};
 use crate::record::Record;
 use crate::{Error, object, rules};
@@ -377,6 +382,9 @@ impl Places for Layered {
 /// How often recovery starts again before it gives up on a branch as lost.
 const RESTARTS: usize = 64;
 
+/// The ring of a recovery holding no key.
+static CLEAR: std::sync::LazyLock<Arc<Ring>> = std::sync::LazyLock::new(Ring::clear);
+
 /// How many segments' footers recovery reads at once, at most: one, then twice as many each time
 /// all it read were there, so that it reads few past a branch's end, and many at once of a long
 /// branch.
@@ -393,13 +401,24 @@ impl From<Error> for Attempt {
     }
 }
 
-/// The state of `branch`, forked from `origin`.
+/// The state of `branch`, forked from `origin`, read holding no key.
 pub async fn recover(
     bucket: &impl Bucket,
     branch: Branch,
     origin: Option<Origin>,
 ) -> Result<Recovered, Error> {
-    Ok(recover_layers(&Checkpoints::new(bucket, 0), branch, origin).await?.flatten())
+    recover_under(bucket, branch, origin, &Ring::clear()).await
+}
+
+/// fxdax: the state of `branch`, forked from `origin`, read holding `ring` (TASK-411.3).
+pub async fn recover_under(
+    bucket: &impl Bucket,
+    branch: Branch,
+    origin: Option<Origin>,
+    ring: &Ring,
+) -> Result<Recovered, Error> {
+    let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
+    Ok(recover_layers(&checkpoints, branch, origin).await?.flatten())
 }
 
 /// The state of `branch`, forked from `origin`, as [`recover`] finds it, in layers: reading the
@@ -457,6 +476,8 @@ pub(crate) struct Checkpoints<'a, B: Bucket> {
     /// TASK-395.19, [`Checkpoints::listed`]).
     listed: Option<&'a BTreeMap<String, Meta>>,
     served: Mutex<BTreeSet<(Branch, Option<u64>)>>,
+    /// fxdax: the keys it reads under ([`Checkpoints::holding`], TASK-411.3).
+    keys: &'a Ring,
 }
 
 /// The reads of checkpoints [`Checkpoints`] keeps, or that are in flight, by their keys; and the
@@ -473,7 +494,14 @@ type Flight<'a> = Shared<BoxFuture<'a, Result<Option<Arc<State>>, Error>>>;
 impl<'a, B: Bucket> Checkpoints<'a, B> {
     /// Reads checkpoints from `bucket`, keeping the last `keep` read.
     pub(crate) fn new(bucket: &'a B, keep: usize) -> Self {
-        Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default() }
+        let keys = &**CLEAR;
+        Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default(), keys }
+    }
+
+    /// fxdax: these, reading their checkpoints and the footers of their segments holding `keys`
+    /// (TASK-411.3).
+    pub(crate) fn holding(self, keys: &'a Ring) -> Self {
+        Self { keys, ..self }
     }
 
     /// fxdax: these, the first listing of each branch's checkpoints served by `listed`, a listing
@@ -539,7 +567,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
             match read.flights.get(key) {
                 Some(flight) => flight.clone(),
                 None => {
-                    let bucket = self.bucket;
+                    let (bucket, keys) = (self.bucket, self.keys);
                     let owned = key.to_owned();
                     let flight = async move {
                         let key = owned;
@@ -552,7 +580,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
                         let Some(object) = bucket::get(bucket, &key).await else {
                             return Ok(None);
                         };
-                        let state = Arc::new(checkpoint(&key, &object.bytes, branch)?);
+                        let state = Arc::new(checkpoint(&key, &object.bytes, branch, keys)?);
                         if let Some(decoded) = decoded {
                             decoded.keep(&object.meta, &state);
                         }
@@ -630,17 +658,19 @@ impl Decoded {
 /// segments from `before`'s end, those that came since, applied to its state, rather than its
 /// state read anew. As [`recover`] would find, unless a checkpoint newer than `before`'s has come,
 /// which may cover segments gone since: then it recovers anew.
+/// fxdax: read holding `ring` (TASK-411.3).
 pub async fn recover_on(
     bucket: &impl Bucket,
     origin: Option<Origin>,
     before: Recovered,
+    ring: &Ring,
 ) -> Result<Recovered, Error> {
     let Recovered { state, end, checkpoint, checkpointer, touched } = before;
     let branch = state.branch;
     let before = Recovered { state: Layered::of(state), end, checkpoint, checkpointer, touched };
-    match follow(bucket, before).await {
+    match follow(bucket, before, ring).await {
         Ok(recovered) => Ok(recovered.flatten()),
-        Err(Attempt::Restart) => recover(bucket, branch, origin).await,
+        Err(Attempt::Restart) => recover_under(bucket, branch, origin, ring).await,
         Err(Attempt::Failed(error)) => Err(error),
     }
 }
@@ -686,7 +716,8 @@ async fn attempt<B: Bucket>(
         },
     };
     let end = checkpoint.map_or(0, |seq| seq + 1);
-    follow(bucket, Recovered { state, end, checkpoint, checkpointer, touched }).await
+    follow(bucket, Recovered { state, end, checkpoint, checkpointer, touched }, checkpoints.keys)
+        .await
 }
 
 /// `recovered`, its segments from its end on applied, to the first missing: the branch's end,
@@ -695,10 +726,11 @@ async fn attempt<B: Bucket>(
 async fn follow(
     bucket: &impl Bucket,
     mut recovered: Recovered<Layers>,
+    keys: &Ring,
 ) -> Result<Recovered<Layers>, Attempt> {
     let Recovered { state, end, touched, .. } = &mut recovered;
     let branch = state.branch;
-    *end = footers(bucket, branch, *end, u64::MAX, |key, footer| {
+    *end = footers((bucket, keys), branch, *end, u64::MAX, |key, footer| {
         state.apply(&footer);
         touched.insert(key);
     })
@@ -722,9 +754,9 @@ async fn follow(
 /// up to the first missing and to `last` at most: read by their objects' tails, a [`WINDOW`] of
 /// them at most at once. Returns the first it did not give: the first missing, or the one after
 /// `last`. What it read past the first missing it leaves, as a recovery reading them one at a time
-/// would never read it.
+/// would never read it. fxdax: read holding `keys` (TASK-411.3).
 async fn footers(
-    bucket: &impl Bucket,
+    (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
     mut seq: u64,
     last: u64,
@@ -733,7 +765,7 @@ async fn footers(
     let mut window = 1;
     while seq <= last {
         let reads = (seq..seq.saturating_add(window).min(last.saturating_add(1)))
-            .map(|seq| segment_footer(bucket, branch, seq));
+            .map(|seq| segment_footer((bucket, keys), branch, seq));
         for read in futures::future::join_all(reads).await {
             let Some(footer) = read? else { return Ok(seq) };
             each(layout::segment(branch, seq), footer);
@@ -745,14 +777,19 @@ async fn footers(
 }
 
 /// The footer of segment `seq` of `branch`, if it is there: read by its object's tail, a ranged
-/// read of its last bytes, which hold it ([`object::tail`]), not by the segment whole.
+/// read of its last bytes, which hold it ([`object::tail`]), not by the segment whole. fxdax:
+/// checked against its MAC if `keys` hold its key, and refused in the clear if they hold its
+/// branch sealed (TASK-411.3).
 async fn segment_footer(
-    bucket: &impl Bucket,
+    (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
     seq: u64,
 ) -> Result<Option<Footer>, Error> {
     let key = layout::segment(branch, seq);
     let Some(tail) = object::tail(bucket, &key).await? else { return Ok(None) };
+    if !keys.is_empty() {
+        tail.open(&keys.of(branch.id)).map_err(|err| err.reading(&key))?;
+    }
     Ok(Some(placed(&key, layout::decode(tail.footer())?, branch, seq)?))
 }
 
@@ -760,9 +797,10 @@ async fn segment_footer(
 /// `state` applied, and applies it; or, if a segment landed there first, applies that, returning its
 /// footer. A writer taking the branch over fences it so, at the end it recovered to and past the
 /// gaps after it; and so does a deletion, of the final epoch, at the end it recovered to (doc-7,
-/// Fencing; TASK-183).
+/// Fencing; TASK-183). fxdax: sealed under the newest of `keys`' DEKs if they are its writer's, and
+/// what landed there first read holding them (TASK-411.3).
 pub(crate) async fn fence(
-    bucket: &impl Bucket,
+    (bucket, keys): (&impl Bucket, &Ring),
     state: &mut State,
     epoch: u64,
     seq: u64,
@@ -771,17 +809,26 @@ pub(crate) async fn fence(
     let key = layout::segment(branch, seq);
     let mut chain = Chain::new(branch, epoch, seq, state.last_segment, state.next_sequence);
     let empty = Segment { data: Vec::new(), footer: chain.close(Contents::default()) };
-    let found = match bucket::create(bucket, &key, empty.encode()).await {
+    let found = match bucket::create(bucket, &key, empty.encode_under(keys.sealing())).await {
         Created::Created => None,
-        Created::Exists(object) => Some(footer(&key, &object.bytes, branch, seq)?),
+        Created::Exists(object) => Some(footer(&key, &object.bytes, branch, seq, keys)?),
     };
     state.apply(found.as_ref().unwrap_or(&empty.footer));
     Ok(found)
 }
 
-/// The footer of segment `seq` of `branch`, whose object holds `bytes`.
-pub(crate) fn footer(key: &str, bytes: &[u8], branch: Branch, seq: u64) -> Result<Footer, Error> {
-    placed(key, Segment::footer(bytes)?, branch, seq)
+/// The footer of segment `seq` of `branch`, whose object holds `bytes`: fxdax: read holding `keys`
+/// (TASK-411.3).
+pub(crate) fn footer(
+    key: &str,
+    bytes: &[u8],
+    branch: Branch,
+    seq: u64,
+    keys: &Ring,
+) -> Result<Footer, Error> {
+    let footer =
+        layout::footer_under(bytes, &keys.of(branch.id)).map_err(|err| err.reading(key))?;
+    placed(key, footer, branch, seq)
 }
 
 /// `footer`, that of the object at `key`, which holds segment `seq` of `branch`, if it says so.
@@ -795,9 +842,11 @@ fn placed(key: &str, footer: Footer, branch: Branch, seq: u64) -> Result<Footer,
     Ok(footer)
 }
 
-/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds.
-fn checkpoint(key: &str, bytes: &[u8], branch: Branch) -> Result<State, Error> {
-    let state = crate::checkpoint::decode(bytes)?;
+/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds: fxdax: read holding
+/// `keys` (TASK-411.3).
+fn checkpoint(key: &str, bytes: &[u8], branch: Branch, keys: &Ring) -> Result<State, Error> {
+    let state = crate::checkpoint::decode_under(bytes, &keys.of(branch.id))
+        .map_err(|err| err.reading(key))?;
     if state.branch != branch {
         return Err(Error::Corrupt(format!("{key} holds a checkpoint of {}", state.branch)));
     }
@@ -862,9 +911,16 @@ fn state_at<'a, B: Bucket>(
                             None => Ok(None),
                             Some(origin) => {
                                 let from = branch.cell;
-                                state_at(checkpoints, origin.parent, origin.at, touched, from, false)
-                                    .await
-                                    .map(Some)
+                                state_at(
+                                    checkpoints,
+                                    origin.parent,
+                                    origin.at,
+                                    touched,
+                                    from,
+                                    false,
+                                )
+                                .await
+                                .map(Some)
                             }
                         }
                     }
@@ -879,7 +935,7 @@ fn state_at<'a, B: Bucket>(
             }
         };
         let from = state.through.map_or(0, |seq| seq + 1);
-        let applied = footers(bucket, branch, from, at, |key, footer| {
+        let applied = footers((bucket, checkpoints.keys), branch, from, at, |key, footer| {
             state.apply(&footer);
             touched.insert(key);
         });
@@ -982,10 +1038,13 @@ mod tests {
             contents: Contents::default(),
         };
         let bytes = Segment { data: Vec::new(), footer: footer.clone() }.encode();
-        assert_eq!(super::footer("here", &bytes, test_branch(1), 2), Ok(footer));
+        assert_eq!(super::footer("here", &bytes, test_branch(1), 2, &Ring::clear()), Ok(footer));
         for (branch, seq) in [(1, 3), (4, 2)] {
             let corrupt = Error::Corrupt("here holds segment 2 of 1/1/1".into());
-            assert_eq!(super::footer("here", &bytes, test_branch(branch), seq), Err(corrupt));
+            assert_eq!(
+                super::footer("here", &bytes, test_branch(branch), seq, &Ring::clear()),
+                Err(corrupt)
+            );
         }
     }
 
@@ -1032,7 +1091,8 @@ mod tests {
         assert_eq!(recovered.touched.iter().cloned().collect::<Vec<_>>(), keys);
 
         committed(&bucket, &writer, 6, 2);
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered));
+        let (on, rounds) =
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!(rounds, [tails(6..7), tails(7..9), checkpoints]);
         let anew = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
@@ -1052,7 +1112,8 @@ mod tests {
         let recovered = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
         committed(&bucket, &writer, 3, 1);
         let seq = bucket.served(writer.checkpoint()).0.unwrap().unwrap();
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered));
+        let (on, rounds) =
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!((on.checkpoint, on.end, on.state.last_commit), (Some(seq), seq + 1, Some(3)));
         let tails = |seqs: std::ops::Range<u64>| -> Vec<String> {

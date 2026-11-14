@@ -34,6 +34,7 @@ use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
 use extent_remote::cache::Cache;
+use extent_remote::keys::Ring;
 use extent_remote::recovery::{Places, Seal};
 use extent_remote::trace;
 use extent_remote::wal::{Fenced, Rebased, Wal};
@@ -247,6 +248,9 @@ pub struct Store<D: Dir> {
     idle: Arc<Condvar>,
     /// fxdax: its views, which followers read it through ([`Store::view`]).
     views: Arc<Views>,
+    /// fxdax: its keys, which its segments and extents stored on their own are sealed and read
+    /// under (TASK-411.3).
+    keys: Arc<Ring>,
 }
 
 /// A store's directory, taken for this process ([`Dir::take`]): let go of once dropped.
@@ -599,11 +603,14 @@ pub struct Unmade;
 /// where the writer found its end ([`Fenced`]), which the store's write-ahead log is put after,
 /// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
-/// one, which what the bucket acknowledged of the store's goes into.
+/// one, which what the bucket acknowledged of the store's goes into. fxdax: and the store's keys,
+/// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
+/// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear.
 pub struct Opening {
     pub state: extent_remote::State,
     pub fenced: Option<Fenced>,
     pub cache: Option<Arc<Cache>>,
+    pub keys: Arc<Ring>,
 }
 
 impl Opening {
@@ -614,7 +621,8 @@ impl Opening {
     pub fn new(branch: Branch) -> Self {
         let chain = Chain::new(branch, 0, 0, None, 0);
         let fenced = Fenced { recovered: None, last_commit: None, chain };
-        Self { state: extent_remote::State::new(branch), fenced: Some(fenced), cache: None }
+        let state = extent_remote::State::new(branch);
+        Self { state, fenced: Some(fenced), cache: None, keys: Ring::clear() }
     }
 }
 
@@ -726,7 +734,7 @@ impl<D: Dir> Recovering<D> {
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
-        let Opening { state, fenced, cache } = opening;
+        let Opening { state, fenced, cache, keys } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // fxdax: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
@@ -842,8 +850,14 @@ impl<D: Dir> Recovering<D> {
                 Data::Remote(_) => {}
             }
         }
+        // fxdax: those a recovery closed again, in the clear, sealed (TASK-411.3).
+        if keys.is_sealed(branch.id) {
+            let numbers = wal.segments().map(|(_, number)| *number);
+            crate::wal::reseal(&*dir, branch, numbers, &keys)?;
+        }
         let opened = (epoch, recovered.next, chain);
-        let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, options.open_files)?;
+        let files = (options.open_files, keys.clone());
+        let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, files)?;
         // fxdax: the sealed extents in each, read in the bucket once it is acknowledged there
         // (TASK-165.8).
         for (extent, entry) in &extents {
@@ -896,7 +910,11 @@ impl<D: Dir> Recovering<D> {
                     uncommitted,
                     gate: Gate::default(),
                     segments,
-                    own_files: OwnFiles::new(branch.id, own_sizes, options.open_files),
+                    own_files: OwnFiles::new(
+                        branch.id,
+                        own_sizes,
+                        (options.open_files, keys.clone()),
+                    ),
                     unreferenced: Unreferenced::default(),
                     wal: Queue::new(wal.base(), queued),
                     point: fenced.is_none(),
@@ -919,6 +937,7 @@ impl<D: Dir> Recovering<D> {
             cache,
             idle: Arc::new(Condvar::new()),
             views,
+            keys,
         };
         Ok(store)
     }
@@ -949,6 +968,13 @@ impl Places for Local {
     fn free(&mut self, extent: ExtentId) {
         self.extents.remove(&extent);
     }
+}
+
+/// fxdax: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
+/// so that one copied to another's key is refused (`extent_remote::layout::own_extent`,
+/// TASK-411.3).
+fn own_footer(extent: ExtentId) -> Vec<u8> {
+    extent_remote::layout::encode(&extent)
 }
 
 /// fxdax: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
@@ -1110,6 +1136,12 @@ impl<D: Dir> Store<D> {
     /// fxdax: the volume of its branch's cell it is, as its description names it (TASK-364).
     pub fn volume(&self) -> Option<&Volume> {
         self.volume.as_ref()
+    }
+
+    /// fxdax: its keys, its branch's and its ancestors' DEKs, which it seals and reads under
+    /// (TASK-411.3): empty, in the clear.
+    pub fn keys(&self) -> &Arc<Ring> {
+        &self.keys
     }
 
     /// fxdax: holds the store's directory taken for this process until what it returns is dropped,
@@ -2040,9 +2072,9 @@ impl<D: Dir> Store<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        // fxdax: in the clear, until the store holds its branch's key (TASK-411.3); sealed, no
-        // part's packed bytes are its data, and it is framed in a copy (TASK-411.2).
-        let mut packer = extent_frame::Packer::new(None);
+        // fxdax: sealed, no part's packed bytes are its data, and it is framed in a copy
+        // (TASK-411.2, TASK-411.3).
+        let mut packer = extent_frame::Packer::new(self.keys.sealing());
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
         let mut framed: Option<D::File> = None;
@@ -2068,7 +2100,7 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let (tail, parts) = packer.finish_parts(&[]);
+        let (tail, parts) = packer.finish_parts(&own_footer(extent));
         let (file, copied) = match framed {
             Some(file) => {
                 file.write_at(&tail, end)?;
@@ -2099,8 +2131,7 @@ impl<D: Dir> Store<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        // fxdax: in the clear, until the store holds its branch's key (TASK-411.3).
-        let mut packer = extent_frame::Packer::new(None);
+        let mut packer = extent_frame::Packer::new(self.keys.sealing());
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -2111,7 +2142,7 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let (tail, parts) = packer.finish_parts(&[]);
+        let (tail, parts) = packer.finish_parts(&own_footer(extent));
         file.write_at(&tail, end)?;
         written::wrote(written::Kind::Own, tail.len());
         let framed = Arc::new(Framed::new(Arc::new(file), parts));
@@ -2382,7 +2413,8 @@ impl<D: Dir> Store<D> {
                 let file = state.own_files.file(&*self.dir, extent)?;
                 own.push((location.key, file.file.clone()));
             }
-            closed.push(Closed { number, footer, file, own, restamped });
+            let keys = self.keys.clone();
+            closed.push(Closed { number, footer, file, own, restamped, keys });
         }
         Ok(closed)
     }

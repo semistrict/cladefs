@@ -94,8 +94,9 @@ struct Inode {
 enum DirChange {
     Add(String, u64),
     Remove(String),
-    /// fxdax: a file renamed, at once ([`Dir::rename`]).
-    Rename(String, String, u64),
+    /// fxdax: a file renamed, at once ([`Dir::rename`]); in place of one there, if it says so
+    /// ([`Dir::replace`]).
+    Rename(String, String, u64, bool),
 }
 
 fn not_found(path: &str) -> io::Error {
@@ -146,10 +147,10 @@ impl Fs {
             DirChange::Remove(name) => {
                 entries.remove(name).ok_or_else(|| not_found(path))?;
             }
-            DirChange::Rename(_, to, _) if entries.contains_key(to) => {
+            DirChange::Rename(_, to, _, false) if entries.contains_key(to) => {
                 return Err(io::Error::new(io::ErrorKind::AlreadyExists, format!("{to} exists")));
             }
-            DirChange::Rename(from, to, inode) => {
+            DirChange::Rename(from, to, inode, _) => {
                 entries.remove(from).ok_or_else(|| not_found(path))?;
                 entries.insert(to.clone(), *inode);
             }
@@ -224,7 +225,7 @@ impl MemDir {
                         DirChange::Remove(name) => {
                             entries.remove(name);
                         }
-                        DirChange::Rename(from, to, inode) => {
+                        DirChange::Rename(from, to, inode, _) => {
                             if entries.remove(from).is_some() {
                                 entries.insert(to.clone(), *inode);
                             }
@@ -308,7 +309,7 @@ impl Dir for MemDir {
         fs.spend()?;
         let inode = fs.lookup(from)?;
         if dir == to_dir {
-            let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode);
+            let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode, false);
             return fs.change_dir(from, rename);
         }
         // Nothing changes if `to` is there.
@@ -317,6 +318,19 @@ impl Dir for MemDir {
         }
         fs.change_dir(to, DirChange::Add(to_name.to_owned(), inode))?;
         fs.change_dir(from, DirChange::Remove(from_name.to_owned()))
+    }
+
+    /// fxdax: within a directory alone, at once (TASK-411.3).
+    fn replace(&self, from: &str, to: &str) -> io::Result<()> {
+        let ((dir, from_name), (to_dir, to_name)) = (split(from), split(to));
+        if dir != to_dir {
+            return Err(io::Error::from(io::ErrorKind::Unsupported));
+        }
+        let mut fs = self.fs.lock().unwrap();
+        fs.spend()?;
+        let inode = fs.lookup(from)?;
+        let rename = DirChange::Rename(from_name.to_owned(), to_name.to_owned(), inode, true);
+        fs.change_dir(from, rename)
     }
 
     /// fxdax: `to`'s entry, of `from`'s file, durable as its directory is synced (TASK-310).

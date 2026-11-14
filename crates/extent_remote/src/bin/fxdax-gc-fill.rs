@@ -161,7 +161,7 @@ async fn fill(files: &LocalFileSystem, cell: Cell, shape: Shape) -> Result<Sum, 
     let memory = Arc::new(object_store::memory::InMemory::new());
     let bucket = Arc::new(Store::new(memory, ""));
     let failed = |err: extent_remote::Error| err.to_string();
-    cell::create(&*bucket, cell, 10, 1).await.map_err(failed)?;
+    cell::create(&*bucket, cell, (10, 1), None).await.map_err(failed)?;
     let id = Branch { cell, id: 1 };
     branch::create(&*bucket, id, 0).await.map_err(failed)?;
     let writer = Writer::open(bucket.clone(), id, 10, 1).await.map_err(failed)?;
@@ -195,7 +195,7 @@ async fn fill(files: &LocalFileSystem, cell: Cell, shape: Shape) -> Result<Sum, 
         };
         let segment = match point_at(shape, cell.tenant, n) {
             Some(point) => {
-                cell::create(&*bucket, point.cell, 10, 1).await.map_err(failed)?;
+                cell::create(&*bucket, point.cell, (10, 1), None).await.map_err(failed)?;
                 batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
             }
             None => batch.close(&mut writer.chain()),

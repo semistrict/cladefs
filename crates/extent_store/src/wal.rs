@@ -54,7 +54,7 @@ use crate::dir::{Dir, File, not_found, read_file};
 use crate::framed::{read_frame, read_whole};
 use crate::layout::{
     FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, branch_dir, decode, encode, extent_path,
-    list_numbers, log_path, open_segment_path, segment_path,
+    framing_path, list_numbers, log_path, open_segment_path, segment_path,
 };
 use crate::segments::{fold, footer_last, segment_footer};
 use anyhow::{Context as _, Error};
@@ -616,16 +616,17 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
 fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Option<Footer>, Error> {
     let path = segment_path(segment);
     let file = dir.open(&path, true)?;
-    let footer = match read_frame(&file)? {
+    let footer = match read_frame(&file, &extent_frame::NoKeys)? {
         Some((_, footer)) => segment_footer(&footer).ok().flatten(),
         None => None,
     };
     if !left {
         return Ok(footer);
     }
-    // fxdax: holding no key, until the store holds its branch's (TASK-411.3).
-    let keys = &extent_frame::NoKeys;
-    let whole = footer.is_some() && extent_frame::data(&read_whole(&file)?, keys).is_ok();
+    // fxdax: whole by the keyless check, its parts' stored bytes against their CRCs, sealed or
+    // not: what a recovery holding no key yet tells of a sealed one, never taken for torn and
+    // closed again from its raw file (TASK-411.3).
+    let whole = footer.is_some() && extent_frame::check(&read_whole(&file)?).is_ok();
     if whole {
         file.sync()?;
     }
@@ -745,12 +746,54 @@ fn close_again<D: Dir>(
     // cut short leaves the raw file with its tail, torn (TASK-310).
     let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max().unwrap_or(0);
     let data = &data[..(end as usize).min(data.len())];
-    // fxdax: in the clear, until the store holds its branch's key (TASK-411.3).
+    // fxdax: in the clear, a recovery holding no key yet: sealed as the store opens holding its
+    // branch's ([`reseal`], TASK-411.3).
     let framed = extent_frame::framed(data, &footer.encode(), None);
     file.write_at(&framed, 0)?;
     crate::written::wrote(crate::written::Kind::Framed, framed.len());
     file.sync()?;
     Ok(footer)
+}
+
+/// fxdax: seals the framed files of `branch`'s segments `numbers`, of its write-ahead log, that are
+/// in the clear, as a recovery holding no key closed them again ([`close_again`]), under the newest
+/// of `keys`' DEKs of the branch, which its readers hold sealed (TASK-411.3): each framed anew
+/// under its framing's name ([`framing_path`]), synced, then renamed its segment's, its directory
+/// synced. A crash between leaves it in the clear, sealed by the next opening, or the framing's
+/// file, which the next recovery removes.
+pub(crate) fn reseal<D: Dir>(
+    dir: &D,
+    branch: Branch,
+    numbers: impl IntoIterator<Item = u64>,
+    keys: &extent_remote::keys::Ring,
+) -> Result<(), Error> {
+    let sealing = keys.sealing().context("a sealed branch's keys seal under its DEK")?;
+    let mut sealed = false;
+    for number in numbers {
+        let segment = SegmentId { branch: branch.id, number };
+        let path = segment_path(segment);
+        let bytes = read_whole(&dir.open(&path, true)?)?;
+        let frame = extent_frame::Frame::of(&bytes)?;
+        if frame.seal != extent_frame::Seal::Clear {
+            continue;
+        }
+        let keyless = &extent_frame::NoKeys;
+        let data = extent_frame::data(&bytes, keyless)?;
+        let framed =
+            extent_frame::framed(&data, extent_frame::footer(&bytes, keyless)?, Some(sealing));
+        let staged = framing_path(segment);
+        let file = dir.create(&staged, true)?;
+        file.write_at(&framed, 0)?;
+        crate::written::wrote(crate::written::Kind::Framed, framed.len());
+        file.sync()?;
+        dir.replace(&staged, &path)?;
+        sealed = true;
+    }
+    if sealed {
+        dir.sync_dir(&branch_dir(SEGMENTS, branch.id))?;
+        dir.barrier()?;
+    }
+    Ok(())
 }
 
 /// fxdax: the last commit `record`, a log's record, holds of: the one it goes on with past its
@@ -1022,6 +1065,44 @@ mod tests {
         assert_eq!(recovered.segments[0].0, footer);
         assert_eq!(recovered.segments[1].0.after, Some((footer.seq, footer.epoch)));
         assert_eq!(recovered.segments[1].0.contents.commits, [tag(2, 2)]);
+    }
+
+    /// TASK-411.3: a sealed segment's framed file, whole, its raw data and log still there, is
+    /// whole to a recovery holding no key, as one's in the clear is: checked by its CRCs, never
+    /// closed again from its raw data, in the clear; and a recovery's closing again, in the clear,
+    /// is sealed as the store opens holding its branch's key ([`reseal`]), its data as it was.
+    #[test]
+    fn sealed_segments_framed_whole_are_whole_holding_no_key() {
+        let dir = MemDir::new();
+        create_branch_dirs(&dir, BRANCH.id).unwrap();
+        left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
+        let footer = recover(&dir, BRANCH).unwrap().segments.remove(0).0;
+        let path = segment_path(segment(0));
+        let read = || read_whole(&dir.open(&path, true).unwrap()).unwrap();
+        assert_eq!(extent_frame::Frame::of(&read()).unwrap().seal, extent_frame::Seal::Clear);
+        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
+        let keys = extent_remote::keys::Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
+        reseal(&dir, BRANCH, [0], &keys).unwrap();
+        let sealed = read();
+        let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
+        assert!(matches!(
+            extent_frame::Frame::of(&sealed).unwrap().seal,
+            extent_frame::Seal::Sealed { key: sealing, .. } if sealing == key
+        ));
+        assert_eq!(extent_frame::data(&sealed, &keys.of(BRANCH.id)).unwrap(), vec![0; 4096]);
+        assert_eq!(
+            extent_frame::data(&sealed, &extent_frame::NoKeys),
+            Err(extent_frame::Error::NoKey(key))
+        );
+        // Sealed again, it stays as it is.
+        reseal(&dir, BRANCH, [0], &keys).unwrap();
+        assert_eq!(read(), sealed);
+        // Framed whole, sealed, its raw data and log still there.
+        left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
+        let recovered = recover(&dir, BRANCH).unwrap();
+        assert_eq!(recovered.segments, [(footer, 0)]);
+        assert_eq!(read(), sealed);
+        assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
     /// A segment the base acknowledged, its framed file gone, as acknowledging it removed it, but

@@ -1000,7 +1000,8 @@ mod tests {
     fn lists_leave_out_what_is_held() {
         let base = Kind::Root.of(0);
         let fork = Kind::Fork(Origin { parent: branch(0xa), at: 0x10 }).of(0);
-        let live = BTreeMap::from([(branch(0xa), base), (branch(0xb), fork), (branch(0xc), fork)]);
+        let live =
+            BTreeMap::from([(branch(0xa), base), (branch(0xb), fork.clone()), (branch(0xc), fork)]);
         let held = held_branches("1/2/c\n").unwrap();
         assert_eq!(listed(&live, &held), "1/2/a\n1/2/b 1/2/a 10\n");
         let refused = "no branch, TENANT/CELL/ID in hexadecimal: x".to_owned();

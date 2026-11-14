@@ -34,6 +34,46 @@ pub trait Kms: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Secret, Error>> + Send;
 }
 
+/// fxdax: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
+/// [`Kms`] is one.
+pub trait Dyn: Send + Sync + 'static {
+    /// [`Kms::wrap`].
+    fn wrap_dyn<'a>(&'a self, tenant: u64, key: &'a Secret) -> Boxed<'a, Wrapped>;
+
+    /// [`Kms::unwrap`].
+    fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret>;
+}
+
+/// What a [`Dyn`] KMS's calls return.
+pub type Boxed<'a, T> = std::pin::Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
+
+impl<K: Kms> Dyn for K {
+    fn wrap_dyn<'a>(&'a self, tenant: u64, key: &'a Secret) -> Boxed<'a, Wrapped> {
+        Box::pin(self.wrap(tenant, key))
+    }
+
+    fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret> {
+        Box::pin(self.unwrap(tenant, wrapped))
+    }
+}
+
+/// fxdax: the KMS a host's processes are configured with, shared (TASK-411.3).
+pub type Shared = std::sync::Arc<dyn Dyn>;
+
+/// fxdax: the KMS `url` names (TASK-411.3): `local:///DIR`, a [`LocalKms`] keeping its tenants'
+/// KEKs under the directory `DIR`, the only kind there is until real KMSes come (doc-16, the
+/// user's decision); any other is refused, naming it.
+pub fn from_url(url: &str) -> Result<Shared, String> {
+    let Some(dir) = url.strip_prefix("local://") else {
+        return Err(format!("{url:?} names no KMS: local:///DIR, a directory of tenants' KEKs"));
+    };
+    if !dir.starts_with('/') {
+        return Err(format!("{url:?} names no KMS: local:///DIR names an absolute directory"));
+    }
+    let kms = LocalKms::open(dir).map_err(|err| format!("the KMS at {url}: {err}"))?;
+    Ok(std::sync::Arc::new(kms))
+}
+
 /// Why a KMS refused, each naming the tenant whose KEK was asked for, so that a store that cannot
 /// open says whose key it lacks.
 #[derive(Debug, thiserror::Error)]
@@ -679,6 +719,32 @@ mod tests {
         assert_eq!(mode(&kek_path(&tenant, 2)), 0o600);
         assert_eq!(mode(&tenant.join(REVOKED)), 0o600);
         assert_eq!(fs::metadata(kek_path(&tenant, 2)).unwrap().len(), KEY_LEN as u64);
+    }
+
+    /// TASK-411.3: a KMS is configured by its URL, `local:///DIR` alone, and reached through a
+    /// trait object as through itself.
+    #[test]
+    fn kmses_are_named_by_their_urls() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kms");
+        let shared = from_url(&format!("local://{}", path.display())).unwrap();
+        LocalKms::open(&path).unwrap().create(7).unwrap();
+        let key = Secret::random();
+        let wrapped = block_on(shared.wrap_dyn(7, &key)).unwrap();
+        assert_eq!(block_on(shared.unwrap_dyn(7, &wrapped)).unwrap().expose(), key.expose());
+        assert_eq!(
+            block_on(shared.unwrap_dyn(8, &wrapped)).map(|_| ()).unwrap_err().to_string(),
+            "tenant 8: no KEK in the KMS"
+        );
+        let refused = |url: &str| from_url(url).map(|_| ()).unwrap_err();
+        assert_eq!(
+            refused("aws-kms://key"),
+            "\"aws-kms://key\" names no KMS: local:///DIR, a directory of tenants' KEKs"
+        );
+        assert_eq!(
+            refused("local://relative"),
+            "\"local://relative\" names no KMS: local:///DIR names an absolute directory"
+        );
     }
 
     #[test]
