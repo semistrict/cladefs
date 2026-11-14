@@ -383,6 +383,41 @@ Final == MaxTakes + 1
 
 R(rule) == rule \in Rules
 
+\* Splits (TASK-405): definitions a model's configuration may override (`Takers = 121`), each
+\* restricting choices every behaviour makes at most once. A configuration's parts, one value of
+\* them each, check between them every behaviour the configuration does, and so every state it
+\* reaches (scripts/check-tla.sh's cover checks it), each in minutes where the whole takes hours.
+\* By default, none. (Digits for sequences, which a configuration can't hold.)
+\*
+\* - Takers: the hosts of the first takings, a digit each, as a pattern: the i-th and the j-th on
+\*   one host if and only if their digits are equal (121: the third on the first's host, not the
+\*   second's); later takings on any host. A pattern, not hosts, so that HostPerms stays sound.
+\* - TakePhases: the steps the first pass may be at as takings happen, 10 i + s each: the i-th
+\*   taking at step s (1, not started; 2, reading records; 3, recovering; 4, listing again; 5,
+\*   finishing; 6, ended). {11, 22, 23}: the first before the pass, the second as it reads records
+\*   or recovers; the third and later at any step.
+\* - CommitPhases: the same of commits, 10 i + s each: the i-th commit as the first pass is at
+\*   step s.
+\* - CommitTakes: the takings before each commit, 10 i + k each: the i-th commit after k.
+\* - ForkTo: the IDs a fork's child may take (a split where a behaviour forks once at most).
+\* - PassCells: the cells of the first passes, a digit each, in order (13: the first pass of cell
+\*   1, the second of cell 3); later passes of any cell.
+Takers == 0
+TakePhases == {}
+CommitPhases == {}
+CommitTakes == {}
+ForkTo == Branches
+PassCells == 0
+
+RECURSIVE Digits(_)
+\* n's decimal digits, the most significant first: none for 0.
+Digits(n) == IF n = 0 THEN <<>> ELSE Append(Digits(n \div 10), n % 10)
+TakerPattern == Digits(Takers)
+PassPattern == Digits(PassCells)
+\* Whether the split fixes, a set of 10 i + v (TakePhases, CommitPhases, CommitTakes), let the
+\* i-th taking or commit happen at v: if they name v for it, or nothing.
+Lets(fixes, i, v) == LET S == {n % 10 : n \in {n \in fixes : n \div 10 = i}} IN S = {} \/ v \in S
+
 VARIABLES
     \* The bucket.
     seg,        \* seg[b][s]: segment s of b, or None
@@ -421,13 +456,14 @@ VARIABLES
     errors,     \* what failed that must not
     freed,      \* the segments' places the collector freed, <<b, s>>: CreatesNeverFreed's history
     \* Bounds.
-    gen, takes, passes, places, crashes, mints
+    gen, takes, passes, places, crashes, mints,
+    takers      \* the hosts of the first takings Takers fixes, in order: its history
 
 bucketVars == <<seg, own, ckpt, rec, lease, moves, inflight, refs, marked, retired>>
 hostVars == <<ses, wal, tok, proc>>
 truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
 \* (freed is no action's: Next keeps it.)
-countVars == <<gen, takes, passes, places, crashes, mints>>
+countVars == <<gen, takes, passes, places, crashes, mints, takers>>
 vars == <<bucketVars, hostVars, gc, truthVars, countVars, freed>>
 
 -----------------------------------------------------------------------------
@@ -775,12 +811,27 @@ Started(s, b) ==
        ELSE IF p.ok THEN [s EXCEPT !.pc = "read", !.st = Inherit(p.st), !.at = 0, !.ck = -1]
        ELSE [s EXCEPT !.pc = "stopped"]
 
+\* The step the first pass is at, as TakePhases and CommitPhases number them.
+Phase == IF passes = 0 THEN 1
+         ELSE CASE gc[1].pc = "records" -> 2
+                [] gc[1].pc = "recover" -> 3
+                [] gc[1].pc = "relist" -> 4
+                [] gc[1].pc = "finish" -> 5
+                [] OTHER -> 6
+
+\* Whether the takings on the hosts hs, in order, fit Takers so far.
+TakersFit(hs) ==
+    \A i, j \in DOMAIN hs : i <= Len(TakerPattern) /\ j <= Len(TakerPattern) =>
+        (hs[i] = hs[j] <=> TakerPattern[i] = TakerPattern[j])
+
 \* h takes b's lease, as a writer of b, of its placement's token, its taking's holder, once it
 \* read b's record; then, the record read again, its recovery starts, or, deleted since, it stops
 \* (Writer::take). With "staleTake", the first read is from before b's deletion, whose lease the
 \* collector may have removed since: taken again, at epoch 1 (TASK-179).
 Open(h, b) ==
     /\ takes < MaxTakes
+    /\ TakersFit(Append(takers, h))
+    /\ Lets(TakePhases, takes + 1, Phase)
     /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
     /\ rec[b] # None
     /\ ~rec[b].deleted \/ ("staleTake" \in Can /\ rec[b].maker \in makers[b])
@@ -801,6 +852,7 @@ Open(h, b) ==
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
+    /\ takers' = IF Len(takers) < Len(TakerPattern) THEN Append(takers, h) ELSE takers
     /\ UNCHANGED <<seg, own, ckpt, rec, moves, inflight, refs, marked, retired, wal, tok, proc, gc>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
     /\ UNCHANGED <<passes, places, crashes, mints>>
@@ -1004,7 +1056,7 @@ Mint(h, b) ==
        /\ mints' = mints + 1
        /\ UNCHANGED <<bucketVars, wal, tok, proc, gc>>
        /\ UNCHANGED <<commits, nextTag, acked, makers, doomed, taken, placed, errors>>
-       /\ UNCHANGED <<gen, takes, passes, places, crashes>>
+       /\ UNCHANGED <<gen, takes, passes, places, crashes, takers>>
 
 \* What a commit does, besides committing: seal an open extent into its segment or on its own,
 \* free an extent its guest holds, fork the branch (a point, or not) to a child with no record,
@@ -1029,7 +1081,7 @@ Ops(h, b) ==
         open == IF "span" \in Can THEN s.open ELSE {}
         \* The IDs a fork's child may take: any with no record; with "forkNext", the least, as
         \* an allocator gives them out, for models whose choice of ID would only multiply states.
-        free == {c \in Branches \ {b, Root} : rec[c] = None}
+        free == {c \in ForkTo \ {b, Root} : rec[c] = None}
     IN (IF "commit" \in Can THEN {op("plain", None, 0, FALSE)} ELSE {})
        \cup {op("seg", x, 0, FALSE) : x \in IF "seg" \in Can THEN s.open ELSE {}}
        \cup {op("own", x, 0, FALSE) : x \in IF "own" \in Can THEN s.open ELSE {}}
@@ -1049,6 +1101,7 @@ Commit(h, b) ==
         t == nextTag
         ws == wal[h][b]
     IN /\ Ready(h, b) /\ t <= MaxCommits
+       /\ Lets(CommitPhases, t, Phase) /\ Lets(CommitTakes, t, takes)
        /\ \E op \in Ops(h, b) :
             LET on == IF op.on THEN 1 ELSE 0
                 n == Len(op.xs) - on
@@ -1228,7 +1281,7 @@ Crash(h) ==
     /\ ses' = [ses EXCEPT ![h] = [b \in Branches |-> None]]
     /\ proc' = [proc EXCEPT ![h] = None]
     /\ crashes' = crashes + 1
-    /\ UNCHANGED <<bucketVars, tok, gc, truthVars, gen, takes, passes, places, mints>>
+    /\ UNCHANGED <<bucketVars, tok, gc, truthVars, gen, takes, passes, places, mints, takers>>
 
 \* b placed on h: a fencing token above every earlier placement's.
 Place(h, b) ==
@@ -1236,7 +1289,7 @@ Place(h, b) ==
     /\ tok' = [tok EXCEPT ![h][b] = placed[b] + 1]
     /\ placed' = [placed EXCEPT ![b] = @ + 1]
     /\ places' = places + 1
-    /\ UNCHANGED <<bucketVars, ses, wal, proc, gc, gen, takes, passes, crashes, mints>>
+    /\ UNCHANGED <<bucketVars, ses, wal, proc, gc, gen, takes, passes, crashes, mints, takers>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, errors>>
 
 \* Another branch takes the ID c, as a guest may give any (TASK-79.82).
@@ -1621,6 +1674,7 @@ CellRecs(c) == [b \in Branches |-> IF CellOf[b] = c THEN rec[b] ELSE None]
 GcStart(c) ==
     LET i == passes + 1 IN
     /\ "collect" \in Can /\ passes < MaxPasses
+    /\ i <= Len(PassPattern) => c = PassPattern[i]
     /\ "overlap" \in Can \/ \A j \in DOMAIN gc : gc[j].pc = "idle"
     /\ gc' = [gc EXCEPT ![i] = [GcIdle EXCEPT !.pc = "records", !.cell = c, !.recs = CellRecs(c),
                                                !.objs = IF R("candidatesFirst") THEN Listing(c)
@@ -1629,7 +1683,7 @@ GcStart(c) ==
                                                         ELSE RefsUnder(c),
                                                !.stale = RefsUnder(c) \cap marked]]
     /\ passes' = i
-    /\ UNCHANGED <<bucketVars, hostVars, truthVars, gen, takes, places, crashes, mints>>
+    /\ UNCHANGED <<bucketVars, hostVars, truthVars, gen, takes, places, crashes, mints, takers>>
 
 \* The records of the cell's branches pass i's listing has not read, which a listing finds.
 Unread(i) == {b \in CellBranches(gc[i].cell) : gc[i].recs[b] = None /\ rec[b] # None}
@@ -1868,6 +1922,7 @@ Init ==
     /\ placed = [b \in Branches |-> 0]
     /\ errors = {}
     /\ gen = 0 /\ takes = 0 /\ passes = 0 /\ places = 0 /\ crashes = 0 /\ mints = 0
+    /\ takers = <<>>
     /\ freed = {}
 
 \* Every step, and what it freed: the places of segments there before it and gone after.
