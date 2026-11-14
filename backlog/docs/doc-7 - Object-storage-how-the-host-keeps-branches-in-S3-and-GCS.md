@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 17:00'
+updated_date: '2026-11-14 22:20'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -1160,11 +1160,12 @@ ID of the one fork's child (`ForkTo`), the cells of the passes (`PassCells`). Ev
 whole is some part's, so nothing the whole checked goes unchecked; `check-tla.sh cover` shows it
 on each model made small, every state the whole reaches one some part reaches, and a full run
 checks it. BucketForks is 6 parts (its pass's cell, and the takings before it), BucketOverlap 5
-(the point's cell, and the passes'), BucketStrays 8 (the third writer on the first's host or the
-second's, and the pass's step as each writer takes the branch), each part under eight minutes;
-parts cost more in all than the whole did (a part checks again the states before its choice).
+(the point's cell, and the passes'), BucketStrays 20 (the third writer on the first's host or the
+second's, the pass's step as each writer takes the branch, and, the pass late, the takings before
+each commit), each part under eight minutes on a laptop (more while other runs load it); parts cost
+more in all than the whole did (a part checks again the states before its choice).
 BucketTakeovers, the hunt for a fourth way to lose a commit, which found none, is a deep model,
-which the default run skips: its 60 parts, each in minutes, take hours in all (`check-tla.sh deep`).
+which the default run skips: its 72 parts, each in minutes, take hours in all (`check-tla.sh deep`).
 
 **Watching before deleting** *(added 2026-11-08, TASK-264).* Two passes delete nothing, for an
 operator to see what the collector would do before trusting it with a bucket:
