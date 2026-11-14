@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-12 10:51'
-updated_date: '2026-11-14 17:32'
+updated_date: '2026-11-14 18:30'
 labels:
   - bug
   - ubu1
@@ -61,4 +61,6 @@ Suggested fix: fxjob gives each job a TMPDIR of its own, which tests make their 
 Evidence (ubu1): scripts/fxjob-check.sh all passed: SIGKILLed job with files, root's files, tmpfs (64M), loop-mounted ext4 inside it and a second loop: no dir, mount or loop left; check slice shmem 65M -> 0M, memory.current 68M -> 0M. fxjob killed outright: dir kept until the next fxjob, then gone. On the real fxdax-work.slice (worktree fxjob, beside t407's TLA job): a job with 512M in a tmpfs in its TMPDIR plus 256M on disk, SIGKILLed: shmem 2044M -> 2566M -> 2059M, memory.current 10705M -> 11496M -> 10722M; dir and mount gone. A real nextest run SIGTERMed by its 15-min cap (FUSE tests among those killed) left /mnt/fxdax-scratch/fxjob empty, no mounts.
 DoD #1: macOS workspace 2369 passed. ubu1 under the new fxjob (tmp on ext4): 1365/2651 passed, 0 failed, then the 900 s hard timeout cut it (full suite ~30 min): the rest not run, by the 15-min heavy-load rule. Found TASK-408 (systemd-run expanded $$ in job commands), fixed in the same commit.
 Note: fxdax-work.slice held 2044M shmem before any of this with only t407's job running: probably old fxjob's leftovers (tmpfs files of ended jobs); not touched.
+
+2026-11-14 13:30 EST: queue idle; ran ubu1's step 146 on its own (sudo system-setup.d/146-fxdax_cgroups.sh, not system-setup.sh, which would also run others' pending steps: vscode, cliproxy, fxdax_tla, user_tweaks). /usr/local/bin/fxjob = origin/main 2eda3972 (md5 02aab1a0...; the step said replaced nothing: it was already that). fxjob-check.sh against the installed fxjob: all passed. Remaining for DoD #1: the full Linux workspace suite under the new fxjob (~30 min; cut at 1365/2651, 0 failed).
 <!-- SECTION:NOTES:END -->
