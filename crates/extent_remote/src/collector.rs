@@ -1123,6 +1123,10 @@ struct Live {
     /// The moves they name extents in whose writers may name them anywhere on their ways from
     /// where they were sealed ([`behind`]).
     behind: BTreeSet<String>,
+    /// fxdax: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
+    /// key parsed once, not once an extent in it (TASK-395.12). Parsing them took most of a pass
+    /// over a cell whose branch was forked at many points, each a state of every extent of it.
+    moves: rustc_hash::FxHashMap<String, bool>,
     /// fxdax: the fork points whose states it keeps, each once ([`Live::keep_point`]).
     points: BTreeSet<Origin>,
     /// fxdax: whether what it found went by more than the cell holds, which may change with nothing
@@ -1319,10 +1323,17 @@ impl Live {
     /// Notes that a writer may name the extent at `location` anywhere on its way there from where
     /// it was sealed: in moves, if it is in some.
     fn behind_at(&mut self, location: &Location) {
-        if matches!(layout::kind(&location.key), Kind::Moves { .. })
-            && !self.behind.contains(&location.key)
-        {
-            self.behind.insert(location.key.clone());
+        let key = &location.key;
+        let moves = match self.moves.get(key) {
+            Some(&moves) => moves,
+            None => {
+                let moves = matches!(layout::kind(key), Kind::Moves { .. });
+                self.moves.insert(key.clone(), moves);
+                moves
+            }
+        };
+        if moves && !self.behind.contains(key) {
+            self.behind.insert(key.clone());
         }
     }
 }
@@ -4713,6 +4724,43 @@ mod tests {
         let (one, read) = asked(1);
         assert_eq!(read, 1, "the fork point's checkpoint");
         assert_eq!(asked(8), (one, read));
+    }
+
+    /// TASK-395.12: a pass over a cell whose branch was forked at many points to other cells, a VM
+    /// snapshotted many times, lists the branch's checkpoints once after its segments
+    /// (`newest_checkpoint`), the listing of the cell serving the first for its whole state and
+    /// for each fork point's; and reads each fork point's checkpoint, which recording the fork
+    /// wrote, once. Before, it listed them once more a fork point.
+    #[test]
+    fn passes_list_a_branchs_checkpoints_once_however_many_points_it_was_forked_at() {
+        let parent = celled(1, 1);
+        let asked = |points: u64| {
+            let bucket = SimBucket::new();
+            let (ats, _) = bucket.served(async {
+                branch::create(&*bucket, parent, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
+                let mut ats = Vec::new();
+                for n in 0..points {
+                    let extent = ExtentId::new(1, writer.chain().next_sequence());
+                    let point = Child { branch: celled(0x10 + n, 1), owner: 0x22, point: true };
+                    ats.push(commit_and_fork(&writer, vec![(extent, vec![1; 64])], point).await);
+                }
+                // Written on, its own checkpoint past the last fork point's.
+                commit(&writer, Commit { tag: 3, ..Commit::default() }).await;
+                writer.checkpoint().await.unwrap();
+                ats
+            });
+            let options = Options { compact_below: 0.0, grace: 0 };
+            let (report, asked) = bucket.served(collect_cell(&*bucket, parent.cell, 7, &options));
+            report.unwrap();
+            let count = |request: String| asked.iter().filter(|asked| **asked == request).count();
+            let listed = count(format!("list {}", layout::checkpoints(parent)));
+            let read = |&at: &u64| count(format!("get {}", layout::checkpoint(parent, at)));
+            let read: Vec<usize> = ats.iter().map(read).collect();
+            (listed, read)
+        };
+        assert_eq!(asked(1), (1, vec![1]));
+        assert_eq!(asked(6), (1, vec![1; 6]));
     }
 
     /// TASK-395.4: a dry run over a dead cell says what reference a pass would retire, deleting it

@@ -901,6 +901,7 @@ dependencies = [
  "opentelemetry",
  "rand 0.10.3",
  "reqwest",
+ "rustc-hash",
  "serde",
  "serde_json",
  "sha2",

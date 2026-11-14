@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 12:50'
+updated_date: '2026-11-14 17:00'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -953,9 +953,10 @@ after the states, finding the records read before new). `extent_remote::collecto
 | `<C>refs/` by delimiter, and `<C>refs/<parent>/` by delimiter for each parent there | the fork points the references name (step 5) | it comes after the states (rule `referencesRelisted`); and a listing of the references whole, as the cell's is, may miss a fork point whose clone's reference lands behind its cursor as the point's own, ahead, is retired (For the code, below) | 1, and 1 per parent with references in other cells |
 
 Rarer: a pass over a cell with no lease yet and no cell object lists `<C>branches/` and `<C>` by
-delimiter before it takes the lease (`passable`); a fork point's state, or a fork's in the cell,
-read from its parent's checkpoints lists them, the cell's listing serving each branch's first
-listing alone; a recovery finding what it inherited lost lists its checkpoints (`newestCheckpoint`,
+delimiter before it takes the lease (`passable`); a fork's in the cell read from its parent's
+checkpoints lists them, the cell's listing serving each branch's first listing alone; a fork
+point's state the pass keeps lists them only to start over, the cell's listing serving each one's
+first (TASK-395.19: a branch forked at a hundred points listed them a hundred times more); a recovery finding what it inherited lost lists its checkpoints (`newestCheckpoint`,
 TASK-177); a fork point found lost lists its references (`needing`); a mark-only pass lists
 `<C>gc/marks/`. *Not done:* one listing of `<C>` after the states serving the records' relisting
 and every branch's check: it would list every segment and reference of the cell again, a request a
