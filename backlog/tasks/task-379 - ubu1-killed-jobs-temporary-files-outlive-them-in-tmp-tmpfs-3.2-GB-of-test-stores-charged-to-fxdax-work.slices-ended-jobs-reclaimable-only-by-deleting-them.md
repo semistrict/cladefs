@@ -4,10 +4,11 @@ title: >-
   ubu1: killed jobs' temporary files outlive them in /tmp (tmpfs): 3.2 GB of
   test stores charged to fxdax-work.slice's ended jobs, reclaimable only by
   deleting them
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-12 10:51'
-updated_date: '2026-11-13 15:15'
+updated_date: '2026-11-14 17:32'
 labels:
   - bug
   - ubu1
@@ -25,16 +26,27 @@ Seen 2026-11-12 while fixing TASK-378. fxdax-work.slice held 4.0 GB with no job 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A job killed with SIGKILL leaves none of its temporary files on ubu1
-- [ ] #2 fxdax-work.slice holds no memory of ended jobs once they are reaped
+- [x] #1 A job killed with SIGKILL leaves none of its temporary files on ubu1
+- [x] #2 fxdax-work.slice holds no memory of ended jobs once they are reaped
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. fxjob: each job gets TMPDIR=$tmp_root/PID (tmp_root /mnt/fxdax-scratch/fxjob, ext4; /tmp/fxjob if scratch isn't mounted; FXJOB_TMP for the check), mode 1777 (jailed VMs' user writes there), made under the queue lock with a marker job-PID (fxjob's start time, the job's scope).
+2. reap: after killing the scope's leftovers, clean the dir: lazily unmount every mount under it (findmnt, deepest first, sudo), detach loop devices backed by files there (sysfs backing_file), refuse to rm while any mount remains, rm -r --one-file-system (sudo if root's files). Processes that outlived the job leave the dir to a later sweep.
+3. sweep: every fxjob, under the queue lock, cleans dirs whose fxjob is gone and whose scope holds no process (fxjob itself SIGKILLed, no reap ran).
+4. sudo strips TMPDIR (glibc drops it for setuid programs; --preserve-env can't keep it): host_command and bench-rounds.sh pass it to root runs with sudo env TMPDIR=..., expanded inside the job.
+5. fxjob-check.sh: a job making files, root's files, a tmpfs mount, a loop-mounted ext4 image under TMPDIR, SIGKILLed: no dir, mount, loop left; slice memory (shmem) back after reap; fxjob SIGKILLed outright: next job sweeps its dir.
+6. Verify on ubu1 (fxjob-check, nextest workspace under fxjob), macOS nextest; push; re-run step 146 when fxjob ps is idle.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
@@ -44,4 +56,9 @@ Three of them (.tmpKHntmR, .tmpy4Rk48, .tmprPqkTq, made 05:59 that day) each hel
 Suggested fix: fxjob gives each job a TMPDIR of its own, which tests make their temp dirs under; at the job's end its reap lazily unmounts any fuse.fxdax mount under it and removes it.
 
 2026-11-13 ~10:15 EST, coordinator: ubu1's swap was full (8,187 of 8,191 MiB) with /tmp (tmpfs) at 7.1G; removed 288 more stale fxdax test dirs older than 6 h and open by no process (.tmp*, tmp.*, fxdax-*, and fuse_differential's differential.*/reference.*/script.* from root runs on 2026-11-11/12, e.g. a 4.6G .tmpkkVBEM store), lazily unmounting the 11 dead mounts left in them first. /tmp 7.1G -> 640M, swap 8.2G -> 3.0G used. Root test runs leave mounted images too, not only FUSE: the fix should unmount and remove a killed job's temp dirs (a per-job TMPDIR fxjob removes).
+
+2026-11-14, 679737d41: fxjob gives each job TMPDIR=/mnt/fxdax-scratch/fxjob/PID (ext4, 1777, 32 bytes), cleaned at reap (loops detached, mounts lazily unmounted deepest first, removed with sudo where root's) and swept by the next fxjob if fxjob itself was killed. sudo can't keep TMPDIR (glibc drops it for set-user-ID programs, --preserve-env too): host_command and bench-rounds.sh pass it with sudo env TMPDIR=..., expanded inside the job.
+Evidence (ubu1): scripts/fxjob-check.sh all passed: SIGKILLed job with files, root's files, tmpfs (64M), loop-mounted ext4 inside it and a second loop: no dir, mount or loop left; check slice shmem 65M -> 0M, memory.current 68M -> 0M. fxjob killed outright: dir kept until the next fxjob, then gone. On the real fxdax-work.slice (worktree fxjob, beside t407's TLA job): a job with 512M in a tmpfs in its TMPDIR plus 256M on disk, SIGKILLed: shmem 2044M -> 2566M -> 2059M, memory.current 10705M -> 11496M -> 10722M; dir and mount gone. A real nextest run SIGTERMed by its 15-min cap (FUSE tests among those killed) left /mnt/fxdax-scratch/fxjob empty, no mounts.
+DoD #1: macOS workspace 2369 passed. ubu1 under the new fxjob (tmp on ext4): 1365/2651 passed, 0 failed, then the 900 s hard timeout cut it (full suite ~30 min): the rest not run, by the 15-min heavy-load rule. Found TASK-408 (systemd-run expanded $$ in job commands), fixed in the same commit.
+Note: fxdax-work.slice held 2044M shmem before any of this with only t407's job running: probably old fxjob's leftovers (tmpfs files of ended jobs); not touched.
 <!-- SECTION:NOTES:END -->
