@@ -7,12 +7,12 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 13:14'
-updated_date: '2026-11-14 20:15'
+updated_date: '2026-11-14 22:45'
 labels:
   - testing
   - flaky
 dependencies: []
-priority: medium
+priority: high
 type: bug
 ordinal: 727000
 ---
@@ -46,4 +46,6 @@ Seen 2026-11-10 on ubu1 (TASK-320's branch at c8e4ff56, scripts/test.sh workspac
 2026-11-14 (TASK-395.13/.14 batch, macOS laptop at load ~48): failed in scripts/test.sh's workspace part and once more alone (Report all 0); then 4 of 4 alone passed. Same symptom.
 
 2026-11-14 (claude, TASK-400's agent): seen again on ubu1 at dddfea15e, in the Linux workspace suite under fxjob (--test-threads 4) and 1 of 3 runs alone after: Report { deleted: 0, compacted: 0, ... }.
+
+2026-11-14, coordinator: now failing on main's CI on both test (workspace) and macos (workspace) in one run: e9b6ac5dc (run 43648106574) and 7036a9bde (run 43641464580), Report { deleted: 0, ... } at kept.rs; passed on 355147cd3 between. Since TASK-400/401 (85b163d62, 9c93d8d08) landed it is the one test keeping main red; check whether they made it likelier.
 <!-- SECTION:NOTES:END -->
