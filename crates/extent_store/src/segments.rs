@@ -1004,9 +1004,9 @@ impl<F: File> Segments<F> {
     /// holding the state, so that no opening of the segment makes them meanwhile (TASK-384).
     /// Returns what of the preparation is left: the entries of the segment placed, to make durable
     /// ([`Segments::placed_synced`]), the preparation running until then; or, one prepared for a
-    /// segment opened meanwhile, with a log of its own, the next's then, a spare, as is the spare a
-    /// failed one took, if the branch keeps another ([`SPARES`]), else its spare's name to remove,
-    /// the preparation ended.
+    /// segment opened meanwhile, with a log of its own, the next's to prepare then, of the log
+    /// prepared, the preparation going on; or, one failed, the spare it took a spare again, if the
+    /// branch keeps another ([`SPARES`]), else its name to remove, the preparation ended.
     pub fn prepared<D: Dir<File = F>>(
         &mut self,
         dir: &D,
@@ -1027,7 +1027,13 @@ impl<F: File> Segments<F> {
                     }
                 }
             }
-            Ok(stale) => stale.spare,
+            // fxdax: its log the next's, the preparation going on: the opening began none, this one
+            // running, and ended here, it left the next segment nothing prepared until another
+            // flush or closing, the last flush's having found it running (TASK-404).
+            Ok(stale) => {
+                let salt = new_salt(self.lifetime, next);
+                return Preparing::Again(Preparation { segment: next, spare: Some(stale.spare), salt });
+            }
             Err((spare, error)) => {
                 log::warn!("extent store: preparing {next:?}'s log: {error:#}");
                 self.preparing = false;
@@ -1066,18 +1072,20 @@ impl<F: File> Segments<F> {
 
     /// fxdax: the entries of segment `segment`, placed ([`Segments::prepared`]), were made durable,
     /// or not, as `synced` says, which ends the preparation: the segment, opened meanwhile, needs
-    /// no flush to sync them, nor, opening later, does it (TASK-384).
-    pub fn placed_synced(&mut self, segment: SegmentId, synced: bool) {
+    /// no flush to sync them, nor, opening later, does it (TASK-384). Returns the next's
+    /// preparation, if the segment opened meanwhile, the preparation going on with it: the opening
+    /// began none, this one running (TASK-404).
+    pub fn placed_synced(&mut self, segment: SegmentId, synced: bool) -> Option<Preparation> {
         self.preparing = false;
-        if !synced {
-            return;
-        }
-        match &mut self.prepared {
-            Some(placed) if placed.segment == segment => placed.synced = true,
-            _ => {
-                self.unsynced_entries.remove(&segment);
+        if synced {
+            match &mut self.prepared {
+                Some(placed) if placed.segment == segment => placed.synced = true,
+                _ => {
+                    self.unsynced_entries.remove(&segment);
+                }
             }
         }
+        self.to_prepare()
     }
 
     /// fxdax: the next segment, if its raw file and log are placed ahead of it (TASK-384).
@@ -1775,11 +1783,13 @@ pub(crate) struct Placed<F> {
 }
 
 /// fxdax: what of a preparation is left once its log is made ([`Segments::prepared`]).
-#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Preparing {
     /// The segment's raw file and log placed, their entries to make durable, the preparation
     /// running until then ([`Segments::placed_synced`]).
     Placed(SegmentId),
+    /// Its segment opened meanwhile, with a log of its own: the next's to prepare, of the log it
+    /// made, the preparation running on (TASK-404).
+    Again(Preparation),
     /// The preparation ended, a spare log's name to remove, if it left one the branch keeps not.
     Ended(Option<SegmentId>),
 }
@@ -1805,6 +1815,8 @@ impl Preparation {
     /// read of the store and its flushes waiting (TASK-333). Fails with the spare it took.
     pub fn prepare<D: Dir>(self, dir: &D) -> Result<Prepared<D::File>, (Option<SegmentId>, Error)> {
         let Self { segment, spare, salt } = self;
+        // Where it runs, off the store's state lock, the segment's opening free to come first.
+        fail::fail_point!("segments::preparing");
         // A file made anew under a name no segment's spare log has: a stale one, its segment
         // opened with another log, its spare later, would take the name, the file a preparation
         // held then gone from under it.
@@ -2236,8 +2248,11 @@ mod tests {
 
     /// fxdax: the next segment's log prepared off the state lock, a filling opens the next with
     /// it, syncing nothing; one prepared for a segment opened meanwhile, the opening having made
-    /// its own, is a spare; and every log's header is its segment's (TASK-333). Before, the
-    /// filling wrote and synced the header, holding the store's state lock.
+    /// its own, goes on as the next's, as does one whose segment opened before its entries were
+    /// durable, no opening beginning another while it runs (TASK-404); and every log's header is
+    /// its segment's (TASK-333). Before, the filling wrote and synced the header, holding the
+    /// store's state lock; and the preparation ended there, leaving the next segment nothing
+    /// prepared until another flush or closing began one.
     #[test]
     fn segments_open_with_their_logs_prepared_syncing_nothing() {
         let dir = MemDir::new();
@@ -2248,16 +2263,18 @@ mod tests {
             log.read_cached(&mut header, 0).unwrap();
             crate::wal::log_salt(&header, segment(number)).is_some()
         };
-        // Made, then placed, its entries made durable, as the store's opener does.
+        // Made, then placed, its entries made durable, as the store's opener does: what of the
+        // preparation goes on.
         let prepare = |segments: &mut Segments<MemFile>, preparation: Preparation| match segments
             .prepared(&dir, preparation.prepare(&dir))
         {
             Preparing::Placed(placed) => segments.placed_synced(placed, true),
-            Preparing::Ended(stale) => assert_eq!(stale, None),
+            Preparing::Again(next) => Some(next),
+            Preparing::Ended(stale) => panic!("the preparation ended, {stale:?} to remove"),
         };
         let preparation = segments.to_prepare().expect("the next's log to prepare");
         assert!(segments.to_prepare().is_none(), "one at a time");
-        prepare(&mut segments, preparation);
+        assert!(prepare(&mut segments, preparation).is_none(), "segment 1's placed");
         assert!(segments.to_prepare().is_none(), "the next's prepared");
         write(&mut segments, 1);
         let before = dir.io().synced_files;
@@ -2271,13 +2288,30 @@ mod tests {
         segments.fill(&dir, 1).unwrap();
         assert_eq!(dir.io().synced_files - before, 1, "the header's sync, nothing prepared");
         assert!(headed(2), "segment 2's log, its header its own");
-        prepare(&mut segments, preparation);
-        assert_eq!(segments.spares.len(), 1, "segment 2's, prepared late, a spare");
-        let preparation = segments.to_prepare().expect("segment 3's log to prepare");
-        prepare(&mut segments, preparation);
+        assert!(segments.to_prepare().is_none(), "segment 2's preparing still");
+        // Late, it goes on as segment 3's, of the log it made.
+        let again = prepare(&mut segments, preparation).expect("segment 3's log to prepare");
+        let made = SegmentId { number: 2 | MADE, ..segment(2) };
+        assert_eq!((again.segment, again.spare), (segment(3), Some(made)));
+        assert!(segments.to_prepare().is_none(), "one at a time");
+        assert!(prepare(&mut segments, again).is_none(), "segment 3's placed");
+        assert!(segments.spares.is_empty(), "no spare left of segment 2's");
         write(&mut segments, 3);
         segments.fill(&dir, 1).unwrap();
-        assert!(headed(3), "segment 3's log, of the spare, its header its own");
+        assert!(headed(3), "segment 3's log, of segment 2's late, its header its own");
+        // Placed, its segment opened before its entries were durable: it goes on as the next's.
+        let preparation = segments.to_prepare().expect("segment 4's log to prepare");
+        let Preparing::Placed(placed) = segments.prepared(&dir, preparation.prepare(&dir)) else {
+            panic!("segment 4's placed");
+        };
+        write(&mut segments, 4);
+        segments.fill(&dir, 1).unwrap();
+        assert!(headed(4), "segment 4's log, placed, its header its own");
+        assert!(segments.to_prepare().is_none(), "segment 4's preparing still");
+        let again = segments.placed_synced(placed, true).expect("segment 5's log to prepare");
+        assert_eq!(again.segment, segment(5));
+        assert!(prepare(&mut segments, again).is_none(), "segment 5's placed");
+        assert_eq!(segments.placed(), Some(segment(5)));
     }
 
     /// fxdax: a segment opened has its entries unsynced until a sync that began after it opened
