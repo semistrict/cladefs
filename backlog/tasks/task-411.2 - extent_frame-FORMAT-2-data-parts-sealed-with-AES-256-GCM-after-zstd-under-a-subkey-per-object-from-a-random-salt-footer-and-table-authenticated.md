@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 19:07'
+updated_date: '2026-11-14 22:01'
 labels: []
 dependencies:
   - TASK-411.1
@@ -29,10 +29,10 @@ The bucket, the WAL and the part cache all hold framed objects, so encrypting pa
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A framed object with a key has no plaintext part bytes; reading it back with the key gives the data, with the wrong key or a flipped byte an error, never wrong data
-- [ ] #2 A part moved to another object or index fails authentication (associated data covers object key, index, encoding, length)
-- [ ] #3 Framing throughput with encryption is measured against without, on ubu1 via fxjob --bench, and the numbers are in the task
-- [ ] #4 A FORMAT 2 reader refuses a FORMAT 1 object by naming its format, not as corrupt (doc-11 rule 1); no migration (the user's decision)
-- [ ] #5 An object of a cell with no key is written and read in the clear, its trailer saying so; each encryption test has a plaintext twin
+- [ ] #2 Framing throughput with encryption is measured against without, on ubu1 via fxjob --bench, and the numbers are in the task
+- [ ] #3 A FORMAT 2 reader refuses a FORMAT 1 object by naming its format, not as corrupt (doc-11 rule 1); no migration (the user's decision)
+- [ ] #4 An object of a cell with no key is written and read in the clear, its trailer saying so; each encryption test has a plaintext twin
+- [ ] #5 A part moved to another index or another object fails authentication: its subkey comes from its object's salt (not the object's key, which a rebase's restamping may change, doc-14), and its associated data covers its index, encoding and lengths
 <!-- AC:END -->
 
 ## Definition of Done

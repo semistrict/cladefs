@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 18:51'
+updated_date: '2026-11-14 22:02'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -59,17 +59,28 @@ GCM's authentication key. A salt per object makes every subkey new.
 *(decided: data encrypted, metadata authenticated only)*
 
 - **Data parts:** each part of a framed object (`extent_frame::PART`, 1 MiB) is compressed
-  first, as now, then sealed with AES-256-GCM under the object's subkey; the nonce is the part's
-  index, the associated data the object's key, the part's index, encoding and length. The table's
-  entry holds the tag. Compression keeps working; ciphertext is the same length plus 16 bytes.
+  first, as now, then sealed with AES-256-GCM under the object's subkey
+  (`dek.derive(salt, ["fxdax frame parts"])`); the nonce is the part's index, the associated data
+  its index, encoding, stored and unpacked lengths. The table's entry holds the tag (every FORMAT 2
+  entry has one, zeros in the clear: 33 bytes a part). Compression keeps working; ciphertext is the
+  same length. *(TASK-411.2)* Nothing is bound to the object's key: a rebase renumbers and restamps
+  closed segments, uploading them under other keys (doc-14), and own extents' keys name their epoch
+  and segment. The salt binds instead: a part moved to another object fails under that object's
+  subkey. A whole object copied to another key of its branch is caught by its footer where the
+  footer names its place (segments: branch, number, epoch), and by TASK-411.3 for the others.
 - **Footers, tables, trailers, checkpoints, moves' maps, records, cell objects, leases:** in the
-  clear, as now, plus a MAC under a key derived from the DEK, which key-holding readers check. The
+  clear, as now, plus a MAC under a key derived from the DEK, which key-holding readers check (a
+  frame's footer and its table, which covers the trailer's seal and the footer's MAC, each have an
+  HMAC-SHA256 under `dek.derive(salt, ["fxdax frame mac"])` in the trailer; restamping a footer
+  needs the key and keeps the salt). The
   collector reads them without keys, checking CRCs, as now. They show extent IDs, sizes, the fork
   tree and live bytes; Fxfs's own metadata (names, inodes, directories) is data inside extents, so
   encrypted. A bucket writer could tamper with what the collector reads; it can delete objects
   anyway, so that is no new power.
 - **The trailer** gains the salt, the branch and DEK generation, and a flag: FORMAT 2 of
-  `extent_frame` (doc-11 rule 1: a FORMAT 1 reader names FORMAT 2, not corrupt).
+  `extent_frame` (doc-11 rule 1: a FORMAT 1 reader names FORMAT 2, not corrupt). An object in the
+  clear says so, its MACs and tags zeros; as its seal is not authenticated, a reader of a branch
+  with a DEK refuses its objects in the clear (TASK-411.3), or a bucket writer could downgrade one.
 - **Local disk:** closed segments in the WAL and the part cache hold the stored bytes, so they are
   encrypted with nothing more. *(decided)* **The open segment is encrypted too**, under the volume
   DEK, so that shredding covers hosts' disks without counting on their disk encryption. Its pieces
@@ -81,7 +92,9 @@ GCM's authentication key. A salt per object makes every subkey new.
   every test of `extent_store`, `sqlite_extents` and `fxdax` on macOS passed (574) but the 62 of
   `extent_store`'s simulation, whose writes are of 512 bytes (`sim/world.rs`, `BLOCK`); the guest's
   writes are aligned to the device's `block_size`, 4096 (doc-4). So the store refuses a write that
-  is not whole sectors, and the simulation writes 4 KiB blocks.
+  is not whole sectors, and the simulation writes 4 KiB blocks (TASK-411.8). Large extents' own raw
+  files (`open-extents/`) hold guest data until sealed too, and are encrypted the same way
+  (TASK-411.5).
   The open segment's log holds `Contents`, metadata, so it gets a MAC, not encryption.
 - **Memory:** the extent cache and DAX windows hold plaintext. DEKs and KEKs in memory are
   zeroized on drop and never written out unwrapped.

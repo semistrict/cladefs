@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-12 22:35'
+updated_date: '2026-11-14 22:01'
 labels:
   - testing
   - bug
@@ -32,3 +33,9 @@ On main (76df8f0f3), with no change of mine to the simulation, the rule-off sear
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-14 (TASK-411.8's run, base 7f5b5e7f7, macOS under load 50-130): first finding seed 11,020 of recreated(), ~41 min; the same with the simulation's blocks at 512 bytes and at 4 KiB. The comment at sim/mod.rs naming seed 1,389 is stale.
+<!-- SECTION:NOTES:END -->

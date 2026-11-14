@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 22:01'
 labels: []
 dependencies:
   - TASK-411.1
@@ -32,6 +32,10 @@ doc-16, Keys: the tenant KEK wraps a cell KEK kept in <C>cell, which wraps each 
 - [ ] #2 Opening a store unwraps with one KMS call per cell taking, not per volume: a test counts calls
 - [ ] #3 A store whose tenant KEK is revoked fails to open with an error naming the tenant
 - [ ] #4 Rotating a cell KEK rewraps its volumes' DEKs by conditional updates; adding a DEK generation makes new objects use it while old ones stay readable
+- [ ] #5 A reader of a branch whose record has a DEK refuses an object of that branch in the clear (a downgrade: someone who can write the bucket zeroing an object's seal, MACs and tags), with an error naming it
+- [ ] #6 Objects whose footers bind nothing to their key (own extents, the collector's moves) are bound to what names them (extent ID or key) under the MAC, so that a whole object copied to another key of the same branch is refused
+- [ ] #7 Host-wide caches (fetch tails, recent parts, peers) open parts with a host-wide key set of the stores the host serves, not a store's own
+- [ ] #8 wal::whole_footer and every other reader that treats an error of data() as not whole reads encrypted segments as whole (keys, or the keyless check), so recovery never re-frames them from their raw files
 <!-- AC:END -->
 
 ## Definition of Done

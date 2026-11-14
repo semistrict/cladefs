@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 17:00'
+updated_date: '2026-11-14 22:02'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -248,7 +248,7 @@ any format reads it before the rest: one of another format, newer or older, is r
 the branch is read or written. Every reader of a branch reads its record first: a
 writer taking it, a host attaching it, the collector, whose pass stops, deleting nothing in a
 bucket it can't read. Every framed object (segments, extents on their own, checkpoints, moves)
-ends with its frame's format, the last byte of its trailer's magic (`fxdaxob1`), which a reader of
+ends with its frame's format, the last byte of its trailer's magic (`fxdaxob2` since TASK-411.2), which a reader of
 an older frame names rather than calls corrupt. A lease goes with its branch's record.
 
 **Kinds of record** *(added 2026-11-03, TASK-160.14).* A record's flags say together one of six
@@ -284,13 +284,15 @@ its own, or raw where that does not shrink it, at offsets in the object that are
   segments (below);
 - then, as in every object that holds data (segments, extents of their own, compaction's moves,
   checkpoints), a table of each part's stored offset and length, the CRC32C of its stored bytes,
-  and its encoding, and a trailer: the lengths of the data, of the parts stored and of the
-  footer, the CRCs of the footer and of the table, and a magic number.
+  its encoding, and its AES-GCM tag (zeros in the clear), and a trailer: the lengths of the data,
+  of the parts stored and of the footer, the footer's CRC, the object's seal (in the clear, or
+  sealed under which branch's DEK of which generation, from which salt), the MACs of the footer
+  and of the table, the table's CRC, and a magic number (doc-16; FORMAT 2, TASK-411.2).
 
 A reader finds the footer and the table with one ranged GET of the object's end (two if they are
 longer than 4 KiB). A host fetching extents fetches whole parts, each with one ranged GET of its
 stored bytes, checks each against its CRC, then decompresses it (Reading). Incompressible data
-costs its table, 17 bytes a part, and nothing more. *Implemented differently
+costs its table, 33 bytes a part, and nothing more. *Implemented differently
 from the first plan, of per-extent CRCs per 64 KiB in the footer: CRCs of the object's parts move
 with nothing (compaction recomputes them for what it copies, from data it checked), need no entry
 per extent in checkpoints, and match what a host fetches.*
