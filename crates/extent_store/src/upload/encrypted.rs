@@ -431,10 +431,10 @@ fn objects_of_sealed_branches_in_the_clear_are_refused() {
     // Its newest checkpoint so, authenticated no more: its store's recovery refuses it, naming it.
     drop((store, remote));
     let objects = world.objects();
-    let checkpoints = objects.iter().filter(|(key, _)| {
+    let mut checkpoints = objects.iter().filter(|(key, _)| {
         matches!(layout::kind(key), layout::Kind::Checkpoint { branch, .. } if branch.id == 7)
     });
-    let (key, bytes) = checkpoints.last().unwrap();
+    let (key, bytes) = checkpoints.next_back().unwrap();
     let keyless = &extent_frame::NoKeys;
     let (data, footer) = (
         extent_frame::data(bytes, keyless).unwrap(),

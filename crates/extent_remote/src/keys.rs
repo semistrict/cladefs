@@ -311,6 +311,12 @@ impl Drop for RingHold {
 /// An unwrap of a cell's KEK by the KMS, or what it found, which a taking's openings share.
 type Unwrap = Shared<BoxFuture<'static, Result<Arc<Secret>, Error>>>;
 
+/// A cell's KEKs unwrapped, by the cell and generation, each with the taking it was unwrapped for.
+type Takings = HashMap<(Cell, u32), ((u64, u64), Unwrap)>;
+
+/// New cell KEKs, by their tenants, and each wrapped by its tenant's KEK.
+type Pool = HashMap<u64, Vec<(Arc<Secret>, Wrapped)>>;
+
 /// A host's KMS, and what it keeps of what it asked it: each cell's KEKs, by the taking of the cell
 /// its object names, unwrapped once for all of it ([`CellKeys`]); and a pool of new cell KEKs,
 /// wrapped by their tenants' KEKs ahead of the cells made with them.
@@ -319,9 +325,9 @@ pub struct Kms {
     /// Each cell's KEKs unwrapped, by generation, and the taking they were unwrapped for: a
     /// taking since unwraps anew, so that a tenant whose KEK was revoked takes none of its cells
     /// again.
-    takings: Mutex<HashMap<(Cell, u32), ((u64, u64), Unwrap)>>,
+    takings: Mutex<Takings>,
     /// New cell KEKs by their tenants, wrapped, for the cells made.
-    pool: Mutex<HashMap<u64, Vec<(Arc<Secret>, Wrapped)>>>,
+    pool: Mutex<Pool>,
 }
 
 /// The error of a KMS's refusal, naming its tenant.
@@ -772,10 +778,10 @@ mod tests {
         assert!(ring.of(7).dek(other).is_none() && ring.of(8).dek(one).is_none());
         assert!(ring.of(7).sealed() && ring.of(8).sealed() && !ring.of(9).sealed());
         assert_eq!(ring.sealing().map(|(_, id)| id), Some(one));
-        assert_eq!(of_key(&ring, &layout::segment(test_branch(8), 3)).sealed(), true);
+        assert!(of_key(&ring, &layout::segment(test_branch(8), 3)).sealed());
         let moves = layout::moves(&layout::segment(test_branch(7), 3)).unwrap();
         assert_eq!(branch_of(&moves), Some(7));
-        assert_eq!(of_key(&ring, &layout::cell(TEST_CELL)).sealed(), false);
+        assert!(!of_key(&ring, &layout::cell(TEST_CELL)).sealed());
 
         let host = HostRing::new();
         assert!(host.ring().is_empty());
