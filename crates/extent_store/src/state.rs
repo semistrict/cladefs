@@ -113,15 +113,23 @@ impl extent_remote::recovery::Places for Lengths {
 }
 
 /// fxdax: the segments closed whose framings are yet to run, in the order they closed, and whether
-/// a framer runs them, one after another (`wal`'s docs, TASK-165.9); and those it framed, written,
-/// not yet durable, since when the first of them waits, and whether a thread makes them durable,
-/// together (`segments::make_durable`, TASK-310).
+/// a framer runs them, one after another (`wal`'s docs, TASK-165.9), with the looks ahead at parts
+/// of segments filling between them (TASK-400); and those it framed, written, not yet durable,
+/// since when the first of them waits, and whether a thread makes them durable, together
+/// (`segments::make_durable`, TASK-310).
 pub(crate) struct Framing<F> {
-    pub queue: std::collections::VecDeque<Unframed<F>>,
+    pub queue: std::collections::VecDeque<Job<F>>,
     pub running: bool,
     pub written: Vec<(SegmentId, Arc<Framed<F>>)>,
     pub since: Option<Instant>,
     pub syncing: bool,
+}
+
+/// fxdax: what a store's framer does ([`Framing`]), in order: a look ahead at a part of a segment,
+/// written whole, as it fills (`framing::see`, TASK-400); or a segment's framing.
+pub(crate) enum Job<F> {
+    See(SegmentId, u64),
+    Frame(Unframed<F>),
 }
 
 impl<F> Default for Framing<F> {

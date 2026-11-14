@@ -7,6 +7,7 @@
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Batch, Durability, FileSyncs, Syncs};
 use crate::framed::{Aligned, Framed, Packed, Part, Source, Unpacked, read_aligned};
+use crate::framing::{self, Seen};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, Extents, FileKey, KINDS, LOGS,
@@ -18,8 +19,8 @@ use crate::seals;
 use crate::segments::{self, Behind, Preparation, Preparing, Segments, Unframed, footer_last};
 use crate::shared::{Shared, SharedLock};
 use crate::state::{
-    Framing, Gate, Life, Locked, OwnFiles, Placement, Readable, Reader, Space, Standing, State,
-    Uncommitted, Unreferenced, Writable,
+    Framing, Gate, Job, Life, Locked, OwnFiles, Placement, Readable, Reader, Space, Standing,
+    State, Uncommitted, Unreferenced, Writable,
 };
 use crate::sync::{Condvar, Mutex, MutexGuard, rules, spawn_or_return, thread};
 use crate::timings::{self, Flush, Waits, flush};
@@ -428,16 +429,25 @@ impl<D: Dir> Framer<D> {
         Locked::new(self.state.with(Mutex::lock))
     }
 
-    /// The framer's thread: frames the segments queued, one after another, until none is.
+    /// The framer's thread: frames the segments queued, one after another, and looks ahead at the
+    /// parts queued between, until none is.
     fn frame_queued(&self) {
         let mut state = self.lock();
-        while let Some(unframed) = state.framing.queue.pop_front() {
+        while let Some(job) = state.framing.queue.pop_front() {
+            let unframed = match job {
+                Job::See(number, part) => {
+                    state = self.see(state, number, part);
+                    continue;
+                }
+                Job::Frame(unframed) => unframed,
+            };
             // fxdax: none once the store failed, a segment before it among what failed, saying so
             // (TASK-165.9).
             let whole = state.standing.whole();
             let number = unframed.number();
+            let seen = state.segments.take_seen(number);
             drop(state);
-            let framed = whole.and_then(|()| unframed.frame(&*self.dir));
+            let framed = whole.and_then(|()| unframed.frame(&*self.dir, &seen));
             state = self.lock();
             if self.wrote(&mut state, number, framed) {
                 // The host refused a thread to make it durable: on this one, as it would.
@@ -447,6 +457,48 @@ impl<D: Dir> Framer<D> {
             }
         }
         state.framing.running = false;
+    }
+
+    /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding no lock, as
+    /// its segment fills, as [`Framer::see_here`] does (TASK-400).
+    fn see<'a>(
+        &'a self,
+        state: Locked<'a, D::File>,
+        number: SegmentId,
+        part: u64,
+    ) -> Locked<'a, D::File> {
+        let Some(raw) = Self::to_see(&state, number) else { return state };
+        drop(state);
+        let seen = framing::see(&*raw, part);
+        let mut state = self.lock();
+        Self::saw(&mut state, (number, part), seen);
+        state
+    }
+
+    /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
+    /// its framing, which reads it no more if it frames the segment in place; unless its framing
+    /// took its parts' looks already, or the store failed, or closed (TASK-400).
+    fn see_here(state: &mut State<D::File>, number: SegmentId, part: u64) {
+        if let Some(raw) = Self::to_see(state, number) {
+            let seen = framing::see(&*raw, part);
+            Self::saw(state, (number, part), seen);
+        }
+    }
+
+    /// fxdax: segment `number`'s raw file, if a look ahead at a part of it is for anything
+    /// ([`Framer::see_here`]).
+    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<Arc<D::File>> {
+        let open = state.standing.whole().is_ok() && !state.standing.is_closed();
+        open.then(|| state.segments.see(number)).flatten()
+    }
+
+    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, or failed: its framing
+    /// reads the part itself then, which fails as it may.
+    fn saw(state: &mut State<D::File>, (number, part): (SegmentId, u64), seen: io::Result<Seen>) {
+        match seen {
+            Ok(seen) => state.segments.saw(number, part, seen),
+            Err(err) => log::warn!("extent store: looking at part {part} of {number:?}: {err}"),
+        }
     }
 
     /// Segment `number`'s framing wrote its framed file, `framed`, in `state`: to be made durable
@@ -502,9 +554,17 @@ impl<D: Dir> Framer<D> {
     /// makes them durable together, unless a thread does already, which takes them. No framer runs
     /// meanwhile.
     fn frame_here(&self, state: &mut State<D::File>) {
-        while let Some(unframed) = state.framing.queue.pop_front() {
+        while let Some(job) = state.framing.queue.pop_front() {
+            let unframed = match job {
+                Job::See(number, part) => {
+                    Self::see_here(state, number, part);
+                    continue;
+                }
+                Job::Frame(unframed) => unframed,
+            };
             let number = unframed.number();
-            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir)) {
+            let seen = state.segments.take_seen(number);
+            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir, &seen)) {
                 Ok(framed) => {
                     state.segments.written(number, framed.clone());
                     state.framing.wrote(number, framed);
@@ -1528,7 +1588,7 @@ impl<D: Dir> Store<D> {
                 // its end grew it by, and which it writes over nothing in (TASK-160.16).
                 let over = covered(pieces, write.extent_offset, end);
                 add_piece(pieces, piece);
-                if state.segments.held(number, write.len) {
+                if state.segments.held(number, (write.offset, write.len)) {
                     self.idle.notify_all();
                 }
                 state.uncommitted.wrote_over(extent, over);
@@ -1542,6 +1602,7 @@ impl<D: Dir> Store<D> {
         }
         state.next_sequence = state.next_sequence.max(extent.sequence + 1);
         self.written(state);
+        self.see_ahead(state);
         let number = write.segment?;
         state.segments.write_behind(number, write.offset + write.len)
     }
@@ -1557,11 +1618,12 @@ impl<D: Dir> Store<D> {
         state.space.unreserve(write.grows);
         if let Some(number) = write.segment {
             state.uncommitted.let_go(write.len);
-            if state.segments.dropped(number, write.len) {
+            if state.segments.dropped(number, (write.offset, write.len)) {
                 self.idle.notify_all();
             }
         }
         self.written(state);
+        self.see_ahead(state);
     }
 
     /// A write in progress is done, finished or abandoned: a commit waiting for the last goes on.
@@ -2006,6 +2068,8 @@ impl<D: Dir> Store<D> {
             let (file, at) = state.segments.append(entry.len);
             file.write_at(data.as_slice(), at)?;
             written::wrote(written::Kind::Copied, data.as_slice().len());
+            state.segments.appended(open, at, entry.len);
+            self.see_ahead(state);
             let pieces =
                 vec![Piece { segment: open, offset: at, extent_offset: 0, len: entry.len }];
             state.uncommitted.push(Change::Move { extent, pieces: pieces.clone() });
@@ -2252,8 +2316,29 @@ impl<D: Dir> Store<D> {
         // another thread ([`Framer`], TASK-310).
         for unframed in closed {
             state.segments.framing_begun(unframed.number());
-            state.framing.queue.push_back(unframed);
+            state.framing.queue.push_back(Job::Frame(unframed));
         }
+        self.run_framer(state);
+    }
+
+    /// fxdax: has the framer look ahead at the parts of segments written whole since it last did,
+    /// as they fill, behind the framings queued before them, as it frames them
+    /// ([`Store::frame_behind`]): its framings in place read them no more (TASK-400). A segment's
+    /// framing read all of its data back as it closed, seconds after its guest wrote it, from the
+    /// host's disk once the host had let its pages go, its 16 GiB at its limit in the long mode,
+    /// 0.7-5.7 s with eight VMs and their bucket keeping the disk busy.
+    fn see_ahead(&self, state: &mut State<D::File>) {
+        let seeing = state.segments.take_seeing();
+        if seeing.is_empty() {
+            return;
+        }
+        let jobs = seeing.into_iter().map(|(number, part)| Job::See(number, part));
+        state.framing.queue.extend(jobs);
+        self.run_framer(state);
+    }
+
+    /// fxdax: runs the framer, if none runs and it has work queued ([`Store::frame_behind`]).
+    fn run_framer(&self, state: &mut State<D::File>) {
         if state.framing.queue.is_empty() || std::mem::replace(&mut state.framing.running, true) {
             return;
         }

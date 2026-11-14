@@ -17,7 +17,8 @@ pub const FLUSH_PHASES: [&str; 6] = ["wait", "data", "dirs", "logs", "gone", "ra
 
 /// The phases of a framing ([`crate::Store::framing`]): syncing the extents stored on their own
 /// its footer names; fxdax: reading its raw data, part by part, each checksummed and
-/// sampled if it may be framed in place (`framing::read`); compressing them, if it is to be framed
+/// sampled if it may be framed in place (`framing::read`), but for the parts looks ahead saw as it
+/// filled, read only for a copy (TASK-400); compressing them, if it is to be framed
 /// in a copy (`framing::pack`); and writing its framed file, or its tail, written back as it goes
 /// (TASK-336: one phase, `write`, said nothing of whether a framing's second went to the host's
 /// CPUs or its disk). fxdax: its framed file is made durable after, with others framed meanwhile
@@ -270,11 +271,16 @@ fn named<const N: usize>(names: &[&str; N], phases: Phases<N>) -> String {
 }
 
 /// A framing of a store of this process's, of `segment`, took `phases`: one past extentd's turn
-/// said as it happens, as a slow flush is ([`flushed`]).
-pub(crate) fn framed(segment: impl std::fmt::Debug, phases: Phases<4>) {
+/// said as it happens, as a slow flush is ([`flushed`]); fxdax: with `how` it framed it, in place
+/// or not, and what of it it read (TASK-400).
+pub(crate) fn framed(
+    segment: impl std::fmt::Debug,
+    how: impl std::fmt::Display,
+    phases: Phases<4>,
+) {
     if phases.total_us() > 50_000 {
         log::warn!(
-            "extent store: framing {segment:?} took {:.1} ms ({})",
+            "extent store: framing {segment:?} ({how}) took {:.1} ms ({})",
             phases.total_us() as f64 / 1000.0,
             named(&FRAMING_PHASES, phases)
         );
