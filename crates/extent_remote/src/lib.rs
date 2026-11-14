@@ -128,8 +128,8 @@ pub enum Error {
     #[error("corrupt: {0}")]
     Corrupt(String),
     /// fxdax: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
-    /// unwrapped by none, or revoked; or the collector's, which reads none of the data of objects
-    /// sealed, until it compacts them under their keys (TASK-411.6).
+    /// unwrapped by none, or revoked; or the collector's marking, which reads none of the data of
+    /// objects sealed, its compaction reading them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
     /// fxdax: an object in the clear, of a branch whose record has a DEK, its objects sealed: a

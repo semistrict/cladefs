@@ -47,7 +47,7 @@ pub enum Mode {
 }
 
 /// A sweep over every cell of a bucket. See the module docs.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Sweep {
     pub options: Options,
     pub mode: Mode,
@@ -64,6 +64,9 @@ pub struct Sweep {
     /// or all of them the sweep's own task's, one at a time between their requests (tests, a
     /// runtime of one thread).
     pub spawned: bool,
+    /// fxdax: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
+    /// any ([`Collector::kms`], TASK-411.6).
+    pub kms: Option<extent_keys::kms::Shared>,
 }
 
 /// The requests made, of each kind, as a [`crate::store::Store`] counts them: a batch of deletes
@@ -221,7 +224,7 @@ impl Sweep {
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
-            let (sweep, bucket) = (*self, bucket.clone());
+            let (sweep, bucket) = (self.clone(), bucket.clone());
             let pass = async move { sweep.pass(&bucket, cell, since).await };
             match self.spawned {
                 false => pass.boxed(),
@@ -250,7 +253,7 @@ impl Sweep {
     async fn pass<B: Bucket>(&self, bucket: &Arc<B>, cell: Cell, since: u64) -> Ran {
         let counted = Counted::new(bucket.clone());
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let mut collector = Collector::new(self.options).holding(holding);
+        let mut collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {
@@ -492,6 +495,7 @@ mod tests {
             lease: LEASE,
             slowest: 3,
             spawned: false,
+            kms: None,
         }
     }
 
@@ -793,6 +797,8 @@ mod tests {
             deleted_bytes: gone.iter().map(|(_, size)| **size).sum(),
             compacted_bytes,
             skipped: 0,
+            locked: 0,
+            uncompacted: 0,
         };
         assert_eq!(swept.report, expected);
         // Of each cell: the segment holding what the next freed, that one, and the one freeing

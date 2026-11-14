@@ -632,7 +632,7 @@ pub type Sealing<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
 /// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. fxdax: in the
-/// clear: tests', and the collector's moves until it compacts sealed objects (TASK-411.6).
+/// clear: tests', and the collector's moves of objects in the clear (TASK-411.6).
 pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
     with_footer_under(data, footer, None)
 }

@@ -30,6 +30,12 @@
 //! sweep after that collects them. A pass that fails says so and stops none of the others; the next
 //! pass tries it again. A compacted object goes, and moves no state names, a grace period after (60
 //! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
+//! A sealed cell's objects are compacted under its keys (TASK-411.6): its KEK unwrapped once a pass,
+//! by the KMS `FXDAX_KMS` names, as for every fxdax process (`local:///DIR`; one it names that
+//! can't be had stops fxdax-gc at once), and only by a pass compacting something sealed. With none,
+//! or its tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what is
+//! sealed uncompacted, warning of the cell and why, and its line says so; the cell is passed over in
+//! full again next time, compacted once its KEK is to be had.
 //!
 //! Each sweep says on standard error, a line for each pass that deleted, compacted or retired
 //! something, or failed, what it did, in how long, and the requests it made of each kind; then two
@@ -384,6 +390,11 @@ async fn collect(
     named: Option<Cell>,
     run: Run,
 ) -> Result<(), String> {
+    let kms = match mode {
+        // It compacts nothing, asking the KMS nothing.
+        Mode::DryRun => None,
+        Mode::Delete | Mode::MarkOnly => kms()?,
+    };
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
         Mode::MarkOnly => sweep::Mode::MarkOnly,
@@ -397,6 +408,7 @@ async fn collect(
         slowest: SLOWEST,
         // Each pass on the runtime's threads (TASK-395.15).
         spawned: true,
+        kms,
     };
     let mut sweeps = 0;
     loop {
@@ -420,6 +432,21 @@ async fn collect(
         }
         let Some(every) = every else { return Ok(()) };
         tokio::time::sleep(every).await;
+    }
+}
+
+/// The KMS `FXDAX_KMS` names, as every fxdax process reads it (TASK-411.3): what passes unwrap
+/// their cells' KEKs through, to compact what is sealed (TASK-411.6). None if it names none: passes
+/// compact what is in the clear alone, leaving what is sealed and saying so. One it names that
+/// can't be had stops fxdax-gc before it collects anything.
+fn kms() -> Result<Option<extent_keys::kms::Shared>, String> {
+    match std::env::var("FXDAX_KMS") {
+        Ok(url) if !url.is_empty() => {
+            let kms =
+                extent_keys::kms::from_url(&url).map_err(|why| format!("FXDAX_KMS: {why}"))?;
+            Ok(Some(kms))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -483,8 +510,22 @@ fn did(report: &Report) -> String {
     let Report { deleted, compacted, retired, deleted_bytes, compacted_bytes, .. } = report;
     format!(
         "deleted {deleted} ({deleted_bytes} bytes), compacted {compacted} ({compacted_bytes} \
-         bytes), retired {retired} references"
+         bytes), retired {retired} references{}",
+        locked(report)
     )
+}
+
+/// What passes that left objects sealed uncompacted, as `report` says, their cells' KEKs not to
+/// be had, say of them (TASK-411.6): nothing if none did. Each warned of its cell and why.
+fn locked(report: &Report) -> String {
+    let Report { locked, uncompacted, .. } = report;
+    match locked {
+        0 => String::new(),
+        1 => format!(", left {uncompacted} sealed uncompacted, without their cell's KEK"),
+        _ => {
+            format!(", left {uncompacted} sealed uncompacted in {locked} cells, without their KEKs")
+        }
+    }
 }
 
 /// What a sweep of `mode` says of `swept`: what its passes did, and the requests it made; then how
@@ -493,12 +534,13 @@ fn swept_lines(mode: Mode, swept: &Swept) -> (String, String) {
     let Swept { visited, held, swept: since, failed, report, requests, slowest, took, .. } = swept;
     let did = match mode {
         Mode::MarkOnly => format!(
-            "marked {} ({} bytes), compacted {} ({} bytes), resurrected {}",
+            "marked {} ({} bytes), compacted {} ({} bytes), resurrected {}{}",
             swept.marked,
             swept.marked_bytes,
             report.compacted,
             report.compacted_bytes,
-            swept.resurrected
+            swept.resurrected,
+            locked(report)
         ),
         _ => did(report),
     };
@@ -551,7 +593,9 @@ impl Histogram {
 ///   `skipped` (unchanged since its last pass, TASK-395.6), `failed`, `held` (left to a pass
 ///   holding it), `swept` (left to a pass that went over it since).
 /// - `fxdax_gc_sweep_objects{action}` and `fxdax_gc_sweep_bytes{action}`: what its passes
-///   `deleted`, `compacted` and `marked`, as listed; `fxdax_gc_sweep_retired_references` and
+///   `deleted`, `compacted` and `marked`, as listed, and the objects sealed they left
+///   `uncompacted`, without their cells' KEKs (TASK-411.6); `fxdax_gc_sweep_retired_references`,
+///   `fxdax_gc_sweep_locked_cells`, the cells those were of, and
 ///   `fxdax_gc_sweep_resurrected_objects`.
 /// - `fxdax_gc_sweep_requests{request}`: the requests it made of each kind
 ///   (`extent_remote::store::Request::name`), listing the cells among them.
@@ -608,6 +652,7 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         ("deleted", report.deleted.to_string()),
         ("compacted", report.compacted.to_string()),
         ("marked", swept.marked.to_string()),
+        ("uncompacted", report.uncompacted.to_string()),
     ];
     family(
         "fxdax_gc_sweep_objects",
@@ -631,6 +676,12 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         "gauge",
         "The references its last sweep's passes retired.",
         &one(report.retired.to_string()),
+    );
+    family(
+        "fxdax_gc_sweep_locked_cells",
+        "gauge",
+        "The cells its last sweep's passes left sealed objects uncompacted in, without their KEKs.",
+        &one(report.locked.to_string()),
     );
     family(
         "fxdax_gc_sweep_resurrected_objects",
@@ -702,17 +753,18 @@ fn write_atomically(file: &std::path::Path, text: &str) -> std::io::Result<()> {
 
 /// What a mark-only pass over `cell` says of `marking`.
 fn marked_line(cell: Cell, marking: &Marking) -> String {
+    let locked = locked(&marking.report);
     let Some(marks) = &marking.marks else {
         let compacted = marking.report.compacted;
         return format!(
             "fxdax-gc: cell {cell}: marked nothing, a later pass having taken the lease, compacted \
-             {compacted}"
+             {compacted}{locked}"
         );
     };
     let bytes: u64 = marks.marked.iter().map(|marked| marked.size).sum();
     format!(
         "fxdax-gc: cell {cell}: marked {} ({bytes} bytes) in {}, deleted 0, compacted {}, \
-         resurrected {}",
+         resurrected {}{locked}",
         marks.marked.len(),
         layout::marks(cell, marks.epoch),
         marking.report.compacted,
@@ -1178,6 +1230,8 @@ mod tests {
             deleted_bytes: 3000,
             compacted_bytes: 200,
             skipped: 4,
+            locked: 2,
+            uncompacted: 5,
         };
         let mut requests = Requests::default();
         requests.0[Request::Get as usize] = 40;
@@ -1202,8 +1256,9 @@ mod tests {
             swept_lines(Mode::Delete, &swept),
             (
                 "fxdax-gc: deleted 3 (3000 bytes), compacted 2 (200 bytes), retired 1 references, \
-                 over 7 cells (4 unchanged), 2 held by other passes, 3 swept by them since, 1 \
-                 failed; requests: get 40, list-delimited 9, delete-batch 2"
+                 left 5 sealed uncompacted in 2 cells, without their KEKs, over 7 cells (4 \
+                 unchanged), 2 held by other passes, 3 swept by them since, 1 failed; requests: \
+                 get 40, list-delimited 9, delete-batch 2"
                     .to_owned(),
                 "fxdax-gc: took 4.321 s; slowest: a/1f 1.250 s, a/2 0.005 s".to_owned()
             )
@@ -1255,6 +1310,17 @@ mod tests {
                  retired 1 references, in 0.012 s; requests: list 2"
             )
         );
+        // TASK-411.6: one that left objects sealed uncompacted, its cell's KEK not to be had, says
+        // so, whatever else it did.
+        let locked = Report { locked: 1, uncompacted: 3, ..Report::default() };
+        assert_eq!(
+            passed_line(&passed(Outcome::Collected(locked))).as_deref(),
+            Some(
+                "fxdax-gc: cell 1/2: deleted 0 (0 bytes), compacted 0 (0 bytes), retired 0 \
+                 references, left 3 sealed uncompacted, without their cell's KEK, in 0.012 s; \
+                 requests: list 2"
+            )
+        );
         assert_eq!(passed_line(&passed(Outcome::Collected(Report::default()))), None);
         let skipped = Report { skipped: 1, ..Report::default() };
         assert_eq!(passed_line(&passed(Outcome::Collected(skipped))), None);
@@ -1272,7 +1338,13 @@ mod tests {
             visited: 3,
             held: 1,
             failed: 1,
-            report: Report { deleted: 4, deleted_bytes: 4096, ..Report::default() },
+            report: Report {
+                deleted: 4,
+                deleted_bytes: 4096,
+                locked: 1,
+                uncompacted: 3,
+                ..Report::default()
+            },
             requests,
             slowest: vec![(Cell { tenant: 1, id: 2 }, Duration::from_millis(250))],
             took: Duration::from_millis(1500),
@@ -1313,6 +1385,7 @@ fxdax_gc_sweep_cells{outcome=\"swept\"} 0
 fxdax_gc_sweep_objects{action=\"deleted\"} 4
 fxdax_gc_sweep_objects{action=\"compacted\"} 0
 fxdax_gc_sweep_objects{action=\"marked\"} 0
+fxdax_gc_sweep_objects{action=\"uncompacted\"} 3
 # HELP fxdax_gc_sweep_bytes What its last sweep's passes did, in bytes, as listed.
 # TYPE fxdax_gc_sweep_bytes gauge
 fxdax_gc_sweep_bytes{action=\"deleted\"} 4096
@@ -1321,6 +1394,9 @@ fxdax_gc_sweep_bytes{action=\"marked\"} 0
 # HELP fxdax_gc_sweep_retired_references The references its last sweep's passes retired.
 # TYPE fxdax_gc_sweep_retired_references gauge
 fxdax_gc_sweep_retired_references 0
+# HELP fxdax_gc_sweep_locked_cells The cells its last sweep's passes left sealed objects uncompacted in, without their KEKs.
+# TYPE fxdax_gc_sweep_locked_cells gauge
+fxdax_gc_sweep_locked_cells 1
 # HELP fxdax_gc_sweep_resurrected_objects What its last sweep's mark-only passes found kept that the marks before named.
 # TYPE fxdax_gc_sweep_resurrected_objects gauge
 fxdax_gc_sweep_resurrected_objects 0

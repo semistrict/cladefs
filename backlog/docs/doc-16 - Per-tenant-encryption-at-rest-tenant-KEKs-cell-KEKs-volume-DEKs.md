@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 23:05'
+updated_date: '2026-11-14 23:44'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2) and TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) and TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**) are implemented.
 
 ## Goals
 
@@ -46,8 +46,11 @@ tenant KEK   in the KMS; never leaves it. Destroying it shreds the tenant.
 A DEK has generations: a record keeps a list of `(generation, wrapped DEK)`, a new writer may add one,
 and every object's trailer names the branch and generation its subkey came from. Rotating a KEK
 rewraps what it wraps (the KMS's own rotation, or a conditional update of each record or cell
-object); rotating a DEK starts a generation, and old data moves to the new one as compaction and
-checkpoints rewrite it.
+object); rotating a DEK starts a generation, which seals what writers write from then on. *(found,
+TASK-411.6)* Old data does not move to it: checkpoints rewrite metadata alone, and compaction
+seals each object's moves under the generation the object was sealed under, as a store opened
+before the generation was added holds none of it. Moving old data on needs readers that learn
+newer generations (TASK-411.12).
 
 **Why a subkey per object, from a random salt:** object keys are create-only, but a fenced writer
 keeps its own bytes for `segments/<branch>/<seq>` in its WAL after another epoch's landed there
@@ -109,7 +112,7 @@ GCM's authentication key. A salt per object makes every subkey new.
 | extentd, a cell's holder | the cell's KEK; its volumes' DEKs; inherited DEKs | reads and writes the volumes |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
 | `fxdax-gc`, marking | none | reads metadata only |
-| `fxdax-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, as the source branch's DEK, with a new salt. Revoking a tenant's key stops its compaction, which is right. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
+| `fxdax-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
 | the control API | whatever a fork across cells needs | rewraps (below) |
 
 ## Forks and shared points
@@ -165,8 +168,8 @@ dropped with its pool, never written out unwrapped.
   footer under the MAC.
 - **The KMS and how a cell chooses.** `FXDAX_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
-  `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl. `fxdax-gc` needs none
-  (marking keyless; compaction of sealed objects is refused, TASK-411.6). A cell is made sealed iff
+  `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl; and `fxdax-gc`, to
+  compact sealed cells (TASK-411.6; marking keyless). A cell is made sealed iff
   the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear, any
   other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
@@ -200,5 +203,39 @@ dropped with its pool, never written out unwrapped.
   (WAL recovery runs before the store's keys are known) and sealed as the store opens
   (`wal::reseal`, by `Dir::replace`, atomic).
 - **Not yet:** open segments and large extents' raw files are in the clear until sealed
-  (TASK-411.5); collector compaction of sealed objects (TASK-411.6); forks across cells
-  (TASK-411.4).
+  (TASK-411.5); forks across cells (TASK-411.4).
+
+## What TASK-411.6 made
+
+- **Marking stays keyless.** A pass reads records, checkpoints (authenticated, their parts in the
+  clear), segments' footers, moves' maps and trailers holding no key, as before; each candidate's
+  trailer, which it reads anyway for its data's length, says whether it is sealed.
+- **Compacting under the cell's keys.** A pass whose compactable objects include a sealed one
+  reads the cell's object and unwraps its KEK through the collector's KMS
+  (`collector::Collector::kms`, `sweep::Sweep::kms`), by a `keys::Kms` made for that pass alone:
+  one unwrap per KEK generation its branches' DEKs name, one in practice, however many objects it
+  compacts, and nothing kept past the pass, so a tenant's KEK revoked stops the next. The DEKs come
+  from the pass's records of those branches (`keys::compacting`). A pass compacting only objects in
+  the clear, or nothing (no candidate below its fraction, `--compact-below 0`), and every dry run
+  ask the KMS nothing: `collector`'s tests count the calls with `extent_keys::testing::Counted`.
+- **Moves sealed as their objects were.** `compact_object` reads the object under the ring's view of
+  its branch (an object in the clear of a branch with DEKs is refused, a downgrade) and seals its
+  moves under the very key its trailer names, branch and generation, with a salt of their own;
+  their footer, `Moves::of` under its MAC, names the object they are the moves of, so moves copied
+  whole to another moves key of the branch are refused, by readers holding the keys or none
+  (TASK-411.3's check, tested now). *Why the source's generation, not the record's newest:* every
+  reader that may follow the moves read the object under that key; a store's ring is built as it
+  opens, and one opened before a generation was added holds none of it (TASK-411.12). Moves of
+  objects in the clear are in the clear, as before.
+- **KEKs not to be had.** The KMS refusing the cell's KEK (the tenant's KEK revoked or destroyed,
+  the KMS failing), or the collector having no KMS: the pass still marks, compacts what is in the
+  clear, and deletes what no live branch needs, leaving the sealed uncompacted; it counts them in
+  its report (`Report::locked`, the passes, `Report::uncompacted`, the objects), warns naming the
+  cell and the KMS's refusal, and records no digest (what it left went by the KMS, outside the
+  cell's listing), so the next pass goes over the cell in full and compacts once the KEK is back.
+  `fxdax-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
+  their cell's KEK`) and in `--metrics` (`fxdax_gc_sweep_objects{action="uncompacted"}`,
+  `fxdax_gc_sweep_locked_cells`).
+- **`fxdax-gc` reads `FXDAX_KMS`** as every fxdax process does (`extent_keys::kms::from_url`); one it
+  names that can't be had stops it before it collects (a CLI fails at once rather than leave every
+  sealed cell uncompacted); `--dry-run` reads none.

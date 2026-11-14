@@ -208,12 +208,21 @@ fn pass(collector: &mut Collector, bucket: &Bucket) -> Report {
     fail::fail_point!("collect::pass", |_| Report::default());
     let failed = match extent_store::upload::block_on(collector.collect(bucket, rand::random())) {
         Ok(Ok(report)) => {
-            let Report { deleted, compacted, retired, deleted_bytes, compacted_bytes, skipped } =
-                report;
+            let Report {
+                deleted,
+                compacted,
+                retired,
+                deleted_bytes,
+                compacted_bytes,
+                skipped,
+                locked,
+                uncompacted,
+            } = report;
+            // Sealed objects it leaves uncompacted, its collector having no KMS (TASK-411.6).
             log::info!(
                 "fxdax: an image's bucket collected: deleted {deleted} ({deleted_bytes} bytes), \
                  compacted {compacted} ({compacted_bytes} bytes), retired {retired} references, \
-                 {skipped} cells unchanged"
+                 {skipped} cells unchanged, {uncompacted} sealed left uncompacted in {locked} cells"
             );
             return report;
         }

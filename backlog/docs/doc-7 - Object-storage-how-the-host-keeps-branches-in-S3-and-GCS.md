@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 22:02'
+updated_date: '2026-11-14 23:44'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -1120,7 +1120,13 @@ The rest of a pass, unchanged within the cell:
 - **Compaction** of objects whose live extents are under a fraction of their data: segments no
   recovery reads, and moves. Their live extents go to the object's moves, data and map in one
   object, written whole, so there is never compaction output without its map, and no orphan of it.
-  A reader that finds an object gone reads its moves.
+  A reader that finds an object gone reads its moves. *(TASK-411.6)* An object of a sealed cell
+  (doc-16) is read under its branch's DEK and its moves sealed under the same key, the generation
+  its trailer names, with a salt of their own: a pass with something sealed to compact unwraps the
+  cell's KEK through `fxdax-gc`'s KMS (`FXDAX_KMS`), once for the pass; marking, and passes
+  compacting nothing sealed, ask it nothing. The KEK not to be had (the tenant's KEK revoked or
+  destroyed, no KMS), the pass compacts what is in the clear and leaves the rest, counted in its
+  report (`locked`, `uncompacted`), deleting as ever.
 - **Deletion** of what is listed and not needed:
   - segments a checkpoint covers that hold no live extent, or were compacted a grace period ago;
     never a live branch's segments at or past its end, which may be uploaded and not yet in it,
@@ -1162,12 +1168,13 @@ operator to see what the collector would do before trusting it with a bucket:
   deletes; it reads the lease's epoch as it starts instead, and says it was fenced if a pass took
   the lease before it ended, what it read being possibly older than that pass's deletes. Nor does it
   write what giving up on forks writes (a fork of a deleted point being made, a failed fork's
-  claim): it takes them as given up on. It compacts nothing, and prints each object a pass would
+  claim): it takes them as given up on. It compacts nothing, asking the KMS nothing, and prints each object a pass would
   delete, then each it would compact by its listed size, `KEY KIND SIZE delete|compact`, and their
   counts and bytes. It **undercounts**: what a pass compacts it deletes a grace period after, which
   a dry run never finds doomed. With `--compact-below 0`, a pass deletes exactly what it lists.
 - `fxdax-gc URL --mark-only [--every S] [--grace S] [--compact-below F]` is a pass in every respect
-  but deleting: it compacts as one does (the compacted originals are the keys most worth watching,
+  but deleting: it compacts as one does, sealed cells under their keys through the KMS
+  (TASK-411.6) (the compacted originals are the keys most worth watching,
   TASK-175), and instead of deleting writes `<C>gc/marks/<epoch>`, the doomed objects of its cell as
   listed. *Decided:* it **takes `<C>gc/lease`** (step 1). Its marks are ordered by the epoch, each
   pass's its own and later than every pass's before, so readers and the next mark-only pass find the
@@ -1264,6 +1271,10 @@ read changed. What a pass reads outside the prefix, case by case:
   children's records read, in their cells), or a branch's recovery lost and nothing lost after all
   (its record read again, and its point's).
 - *Time*: only for the grace period, which what is deferred carries.
+- *The KMS* (TASK-411.6): a pass that left sealed objects uncompacted, their cell's KEK refused or
+  no KMS given, went by something outside the cell, and records no digest: the next goes in full,
+  and compacts once the KEK is to be had. A revoked tenant's idle cells cost a pass in full each
+  sweep for as long as it stays revoked.
 
 A pass that skips makes the recorded pass's deletes, late: what the model's pass may do, slow, its
 deletes coming any time after its reads while no other pass took the lease. Passes that took it

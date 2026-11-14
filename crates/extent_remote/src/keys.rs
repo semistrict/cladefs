@@ -108,7 +108,8 @@ pub fn unwrap_dek(kek: &Secret, branch: Branch, dek: &Dek) -> Result<Secret, Err
 /// What a reader of a store's objects holds: the DEKs of its branch and its ancestors, by which
 /// they are, and which of those branches are sealed, whose objects in the clear it refuses; and the
 /// key its writer seals new objects under, its branch's newest, if it writes. Empty: a reader of
-/// branches in the clear, or of metadata alone, as the collector is.
+/// branches in the clear, or of metadata alone, as the collector's marking is ([`compacting`]
+/// for its compaction's).
 #[derive(Debug, Default)]
 pub struct Ring {
     deks: HashMap<KeyId, Arc<Secret>>,
@@ -223,7 +224,8 @@ impl Keys for View<'_> {
 }
 
 /// The branch the object at `key` is of, by its key: the moves of an object are of that object's
-/// branch, as the collector seals them under its DEK (TASK-411.6). None for one of no branch's.
+/// branch, as the collector seals them under the DEK it was sealed under (TASK-411.6). None for one
+/// of no branch's.
 pub fn branch_of(key: &str) -> Option<u64> {
     match layout::kind(key) {
         Key::Segment { branch, .. }
@@ -703,6 +705,39 @@ pub async fn ring(
             ring.add(parent, &found.deks, &keys.keks(&found.deks).await?)?;
         }
         origin = found.origin();
+    }
+    Ok(match ring.is_empty() {
+        true => Ring::clear(),
+        false => Arc::new(ring),
+    })
+}
+
+/// The ring the collector compacts a cell's objects under (TASK-411.6): of `records`, branches of
+/// the cell and their records' DEKs, those with any sealed, their objects in the clear refused; and
+/// their DEKs, if `keys`, the cell's, are given, unwrapped under the generations of its KEK they
+/// name, each unwrapped once, all before any DEK. It seals nothing of its own: the collector seals
+/// what it compacts under the key its source was sealed under. Without `keys`, it unwraps nothing:
+/// what a pass compacting only objects in the clear holds, asking its KMS nothing.
+pub async fn compacting<'a>(
+    records: impl IntoIterator<Item = (Branch, &'a [Dek])>,
+    keys: Option<&CellKeys>,
+) -> Result<Arc<Ring>, Error> {
+    let records: Vec<(Branch, &[Dek])> =
+        records.into_iter().filter(|(_, deks)| !deks.is_empty()).collect();
+    let mut ring = Ring::default();
+    match keys {
+        None => ring.sealed.extend(records.iter().map(|(branch, _)| branch.id)),
+        Some(keys) => {
+            let generations: BTreeSet<u32> =
+                records.iter().flat_map(|(_, deks)| deks.iter().map(|dek| dek.kek)).collect();
+            let mut keks = BTreeMap::new();
+            for generation in generations {
+                keks.insert(generation, keys.kek(generation).await?);
+            }
+            for (branch, deks) in records {
+                ring.add(branch, deks, &keks)?;
+            }
+        }
     }
     Ok(match ring.is_empty() {
         true => Ring::clear(),
