@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 23:45'
+updated_date: '2026-11-14 23:51'
 labels: []
 dependencies:
   - TASK-411.3
@@ -28,10 +28,10 @@ collector::compact_object copies extent ranges out of decompressed data, so it m
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A pass compacts an encrypted cell and readers read the moved extents
-- [ ] #2 A pass that only marks, or finds nothing to compact, makes no KMS call: a test counts calls
-- [ ] #3 A cell whose tenant KEK is revoked is marked and has unreferenced objects deleted, but is not compacted, and the pass reports it
-- [ ] #4 A sealed moves object copied to another key of its branch is refused (TASK-411.3 wrote the check, untested until moves are sealed)
+- [x] #1 A pass compacts an encrypted cell and readers read the moved extents
+- [x] #2 A pass that only marks, or finds nothing to compact, makes no KMS call: a test counts calls
+- [x] #3 A cell whose tenant KEK is revoked is marked and has unreferenced objects deleted, but is not compacted, and the pass reports it
+- [x] #4 A sealed moves object copied to another key of its branch is refused (TASK-411.3 wrote the check, untested until moves are sealed)
 <!-- AC:END -->
 
 ## Definition of Done
@@ -62,4 +62,13 @@ compact_object(.., ring): data_under(of_key view), moves sealed under the source
 Locked: Error::Kms from the unwrap (revoked, destroyed, Io, no KMS) -> warn (cell, why), Report.locked += 1, Report.uncompacted += sealed, compact clear ones only, still mark/delete; listing digest dropped (KMS outside the cell), so the next pass goes in full. Other errors (corrupt record, missing KEK generation) fail the pass as corruption does.
 fxdax-gc: pass/sweep lines append ", left N sealed uncompacted, without their cell's KEK" (or "in L cells, without their KEKs"); metrics fxdax_gc_sweep_objects{action="uncompacted"}, fxdax_gc_sweep_locked_cells. extent_store sim/world.rs and fxdax storage/collect.rs take the two new Report fields (clear cells: 0).
 Hand mutant: dropping fetch::Tail::of's Moves::of check fails sealed_moves_copied_to_another_key_of_their_branch_are_refused.
+
+Validation (macOS): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E "not (package(extent_store) & test(/^sim::/))": 935/935 passed (extent_remote alone 317/317). sim::one SIM_SEEDS=10 over everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, collectors, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax, sqlite_extents): no warning in new code (one pre-existing type_complexity in collector tests). scripts/upstream-changes.py --check passes. No dependency change (lock untouched). Linux not run (no ubu1 per brief): DoD #1 open.
+AC evidence (extent_remote collector::tests): #1 sealed_cells_are_compacted_under_their_keys_unwrapped_once_a_pass (3 sealed segments compacted, moves Sealed under KeyId{1,1} with a new salt, no plaintext in any object; reader holding the ring reads moved extents from the segment location after deletion and from the moves location after the writer checkpoints; keyless reader NoKey), moves_are_sealed_under_the_generation_their_objects_were, twin cells_in_the_clear_are_compacted_asking_the_kms_nothing; #2 same test: KEEP pass, dry run (0,0) calls, compacting pass (0,1), next pass compacting nothing still (0,1); #3 cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted (no KMS: locked 1, uncompacted 3, deleted 1, no call; revoked: locked each pass, no skip, 1 refused unwrap a pass; unrevoked: compacted 3) and fxdax-gc passes_say_what_they_did_if_anything / sweeps_say_what_their_passes_did / metrics_say_what_the_last_sweep_did; #4 sealed_moves_copied_to_another_key_of_their_branch_are_refused (copied: Corrupt naming both keys, with or without keys; renamed in the clear: Downgrade); hand mutant removing the check fails it.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The collector compacts sealed cells: a pass with something sealed to compact reads the cell object and unwraps its KEK once through a per-pass keys::Kms over the collector's KMS (Collector::kms, Sweep.kms, fxdax-gc FXDAX_KMS), DEKs from the pass's records (keys::compacting); objects are read under their branch's keys and moves sealed under the source's own DEK generation with a fresh salt (TASK-411.12 filed for moving old generations on). Marking, dry runs and passes compacting nothing sealed make no KMS call. A KEK not to be had (revoked, destroyed, no KMS) leaves sealed objects uncompacted while marking and deleting go on, counted in Report::locked/uncompacted, warned, printed by fxdax-gc, no digest recorded. Verified by 935 macOS tests, a 10-seed sim sample over 10 profiles, new tests per AC and a hand mutant; Linux not run.
+<!-- SECTION:FINAL_SUMMARY:END -->
