@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 18:51'
 labels: []
 dependencies:
   - TASK-411.3
@@ -22,15 +22,15 @@ ordinal: 802000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The open segment holds raw guest writes on local disk until it is framed, read back by offset meanwhile. The user chose to encrypt it rather than rely on host disk encryption, so that shredding covers hosts' disks too (doc-16). Whether writes that are not whole sectors reach it is unknown.
+The open segment holds raw guest writes on local disk until it is framed, read back by offset meanwhile. The user chose to encrypt it rather than rely on host disk encryption, so that shredding covers hosts' disks too (doc-16). A probe on 2026-11-14 found every real write whole 4 KiB sectors (only extent_store's simulation writes 512-byte blocks), so XTS needs no read-modify-write.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 An open segment file holds no plaintext of written data: a test writes known content and searches the file
 - [ ] #2 Reads of sealed extents from the open segment and its framing on close give the written data
-- [ ] #3 A write that is not whole sectors is either handled correctly by a test or shown not to occur, with the reason in the task
-- [ ] #4 Recovery after a crash with an open segment gives the same state as before
+- [ ] #3 Recovery after a crash with an open segment gives the same state as before
+- [ ] #4 The store refuses a write to the open segment that is not whole 4 KiB sectors, and extent_store's simulation writes 4 KiB blocks
 <!-- AC:END -->
 
 ## Definition of Done

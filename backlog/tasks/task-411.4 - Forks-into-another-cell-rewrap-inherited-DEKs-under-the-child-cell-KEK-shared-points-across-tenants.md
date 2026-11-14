@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 18:51'
 labels: []
 dependencies:
   - TASK-411.3
@@ -22,15 +22,16 @@ ordinal: 801000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-A child reads its parents' objects under their DEKs. Rewrapping them under the child's own cell KEK at the fork means a child never needs another cell's KEK or another tenant's KMS, and shredding a parent leaves children what they inherited, as doc-7 already says of deletion (the user's decision; doc-16, Forks and shared points). It puts a KMS call on the fork's path.
+A child reads its parents' objects under their DEKs. Rewrapping them under the child's own cell KEK at the fork means a child never needs another cell's KEK or another tenant's KMS, and shredding a parent leaves children what they inherited, as doc-7 already says of deletion (the user's decision; doc-16, Forks and shared points). A new cell's KEK comes from a per-host pool of KEKs the KMS wrapped ahead of time (the user's decision), so the fork's path makes no KMS call.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A fork of a point the forker cannot unwrap is refused before any record is made
-- [ ] #2 Fork latency with the KMS call is measured and in the task
-- [ ] #3 A fork into another cell, and a fork of a shared point into another tenant's cell, reads every inherited extent with only the child's tenant KEK
-- [ ] #4 Destroying the parent's tenant KEK after the fork leaves the child fully readable
+- [ ] #2 A fork into another cell, and a fork of a shared point into another tenant's cell, reads every inherited extent with only the child's tenant KEK
+- [ ] #3 Destroying the parent's tenant KEK after the fork leaves the child fully readable
+- [ ] #4 A fork into a new cell makes no KMS call: its cell KEK comes from the host's pool, refilled in batches off the fork's path; a test counts calls
+- [ ] #5 Revoking or destroying a tenant's KEK discards its pool: the next fork into a new cell of that tenant is refused
 <!-- AC:END -->
 
 ## Definition of Done

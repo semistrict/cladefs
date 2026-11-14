@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 18:51'
 labels: []
 dependencies: []
 documentation:
@@ -29,7 +29,7 @@ Every later step of doc-16 wraps or unwraps keys. Real KMS providers come later 
 - [ ] #1 A trait wraps and unwraps a key under a tenant KEK, and the fake implements it, keeping KEKs in a local directory
 - [ ] #2 The fake can revoke and destroy a tenant KEK, after which unwrap fails with an error naming the tenant
 - [ ] #3 Unwrapped keys are zeroized on drop and have no Debug or serde output of their bytes: a test checks Debug
-- [ ] #4 Any crypto crate added has an OSI-approved license, checked and noted in the task
+- [ ] #4 AES-256-GCM, AES-256-XTS and HKDF come from aws-lc-rs (the user's decision; Apache-2.0 and ISC), or storage_xts for XTS if aws-lc-rs has none
 <!-- AC:END -->
 
 ## Definition of Done

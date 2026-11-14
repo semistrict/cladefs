@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 18:33'
+updated_date: '2026-11-14 18:51'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -75,8 +75,13 @@ GCM's authentication key. A salt per object makes every subkey new.
   DEK, so that shredding covers hosts' disks without counting on their disk encryption. Its pieces
   are read back by offset until the segment is framed, so it needs a length-preserving, random-access
   cipher: AES-256-XTS per 4 KiB sector (the workspace has `storage_xts`), tweak the sector, key
-  derived from the DEK and the segment's salt (`wal::log_salt` exists already). Writes that are not
-  whole sectors need a read-modify-write, or a check that none come; the implementer finds which.
+  derived from the DEK and the segment's salt (`wal::log_salt` exists already). *(found
+  2026-11-14)* Every write reaching it is whole sectors, so XTS needs no read-modify-write: with an
+  assert that each length given `Segments::reserve` and `Segments::append` is a multiple of 4096,
+  every test of `extent_store`, `sqlite_extents` and `fxdax` on macOS passed (574) but the 62 of
+  `extent_store`'s simulation, whose writes are of 512 bytes (`sim/world.rs`, `BLOCK`); the guest's
+  writes are aligned to the device's `block_size`, 4096 (doc-4). So the store refuses a write that
+  is not whole sectors, and the simulation writes 4 KiB blocks.
   The open segment's log holds `Contents`, metadata, so it gets a MAC, not encryption.
 - **Memory:** the extent cache and DAX windows hold plaintext. DEKs and KEKs in memory are
   zeroized on drop and never written out unwrapped.
@@ -102,8 +107,12 @@ point) already says. Shared points (TASK-395.7) work the same way: the trusted c
 can unwrap both, rewraps at each fork into another tenant's cell, so the point's owner shredding its
 tenant stops new forks of the point and breaks no clone.
 
-The cost: a fork into a new cell makes a cell KEK and wraps it with the KMS, one call on the fork's
-path, which doc-7 keeps O(1) in the bucket. Measured before deciding whether it needs anything else.
+A fork into a new cell needs a new cell KEK, which only the KMS can wrap under the tenant's KEK.
+*(decided)* **Hosts keep a pool of cell KEKs per tenant, wrapped ahead of time** in batches, and a
+fork takes one: no KMS call on the fork's path, which doc-7 keeps O(1) in the bucket. A tenant's pool
+is discarded when its KEK is revoked or destroyed (the next refill's wrap fails, or the control API
+says so), so a revocation stops new cells at once, not after a TTL; a pooled key never used is
+dropped with its pool, never written out unwrapped.
 
 ## Shredding
 
@@ -116,13 +125,13 @@ path, which doc-7 keeps O(1) in the bucket. Measured before deciding whether it 
 - **A volume:** deleting it, as now; its record stays (records stay, doc-7) and could have its
   wrapped DEKs cleared once the collector has removed the branch's objects.
 
-## Open questions
+## Decided later the same day
 
-1. Unencrypted stores: does FORMAT 2 keep a plaintext mode (tenant 0, tests, existing buckets), and
-   how do FORMAT 1 buckets move over (doc-11)?
-2. The KMS call on a cross-cell fork's path: acceptable as measured, or a per-host cache of
-   unwrapped cell KEKs with a TTL bounding revocation?
-3. Sectors: does any write reach the open segment that is not whole 4 KiB sectors?
-4. Which AEAD crate: `aws-lc-rs` is already in the lock file (Apache-2.0 and ISC); RustCrypto's
-   `aes-gcm` (MIT or Apache-2.0) is the other. Licenses checked before adding either.
-5. Real KMS backends. *(decided)* A trait and a local fake first; providers later.
+- **Unencrypted stores stay** *(decided)*: FORMAT 2's trailer says whether an object is encrypted,
+  and a cell with no wrapped KEK (tenant 0, tests that ask) writes in the clear, its records with no
+  DEKs. Both paths are tested: every encryption test has a plaintext twin where it applies.
+- **No migration** *(decided)*: no bucket in use needs keeping; FORMAT 2 refuses FORMAT 1 by name,
+  as `layout::FORMAT` 5 refused 4 (doc-11 rule 1).
+- **aws-lc-rs** *(decided)* for AES-256-GCM, AES-256-XTS (if it has XTS; `storage_xts` otherwise)
+  and HKDF: already in the lock file, Apache-2.0 and ISC, AES-NI and ARMv8 AES.
+- **Real KMS backends later** *(decided)*: a trait and a local fake first.

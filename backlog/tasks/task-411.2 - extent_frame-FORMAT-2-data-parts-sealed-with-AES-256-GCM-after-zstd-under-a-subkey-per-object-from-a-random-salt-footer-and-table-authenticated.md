@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:33'
+updated_date: '2026-11-14 18:51'
 labels: []
 dependencies:
   - TASK-411.1
@@ -28,8 +29,9 @@ The bucket, the WAL and the part cache all hold framed objects, so encrypting pa
 <!-- AC:BEGIN -->
 - [ ] #1 A framed object with a key has no plaintext part bytes; reading it back with the key gives the data, with the wrong key or a flipped byte an error, never wrong data
 - [ ] #2 A part moved to another object or index fails authentication (associated data covers object key, index, encoding, length)
-- [ ] #3 A FORMAT 1 reader names FORMAT 2 rather than calling it corrupt (doc-11 rule 1)
-- [ ] #4 Framing throughput with encryption is measured against without, on ubu1 via fxjob --bench, and the numbers are in the task
+- [ ] #3 Framing throughput with encryption is measured against without, on ubu1 via fxjob --bench, and the numbers are in the task
+- [ ] #4 A FORMAT 2 reader refuses a FORMAT 1 object by naming its format, not as corrupt (doc-11 rule 1); no migration (the user's decision)
+- [ ] #5 An object of a cell with no key is written and read in the clear, its trailer saying so; each encryption test has a plaintext twin
 <!-- AC:END -->
 
 ## Definition of Done
