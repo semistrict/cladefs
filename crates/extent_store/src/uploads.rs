@@ -26,13 +26,16 @@ pub struct Closed<F> {
 
 impl<F: File> Closed<F> {
     /// The segment's bytes: the object it is, checked ([`read_object`]), with its footer, stamped
-    /// anew if it was (`extent_frame::restamp`).
+    /// anew if it was (`extent_frame::restamp`): fxdax: one sealed, its new footer and table
+    /// authenticated under its key, which restamping it needs, and fails without (TASK-411.2).
     pub fn bytes(&self) -> io::Result<Vec<u8>> {
         let object = read_object(&*self.file)?;
         if !self.restamped {
             return Ok(object);
         }
-        extent_frame::restamp(&object, &self.footer.encode()).map_err(io::Error::other)
+        // fxdax: holding no key, until the store holds its branch's (TASK-411.3).
+        let keys = &extent_frame::NoKeys;
+        extent_frame::restamp(&object, &self.footer.encode(), keys).map_err(io::Error::other)
     }
 
     /// The bytes of the files of its extents stored on their own, by their keys, checked.

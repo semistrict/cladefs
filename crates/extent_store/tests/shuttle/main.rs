@@ -274,19 +274,24 @@ fn run_with(Run { steps, follow }: Run) {
                         *taken.lock().unwrap() = epoch;
                     }
                     let holds = held(last);
-                    let data = extent_frame::data(&closed.bytes().unwrap()).unwrap();
+                    let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys)
+                        .unwrap();
                     let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
                     bucket.put(bucket_key(&closed), data.to_vec());
                     bucket.acknowledge(closed.footer.clone());
                     for (key, bytes) in &own {
-                        bucket.put(key.clone(), extent_frame::data(bytes).unwrap().to_vec());
+                        bucket.put(
+                            key.clone(),
+                            extent_frame::data(bytes, &extent_frame::NoKeys).unwrap().to_vec(),
+                        );
                     }
                     let in_segment =
                         closed.footer.contents.extents.iter().map(|&(extent, offset, len)| {
                             (extent, len, data[offset as usize..(offset + len) as usize].to_vec())
                         });
                     let on_their_own = closed.footer.own().map(|(extent, location)| {
-                        let data = extent_frame::data(&own[&location.key]).unwrap();
+                        let data =
+                            extent_frame::data(&own[&location.key], &extent_frame::NoKeys).unwrap();
                         (extent, location.len, data)
                     });
                     // Each extent its footer names, as its last commit left it: in it, or in a

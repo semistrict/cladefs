@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 bincode.workspace = true
 crc-fast.workspace = true
+extent_keys.workspace = true
 serde.workspace = true
 storage_device.workspace = true
 thiserror.workspace = true

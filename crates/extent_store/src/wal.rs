@@ -623,7 +623,9 @@ fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Optio
     if !left {
         return Ok(footer);
     }
-    let whole = footer.is_some() && extent_frame::data(&read_whole(&file)?).is_ok();
+    // fxdax: holding no key, until the store holds its branch's (TASK-411.3).
+    let keys = &extent_frame::NoKeys;
+    let whole = footer.is_some() && extent_frame::data(&read_whole(&file)?, keys).is_ok();
     if whole {
         file.sync()?;
     }
@@ -743,7 +745,8 @@ fn close_again<D: Dir>(
     // cut short leaves the raw file with its tail, torn (TASK-310).
     let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max().unwrap_or(0);
     let data = &data[..(end as usize).min(data.len())];
-    let framed = extent_frame::framed(data, &footer.encode());
+    // fxdax: in the clear, until the store holds its branch's key (TASK-411.3).
+    let framed = extent_frame::framed(data, &footer.encode(), None);
     file.write_at(&framed, 0)?;
     crate::written::wrote(crate::written::Kind::Framed, framed.len());
     file.sync()?;
@@ -994,7 +997,7 @@ mod tests {
         assert_eq!(files(&dir, SEGMENTS), [3]);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
         let object = read_whole(&dir.open(&segment_path(segment(3)), true).unwrap()).unwrap();
-        assert_eq!(extent_frame::data(&object).unwrap(), vec![3; 2 * 4096]);
+        assert_eq!(extent_frame::data(&object, &extent_frame::NoKeys).unwrap(), vec![3; 2 * 4096]);
         // Recovered again, it holds the same.
         let again = recover(&dir, BRANCH).unwrap();
         assert_eq!(again.segments, recovered.segments);

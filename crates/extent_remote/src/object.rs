@@ -10,7 +10,7 @@
 use crate::Error;
 use crate::bucket::{self, Bucket, ByteRange};
 use crate::layout;
-use extent_frame::{Frame, Parts, TRAILER};
+use extent_frame::{Frame, Keys, NoKeys, Parts, TRAILER};
 use serde::de::DeserializeOwned;
 
 /// How many bytes of an object's end a read of its tail reads at first: its trailer, its table and
@@ -21,7 +21,9 @@ use serde::de::DeserializeOwned;
 pub const TAIL: u64 = 64 << 10;
 
 /// An object's tail: its footer, the table of where its parts are stored, and its trailer, the
-/// object's bytes from where its footer begins to its end; and where its parts are stored.
+/// object's bytes from where its footer begins to its end; and where its parts are stored, as a
+/// reader holding no key reads them: what the cache keeps, and peers serve, of a sealed object as
+/// of one in the clear. Its readers open it under their keys ([`Tail::open`], TASK-411.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tail {
     pub bytes: Vec<u8>,
@@ -37,9 +39,18 @@ impl Tail {
         if tail.end - tail.start != bytes.len() as u64 {
             return Err(Error::Corrupt(format!("{key}, by its trailer")));
         }
-        let stored = frame.stored_in(&bytes)?;
-        frame.check_footer(&bytes[..frame.footer_len as usize])?;
-        Ok(Self { bytes, parts: Parts { frame, stored } })
+        let parts = Parts::of_suffix(&bytes, &NoKeys)?;
+        parts.check_footer(&bytes[..frame.footer_len as usize])?;
+        Ok(Self { bytes, parts })
+    }
+
+    /// fxdax: its parts, as a reader holding `keys` reads them: its table and footer checked
+    /// against their MACs too, if the object is sealed under a key `keys` holds, and its parts
+    /// opened under it (TASK-411.2).
+    pub fn open(&self, keys: &dyn Keys) -> Result<Parts, Error> {
+        let parts = Parts::of_suffix(&self.bytes, keys)?;
+        parts.check_footer(self.footer())?;
+        Ok(parts)
     }
 
     /// Its footer.
@@ -85,7 +96,7 @@ pub async fn footer<T: DeserializeOwned>(
     else {
         return Ok(None);
     };
-    Ok(Some(layout::decode(frame.check_footer(&footer)?)?))
+    Ok(Some(layout::decode(frame.check_footer(&footer, &NoKeys)?)?))
 }
 
 #[cfg(test)]
@@ -116,7 +127,7 @@ mod tests {
         };
         let read_tail = |bytes: &[u8]| {
             let start = Frame::of(bytes).unwrap().tail().start as usize;
-            Tail { bytes: bytes[start..].to_vec(), parts: Parts::of(bytes).unwrap() }
+            Tail { bytes: bytes[start..].to_vec(), parts: Parts::of(bytes, &NoKeys).unwrap() }
         };
         let first = format!("get {KEY} last {TAIL}");
 
@@ -148,6 +159,34 @@ mod tests {
         assert_eq!(read_back.footer(), layout::encode(&footer));
         assert_eq!(read_back, read_tail(&long));
         assert_eq!(asked, [first, format!("get {KEY} {range:?}")]);
+    }
+
+    /// fxdax: a sealed object's tail is read and checked by a reader holding no key, as the cache
+    /// keeps it; opened under its key, its parts open, and its footer and table are checked
+    /// against their MACs; under another key of its name, refused (TASK-411.2). One in the clear
+    /// opens alike under any keys.
+    #[test]
+    fn sealed_tails_are_read_keyless_and_opened_under_their_key() {
+        let id = extent_frame::KeyId { branch: 1, generation: 0 };
+        let dek = extent_frame::Secret::from_bytes(&[7; 32]);
+        let footer = layout::encode(&"footer");
+        let keys = std::collections::HashMap::from([(id, dek)]);
+        let sealed = extent_frame::framed(&[1; 5000], &footer, Some((&keys[&id], id)));
+        let bucket = holding(sealed.clone());
+        let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
+        assert_eq!(read.footer(), footer);
+        assert!(!read.parts.opens());
+        let opened = read.open(&keys).unwrap();
+        assert!(opened.opens());
+        assert_eq!(opened, Parts::of(&sealed, &keys).unwrap());
+        let wrong =
+            std::collections::HashMap::from([(id, extent_frame::Secret::from_bytes(&[8; 32]))]);
+        let by_mac = Error::Corrupt("an object's table, by its MAC".into());
+        assert_eq!(read.open(&wrong), Err(by_mac));
+        let clear = layout::with_footer(&[1; 5000], &"footer");
+        let bucket = holding(clear.clone());
+        let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
+        assert_eq!(read.open(&keys), Ok(read.parts.clone()));
     }
 
     /// An object shorter than a tail's read whose trailer says another length is corrupt; so are

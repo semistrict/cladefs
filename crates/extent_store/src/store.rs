@@ -1663,7 +1663,7 @@ impl<D: Dir> Store<D> {
 
     /// A part of a framed file, read, checked and unpacked.
     pub fn read_packed(&self, part: &Packed<D::File>) -> Result<Arc<Aligned>, Error> {
-        let stored = read_aligned(&*part.file, part.stored.offset, part.stored.len as usize)?;
+        let stored = read_aligned(&*part.file, part.stored().offset, part.stored().len as usize)?;
         self.unpack(part, stored)
     }
 
@@ -2033,7 +2033,9 @@ impl<D: Dir> Store<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        let mut packer = extent_frame::Packer::new();
+        // fxdax: in the clear, until the store holds its branch's key (TASK-411.3); sealed, no
+        // part's packed bytes are its data, and it is framed in a copy (TASK-411.2).
+        let mut packer = extent_frame::Packer::new(None);
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
         let mut framed: Option<D::File> = None;
@@ -2059,8 +2061,7 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let tail = packer.finish(&[]);
-        let parts = extent_frame::Parts::of_suffix(&tail)?;
+        let (tail, parts) = packer.finish_parts(&[]);
         let (file, copied) = match framed {
             Some(file) => {
                 file.write_at(&tail, end)?;
@@ -2091,7 +2092,8 @@ impl<D: Dir> Store<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        let mut packer = extent_frame::Packer::new();
+        // fxdax: in the clear, until the store holds its branch's key (TASK-411.3).
+        let mut packer = extent_frame::Packer::new(None);
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -2102,10 +2104,9 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let tail = packer.finish(&[]);
+        let (tail, parts) = packer.finish_parts(&[]);
         file.write_at(&tail, end)?;
         written::wrote(written::Kind::Own, tail.len());
-        let parts = extent_frame::Parts::of_suffix(&tail)?;
         let framed = Arc::new(Framed::new(Arc::new(file), parts));
         state.own_files.sealed(extent, framed);
         Ok(())

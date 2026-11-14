@@ -1324,34 +1324,36 @@ fn frame_segment<D: Dir>(
     let started = Instant::now();
     // fxdax: its parts read, each in a buffer kept for the framings after; checksummed and looked
     // at if it may be framed in place (TASK-336).
-    let parts = framing::read(&**raw, len, quiet)?;
+    // fxdax: in the clear, until the store holds its branch's key (TASK-411.3); sealed, framed in
+    // a copy, never in place, as a sealed object's bytes are never its data (TASK-411.2).
+    let mut packer = extent_frame::Packer::new(None);
+    let in_place_maybe = quiet && len > 0 && packer.key().is_none();
+    let parts = framing::read(&**raw, len, in_place_maybe)?;
     timing.took(framing_phase::READ);
-    let mut packer = extent_frame::Packer::new();
     // fxdax: in place at once if a sample of its parts says compressing them saves too little,
     // compressing no more of them: compressing every part to tell was most of what framings took
     // with eight VMs framing at once, up to 0.9 s each; else by them all (TASK-310).
     let look = parts.iter().fold(framing::Look::default(), |look, part| look.plus(part.look));
-    let sampled = quiet && len > 0 && look.saves_little();
+    let sampled = in_place_maybe && look.saves_little();
     let mut packed = Vec::new();
     if !sampled {
         // On threads of their own, whose waits to run count in this one's stead.
         let handing = timing.waits.handing();
-        let (each, waited) = framing::pack(&parts);
+        let (each, waited) = framing::pack(&parts, packer.key());
         timing.waits.handed(handing, waited);
         for (part, each) in parts.iter().zip(&each) {
             packer.push_part(&mut packed, &part.data, each);
         }
     }
     let in_place =
-        sampled || (quiet && len > 0 && packer.end() > len - len / framing::IN_PLACE_SAVING);
+        sampled || (in_place_maybe && packer.end() > len - len / framing::IN_PLACE_SAVING);
     if (in_place && !packer.raw()) || sampled {
-        packer = extent_frame::Packer::new();
+        packer = extent_frame::Packer::new(None);
         packer.push_raw_parts(parts.iter().map(|part| (part.data.len() as u64, part.crc)));
     }
     drop(parts);
     let end = packer.end();
-    let tail = packer.finish(footer);
-    let parts = extent_frame::Parts::of_suffix(&tail)?;
+    let (tail, parts) = packer.finish_parts(footer);
     timing.took(framing_phase::COMPRESS);
     let framed = match in_place {
         true => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
@@ -1804,7 +1806,8 @@ mod tests {
         match segments.source(dir, number).unwrap() {
             Source::Raw(file) => read_file(&*file).unwrap(),
             Source::Framed(framed) => {
-                extent_frame::data(&read_whole(&*framed.file).unwrap()).unwrap()
+                extent_frame::data(&read_whole(&*framed.file).unwrap(), &extent_frame::NoKeys)
+                    .unwrap()
             }
         }
     }

@@ -223,7 +223,7 @@ impl Device for ImageDevice {
                 Part::Packed { part, skip, len } => {
                     let range = part.read_range();
                     let read_len = (range.end - range.start) as usize;
-                    let needed = part.stored.len as usize;
+                    let needed = part.stored().len as usize;
                     let stored = self.read_file(&part.file, read_len, needed, range.start).await?;
                     let bytes = self.store.unpack(&part, stored)?;
                     let (skip, len) = (skip as usize, len as usize);
@@ -422,7 +422,8 @@ mod tests {
                 let path =
                     image.join(format!("extents/{:016x}/{:016x}", BRANCH.id, extent.sequence));
                 let mut bytes = std::fs::read(&path).unwrap();
-                let stored = extent_frame::Parts::of(&bytes).unwrap().stored[3];
+                let stored =
+                    extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[3];
                 assert_eq!(stored.encoding, *encoding);
                 bytes[(stored.offset + stored.len / 2) as usize] ^= 0x10;
                 std::fs::write(&path, bytes).unwrap();

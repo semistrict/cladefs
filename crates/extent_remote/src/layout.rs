@@ -621,19 +621,21 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
-/// compressed, the footer, the table of where the parts are, then the [`TRAILER`].
+/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. fxdax: in the
+/// clear, until its writers hold their branches' keys (TASK-411.3).
 pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer))
+    extent_frame::framed(data, &encode(footer), None)
 }
 
-/// The data of a whole object [`with_footer`] made, checked against its CRCs.
+/// The data of a whole object [`with_footer`] made, checked against its CRCs: by a reader holding
+/// no key, which reads none of a sealed object's ([`crate::Error::NoKey`], TASK-411.2).
 pub fn data(bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
-    Ok(extent_frame::data(bytes)?)
+    Ok(extent_frame::data(bytes, &extent_frame::NoKeys)?)
 }
 
-/// The footer of a whole object [`with_footer`] made.
+/// The footer of a whole object [`with_footer`] made, checked against its CRC.
 pub fn footer<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
-    decode(extent_frame::footer(bytes)?)
+    decode(extent_frame::footer(bytes, &extent_frame::NoKeys)?)
 }
 
 impl Segment {

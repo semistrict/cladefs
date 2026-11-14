@@ -19,7 +19,7 @@
 
 use crate::dir::File;
 use crate::timings::runnable_ns;
-use extent_frame::{PART, PackedPart, PartPacker};
+use extent_frame::{ObjectKey, PART, PackedPart, PartPacker};
 use std::io;
 use std::sync::Mutex;
 
@@ -177,7 +177,7 @@ pub(crate) fn read<F: File>(raw: &F, len: u64, in_place: bool) -> io::Result<Vec
         let mut data = Buffer::of((len - at).min(PART) as usize);
         raw.read_cached(&mut data, at)?;
         let (crc, look) = match in_place {
-            true => (PackedPart::raw(&data).crc, Look::at(&data, &mut packer)),
+            true => (extent_frame::crc(&data), Look::at(&data, &mut packer)),
             false => (0, Look::default()),
         };
         Ok(Read { data, crc, look })
@@ -187,11 +187,13 @@ pub(crate) fn read<F: File>(raw: &F, len: u64, in_place: bool) -> io::Result<Vec
     parts
 }
 
-/// fxdax: `parts`, a segment's data, read ([`read`]), packed, on threads ([`on_threads`]); and the
-/// longest any thread waited to run, in nanoseconds.
-pub(crate) fn pack(parts: &[Read]) -> (Vec<PackedPart>, u64) {
-    let (packed, waited) =
-        on_threads(parts.len(), |part, packer| Ok(packer.pack(&parts[part].data)));
+/// fxdax: `parts`, a segment's data, read ([`read`]), packed, on threads ([`on_threads`]), sealed
+/// under `key`, its framed file's, if it is sealed (TASK-411.2); and the longest any thread waited
+/// to run, in nanoseconds.
+pub(crate) fn pack(parts: &[Read], key: Option<&ObjectKey>) -> (Vec<PackedPart>, u64) {
+    let pack =
+        |part: usize, packer: &mut PartPacker| Ok(packer.pack(part as u64, &parts[part].data, key));
+    let (packed, waited) = on_threads(parts.len(), pack);
     (packed.expect("packing fails not"), waited)
 }
 
@@ -239,6 +241,9 @@ mod tests {
     use crate::{Dir, MemDir};
 
     const MIB: usize = 1 << 20;
+
+    /// The key the tests' sealed segments are sealed under.
+    const KEY: extent_frame::KeyId = extent_frame::KeyId { branch: 1, generation: 0 };
 
     /// `len` bytes that don't compress, of `seed`'s.
     fn noise(seed: u64, len: usize) -> Vec<u8> {
@@ -297,14 +302,25 @@ mod tests {
         let mut packer = PartPacker::new();
         for (read, part) in parts.iter().zip(data.chunks(PART as usize)) {
             assert!(*read.data == *part, "a part's bytes");
-            assert_eq!(read.crc, PackedPart::raw(part).crc);
+            assert_eq!(read.crc, extent_frame::crc(part));
             assert_eq!(read.look, Look::at(part, &mut packer));
         }
-        let (packed, _) = pack(&parts);
-        let each: Vec<PackedPart> =
-            data.chunks(PART as usize).map(|part| packer.pack(part)).collect();
+        let (packed, _) = pack(&parts, None);
+        let each: Vec<PackedPart> = (data.chunks(PART as usize).enumerate())
+            .map(|(index, part)| packer.pack(index as u64, part, None))
+            .collect();
         assert_eq!(packed, each);
-        assert!(packed[2].compressed.is_some() && packed[0].compressed.is_none());
+        let encodings = (packed[2].encoding(), packed[0].encoding());
+        assert_eq!(encodings, (extent_frame::Encoding::Zstd, extent_frame::Encoding::Raw));
+        // TASK-411.2: sealed under a segment's key, each as one packer seals it.
+        let sealing = extent_frame::Packer::new(Some((&extent_frame::Secret::random(), KEY)));
+        let (sealed, _) = pack(&parts, sealing.key());
+        let each: Vec<PackedPart> = (data.chunks(PART as usize).enumerate())
+            .map(|(index, part)| packer.pack(index as u64, part, sealing.key()))
+            .collect();
+        assert_eq!(sealed, each);
+        let crcs = |packed: &[PackedPart]| packed.iter().map(PackedPart::crc).collect::<Vec<_>>();
+        assert!((crcs(&sealed).iter().zip(crcs(&packed))).all(|(sealed, clear)| *sealed != clear));
         let parts = read(&raw, len as u64, false).unwrap();
         assert!(parts.iter().all(|read| read.crc == 0 && read.look == Look::default()));
         assert!(read(&raw, 0, true).unwrap().is_empty(), "no data, no parts");

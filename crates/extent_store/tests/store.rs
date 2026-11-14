@@ -309,7 +309,7 @@ fn segments_close_framed_by_the_commits_flush() {
     assert_eq!(reads().collect::<Vec<_>>(), written);
     let closed = store.closed(usize::MAX).unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    let data = extent_frame::data(&segment.bytes().unwrap()).unwrap();
+    let data = extent_frame::data(&segment.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
     assert_eq!(&data[..BLOCK], &pattern(0, 0, BLOCK)[..]);
 }
 
@@ -367,8 +367,11 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     // Freed: the store's users read them not, the log holds them, which the uploader reads.
     error_is(store.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
     let [(_, own_bytes)] = &writing.own_bytes().unwrap()[..] else { panic!("no extent's own") };
-    assert_eq!(extent_frame::data(own_bytes).unwrap(), pattern(17, 0, 32 << 10));
-    let data = extent_frame::data(&writing.bytes().unwrap()).unwrap();
+    assert_eq!(
+        extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap(),
+        pattern(17, 0, 32 << 10)
+    );
+    let data = extent_frame::data(&writing.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
     assert_eq!(&data[2 * BLOCK..3 * BLOCK], &pattern(3, 0, BLOCK)[..]);
     store.commit(None).unwrap();
     assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
@@ -622,7 +625,7 @@ fn closed_segments_hold_the_branchs_history() {
     let file = dir.open(&format!("{}/{number:016x}", of("segments", BRANCH.id)), true).unwrap();
     let mut bytes = vec![0; extent_store::File::size(&file).unwrap() as usize];
     extent_store::File::read_at(&file, &mut bytes, 0).unwrap();
-    let data = extent_frame::data(&bytes).unwrap();
+    let data = extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap();
     assert_eq!(data[offset as usize..][..BLOCK], pattern(40, 0, BLOCK));
 
     // Old.
@@ -887,7 +890,8 @@ fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_
         assert_eq!(store.epoch().unwrap(), 2, "seed {seed}");
         assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
         let framed = extent_store::read_whole(&crashed.open(&path("segments"), true).unwrap());
-        let footer = extent_frame::footer(&framed.unwrap()).unwrap().to_vec();
+        let footer =
+            extent_frame::footer(&framed.unwrap(), &extent_frame::NoKeys).unwrap().to_vec();
         let footer = Footer::decode(&footer).unwrap();
         assert_eq!(footer.contents.commits, [tag(0, 2)], "seed {seed}");
     }
@@ -1022,11 +1026,18 @@ fn segments_close_for_the_writer_of_their_chain() {
     assert_eq!(first.footer.own().collect::<Vec<_>>(), [(extent(2), own.clone())]);
     // Its file is the object, footer and all; its extent of its own's, the extent's object.
     let bytes = first.bytes().unwrap();
-    let footer = Footer::decode(extent_frame::footer(&bytes).unwrap()).unwrap();
+    let footer =
+        Footer::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
     assert_eq!(footer, first.footer);
-    assert_eq!(extent_frame::data(&bytes).unwrap()[..BLOCK], pattern(1, 0, BLOCK));
+    assert_eq!(
+        extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()[..BLOCK],
+        pattern(1, 0, BLOCK)
+    );
     let [(key, own_bytes)] = &first.own_bytes().unwrap()[..] else { panic!("no extent's own") };
-    assert_eq!((key, extent_frame::data(own_bytes).unwrap()), (&own.key, pattern(2, 0, 32 << 10)));
+    assert_eq!(
+        (key, extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap()),
+        (&own.key, pattern(2, 0, 32 << 10))
+    );
 
     // The next follows it; a fork's names the fork.
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
@@ -1308,7 +1319,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.write(extent(1), 0, &data).unwrap();
     let before = extent_store::written();
     store.commit(None).unwrap();
-    let framed = extent_frame::framed(&data, &[]);
+    let framed = extent_frame::framed(&data, &[], None);
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1521,7 +1532,7 @@ fn compressible_large_extents_are_framed_in_copies() {
         store.write(extent(sequence), 0, data).unwrap();
         let before = extent_store::written();
         store.commit(None).unwrap();
-        let framed = extent_frame::framed(data, &[]);
+        let framed = extent_frame::framed(data, &[], None);
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -2274,7 +2285,11 @@ fn segment_data(dir: &MemDir) -> Vec<u64> {
             let file = dir.open(&format!("{}/{name}", of(kind, BRANCH.id)), true).unwrap();
             let mut bytes = vec![0; file.size().unwrap() as usize];
             file.read_at(&mut bytes, 0).unwrap();
-            let data = if kind == "segments" { extent_frame::data(&bytes).unwrap() } else { bytes };
+            let data = if kind == "segments" {
+                extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()
+            } else {
+                bytes
+            };
             lens.push(data.len() as u64);
         }
     }
@@ -2560,7 +2575,7 @@ fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000000004"]);
     assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), segments);
     for closed in store.closed(usize::MAX).unwrap() {
-        let data = extent_frame::data(&closed.bytes().unwrap()).unwrap();
+        let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
         assert_eq!(data.len(), 0, "segment {}, no extent's data in it, framed", closed.number);
     }
     let store = reopened(store, &dir);
@@ -3406,7 +3421,7 @@ fn extents_larger_than_a_framing_chunk_seal_whole() {
     let file = dir.open(&format!("{}/{:016x}", of("extents", BRANCH.id), 1), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
     file.read_at(&mut framed, 0).unwrap();
-    assert_eq!(extent_frame::data(&framed).unwrap().len(), data.len());
+    assert_eq!(extent_frame::data(&framed, &extent_frame::NoKeys).unwrap().len(), data.len());
     drop(store);
     let store = Store::open(dir, OPTIONS).unwrap();
     assert!(read(&store, extent(1), 0, data.len()) == data, "the extent reads other data");

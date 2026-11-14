@@ -16,13 +16,14 @@ use storage_device::ExtentId;
 
 pub use extent_frame::table::BLOCK;
 
-/// The checkpoint of `state`.
+/// The checkpoint of `state`: fxdax: in the clear, until its writers hold their branches' keys
+/// (TASK-411.3).
 pub fn encode(state: &State) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter()).map(|(extent, location)| {
         ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
     });
-    table::encode(entries, layout::encode(&rest))
+    table::encode(entries, layout::encode(&rest), None)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -30,9 +31,10 @@ fn located(entry: Entry) -> (ExtentId, Location) {
     (ExtentId::new(branch, sequence), Location { key, offset, len })
 }
 
-/// The state a checkpoint holds.
+/// The state a checkpoint holds: read by a reader holding no key, which reads none of a sealed
+/// one's (TASK-411.2).
 pub fn decode(bytes: &[u8]) -> Result<State, Error> {
-    let (footer, entries) = table::decode(bytes)?;
+    let (footer, entries) = table::decode(bytes, &extent_frame::NoKeys)?;
     let mut state: State = layout::decode(&footer.rest)?;
     state.extents.extend(entries.into_iter().map(located));
     Ok(state)
@@ -214,7 +216,7 @@ mod tests {
     fn tables_hold_the_rest_of_the_state() {
         let state = state(3000);
         let bytes = encode(&state);
-        let footer = extent_frame::footer(&bytes).unwrap();
+        let footer = extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap();
         let table = Table::decode(footer).unwrap();
         assert_eq!(*table.state(), State { extents: Default::default(), ..state });
     }
@@ -241,8 +243,10 @@ mod tests {
         let budget = Budget::new(Limits::UNBOUNDED);
         let fetcher = Fetcher::new(bucket.clone(), budget, Memory::new(), None);
         let frame = extent_frame::Frame::of(&bytes).unwrap();
-        let (tail, stored) = (frame.tail(), extent_frame::Parts::of(&bytes).unwrap().stored);
-        let table = Table::decode(extent_frame::footer(&bytes).unwrap()).unwrap();
+        let (tail, stored) =
+            (frame.tail(), extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored);
+        let table =
+            Table::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
         futures::executor::block_on(async {
             bucket.put(&key, bytes.clone().into(), PutMode::Create).await.unwrap();
             let mut counted = bucket.counted();
