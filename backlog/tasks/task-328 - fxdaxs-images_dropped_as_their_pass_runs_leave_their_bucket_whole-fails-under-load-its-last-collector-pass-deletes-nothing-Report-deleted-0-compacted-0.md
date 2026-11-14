@@ -7,7 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 13:14'
-updated_date: '2026-11-14 13:10'
+updated_date: '2026-11-14 20:15'
 labels:
   - testing
   - flaky
@@ -44,4 +44,6 @@ Seen 2026-11-10 on ubu1 (TASK-320's branch at c8e4ff56, scripts/test.sh workspac
 2026-11-13 (TASK-395.15/.16 batch, file bucket locks per directory, fxdax-gc passes spawned): failed once in cargo nextest -p extent_remote -p fxdax, and 1 of 3 runs alone on the macOS laptop; same symptom (Report all 0), as before the batch.
 
 2026-11-14 (TASK-395.13/.14 batch, macOS laptop at load ~48): failed in scripts/test.sh's workspace part and once more alone (Report all 0); then 4 of 4 alone passed. Same symptom.
+
+2026-11-14 (claude, TASK-400's agent): seen again on ubu1 at dddfea15e, in the Linux workspace suite under fxjob (--test-threads 4) and 1 of 3 runs alone after: Report { deleted: 0, compacted: 0, ... }.
 <!-- SECTION:NOTES:END -->
