@@ -459,8 +459,11 @@ mod tests {
     }
 
     /// TASK-291.3: an image and its clone, closed and dropped while a pass of their bucket's
-    /// collector, held up, runs, leave their bucket whole: opened again, each holds what it did,
-    /// and the next pass completes.
+    /// collector, held up, runs, leave their bucket whole: opened again, each holds what it did;
+    /// and the passes after, those their commits start as they are opened again, held up as they
+    /// are closed and dropped again, then one alone, delete what they freed, leaving nothing they
+    /// should have collected. The passes after, not the one alone: their commits' passes, as
+    /// often as one ends, may leave it nothing (TASK-328).
     #[test]
     fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
         quicken(BUSY);
@@ -475,22 +478,30 @@ mod tests {
             let clone = clone.await.unwrap();
             cloned = files.clone();
             churn(&clone, &mut cloned, 2, 1).await;
-            // The next commit's pass held up until both are gone.
+            // Passes held up from the next commit's on: both closed and dropped as one runs.
             fail::cfg("collect::pass", "sleep(500)").unwrap();
             churn(&clone, &mut cloned, 3, 1).await;
             drop(clone.close().await.unwrap());
             drop(fs.close().await.unwrap());
         });
-        scenario.teardown();
+        // Opened again, they share a collector this holds, which counts what their commits'
+        // passes, still held up, delete as they are closed and dropped again.
+        let mut collecting = None;
         block_on(async {
             for (path, files) in [(&path, &files), (&clone_path, &cloned)] {
-                let fs = Filesystem::mount(Storage::open(path).unwrap()).await.unwrap();
+                let storage = Storage::open(path).unwrap();
+                collecting.get_or_insert_with(|| image(&storage).collecting().unwrap().clone());
+                let fs = Filesystem::mount(storage).await.unwrap();
                 holds(&fs, files, &format!("{} opened again", path.display())).await;
                 drop(fs.close().await.unwrap());
             }
         });
-        let report = image(&Storage::open(&path).unwrap()).collecting().unwrap().pass_now();
-        assert!(report.deleted > 0, "{report:?}");
+        scenario.teardown();
+        let collecting = collecting.unwrap();
+        let (started, alone) = (collecting.collected(), collecting.pass_now());
+        assert!(started.deleted + alone.deleted > 0, "{started:?}, then alone {alone:?}");
+        assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
+        drop(collecting);
         block_on(async {
             let fs = Filesystem::mount(Storage::open(&clone_path).unwrap()).await.unwrap();
             holds(&fs, &cloned, "the clone after the pass").await;
