@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 23:22'
 labels: []
 dependencies:
   - TASK-411.3
@@ -30,6 +30,7 @@ collector::compact_object copies extent ranges out of decompressed data, so it m
 - [ ] #1 A pass compacts an encrypted cell and readers read the moved extents
 - [ ] #2 A pass that only marks, or finds nothing to compact, makes no KMS call: a test counts calls
 - [ ] #3 A cell whose tenant KEK is revoked is marked and has unreferenced objects deleted, but is not compacted, and the pass reports it
+- [ ] #4 A sealed moves object copied to another key of its branch is refused (TASK-411.3 wrote the check, untested until moves are sealed)
 <!-- AC:END -->
 
 ## Definition of Done

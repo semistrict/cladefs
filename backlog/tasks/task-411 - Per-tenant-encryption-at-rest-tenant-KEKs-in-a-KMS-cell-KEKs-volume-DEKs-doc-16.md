@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 18:35'
+updated_date: '2026-11-14 23:22'
 labels: []
 dependencies: []
 documentation:
@@ -38,3 +38,9 @@ Tenants need BYOK (their root key in a KMS they control and can revoke), crypto-
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-411.3: sqlite volumes, FUSE mounts, extentd and restores have no encrypted test variants yet (Linux-only daemon paths; restores fork across cells, TASK-411.4); AC #3 waits on them.
+<!-- SECTION:NOTES:END -->

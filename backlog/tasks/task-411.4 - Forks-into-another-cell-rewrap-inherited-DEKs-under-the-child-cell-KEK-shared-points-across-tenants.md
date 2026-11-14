@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 18:51'
+updated_date: '2026-11-14 23:22'
 labels: []
 dependencies:
   - TASK-411.3
@@ -15,6 +15,7 @@ documentation:
     backlog/docs/doc-16 -
     Per-tenant-encryption-at-rest-tenant-KEKs-cell-KEKs-volume-DEKs.md
 parent_task_id: TASK-411
+priority: high
 type: task
 ordinal: 801000
 ---
@@ -40,3 +41,9 @@ A child reads its parents' objects under their DEKs. Rewrapping them under the c
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Since TASK-411.3, fxdax makes every fork, point and restore of a sealed store in a new cell, so all of them fail ENOTSUP until this task rewraps inherited DEKs.
+<!-- SECTION:NOTES:END -->
