@@ -33,6 +33,9 @@ argh = "0.1.19"
 libc = { version = "0.2.189", features = ["extra_traits"] }
 aes = "0.9.1"
 aes-gcm-siv = "0.12.0-rc.3"
+# AES-256-GCM, AES-KW, HKDF and HMAC for encryption at rest (aws/aws-lc-rs, ISC AND (Apache-2.0 OR
+# ISC); backlog doc-16). Already in the build through object_store and rustls.
+aws-lc-rs = "1.18.2"
 assert_matches = "1.5.0"
 async-trait = "0.1.92"
 base64 = "0.22.1"
@@ -92,6 +95,7 @@ smallvec = { version = "1.15.2", features = ["const_generics", "const_new", "uni
 syn = { version = "2.0.119", features = ["full", "visit", "visit-mut", "extra-traits"] }
 tokio = { version = "=1.53.1", default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "sync"] }
 zerocopy = { version = "0.8.48", features = ["derive", "simd"] }
+zeroize = "1.9.1"
 
 fidl = { path = "crates/fidl" }
 fprint = { path = "crates/fprint" }
@@ -129,6 +133,7 @@ extent_store = { path = "crates/extent_store" }
 follower = { path = "crates/follower" }
 follower_history = { path = "crates/follower_history" }
 extent_frame = { path = "crates/extent_frame" }
+extent_keys = { path = "crates/extent_keys" }
 extent_remote = { path = "crates/extent_remote" }
 bssl-crypto = { path = "crates/bssl-crypto" }
 mundane = { path = "crates/mundane" }

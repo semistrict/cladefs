@@ -3,10 +3,11 @@ id: TASK-411.1
 title: >-
   A KMS trait, a local fake, and key types: wrapped keys, generations, zeroized
   in memory
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 18:51'
+updated_date: '2026-11-14 19:04'
 labels: []
 dependencies: []
 documentation:

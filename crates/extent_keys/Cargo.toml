@@ -1,0 +1,17 @@
+# fxdax's own: the keys a tenant's data is encrypted under at rest, and the primitives that use them
+# (backlog doc-16).
+[package]
+name = "extent_keys"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+aws-lc-rs.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints]
+workspace = true
