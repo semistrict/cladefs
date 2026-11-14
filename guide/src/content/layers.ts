@@ -44,10 +44,10 @@ export const layers: Layer[] = [
       "daemon over a Unix socket. It maps the daemon's physical memory (memfds) into the memory " +
       "KVM follows for the window, and reports the guest's faults there to the daemon through " +
       "userfaultfd.",
-    dirs: ["vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/fxdax/src/dax/uffd.rs"],
+    dirs: ["crates/virtio_extent", "vendor/firecracker/src/vmm/src/devices/virtio/extent", "crates/fxdax/src/dax/uffd.rs"],
     anchors: ["vmm_handle", "vmm_window", "remote_store", "uffd_serve", "vmm_private_max"],
     docs: ["doc-4"],
-    provenance: "Firecracker is upstream's, at v1.16.1; the extent device is fxdax's, in the fork semistrict/firecracker.",
+    provenance: "Firecracker is upstream's, at v1.16.1; the extent device is fxdax's: crates/virtio_extent, which libmachine shares, and its adapter in the fork semistrict/firecracker.",
   },
   {
     id: "daemon",
