@@ -28,7 +28,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Has the crate's `FXDAX_BUILD_COMMIT` be the commit scripts/build-commit.sh says the tree is
 /// of, and the build stamp it again as that changes: as the checkout moves to another commit, or
-/// the crate's own sources change, which may make it dirty; or the source a GCE host builds says
+/// the crate's own sources change, which may make it dirty; or the source a host run's worktree carries says
 /// another (`source-revision.txt`).
 fn stamp_commit() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR")?).join("../..");

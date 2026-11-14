@@ -146,7 +146,7 @@ if part firecracker; then
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
     FXDAX_EXTENTD_REMOTE=memory:///vmm FXDAX_EXTENTD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features fxdax -E "$tests"
-    # Where KVM is, as on the GCE hosts: the PCI transport's tests and the device managers'
+    # Where KVM is, as on ubu1: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
     # (TASK-267); with FXDAX_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration
     # tests too, in their place. One at a time, as Firecracker runs them (--test-threads=1): they

@@ -2,6 +2,10 @@
 
 # Decisions
 
+## GCE out of the instructions and of what describes today's runs; past runs' citations kept (2026-11-14)
+
+The user: remove all references to GCE, use ubu1 instead. AGENTS.md already named ubu1 everywhere; its "never GCP" wording went too. Comments, docstrings and script docs that described where runs happen now (root as on the GCE hosts, a GCE run's results, n2-standard-4 as the size cases are scaled to) now say ubu1, or a host of 4 vCPUs and 16 GB. *Kept:* citations of past runs ("GCE r649"), docs/measurements (its `gce-*` directories, which bench-history.py lists), docs/reviews, dead-ends and backlog, since those record where a measurement was taken, and calling them ubu1's would be false; scripts/tests/test_ci.py's checks that no GCE is used. *Else possible:* drop "GCE" from the ~150 citations in code, leaving bare run numbers. *Undo:* revert the commit.
+
 ## Sweeps at 4 at once, and passes over cells forked at many points (TASK-395.17, .12, .18, .19, 2026-11-14)
 
 - **TASK-395.17 needs no fix**: 4 interleaved rounds at 4 passes at once on ubu1, first sweeps: main 496 s median (474-525), c9b5ba549 540 s (505-601) (docs/measurements/ubu1-gc-sweep-ab-2026-11-14-t39517a). The 320 s against 559 s were single runs of a sweep bound by ubu1's scratch disk (ext4 on a ZFS zvol: ~11% iowait, fxdax-gc at half a core). *Undo:* none.

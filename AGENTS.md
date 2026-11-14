@@ -24,9 +24,9 @@ of a batch.
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
   one host).
 
-### Linux runs go to ubu1, never GCP
+### Linux runs go to ubu1
 
-The user's rule (2026-11-11): no GCP in any form, CI included. Every Linux run goes to ubu1, a
+The user's rule (2026-11-11): every Linux run goes to ubu1, a
 physical host others' agents share, through the `scripts/*-host.sh` drivers
 (`scripts/lib/host.sh`; `FXDAX_HOST` names another host): `test-host.sh`, `bench-host.sh`,
 `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,

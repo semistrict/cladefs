@@ -378,7 +378,7 @@ mod tests {
         assert_eq!(run_script("exit 101", budget), (Ok(Ended::Exited(101)), false, true));
     }
 
-    /// A crash fails the check by its signal. Without a core, which the GCE hosts' runs report as
+    /// A crash fails the check by its signal. Without a core, which the Linux hosts' runs report as
     /// a process crashed (r610).
     #[test]
     fn crashes_fail_by_signal() {
