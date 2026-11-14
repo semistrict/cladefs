@@ -126,6 +126,11 @@ pub enum Error {
     Lost(String),
     #[error("corrupt: {0}")]
     Corrupt(String),
+    /// fxdax: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
+    /// unwrapped by none, or revoked; or the collector's, which reads none of the data of objects
+    /// sealed, until it compacts them under their keys (TASK-411.6).
+    #[error("{}", extent_frame::Error::NoKey(*.0))]
+    NoKey(extent_frame::KeyId),
     /// The branch's record says its objects are of another format than this one's, newer or
     /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
     #[error(
@@ -183,6 +188,15 @@ pub enum Left {
 impl From<extent_frame::Corrupt> for Error {
     fn from(corrupt: extent_frame::Corrupt) -> Self {
         Self::Corrupt(corrupt.0)
+    }
+}
+
+impl From<extent_frame::Error> for Error {
+    fn from(error: extent_frame::Error) -> Self {
+        match error {
+            extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
+            extent_frame::Error::NoKey(key) => Self::NoKey(key),
+        }
     }
 }
 

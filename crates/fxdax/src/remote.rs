@@ -87,8 +87,11 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         Failure::Remote(Error::NotShared(_)) => Some(Errno::EACCES),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
-        // The collector's alone (TASK-395.5).
-        Failure::Remote(Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_))
+        // The collector's alone (TASK-395.5). fxdax: data sealed under a key the host doesn't
+        // hold is unread, as data it failed to read is (TASK-411.2).
+        Failure::Remote(
+            Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
+        )
         | Failure::Local(_) => None,
     }
 }
@@ -1018,7 +1021,7 @@ mod tests {
         let path =
             dir.path().join(format!("store/extents/{:016x}/{:016x}", branch.id, extent.sequence));
         let mut bytes = std::fs::read(&path).unwrap();
-        let stored = extent_frame::Parts::of(&bytes).unwrap().stored[1];
+        let stored = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[1];
         assert_eq!(stored.encoding, extent_frame::Encoding::Raw);
         bytes[stored.offset as usize + 7] ^= 0x10;
         std::fs::write(&path, bytes).unwrap();

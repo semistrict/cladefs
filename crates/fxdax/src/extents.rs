@@ -3053,7 +3053,9 @@ mod tests {
                 .path()
                 .join(format!("store/extents/{:016x}/{:016x}", extent.branch, extent.sequence));
             let mut bytes = std::fs::read(&path).unwrap();
-            let (place, stored) = extent_frame::Parts::of(&bytes).unwrap().part(2).unwrap();
+            let parts = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap();
+            let opened = parts.part(2).unwrap();
+            let (place, stored) = (opened.place, opened.stored);
             assert_eq!(stored.encoding, *encoding);
             let offset = place.start + 5 * ps + 7;
             let byte = match stored.encoding {

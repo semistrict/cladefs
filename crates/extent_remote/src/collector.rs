@@ -697,13 +697,10 @@ impl Remembered {
                 Some(listed) => listed,
                 None => bucket::list(bucket, &layout::records(cell)).await,
             };
-            let listed = (listing.into_iter())
-                .filter_map(|meta| match layout::kind(&meta.key) {
-                    Kind::Record { branch } if !records.contains_key(&branch) => {
-                        Some((branch, meta))
-                    }
-                    _ => None,
-                });
+            let listed = (listing.into_iter()).filter_map(|meta| match layout::kind(&meta.key) {
+                Kind::Record { branch } if !records.contains_key(&branch) => Some((branch, meta)),
+                _ => None,
+            });
             let known = &self.records;
             let reads = futures::stream::iter(listed)
                 .map(|(branch, meta)| async move {
@@ -2002,7 +1999,8 @@ mod tests {
                 commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
                 writer.checkpoint().await.unwrap();
                 let mut bytes = bucket::get(&*bucket, &segment).await.unwrap().bytes;
-                let stored = extent_frame::Parts::of(&bytes).unwrap().stored[0];
+                let stored =
+                    extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
                 let encoding = match compressible {
                     true => extent_frame::Encoding::Zstd,
                     false => extent_frame::Encoding::Raw,
@@ -3901,6 +3899,40 @@ mod tests {
         })
     }
 
+    /// TASK-411.2: compacting an object sealed under a key the collector doesn't hold copies none
+    /// of it, its data unread, and fails naming the key, leaving the bucket as it was, until the
+    /// collector compacts under keys (TASK-411.6); its twin in the clear is compacted, its live
+    /// extent copied to its moves.
+    #[test]
+    fn objects_sealed_are_not_compacted_without_their_keys() {
+        let id = extent_frame::KeyId { branch: 1, generation: 0 };
+        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
+        let key = layout::segment(test_branch(1), 0);
+        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
+        let live = ExtentId::new(1, 2);
+        let extents =
+            BTreeMap::from([(live, Location { key: key.clone(), offset: 4096, len: 4096 })]);
+        let footer = layout::encode(&());
+        block_on(async {
+            let sealed = Direct(SimBucket::new());
+            let object = extent_frame::framed(&data, &footer, Some((&dek, id)));
+            assert!(matches!(bucket::create(&sealed, &key, object).await, Created::Created));
+            let before = held(&sealed).await;
+            let compacted = compact_object(&sealed, &key, &extents).await;
+            assert_eq!(compacted, Err(Error::NoKey(id)));
+            assert_eq!(held(&sealed).await, before);
+
+            let clear = Direct(SimBucket::new());
+            let object = extent_frame::framed(&data, &footer, None);
+            assert!(matches!(bucket::create(&clear, &key, object).await, Created::Created));
+            let compacted = compact_object(&clear, &key, &extents).await;
+            let moves = layout::moves(&key).unwrap();
+            let bytes = bucket::get(&clear, &moves).await.unwrap().bytes;
+            assert_eq!(compacted, Ok(Some((moves, bytes.len() as u64))));
+            assert_eq!(layout::data(&bytes).unwrap(), &data[4096..8192]);
+        });
+    }
+
     /// A live branch whose recovery finds what it needs gone fails the pass, which deletes
     /// nothing; one deleted meanwhile is live no longer, and the pass goes on.
     #[test]
@@ -4665,13 +4697,13 @@ mod tests {
             asked.into_iter().filter(|asked| asked.starts_with("list")).collect()
         };
         let listed = |cell: Cell, checkpoints: &[u64]| -> Vec<String> {
-            let mut listed = vec![
-                format!("list {}", cell.prefix()),
-                format!("list {}", layout::records(cell)),
-            ];
-            listed.extend(checkpoints.iter().map(|&id| {
-                format!("list {}", layout::checkpoints(Branch { cell, id }))
-            }));
+            let mut listed =
+                vec![format!("list {}", cell.prefix()), format!("list {}", layout::records(cell))];
+            listed.extend(
+                checkpoints
+                    .iter()
+                    .map(|&id| format!("list {}", layout::checkpoints(Branch { cell, id }))),
+            );
             listed.push(format!("list {}", layout::records(cell)));
             listed.push(format!("list-delimited {}", layout::references(cell)));
             listed
@@ -5640,4 +5672,3 @@ mod tests {
         });
     }
 }
-

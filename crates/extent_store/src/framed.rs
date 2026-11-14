@@ -8,7 +8,7 @@
 use crate::dir::File;
 use crate::sync::Mutex;
 use anyhow::{Error, bail};
-use extent_frame::{ALIGN, Corrupt, Encoding, Frame, PART, Parts, Stored, TRAILER};
+use extent_frame::{ALIGN, Corrupt, Encoding, Frame, NoKeys, PART, Parts, Stored, TRAILER};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::io;
@@ -87,7 +87,8 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
 }
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
-/// footer pass their checks. Its parts are checked as they are read.
+/// footer pass their checks. Its parts are checked as they are read. fxdax: by a reader holding no
+/// key, until the store holds its branch's (TASK-411.2, TASK-411.3).
 pub(crate) fn read_frame<F: File>(file: &F) -> Result<Option<(Parts, Vec<u8>)>, Error> {
     let size = file.size()?;
     let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -98,17 +99,19 @@ pub(crate) fn read_frame<F: File>(file: &F) -> Result<Option<(Parts, Vec<u8>)>, 
     }
     let tail = read_aligned(file, frame.stored_len, (size - frame.stored_len) as usize)?;
     let tail = tail.as_slice();
-    let Ok(stored) = frame.stored_in(tail) else { return Ok(None) };
-    let Ok(footer) = frame.check_footer(&tail[..frame.footer_len as usize]) else {
+    let Ok(parts) = Parts::of_suffix(tail, &NoKeys) else { return Ok(None) };
+    let Ok(footer) = parts.check_footer(&tail[..frame.footer_len as usize]) else {
         return Ok(None);
     };
-    Ok(Some((Parts { frame, stored }, footer.to_vec())))
+    let footer = footer.to_vec();
+    Ok(Some((parts, footer)))
 }
 
 /// fxdax: the parts of the framed file `file`, if its trailer and table pass their checks: read
 /// from the blocks they are in alone, the last, but for a table that begins before them, and not
 /// its footer, which reading its data needs not (TASK-92.2). Its parts are checked as they are
-/// read.
+/// read. fxdax: by a reader holding no key, until the store holds its branch's (TASK-411.2,
+/// TASK-411.3).
 pub(crate) fn read_parts<F: File>(file: &F) -> Result<Option<Parts>, Error> {
     let size = file.size()?;
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -121,8 +124,8 @@ pub(crate) fn read_parts<F: File>(file: &F) -> Result<Option<Parts>, Error> {
     let table = frame.table().start;
     let suffix =
         if table >= last { suffix } else { read_aligned(file, table, (size - table) as usize)? };
-    let Ok(stored) = frame.stored_in(suffix.as_slice()) else { return Ok(None) };
-    Ok(Some(Parts { frame, stored }))
+    let Ok(parts) = Parts::of_suffix(suffix.as_slice(), &NoKeys) else { return Ok(None) };
+    Ok(Some(parts))
 }
 
 /// Numbers the framed files opened, for the parts unpacked to name them by.
@@ -261,20 +264,15 @@ impl<F: File> Source<F> {
             return Err(Corrupt(format!("{len} bytes at {at}, past a framed file's {data_len}")));
         }
         for part in frame.parts_of(at..at + len) {
-            let place = frame.part(part);
-            let stored = framed.parts.stored[part as usize];
+            let opened = framed.parts.part(part)?;
+            let place = opened.place.clone();
             let (from, to) = (at.max(place.start), (at + len).min(place.end));
             let (skip, len) = (from - place.start, to - from);
             let key = (framed.id, part);
             parts.push(match unpacked.get(key) {
                 Some(bytes) => Part::Unpacked { bytes, skip, len },
                 None => Part::Packed {
-                    part: Packed {
-                        file: framed.file.clone(),
-                        stored,
-                        len: place.end - place.start,
-                        key,
-                    },
+                    part: Packed { file: framed.file.clone(), part: opened, key },
                     skip,
                     len,
                 },
@@ -337,47 +335,54 @@ impl<F> Part<F> {
     }
 }
 
-/// A part of a framed file, stored raw or compressed: read whole, to be checked against its CRC
-/// and unpacked.
+/// A part of a framed file, stored raw or compressed: read whole, to be checked against its CRC,
+/// opened if sealed, and unpacked.
 pub struct Packed<F> {
     pub file: Arc<F>,
-    pub stored: Stored,
-    /// Its length, unpacked.
-    len: u64,
+    /// fxdax: the part, as its file's tail says it is stored and opened (TASK-411.2).
+    part: extent_frame::Part,
     /// Its name among the parts unpacked.
     key: Key,
 }
 
 impl<F> Packed<F> {
+    /// Where and how it is stored.
+    pub fn stored(&self) -> &Stored {
+        &self.part.stored
+    }
+
     /// The range of the file a read of its stored bytes reads, in whole aligned blocks: as far as
     /// the file goes, which may end before the range does.
     pub fn read_range(&self) -> Range<u64> {
-        let start = self.stored.offset;
-        start..(start + self.stored.len).next_multiple_of(ALIGN)
+        let start = self.stored().offset;
+        start..(start + self.stored().len).next_multiple_of(ALIGN)
     }
 
     /// The part, unpacked from `stored`, its stored bytes and any after them, read from its file,
-    /// checked against its CRC, and kept in `unpacked`: one stored compressed unpacked into what
-    /// keeps it, rather than copied there (TASK-92.19); one stored raw kept in the buffer it was
-    /// read into, which a page-in reads all of, uncopied (TASK-153.11).
+    /// checked against its CRC, opened in place if sealed (TASK-411.2), and kept in `unpacked`:
+    /// one stored compressed unpacked into what keeps it, rather than copied there (TASK-92.19);
+    /// one stored raw kept in the buffer it was read into, which a page-in reads all of, uncopied
+    /// (TASK-153.11).
     pub(crate) fn unpack(
         &self,
-        stored: Aligned,
+        mut stored: Aligned,
         unpacked: &Unpacked,
     ) -> Result<Arc<Aligned>, Error> {
-        debug_assert!(self.len <= PART);
-        let part = match self.stored.encoding {
+        let len = self.part.len();
+        debug_assert!(len <= PART);
+        let part = match self.stored().encoding {
             Encoding::Raw => {
                 // A raw part's stored bytes are as long as it is (`Frame::stored_in`).
-                self.stored.check(&stored)?;
-                stored.within(0, self.len as usize)
+                self.part.open(stored.as_mut_slice()).map_err(unread)?;
+                stored.within(0, len as usize)
             }
             Encoding::Zstd => {
                 // Zeroed as it is allocated, not a byte at a time, as collecting an iterator is in
                 // a debug build, where a fork's opening spent seconds unpacking its base's parts
                 // so (TASK-92.17).
-                let mut part = Aligned::new(self.len as usize);
-                self.stored.unpack_into(&stored, part.as_mut_slice())?;
+                let mut part = Aligned::new(len as usize);
+                (self.part.unpack_into(stored.as_mut_slice(), part.as_mut_slice()))
+                    .map_err(unread)?;
                 UNPACKS.fetch_add(1, Ordering::Relaxed);
                 part
             }
@@ -390,6 +395,16 @@ impl<F> Packed<F> {
 
 /// How many parts stored compressed this process unpacked.
 static UNPACKS: AtomicU64 = AtomicU64::new(0);
+
+/// fxdax: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
+/// [`Corrupt`] alone, as before parts were sealed; one sealed under a key the store doesn't hold
+/// by `extent_frame::Error::NoKey` (TASK-411.2).
+fn unread(error: extent_frame::Error) -> Error {
+    match error {
+        extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
+        error => error.into(),
+    }
+}
 
 /// How many parts stored compressed this process unpacked (decompressed) since it started: a
 /// part read again once it is no longer kept unpacked is unpacked again.
@@ -457,9 +472,9 @@ mod tests {
     fn bytes_past_the_data_are_located_nowhere() {
         let dir = MemDir::new();
         let file = dir.create("framed", true).unwrap();
-        let bytes = extent_frame::framed(&[7; 4096], &[]);
+        let bytes = extent_frame::framed(&[7; 4096], &[], None);
         file.write_at(&bytes, 0).unwrap();
-        let framed = Framed::new(Arc::new(file), Parts::of(&bytes).unwrap());
+        let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &NoKeys).unwrap());
         let source = Source::Framed(Arc::new(framed));
         let mut parts = Vec::new();
         let corrupt = source.locate(2 * PART, 4096, &Unpacked::default(), &mut parts).unwrap_err();
@@ -482,9 +497,9 @@ mod tests {
         let framed = |key: u64| {
             made.set(made.get() + 1);
             let file = dir.create(&made.get().to_string(), true).unwrap();
-            let bytes = extent_frame::framed(&[key as u8; 4096], &[]);
+            let bytes = extent_frame::framed(&[key as u8; 4096], &[], None);
             file.write_at(&bytes, 0).unwrap();
-            Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes).unwrap()))
+            Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &NoKeys).unwrap()))
         };
         let open = |files: &Files<u64, _>| {
             let mut open: Vec<u64> = files.files.keys().copied().collect();
