@@ -1453,6 +1453,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "extent_frame",
+ "extent_keys",
  "extent_store",
  "fidl-fuchsia-io",
  "fuchsia-async",

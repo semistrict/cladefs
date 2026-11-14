@@ -14,6 +14,7 @@ publish = false
 [dev-dependencies]
 anyhow.workspace = true
 extent_frame.workspace = true
+extent_keys.workspace = true
 extent_store.workspace = true
 # fxfs-metabench's attributes, as Fxfs's API takes them.
 fidl-fuchsia-io.workspace = true
