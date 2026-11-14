@@ -7,10 +7,8 @@ fixes, days of work, each still its own commit. Then compile once, fix what the 
 build the guest kernel once if the batch touches it, and run the tests once, on ubu1
 (`scripts/test-host.sh`; Linux tests run there, not in Lima).
 
-A batch is several backlog tasks worked through one after another, in one worktree, by one agent.
-It does not mean tasks run in parallel: subagents or worktrees side by side each pay for their own
-compiles and test runs, which a batch exists to pay once. Pick the batch's tasks, read them, write
-all their changes, and only then compile.
+A batch is several backlog tasks. Pick the batch's tasks, read them, write all their changes, and
+only then compile.
 
 Do not alternate "write one change, compile, test, write the next". A compile of this workspace,
 a guest kernel build and a host run each take minutes; paying them per change wastes most of
