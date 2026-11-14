@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-10 13:14'
-updated_date: '2026-11-14 23:24'
+updated_date: '2026-11-14 23:49'
 labels:
   - testing
   - flaky
@@ -32,7 +32,7 @@ Seen 2026-11-10 on ubu1 (TASK-320's branch at c8e4ff56, scripts/test.sh workspac
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -62,6 +62,8 @@ Seen 2026-11-10 on ubu1 (TASK-320's branch at c8e4ff56, scripts/test.sh workspac
 2026-11-14 (claude): root cause, a test race. After the drops the test tore the failpoint down and opened both images again; those mounts' and closes' commits start BUSY passes (grace 0, as often as one ends) on the bucket's collector. Whichever of them saw the clone's shutdown checkpoint (written as its uploader stops, before Remote's drop returns) deleted the last garbage, the reopening's own freed metadata and the held-up pass's compaction sources, so pass_now found nothing. Instrumented traces: in every failing run the last background pass deleted 2 objects and pass_now 0; in passing runs that pass ran before the checkpoint (skipped: 1) and pass_now deleted the 2. No product bug: the code promises no order between those passes and the test's pass alone.
 Not TASK-400/401: A/B on the Mac, concurrently, 20 runs each: 1e3253239 (before 85b163d62) 12/20 failed, 9c93d8d08 (after 9c93d8d08) 7/20. Not TASK-395.18/19 either: 3 of 6 failed on 2026-11-13, before 590941889. On main before the fix, 3/12 and 5/8 failed alone on the Mac. CI going red on both platforms in one run is that rate, not a new cause.
 Fix (17898693d): the passes stay held up through the reopening (the reopened images dropped as their passes run too: makes the failing order certain); the test holds the bucket's Collecting across it so those passes are counted (collected() waits for the running one); assert the passes after the drops, theirs plus one pass alone, deleted > 0; then collected_alone leaves nothing (TASK-390, as model_tests' end). Red without the fix: the old assertion under the held-up reopening failed 6/6. Green: 30/30 at load avg 43-50, then 20/20 beside the fxdax suite; fxdax suite 348/348 on macOS; clippy adds nothing in kept.rs; upstream-changes.py --check passes.
+
+2026-11-14, coordinator: main's CI green on efa48fa88 (run 43653116878): test (workspace) on Linux and macos (workspace) both pass, with this fix in.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
