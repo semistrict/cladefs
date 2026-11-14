@@ -28,6 +28,34 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage_device::ExtentId;
 
+/// fxdax: the bytes of a sector of an open segment, whose raw file is to be encrypted a sector at
+/// a time, AES-256-XTS, the sector its tweak (doc-16, TASK-411.5): which takes no reading,
+/// modifying and writing again only if what reaches the segment is whole sectors, at offsets in it
+/// and of lengths that are multiples of this (TASK-411.8).
+pub(crate) const SECTOR: u64 = 4096;
+
+/// fxdax: the error of `len` bytes at `offset` that are not whole sectors ([`SECTOR`]), going to
+/// the open segment: a write of an extent stored in segments, `offset` in the extent, as its seal
+/// copies it whole, from its start; or what a write, or a seal, takes of the segment, `offset` in
+/// it. Refused before anything is written (TASK-411.8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{len} bytes at {offset}: not whole sectors of {SECTOR} bytes, as an open segment takes")]
+pub struct Unsectored {
+    pub offset: u64,
+    pub len: u64,
+}
+
+impl Unsectored {
+    /// Fails unless `len` bytes at `offset` are whole sectors.
+    pub(crate) fn check(offset: u64, len: u64) -> Result<(), Self> {
+        if offset.is_multiple_of(SECTOR) && len.is_multiple_of(SECTOR) {
+            Ok(())
+        } else {
+            Err(Self { offset, len })
+        }
+    }
+}
+
 /// Where a segment the branch tracks is in its life.
 enum Phase<F> {
     /// Taking writes, in its raw file; fxdax: its commits recorded in its log, which the flushes
@@ -324,10 +352,12 @@ impl<F: File> Segments<F> {
 
     /// Reserves `len` bytes of the open segment for a write: the segment, its raw file, and where
     /// in it the write goes. The write is in progress until it is done: held
-    /// ([`Segments::held`]), or dropped ([`Segments::dropped`]).
-    pub fn reserve(&mut self, len: u64) -> (SegmentId, Arc<F>, u64) {
+    /// ([`Segments::held`]), or dropped ([`Segments::dropped`]). fxdax: refused, nothing reserved,
+    /// unless they are whole sectors ([`Unsectored`], TASK-411.8).
+    pub fn reserve(&mut self, len: u64) -> Result<(SegmentId, Arc<F>, u64), Unsectored> {
         let open = self.open;
-        self.change(open, |segment| {
+        Unsectored::check(self.tracked[&open].len, len)?;
+        Ok(self.change(open, |segment| {
             let Phase::Open { raw: file, .. } = &segment.phase else {
                 unreachable!("the open segment is open")
             };
@@ -337,7 +367,7 @@ impl<F: File> Segments<F> {
             segment.writers += 1;
             segment.pending += len;
             (open, file, at)
-        })
+        }))
     }
 
     /// A write of `len` bytes to segment `number` is done, and the segment holds what it wrote,
@@ -360,10 +390,12 @@ impl<F: File> Segments<F> {
     }
 
     /// Appends `len` bytes of an extent's data, sealed in one run, to the open segment, which
-    /// holds them: returns its raw file, and where in it they go.
-    pub fn append(&mut self, len: u64) -> (Arc<F>, u64) {
+    /// holds them: returns its raw file, and where in it they go. fxdax: refused, nothing appended,
+    /// unless they are whole sectors ([`Unsectored`], TASK-411.8).
+    pub fn append(&mut self, len: u64) -> Result<(Arc<F>, u64), Unsectored> {
+        Unsectored::check(self.tracked[&self.open].len, len)?;
         self.written = true;
-        self.change(self.open, |segment| {
+        Ok(self.change(self.open, |segment| {
             let Phase::Open { raw: file, .. } = &segment.phase else {
                 unreachable!("the open segment is open")
             };
@@ -372,7 +404,7 @@ impl<F: File> Segments<F> {
             segment.size += len;
             segment.live += len;
             (file, at)
-        })
+        }))
     }
 
     /// fxdax: what of segment `number`'s raw file to write back, a write to which, while it is open,
@@ -1769,7 +1801,7 @@ mod tests {
     use crate::layout::create_branch_dirs;
     use crate::{MemDir, MemFile};
 
-    const BLOCK: u64 = 4096;
+    const BLOCK: u64 = SECTOR;
     const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
@@ -1793,7 +1825,7 @@ mod tests {
 
     /// Writes a block of `byte`s to the open segment, which holds it, and returns its piece.
     fn write(segments: &mut Segments<MemFile>, byte: u8) -> Piece {
-        let (number, file, at) = segments.reserve(BLOCK);
+        let (number, file, at) = segments.reserve(BLOCK).unwrap();
         file.write_at(&[byte; BLOCK as usize], at).unwrap();
         segments.held(number, BLOCK);
         Piece { segment: number, offset: at, extent_offset: 0, len: BLOCK }
@@ -1861,6 +1893,21 @@ mod tests {
         drop(unframed);
     }
 
+    /// fxdax: the open segment takes whole sectors only: what is not is refused, the segment
+    /// unchanged, the next write going where it would have (TASK-411.8).
+    #[test]
+    fn open_segments_take_whole_sectors() {
+        let dir = MemDir::new();
+        let mut segments = opened(&dir, 64);
+        let refused = segments.reserve(SECTOR / 8).map(|_| ()).unwrap_err();
+        assert_eq!(refused, Unsectored { offset: 0, len: 512 });
+        let refused = segments.append(SECTOR + 1).map(|_| ()).unwrap_err();
+        assert_eq!(refused, Unsectored { offset: 0, len: 4097 });
+        assert_eq!(write(&mut segments, 1).offset, 0);
+        assert_eq!(segments.append(SECTOR).unwrap().1, SECTOR);
+        assert_eq!(segments.reserve(SECTOR).unwrap().2, 2 * SECTOR);
+    }
+
     /// Footers are stamped by the writer's chain the segments opened with, numbered on from it,
     /// each following the one before, of its writer's epoch, the next sequence number they name
     /// its floor at least; the segments are numbered on from the number they opened with, whatever
@@ -1897,14 +1944,14 @@ mod tests {
         let dir = MemDir::new();
         let mut segments = opened(&dir, 64);
         // Written, its write abandoned: no extent is in it.
-        let (number, ..) = segments.reserve(BLOCK);
+        let (number, ..) = segments.reserve(BLOCK).unwrap();
         segments.dropped(number, BLOCK);
         let empty = segments.close(&dir, 1, 0).unwrap();
         // Holding an extent.
         let held = write(&mut segments, 1);
         let holding = segments.close(&dir, 2, 0).unwrap();
         // A write in progress, which a closing between commits did not wait for.
-        let (writing, ..) = segments.reserve(BLOCK);
+        let (writing, ..) = segments.reserve(BLOCK).unwrap();
         let unwritten = segments.close(&dir, 3, 0).unwrap();
         let reap = |segments: &mut Segments<MemFile>| segments.reap();
         for (number, unframed) in [(0, empty), (1, holding), (2, unwritten)] {
@@ -2090,7 +2137,7 @@ mod tests {
         segments.close(&dir, 1, 0).unwrap();
         let dirs = vec![branch_dir(LOGS, BRANCH.id), branch_dir(OPEN_SEGMENTS, BRANCH.id)];
         assert_eq!(syncs(&mut segments), ((0, 1), dirs));
-        segments.append(BLOCK);
+        segments.append(BLOCK).unwrap();
         assert_eq!(syncs(&mut segments), ((0, 1), vec![]));
     }
 }

@@ -193,7 +193,9 @@ pub use host::{
 };
 pub use layout::{Description, Format, Place, Volume};
 pub use mem::{Io, MemDir, MemFile};
-pub use segments::{commits_spanning_segments, segment_closes, segments_framed_in_place};
+pub use segments::{
+    Unsectored, commits_spanning_segments, segment_closes, segments_framed_in_place,
+};
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
 pub use store::{

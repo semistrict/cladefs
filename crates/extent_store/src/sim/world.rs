@@ -155,8 +155,6 @@ impl Default for Profile {
     }
 }
 
-/// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
-/// of a few extents close, full, between commits.
 /// fxdax: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
 /// or a fork, is (TASK-364).
 fn sim_branch(id: u64) -> extent_remote::layout::Branch {
@@ -164,7 +162,10 @@ fn sim_branch(id: u64) -> extent_remote::layout::Branch {
     extent_remote::layout::Branch { cell, id }
 }
 
-const BLOCK: u64 = 512;
+/// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
+/// of a few extents close, full, between commits. fxdax: a sector of an open segment, the least
+/// it takes (`segments::SECTOR`, TASK-411.8); 512 bytes before.
+const BLOCK: u64 = crate::segments::SECTOR;
 
 /// How the hosts' stores keep their branches: in segments of a few extents, those of three blocks
 /// or more in objects of their own. No segment closes for its age, which the store's clock, not

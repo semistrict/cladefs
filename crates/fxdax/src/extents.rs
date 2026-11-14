@@ -39,7 +39,9 @@ use crate::store_dir;
 use extent_remote::cell::Kind;
 use extent_remote::layout::{Branch, Cell};
 use extent_remote::trace;
-use extent_store::{HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned};
+use extent_store::{
+    HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned, Unsectored,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -454,7 +456,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
-    } else if error.is::<Unaligned>() || error.is::<TooLong>() {
+    } else if error.is::<Unaligned>() || error.is::<Unsectored>() || error.is::<TooLong>() {
         Errno::EINVAL
     } else {
         log::error!("fxdax: extent store: {error:#}");
@@ -2203,7 +2205,7 @@ mod tests {
     #[test]
     fn each_store_error_has_its_errno() {
         let extent = ExtentId { branch: 1, sequence: 2 }.into();
-        let cases: [(anyhow::Error, Errno); 12] = [
+        let cases: [(anyhow::Error, Errno); 13] = [
             (extent_store::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
@@ -2213,6 +2215,7 @@ mod tests {
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),
             (Unaligned { offset: 1, len: 2 }.into(), Errno::EINVAL),
+            (Unsectored { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (TooLong { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (remote_data(extent).into(), Errno::EIO),
             (anyhow::anyhow!("the disk"), Errno::EIO),
