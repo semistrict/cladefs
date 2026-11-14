@@ -15,7 +15,9 @@ use crate::layout::{
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
 use crate::seals;
-use crate::segments::{self, Behind, Preparation, Preparing, Segments, Unframed, footer_last};
+use crate::segments::{
+    self, Behind, Preparation, Preparing, SECTOR, Segments, Unframed, Unsectored, footer_last,
+};
 use crate::shared::{Shared, SharedLock};
 use crate::state::{
     Framing, Gate, Life, Locked, OwnFiles, Placement, Readable, Reader, Space, Standing, State,
@@ -1347,6 +1349,11 @@ impl<D: Dir> Store<D> {
             };
             (grows, to_segment, overwrites)
         };
+        // fxdax: whole sectors, which the open segment takes, and its seal, copying it whole from
+        // its start, appends there (TASK-411.8): refused before the extent opens.
+        if to_segment {
+            Unsectored::check(offset, len)?;
+        }
         state.check_room(grows, overwrites)?;
         if to_segment {
             self.make_room(&mut state, len)?;
@@ -1367,7 +1374,7 @@ impl<D: Dir> Store<D> {
         let (file, file_offset, segment) = match placement {
             Placement::Own(file) => (file, offset, None),
             Placement::Segment => {
-                let (number, file, at) = state.segments.reserve(len);
+                let (number, file, at) = state.segments.reserve(len)?;
                 (file, at, Some(number))
             }
         };
@@ -2003,7 +2010,7 @@ impl<D: Dir> Store<D> {
                 self.prepare_next(state);
             }
             let open = state.segments.open_segment();
-            let (file, at) = state.segments.append(entry.len);
+            let (file, at) = state.segments.append(entry.len)?;
             file.write_at(data.as_slice(), at)?;
             written::wrote(written::Kind::Copied, data.as_slice().len());
             let pieces =
@@ -2828,7 +2835,8 @@ impl<D: Dir> Store<D> {
     /// fxdax: writes `len` bytes at `offset` in `extent`, as [`Store::write`] does, one write, but
     /// `piece` bytes at a time at most, each of which `fill(at, buf)` fills with the bytes at `at`
     /// of them: so that what a write holds of memory is a piece, whatever its length, which a VM
-    /// process names (TASK-149.17).
+    /// process names (TASK-149.17). Its pieces are whole sectors, one at least, as what reaches
+    /// the open segment is ([`SECTOR`], TASK-411.8).
     pub fn write_with(
         &self,
         extent: ExtentId,
@@ -2838,10 +2846,11 @@ impl<D: Dir> Store<D> {
         mut fill: impl FnMut(u64, &mut [u8]),
     ) -> Result<(), Error> {
         let write = self.begin_write(extent, offset, len)?;
-        let mut aligned = Aligned::new((len as usize).min(piece.max(1)));
+        let piece = (piece as u64 / SECTOR).max(1) * SECTOR;
+        let mut aligned = Aligned::new(len.min(piece) as usize);
         let mut at = 0;
         while at < len {
-            let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece as u64) as usize];
+            let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece) as usize];
             fill(at, buf);
             write.file().write_at(buf, write.offset() + at)?;
             at += buf.len() as u64;

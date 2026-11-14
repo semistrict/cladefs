@@ -11,7 +11,7 @@ use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_remote::wal::Fenced;
 use extent_store::{
     Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening, Options, Part,
-    Place, RemoteData, Spent, Store, TooLong, TooSmall,
+    Place, RemoteData, Spent, Store, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -3440,6 +3440,43 @@ fn io_ends_within_the_most_an_extent_holds() {
     // To its end, the most.
     store.write(extent(1), MAX_EXTENT - BLOCK as u64, &[1; BLOCK]).unwrap();
     assert_eq!(store.extents().unwrap(), [(extent(1), MAX_EXTENT)]);
+}
+
+/// fxdax: what goes to the open segment is whole sectors of 4 KiB, which it is to be encrypted in
+/// (doc-16, TASK-411.8): a write of an extent stored in segments at an offset, or of a length, that
+/// is not, though whole blocks of a store of smaller blocks, is refused, writing nothing; a large
+/// extent, in a file of its own, takes it.
+#[test]
+fn writes_to_segments_are_whole_sectors() {
+    let description = Description { block_size: 512, capacity: 1 << 30, branch: BRANCH };
+    let store = Store::create(MemDir::new(), description, OPTIONS).unwrap();
+    let refused = |offset: u64, len: usize| {
+        let error = store.write(extent(1), offset, &vec![1; len]).expect_err("succeeded");
+        (error.downcast_ref::<Unsectored>().copied(), error.to_string())
+    };
+    let message = |offset, len| {
+        format!(
+            "{len} bytes at {offset}: not whole sectors of 4096 bytes, as an open segment takes"
+        )
+    };
+    let at = Unsectored { offset: 512, len: BLOCK as u64 };
+    assert_eq!(refused(512, BLOCK), (Some(at), message(512, BLOCK)));
+    let of = Unsectored { offset: 0, len: BLOCK as u64 + 512 };
+    assert_eq!(refused(0, BLOCK + 512), (Some(of), message(0, BLOCK + 512)));
+    assert_eq!(store.extents().unwrap(), []);
+    // Whole sectors go where the first would have, at the open segment's start.
+    store.write(extent(1), 0, &[1; BLOCK]).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(
+        store.place(extent(1)).unwrap(),
+        Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
+    );
+    // Large, in a file of its own: not a segment's.
+    let large = OPTIONS.large_extent as usize + 512;
+    store.write(extent(2), 0, &vec![2; large]).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Own));
+    assert_eq!(read(&store, extent(2), 0, large), vec![2; large]);
 }
 
 /// What is read past an extent's end, or where nothing was written, reads as zeros, whatever the
