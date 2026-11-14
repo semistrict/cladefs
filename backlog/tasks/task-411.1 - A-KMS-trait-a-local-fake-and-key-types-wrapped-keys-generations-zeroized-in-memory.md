@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 19:04'
+updated_date: '2026-11-14 19:16'
 labels: []
 dependencies: []
 documentation:
@@ -39,3 +39,9 @@ Every later step of doc-16 wraps or unwraps keys. Real KMS providers come later 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+kms module (commit cba47aed3, branch worktree-agent-aae1193f67894a793): Kms trait (async wrap/unwrap by tenant u64), kms::Error naming the tenant (NoSuchTenant, Exists, Revoked, Destroyed, Unauthentic, Io), LocalKms file-backed fake (create/rotate/revoke/unrevoke/destroy/versions, KEK files 0600, dirs 0700), wrapped format: 'fxkw' | 1 | tenant u64 BE | KEK version u32 BE | AES-KW (57 bytes), wrapping key HKDF(KEK version, info = header). testing::Counted behind feature 'testing'. 21 extent_keys tests pass on macOS. Open: no retiring of single old KEK versions (all kept until destroy).
+<!-- SECTION:NOTES:END -->
