@@ -330,7 +330,7 @@ mod tests {
         let watch = Watch { started: Instant::now() - 3 * REFRESH, ..Watch::new() };
         watch.hold_marking(true);
         assert!(watch.take_refresh(TEST_CELL));
-        let segment = layout::segment(test_branch(1), 2);
+        let segment = layout::segment(test_branch(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
         watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
@@ -348,7 +348,7 @@ mod tests {
     #[test]
     fn marks_held_are_of_their_object() {
         let watch = Watch::new();
-        let segment = layout::segment(test_branch(1), 2);
+        let segment = layout::segment(test_branch(1), 2, 1);
         let of = meta(&layout::marks(TEST_CELL, 7), "a");
         let marked = vec![Marked::of(&meta(&segment, "s"))];
         watch.hold(TEST_CELL, Some((&of, Marks { epoch: 7, grace: 0, marked })));
@@ -360,9 +360,9 @@ mod tests {
                 .is_some_and(|held| held.keys.contains(key))
         };
         assert!(held(&segment));
-        assert!(!held(&layout::segment(test_branch(1), 3)));
+        assert!(!held(&layout::segment(test_branch(1), 3, 1)));
         let other = Cell { tenant: 1, id: 2 };
-        let elsewhere = layout::segment(layout::Branch { cell: other, id: 1 }, 2);
+        let elsewhere = layout::segment(layout::Branch { cell: other, id: 1 }, 2, 1);
         assert!(!held(&elsewhere));
         assert_eq!(
             [

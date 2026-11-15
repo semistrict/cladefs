@@ -90,8 +90,7 @@ fn lists_and_deletes_branches() {
 
 /// fxdax: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
 /// it reclaims the branch's segments its checkpoint covers, which hold no live extent (the one
-/// holding what it freed, the one freeing it), but its fence, which it keeps (TASK-371), and lists
-/// the branch.
+/// holding what it freed, the one freeing it), and lists the branch.
 #[test]
 fn collects_a_file_bucket() {
     use extent_remote::batch::{Batch, Commit};
@@ -120,7 +119,8 @@ fn collects_a_file_bucket() {
     });
     // The two segments a pass deletes, and their bytes.
     let at = "tenants/0000000000000001/cells/0000000000000001";
-    let doomed = [1, 2].map(|seq| format!("{at}/segments/0000000000000001/{seq:016x}"));
+    let doomed =
+        [0, 1].map(|seq| format!("{at}/segments/0000000000000001/0000000000000001.{seq:016x}"));
     let bytes: u64 = futures::executor::block_on(async {
         use extent_remote::Bucket as _;
         let listed = Store::from_url(&url).unwrap().list("").await.unwrap();
@@ -153,12 +153,11 @@ fn collects_a_file_bucket() {
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000000001/cells/0000000000000001";
     let branch = "0000000000000001";
-    // The writer's fence too, which a writer taken over must find (TASK-371).
+    // Its head, which names its checkpoint (TASK-407).
     let kept = [
         format!("{at}/branches/{branch}"),
-        format!("{at}/checkpoints/{branch}/0000000000000002"),
-        format!("{at}/leases/{branch}"),
-        format!("{at}/segments/{branch}/0000000000000000"),
+        format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
+        format!("{at}/heads/{branch}"),
     ];
     assert_eq!(left, kept);
     let out = gc(&[&url, "--branches"]);
@@ -212,10 +211,10 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let before = files();
     let out = gc(&[&url, "--dry-run", "--grace", "0"]);
     let branch = "0000000000000001";
-    let segment =
-        |seq: u64| format!("tenants/{branch}/cells/{branch}/segments/{branch}/{seq:016x}");
-    // Not the fence, which the collector keeps (TASK-371).
-    let (fence, holding, freeing) = (segment(0), segment(1), segment(2));
+    let segment = |seq: u64| {
+        format!("tenants/{branch}/cells/{branch}/segments/{branch}/0000000000000001.{seq:016x}")
+    };
+    let (holding, freeing) = (segment(0), segment(1));
     let listed = String::from_utf8_lossy(&out.stdout).into_owned();
     let sizes: Vec<&str> = listed.lines().map(|line| line.split(' ').nth(2).unwrap()).collect();
     let expected: String = [&holding, &freeing]
@@ -251,7 +250,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         )
     );
     let names: Vec<String> = files().into_iter().map(|(name, _)| name).collect();
-    for key in [&fence, &holding, &freeing] {
+    for key in [&holding, &freeing] {
         assert!(names.contains(key), "{key} marked, deleted");
     }
     assert!(names.contains(&marks), "{names:?}");
@@ -275,11 +274,10 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         // The word that the bucket is marked, which an operator removes with the marks.
         extent_remote::layout::MARKING.to_owned(),
         format!("{at}/branches/{branch}"),
-        format!("{at}/checkpoints/{branch}/0000000000000002"),
+        format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
         format!("{at}/gc/lease"),
         marks,
-        format!("{at}/leases/{branch}"),
-        fence,
+        format!("{at}/heads/{branch}"),
     ];
     assert_eq!(names, kept);
 }
@@ -347,8 +345,8 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let (did, slowest) = said.split_at(said.find("fxdax-gc: took").unwrap());
     assert_eq!(
         did,
-        "fxdax-gc: cell 1/1: deleted 2 (396 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\nfxdax-gc: deleted 2 (396 bytes), compacted 0 (0 bytes), retired 0 \
+        "fxdax-gc: cell 1/1: deleted 2 (362 bytes), compacted 0 (0 bytes), retired 0 references, \
+         in T s; requests: R\nfxdax-gc: deleted 2 (362 bytes), compacted 0 (0 bytes), retired 0 \
          references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\n"
     );
@@ -443,8 +441,10 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         tenant_b[1].clone(),
     ];
     assert_eq!(out, expected);
-    // What the pass deleted is gone from it: the first cell's segments the checkpoint covers.
-    assert_eq!(out[0]["kinds"]["segment"]["objects"], 1, "{}", out[0]);
+    // What the pass deleted is gone from it: the first cell's segments the checkpoint covers, all
+    // of them, its head naming none after it (TASK-407).
+    assert_eq!(out[0]["kinds"]["segment"], Value::Null, "{}", out[0]);
+    assert_eq!(out[0]["kinds"]["head"]["objects"], 1, "{}", out[0]);
     assert_eq!(out[0]["kinds"]["gc-lease"]["objects"], 1, "{}", out[0]);
     assert_eq!(lines(&gc(&[&url, "--usage", "--tenant", "b"])), tenant_b);
     let after = futures::executor::block_on(bucket.list("")).unwrap();

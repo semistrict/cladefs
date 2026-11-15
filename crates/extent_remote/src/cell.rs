@@ -386,7 +386,7 @@ mod tests {
         let keys = [
             layout::cell(cells[2]),
             layout::record(branch(cells[0], 4)),
-            layout::segment(branch(cells[0], 4), 0),
+            layout::segment(branch(cells[0], 4), 0, 1),
             layout::gc_lease(cells[1]),
             layout::objectid_block(1),
         ];

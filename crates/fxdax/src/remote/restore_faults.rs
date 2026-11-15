@@ -159,7 +159,7 @@ impl Hosts {
         let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
         let written = keys.iter().filter(|meta| match layout::kind(&meta.key) {
             Kind::Segment { branch, .. } | Kind::Checkpoint { branch, .. } => branch == self.point,
-            Kind::Lease { branch } => branch == self.point && !self.deleted.load(Ordering::SeqCst),
+            Kind::Head { branch } => branch == self.point && !self.deleted.load(Ordering::SeqCst),
             _ => false,
         });
         let written: Vec<_> = written.map(|meta| &meta.key).collect();
@@ -417,9 +417,10 @@ impl Hosts {
                         record.is_some_and(|record| !record.deleted)
                     })
                 }
-                // fxdax: a block of object IDs taken stays for good (TASK-364), and a reference's
-                // mark, retired or taken back (TASK-395.13).
-                Kind::GcLease { .. }
+                // fxdax: a block of object IDs taken stays for good (TASK-364), a reference's
+                // mark, retired or taken back (TASK-395.13), and every branch's head (TASK-407).
+                Kind::Head { .. }
+                | Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Retired { .. } => false,

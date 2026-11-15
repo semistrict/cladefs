@@ -747,7 +747,7 @@ mod tests {
         let left = block_on(sizes(&*bucket));
         let leases = cells.iter().map(|&cell| layout::gc_lease(cell));
         let deleted =
-            |key: &&String| matches!(layout::kind(key), layout::Kind::Segment { seq: 1..=2, .. });
+            |key: &&String| matches!(layout::kind(key), layout::Kind::Segment { seq: 0..=1, .. });
         let kept: BTreeSet<String> =
             (before.keys().filter(|key| !deleted(key)).cloned()).chain(leases).collect();
         assert_eq!(left.keys().cloned().collect::<BTreeSet<_>>(), kept);

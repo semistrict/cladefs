@@ -18,7 +18,10 @@ pub(crate) fn newest(bucket: &Bucket, branch: crate::Branch) -> Option<u64> {
     let prefix = extent_remote::layout::checkpoints(branch);
     let listed = futures::executor::block_on(extent_remote::Bucket::list(bucket, &prefix));
     (listed.unwrap().iter())
-        .filter_map(|meta| u64::from_str_radix(meta.key.strip_prefix(&prefix)?, 16).ok())
+        .filter_map(|meta| match extent_remote::layout::kind(&meta.key) {
+            extent_remote::layout::Kind::Checkpoint { seq, .. } => Some(seq),
+            _ => None,
+        })
         .max()
 }
 

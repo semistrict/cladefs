@@ -12,9 +12,10 @@
 //! what it found to what it writes (TASK-160.14).
 
 use crate::bucket::{self, Bucket, Created, Object, Updated};
-use crate::layout::{self, Branch, Cell, Child, Kind as Key, Lease, Origin};
+use crate::layout::{self, Branch, Cell, Child, Head, Kind as Key, Origin};
 use crate::record::{Kind, Record};
-use crate::recovery::{self, Recovered, State, recover};
+use crate::recovery::{self, recover_from};
+use crate::head;
 use crate::{Error, rules};
 use futures::StreamExt as _;
 use serde::Serialize;
@@ -443,10 +444,10 @@ pub async fn share(bucket: &impl Bucket, point: Branch, shared: bool) -> Result<
     .await
 }
 
-/// Whether no writer has `branch`: it has no lease, or its deletion's.
+/// Whether no writer has `branch`: it has no head, or its deletion's.
 async fn unwritten(bucket: &impl Bucket, branch: Branch) -> Result<bool, Error> {
-    let epoch = lease_epoch(bucket, &layout::lease(branch)).await?;
-    Ok(epoch == 0 || epoch == Lease::FINAL)
+    let epoch = head::epoch(bucket, branch).await?;
+    Ok(epoch == 0 || epoch == Head::FINAL)
 }
 
 /// Whether recovering `branch`, whose record is `record`, failing, what it names gone
@@ -483,104 +484,19 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: Branch) -> Result<Recor
     .await
 }
 
-/// Takes the lease at `key`, of the epoch after its last, as `holder`, which must differ from every
-/// other taking's, of the placement whose fencing token is `token`. Fails for a deleted branch's,
-/// and for one a later placement took, whose token is higher ([`Error::Stale`]): a placement cut
-/// off takes no branch back from the one after it (TASK-39.7).
-pub async fn take_lease(
-    bucket: &impl Bucket,
-    key: &str,
-    holder: u64,
-    token: u64,
-) -> Result<u64, Error> {
-    taking(bucket, key, Start::Read, holder, token).await
-}
-
-/// The lease at `key` as a read finds it, for a taking of it after ([`take_lease_from`]).
-pub struct LeaseRead(Option<Object>);
-
-/// Reads the lease at `key` for a taking of it after ([`take_lease_from`]), as with other reads a
-/// taking needs, at once (TASK-165.11).
-pub async fn read_lease(bucket: &impl Bucket, key: &str) -> LeaseRead {
-    LeaseRead(bucket::get(bucket, key).await)
-}
-
-/// Takes the lease at `key` as [`take_lease`] does, starting from `read`, what a read of it before
-/// found ([`read_lease`]), rather than reading it again: its write is conditional on what `read`
-/// found, so that another's taking since, which changed it, is read and gone on from, as after a
-/// read of its own. A round trip less, on a real bucket, for every opening of a store
-/// (TASK-165.11).
-pub async fn take_lease_from(
-    bucket: &impl Bucket,
-    key: &str,
-    read: LeaseRead,
-    holder: u64,
-    token: u64,
-) -> Result<u64, Error> {
-    taking(bucket, key, Start::Found(read.0), holder, token).await
-}
-
-/// Takes the lease at `key` as [`take_lease`] says, starting from `start`.
-async fn taking(
-    bucket: &impl Bucket,
-    key: &str,
-    start: Start,
-    holder: u64,
-    token: u64,
-) -> Result<u64, Error> {
-    transition(bucket, key, start, Lease::decode, |found| {
-        let epoch = match found {
-            None => 1,
-            Some(lease) if lease.epoch == Lease::FINAL => return Err(Error::Deleted),
-            Some(lease) if rules().tokens && lease.token > token => return Err(Error::Stale),
-            Some(lease) => lease.epoch + 1,
-        };
-        Ok(Step::Write(Lease { epoch, holder, token }, epoch))
-    })
-    .await
-}
-
-/// The epoch of the lease at `key`: 0 if there is none.
-pub async fn lease_epoch(bucket: &impl Bucket, key: &str) -> Result<u64, Error> {
-    Ok(lease(bucket, key).await?.map_or(0, |lease| lease.epoch))
-}
-
-/// The lease at `key`, if there is one.
-pub async fn lease(bucket: &impl Bucket, key: &str) -> Result<Option<Lease>, Error> {
-    match bucket::get(bucket, key).await {
-        Some(object) => Ok(Some(Lease::decode(&object.bytes)?)),
-        None => Ok(None),
-    }
-}
-
-/// Whether the lease at `key` is still the taking of epoch `epoch` by `holder`: its epoch alone
-/// may be another taking's, as a deleted branch's lease the collector removed and a taking created
-/// again, at epoch 1, before finding the branch deleted (TASK-179).
-pub async fn holds_lease(
-    bucket: &impl Bucket,
-    key: &str,
-    epoch: u64,
-    holder: u64,
-) -> Result<bool, Error> {
-    let lease = lease(bucket, key).await?;
-    Ok(lease.is_some_and(|lease| {
-        lease.epoch == epoch && (lease.holder == holder || !rules().leases_by_takings)
-    }))
-}
-
 /// Deletes `branch`, as `holder`, of the placement whose fencing token is `token`: no writer takes
-/// it again, the one it has stops at its next acknowledgement, no segment lands in it past the
-/// deletion's fence ([`fence_deleted`]), and the collector reclaims what no other branch inherited
-/// from it. Deleting it again does nothing, though the collector reclaimed that since. Fails for a
-/// branch a later placement took, whose token is higher ([`Error::Stale`]), leaving it as it was:
-/// a placement cut off deletes no branch from under the one after it (TASK-45.1).
+/// it again, the one it has stops at its next swap of the head, and the collector reclaims what no
+/// other branch inherited from it. Deleting it again does nothing, though the collector reclaimed
+/// that since. Fails for a branch a later placement took, whose token is higher ([`Error::Stale`]),
+/// leaving it as it was: a placement cut off deletes no branch from under the one after it
+/// (TASK-45.1).
 pub async fn delete(
     bucket: &impl Bucket,
     branch: Branch,
     holder: u64,
     token: u64,
 ) -> Result<(), Error> {
-    end_lease(bucket, branch, holder, token).await?;
+    let ended = end_head(bucket, branch, holder, token).await?;
     failpoint!("branch::lease_ended");
     // A fork's child before its record, or no branch: either way none is, from now, unless its
     // record came meanwhile. Its owner the deletion's, which no other's is.
@@ -595,13 +511,10 @@ pub async fn delete(
     let Some(record) = found.filter(|record| !record.deleted) else { return Ok(()) };
     // Its children get their records, so that the collector finds them without its state. A fork
     // of a point still being made has none, and may name what is gone; so may a claim, with
-    // neither a writer nor a child, if it does.
+    // neither a writer nor a child, if it does. Recovered from the head it ended, which nothing
+    // swaps after: every deletion of it finds the same forks (TASK-183).
     if record.forking().is_none() {
-        let forks = match recover(bucket, branch, record.origin()).await {
-            // A point, which no writer has, needs no fence.
-            Ok(recovered) if rules().deletions_fence && !record.is_point() => {
-                fence_deleted(bucket, recovered).await?.forks
-            }
+        let forks = match recover_from(bucket, branch, record.origin(), Some(ended)).await {
             Ok(recovered) => recovered.state.forks,
             // Deleted meanwhile, by another deletion, which gave its children their records: what
             // recovering it needs, the collector may have reclaimed since (TASK-178).
@@ -613,16 +526,6 @@ pub async fn delete(
             Err(Error::Lost(_)) if lost_is_ok(bucket, branch, &record).await? => Vec::new(),
             Err(error) => return Err(error),
         };
-        // Deleted since its record was read, by another deletion, which gave the children of the
-        // forks before its fence their records: done. A pass may have deleted that fence since,
-        // with what no live branch needed, and a writer's segment, taken over, landed where it
-        // was: what this recovery found past it, the forks of that segment, whose children would
-        // name what the pass deleted, the extents it stores on their own (TASK-380). Read once
-        // the recovery is fenced: found live, that fence was there for all it read.
-        if rules().deletions_reread && self::record(bucket, branch).await?.is_none_or(|r| r.deleted)
-        {
-            return Ok(());
-        }
         for fork in &forks {
             let origin = Origin { parent: branch, at: fork.at };
             let child = Child { branch: fork.child, owner: fork.owner, point: fork.point };
@@ -647,49 +550,25 @@ pub async fn delete(
     mark_deleted(bucket, branch).await
 }
 
-/// The state of a branch being deleted that `recovered` found, fenced, as [`delete`] fences it: an
-/// empty segment of the final epoch at its end, as a writer taking the branch over puts its fence
-/// ([`recovery::fence`]); a segment landed there first, of a writer that never acknowledged it,
-/// applied, and the fence after it. Every segment landing after follows none of the branch's, so
-/// that every deletion of it finds the forks this one does, and gives their children their records
-/// before the branch is marked deleted, as the collector, reading it deleted, relies on: a second
-/// deletion, of a placement cut off or the latest one's again, recovering past a fork's segment
-/// landed after this one marked the branch deleted, would record the fork's child after a pass let
-/// go of what it needs (TASK-183).
-async fn fence_deleted(bucket: &impl Bucket, recovered: Recovered) -> Result<State, Error> {
-    let Recovered { mut state, mut end, .. } = recovered;
-    while recovery::fence(bucket, &mut state, Lease::FINAL, end).await?.is_some() {
-        end += 1;
-    }
-    Ok(state)
-}
-
-/// Ends `branch`'s lease, as [`delete`] does first: its final epoch, which no writer takes, as
+/// Ends `branch`'s head, as [`delete`] does first: its final epoch, which no writer takes, as
 /// `holder` of the placement whose fencing token is `token`, unless a later placement took it
-/// ([`Error::Stale`]).
-async fn end_lease(
+/// ([`Error::Stale`]). Returns it, ended: what it names, kept.
+async fn end_head(
     bucket: &impl Bucket,
     branch: Branch,
     holder: u64,
     token: u64,
-) -> Result<(), Error> {
-    let key = layout::lease(branch);
-    let found = bucket::get(bucket, &key).await;
+) -> Result<Head, Error> {
+    let read = head::read(bucket, branch).await;
     // fxdax: ended already, by this deletion or another, whatever placement's: deletions are
     // idempotent. Else the token is resolved by the branch's cell (TASK-364).
-    if let Some(object) = &found
-        && Lease::decode(&object.bytes)?.epoch == Lease::FINAL
+    if let Some(found) = read.head()?
+        && found.epoch == Head::FINAL
     {
-        return Ok(());
+        return Ok(found);
     }
     let token = deleting_token(bucket, branch, token).await?;
-    let lease = Lease { epoch: Lease::FINAL, holder, token: u64::MAX };
-    transition(bucket, &key, Start::Found(found), Lease::decode, |found| match found {
-        Some(found) if found.epoch == Lease::FINAL => Ok(Step::Stop(())),
-        Some(found) if rules().delete_tokens && found.token > token => Err(Error::Stale),
-        _ => Ok(Step::Write(lease, ())),
-    })
-    .await
+    head::end(bucket, branch, read, holder, token).await
 }
 
 /// fxdax: the token a deletion by the placement of `token` ends `branch`'s lease with, as its
@@ -781,7 +660,7 @@ pub async fn delete_fork(
             // checkpoint at the fork point, which is what its recovery reads of the parent there
             // (TASK-395.4), as [`record_fork`] writes it: what is going since the parent's branch
             // was found holding the segment, as a pass takes it, reads as not held, as there.
-            let held = match recovery::holds(bucket, origin.parent, origin.at).await? {
+            let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
                 true if origin.parent.cell != child.cell => {
                     match recovery::checkpoint_at(bucket, origin.parent, origin.at).await {
                         Ok(()) => true,
@@ -810,7 +689,7 @@ pub async fn delete_fork(
         return delete_found(taken).await;
     }
     failpoint!("branch::claimed");
-    end_lease(bucket, child, holder, token).await?;
+    end_head(bucket, child, holder, token).await?;
     failpoint!("branch::claim_lease_ended");
     if live {
         mark_deleted(bucket, child).await?;
@@ -883,9 +762,8 @@ mod tests {
             let deleted = block_on(delete_fork(&*bucket, test_branch(child), origin, owner, 9, 0));
             assert_eq!(deleted, Ok(false), "{child}");
             assert_eq!(live(test_branch(child)), Some(true), "{child}");
-            let lease =
-                block_on(take_lease(&*bucket, &layout::lease(test_branch(child)), 10 + child, 0));
-            assert_eq!(lease, Ok(1), "{child}");
+            let taken = block_on(head::take(&*bucket, test_branch(child), 10 + child, 0));
+            assert_eq!(taken.map(|held| held.head.epoch), Ok(1), "{child}");
         }
     }
 
@@ -1108,7 +986,7 @@ mod tests {
                 assert_eq!(make(&bucket, 0x11), "Ok(())", "{first}");
                 let made = |bucket: &Direct| {
                     let record = block_on(record(bucket, test_branch(child))).unwrap();
-                    (record, block_on(lease_epoch(bucket, &layout::lease(test_branch(child)))))
+                    (record, block_on(head::epoch(bucket, test_branch(child))))
                 };
                 let before = made(&bucket);
                 assert_eq!(again(&bucket, 0x12), *another, "{second} after {first}");
@@ -1144,8 +1022,7 @@ mod tests {
                         && !self.raced.swap(true, Ordering::SeqCst)
                     {
                         create(&self.bucket, self.child, 0).await.unwrap();
-                        let lease = layout::lease(self.child);
-                        take_lease(&self.bucket, &lease, 7, 0).await.unwrap();
+                        head::take(&self.bucket, self.child, 7, 0).await.unwrap();
                     }
                     got
                 }
@@ -1209,9 +1086,8 @@ mod tests {
         );
         let record = block_on(record(&racing.bucket, test_branch(3))).unwrap();
         assert_eq!(record, Some(Kind::Root.of(0)));
-        let lease = block_on(bucket::get(&racing.bucket, &layout::lease(test_branch(3)))).unwrap();
-        let lease = Lease::decode(&lease.bytes).unwrap();
-        assert_eq!((lease.epoch, lease.holder), (1, 7), "the other branch's lease");
+        let head = block_on(head::get(&racing.bucket, test_branch(3))).unwrap().unwrap();
+        assert_eq!((head.epoch, head.holder), (1, 7), "the other branch's head");
     }
 
     /// TASK-79.82: a parent whose state names a fork to an ID another branch took is deleted all
@@ -1264,7 +1140,7 @@ mod tests {
             let origin = Origin { parent: test_branch(1), at: 1 };
             let lost = "branch 1/1/3: what its recovery starts from keeps going".to_owned();
             assert_eq!(
-                recover(&*bucket, test_branch(3), Some(origin)).await.map(drop),
+                crate::recovery::recover(&*bucket, test_branch(3), Some(origin)).await.map(drop),
                 Err(Error::Lost(lost))
             );
 
@@ -1292,25 +1168,25 @@ mod tests {
             let claim = Kind::Claim(origin).of(0);
             let (key, bytes) = (layout::record(test_branch(5)), layout::encode(&claim));
             assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created));
-            take_lease(&*bucket, &layout::lease(test_branch(5)), 11, 0).await.unwrap();
+            head::take(&*bucket, test_branch(5), 11, 0).await.unwrap();
             let lost = "branch 1/1/5: what its recovery starts from keeps going".to_owned();
             assert_eq!(collect(&*bucket, 3, &NOW).await, Err(Error::Lost(lost)));
             assert_eq!(record(&*bucket, test_branch(5)).await, Ok(Some(claim)));
         });
     }
 
-    /// A branch deleted, before it had a record, has a deleted one, and takes no lease again.
+    /// A branch deleted, before it had a record, has a deleted one, and its head is taken no more.
     #[test]
-    fn deleted_branches_take_no_lease() {
+    fn deleted_branches_take_no_head() {
         let bucket = Direct(SimBucket::new());
-        let lease = layout::lease(test_branch(3));
-        assert_eq!(block_on(take_lease(&bucket, &lease, 1, 0)).unwrap(), 1);
+        let taken = block_on(head::take(&bucket, test_branch(3), 1, 0)).unwrap();
+        assert_eq!(taken.head.epoch, 1);
         block_on(delete(&bucket, test_branch(3), 2, 0)).unwrap();
         let record = block_on(record(&bucket, test_branch(3))).unwrap();
         // Of the deletion's owner, its holder's, which no other's is.
         let deleted = Record { deleted: true, ..Kind::Own.of(2) };
         assert_eq!(record, Some(deleted));
-        let taken = block_on(take_lease(&bucket, &lease, 3, 0));
+        let taken = block_on(head::take(&bucket, test_branch(3), 3, 0));
         assert!(matches!(taken, Err(Error::Deleted)), "{taken:?}");
     }
 
@@ -1349,7 +1225,7 @@ mod tests {
             let origin = Origin { parent: test_branch(1), at };
             let lost = "branch 1/1/2: what its recovery starts from keeps going".to_owned();
             assert_eq!(
-                recover(&*bucket, test_branch(2), Some(origin)).await.map(drop),
+                crate::recovery::recover(&*bucket, test_branch(2), Some(origin)).await.map(drop),
                 Err(Error::Lost(lost))
             );
 

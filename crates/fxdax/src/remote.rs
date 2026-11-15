@@ -442,7 +442,7 @@ mod tests {
         // What the store holds ends far below: the guest looks for what a crash left there only.
         assert!(info.next_sequence < 1 << extent_remote::EPOCH_SHIFT, "{info:?}");
         let keys = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, "")).unwrap();
-        // Its fence, and nothing more.
+        // No segment more: the store takes the branch by its head alone.
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
@@ -450,7 +450,7 @@ mod tests {
                     extent_remote::layout::Kind::Segment { .. }
                 ))
                 .count(),
-            segments + 1
+            segments
         );
         write(&store, 5, &pattern(5, BLOCK));
         store.commit(None).unwrap();
@@ -459,10 +459,11 @@ mod tests {
         assert_eq!(root, Some(b"second".to_vec()));
     }
 
-    /// doc-7, Fencing: a writer whose create fails on an earlier writer's segment, landed late where
-    /// its own was to go, takes the branch again, which keeps its guest. A store taking a branch
-    /// over from a writer still uploading, two segments of it in flight, the second landing past the
-    /// fence, where the store's first goes, commits on.
+    /// doc-7, The head: a store taking a branch over from a writer still uploading, two segments
+    /// of it in flight, commits on. The writer's segments land at keys naming its epoch, which the
+    /// store's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and the
+    /// store keeps its lease. Before (TASK-407), its late segment landed where the store's first
+    /// went, and the store took the branch again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use extent_remote::{Batch, Commit, Writer};
@@ -484,19 +485,19 @@ mod tests {
         let path = dir.path().join("store");
         made_for(&path, branch, &bucket);
         let store = reopened(&path, idle()).unwrap();
-        // The second lands, past the fence, void, where the store's first goes; the first finds
-        // the fence at its place.
+        // Both land, the second first, at keys of the writer's epoch; its head swap fails.
         futures::executor::block_on(async {
             before.upload(seqs[1]).await.unwrap();
-            assert_eq!(before.upload(seqs[0]).await, Err(extent_remote::Error::Fenced));
+            before.upload(seqs[0]).await.unwrap();
+            assert_eq!(before.acknowledge().await, Err(extent_remote::Error::Fenced));
         });
-        // The store's writer, displaced, takes the branch again, and its commit is the branch's.
+        // The store's commit is the branch's, its lease as it was.
         write(&store, 1, &pattern(1, BLOCK));
         let epoch = store.remote().unwrap().status().unwrap().lease.unwrap().epoch;
         let committed = store.commit(Some(b"after"));
         let remote = store.remote().unwrap();
         assert_eq!((committed, remote.failed()), (Ok(()), None));
-        assert_eq!(remote.status().unwrap().lease.unwrap().epoch, epoch + 1);
+        assert_eq!(remote.status().unwrap().lease.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
         assert_eq!(uploaded(&bucket, branch), after);
     }
@@ -561,7 +562,7 @@ mod tests {
                 .map(|meta| meta.key)
                 .collect();
         let moves = extent_remote::layout::moves(&extent_remote::layout::segments(branch)).unwrap();
-        let first = extent_remote::layout::segment(branch, 1);
+        let first = extent_remote::layout::segment(branch, 0, 1);
         assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
         assert!(!keys.contains(&first), "{keys:?}");
         // The host dies: its disk copied as it is, its cache not, its store cut off.
@@ -757,8 +758,7 @@ mod tests {
 
     /// TASK-165.9: a store whose bucket was out of reach holds its commits in its write-ahead log,
     /// segments the commits closed, which upload once it is in reach again, in order, each the
-    /// object its file is, after the writer's fence; what the commits made, and the root, the
-    /// branch has then. (Before, a store attaching uploaded what its branch lacked in batches.)
+    /// object its file is; what the commits made, and the root, the branch has then. (Before, a store attaching uploaded what its branch lacked in batches.)
     #[test]
     fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
@@ -782,7 +782,7 @@ mod tests {
         store.wait_uploaded().unwrap();
         let footers = footers(&bucket, branch);
         let commits: Vec<_> = footers.iter().map(|footer| footer.contents.commits.len()).collect();
-        assert_eq!(commits, [0, 1], "the fence, then the segment of the commits");
+        assert_eq!(commits, [1], "the segment of the commits");
         assert_eq!(uploaded(&bucket, branch), (written, Some(b"root 3".to_vec())));
     }
 
@@ -1077,13 +1077,8 @@ mod tests {
         // The first, restarted, takes it back no more: its token is the earlier.
         let refused = reopened(&first_path, idle()).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ESTALE));
-        let lease = futures::executor::block_on(extent_remote::Bucket::get(
-            &*bucket,
-            &extent_remote::layout::lease(branch),
-        ));
-        let lease: extent_remote::layout::Lease =
-            extent_remote::layout::decode(&lease.unwrap().bytes).unwrap();
-        assert_eq!(lease.token, 2);
+        let head = futures::executor::block_on(extent_remote::head::get(&*bucket, branch));
+        assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
         ExtentStore::place(&first_path, 3).unwrap();
@@ -1134,11 +1129,8 @@ mod tests {
         let options = extent_store::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let lease = futures::executor::block_on(extent_remote::Bucket::get(
-            &*bucket,
-            &extent_remote::layout::lease(store.branch()),
-        ));
-        let lease = extent_remote::layout::Lease::decode(&lease.unwrap().bytes).unwrap();
+        let lease = futures::executor::block_on(extent_remote::head::get(&*bucket, store.branch()));
+        let lease = lease.unwrap().unwrap();
         // fxdax: its cell taken with the host's token, its branch's lease with the cell's epoch
         // (TASK-364).
         let cell = extent_remote::cell::read(&*bucket, store.branch().cell);
@@ -1217,6 +1209,9 @@ mod tests {
         SegmentsFrom(u64),
         /// The write of the object at this key.
         Key(String),
+        /// The first write of the object at this key, those after it while it waits going on: a
+        /// takeover's of a branch's head, its writer's swaps of it meanwhile not (TASK-407).
+        First(String),
     }
 
     impl Hold {
@@ -1233,7 +1228,7 @@ mod tests {
                 Hold::SegmentsFrom(from) => {
                     matches!(kind(key), Kind::Segment { seq, .. } if seq >= *from)
                 }
-                Hold::Key(held) => held == key,
+                Hold::Key(held) | Hold::First(held) => held == key,
             }
         }
     }
@@ -1461,7 +1456,9 @@ mod tests {
                 return self.mishap(armed, location, payload, opts).await;
             }
             let key = location.as_ref();
-            if !self.hold.borrow().holds(key) {
+            let after_first = matches!(&*self.hold.borrow(), Hold::First(_))
+                && self.held.load(std::sync::atomic::Ordering::Relaxed) > 0;
+            if !self.hold.borrow().holds(key) || after_first {
                 return self.reached().put_opts(location, payload, opts).await;
             }
             let mut hold = self.hold.subscribe();
@@ -1674,8 +1671,8 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
         let branch = store.branch();
-        // The writer's fence is segment 0; the commits' are 1 to 4.
-        gated.hold.send_replace(Hold::SegmentsFrom(1));
+        // The commits' segments are 0 to 3.
+        gated.hold.send_replace(Hold::Segments);
         let waiting: Vec<_> = (1..=extent_store::upload::IN_FLIGHT as u64)
             .map(|sequence| {
                 let committing = store.clone();
@@ -1692,18 +1689,17 @@ mod tests {
         store.commit_ordered(None).unwrap();
         // The first lands alone: its commit is acknowledged; then the rest.
         let mut waiting = waiting.into_iter();
-        gated.hold.send_replace(Hold::SegmentsFrom(2));
+        gated.hold.send_replace(Hold::SegmentsFrom(1));
         assert_eq!(waiting.next().unwrap().join().unwrap(), Ok(()));
         gated.hold.send_replace(Hold::Nothing);
         for commit in waiting {
             assert_eq!(commit.join().unwrap(), Ok(()));
         }
-        // The store's segments closed, in the bucket: those of the commits waiting, and the
-        // writer's fence.
+        // The store's segments closed, in the bucket: those of the commits waiting.
         let prefix = extent_remote::layout::segments(branch);
         let closed = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
-        assert_eq!(closed.len(), extent_store::upload::IN_FLIGHT + 1);
+        assert_eq!(closed.len(), extent_store::upload::IN_FLIGHT);
         store.wait_uploaded().unwrap();
         let (extents, _) = uploaded(&bucket, branch);
         let sequences: Vec<_> = extents.iter().map(|(sequence, _)| *sequence).collect();
@@ -1915,12 +1911,12 @@ mod tests {
     }
 
     /// TASK-165.11: a durable commit, as a guest's sync makes one, costs the bucket what doc-7's
-    /// Uploads and Fencing say it needs: the create of the segment its commit closes, which
-    /// acknowledges it, its create the fencing (TASK-371: it was followed by a read of the lease,
-    /// a second round trip); nothing else, as no checkpoint is due and no fork made. On GCS each
-    /// request is a round trip (GCE r740: a guest's fdatasync about 130 ms with the read).
+    /// The head say it needs: the create of the segment its commit closes, then the swap of the
+    /// branch's head that names it, which acknowledges it (TASK-407: before, the create alone, the
+    /// fencing; TASK-371: before that, a read of the lease after it); nothing else, as no
+    /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
-    fn durable_commits_cost_their_segments_create() {
+    fn durable_commits_cost_a_create_and_a_head_swap() {
         use extent_remote::store::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
@@ -1943,7 +1939,7 @@ mod tests {
                 ("head", 0),
                 ("list", 0),
                 ("create", 1),
-                ("update", 0),
+                ("update", 1),
                 ("overwrite", 0),
                 ("delete", 0),
                 ("list-delimited", 0),
@@ -1961,7 +1957,7 @@ mod tests {
         let lost =
             kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = lost.branch();
-        // Its writer's fence, then a segment of a MiB for each commit, uploaded as it is durable.
+        // A segment of a MiB for each commit, uploaded as it is durable.
         for sequence in 1..=4 {
             write(&lost, sequence, &noise(sequence, 1 << 20));
             lost.commit(None).unwrap();
@@ -1983,32 +1979,30 @@ mod tests {
                 .into_iter()
                 .map(|meta| (meta.key, meta.size))
                 .collect();
-        let tails: u64 = (0..=4)
-            .map(|seq| sizes[&layout::segment(branch, seq)].min(extent_remote::object::TAIL))
+        let tails: u64 = (0..4)
+            .map(|seq| sizes[&layout::segment(branch, seq, 1)].min(extent_remote::object::TAIL))
             .sum();
-        let (record, lease) = (sizes[&layout::record(branch)], sizes[&layout::lease(branch)]);
+        let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
         let cell = sizes[&layout::cell(branch.cell)];
-        // The record, before the lease and after; fxdax: its cell's object, held, read alone, its
-        // holder's as it was and naming the branch (TASK-364); the lease, taken, and read again
-        // once the fence is in. The segments' tails: one, then two, then four at once, the last two past the
-        // end; and the first past the end again, once the lease is taken. The checkpoints listed
-        // as each of those finds the end, and the segments as the fence goes in.
+        // The record, before the head and after; fxdax: its cell's object, held, read alone, its
+        // holder's as it was and naming the branch (TASK-364); the head, read, then swapped to
+        // take it. The segments' tails it names, all at once: no listing (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
                     ("get", 5),
-                    ("get-range", 8),
+                    ("get-range", 4),
                     ("head", 0),
-                    ("list", 4),
-                    ("create", 1),
+                    ("list", 0),
+                    ("create", 0),
                     ("update", 1),
                     ("overwrite", 0),
                     ("delete", 0),
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + 2 * lease + cell
+                tails + 2 * record + 2 * head + cell
             )
         );
         let mut data = vec![0; 1 << 20];
@@ -2151,14 +2145,14 @@ mod tests {
     }
 
     /// Opens the store at `path`, whose bucket's objects `gated` reaches, the write of its branch's
-    /// lease held until `meanwhile` ran.
+    /// head that takes it held until `meanwhile` ran.
     fn open_racing(
         path: std::path::PathBuf,
         gated: &Arc<Gated>,
         branch: crate::Branch,
         meanwhile: impl FnOnce(),
     ) -> Result<ExtentStore, crate::Error> {
-        gated.hold.send_replace(Hold::Key(extent_remote::layout::lease(branch)));
+        gated.hold.send_replace(Hold::First(extent_remote::layout::head(branch)));
         let opening = std::thread::spawn(move || reopened(path, idle()));
         gated.wait_held(1);
         meanwhile();
@@ -2519,9 +2513,9 @@ mod tests {
         let branch = parent.branch();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        // The fork's segment, after the writer's fence and the commit's, lands after the next.
-        let segment = |seq| extent_remote::layout::segment(branch, seq);
-        let (forking, next) = (segment(2), segment(3));
+        // The fork's segment, after the commit's, lands after the next.
+        let segment = |seq| extent_remote::layout::segment(branch, seq, 1);
+        let (forking, next) = (segment(1), segment(2));
         gated.hold.send_replace(Hold::Key(forking));
         let child = crate::host_store::fork_child(branch);
         let fork = {
@@ -2733,19 +2727,19 @@ mod tests {
         let parents = futures::executor::block_on(recover(&*bucket, parent.branch(), None));
         let forks = parents.unwrap().state.forks;
         let forks: Vec<_> = forks.iter().map(|fork| (fork.child, fork.at, fork.point)).collect();
-        assert_eq!(forks, [(child, 2, false)]);
+        assert_eq!(forks, [(child, 1, false)]);
     }
 
-    /// TASK-165.7: a fork whose host crashed as its segment uploaded leaves no store of its child
-    /// here, the store being made only once the bucket has the child's record: the directory it
-    /// began at the fork's path is no store, and goes as one left unmade. The segment, landing
-    /// late, is the fork, which stands (doc-14): the parent's next writer gives the child its
+    /// TASK-165.7: a fork whose host crashed as its parent's head swapped to name its segment
+    /// leaves no store of its child here, the store being made only once the bucket has the
+    /// child's record: the directory it began at the fork's path is no store, and goes as one left
+    /// unmade. The swap, landing late, is the fork, which stands (doc-14): the parent's next writer gives the child its
     /// record, and a store naming the child, made anywhere, takes what it inherited. Before, the
     /// fork's handle, a store of the child's at once, took no branch of its own while the segment
     /// might land, but took its parent's branch itself, through markers naming the fork
     /// (TASK-79.72), and gave the child its record from the parent's state (TASK-79.20).
     #[test]
-    fn forks_whose_host_crashed_stand_once_their_segment_lands() {
+    fn forks_whose_host_crashed_stand_once_their_heads_swap_lands() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -2772,7 +2766,7 @@ mod tests {
         );
         futures::executor::block_on(next).unwrap();
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
-        let origin = extent_remote::layout::Origin { parent: branch, at: 2 };
+        let origin = extent_remote::layout::Origin { parent: branch, at: 1 };
         assert_eq!(record.map(|record| record.origin()), Some(Some(origin)));
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(child)), &bucket, idle());
         let taken = taken.unwrap();
@@ -2781,11 +2775,11 @@ mod tests {
         let extent = ExtentId { branch: branch.id, sequence: 1 };
         taken.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert_eq!(data, pattern(1, BLOCK));
-        // The crashed host's fork, its writer reaching the bucket no more, fails, finding nothing
-        // at its path, and deletes nothing there.
+        // The crashed host's fork, its writer reaching the bucket no more, fails, its next swap of
+        // the head refused, as a dead host's finds the branch taken (its copy holds the head at
+        // another version), and deletes nothing there.
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
-        let unmade = format!("forking to branch {child}: making its store");
-        assert_eq!((forked, path.exists()), (Err(unmade), false));
+        assert_eq!((forked, path.exists()), (taken_over(child), false));
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(|record| record.deleted), Some(false));
     }
@@ -2836,32 +2830,26 @@ mod tests {
 
     /// A fork that fails once its segment landed, its parent's writer taken over before it
     /// acknowledged it (TASK-79.72): the parent, in `dir`, reaches the bucket, `memory`, through
-    /// `gated`; its next writer takes its branch through a gate of its own, `next`, whose fence
-    /// waits for the fork's segment, which it goes after, until it is let go. The parent holds an
-    /// extent in a segment and one stored on its own, [`FailedFork::OWN`], which the child
-    /// inherits.
+    /// `gated`, which holds the fork's segment while its next writer takes its branch, swapping
+    /// its head (TASK-407): the fork's segment, landing then, is no head's, and the parent's
+    /// writer's swap fails. The parent holds an extent in a segment and one stored on its own,
+    /// [`FailedFork::OWN`], which the child inherits.
     struct FailedFork {
         memory: Arc<dyn object_store::ObjectStore>,
         gated: Arc<Gated>,
-        next: Arc<Gated>,
         branch: crate::Branch,
         child: crate::Branch,
     }
-
-    /// A writer taking a branch, in a thread of its own: what it gives.
-    type Taking = std::thread::JoinHandle<Result<(), extent_remote::Error>>;
 
     impl FailedFork {
         /// The parent's extent stored on its own.
         const OWN: u64 = 2;
 
-        /// Forks the parent to a handle in `dir`, the fork's segment held, and the next writer,
-        /// taking the parent's branch, waiting for it: the fork, waiting for the segment, and the
-        /// next writer, in threads of their own.
-        fn new(dir: &std::path::Path) -> (Self, Forking, Taking) {
+        /// Forks the parent to a handle in `dir`, the fork's segment held, and the next writer
+        /// takes the parent's branch: the fork, waiting for the segment in a thread of its own.
+        fn new(dir: &std::path::Path) -> (Self, Forking) {
             let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-            let (gated, next) = (Gated::over(memory.clone()), Gated::over(memory.clone()));
-            let (gated, next) = (Arc::new(gated), Arc::new(next));
+            let gated = Arc::new(Gated::over(memory.clone()));
             let parent = Arc::new(
                 kept_in(
                     dir.join("parent"),
@@ -2875,27 +2863,19 @@ mod tests {
             write(&parent, 1, &pattern(1, BLOCK));
             write(&parent, Self::OWN, &pattern(2, (4 << 20) as usize));
             parent.commit(Some(b"root")).unwrap();
-            let forking = extent_remote::layout::segment(branch, 2);
-            gated.hold.send_replace(Hold::Key(forking.clone()));
-            next.hold.send_replace(Hold::Key(forking));
+            let forking = extent_remote::layout::segment(branch, 1, 1);
+            gated.hold.send_replace(Hold::Key(forking));
             let child = crate::host_store::fork_child(branch);
             let fork = {
                 let path = dir.join("child");
                 std::thread::spawn(move || parent.fork_to(path, child))
             };
             gated.wait_held(1);
-            let taking = {
-                let bucket = Arc::new(Bucket::new(next.clone(), ""));
-                let taking = extent_remote::Writer::open(
-                    bucket,
-                    branch,
-                    3,
-                    crate::host_store::token().unwrap(),
-                );
-                std::thread::spawn(move || futures::executor::block_on(taking).map(drop))
-            };
-            next.wait_held(1);
-            (Self { memory, gated, next, branch, child }, fork, taking)
+            let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+            let token = crate::host_store::token().unwrap();
+            futures::executor::block_on(extent_remote::Writer::open(bucket, branch, 3, token))
+                .unwrap();
+            (Self { memory, gated, branch, child }, fork)
         }
 
         /// Lands the fork's segment, after which the parent's writer finds its branch taken, and
@@ -2918,59 +2898,61 @@ mod tests {
 
     /// A fork that failed, its writer taken over once the fork's segment landed, before it
     /// acknowledged it, leaves its child no branch in object storage, as it leaves it no handle:
-    /// the child's branch there is deleted, so that the parent's next writer, recording the fork,
-    /// finds it deleted, and the collector keeps nothing the child inherited for it.
+    /// the child's branch there is deleted from the first, as the parent's head never names the
+    /// fork's segment (TASK-407), and the collector keeps nothing the child inherited for it.
     #[test]
     fn forks_failed_once_their_segment_landed_leave_their_child_no_branch() {
         let dir = tempfile::tempdir().unwrap();
-        let (failed, fork, taking) = FailedFork::new(dir.path());
+        let (failed, fork) = FailedFork::new(dir.path());
         failed.land(Hold::Nothing);
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
         let handle = dir.path().join("child");
         assert_eq!((forked, handle.exists()), (taken_over(failed.child), false));
-        failed.next.hold.send_replace(Hold::Nothing);
-        assert_eq!(taking.join().unwrap(), Ok(()));
 
-        // TASK-79.82: its deletion gave it the record its fork would first, naming the fork.
-        let origin = extent_remote::layout::Origin { parent: failed.branch, at: 2 };
+        // TASK-79.82: its deletion gave it the record its fork would first, naming the fork:
+        // deleted, as its parent's branch holds no fork.
+        let origin = extent_remote::layout::Origin { parent: failed.branch, at: 1 };
         // Of the fork's owner, which its footer names.
         let owner = failed.record().unwrap().owner;
         let deleted = extent_remote::record::Record {
             deleted: true,
-            ..extent_remote::record::Kind::Claim(origin).of(owner)
+            ..extent_remote::record::Kind::Fork(origin).of(owner)
         };
         assert_eq!(failed.record(), Some(deleted));
         let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.branch, None));
-        let fork = extent_remote::layout::Fork { child: failed.child, at: 2, point: false, owner };
-        assert_eq!(parents.unwrap().state.forks, [fork]);
+        assert_eq!(parents.unwrap().state.forks, []);
     }
 
     /// TASK-79.78: a fork that failed whose deletion in object storage is refused changes nothing
-    /// there, and leaves nothing here: here a later placement takes the child's branch as the
-    /// deletion's first write, of its lease, goes, so that the deletion, as this host's placement,
-    /// refuses (`ESTALE`): the parent's next writer gives the child its record, live, the later
-    /// placement's. Before, the fork's handle stayed, naming the branch, and its store held it
-    /// here; now a child's store is made only once its fork is (TASK-165.7).
+    /// there, and leaves nothing here. Here its parent's head names it, and its child has its
+    /// record, live, when its store is not made, its path gone; and a later placement takes the
+    /// child's branch as the deletion's first write, of the child's head, goes, so that the
+    /// deletion, as this host's placement, refuses (`ESTALE`): the child's record stays live, the
+    /// later placement's. Before, the fork's handle stayed, naming the branch, and its store held
+    /// it here; now a child's store is made only once its fork is (TASK-165.7).
     #[test]
     fn forks_failed_whose_deletion_is_refused_leave_their_branch_to_its_placement() {
         let dir = tempfile::tempdir().unwrap();
-        let (failed, fork, taking) = FailedFork::new(dir.path());
-        let lease = extent_remote::layout::lease(failed.child);
-        failed.land(Hold::Key(lease.clone()));
-        failed.gated.wait_held(1);
-        let later =
-            futures::executor::block_on(branch::take_lease(&*failed.bucket(), &lease, 5, 5));
-        assert_eq!(later, Ok(1));
-        failed.gated.hold.send_replace(Hold::Nothing);
-        let forked = fork.join().unwrap().map_err(|err| err.to_string());
+        let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let gated = Arc::new(Gated::over(memory.clone()));
+        let bucket = Arc::new(Bucket::new(memory, ""));
         let path = dir.path().join("child");
-        assert_eq!((forked, path.exists()), (taken_over(failed.child), false));
-        failed.next.hold.send_replace(Hold::Nothing);
-        assert_eq!(taking.join().unwrap(), Ok(()));
+        let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
+        crate::ExtentStore::delete(&path, None).unwrap();
+        gated.hold.send_replace(Hold::Key(extent_remote::layout::head(child)));
+        gated.wait_went(1);
+        gated.wait_held(1);
+        let later = futures::executor::block_on(extent_remote::head::take(&*bucket, child, 5, 5));
+        assert_eq!(later.map(|held| held.head.epoch), Ok(1));
+        gated.hold.send_replace(Hold::Nothing);
+        let forked = fork.join().unwrap().map_err(|err| err.to_string());
+        let unmade = format!("forking to branch {child}: making its store");
+        assert_eq!((forked, path.exists()), (Err(unmade), false));
 
-        let origin = extent_remote::layout::Origin { parent: failed.branch, at: 2 };
-        let live = extent_remote::record::Kind::Claim(origin).of(0);
-        assert_eq!(failed.record().map(unowned), Some(live));
+        let origin = extent_remote::layout::Origin { parent: branch, at: 1 };
+        let live = extent_remote::record::Kind::Fork(origin).of(0);
+        let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
+        assert_eq!(record.map(unowned), Some(live));
     }
 
     /// The record of a branch no fork made, its store's own, of no parent, but for its owner
@@ -3039,8 +3021,9 @@ mod tests {
     }
 
     /// A parent attached to the bucket through `gated`, in `dir`, holding an extent and a root,
-    /// and its fork to a child whose handle is `path`, waiting in a thread of its own for the
-    /// fork's segment, which `gated` holds: the parent's branch and the child.
+    /// and its fork to a child whose handle is `path`, waiting in a thread of its own for the swap
+    /// of the parent's head that names the fork's segment, which `gated` holds: the parent's
+    /// branch and the child.
     fn forking_held(
         dir: &std::path::Path,
         gated: &Arc<Gated>,
@@ -3058,7 +3041,7 @@ mod tests {
         let branch = parent.branch();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        gated.hold.send_replace(Hold::Key(extent_remote::layout::segment(branch, 2)));
+        gated.hold.send_replace(Hold::Key(extent_remote::layout::head(branch)));
         let child = crate::host_store::fork_child(branch);
         let fork = {
             let path = path.to_owned();

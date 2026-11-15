@@ -225,9 +225,8 @@ impl World {
                         && block_on(branch::create(&*bucket, child, 0)).is_ok()
                     {
                         taken.store(true, Ordering::SeqCst);
-                        let lease = layout::lease(child);
-                        let leased = branch::take_lease(&*bucket, &lease, rand::random(), TOKEN);
-                        assert_eq!(block_on(leased), Ok(1));
+                        let taking = extent_remote::head::take(&*bucket, child, rand::random(), TOKEN);
+                        assert_eq!(block_on(taking).map(|held| held.head.epoch), Ok(1));
                     }
                 })
             }
@@ -433,7 +432,6 @@ impl World {
                 Kind::Segment { branch, .. }
                 | Kind::Checkpoint { branch, .. }
                 | Kind::Extent { branch, .. } => !kept(branch),
-                Kind::Lease { branch } => !kept(branch),
                 // fxdax: no reference stays: the branch that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
@@ -444,8 +442,10 @@ impl World {
                             .is_some_and(|record| record.deleted && !record.may_drop())
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
-                // retired or taken back (TASK-395.13).
-                Kind::GcLease { .. }
+                // retired or taken back (TASK-395.13), and every branch's head, a deleted one's
+                // final, fencing its writers (TASK-407).
+                Kind::Head { .. }
+                | Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
                 | Kind::Retired { .. }
@@ -634,8 +634,8 @@ fn each_write_of_a_failed_forks_cleanup_going_wrong() {
     }));
 }
 
-/// TASK-79.78: a fork whose segment landed, its host lost with its disk before anything came of
-/// it, is an orphan: a live branch no host holds, once the parent's next writer, elsewhere, gives
+/// TASK-79.78: a fork its parent's head names, its host lost with its disk before anything else
+/// came of it, is an orphan: a live branch no host holds, once the parent's next writer, elsewhere, gives
 /// it its record. The collector keeps what it inherited, though its parent freed it, as it cannot
 /// tell it from a branch held idle; an operator finds it among the live branches, as `fxdax-gc
 /// --branches` does, and deletes it, whichever placement took it last, as `--delete-branch` does;
@@ -645,7 +645,7 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     host();
     let mut world = World::new();
     let large = world.held.last().unwrap().0;
-    let _ = world.fork(&[Fault::Dies("writer::uploaded")]);
+    let _ = world.fork(&[Fault::Dies("writer::acknowledged")]);
     assert!(world.dead.load(Ordering::SeqCst), "the host lives");
 
     let moved = world.temp.path().join("moved");

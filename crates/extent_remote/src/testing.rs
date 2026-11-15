@@ -591,7 +591,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut pending = BTreeSet::new();
     for (&branch, record) in &records {
         let key = layout::record(branch);
-        // Deleted branches' records stay (TASK-174).
+        // Deleted branches' records stay (TASK-174), and every branch's head, a deleted one's
+        // final, which fences its writers (TASK-407).
+        needed.insert(layout::head(branch));
         if record.deleted {
             if !record.may_drop() {
                 needed.insert(key);
@@ -599,7 +601,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             continue;
         }
         needed.insert(key);
-        needed.insert(layout::lease(branch));
+        needed.insert(layout::head(branch));
         let (origin, point): (Option<Origin>, bool) = match record.kind {
             Made::Root | Made::Own => (None, false),
             Made::Fork(origin) | Made::Claim(origin) | Made::Forking { origin, .. } => {
@@ -610,6 +612,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let Ok(recovered) = crate::recovery::recover(bucket, branch, origin).await else {
             continue;
         };
+        let (epoch, end, checkpoint) = (recovered.epoch(), recovered.end(), recovered.checkpoint());
         // Its forks to other cells, whose children may have no references yet.
         for fork in &recovered.state.forks {
             if fork.child.cell != branch.cell {
@@ -620,19 +623,20 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         touched.extend(recovered.touched.iter().cloned());
         needed.extend(recovered.touched);
         // Its writer may name its extents anywhere on their ways from where they were sealed,
-        // unless its state is from a checkpoint of the writer holding its lease (TASK-175).
-        let lease = crate::branch::lease_epoch(bucket, &layout::lease(branch)).await.ok();
-        let behind = lease != recovered.checkpointer;
-        // Its pins, where a writer taken over or taking it over may still create (TASK-388).
-        match crate::collector::pinned(&recovered.state, lease.unwrap_or(0)) {
-            crate::collector::Pinned::All => {
-                let prefix = layout::segments(branch);
-                needed.extend(keys.iter().filter(|key| key.starts_with(&prefix)).cloned());
+        // unless its state is from a checkpoint of the writer holding its head (TASK-175).
+        let behind = checkpoint.is_none_or(|(_, by)| by != epoch);
+        // What its head may yet name: of its epoch, or a later one, its segments and extents of
+        // their own at or past its end, and its checkpoints newer than its own (TASK-407).
+        needed.extend(keys.iter().filter(|key| match layout::kind(key) {
+            layout::Kind::Segment { branch: of, seq, epoch: by }
+            | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
+                of == branch && by >= epoch && seq >= end
             }
-            crate::collector::Pinned::Only(pinned) => {
-                needed.extend(pinned.iter().map(|&seq| layout::segment(branch, seq)));
+            layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
+                of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
             }
-        }
+            _ => false,
+        }).cloned());
         for (&extent, location) in &recovered.state.extents {
             needed.insert(location.key.clone());
             named.entry(location.key.clone()).or_default().insert(extent, location.len);
@@ -775,9 +779,9 @@ mod tests {
     fn held_creates_wait_for_objects_at_their_keys_to_be_deleted() {
         let bucket = SimBucket::new();
         bucket.hold(test_branch(2), 1);
-        let key = layout::segment(test_branch(2), 4);
+        let key = layout::segment(test_branch(2), 4, 1);
         let footer =
-            layout::Chain::new(test_branch(2), 1, 4, None, 0).close(layout::Contents::default());
+            layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
         let stale = layout::Segment { data: Vec::new(), footer }.encode();
         let created = bucket.put(&key, stale.into(), PutMode::Create);
         assert_eq!(bucket.waiting(), 0);

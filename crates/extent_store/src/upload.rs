@@ -51,7 +51,7 @@ use extent_remote::fetch::Budget;
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
-use extent_remote::wal::Fenced;
+use extent_remote::wal::Taken;
 use extent_remote::{Body, Objects, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
@@ -818,7 +818,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             Err(err) => return started.send(Err(err)).unwrap(),
         };
         // A point's store has nothing to upload.
-        let Some(mut writer) = writer else {
+        let Some(writer) = writer else {
             while !self.progress.lock().unwrap().stop {
                 self.wake.notified().await;
             }
@@ -853,13 +853,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 let gathered = blocking(|| self.gather(&writer, &mut in_flight, closing));
                 let gathered = match gathered {
                     Ok(gathered) => gathered,
-                    Err(err) => match self.after(err, &bucket).await {
-                        Ok(taken) => {
-                            (writer, in_flight, more) = (taken, InFlight::default(), true);
-                            continue;
-                        }
-                        Err(err) => return self.fail(&writer, err),
-                    },
+                    Err(err) => return self.fail(&writer, err),
                 };
                 // Done with once closed; the segments the store had closed taking the room, it
                 // closes the next time.
@@ -895,13 +889,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 Err(err) => Err(err.into()),
             };
             if let Err(err) = acked {
-                match self.after(err, &bucket).await {
-                    Ok(taken) => {
-                        (writer, in_flight, more) = (taken, InFlight::default(), true);
-                        continue;
-                    }
-                    Err(err) => return self.fail(&writer, err),
-                }
+                return self.fail(&writer, err);
             }
             segments += 1;
             if segments % self.options.checkpoint_every == 0 {
@@ -939,11 +927,10 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     ) -> Result<Option<Arc<Writer<B>>>, Failure> {
         let branch = recovering.branch();
         let cache = self.options.cache.clone();
-        // The record, and the lease the writer takes after recovering the branch, at once: the
+        // The record, and the head the writer takes after recovering the branch, at once: the
         // taking goes on from this read of it, a round trip less (TASK-165.11).
-        let lease = extent_remote::layout::lease(branch);
-        let leased = branch::read_lease(&**bucket, &lease);
-        let (found, lease) = futures::join!(record(&**bucket, branch), leased);
+        let (found, read) =
+            futures::join!(record(&**bucket, branch), extent_remote::head::read(&**bucket, branch));
         let found = match found? {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
@@ -957,7 +944,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
             Some(record) if record.is_point() => {
                 let state = self.point(bucket, branch, record).await?;
-                let opening = Opening { state, fenced: None, cache };
+                let opening = Opening { state, taken: None, cache };
                 let store = blocking(|| recovering.open(options, opening))?;
                 let _ = self.store.set(Arc::new(store));
                 let mut progress = self.progress.lock().unwrap();
@@ -967,10 +954,10 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
             Some(record) => {
                 let recovered = extent_remote::recover(&**bucket, branch, record.origin()).await?;
-                let last = recovered.state.last_commit;
                 // Where the writer's chain would go: the log's restamping, not looked at here.
-                let chain = Chain::new(branch, 0, recovered.end, recovered.state.last_segment, 0);
-                let found = Fenced { recovered: last, last_commit: last, chain };
+                let chain = Chain::new(branch, 0, recovered.end(), 0);
+                let head = recovered.head.clone().unwrap_or_default();
+                let found = Taken::of(head, &recovered.state, chain);
                 if !recovering.follows(&found) {
                     return Err(extent_remote::Error::Diverged.into());
                 }
@@ -1001,12 +988,12 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let writer = match found {
             None => Writer::open(bucket.clone(), branch, holder, token).await?,
             Some((record, recovered)) => {
-                let found = (recovered, lease);
+                let found = (recovered, read);
                 Writer::open_recovered_from(bucket.clone(), record, found, holder, token).await?
             }
         };
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
-        let opening = Opening { state: writer.state(), fenced: Some(writer.fenced()), cache };
+        let opening = Opening { state: writer.state(), taken: Some(writer.taken().clone()), cache };
         let store = blocking(|| recovering.open(options, opening))?;
         let _ = self.store.set(Arc::new(store));
         let _ = self.token.set(token);
@@ -1036,40 +1023,6 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         }
         drop(progress);
         self.changed.notify(usize::MAX);
-    }
-
-    /// What uploading goes on with after `err`: if its writer was displaced, an earlier writer's
-    /// segment, landed late past its fence, where its own was to go, a writer taking the branch
-    /// again ([`Shared::retake`]); else `err`, which stops it.
-    async fn after(&self, err: Failure, bucket: &Arc<B>) -> Result<Arc<Writer<B>>, Failure> {
-        match err {
-            Failure::Remote(extent_remote::Error::Displaced) => self.retake(bucket).await,
-            err => Err(err),
-        }
-    }
-
-    /// Takes the branch again, its writer displaced (doc-7, Fencing; TASK-204): a writer of a lease
-    /// of its own fences the branch past every segment landed, and the store's write-ahead log goes
-    /// after the branch's end ([`Store::rebase`]), what of it landed acknowledged, the rest stamped
-    /// anew, which the new writer uploads. The guest's commits wait for it, none lost: the late
-    /// segment follows none of the branch's, void, and the branch's last commit is the store's own
-    /// or the one its log goes on from. Fails as opening a store does: `Diverged` if another
-    /// writer's commits moved the branch past the log, fenced if a later writer has it.
-    async fn retake(&self, bucket: &Arc<B>) -> Result<Arc<Writer<B>>, Failure> {
-        let store = self.store().clone();
-        let branch = store.description().branch;
-        let record = record(&**bucket, branch).await?.ok_or(extent_remote::Error::NoBranch)?;
-        let recovered = extent_remote::recover(&**bucket, branch, record.origin()).await?;
-        let token = *self.token.get().expect("a writer took the branch before");
-        let holder = self.holder();
-        let writer =
-            Writer::open_recovered(bucket.clone(), record, recovered, holder, token).await?;
-        let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
-        let fenced = writer.fenced();
-        blocking(|| store.rebase(&fenced))?;
-        log::warn!("fxdax: branch {branch} displaced, taken again at epoch {}", writer.epoch());
-        self.took(&writer, token);
-        Ok(writer)
     }
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
@@ -1342,9 +1295,8 @@ mod tests {
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
         let root = cell::Volume { branch: BRANCH.id, kind: cell::Kind::Fxfs };
         assert_eq!(object.volumes, std::collections::BTreeMap::from([("root".to_owned(), root)]));
-        let key = extent_remote::layout::lease(BRANCH);
-        let lease = runtime.block_on(branch::lease(&*bucket, &key)).unwrap().unwrap();
-        assert_eq!((lease.epoch, lease.token), (1, 1));
+        let head = runtime.block_on(extent_remote::head::get(&*bucket, BRANCH)).unwrap().unwrap();
+        assert_eq!((head.epoch, head.token), (1, 1));
 
         store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
@@ -1850,7 +1802,7 @@ mod shuttle_tests {
             let listed = listed_while_forking();
             extent_remote::set_rules(all);
             let extent = "ExtentId { branch: 8, sequence: 1099511627776 }";
-            let segment = extent_remote::layout::segment(CHILD, 1);
+            let segment = extent_remote::layout::segment(CHILD, 0, 1);
             let lost =
                 format!("branch {CHILD}: {extent} reads Err(Lost(\"{extent} in {segment}\"))");
             assert_eq!(listed, Err(lost));

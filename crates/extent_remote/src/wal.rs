@@ -8,44 +8,50 @@
 //! writer's name is the log's; one leaves it once acknowledged.
 //!
 //! A writer taking the branch over, here after a crash or elsewhere, puts the log after the
-//! branch's end ([`Wal::rebase`]), by commits: the log keeps its base, the branch's last commit
-//! before its first segment, and the branch's last commit, after the writer's fence, says how far
-//! the log landed. If it is one of the log's, the log's segments to it are the branch's; if it is
-//! that one, or the base, the rest are stamped again on the new writer's chain, after its fence;
-//! fxdax: if it ends in a segment of the log's going on with the log's next commit, that segment's
-//! continuation is stamped again too, alone, before the rest (TASK-345); otherwise another
-//! writer's commits moved the branch on, and the log diverged
-//! ([`Error::Diverged`]): its commits, never acknowledged, are lost once `fxdaxctl take` drops it.
-//! By commits, not by the footers recovery read: a checkpoint covering the log's segments, landed,
-//! or a fence alone coming after them, takes nothing from the guest (TASK-165.2).
+//! branch's end ([`Wal::rebase`]), as the head it took names it (doc-7, The head; TASK-407), by
+//! commits: the log keeps its base, the branch's last commit before its first segment, and the
+//! branch's last commit says how far the log landed. If it is one of the log's, the log's segments
+//! to it are the branch's; if it is that one, or the base, the rest are stamped again on the new
+//! writer's chain, after the head's end; otherwise another writer's commits moved the branch on,
+//! and the log diverged ([`Error::Diverged`]): its commits, never acknowledged, are lost once
+//! `fxdaxctl take` drops it. By commits, not by the keys the head names: a log stamped again on a
+//! writer's chain is kept so in memory alone (TASK-165.9), a crash after finding it stamped as
+//! before, at the keys of none of what landed. A head names a writer's segments only between its
+//! commits, so that the log keeps a commit whole until the branch has it whole.
 
-use crate::layout::{Chain, Contents, Footer};
+use crate::layout::{Branch, Chain, Footer, Head};
 use crate::{Error, rules};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 
-/// Where a writer taking a branch over found the branch's end ([`Writer::fenced`]): its last commit
-/// as recovery found it, and after the writer's fence, which applied what landed at the end
-/// meanwhile; and the writer's chain then, where its first segment goes. What a host's log is put
-/// after ([`Wal::rebase`]).
+/// What a writer taking a branch over found ([`Writer::taken`]): the head as it took it, what it
+/// names, the branch's segments; the branch's last commit, and the forks it holds, by their
+/// children and owners; and the writer's chain then, where its first segment goes, at the head's
+/// end. What a host's log is put after ([`Wal::rebase`]).
 ///
-/// [`Writer::fenced`]: crate::Writer::fenced
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Fenced {
-    pub recovered: Option<u64>,
+/// [`Writer::taken`]: crate::Writer::taken
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Taken {
+    pub head: Head,
     pub last_commit: Option<u64>,
+    pub forks: BTreeSet<(Branch, u64)>,
     pub chain: Chain,
+}
+
+impl Taken {
+    /// What a writer whose chain is `chain` found taking a branch whose head is `head`, `state` the
+    /// branch's state as it names it.
+    pub fn of(head: Head, state: &crate::State, chain: Chain) -> Self {
+        let forks = state.forks.iter().map(|fork| (fork.child, fork.owner)).collect();
+        Self { head, last_commit: state.last_commit, forks, chain }
+    }
 }
 
 /// What putting a host's log after the end of a branch took out of it ([`Wal::rebase`]).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Rebased<T> {
-    /// The segments the branch holds, landed, by their footers, with what the host keeps of each.
+    /// The segments the branch holds, landed and named by its head, by their footers, with what
+    /// the host keeps of each.
     pub landed: Vec<(Footer, T)>,
-    /// fxdax: the footer, as it landed, of the log's first segment left, if the branch's last
-    /// commit is the last that segment ends and it goes on with the next: the branch holds the
-    /// commits it ends, and the log keeps it, stamped again with its continuation alone
-    /// (TASK-345).
-    pub ended: Option<Footer>,
 }
 
 /// A host's write-ahead log of a branch: its base, the branch's last commit before its first
@@ -89,10 +95,10 @@ impl<T> Wal<T> {
         self.heads().last().copied().flatten()
     }
 
-    /// Adds a segment its writer closed, which follows the last.
+    /// Adds a segment its writer closed, the next of its chain.
     pub fn push(&mut self, footer: Footer, data: T) {
         if let Some((last, _)) = self.segments.back() {
-            debug_assert_eq!(footer.after, Some((last.seq, last.epoch)), "a log's segments follow");
+            debug_assert_eq!((footer.seq, footer.epoch), (last.seq + 1, last.epoch), "a chain's");
         }
         self.segments.push_back((footer, data));
     }
@@ -124,74 +130,44 @@ impl<T> Wal<T> {
         heads
     }
 
-    /// Puts the log after the end of the branch a writer took over, as `fenced` says it found it,
-    /// by commits: takes out and returns the segments the branch holds, those to the branch's last
-    /// commit, if it is one of the log's (`wal_follows`), and stamps the rest again on the writer's
-    /// chain, after its fence, their data as it was and their extents of their own at the writer's
-    /// keys; the writer then takes them as it takes any segment it closed. The branch's last commit
-    /// is the one after the fence (`wal_after_fence`): the log's own segments may have landed since
-    /// recovery found the end, which the fence applied. The log's base is then the branch's last
-    /// commit after the fence, which what it stamped again follows.
-    ///
-    /// A segment making no commit, a fork's alone, the branch's last commit doesn't place: the last
-    /// that commit may be the branch's through is taken as landed. If it did not, its fork, never
-    /// acknowledged, is lost, as a fork whose host lost its disk is; the other way, the branch would
-    /// have it twice.
-    ///
-    /// fxdax: a segment ending commits and going on with the next (a segment filled after a commit,
-    /// before the next, `Contents::continued`, TASK-92.41) is no branch's end either, the fence
-    /// having left the next unended: if it landed, ending the branch's last commit, those after it
-    /// not, the branch holds the commits it ends and none of its continuation. It stays the log's,
-    /// stamped again with its continuation alone, its data as it was, the commits it ends, their
-    /// extents, frees, root, capacity and forks dropped, the branch having them; the rest after it
-    /// ([`Rebased::ended`], TASK-345). Before, the log diverged, though no other writer moved the
-    /// branch on, and `fxdaxctl take` dropped it, the next commit with it, durable on the host.
-    /// Taken as landed, the next commit would lose its runs in it; stamped again whole, the branch
-    /// would apply the commits it ends twice.
+    /// Puts the log after the end of the branch a writer took over, as `taken` says it found it,
+    /// by commits: takes out and returns the segments the branch holds, those to the one ending
+    /// its last commit, if it is one of the log's, and after it those making no commit, a fork's
+    /// alone, whose forks the branch holds (a head names a writer's segments between commits, so
+    /// that a fork's alone, after them, is the branch's as its fork is); and stamps the rest again
+    /// on the writer's chain, after the head's end, their data as it was and their extents of their
+    /// own at the writer's keys; the writer then takes them as it takes any segment it closed. The
+    /// log's base is then the branch's last commit, which what it stamped again follows.
     ///
     /// Fails with [`Error::Diverged`], the log unchanged, if another writer's commits moved the
-    /// branch on: its last commit is neither one of the log's nor its base. An empty log never
-    /// diverges: taking a branch with one is how a host takes it, wherever it was.
-    pub fn rebase(&mut self, fenced: &Fenced) -> Result<Rebased<T>, Error> {
-        let rules = rules();
-        let last = if rules.wal_after_fence { fenced.last_commit } else { fenced.recovered };
-        // fxdax: none of a commit spanning segments, but those to the one it ends in: the segments
-        // going on with it are no branch's end, the fence having left their commit unended, never
-        // acknowledged (TASK-92.41).
-        let between =
-            |landed: usize| landed == 0 || self.segments[landed - 1].0.contents.continued.is_none();
+    /// branch on (`wal_follows`): its last commit is neither one of the log's nor its base. An
+    /// empty log never diverges: taking a branch with one is how a host takes it, wherever it was.
+    pub fn rebase(&mut self, taken: &Taken) -> Result<Rebased<T>, Error> {
+        let last = taken.last_commit;
         let heads = self.heads();
-        let landed = heads.iter().enumerate().rposition(|(at, &head)| head == last && between(at));
-        // fxdax: the segment ending the branch's last commit, going on with the next.
-        let ending = || {
-            let ends = |contents: &Contents| {
-                last.is_some()
-                    && contents.commits.last() == last.as_ref()
-                    && contents.continued.is_some()
-            };
-            self.segments.iter().position(|(footer, _)| ends(&footer.contents))
-        };
-        let (landed, ended) = match landed {
-            Some(landed) => (landed, false),
-            None if self.segments.is_empty() || !rules.wal_follows => (0, false),
-            None => match ending() {
-                Some(ending) if rules.wal_continues => (ending, true),
-                _ => return Err(Error::Diverged),
-            },
+        let landed = match heads.iter().position(|&head| head == last) {
+            Some(landed) => {
+                // And the segments of forks alone after it, those the branch holds.
+                let held = |footer: &Footer| {
+                    footer.contents.commits.is_empty()
+                        && footer.contents.continued.is_none()
+                        && !footer.contents.forks.is_empty()
+                        && (footer.contents.forks.iter())
+                            .all(|fork| taken.forks.contains(&(fork.branch, fork.owner)))
+                };
+                let after = self.segments.iter().skip(landed);
+                landed + after.take_while(|(footer, _)| held(footer)).count()
+            }
+            None if self.segments.is_empty() || !rules().wal_follows => 0,
+            None => return Err(Error::Diverged),
         };
         let landed = self.take(landed);
-        let ended = ended.then(|| {
-            let (footer, _) = self.segments.front_mut().expect("the segment ending the branch");
-            let Contents { continued, next_sequence, .. } = footer.contents.clone();
-            let continuation = Contents { continued, next_sequence, ..Contents::default() };
-            std::mem::replace(footer, Footer { contents: continuation, ..footer.clone() })
-        });
-        let mut chain = fenced.chain;
+        let mut chain = taken.chain;
         for (footer, _) in &mut self.segments {
             *footer = chain.close(footer.contents.clone());
         }
-        self.base = fenced.last_commit;
-        Ok(Rebased { landed, ended })
+        self.base = taken.last_commit;
+        Ok(Rebased { landed })
     }
 }
 
@@ -201,9 +177,8 @@ mod tests {
     use crate::batch::{Batch, Commit, Data, Unframed};
     use crate::layout::test_branch;
     use crate::layout::{self, Contents, Continued, child};
-    use crate::recovery::State;
     use crate::store::Store;
-    use crate::{Writer, branch, bucket};
+    use crate::{Writer, branch, head};
     use object_store::memory::InMemory;
     use std::sync::Arc;
     use storage_device::ExtentId;
@@ -226,7 +201,7 @@ mod tests {
 
     /// An empty log of the branch `writer` just took.
     fn log(writer: &Writer<Store>) -> Wal<Data> {
-        Wal::new(writer.fenced().last_commit)
+        Wal::new(writer.taken().last_commit)
     }
 
     fn commit(tag: u64) -> Commit {
@@ -251,7 +226,7 @@ mod tests {
     /// Puts `wal` after the end of the branch `writer` just took, as opening a store does, and
     /// lands what it stamped again: the commits of the segments it found the branch held.
     async fn rebase(writer: &Writer<Store>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
-        let Rebased { landed, .. } = wal.rebase(&writer.fenced())?;
+        let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
             let seq = writer.add_segment(data.frame(footer)).unwrap();
             land(writer, seq).await;
@@ -260,28 +235,24 @@ mod tests {
         Ok(landed.iter().flat_map(|(footer, _)| footer.contents.commits.clone()).collect())
     }
 
-    /// The commits branch 1's segments make, in the order its readers apply them, skipping those
-    /// that are void: each once, if its history is whole.
+    /// The commits the segments branch 1's head names make, in order: each once, if its history
+    /// is whole.
     async fn history(bucket: &Arc<Store>) -> Vec<u64> {
-        let mut state = State::new(test_branch(1));
+        let named = head::get(&**bucket, test_branch(1)).await.unwrap().unwrap_or_default();
         let mut commits = Vec::new();
-        for seq in 0.. {
-            let Some(object) = bucket::get(&**bucket, &layout::segment(test_branch(1), seq)).await
-            else {
-                return commits;
-            };
-            let footer = layout::Segment::footer(&object.bytes).unwrap();
-            if state.apply(&footer) {
-                commits.extend(footer.contents.commits);
-            }
+        for (seq, epoch) in named.segments(0) {
+            let key = layout::segment(test_branch(1), seq, epoch);
+            let object = crate::bucket::get(&**bucket, &key).await.unwrap();
+            commits.extend(layout::Segment::footer(&object.bytes).unwrap().contents.commits);
         }
-        unreachable!()
+        commits
     }
 
-    /// A log whose segments all landed, though never acknowledged, its host crashing first, is the
-    /// branch's: taken out, nothing stamped again, its base the branch's last commit.
+    /// A log whose segments all landed, though never acknowledged, its host crashing first, is not
+    /// the branch's: no head names them (TASK-407). Stamped again whole after the head's end, they
+    /// land again, at the new writer's keys, each commit once.
     #[test]
-    fn logs_wholly_landed_are_the_branchs() {
+    fn logs_landed_unacknowledged_are_stamped_again() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -291,7 +262,7 @@ mod tests {
                 first.upload(seq).await.unwrap();
             }
             let second = open(&bucket, 11).await;
-            assert_eq!(rebase(&second, &mut wal).await, Ok(vec![1, 2]));
+            assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert!(wal.is_empty());
             assert_eq!(wal.base(), Some(2));
             assert_eq!(history(&bucket).await, [1, 2]);
@@ -299,19 +270,19 @@ mod tests {
     }
 
     /// TASK-165.2's case, which a rebase by the footers recovery read declared diverged: a log
-    /// whose segments landed, and which another host's writer then checkpointed past, is the
-    /// branch's, though recovery, starting from the checkpoint, reads none of its footers.
+    /// whose segment the head names, which another host's writer then checkpointed past, is the
+    /// branch's, though recovery, starting from the checkpoint, reads none of its footers: the head
+    /// names it by its number and epoch.
     #[test]
-    fn logs_landed_under_a_later_checkpoint_are_the_branchs() {
+    fn logs_acknowledged_under_a_later_checkpoint_are_the_branchs() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
             let seq = close(&first, &mut wal, commit(1));
-            first.upload(seq).await.unwrap();
+            land(&first, seq).await;
             let elsewhere = open(&bucket, 11).await;
-            let checkpoint = elsewhere.checkpoint().await.unwrap();
-            assert_eq!(checkpoint, Some(seq + 1), "the checkpoint is as of the fence after it");
+            assert_eq!(elsewhere.checkpoint().await.unwrap(), Some(seq));
             let third = open(&bucket, 12).await;
             assert_eq!(rebase(&third, &mut wal).await, Ok(vec![1]));
             assert!(wal.is_empty());
@@ -319,25 +290,52 @@ mod tests {
         });
     }
 
-    /// A log whose first segment landed, the second not: the first is the branch's, the second
-    /// is stamped again after the next writer's fence, and lands, each commit once.
+    /// A log stamped again by a writer taking the branch, in memory alone, as a store keeps it
+    /// (TASK-165.9), which then landed it, under its own epoch, and acknowledged it, the host
+    /// crashing before its log let go of it: the next writer finds it stamped as before, at keys
+    /// none of what landed is at, and finds it the branch's by its commits (found by extent_store's
+    /// crash rounds once the log was put after the branch by the keys the head names).
     #[test]
-    fn logs_partly_landed_go_on_after_the_fence() {
+    fn logs_stamped_again_in_memory_are_the_branchs_by_their_commits() {
+        futures::executor::block_on(async {
+            let bucket = bucket().await;
+            let first = open(&bucket, 10).await;
+            let mut wal = log(&first);
+            close(&first, &mut wal, commit(1));
+            close(&first, &mut wal, commit(2));
+            let on_disk = wal.clone();
+            let second = open(&bucket, 11).await;
+            assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
+            assert_eq!(history(&bucket).await, [1, 2]);
+            let mut again = on_disk;
+            let third = open(&bucket, 12).await;
+            assert_eq!(rebase(&third, &mut again).await, Ok(vec![1, 2]));
+            assert!(again.is_empty());
+            assert_eq!(history(&bucket).await, [1, 2]);
+        });
+    }
+
+    /// A log whose first segment the head names, the second not: the first is the branch's, the
+    /// second is stamped again after the head's end, and lands, each commit once.
+    #[test]
+    fn logs_partly_acknowledged_go_on_after_the_heads_end() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
             let seq = close(&first, &mut wal, commit(1));
-            close(&first, &mut wal, commit(2));
-            first.upload(seq).await.unwrap();
+            let second_seq = close(&first, &mut wal, commit(2));
+            land(&first, seq).await;
+            first.upload(second_seq).await.unwrap();
             let second = open(&bucket, 11).await;
-            let chain = second.fenced().chain;
-            assert_eq!(wal.rebase(&second.fenced()).map(|rebased| rebased.landed.len()), Ok(1));
+            let chain = second.taken().chain;
+            assert_eq!(chain.next_seq(), seq + 1, "the head's end");
+            assert_eq!(wal.rebase(second.taken()).map(|rebased| rebased.landed.len()), Ok(1));
             let [(footer, _)] = &wal.segments().collect::<Vec<_>>()[..] else {
                 panic!("{} segments stamped again", wal.segments().len())
             };
-            let place = (footer.seq, footer.epoch, footer.after, footer.contents.commits.clone());
-            assert_eq!(place, (chain.next_seq(), second.epoch(), chain.after(), vec![2]));
+            let place = (footer.seq, footer.epoch, footer.contents.commits.clone());
+            assert_eq!(place, (chain.next_seq(), second.epoch(), vec![2]));
             assert_eq!(wal.base(), Some(1));
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1, 2]);
@@ -345,10 +343,9 @@ mod tests {
         });
     }
 
-    /// fxdax: a log whose commit spans two segments, the first landed, the second not: no segment
-    /// of it landed, the commit unended at the fence, so both are stamped again after it, and land,
-    /// the commit once, its runs in both sealed (TASK-92.41). Taken as landed, the first's runs, the
-    /// fence having left them unsealed, would be lost.
+    /// fxdax: a log whose commit spans two segments, the first landed, the second not: no head
+    /// names the first, as its writer acknowledges whole commits alone, so both are stamped again
+    /// after the head's end, and land, the commit once, its runs in both sealed (TASK-92.41).
     #[test]
     fn logs_of_commits_spanning_segments_land_whole() {
         futures::executor::block_on(async {
@@ -375,7 +372,7 @@ mod tests {
             close_contents(ending);
             first.upload(seq).await.unwrap();
             let second = open(&bucket, 11).await;
-            assert_eq!(second.fenced().chain.next_seq(), seq + 2, "the fence after the first");
+            assert_eq!(second.taken().chain.next_seq(), seq, "the head names neither");
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1]);
             let sealed: Vec<ExtentId> = second.state().extents.keys().copied().collect();
@@ -384,11 +381,10 @@ mod tests {
     }
 
     /// fxdax: a log whose segment ending commit 1 goes on with commit 2, landed alone, the
-    /// segment ending commit 2 not: the branch holds commit 1, and the log follows it, keeping the
-    /// segment, stamped again after the fence with its run of commit 2 alone, then the one ending
-    /// commit 2; both land, each commit once, both runs sealed (TASK-345, found by specs/bucket and
-    /// by extent_store's crash rounds, round 45). It diverged, though no other writer moved the
-    /// branch on.
+    /// segment ending commit 2 not: no head names it, as its writer acknowledges whole commits
+    /// alone, so both are stamped again after the head's end, and land, each commit once, both
+    /// runs sealed (TASK-345's case, which diverged when the log was put after the branch by
+    /// commits, though no other writer moved the branch on).
     #[test]
     fn logs_whose_segment_ending_a_commit_and_going_on_landed_alone_go_on() {
         futures::executor::block_on(async {
@@ -419,19 +415,9 @@ mod tests {
             };
             close_contents(ending);
             first.upload(seq).await.unwrap();
+            assert_eq!(first.acknowledge().await, Ok(None), "no whole commit to acknowledge");
             let second = open(&bucket, 11).await;
-            assert_eq!(second.fenced().last_commit, Some(1));
-            let mut rebased = wal.clone();
-            let Rebased { landed, ended } = rebased.rebase(&second.fenced()).unwrap();
-            assert_eq!((landed.len(), ended.map(|footer| footer.seq)), (0, Some(seq)));
-            let contents: Vec<_> = rebased.segments().map(|(f, _)| f.contents.clone()).collect();
-            // Its run of commit 2 alone, minting on from the writer's floor.
-            let next_sequence = contents[0].next_sequence;
-            let continuation =
-                Contents { continued: Some(continued), next_sequence, ..Contents::default() };
-            assert_eq!(contents[0], continuation);
-            assert_eq!(contents[1].commits, [2]);
-            assert_eq!(rebased.base(), Some(1));
+            assert_eq!(second.taken().last_commit, None);
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1, 2]);
             let sealed: Vec<ExtentId> = second.state().extents.keys().copied().collect();
@@ -440,8 +426,8 @@ mod tests {
         });
     }
 
-    /// A log whose second segment landed past a gap, its first not: the second is void, and both
-    /// are stamped again after the fence, which filled the gap.
+    /// A log whose second segment landed, its first not: neither is acknowledged, a writer
+    /// acknowledging in order, and both are stamped again after the head's end.
     #[test]
     fn logs_landed_past_a_gap_are_stamped_again() {
         futures::executor::block_on(async {
@@ -452,7 +438,7 @@ mod tests {
             let seq = close(&first, &mut wal, commit(2));
             first.upload(seq).await.unwrap();
             let second = open(&bucket, 11).await;
-            assert_eq!(second.fenced().chain.next_seq(), seq + 1, "the fence filled the gap");
+            assert_eq!(second.taken().chain.next_seq(), seq - 1, "the head names neither");
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1, 2]);
         });
@@ -473,7 +459,7 @@ mod tests {
             close(&first, &mut wal, Commit { tag: 1, extents, own: owns, ..Commit::default() });
             close(&first, &mut wal, commit(2));
             let second = open(&bucket, 11).await;
-            assert_eq!(wal.rebase(&second.fenced()).map(|rebased| rebased.landed.len()), Ok(0));
+            assert_eq!(wal.rebase(second.taken()).map(|rebased| rebased.landed.len()), Ok(0));
             let (footer, _) = wal.segments().next().unwrap();
             let key = layout::extent(layout::TEST_CELL, second.epoch(), footer.seq, own);
             assert_eq!(footer.own().map(|(_, location)| location.key).collect::<Vec<_>>(), [key]);
@@ -510,10 +496,10 @@ mod tests {
         });
     }
 
-    /// TASK-165.2's other case: a log after which only another writer's fence came, a takeover
-    /// that went no further, goes on after the next fence.
+    /// TASK-165.2's other case: a log after which only another writer's taking came, a takeover
+    /// that went no further, goes on after the head's end.
     #[test]
-    fn logs_only_a_fence_came_after_go_on() {
+    fn logs_only_a_takeover_came_after_go_on() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -543,10 +529,12 @@ mod tests {
         });
     }
 
-    /// A segment making no commit, a fork's alone, after the branch's last commit, is taken as
-    /// landed: never put after the end twice, though it may not have landed.
+    /// The segments the head names are the log's landed, exactly, by their numbers and epochs: a
+    /// segment making no commit, a fork's alone, after the branch's last commit, is not taken as
+    /// landed, as it was when the log was put after the branch by commits; stamped again, it lands
+    /// once.
     #[test]
-    fn segments_of_forks_alone_after_the_last_commit_are_taken_as_landed() {
+    fn segments_the_head_names_are_landed_exactly() {
         futures::executor::block_on(async {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
@@ -557,13 +545,13 @@ mod tests {
             first.add_segment(data.frame(&footer)).unwrap();
             wal.push(footer, data);
             close(&first, &mut wal, commit(3));
-            first.upload(seq).await.unwrap();
+            land(&first, seq).await;
             let second = open(&bucket, 11).await;
-            let landed = wal.rebase(&second.fenced()).unwrap().landed;
-            let forks: Vec<_> = landed.iter().map(|(f, _)| f.contents.forks.clone()).collect();
-            assert_eq!(forks, [vec![], vec![child(test_branch(2))]]);
-            let commits: Vec<_> = wal.segments().map(|(f, _)| f.contents.commits.clone()).collect();
-            assert_eq!(commits, [vec![3]]);
+            let landed = wal.rebase(second.taken()).unwrap().landed;
+            let commits: Vec<_> = landed.iter().map(|(f, _)| f.contents.commits.clone()).collect();
+            assert_eq!(commits, [vec![1]]);
+            let forks: Vec<_> = wal.segments().map(|(f, _)| f.contents.forks.clone()).collect();
+            assert_eq!(forks, [vec![child(test_branch(2))], vec![]]);
         });
     }
 
@@ -571,7 +559,7 @@ mod tests {
     /// commit they make, or, those making none, the base before.
     #[test]
     fn acknowledged_segments_leave_the_log() {
-        let mut chain = Chain::new(test_branch(1), 2, 5, Some((4, 2)), 0);
+        let mut chain = Chain::new(test_branch(1), 2, 5, 0);
         let mut wal = Wal::new(Some(7));
         let mut push = |commits: Vec<u64>| {
             wal.push(chain.close(Contents { commits, ..Contents::default() }), ());

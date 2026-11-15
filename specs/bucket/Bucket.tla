@@ -10,120 +10,105 @@
 (* order. The simulation (extent_remote's sim) samples interleavings, and  *)
 (* found TASK-79.18 and 79.3 only after the fact; TLC exhausts small ones. *)
 (*                                                                         *)
-(* The bucket holds, per branch: segments, dense and create-only, each a   *)
-(* footer naming the segment it follows (`after`), its writer's epoch, one *)
-(* commit (or none: a fence), an extent sealed into it or stored on its    *)
-(* own, an extent freed, the branch's next sequence number, a fork, and    *)
-(* the run of a commit it goes on with, which a later segment ends;        *)
-(* extents stored on their own, at keys naming their writer's epoch and    *)
-(* the segment that names them; checkpoints, a state as of a segment;      *)
-(* records; leases, with their placement's fencing token; and the          *)
-(* collector's moves. A segment's create is in flight from its upload      *)
-(* until it lands, in any order, though its writer has gone.               *)
+(* Keys are written once (TASK-407): every object a writer writes is at a  *)
+(* key naming its lease epoch, and becomes part of its branch only when    *)
+(* the branch's head names it. The head, one object per branch, is the     *)
+(* writer's lease and its commit: its epoch, the token and holder of its   *)
+(* taking, the segments committed (`end`, and each one's epoch: `chain`),  *)
+(* and the newest checkpoint (`ck`), swapped with a condition (S3          *)
+(* If-Match, GCS generation). A takeover swaps it to the next epoch, and   *)
+(* the writer taken over fails at its next swap: the head is the fence.    *)
+(* Readers read the head, then what it names, and nothing else; an object  *)
+(* the head does not name, of an epoch below its, never will be named, and *)
+(* the collector deletes it. No key is written twice, so readers need no   *)
+(* versions of a key (KeysWrittenOnce).                                    *)
 (*                                                                         *)
-(* Hosts run writers. Opening a branch takes its lease and starts its      *)
-(* recovery (the newest checkpoint, or the origin's state); recovery reads *)
-(* the segments after to the first missing, then the checkpoints again;    *)
-(* the fence, a step a create, applies what landed at the end first and    *)
-(* fills gaps; then the writer reads its lease and mints from its epoch's  *)
-(* range, and puts its WAL after the branch's end (doc-14, Opening a       *)
-(* store: wal::rebase), by commits: the WAL's commits to the branch's      *)
-(* last, if it is one of them, are acknowledged, and the rest restamped    *)
-(* after the fence, if the branch's last commit is one of the WAL's or the *)
-(* commit the WAL started from; otherwise the WAL diverged, and is         *)
+(* The bucket holds, per branch: segments, at <<seq, epoch>>, each a       *)
+(* footer naming its writer's epoch, one commit (or none), an extent       *)
+(* sealed into it or stored on its own, an extent freed, the branch's next *)
+(* sequence number, a fork, and the run of a commit it goes on with, which *)
+(* a later segment ends; extents stored on their own, at keys naming their *)
+(* writer's epoch and the segment that names them; checkpoints, a state as *)
+(* of a segment, at <<seq, epoch>>; records; heads; and the collector's    *)
+(* moves. A segment's PUT is in flight from its upload until it lands,     *)
+(* whenever, though its writer has gone.                                   *)
+(*                                                                         *)
+(* Hosts run writers. Opening a branch swaps its head to the next epoch    *)
+(* and starts its recovery (the head's checkpoint, or the origin's state), *)
+(* then reads the segments the head names; then the writer mints from its  *)
+(* epoch's range, and puts its WAL after the branch's end (doc-14, Opening *)
+(* a store: wal::rebase): the WAL's segments the head names are            *)
+(* acknowledged, and the rest restamped after the head's end, if the       *)
+(* branch's last segment is the last of those, or the branch's last commit *)
+(* the commit the WAL started from; otherwise the WAL diverged, and is     *)
 (* dropped, as `fxdaxctl take` drops it. A commit is a segment of the WAL, *)
 (* stamped by the chain; or, spanning segments (TASK-92.41), segments      *)
 (* going on with it, a run of it in each, then the one it ends in. Readers *)
-(* hold such runs until that one, and drop them at a segment neither going *)
-(* on with the commit nor ending it, a fence; writers acknowledge, and     *)
-(* WALs land, only between commits. An upload creates its extent of its    *)
-(* own, then puts it in flight; an acknowledgement takes the WAL's prefix  *)
-(* created, after a read of the lease if it holds a fork; then the         *)
-(* children of its forks get their records. The collector keeps the        *)
-(* fences of live branches. A host crashes keeping its WALs, to their      *)
-(* last durable commits with "cut" (local recovery keeping commits whole), *)
-(* or losing them. Placements give hosts fencing tokens. Branches are      *)
-(* deleted by their placements (the lease ended, then the record, the      *)
+(* hold such runs until that one; writers acknowledge, and so heads name,  *)
+(* only between commits. An upload creates its extent of its own, then     *)
+(* puts its segment in flight; an acknowledgement swaps the head to name   *)
+(* the WAL's prefix landed; then the children of its forks get their       *)
+(* records. A host crashes keeping its WALs, to their last durable commits *)
+(* with "cut" (local recovery keeping commits whole), or losing them.      *)
+(* Placements give hosts fencing tokens. Branches are deleted by their     *)
+(* placements (the head swapped to the final epoch, then the record, the   *)
 (* children recorded), failed forks by their hosts (delete_fork), points   *)
 (* forked by restores (the child's record, the point read, the record      *)
 (* made); other branches take forks' children's IDs. Every branch is a     *)
 (* volume of a cell (CellOf), whose prefix holds its objects. The          *)
 (* collector runs passes per cell (TASK-395), each under its cell's        *)
 (* collector lease, at once with other cells' and with writers: the cell's *)
-(* listing and records, its live branches recovered, the states at their   *)
-(* fork points of its branches' forks to other cells kept, its records and *)
-(* references listed again, then compaction and deletion within the cell,  *)
-(* and the references of its deleted children retired once nothing in it   *)
-(* lives. A fork to another cell writes a reference under its parent's     *)
-(* cell, naming the parent, the fork point and the child, which keeps the  *)
-(* parent's whole state at the fork point there while it stands, whatever  *)
-(* the child frees of it since: the collector is conservative.             *)
+(* listing and records, its live branches recovered from their heads, the  *)
+(* states at their fork points of its branches' forks to other cells       *)
+(* kept, its records and references listed again, then compaction and      *)
+(* deletion within the cell, and the references of its deleted children    *)
+(* retired once nothing in it lives. A fork to another cell writes a       *)
+(* reference under its parent's cell, naming the parent, the fork point    *)
+(* and the child, which keeps the parent's whole state at the fork point   *)
+(* there while it stands, whatever the child frees of it since: the        *)
+(* collector is conservative.                                              *)
 (*                                                                         *)
 (* Each rule is a member of Rules; specs/bucket/mutations removes one      *)
 (* each, and must find the violation it prevents (each mutation's model    *)
-(* says which, and how). The first 33 are the fields of extent_remote's    *)
-(* `Rules` (crates/extent_remote/src/lib.rs); then one the code holds with *)
-(* no field (TASK-178); then two doc-14's, its last two fields too         *)
-(* (TASK-165.5, crates/extent_remote/src/wal.rs); then five those of       *)
-(* commits spanning segments, which the code holds with no field           *)
-(* (TASK-92.41, TASK-149.45); then six the per-cell collector's           *)
-(* (TASK-395.1), fields of Rules since TASK-395.3 and 395.4; then two its   *)
-(* references' retirement's (TASK-395.10), fields too; the last, that a    *)
-(* retirement is marked (TASK-395.13, TASK-395.14), a field too:           *)
+(* says which, and how):                                                   *)
 (*                                                                         *)
-(* - pinsFences, pinsOldFences, pinsVoidStrays, pinsLateStrays,            *)
-(*   pinsTakings (NoPinsFences, NoPinsOldFences, NoPinsVoidStrays,         *)
-(*   NoPinsLateStrays, NoPinsTakings): the cases of the collector's one    *)
-(*   function of what it keeps of a live branch whatever covers it, Pinned *)
-(*   (collector::pinned, TASK-388): every position a writer of the branch, *)
-(*   taken over or taking it over, may still create at. A writer           *)
-(*   acknowledges what it created with no read of its lease, its creates   *)
-(*   its fencing (TASK-371), so CreatesNeverFreed states the safety they   *)
-(*   keep once: the first position a writer may still create at was never  *)
-(*   freed. Its fences (TASK-371), of every epoch; its strays, void or     *)
-(*   late (TASK-383); and, while a writer takes it over, its lease of an   *)
-(*   epoch past its state's, everything (TASK-371). Without any, a         *)
-(*   writer's create lands where the collector freed, below a later        *)
-(*   writer's fence, and is acknowledged: a commit no history holds.       *)
-(* - forksAfterLease (NoForksAfterLease): a writer acknowledges a segment  *)
-(*   holding a fork only once a read of its lease after the creates shows  *)
-(*   it still its: a deleted branch's fences go, and a writer of it taken  *)
-(*   over would record the child of a fork landed where its deletion's     *)
-(*   fence was, of segments the collector let go of.                       *)
-(* - fence (NoFence): a writer taking over creates an empty segment at the *)
-(*   end it found.                                                         *)
-(* - continuity (NoContinuity): readers skip a segment that does not       *)
-(*   follow the last applied.                                              *)
+(* - headSwap (NoHeadSwap): a writer acknowledges what it uploaded only by *)
+(*   swapping the head with a condition, its own taking's: without it, a   *)
+(*   writer taken over writes the head over its successor's, and the       *)
+(*   successor's acknowledged commits are gone (TASK-407).                 *)
+(* - epochKeys (NoEpochKeys): a segment's and a checkpoint's key names its *)
+(*   writer's epoch: without it, two writers' PUTs land at one key, the    *)
+(*   later over the earlier, which a head names (KeysWrittenOnce).         *)
+(* - collectorEpochs (NoCollectorEpochs): the collector keeps, of a live   *)
+(*   branch's objects its head does not name, those of the head's epoch    *)
+(*   that it may yet name: segments and extents of their own at or past    *)
+(*   its end, checkpoints newer than its own; all others are deleted, of   *)
+(*   an epoch no swap of whose can succeed.                                *)
+(* - movesByPass (NoMovesByPass): the key of moves names the pass that    *)
+(*   made them (the cell's collector lease epoch), so that two passes'     *)
+(*   compactions of one object never write one key; readers find them by  *)
+(*   listing the object's moves. Without it, a pass slow to land its       *)
+(*   create, after later passes made the same moves, then deleted them,    *)
+(*   makes them again at their key, other bytes (TASK-407.1).              *)
 (* - epochSequences (NoEpochSequences): a writer mints from its epoch's    *)
-(*   range, having read its lease after recovering and fencing.            *)
+(*   range, having found the head its taking's after recovering.           *)
 (* - recordsAfterAck (NoRecordsAfterAck): a fork's child gets its record   *)
 (*   once the fork's segment is acknowledged.                              *)
 (* - candidatesFirst (NoCandidatesFirst): the collector lists before it    *)
-(*   reads records and states.                                             *)
-(* - newestCheckpoint (NoNewestCheckpoint, NoNewestCheckpointInherited): a *)
-(*   recovery that finds a segment missing lists the checkpoints again,    *)
-(*   and starts again from a newer one; one that listed none and finds     *)
-(*   what it inherited lost, if one has come since (TASK-177). A writer's  *)
-(*   recovery, pinsTakings covers too (TASK-371): its mutation removes     *)
-(*   both.                                                                 *)
+(*   reads records and heads.                                              *)
 (* - forksFromStates (NoForksFromStates): the collector finds forks in     *)
 (*   their parents' states, not only by their records.                     *)
-(* - orphansAfterSuccessor (NoOrphansAfterSuccessor): an earlier writer's  *)
-(*   extent goes once a later one's segment is in the branch, not its      *)
-(*   lease.                                                                *)
-(* - tokens (NoTokens): a lease is taken only with a token as high.        *)
+(* - tokens (NoTokens): a head is taken only with a token as high.         *)
 (* - deleteTokens (NoDeleteTokens): a branch is deleted only with a token  *)
-(*   as high as its lease's.                                               *)
-(* - footers (NoFooters): readers read an extent where the footer of the   *)
-(*   object at its key says, not where their state says (TASK-79.18).      *)
+(*   as high as its head's.                                                *)
 (* - forkClaimsIds (NoForkClaimsIds): a failed fork's deletion takes its   *)
-(*   child's ID with a record before it ends the child's lease. The code's *)
+(*   child's ID with a record before it ends the child's head. The code's  *)
 (*   rule is of forks made nowhere in the bucket (create_forked), which    *)
 (*   doc-14 removes; here every fork has an origin, and the rule is what   *)
 (*   it says: without it, the deletion of a child with no record deletes   *)
 (*   it directly (TASK-79.82).                                             *)
 (* - forkClaimsLanded (NoForkClaimsLanded): that record lives only if the  *)
-(*   fork's parent holds the fork's segment, and says it is a claim.       *)
+(*   fork's parent's head names the fork's segment, and says it is a claim.*)
 (* - pointsTakeNoWriter (NoPointsTakeNoWriter): no writer takes a point.   *)
 (* - forksCheckPoints (NoForksCheckPoints): a fork of a point reads the    *)
 (*   point's record after it creates its child's.                          *)
@@ -136,19 +121,12 @@
 (*   TASK-395.1, a clone's reference, listed after the states, finds it    *)
 (*   too: its mutation removes references with it.                         *)
 (* - recordsOwned (NoRecordsOwned): records name their makings' owners.    *)
-(* - extentKeysNameSegments (NoExtentKeysNameSegments): the collector      *)
-(*   keeps an extent of its own while the segment its key names may land,  *)
-(*   not while the branch's next sequence number is below it (TASK-79.3).  *)
 (* - waysFromSeals (NoWaysFromSeals): the collector keeps every moves on   *)
 (*   the way to an extent from where it was sealed, unless the state       *)
-(*   naming it is from a checkpoint of the lease's epoch, read after the   *)
-(*   checkpoints were listed (TASK-175).                                   *)
+(*   naming it is from a checkpoint of the head's epoch (TASK-175).        *)
 (* - movesTakenFirst (NoMovesTakenFirst): a writer names what its          *)
-(*   checkpoint moves where it went before it creates the checkpoint, only *)
+(*   checkpoint moves where it went before it writes the checkpoint, only  *)
 (*   forward along the way (TASK-175).                                     *)
-(* - leasesByTakings (NoLeasesByTakings): a writer finds the lease still   *)
-(*   its by its epoch and its holder, the taking's, not by its epoch       *)
-(*   alone (TASK-179).                                                     *)
 (* - passesFencedStop (NoPassesFencedStop): a pass that finds what a live  *)
 (*   branch needs lost stops, without failing, if a later pass took the    *)
 (*   collector's lease (TASK-180).                                         *)
@@ -162,146 +140,107 @@
 (* - recordsKept (NoRecordsKept): the collector drops no record, a deleted *)
 (*   root's neither: a parent's writer slow to record a fork whose child's *)
 (*   ID a root took, and was deleted, would make it again (TASK-174).      *)
-(* - deletionsFence (NoDeletionsFence): a deletion's recovery creates an   *)
-(*   empty segment of the final epoch at the end it found, as a writer     *)
-(*   taking over does, so that every deletion of the branch finds the same *)
-(*   forks: without it, a second deletion, recovering past a fork's        *)
-(*   segment landed after the first marked the branch deleted, records the *)
-(*   child of a fork never acknowledged, whose origin a pass, reading the  *)
-(*   branch deleted and no record of the child, deletes (TASK-183).        *)
-(* - deletionsReread (NoDeletionsReread): a deletion reads the record      *)
-(*   again once its recovery is fenced, before recording the children of   *)
-(*   the forks it found: deleted since, it is done, as the deletion that   *)
-(*   marked it recorded those before its own fence. A pass deletes that    *)
-(*   fence, and the extents a writer taken over stored on their own ahead  *)
-(*   of its segments: one of them, of a fork, landing where the fence was, *)
-(*   the later deletion would record the fork's child, which names an      *)
-(*   extent the pass deleted (TASK-380).                                   *)
 (* - deletionsDoneByOthers (NoDeletionsDoneByOthers): a deletion whose     *)
 (*   recovery of the branch finds what it needs lost, the record deleted   *)
 (*   since, is done (TASK-178; branch::delete, with no field of Rules).    *)
 (* - walFollows (NoWalFollows): a WAL is put after the branch only if the  *)
-(*   branch's last commit is one of the WAL's or the commit the WAL        *)
-(*   started from.                                                         *)
-(* - walAfterFence (NoWalAfterFence): that last commit is the branch's     *)
-(*   after the fence, which may have applied the WAL's own segments,       *)
-(*   landed since recovery.                                                *)
-(* - spansHeld (NoSpansHeld): readers hold the runs of a commit a segment  *)
-(*   goes on with (Contents::continued) until a segment ends it, then seal *)
-(*   them with it (State::apply_contents, State::begun).                   *)
-(* - spansFenced (NoSpansFenced): they drop them at a segment applied that *)
-(*   neither goes on with the commit nor ends it, a later writer's fence:  *)
-(*   the commit, never ended, never was.                                   *)
+(*   head's last segment is the WAL's last it names, or, naming none of    *)
+(*   them, the branch's last commit is the commit the WAL started from.    *)
 (* - acksBetweenCommits (NoAcksBetweenCommits): a writer acknowledges      *)
 (*   segments only to the last going on with no commit                     *)
 (*   (Writer::acknowledge), so that its WAL keeps a commit whole until the *)
-(*   bucket has it whole.                                                  *)
-(* - walBetweenCommits (NoWalBetweenCommits): a WAL is put after the       *)
-(*   branch only between commits: the segments taken out as landed end     *)
-(*   every commit they go on with (Wal::rebase's `between`).               *)
-(* - walContinues (NoWalContinues): a WAL whose segment ending the         *)
-(*   branch's last commit and going on with the next landed alone, those   *)
-(*   after it not, is put after the branch too: that segment restamped     *)
-(*   after the fence with its continuation alone, then the rest            *)
-(*   (Wal::rebase, TASK-345).                                              *)
+(*   bucket has it whole, and a head names no commit begun.                *)
 (* - wholeCommitsKept (NoWholeCommitsKept): a host's local recovery keeps  *)
 (*   a commit spanning segments only if consecutive segments end it, and   *)
 (*   closes the first again without it otherwise (extent_store's           *)
 (*   wal::recover): a store whose log ends inside a commit refuses to      *)
 (*   open.                                                                 *)
 (* - references (NoReferences): a fork of a branch to a child in another   *)
-(* cell, a writable fork or a point's clone, has a reference under the     *)
-(* parent's cell, which that cell's passes keep the parent's state at the  *)
-(* fork point for: its pass lists nothing of the child's cell, and the     *)
-(* parent deleted, would delete what the child inherits.                   *)
-(*                                                                         *)
+(*   cell, a writable fork or a point's clone, has a reference under the   *)
+(*   parent's cell, which that cell's passes keep the parent's state at    *)
+(*   the fork point for: its pass lists nothing of the child's cell, and   *)
+(*   the parent deleted, would delete what the child inherits.             *)
 (* - referencesFirst (NoReferencesFirst): a writable fork's reference is   *)
-(* written before its child's record, by whoever writes the record: its    *)
-(* writer, the next, or the parent's deletion, before that marks the       *)
-(* parent deleted. Without it, a pass reading the parent deleted finds no  *)
-(* reference.                                                              *)
-(*                                                                         *)
+(*   written before its child's record, by whoever writes the record: its  *)
+(*   writer, the next, or the parent's deletion, before that marks the     *)
+(*   parent deleted. Without it, a pass reading the parent deleted finds   *)
+(*   no reference.                                                         *)
 (* - clonesReferFirst (NoClonesReferFirst): a point's clone writes its     *)
-(* reference before its record and before it reads the point's record: one *)
-(* that read the point live then wrote it before the point's deletion,     *)
-(* which a pass reading the point deleted, or finding its reference        *)
-(* retired, read after.                                                    *)
-(*                                                                         *)
+(*   reference before its record and before it reads the point's record:   *)
+(*   one that read the point live then wrote it before the point's         *)
+(*   deletion, which a pass reading the point deleted, or finding its      *)
+(*   reference retired, read after.                                        *)
 (* - referencesHeld (NoReferencesHeld): a reference is retired, by the     *)
-(* pass of its child's cell, only once that cell has no live branch and no *)
-(* reference of its own: the child's forks inherit what it did, kept by    *)
-(* its reference.                                                          *)
-(*                                                                         *)
+(*   pass of its child's cell, only once that cell has no live branch and  *)
+(*   no reference of its own: the child's forks inherit what it did, kept  *)
+(*   by its reference.                                                     *)
 (* - referencesRelisted (NoReferencesRelisted): a pass lists its cell's    *)
-(* references after the states, as it lists the records again: listed with *)
-(* the candidates, it misses a clone's of a point a checkpoint dropped     *)
-(* since.                                                                  *)
-(*                                                                         *)
+(*   references after the states, as it lists the records again: listed    *)
+(*   with the candidates, it misses a clone's of a point a checkpoint      *)
+(*   dropped since.                                                        *)
 (* - forkPointsKept (NoForkPointsKept): a pass keeps, of the parent's      *)
-(* state at a referenced fork point, what recovering it reads, not only    *)
-(* the objects holding its extents: a child with no checkpoint of its own  *)
-(* recovers through it.                                                    *)
-(*                                                                         *)
+(*   state at a referenced fork point, what recovering it reads, not only  *)
+(*   the objects holding its extents: a child with no checkpoint of its    *)
+(*   own recovers through it.                                              *)
 (* - clonesRecordFirst (NoClonesRecordFirst): a point's clone creates its  *)
-(* record, being made, before its reference (and reads the point's after   *)
-(* both, clonesReferFirst): a reference always has a record naming its     *)
-(* origin, by which its child's cell's pass retires it, whatever comes of  *)
-(* the clone. Written first, a host dying between leaves a reference no    *)
-(* record names, which no pass retires (ReferencesNamed).                  *)
-(*                                                                         *)
+(*   record, being made, before its reference (and reads the point's after *)
+(*   both, clonesReferFirst): a reference always has a record naming its   *)
+(*   origin, by which its child's cell's pass retires it, whatever comes   *)
+(*   of the clone. Written first, a host dying between leaves a reference  *)
+(*   no record names, which no pass retires (ReferencesNamed).             *)
 (* - referencesTakenBack (NoReferencesTakenBack): whoever finds the record *)
-(* of a writable fork's child naming another origin, or none, deletes the  *)
-(* fork's reference: as it writes the record and finds another's there,   *)
-(* or as a later writer or the parent's deletion records the fork again.   *)
-(* Without it, a reference whose child's ID another branch took between    *)
-(* its writer's read of the child's record and its create stays for ever  *)
-(* (ReferencesNamed).                                                      *)
-(*                                                                         *)
+(*   of a writable fork's child naming another origin, or none, deletes    *)
+(*   the fork's reference: as it writes the record and finds another's     *)
+(*   there, or as a later writer or the parent's deletion records the fork *)
+(*   again. Without it, a reference whose child's ID another branch took   *)
+(*   between its writer's read of the child's record and its create stays  *)
+(*   for ever (ReferencesNamed).                                           *)
 (* - retirementsMarked (NoRetirementsMarked): a reference retired, or      *)
-(* taken back, is marked, a mark kept for good under its parent's cell     *)
-(* beside it, before it is deleted; a pass deletes the references of its   *)
-(* cell it lists marked. A writer of the reference whose read of the       *)
-(* child's record came before the retirement, none there, writes it after: *)
-(* one a stale recorder wrote after another's take-back, dying before its  *)
-(* create, which no record names (TASK-395.13); one written again after    *)
-(* its child's cell's pass retired it, which that cell's passes, skipping  *)
-(* it, the cell dead and unchanged, never retire again (TASK-395.14). Its  *)
-(* write changes its parent's cell's listing, whose next pass deletes it,  *)
-(* by its mark (ReferencesRetiredMarked). A writer finding the child's     *)
-(* record live and its own writes none: its maker's came first             *)
-(* (referencesFirst), and stands.                                          *)
+(*   taken back, is marked, a mark kept for good under its parent's cell   *)
+(*   beside it, before it is deleted; a pass deletes the references of its *)
+(*   cell it lists marked. A writer of the reference whose read of the     *)
+(*   child's record came before the retirement, none there, writes it      *)
+(*   after: one a stale recorder wrote after another's take-back, dying    *)
+(*   before its create, which no record names (TASK-395.13); one written   *)
+(*   again after its child's cell's pass retired it, which that cell's     *)
+(*   passes, skipping it, the cell dead and unchanged, never retire again  *)
+(*   (TASK-395.14). Its write changes its parent's cell's listing, whose   *)
+(*   next pass deletes it, by its mark (ReferencesRetiredMarked). A writer *)
+(*   finding the child's record live and its own writes none: its maker's  *)
+(*   came first (referencesFirst), and stands.                             *)
+(*                                                                         *)
+(* Gone with the head (TASK-407), with what they guarded: a create where   *)
+(* nothing is as a writer's fence, the fence segment a takeover made, gaps *)
+(* filled, void and late segments, the collector's pins of where a writer  *)
+(* taken over could still create (TASK-388), a lease read before a fork's  *)
+(* acknowledgement, readers listing checkpoints again, a deletion's fence  *)
+(* and its read of the record again, readers going by the footer of the   *)
+(* object at an extent's key rather than their state (TASK-79.18), the     *)
+(* collector keeping extents of their own by the segments their keys name, *)
+(* the WAL's rules for fences, and readers holding a commit's runs as a    *)
+(* rule, as a fence could leave it unended: a head names only what its     *)
+(* writer acknowledged, whole commits, and a key only one object.          *)
 (*                                                                         *)
 (* Where this differs from doc-14 and the code, by what TLC found:         *)
 (*                                                                         *)
 (* - doc-14 put the WAL after the branch by segments: WAL segments whose   *)
-(*   footers recovery read were acknowledged, and the first other one had  *)
-(*   to follow the fence's `after`. A WAL whose landed segments a later    *)
-(*   writer's checkpoint covers is then declared diverged (recovery reads  *)
-(*   no footer a checkpoint covers), and so is one the branch moved past   *)
-(*   by a fence alone (a takeover that crashed): the store refuses to      *)
-(*   open, its guest's commits dropped by `take`, though the branch holds  *)
-(*   them or nothing came after them. By commits, as doc-7's recovery on   *)
-(*   the same host was, neither diverges.                                  *)
-(* - What TASK-177 found lost, a fork's deleted parent's record, which no *)
-(*   record is now (recordsKept), is here that parent's segments to the    *)
-(*   fork, which the collector lets go of for the same reason: the fork's  *)
-(*   checkpoint.                                                           *)
+(*   footers recovery read were acknowledged. Here by commits, as doc-7's  *)
+(*   recovery on the same host was. The code's segments of forks alone,    *)
+(*   making no commit, are none here: a fork is a commit's.                *)
 (*                                                                         *)
 (* Steps are what the code does between two requests, or merged: a         *)
-(* writer's taking reads the record, takes the lease and reads the record  *)
+(* writer's taking reads the record, swaps the head and reads the record   *)
 (* again in one step, the first read of it from before the branch's        *)
-(* deletion if "staleTake" is in Can; the writers' and the collector's     *)
-(* recoveries read the bucket at once, the deletions' in two steps, the    *)
-(* checkpoints listed, then the rest, its fence and the record read again; *)
-(* their forks' children are recorded in a step after. (The code's writer, *)
-(* once it holds the lease, reads the record, recovers and lists the       *)
-(* segments at once, and takes the lease from a read of it made as it      *)
-(* first read the record, conditionally: TASK-165.11.) A checkpoint's      *)
-(* create lands after its writer took its moves, in a step of its own,     *)
-(* while its writer's session lasts. Passes overlap if "overlap" is in     *)
-(* Can, of any cells, a later one of a cell taking its collector lease;    *)
+(* deletion if "staleTake" is in Can; it reads the head's checkpoint then, *)
+(* and the segments the head names in a step after. The collector's        *)
+(* recoveries read the bucket at once, a deletion's in one step after its  *)
+(* swap. Forks' children are recorded in a step after their parents'       *)
+(* acknowledgements. A checkpoint's PUT lands after its writer took its    *)
+(* moves, in a step of its own, while its writer's session lasts, and its  *)
+(* swap into the head in another. Passes overlap if "overlap" is in Can,   *)
+(* of any cells, a later one of a cell taking its collector lease;         *)
 (* MaxPasses bounds them all. A pass reads its cell's records once each,   *)
-(* as listings find them, until one finds none new, then once again each   *)
+(* as listings find them, until one finds none new, then once again each  *)
 (* after the states (recordsRelisted), when it lists its references too.   *)
 (* Reads of other cells' objects (a parent's state, a point's record) are  *)
 (* a pass's GETs; it lists only its own cell, and deletes only there, but  *)
@@ -314,12 +253,9 @@
 (* spans three segments at most, two going on with it, each a run of one   *)
 (* extent, the one ending it holding nothing else (the code's may hold its *)
 (* frees and more). A segment ends a commit and goes on with the next only *)
-(* with "spanOn" in Can (BucketSpans has it): without walContinues,        *)
-(* Wal::rebase finds a WAL diverged whose segment doing so landed alone,   *)
-(* though no other writer moved the branch on (TASK-345). Not              *)
-(* modelled: the collector's grace period (correctness does not depend on  *)
-(* it, doc-7) and its compaction threshold (it compacts any object it may, *)
-(* by choice), and creates failing.                                        *)
+(* with "spanOn" in Can. Not modelled: the collector's grace period        *)
+(* (correctness does not depend on it, doc-7) and its compaction threshold *)
+(* (it compacts any object it may, by choice), and PUTs failing.           *)
 (***************************************************************************)
 EXTENDS Integers, Sequences, FiniteSets, TLC
 
@@ -328,7 +264,7 @@ CONSTANTS
     Branches,       \* branch IDs
     Root,           \* the branch the bucket starts with
     Segs,           \* segments per branch: 0..Segs-1
-    MaxTakes,       \* lease takings, all branches'
+    MaxTakes,       \* head takings, all branches'
     MaxCommits,     \* commits
     MaxMints,       \* extent IDs minted
     MaxPasses,      \* passes of the collector
@@ -339,20 +275,15 @@ CONSTANTS
     Rules,          \* the protocol's rules in force (all, but in a mutation)
     CellOf          \* CellOf[b]: the cell b is a volume of, whose prefix holds its objects
 
-AllRules == {"pinsFences", "pinsOldFences", "pinsVoidStrays", "pinsLateStrays", "pinsTakings",
-             "forksAfterLease", "fence", "continuity", "epochSequences", "recordsAfterAck",
-             "candidatesFirst", "newestCheckpoint", "forksFromStates", "orphansAfterSuccessor",
-             "tokens", "deleteTokens", "footers", "forkClaimsIds", "forkClaimsLanded",
-             "pointsTakeNoWriter", "forksCheckPoints", "forksPending", "collectorAbandons",
-             "recordsRelisted", "recordsOwned", "extentKeysNameSegments", "waysFromSeals",
-             "movesTakenFirst", "leasesByTakings", "passesFencedStop", "recoveriesByOrigins",
-             "recordsKept", "deletionsFence", "deletionsReread", "deletionsDoneByOthers",
-             "walFollows",
-             "walAfterFence", "spansHeld", "spansFenced", "acksBetweenCommits",
-             "walBetweenCommits", "wholeCommitsKept", "walContinues",
-             "references", "referencesFirst", "clonesReferFirst", "referencesHeld",
-             "referencesRelisted", "forkPointsKept", "clonesRecordFirst", "referencesTakenBack",
-             "retirementsMarked"}
+AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "recordsAfterAck",
+             "candidatesFirst", "forksFromStates", "tokens", "deleteTokens", "forkClaimsIds",
+             "forkClaimsLanded", "pointsTakeNoWriter", "forksCheckPoints", "forksPending",
+             "collectorAbandons", "recordsRelisted", "recordsOwned", "waysFromSeals",
+             "movesTakenFirst", "passesFencedStop", "recoveriesByOrigins", "recordsKept",
+             "deletionsDoneByOthers", "walFollows", "acksBetweenCommits",
+             "wholeCommitsKept", "references", "referencesFirst", "clonesReferFirst",
+             "referencesHeld", "referencesRelisted", "forkPointsKept", "clonesRecordFirst",
+             "referencesTakenBack", "retirementsMarked", "movesByPass"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "fork", "point", "restore", "unfork",
            "contest", "delete", "deletePoints", "place", "checkpoint", "collect", "compact",
@@ -378,27 +309,37 @@ CellBranches(c) == {b \in Branches : CellOf[b] = c}
 Cross(p, c) == CellOf[p] # CellOf[c]
 
 Seqs == 0..(Segs - 1)
-\* The lease epoch of a deletion's, which no writer takes.
+\* The epochs writers take, and the final one, a deletion's, which no writer takes.
+Epochs == 1..MaxTakes
 Final == MaxTakes + 1
 
 R(rule) == rule \in Rules
 
+\* The epoch a key names: its writer's (epochKeys); without the rule, none, every writer's at one.
+KE(e) == IF R("epochKeys") THEN e ELSE 1
+
 VARIABLES
     \* The bucket.
-    seg,        \* seg[b][s]: segment s of b, or None
+    seg,        \* seg[b][s][e]: segment s of b by the writer of epoch e, or None
     own,        \* the extents stored on their own: [b, e, s, x], at the key of writer e's segment s
-    ckpt,       \* ckpt[b][s]: b's checkpoint as of segment s, or None
+    ckpt,       \* ckpt[b][s][e]: b's checkpoint as of segment s by the writer of epoch e, or None
     rec,        \* rec[b]: b's record, or None
-    lease,      \* lease[b]: [epoch, token, holder], or None: the holder its taking's, unique
-    moves,      \* moves[b][s][d]: the extents the collector moved out of segment s of b, at d = 1,
-                \* or out of those moves, at d = 2; or None
-    inflight,   \* the segments' creates in flight: [h, b, g, s, o]
+    head,       \* head[b]: [epoch, token, holder, end, chain, ck], or None: the holder its
+                \* taking's, unique; the segments 0..end-1 committed, chain[s + 1] the epoch of s;
+                \* ck the newest checkpoint, <<s, e>>, or <<>>
+    moves,      \* moves[b][s][e][p]: the moves the collector's passes p made of segment <<s, e>> of
+                \* b: p = <<i>>, pass i's moves of the segment; <<i, j>>, pass j's of those; or None.
+                \* Each [pass, names]: its pass, and the extents it holds
+    mflight,    \* the moves' PUTs in flight: [k, o], at the key k, the moves o
+    inflight,   \* the segments' PUTs in flight: [h, b, g, s, o]
     refs,       \* the references of forks across cells, [p, at, c]: under p's cell, naming p, the
                 \* fork point at, and the child c
     marked,     \* the marks of the references retired or taken back, [p, at, c], under p's cell,
                 \* kept (retirementsMarked): a reference marked is garbage, written again or not
     retired,    \* what happened: the references retired or taken back (kept with the bucket's
                 \* variables, as it changes with them)
+    written,    \* what happened: every <<key, object>> written at a segment's, a checkpoint's or
+                \* moves' key (KeysWrittenOnce)
     \* The hosts.
     ses,        \* ses[h][b]: h's writer of b, or None
     wal,        \* wal[h][b]: h's WAL of b, a sequence of [s, o]: kept by a crash, or lost
@@ -416,26 +357,25 @@ VARIABLES
     twice,      \* whether an ID was minted twice
     makers,     \* makers[b]: the makings of b told they made it
     doomed,     \* the makings a deletion of was asked by whoever may
-    taken,      \* taken[b]: the highest token that took b's lease, -1 if none did
+    taken,      \* taken[b]: the highest token that took b's head, -1 if none did
     placed,     \* placed[b]: the last placement's token
     errors,     \* what failed that must not
-    freed,      \* the segments' places the collector freed, <<b, s>>: CreatesNeverFreed's history
     \* Bounds.
     gen, takes, passes, places, crashes, mints
 
-bucketVars == <<seg, own, ckpt, rec, lease, moves, inflight, refs, marked, retired>>
+bucketVars == <<seg, own, ckpt, rec, head, moves, mflight, inflight, refs, marked, retired, written>>
 hostVars == <<ses, wal, tok, proc>>
 truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
-\* (freed is no action's: Next keeps it.)
 countVars == <<gen, takes, passes, places, crashes, mints>>
-vars == <<bucketVars, hostVars, gc, truthVars, countVars, freed>>
+vars == <<bucketVars, hostVars, gc, truthVars, countVars>>
 
 -----------------------------------------------------------------------------
 (* Values. *)
 
 Max(S) == CHOOSE x \in S : \A y \in S : x >= y
 Min(S) == CHOOSE x \in S : \A y \in S : x <= y
-\* Pairs <<epoch, n>>, ordered as sequence numbers are: the epoch's range, then n.
+\* Pairs <<epoch, n>>, ordered as sequence numbers are: the epoch's range, then n; and keys
+\* <<s, e>> of checkpoints, by s, then e.
 GE2(a, b) == a[1] > b[1] \/ (a[1] = b[1] /\ a[2] >= b[2])
 Max2(a, b) == IF GE2(a, b) THEN a ELSE b
 
@@ -456,23 +396,39 @@ Record(kind, origin, point, o, base) ==
 \* Whether r is the record of the child of the fork whose owner is o.
 ChildOf(r, o) == r.kind # "root" /\ r.owner = Owner(o)
 
-\* A state: its extents' locations, its last commit, the last segment applied <<s, epoch>>, its
-\* next sequence number, its forks, the highest epoch applied, the last segment read, the runs
-\* of the commit the segments applied last went on with (State::begun: [commit, runs], runs the
-\* locations of its extents; or None), its fences, the segments applied that began an epoch
-\* (State::fences), its strays (State::strays), the segments read that are neither, void, or
-\* late, following the last applied of an earlier epoch, and, not in the bucket's bytes, the
-\* commits applied and whether one was applied twice.
-Fresh == [ext |-> Nothing, head |-> 0, last |-> <<>>, next |-> <<0, 0>>, forks |-> {},
-          epoch |-> 0, through |-> -1, begun |-> None, fences |-> {}, voids |-> {}, lates |-> {},
-          hist |-> {}, dup |-> FALSE]
+\* How many times the collector moves what was in a segment: into its moves, then those moves'.
+Hops == 2
+\* The passes that may make moves, one after another from a segment: <<i>>, then <<i, j>>.
+Passes == 1..MaxPasses
+Ways == {<<i>> : i \in Passes} \cup {<<i, j>> : i, j \in Passes}
+\* The pass a moves' key names: the one that made them (movesByPass); without the rule, none,
+\* every pass's moves of an object at one key, as before TASK-407.1.
+KP(i) == IF R("movesByPass") THEN i ELSE 1
+
+\* The keys of segment s of b by the writer of epoch e, of its moves along the way p from it
+\* (p = <<>>, the segment itself), and of b's checkpoint as of s by that writer; a key's way, and
+\* its depth.
+SegKey(b, s, e) == <<"seg", b, s, KE(e)>>
+Key(b, s, e, p) == IF p = <<>> THEN <<"seg", b, s, e>> ELSE <<"moves", b, s, e, p>>
+CkKey(b, s, e) == <<"ckpt", b, s, KE(e)>>
+Way(loc) == IF loc[1] = "seg" THEN <<>> ELSE loc[5]
+Depth(loc) == Len(Way(loc))
+
+\* The object at the key k of a segment, a checkpoint or moves, or None.
+Obj(k) == CASE k[1] = "seg" -> seg[k[2]][k[3]][k[4]]
+            [] k[1] = "ckpt" -> ckpt[k[2]][k[3]][k[4]]
+            [] k[1] = "moves" -> moves[k[2]][k[3]][k[4]][k[5]]
+
+\* A state: its extents' locations (the keys holding them), its last commit, its next sequence
+\* number, its forks, the last segment applied, the runs of the commit the segments applied last
+\* went on with (State::begun: [commit, runs], runs the locations of its extents; or None), and,
+\* not in the bucket's bytes, the commits applied and whether one was applied twice.
+Fresh == [ext |-> Nothing, tip |-> 0, next |-> <<0, 0>>, forks |-> {}, through |-> -1,
+          begun |-> None, hist |-> {}, dup |-> FALSE]
 
 \* A fork's child's state before its segments: what it inherits (State::inheriting: no runs
 \* begun).
-Inherit(st) == [Fresh EXCEPT !.ext = st.ext, !.head = st.head, !.hist = st.hist]
-
-\* Whether a reader applies segment o after st: it follows the last applied (continuity).
-Follows(st, o) == o.after = st.last \/ ~R("continuity")
+Inherit(st) == [Fresh EXCEPT !.ext = st.ext, !.tip = st.tip, !.hist = st.hist]
 
 \* Whether segment o, following one that went on with commit t, ends it (Contents::ends): it
 \* names it. The code's names a commit of t's writer, t or a later one, the last of those its
@@ -485,43 +441,37 @@ Continues(o, t) == o.commit = 0 /\ o.cont # None /\ o.cont.commit = t
 \* The locations f, those of g sealed over them.
 Over(f, g) == [x \in DOMAIN f \cup DOMAIN g |-> IF x \in DOMAIN g THEN g[x] ELSE f[x]]
 
-\* st, segment s of b, whose object is o, applied: unless it is void. First the runs of the commit
-\* the segments before went on with: sealed, if o ends it; held on, if o goes on with it; else
-\* dropped (spansFenced), its writer's, never acknowledged, a later writer fenced. Then o's own;
-\* then, if o goes on with a commit, its run held until a segment ends it (spansHeld)
-\* (State::apply_contents).
+\* st, segment s of b, whose object is o, applied. First the runs of the commit the segments
+\* before went on with: sealed, if o ends it; else held on (a head names a writer's segments only
+\* between its commits, so that o goes on with it). Then o's own; then, if o goes on with a commit,
+\* its run held until a segment ends it (State::apply_contents). A state a head or a checkpoint
+\* names ends between commits, so that it holds none begun; a WAL's may (wholeCommitsKept). Since
+\* the head (TASK-407), no rule: sealed at once, the runs would end the same, the segment ending
+\* their commit always named with them (spansHeld's mutation found nothing).
 Apply(st, b, s, o) ==
-    IF ~Follows(st, o) THEN [st EXCEPT !.through = s, !.voids = @ \cup {s}]
-    ELSE LET bg == st.begun
-             ended == bg # None /\ Ends(o, bg.commit)
-             held == IF bg = None \/ ended THEN None
-                     ELSE IF Continues(o, bg.commit) \/ ~R("spansFenced") THEN bg
-                     ELSE None
-             e0 == IF ended THEN Over(st.ext, bg.runs) ELSE st.ext
-             e1 == IF o.ext # None THEN Put(e0, o.ext, <<"seg", b, s>>) ELSE e0
-             e2 == IF o.own # None THEN Put(e1, o.own, <<"own", b, o.epoch, s>>) ELSE e1
-             e3 == IF o.free # None /\ o.free \in DOMAIN e2 THEN Drop(e2, o.free) ELSE e2
-             run == IF o.cont = None THEN Nothing ELSE Put(Nothing, o.cont.ext, <<"seg", b, s>>)
-             \* Without spansHeld, a continuation's run sealed at once.
-             e4 == IF R("spansHeld") THEN e3 ELSE Over(e3, run)
-             begun == IF o.cont = None \/ ~R("spansHeld") THEN held
-                      ELSE IF held = None THEN [commit |-> o.cont.commit, runs |-> run]
-                      ELSE [held EXCEPT !.runs = Over(@, run)]
-         IN [st EXCEPT !.ext = e4,
-                       !.begun = begun,
-                       !.head = IF o.commit # 0 THEN o.commit ELSE st.head,
-                       !.hist = IF o.commit # 0 THEN st.hist \cup {o.commit} ELSE st.hist,
-                       !.dup = st.dup \/ o.commit \in st.hist,
-                       !.last = <<s, o.epoch>>,
-                       !.next = Max2(st.next, o.next),
-                       !.forks = IF o.fork = None THEN st.forks
-                                 ELSE st.forks \cup {[child |-> o.fork.child, at |-> s,
-                                                      owner |-> o.fork.owner,
-                                                      point |-> o.fork.point]},
-                       !.epoch = IF o.epoch > st.epoch THEN o.epoch ELSE st.epoch,
-                       !.fences = IF o.epoch > st.epoch THEN st.fences \cup {s} ELSE st.fences,
-                       !.lates = IF o.epoch < st.epoch THEN st.lates \cup {s} ELSE st.lates,
-                       !.through = s]
+    LET bg == st.begun
+        at == SegKey(b, s, o.epoch)
+        ended == bg # None /\ Ends(o, bg.commit)
+        held == IF ended THEN None ELSE bg
+        e0 == IF ended THEN Over(st.ext, bg.runs) ELSE st.ext
+        e1 == IF o.ext # None THEN Put(e0, o.ext, at) ELSE e0
+        e2 == IF o.own # None THEN Put(e1, o.own, <<"own", b, o.epoch, s>>) ELSE e1
+        e3 == IF o.free # None /\ o.free \in DOMAIN e2 THEN Drop(e2, o.free) ELSE e2
+        run == IF o.cont = None THEN Nothing ELSE Put(Nothing, o.cont.ext, at)
+        begun == IF o.cont = None THEN held
+                 ELSE IF held = None THEN [commit |-> o.cont.commit, runs |-> run]
+                 ELSE [held EXCEPT !.runs = Over(@, run)]
+    IN [st EXCEPT !.ext = e3,
+                  !.begun = begun,
+                  !.tip = IF o.commit # 0 THEN o.commit ELSE st.tip,
+                  !.hist = IF o.commit # 0 THEN st.hist \cup {o.commit} ELSE st.hist,
+                  !.dup = st.dup \/ o.commit \in st.hist,
+                  !.next = Max2(st.next, o.next),
+                  !.forks = IF o.fork = None THEN st.forks
+                            ELSE st.forks \cup {[child |-> o.fork.child, at |-> s,
+                                                 owner |-> o.fork.owner,
+                                                 point |-> o.fork.point]},
+                  !.through = s]
 
 RECURSIVE ApplyAll(_, _, _)
 \* st, the WAL ws applied.
@@ -533,121 +483,105 @@ CommitsOf(ws) == {ws[i].o.commit : i \in DOMAIN ws} \ {0}
 -----------------------------------------------------------------------------
 (* Recovery, as one read of the bucket: what invariants and the collector see. *)
 
-CkSeqs(b) == {s \in Seqs : ckpt[b][s] # None}
+RECURSIVE FollowChain(_, _, _, _, _, _)
+\* st, b's segments from s to before `to` applied, each at the key of the epoch chain names, every
+\* one there, and what that read.
+FollowChain(b, st, s, to, chain, t) ==
+    IF s >= to THEN [ok |-> TRUE, st |-> st, touched |-> t]
+    ELSE LET k == SegKey(b, s, chain[s + 1]) IN
+         IF Obj(k) = None THEN [ok |-> FALSE, st |-> st, touched |-> t]
+         ELSE FollowChain(b, Apply(st, b, s, Obj(k)), s + 1, to, chain, t \cup {k})
 
-RECURSIVE FollowTo(_, _, _, _, _)
-\* st, b's segments from s to at applied, every one there, and what that read.
-FollowTo(b, st, s, at, t) ==
-    IF s > at THEN [ok |-> TRUE, st |-> st, touched |-> t]
-    ELSE IF seg[b][s] = None THEN [ok |-> FALSE, st |-> st, touched |-> t]
-    ELSE FollowTo(b, Apply(st, b, s, seg[b][s]), s + 1, at, t \cup {<<"seg", b, s>>})
+\* The head of b's fields, none if it has no head.
+End(b) == IF head[b] = None THEN 0 ELSE head[b].end
+Chain(b) == IF head[b] = None THEN <<>> ELSE head[b].chain
+HeadCk(b) == IF head[b] = None THEN <<>> ELSE head[b].ck
+HeadEpoch(b) == IF head[b] = None THEN 0 ELSE head[b].epoch
+
+\* b's checkpoints listed as of segment `at` or before: <<s, e>>.
+CksTo(b, at) == {k \in Seqs \X Epochs : k[1] <= at /\ ckpt[b][k[1]][k[2]] # None}
+\* The newest of the checkpoints K.
+Newest(K) == CHOOSE k \in K : \A j \in K : GE2(k, j)
 
 RECURSIVE StateAt(_, _)
-\* b's state as of its segment at: its newest checkpoint to there, or its origin's, then its
-\* segments to there; or a failure, something gone.
+\* b's state as of its segment at, which its head names: its newest checkpoint to there, listed,
+\* or its origin's state, then the segments its head names to there; or a failure, something gone.
 StateAt(b, at) ==
-    LET cs == {s \in CkSeqs(b) : s <= at} IN
-    IF cs # {} THEN FollowTo(b, ckpt[b][Max(cs)], Max(cs) + 1, at, {<<"ckpt", b, Max(cs)>>})
+    LET cs == CksTo(b, at) IN
+    IF End(b) <= at THEN [ok |-> FALSE, st |-> Fresh, touched |-> {}]
+    ELSE IF cs # {} THEN
+       LET c == Newest(cs)
+           k == <<"ckpt", b, c[1], c[2]>>
+       IN FollowChain(b, Obj(k), c[1] + 1, at + 1, Chain(b), {k})
     ELSE IF rec[b] = None THEN [ok |-> FALSE, st |-> Fresh, touched |-> {}]
-    ELSE IF rec[b].origin = <<>> THEN FollowTo(b, Fresh, 0, at, {<<"rec", b>>})
+    ELSE IF rec[b].origin = <<>> THEN FollowChain(b, Fresh, 0, at + 1, Chain(b), {<<"rec", b>>})
     ELSE LET p == StateAt(rec[b].origin[1], rec[b].origin[2]) IN
          IF ~p.ok THEN p
-         ELSE FollowTo(b, Inherit(p.st), 0, at, p.touched \cup {<<"rec", b>>})
+         ELSE FollowChain(b, Inherit(p.st), 0, at + 1, Chain(b), p.touched \cup {<<"rec", b>>})
 
-RECURSIVE FollowEnd(_, _, _, _)
-\* st, b's segments from s applied to the first missing, and what that read.
-FollowEnd(b, st, s, t) ==
-    IF s >= Segs \/ seg[b][s] = None
-    THEN [ok |-> TRUE, st |-> st, end |-> s, touched |-> t]
-    ELSE FollowEnd(b, Apply(st, b, s, seg[b][s]), s + 1, t \cup {<<"seg", b, s>>})
+Lost == [ok |-> FALSE, st |-> Fresh, end |-> 0, touched |-> {}, ck |-> <<>>]
 
-Lost == [ok |-> FALSE, st |-> Fresh, end |-> 0, touched |-> {}, ck |-> -1]
-
-\* b's state, forked from origin: its newest checkpoint, or its origin's state, then its segments.
+\* b's state, forked from origin, as its head names it: the head's checkpoint, or its origin's
+\* state, then the segments the head names after it. Something named gone, a failure.
 Recover(b, origin) ==
-    LET cs == CkSeqs(b)
-        with(r, ck) == [ok |-> r.ok, st |-> r.st, end |-> r.end, touched |-> r.touched, ck |-> ck]
-    IN IF cs # {} THEN with(FollowEnd(b, ckpt[b][Max(cs)], Max(cs) + 1,
-                                      {<<"ckpt", b, Max(cs)>>}), Max(cs))
-       ELSE IF origin = <<>> THEN with(FollowEnd(b, Fresh, 0, {}), -1)
+    LET ck == HeadCk(b)
+        with(r) == [ok |-> r.ok, st |-> r.st, end |-> End(b), touched |-> r.touched, ck |-> ck]
+    IN IF ck # <<>> THEN
+          LET k == CkKey(b, ck[1], ck[2]) IN
+          IF Obj(k) = None THEN Lost
+          ELSE with(FollowChain(b, Obj(k), ck[1] + 1, End(b), Chain(b), {k}))
+       ELSE IF origin = <<>> THEN with(FollowChain(b, Fresh, 0, End(b), Chain(b), {}))
        ELSE LET p == StateAt(origin[1], origin[2]) IN
-            IF ~p.ok THEN Lost ELSE with(FollowEnd(b, Inherit(p.st), 0, p.touched), -1)
+            IF ~p.ok THEN Lost
+            ELSE with(FollowChain(b, Inherit(p.st), 0, End(b), Chain(b), p.touched))
 
-\* b's newest checkpoint, -1 if it has none.
-Newest(b) == IF CkSeqs(b) = {} THEN -1 ELSE Max(CkSeqs(b))
+\* Whether b's head names its segment at as the one by the writer of epoch e, b holding it, as a
+\* fork's recovery from there needs.
+Holds(b, at, e) == at < End(b) /\ Chain(b)[at + 1] = e /\ StateAt(b, at).ok
 
-\* A recovery of b, forked from origin, that listed its checkpoints, the newest ck (-1 if none),
-\* going on: from it, or from its origin's state, then its segments. It starts again if the
-\* checkpoint has gone, or, listing the checkpoints again (newestCheckpoint), a newer one has come,
-\* which the collector, going by it, may have let what it read go for: segments, or what it
-\* inherited (TASK-177).
-Recovering(b, origin, ck) ==
-    LET newer == R("newestCheckpoint") /\ Newest(b) # ck
-        again == [restart |-> TRUE, ok |-> FALSE, st |-> Fresh, end |-> 0]
-        from(st, s) == LET r == FollowEnd(b, st, s, {}) IN
-                       IF newer THEN again
-                       ELSE [restart |-> FALSE, ok |-> TRUE, st |-> r.st, end |-> r.end]
-    IN IF ck >= 0 THEN IF ckpt[b][ck] = None THEN again ELSE from(ckpt[b][ck], ck + 1)
-       ELSE IF origin = <<>> THEN from(Fresh, 0)
-       ELSE LET p == StateAt(origin[1], origin[2]) IN
-            IF p.ok THEN from(Inherit(p.st), 0)
-            ELSE IF newer THEN again
-            ELSE [restart |-> FALSE, ok |-> FALSE, st |-> Fresh, end |-> 0]
+\* Whether no writer has b: no head, or its deletion's.
+Unwritten(b) == head[b] = None \/ head[b].epoch = Final
 
-\* Whether b holds its segment at, as a fork's recovery from there needs.
-Holds(b, at) == StateAt(b, at).ok
-
-\* Whether no writer has b: no lease, or its deletion's.
-Unwritten(b) == lease[b] = None \/ lease[b].epoch = Final
-
-LeaseEpoch(b) == IF lease[b] = None THEN 0 ELSE lease[b].epoch
-
-\* Whether b's lease is the taking of the writer whose session is s: its epoch, and its holder.
-Taking(s, b) == lease[b] # None /\ lease[b].epoch = s.epoch /\ lease[b].holder = s.gen
-
-\* Whether that writer finds b's lease still its, reading it: by its taking (leasesByTakings), or
-\* by its epoch alone, which a lease removed and taken again repeats (TASK-179).
-Leased(s, b) == IF R("leasesByTakings") THEN Taking(s, b) ELSE LeaseEpoch(b) = s.epoch
-
-\* How many times the collector moves what was in a segment: into its moves, then those moves'.
-Hops == 2
-
-\* The key of segment s of b (d = 0), or of the moves d hops from it, and its depth.
-Key(b, s, d) == IF d = 0 THEN <<"seg", b, s>> ELSE <<"moves", b, s, d>>
-Depth(loc) == IF loc[1] = "seg" THEN 0 ELSE loc[4]
+\* Whether b's head is the taking of the writer whose session is s: its epoch, and its holder,
+\* as its writer last swapped it (an ETag's condition).
+Taking(s, b) == head[b] # None /\ head[b].epoch = s.epoch /\ head[b].holder = s.gen
 
 \* Whether segment o's footer names a run of x in its data: of a commit it ends, or of the one it
 \* goes on with (Contents::runs).
 Runs(o, x) == o.ext = x \/ (o.cont # None /\ o.cont.ext = x)
 
-\* Whether the object d hops from segment s of b names x: the segment's footer, or the moves' map.
-Names(b, s, d, x) ==
-    IF d = 0 THEN seg[b][s] # None /\ Runs(seg[b][s], x)
-    ELSE moves[b][s][d] # None /\ x \in moves[b][s][d]
+\* Whether the object along the way p from segment <<s, e>> of b names x: the segment's footer, or
+\* the moves' map.
+Names(b, s, e, p, x) ==
+    IF p = <<>> THEN seg[b][s][e] # None /\ Runs(seg[b][s][e], x)
+    ELSE moves[b][s][e][p] # None /\ x \in moves[b][s][e][p].names
 
-\* Whether a reader of extent x at loc reads x's bytes: where the footer of the object at its key
-\* says it is, or, that object gone or naming it not, where the map of the moves of it says, one
-\* hop at a time (fetch's read); without footers, a segment where loc says, whatever it holds.
+\* The ways one hop on from p: the moves of it any pass may have made.
+On(p) == IF Len(p) >= Hops THEN {} ELSE {p \o <<KP(i)>> : i \in Passes}
+
+\* Whether a reader of extent x at loc reads x's bytes: the object at loc's key names it, or, that
+\* object gone, moves of it that do, listed (fetch's read), one hop at a time.
 Readable(x, loc) ==
     IF loc[1] = "own" THEN [b |-> loc[2], e |-> loc[3], s |-> loc[4], x |-> x] \in own
-    ELSE LET b == loc[2]
-             s == loc[3]
-             d == Depth(loc)
-         IN IF d = 0 /\ seg[b][s] # None /\ ~R("footers") THEN Runs(seg[b][s], x)
-            ELSE Names(b, s, d, x) \/ (d < Hops /\ Names(b, s, d + 1, x))
+    ELSE \E p \in {Way(loc)} \cup On(Way(loc)) : Names(loc[2], loc[3], loc[4], p, x)
 
-RECURSIVE Followed(_, _, _, _)
-\* How many hops from segment s of b x is, following the moves' maps on from d.
-Followed(x, b, s, d) == IF d < Hops /\ Names(b, s, d + 1, x) THEN Followed(x, b, s, d + 1) ELSE d
+RECURSIVE Followed(_, _, _, _, _)
+\* The way from segment <<s, e>> of b to x, following moves that name it on from p.
+Followed(x, b, s, e, p) ==
+    LET next == {q \in On(p) : Names(b, s, e, q, x)} IN
+    IF next = {} THEN p ELSE Followed(x, b, s, e, CHOOSE q \in next : TRUE)
 
 \* Where a checkpoint records x, at loc, to be: where the collector moved it.
-Moved(x, loc) == IF loc[1] = "own" THEN loc
-                 ELSE LET d == Followed(x, loc[2], loc[3], Depth(loc)) IN Key(loc[2], loc[3], d)
+Moved(x, loc) ==
+    IF loc[1] = "own" THEN loc
+    ELSE Key(loc[2], loc[3], loc[4], Followed(x, loc[2], loc[3], loc[4], Way(loc)))
 
 \* Whether loc2 is further along an extent's way than loc (layout::further): moves of it, or of
 \* those moves.
 Further(loc, loc2) == /\ loc[1] # "own" /\ loc2[1] = "moves"
-                      /\ loc2[2] = loc[2] /\ loc2[3] = loc[3] /\ Depth(loc2) > Depth(loc)
+                      /\ loc2[2] = loc[2] /\ loc2[3] = loc[3] /\ loc2[4] = loc[4]
+                      /\ Depth(loc2) > Depth(loc)
+                      /\ SubSeq(Way(loc2), 1, Depth(loc)) = Way(loc)
 
 \* The state st, its extents named where the state ck names them if that is further along their
 \* ways (Writer::take_moves).
@@ -764,21 +698,29 @@ Stopped(h, b) == ses' = [ses EXCEPT ![h][b].pc = "stopped"]
 Unrecorded(b, st, s) ==
     \E f \in st.forks : f.child \notin s.recorded \/ (NeedsRef(b, f) /\ f.child \notin s.reffed)
 
-\* s, the session of a writer of b, its recovery started: from the newest checkpoint, or its
-\* origin's state; stopped, what that needs gone.
-Started(s, b) ==
-    LET cs == CkSeqs(b)
-        p == StateAt(s.origin[1], s.origin[2])
-    IN IF cs # {} THEN [s EXCEPT !.pc = "read", !.st = ckpt[b][Max(cs)], !.at = Max(cs) + 1,
-                                 !.ck = Max(cs)]
-       ELSE IF s.origin = <<>> THEN [s EXCEPT !.pc = "read", !.st = Fresh, !.at = 0, !.ck = -1]
-       ELSE IF p.ok THEN [s EXCEPT !.pc = "read", !.st = Inherit(p.st), !.at = 0, !.ck = -1]
-       ELSE [s EXCEPT !.pc = "stopped"]
+\* The head the writer whose session is s writes: its taking, with what it committed.
+HeadOf(s) == [epoch |-> s.epoch, token |-> s.token, holder |-> s.gen, end |-> s.end,
+              chain |-> s.chain, ck |-> s.hck]
 
-\* h takes b's lease, as a writer of b, of its placement's token, its taking's holder, once it
-\* read b's record; then, the record read again, its recovery starts, or, deleted since, it stops
-\* (Writer::take). With "staleTake", the first read is from before b's deletion, whose lease the
-\* collector may have removed since: taken again, at epoch 1 (TASK-179).
+\* s, the session of a writer of b, its recovery started from b's head H as it swapped it: from
+\* the head's checkpoint, or its origin's state; stopped, what that needs gone.
+Started(s, b, H) ==
+    LET p == StateAt(s.origin[1], s.origin[2])
+        ck == IF H = None THEN <<>> ELSE H.ck
+        s1 == [s EXCEPT !.end = IF H = None THEN 0 ELSE H.end,
+                        !.chain = IF H = None THEN <<>> ELSE H.chain,
+                        !.hck = ck]
+    IN IF ck # <<>> THEN
+          IF Obj(CkKey(b, ck[1], ck[2])) = None THEN [s1 EXCEPT !.pc = "stopped"]
+          ELSE [s1 EXCEPT !.pc = "read", !.st = Obj(CkKey(b, ck[1], ck[2])), !.at = ck[1] + 1]
+       ELSE IF s.origin = <<>> THEN [s1 EXCEPT !.pc = "read", !.st = Fresh, !.at = 0]
+       ELSE IF p.ok THEN [s1 EXCEPT !.pc = "read", !.st = Inherit(p.st), !.at = 0]
+       ELSE [s1 EXCEPT !.pc = "stopped"]
+
+\* h takes b's head, as a writer of b, of its placement's token, its taking's holder, once it
+\* read b's record: swapped to the next epoch, what it names kept. Then, the record read again,
+\* its recovery starts, or, deleted since, it stops (Writer::take). With "staleTake", the first
+\* read is from before b's deletion, whose head says so: the swap is refused.
 Open(h, b) ==
     /\ takes < MaxTakes
     /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
@@ -786,94 +728,68 @@ Open(h, b) ==
     /\ ~rec[b].deleted \/ ("staleTake" \in Can /\ rec[b].maker \in makers[b])
     /\ IF rec[b].kind = "point" THEN ~R("pointsTakeNoWriter") ELSE rec[b].kind \in {"root", "fork"}
     \* Not deleted's; nor, its token higher, a later placement's (tokens).
-    /\ IF lease[b] = None THEN TRUE
-       ELSE lease[b].epoch # Final /\ (R("tokens") => lease[b].token <= tok[h][b])
-    /\ LET e == IF lease[b] = None THEN 1 ELSE lease[b].epoch + 1
-           s == [gen |-> gen + 1, pc |-> "start", epoch |-> e, token |-> tok[h][b],
-                 origin |-> rec[b].origin, st |-> Fresh, ck |-> -1, at |-> 0, pre |-> 0,
-                 fenced |-> FALSE, top |-> -1, seq |-> 0, last |-> <<>>, next |-> <<0, 0>>,
-                 up |-> {}, done |-> {}, open |-> {}, recorded |-> {}, reffed |-> {},
-                 reading |-> {}, ckd |-> -1,
-                 ckp |-> None, durable |-> None]
-       IN /\ lease' = [lease EXCEPT ![b] = [epoch |-> e, token |-> tok[h][b], holder |-> gen + 1]]
+    /\ IF head[b] = None THEN TRUE
+       ELSE head[b].epoch # Final /\ (R("tokens") => head[b].token <= tok[h][b])
+    /\ LET e == IF head[b] = None THEN 1 ELSE head[b].epoch + 1
+           s == [gen |-> gen + 1, pc |-> "read", epoch |-> e, token |-> tok[h][b],
+                 origin |-> rec[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
+                 hck |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
+                 recorded |-> {}, reffed |-> {}, reading |-> {}, ckd |-> -1, ckp |-> None,
+                 durable |-> None]
+       IN /\ head' = [head EXCEPT ![b] = [epoch |-> e, token |-> tok[h][b], holder |-> gen + 1,
+                                          end |-> End(b), chain |-> Chain(b), ck |-> HeadCk(b)]]
           /\ ses' = [ses EXCEPT ![h][b] = IF rec[b].deleted THEN [s EXCEPT !.pc = "stopped"]
-                                          ELSE Started(s, b)]
+                                          ELSE Started(s, b, head[b])]
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
-    /\ UNCHANGED <<seg, own, ckpt, rec, moves, inflight, refs, marked, retired, wal, tok, proc, gc>>
+    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, wal, tok,
+                   proc, gc>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
     /\ UNCHANGED <<passes, places, crashes, mints>>
 
-\* Recovery started again, a newer checkpoint come (newestCheckpoint).
-RecoverStart(h, b) ==
-    /\ ses[h][b] # None /\ ses[h][b].pc = "start"
-    /\ ses' = [ses EXCEPT ![h][b] = Started(ses[h][b], b)]
-    /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
-
-RECURSIVE Restamp(_, _, _, _, _)
-\* The WAL's segments R restamped on the chain of epoch e from segment q, after last, minting
-\* on from next: their data unchanged, new footers.
-Restamp(Rs, q, e, last, next) ==
+RECURSIVE Restamp(_, _, _, _)
+\* The WAL's segments R restamped on the chain of epoch e from segment q, minting on from next:
+\* their data unchanged, new footers.
+Restamp(Rs, q, e, next) ==
     IF Rs = <<>> THEN <<>>
-    ELSE LET o == [Rs[1].o EXCEPT !.epoch = e, !.after = last, !.next = Max2(@, next)]
-         IN <<[s |-> q, o |-> o]>> \o Restamp(Tail(Rs), q + 1, e, <<q, e>>, o.next)
+    ELSE LET o == [Rs[1].o EXCEPT !.epoch = e, !.next = Max2(@, next)]
+         IN <<[s |-> q, o |-> o]>> \o Restamp(Tail(Rs), q + 1, e, o.next)
 
 \* The first commit segment o is of: the one it ends, or the one it goes on with.
 SegCommit(o) == IF o.commit # 0 THEN o.commit ELSE o.cont.commit
 
-\* The guest's last commit as of the first k segments of the WAL ws, whose base is base
-\* (Wal::heads): the last any of them makes, or base.
-HeadAt(ws, base, k) ==
-    LET C == {i \in 1..k : ws[i].o.commit # 0} IN IF C = {} THEN base ELSE ws[Max(C)].o.commit
-
-\* Whether the WAL's first k segments end every commit they go on with (walBetweenCommits).
-Between(ws, k) == k = 0 \/ ws[k].o.cont = None \/ ~R("walBetweenCommits")
-
-\* Whether the fence of a writer whose session is s goes on: it has not created its fence, or
-\* not filled the gaps to the last segment listed.
-Fencing(s) == ~s.fenced \/ s.seq <= s.top
-
-\* h's writer of b, whose session s fenced the branch, opened: the lease read again
-\* (epochSequences), and the chain, minting from the epoch's range. Then its WAL put after the
-\* branch's end (wal::rebase), by commits: the WAL's commits to the branch's last, if it is one
-\* of them, acknowledged; the rest restamped after the fence, if the branch's last commit is one
-\* of the WAL's or the commit the WAL started from (walFollows), as the branch is after the fence
-\* (walAfterFence); otherwise the WAL diverged, and is dropped. The commit the WAL started from,
-\* its first segment's commit's parent, the WAL keeps. The store keeps the restamped footers in
-\* memory alone (TASK-165.9): a crash after finds them stamped as before, which the next opening
-\* restamps by the same commits, its own chain, and Max2 with a later floor, to what this would
-\* have: so the WAL here holds them restamped.
-\*
-\* By commits, as Wal::heads has them: the WAL's first k segments are taken out if the guest's
-\* last commit as of them is the branch's, and they end no commit begun, unless no such k but 0
-\* is, the WAL's base (walBetweenCommits): segments going on with a commit are no branch's end,
-\* the fence having left their commit unended. If none is, the branch's last commit may be the
-\* one a segment of the WAL's ends going on with the next, landed alone (walContinues): the
-\* segments before it are taken out, and it is restamped with its continuation alone, its commit
-\* and what that sealed, freed and forked dropped, the branch holding them, then the rest
-\* (TASK-345). The WAL's segments replayed over the state after the fence must end every commit
-\* they go on with, or the store refuses to open (store.rs: "log ends inside a commit"), its
-\* local recovery having kept a commit begun.
+\* h's writer of b, whose session s recovered the branch to its head's end, opened: the head read
+\* again (epochSequences), and the chain, minting from the epoch's range. Then its WAL put after
+\* the branch's end (wal::rebase), by commits: the WAL's segments to the one ending the branch's
+\* last commit, if it is one of the WAL's, acknowledged; the rest restamped after the head's end,
+\* if the branch's last commit is one of the WAL's or the commit the WAL started from
+\* (walFollows); otherwise the WAL diverged, and is dropped. By commits, not by the keys the head
+\* names: a store keeps what it restamps in memory alone, its footers on disk naming the keys of
+\* an earlier stamping after a crash. The commit the WAL started
+\* from, its first segment's commit's parent, the WAL keeps. The store keeps the restamped
+\* footers in memory alone (TASK-165.9): a crash after finds them stamped as before, which the
+\* next opening restamps by the same commits, its own chain, and Max2 with a later floor, to what
+\* this would have: so the WAL here holds them restamped. The WAL's segments replayed over the
+\* state must end every commit they go on with, or the store refuses to open (store.rs: "log
+\* ends inside a commit"), its local recovery having kept a commit begun.
 Opened(h, b, s) ==
     LET floor == IF R("epochSequences") THEN <<s.epoch, 0>> ELSE <<0, 0>>
         next == Max2(s.st.next, floor)
         ws == wal[h][b]
-        head == IF R("walAfterFence") THEN s.st.head ELSE s.pre
         base == IF ws = <<>> THEN 0 ELSE commits[SegCommit(ws[1].o)].parent
-        at == {k \in 0..Len(ws) : HeadAt(ws, base, k) = head /\ Between(ws, k)}
-        on == {k \in 1..Len(ws) : ws[k].o.commit = head /\ ws[k].o.cont # None}
-        cont == at = {} /\ on # {} /\ R("walFollows") /\ R("walContinues")
-        k == IF at # {} THEN Max(at) ELSE IF cont THEN Max(on) - 1 ELSE 0
-        A == SubSeq(ws, 1, IF cont THEN k + 1 ELSE k)
-        Rest == SubSeq(ws, k + 1, Len(ws))
-        Rs == IF cont
-              THEN <<[Rest[1] EXCEPT !.o.commit = 0, !.o.ext = None, !.o.own = None,
-                                     !.o.free = None, !.o.fork = None]>> \o Tail(Rest)
-              ELSE Rest
-        keep == Rs # <<>> /\ (at # {} \/ cont \/ ~R("walFollows"))
-        new == IF keep THEN Restamp(Rs, s.seq, s.epoch, s.st.last, next) ELSE <<>>
-    IN IF (R("epochSequences") /\ ~Leased(s, b)) \/ s.seq + Len(new) > Segs
+        \* The guest's last commit as of the WAL's first j segments (Wal::heads): the last any of
+        \* them makes, or the WAL's base.
+        tipAt(j) == LET C == {i \in 1..j : ws[i].o.commit # 0} IN
+                    IF C = {} THEN base ELSE ws[Max(C)].o.commit
+        at == {j \in 0..Len(ws) : tipAt(j) = s.st.tip}
+        follows == at # {}
+        k == IF follows THEN Min(at) ELSE 0
+        A == SubSeq(ws, 1, k)
+        Rs == SubSeq(ws, k + 1, Len(ws))
+        keep == Rs # <<>> /\ (follows \/ ~R("walFollows"))
+        new == IF keep THEN Restamp(Rs, s.seq, s.epoch, next) ELSE <<>>
+    IN IF (R("epochSequences") /\ ~Taking(s, b)) \/ s.seq + Len(new) > Segs
        THEN /\ ses' = [ses EXCEPT ![h][b] = [s EXCEPT !.pc = "stopped"]]
             /\ UNCHANGED <<wal, acked, errors>>
        ELSE IF ApplyAll(s.st, b, new).begun # None
@@ -886,56 +802,23 @@ Opened(h, b, s) ==
                          [s EXCEPT !.pc = IF Unrecorded(b, s.st, s) THEN "record" ELSE "ready",
                                    !.durable = {new[i].s : i \in DOMAIN new},
                                    !.seq = s.seq + Len(new),
-                                   !.last = IF new = <<>> THEN s.st.last
-                                            ELSE <<new[Len(new)].s, s.epoch>>,
                                    !.next = IF new = <<>> THEN next ELSE new[Len(new)].o.next]]
             \* Diverged, the WAL dropped, though no other writer's commit moved the branch on: its
             \* last is one of the WAL's, or the WAL's base.
-            /\ errors' = IF Rs # <<>> /\ ~keep /\ head \in CommitsOf(ws) \cup {base}
+            /\ errors' = IF Rs # <<>> /\ ~keep /\ s.st.tip \in CommitsOf(ws) \cup {base}
                          THEN errors \cup {"a WAL diverged from a branch holding its commits"}
                          ELSE errors
 
-\* Recovery's segments, to the first missing; then the checkpoints, listed again
-\* (newestCheckpoint); then the segments, listed, where the fence goes.
+\* Recovery's segments, those the head names after its checkpoint, each at its key; something
+\* named gone, the writer stops (its head taken since, or the bucket lost it: NothingNeededGone);
+\* then the writer opened.
 RecoverRead(h, b) ==
     LET s == ses[h][b]
-        r == FollowEnd(b, s.st, s.at, {})
-        cs == CkSeqs(b)
-        newest == IF cs = {} THEN -1 ELSE Max(cs)
-        listed == {q \in Seqs : seg[b][q] # None}
-        s2 == [s EXCEPT !.pc = "fence", !.st = r.st, !.seq = r.end, !.pre = r.st.head,
-                        !.top = IF listed = {} THEN -1 ELSE Max(listed), !.fenced = ~R("fence")]
+        r == FollowChain(b, s.st, s.at, s.end, s.chain, {})
     IN /\ s # None /\ s.pc = "read"
-       /\ IF R("newestCheckpoint") /\ newest # s.ck THEN
-             /\ ses' = [ses EXCEPT ![h][b].pc = "start"]
-             /\ UNCHANGED <<wal, acked, errors>>
-          ELSE IF Fencing(s2) THEN
-             /\ ses' = [ses EXCEPT ![h][b] = s2]
-             /\ UNCHANGED <<wal, acked, errors>>
-          ELSE Opened(h, b, s2)
+       /\ IF ~r.ok THEN Stopped(h, b) /\ UNCHANGED <<wal, acked, errors>>
+          ELSE Opened(h, b, [s EXCEPT !.st = r.st, !.seq = s.end])
        /\ UNCHANGED <<bucketVars, tok, proc, gc, countVars>>
-       /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed>>
-
-\* The fence: an empty segment of the writer's at the branch's end, what landed there first
-\* applied before it, and the gaps to the last listed filled; then the writer opened.
-Fence(h, b) ==
-    LET s == ses[h][b]
-        q == s.seq
-        f == [epoch |-> s.epoch, after |-> s.st.last, commit |-> 0, ext |-> None, own |-> None,
-              free |-> None, next |-> s.st.next, fork |-> None, cont |-> None]
-        o == IF seg[b][q] = None THEN f ELSE seg[b][q]
-        s2 == [s EXCEPT !.fenced = (@ \/ seg[b][q] = None), !.st = Apply(s.st, b, q, o),
-                        !.seq = q + 1]
-    IN /\ s # None /\ s.pc = "fence" /\ q < Segs
-       /\ IF seg[b][q] # None /\ seg[b][q].epoch > s.epoch THEN
-             /\ Stopped(h, b)
-             /\ UNCHANGED <<seg, wal, acked, errors>>
-          ELSE /\ seg' = [seg EXCEPT ![b][q] = o]
-               /\ IF Fencing(s2) THEN
-                     ses' = [ses EXCEPT ![h][b] = s2] /\ UNCHANGED <<wal, acked, errors>>
-                  ELSE Opened(h, b, s2)
-       /\ UNCHANGED <<own, ckpt, rec, lease, moves, inflight, refs, marked, retired, tok, proc, gc,
-                      countVars>>
        /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed>>
 
 \* The children of the forks acknowledged get their records (record_forks), one at a time; those
@@ -987,7 +870,7 @@ RecordForks(h, b) ==
              /\ refs' = refs \ back
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
-       /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, wal, tok, proc, gc>>
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, written, wal, tok, proc, gc>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, doomed, taken, placed, errors>>
        /\ UNCHANGED countVars
 
@@ -1055,13 +938,11 @@ Commit(h, b) ==
                 f == [child |-> op.c, owner |-> <<"fork", t>>, point |-> op.point]
                 cont(i) == [commit |-> t, ext |-> op.xs[i]]
                 part(i) == [s |-> s.seq + i - 1,
-                            o |-> [epoch |-> s.epoch,
-                                   after |-> IF i = 1 THEN s.last ELSE <<s.seq + i - 2, s.epoch>>,
-                                   commit |-> 0, ext |-> None, own |-> None, free |-> None,
-                                   next |-> s.next, fork |-> None, cont |-> cont(i + on)]]
+                            o |-> [epoch |-> s.epoch, commit |-> 0, ext |-> None, own |-> None,
+                                   free |-> None, next |-> s.next, fork |-> None,
+                                   cont |-> cont(i + on)]]
                 before == IF op.on THEN [ws EXCEPT ![Len(ws)].o.cont = cont(1)] ELSE ws
                 o == [epoch |-> s.epoch,
-                      after |-> IF n = 0 THEN s.last ELSE <<s.seq + n - 1, s.epoch>>,
                       commit |-> t,
                       ext |-> IF op.k = "seg" THEN op.x ELSE None,
                       own |-> IF op.k \in {"own", "fork"} THEN op.x ELSE None,
@@ -1074,9 +955,8 @@ Commit(h, b) ==
                /\ wal' = [wal EXCEPT ![h][b] = before \o [i \in 1..n |-> part(i)]
                                                  \o <<[s |-> s.seq + n, o |-> o]>>]
                /\ ses' = [ses EXCEPT ![h][b] =
-                            [s EXCEPT !.seq = @ + n + 1, !.last = <<s.seq + n, s.epoch>>,
-                                      !.open = @ \ ({op.x} \cup xs)]]
-               /\ commits' = [commits EXCEPT ![t] = [branch |-> b, parent |-> View(h, b).head,
+                            [s EXCEPT !.seq = @ + n + 1, !.open = @ \ ({op.x} \cup xs)]]
+               /\ commits' = [commits EXCEPT ![t] = [branch |-> b, parent |-> View(h, b).tip,
                                                       seals |-> IF op.k \in {"seg", "own"}
                                                                    \/ op.x # None
                                                                 THEN {op.x} ELSE xs,
@@ -1090,10 +970,11 @@ Commit(h, b) ==
                           THEN refs \cup RefsOf(b, {[child |-> op.c, at |-> s.seq]})
                           ELSE refs
        /\ nextTag' = t + 1
-       /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, marked, retired, tok, proc, gc>>
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, tok, proc,
+                      gc>>
        /\ UNCHANGED <<acked, minted, twice, makers, doomed, taken, placed, errors, countVars>>
 
-\* The upload of the WAL's next segment: its extent of its own created, then it in flight.
+\* The upload of the WAL's next segment: its extent of its own created, then its PUT in flight.
 Upload(h, b) ==
     LET s == ses[h][b]
         ws == wal[h][b]
@@ -1104,57 +985,59 @@ Upload(h, b) ==
                  ELSE own \cup {[b |-> b, e |-> w.o.epoch, s |-> w.s, x |-> w.o.own]}
        /\ inflight' = inflight \cup {[h |-> h, b |-> b, g |-> s.gen, s |-> w.s, o |-> w.o]}
        /\ ses' = [ses EXCEPT ![h][b].up = @ \cup {w.s}]
-       /\ UNCHANGED <<seg, ckpt, rec, lease, moves, refs, marked, retired, wal, tok, proc, gc,
-                      truthVars, countVars>>
+       /\ UNCHANGED <<seg, ckpt, rec, head, moves, mflight, refs, marked, retired, written, wal, tok, proc,
+                      gc, truthVars, countVars>>
 
-\* A create lands, whenever, though its writer has gone: where nothing is, or its own is; else
-\* its writer, if it still is, stops (fenced, or displaced). With "landInOrder", a writer's creates
-\* land in the order it made them, the earliest first, landing or failing: a model of more
-\* writers kept to a size TLC exhausts (BucketTakeovers), BucketStrays landing them in any order.
+\* A PUT lands, whenever, though its writer has gone: at its key, its writer's alone, over what
+\* is there (nothing, or its own); its writer, if it still is, told. With "landInOrder", a
+\* writer's PUTs land in the order it made them, the earliest first: a model of more writers kept
+\* to a size TLC exhausts (BucketTakeovers), BucketStrays landing them in any order.
 Land(m) ==
     LET s == ses[m.h][m.b]
         mine == s # None /\ s.gen = m.g /\ s.pc # "stopped"
+        k == SegKey(m.b, m.s, m.o.epoch)
     IN /\ "landInOrder" \notin Can
           \/ \A n \in inflight : n.h = m.h /\ n.b = m.b /\ n.g = m.g => n.s >= m.s
        /\ inflight' = inflight \ {m}
-       /\ IF seg[m.b][m.s] = None \/ seg[m.b][m.s] = m.o THEN
-             /\ seg' = [seg EXCEPT ![m.b][m.s] = m.o]
-             /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].done = @ \cup {m.s}] ELSE ses
-          ELSE
-             /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].pc = "stopped"] ELSE ses
-             /\ UNCHANGED seg
-       /\ UNCHANGED <<own, ckpt, rec, lease, moves, refs, marked, retired, wal, tok, proc, gc,
+       /\ seg' = [seg EXCEPT ![m.b][m.s][k[4]] = m.o]
+       /\ written' = written \cup {<<k, m.o>>}
+       /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].done = @ \cup {m.s}] ELSE ses
+       /\ UNCHANGED <<own, ckpt, rec, head, moves, mflight, refs, marked, retired, wal, tok, proc, gc,
                       truthVars, countVars>>
 
-\* The acknowledgement of the WAL's prefix created, its creates the fencing (Pinned); if it
-\* holds a fork, once a read of the lease shows it the writer's (forksAfterLease): its commits
-\* told durable, its forks' children to be recorded. To
-\* the last segment going on with no commit (acksBetweenCommits, Writer::acknowledge): a commit
-\* spanning segments is acknowledged with the one it ends in, so that the state acknowledged,
-\* which checkpoints hold, holds no commit begun, and the WAL keeps it whole.
+\* The acknowledgement of the WAL's prefix landed: the head swapped to name it, with the
+\* condition that it is the writer's taking still (headSwap); failing, the writer stops, taken
+\* over. Without the rule, written whatever is there. Then its commits told durable, its forks'
+\* children to be recorded. To the last segment going on with no commit (acksBetweenCommits,
+\* Writer::acknowledge): a commit spanning segments is acknowledged with the one it ends in, so
+\* that the state acknowledged, which heads and checkpoints name, holds no commit begun, and the
+\* WAL keeps it whole.
 Ack(h, b) ==
     LET s == ses[h][b]
         ws == wal[h][b]
         n == Max({k \in 0..Len(ws) : /\ \A i \in 1..k : ws[i].s \in s.done
                                      /\ k = 0 \/ ws[k].o.cont = None \/ ~R("acksBetweenCommits")})
         P == SubSeq(ws, 1, n)
+        s2 == [s EXCEPT !.st = ApplyAll(s.st, b, P),
+                        !.end = P[n].s + 1,
+                        !.chain = @ \o [i \in 1..n |-> P[i].o.epoch]]
     IN /\ Ready(h, b) /\ n > 0
-       /\ IF /\ R("forksAfterLease") /\ ~Leased(s, b)
-             /\ \E i \in DOMAIN P : P[i].o.fork # None THEN
-             Stopped(h, b) /\ UNCHANGED <<wal, acked>>
-          ELSE /\ wal' = [wal EXCEPT ![h][b] = SubSeq(ws, n + 1, Len(ws))]
+       /\ IF R("headSwap") /\ ~Taking(s, b) THEN
+             Stopped(h, b) /\ UNCHANGED <<head, wal, acked>>
+          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+               /\ wal' = [wal EXCEPT ![h][b] = SubSeq(ws, n + 1, Len(ws))]
                /\ ses' = [ses EXCEPT ![h][b] =
-                            [s EXCEPT !.st = ApplyAll(s.st, b, P),
-                                      !.pc = IF Unrecorded(b, ApplyAll(s.st, b, P), s)
-                                             THEN "record" ELSE "ready"]]
+                            [s2 EXCEPT !.pc = IF Unrecorded(b, s2.st, s) THEN "record"
+                                              ELSE "ready"]]
                /\ acked' = [acked EXCEPT ![b] = @ \cup CommitsOf(P)]
-       /\ UNCHANGED <<bucketVars, tok, proc, gc, countVars>>
+       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, tok,
+                      proc, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed, errors>>
 
 \* A checkpoint as of the last segment acknowledged: the extents the collector moved where they
-\* went, the forks whose children were deleted dropped; its create then in flight. The writer
-\* names those extents where they went now, before it creates it (movesTakenFirst), only forward
-\* along their ways; without the rule, once it is created.
+\* went, the forks whose children were deleted dropped; its PUT then made. The writer names
+\* those extents where they went now, before it writes it (movesTakenFirst), only forward along
+\* their ways; without the rule, once it is in the head.
 Checkpoint(h, b) ==
     LET s == ses[h][b]
         q == s.st.through
@@ -1166,33 +1049,49 @@ Checkpoint(h, b) ==
        /\ ses' = [ses EXCEPT ![h][b].st = IF R("movesTakenFirst") THEN TakeMoves(kept, st)
                                          ELSE kept,
                              ![h][b].ckd = q,
-                             ![h][b].ckp = [q |-> q, st |-> st, landed |-> FALSE]]
+                             ![h][b].ckp = [q |-> q, st |-> st, landed |-> FALSE,
+                                            swapped |-> FALSE]]
        /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
-\* The checkpoint's create lands, whenever while its writer's session lasts, though it stopped;
-\* without movesTakenFirst, the writer names what it moved where it went once it is answered.
+\* The checkpoint's PUT lands, at its writer's key, whenever while its writer's session lasts,
+\* though it stopped.
 CheckpointLand(h, b) ==
-    LET s == ses[h][b] IN
-    /\ s # None /\ s.ckp # None /\ ~s.ckp.landed
-    /\ ckpt' = IF ckpt[b][s.ckp.q] = None THEN [ckpt EXCEPT ![b][s.ckp.q] = s.ckp.st] ELSE ckpt
-    /\ ses' = [ses EXCEPT ![h][b].ckp = IF R("movesTakenFirst") THEN None
-                                      ELSE [@ EXCEPT !.landed = TRUE]]
-    /\ UNCHANGED <<seg, own, rec, lease, moves, inflight, refs, marked, retired, wal, tok, proc, gc,
-                   truthVars, countVars>>
+    LET s == ses[h][b]
+        k == CkKey(b, s.ckp.q, s.epoch)
+    IN /\ s # None /\ s.ckp # None /\ ~s.ckp.landed
+       /\ ckpt' = [ckpt EXCEPT ![b][s.ckp.q][k[4]] = s.ckp.st]
+       /\ written' = written \cup {<<k, s.ckp.st>>}
+       /\ ses' = [ses EXCEPT ![h][b].ckp.landed = TRUE]
+       /\ UNCHANGED <<seg, own, rec, head, moves, mflight, inflight, refs, marked, retired, wal, tok, proc,
+                      gc, truthVars, countVars>>
 
-\* The create answered, the writer names what the checkpoint moved where it went, only forward
+\* The checkpoint landed swapped into the head, with the condition that it is the writer's taking
+\* still (headSwap); failing, the writer stops.
+CheckpointSwap(h, b) ==
+    LET s == ses[h][b]
+        s2 == [s EXCEPT !.hck = <<s.ckp.q, s.epoch>>,
+                        !.ckp = IF R("movesTakenFirst") THEN None ELSE [@ EXCEPT !.swapped = TRUE]]
+    IN /\ s # None /\ s.pc \in {"ready", "record"} /\ s.ckp # None /\ s.ckp.landed
+       /\ ~s.ckp.swapped
+       /\ IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED head
+          ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+               /\ ses' = [ses EXCEPT ![h][b] = s2]
+       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, wal,
+                      tok, proc, gc, truthVars, countVars>>
+
+\* The swap answered, the writer names what the checkpoint moved where it went, only forward
 \* along their ways (without movesTakenFirst).
 CheckpointTaken(h, b) ==
     LET s == ses[h][b] IN
-    /\ s # None /\ s.ckp # None /\ s.ckp.landed
+    /\ s # None /\ s.ckp # None /\ s.ckp.swapped
     /\ ses' = [ses EXCEPT ![h][b].st = TakeMoves(s.st, s.ckp.st), ![h][b].ckp = None]
     /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
 WriterNext ==
     \E h \in Hosts, b \in Branches :
-        \/ Open(h, b) \/ RecoverStart(h, b) \/ RecoverRead(h, b) \/ Fence(h, b)
-        \/ RecordForks(h, b) \/ Mint(h, b) \/ Commit(h, b) \/ Upload(h, b)
-        \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b) \/ CheckpointTaken(h, b)
+        \/ Open(h, b) \/ RecoverRead(h, b) \/ RecordForks(h, b) \/ Mint(h, b) \/ Commit(h, b)
+        \/ Upload(h, b) \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b)
+        \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b)
 
 -----------------------------------------------------------------------------
 (* Hosts and placements. *)
@@ -1244,14 +1143,14 @@ Contest(c) ==
     /\ "contest" \in Can /\ c # Root /\ rec[c] = None
     /\ rec' = [rec EXCEPT ![c] = Record("root", <<>>, 0, <<"root", c>>, 0)]
     /\ makers' = [makers EXCEPT ![c] = @ \cup {<<"root", c>>}]
-    /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, refs, marked, retired, hostVars, gc,
-                   countVars>>
+    /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, hostVars,
+                   gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, doomed, taken, placed, errors>>
 
 -----------------------------------------------------------------------------
 (* Deletions, failed forks' deletions, and forks of points: a host's work, one at a time. *)
 
-\* A deletion of b, asked on h: the lease ended first. Asked by b's last placement, or one as
+\* A deletion of b, asked on h: the head ended first. Asked by b's last placement, or one as
 \* late, it may delete b's making. With "deleteRoot" alone, of the root alone.
 StartDelete(h, b) ==
     /\ proc[h] = None
@@ -1260,8 +1159,8 @@ StartDelete(h, b) ==
        \/ "deletePoints" \in Can /\ rec[b].kind = "point"
        \/ "deleteRoot" \in Can /\ b = Root
     /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", c |-> 0, p |-> 0,
-                                    at |-> 0, o |-> <<>>, live |-> FALSE, tk |-> tok[h][b],
-                                    ck |-> -1, fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0]]
+                                    at |-> 0, ep |-> 0, o |-> <<>>, live |-> FALSE,
+                                    tk |-> tok[h][b], fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0]]
     /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {rec[b].maker} ELSE doomed
     /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
@@ -1276,8 +1175,8 @@ StartUnfork(h, b) ==
             LET w == wal[h][b][i] IN
             /\ proc' = [proc EXCEPT ![h] = [op |-> "unfork", b |-> w.o.fork.child, pc |-> "read",
                                             c |-> w.o.fork.child, p |-> b, at |-> w.s,
-                                            o |-> w.o.fork.owner, live |-> FALSE,
-                                            tk |-> tok[h][w.o.fork.child], ck |-> -1,
+                                            ep |-> w.o.epoch, o |-> w.o.fork.owner,
+                                            live |-> FALSE, tk |-> tok[h][w.o.fork.child],
                                             fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0]]
             /\ doomed' = doomed \cup {w.o.fork.owner}
        /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
@@ -1298,8 +1197,8 @@ Forking(q) == Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p,
 \* (clonesReferFirst); without clonesRecordFirst, the reference first. From a host's copy of P,
 \* stale perhaps.
 StartRestore(h, c, p) ==
-    LET q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0,
-              o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c], ck |-> -1, fs |-> {},
+    LET q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0, ep |-> 0,
+              o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c], fs |-> {},
               ws |-> {}, og |-> rec[p].origin, bs |-> rec[p].base]
         refers == R("clonesReferFirst") /\ CloneRefs(q) # {}
         first == refers /\ ~R("clonesRecordFirst")
@@ -1313,29 +1212,35 @@ StartRestore(h, c, p) ==
              /\ rec' = [rec EXCEPT ![c] = Forking(q)]
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
              /\ UNCHANGED refs
-       /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, marked, retired, ses, wal, tok, gc,
-                      truthVars, countVars>>
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, ses, wal,
+                      tok, gc, truthVars, countVars>>
 
 Done(h) == proc' = [proc EXCEPT ![h] = None]
 \* A deletion of the branch proc[h] names, after a failed fork's or restore's.
 Deleting(h) == proc' = [proc EXCEPT ![h] = [@ EXCEPT !.op = "delete", !.pc = "end"]]
+
+\* b's head swapped to the final epoch, what it names kept: made so, if b has none.
+Ended(b) ==
+    head' = [head EXCEPT ![b] = IF @ = None
+                                THEN [epoch |-> Final, token |-> 0, holder |-> 0, end |-> 0,
+                                      chain |-> <<>>, ck |-> <<>>]
+                                ELSE [@ EXCEPT !.epoch = Final, !.token = 0, !.holder = 0]]
 
 ProcStep(h) ==
     LET q == proc[h]
         b == q.b
     IN /\ q # None
        /\ CASE q.op = "delete" /\ q.pc = "end" ->
-                 \* end_lease, unless a later placement took the branch (deleteTokens).
-                 /\ IF lease[b] # None /\ lease[b].epoch # Final /\ R("deleteTokens")
-                       /\ lease[b].token > q.tk
-                    THEN Done(h) /\ UNCHANGED lease
-                    ELSE /\ lease' = [lease EXCEPT ![b] = [epoch |-> Final, token |-> 0,
-                                                           holder |-> 0]]
-                         /\ proc' = [proc EXCEPT ![h].pc = "mark"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, moves, inflight, makers, errors>>
+                 \* end_lease, its head swapped to the final epoch, unless a later placement took
+                 \* the branch (deleteTokens). No writer swaps it after: the head is the fence.
+                 /\ IF head[b] # None /\ head[b].epoch # Final /\ R("deleteTokens")
+                       /\ head[b].token > q.tk
+                    THEN Done(h) /\ UNCHANGED head
+                    ELSE Ended(b) /\ proc' = [proc EXCEPT ![h].pc = "mark"]
+                 /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "mark" ->
                  \* Its record, deleted: made so if it has none; else, unless it is deleted or
-                 \* being made, its checkpoints listed, to recover it.
+                 \* being made, to recover it.
                  LET r == rec[b] IN
                  /\ IF r = None THEN
                        /\ rec' = [rec EXCEPT ![b] =
@@ -1346,36 +1251,26 @@ ProcStep(h) ==
                     ELSE IF r.kind = "forking" THEN
                        /\ rec' = [rec EXCEPT ![b].deleted = TRUE]
                        /\ Done(h)
-                    ELSE /\ proc' = [proc EXCEPT ![h].pc = "recover", ![h].ck = Newest(b)]
+                    ELSE /\ proc' = [proc EXCEPT ![h].pc = "recover"]
                          /\ UNCHANGED rec
-                 /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "recover" /\ rec[b] = None ->
                  \* Its record dropped since, as only a deleted root's is, without recordsKept:
                  \* done, as by another deletion.
                  /\ Done(h)
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "recover" /\ rec[b] # None ->
-                 \* Its recovery, starting again with the checkpoints listed again; then an
-                 \* empty segment of the final epoch created where it found the first missing
-                 \* (deletionsFence; a point, which no writer has, needs none), and its record
-                 \* read again, that read, the create and the read one step: deleted since, by
-                 \* another deletion, it is done (deletionsReread); else its forks are recorded
-                 \* next, those in other cells their references first (referencesFirst). Finding
-                 \* what it needs lost: done if the record was deleted since
-                 \* (deletionsDoneByOthers), or a claim no writer has.
-                 LET got == Recovering(b, rec[b].origin, q.ck)
-                     fence == /\ R("deletionsFence") /\ got.ok /\ got.end < Segs
-                              /\ rec[b].kind # "point"
-                 IN
-                 /\ IF got.restart THEN
-                       /\ proc' = [proc EXCEPT ![h].ck = Newest(b)]
-                       /\ UNCHANGED <<rec, makers, errors>>
-                    ELSE IF got.ok THEN
-                       /\ IF R("deletionsReread") /\ rec[b].deleted THEN Done(h)
-                          ELSE proc' = [proc EXCEPT ![h].pc = IF /\ R("referencesFirst")
-                                                                 /\ RefsOf(b, got.st.forks) # {}
-                                                              THEN "refs" ELSE "record",
-                                                    ![h].fs = got.st.forks]
+                 \* Its recovery, from the head it ended, which no writer swaps since: every
+                 \* deletion of the branch finds the same forks. Then its forks are recorded,
+                 \* those in other cells their references first (referencesFirst). Finding what it
+                 \* needs lost: done if the record was deleted since (deletionsDoneByOthers), or a
+                 \* claim no writer has.
+                 LET got == Recover(b, rec[b].origin) IN
+                 /\ IF got.ok THEN
+                       /\ proc' = [proc EXCEPT ![h].pc = IF /\ R("referencesFirst")
+                                                           /\ RefsOf(b, got.st.forks) # {}
+                                                        THEN "refs" ELSE "record",
+                                               ![h].fs = got.st.forks]
                        /\ UNCHANGED <<rec, makers, errors>>
                     ELSE IF R("deletionsDoneByOthers") /\ rec[b].deleted THEN
                        Done(h) /\ UNCHANGED <<rec, makers, errors>>
@@ -1386,13 +1281,7 @@ ProcStep(h) ==
                     ELSE /\ errors' = errors \cup {"a deletion lost what it needs"}
                          /\ Done(h)
                          /\ UNCHANGED <<rec, makers>>
-                 /\ seg' = IF fence
-                           THEN [seg EXCEPT ![b][got.end] =
-                                   [epoch |-> Final, after |-> got.st.last, commit |-> 0,
-                                    ext |-> None, own |-> None, free |-> None,
-                                    next |-> got.st.next, fork |-> None, cont |-> None]]
-                           ELSE seg
-                 /\ UNCHANGED <<own, ckpt, lease, moves, inflight>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight>>
             [] q.op = "delete" /\ q.pc = "refs" ->
                  \* The references of the forks its recovery found to other cells' children,
                  \* before their records (referencesFirst): the children's records read, those
@@ -1403,11 +1292,11 @@ ProcStep(h) ==
                     ELSE IF ToRefer(b, q.fs) # {} THEN
                        proc' = [proc EXCEPT ![h].pc = "write", ![h].ws = ToRefer(b, q.fs)]
                     ELSE proc' = [proc EXCEPT ![h].pc = "record"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "write" ->
                  \* Those references written, as their records read none.
                  /\ proc' = [proc EXCEPT ![h].pc = "record", ![h].ws = {}]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "record" ->
                  \* The children of the forks its recovery found recorded, and its record
                  \* deleted, unless the collector dropped it (without recordsKept).
@@ -1418,45 +1307,44 @@ ProcStep(h) ==
                  /\ IF ~R("referencesFirst") /\ RefsOf(b, q.fs) # {}
                     THEN proc' = [proc EXCEPT ![h].pc = "refs"]
                     ELSE Done(h)
-                 /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, errors>>
             [] q.op = "unfork" /\ q.pc = "read" ->
                  /\ IF rec[b] # None THEN
                        IF ~rec[b].deleted /\ ChildOf(rec[b], q.o) THEN Deleting(h) ELSE Done(h)
                     ELSE IF ~R("forkClaimsIds") THEN Deleting(h)
                     ELSE proc' = [proc EXCEPT ![h].pc = "claim"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "unfork" /\ q.pc = "claim" ->
-                 \* The child's ID taken with a record: live, a claim, only if its parent holds
-                 \* the fork's segment (forkClaimsLanded).
-                 LET live == ~R("forkClaimsLanded") \/ Holds(q.p, q.at)
+                 \* The child's ID taken with a record: live, a claim, only if its parent's head
+                 \* names the fork's segment (forkClaimsLanded): its writer's WAL, on that host,
+                 \* may yet commit it.
+                 LET live == ~R("forkClaimsLanded") \/ Holds(q.p, q.at, q.ep)
                      kind == IF R("forkClaimsLanded") /\ live THEN "claim" ELSE "fork"
                  IN IF rec[b] = None THEN
                        /\ rec' = [rec EXCEPT ![b] = [Record(kind, <<q.p, q.at>>, 0, q.o, q.o[2])
                                                         EXCEPT !.deleted = ~live]]
                        /\ proc' = [proc EXCEPT ![h].pc = "end", ![h].live = live,
                                                ![h].op = "unforkEnd"]
-                       /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, makers, errors>>
+                       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
                     ELSE /\ IF ~rec[b].deleted /\ ChildOf(rec[b], q.o) THEN Deleting(h)
                             ELSE Done(h)
-                         /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers,
+                         /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers,
                                         errors>>
             [] q.op = "unforkEnd" /\ q.pc = "end" ->
-                 /\ IF lease[b] # None /\ lease[b].epoch # Final /\ R("deleteTokens")
-                       /\ lease[b].token > q.tk
-                    THEN Done(h) /\ UNCHANGED lease
-                    ELSE /\ lease' = [lease EXCEPT ![b] = [epoch |-> Final, token |-> 0,
-                                                           holder |-> 0]]
-                         /\ proc' = [proc EXCEPT ![h].pc = "mark"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, moves, inflight, makers, errors>>
+                 /\ IF head[b] # None /\ head[b].epoch # Final /\ R("deleteTokens")
+                       /\ head[b].token > q.tk
+                    THEN Done(h) /\ UNCHANGED head
+                    ELSE Ended(b) /\ proc' = [proc EXCEPT ![h].pc = "mark"]
+                 /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, makers, errors>>
             [] q.op = "unforkEnd" /\ q.pc = "mark" ->
                  /\ rec' = IF q.live /\ ~rec[b].deleted THEN [rec EXCEPT ![b].deleted = TRUE]
                            ELSE rec
                  /\ Done(h)
-                 /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "refer" ->
                  \* Its reference, its record made (clonesRecordFirst), before the point's read.
                  /\ proc' = [proc EXCEPT ![h].pc = "check"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "fork" ->
                  \* Without clonesRecordFirst: the child's record, its reference made, unless its ID
                  \* was taken since: the reference then taken back (referencesTakenBack), or left
@@ -1464,14 +1352,14 @@ ProcStep(h) ==
                  /\ IF rec[b] = None THEN /\ rec' = [rec EXCEPT ![b] = Forking(q)]
                                           /\ proc' = [proc EXCEPT ![h].pc = "check"]
                     ELSE Done(h) /\ UNCHANGED rec
-                 /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "check" ->
                  \* The point's record, read after the child's (forksCheckPoints): deleted, the
                  \* fork fails, and its host deletes the child.
                  /\ IF R("forksCheckPoints") /\ (rec[q.p] = None \/ rec[q.p].deleted)
                     THEN Deleting(h)
                     ELSE proc' = [proc EXCEPT ![h].pc = "make"]
-                 /\ UNCHANGED <<seg, own, ckpt, rec, lease, moves, inflight, makers, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "make" ->
                  \* No longer being made, with a condition: unless deleted, given up on. Without
                  \* clonesReferFirst, its reference made now, after the point's read.
@@ -1480,7 +1368,7 @@ ProcStep(h) ==
                        /\ makers' = [makers EXCEPT ![b] = @ \cup {q.o}]
                     ELSE UNCHANGED <<rec, makers>>
                  /\ Done(h)
-                 /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, errors>>
+                 /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, errors>>
        /\ doomed' = IF q.op = "restore" /\ q.pc = "check" /\ R("forksCheckPoints")
                        /\ (rec[q.p] = None \/ rec[q.p].deleted)
                     THEN doomed \cup {q.o} ELSE doomed
@@ -1505,7 +1393,7 @@ ProcStep(h) ==
                                [] OTHER -> {}
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
-       /\ UNCHANGED <<ses, wal, tok, gc, countVars>>
+       /\ UNCHANGED <<written, ses, wal, tok, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, taken, placed>>
 
 HostNext ==
@@ -1530,13 +1418,14 @@ Idle(g) == [GcIdle EXCEPT !.cell = g.cell]
 \* child's cell's pass retires them.
 Listing(c) ==
     LET B == CellBranches(c) IN
-    {k \in {<<"seg", b, s>> : b \in B, s \in Seqs} : seg[k[2]][k[3]] # None}
+    {k \in {<<"seg", b, s, e>> : b \in B, s \in Seqs, e \in Epochs} : seg[k[2]][k[3]][k[4]] # None}
     \cup {<<"own", o.b, o.e, o.s, o.x>> : o \in {o \in own : o.b \in B}}
-    \cup {k \in {<<"ckpt", b, s>> : b \in B, s \in Seqs} : ckpt[k[2]][k[3]] # None}
+    \cup {k \in {<<"ckpt", b, s, e>> : b \in B, s \in Seqs, e \in Epochs} :
+            ckpt[k[2]][k[3]][k[4]] # None}
     \cup {<<"rec", b>> : b \in {b \in B : rec[b] # None}}
-    \cup {<<"lease", b>> : b \in {b \in B : lease[b] # None}}
-    \cup {k \in {<<"moves", b, s, d>> : b \in B, s \in Seqs, d \in 1..Hops} :
-            moves[k[2]][k[3]][k[4]] # None}
+    \cup {<<"head", b>> : b \in {b \in B : head[b] # None}}
+    \cup {k \in {<<"moves", b, s, e, p>> : b \in B, s \in Seqs, e \in Epochs, p \in Ways} :
+            moves[k[2]][k[3]][k[4]][k[5]] # None}
 
 \* The state of p at its fork point at, as a pass keeps it for a fork to another cell: the extents
 \* it names, and what recovering it reads (forkPointsKept); without the rule, the extents alone.
@@ -1556,11 +1445,11 @@ RefPoints(Rs) ==
     IN [pts |-> {Kept(ForkPoint(pt[1], pt[2])) : pt \in {pt \in P : ForkPoint(pt[1], pt[2]).ok}},
         lost |-> \E pt \in P : lost(pt)]
 
-\* Whether the writer of b may name the extents of its state, recovered from its checkpoint ck
-\* (-1 if none), anywhere on their ways from where they were sealed (waysFromSeals): unless the
-\* checkpoint is of the lease's epoch, read after the checkpoints were listed (collector::behind).
-\* A fork's inherited extents, which a fork with no checkpoint holds, always.
-Behind(b, ck) == R("waysFromSeals") /\ (ck < 0 \/ ckpt[b][ck].epoch # LeaseEpoch(b))
+\* Whether the writer of b may name the extents of its state, recovered from its head's checkpoint
+\* ck (<<>> if none), anywhere on their ways from where they were sealed (waysFromSeals): unless
+\* the checkpoint is of the head's epoch (collector::behind). A fork's inherited extents, which a
+\* fork with no checkpoint holds, always.
+Behind(b, ck) == R("waysFromSeals") /\ (ck = <<>> \/ ck[2] # HeadEpoch(b))
 
 \* Whether acc holds a recovery of q, <<b, origin>>: by that origin (recoveriesByOrigins), or,
 \* without the rule, by any.
@@ -1575,7 +1464,8 @@ RECURSIVE RecoverAll(_, _, _)
 \* another origin, a restore's that took the ID (TASK-173). Of the forks to other cells, the
 \* parent's state at each fork point is kept instead (forksFromStates too): the child's cell's
 \* pass recovers the child. A failure that loses nothing (deleted since, a claim no writer has) is
-\* skipped, the claim given up on; any other loses the pass.
+\* skipped, the claim given up on; any other loses the pass. Each recovery keeps what its head
+\* may yet name: of its epoch, the segments from its end and the checkpoints after its own.
 RecoverAll(queue, recs, acc) ==
     IF queue = {} \/ acc.lost THEN acc
     ELSE LET q == CHOOSE q \in queue : TRUE
@@ -1591,14 +1481,10 @@ RecoverAll(queue, recs, acc) ==
             ELSE IF r.ok THEN
                RecoverAll(rest \cup kids, recs,
                           [acc EXCEPT !.live = Put(@, q, [ext |-> r.st.ext, end |-> r.end,
-                                                          epoch |-> r.st.epoch, next |-> r.st.next,
+                                                          epoch |-> HeadEpoch(b), ck |-> r.ck,
                                                           touched |-> r.touched,
-                                                          fences |-> r.st.fences,
-                                                          voids |-> r.st.voids,
-                                                          lates |-> r.st.lates,
-                                                          taking |-> LeaseEpoch(b) > r.st.epoch,
                                                           behind |-> Behind(b, r.ck)]),
-                                      !.ck = @ \/ r.ck >= 0,
+                                      !.ck = @ \/ r.ck # <<>>,
                                       !.pts = @ \cup {Kept(fp) : fp \in fps}])
             ELSE IF rec[b] = None \/ rec[b].deleted THEN RecoverAll(rest, recs, acc)
             ELSE IF rec[b].kind = "claim" /\ Unwritten(b)
@@ -1644,9 +1530,9 @@ GcRecords(i) ==
     /\ UNCHANGED <<bucketVars, hostVars, truthVars, countVars>>
 
 \* The forks being made of points deleted given up on (collectorAbandons), then the live
-\* branches recovered. Finding what one needs lost, a pass a later one took the lease from
-\* stops (passesFencedStop): what it read may be older than what that pass, deleting since, read.
-\* A point of another cell's is read now.
+\* branches recovered from their heads. Finding what one needs lost, a pass a later one took the
+\* lease from stops (passesFencedStop): what it read may be older than what that pass, deleting
+\* since, read. A point of another cell's is read now.
 GcRecover(i) ==
     LET g == gc[i]
         pointRec(p) == IF CellOf[p] = g.cell THEN g.recs[p] ELSE rec[p]
@@ -1675,8 +1561,8 @@ GcRecover(i) ==
                                                  !.pts = acc.pts, !.ck = acc.ck,
                                                  !.pc = "relist"]]
              /\ UNCHANGED errors
-       /\ UNCHANGED <<seg, own, ckpt, lease, moves, inflight, refs, marked, retired, hostVars,
-                      countVars>>
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written,
+                      hostVars, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
 \* After the states: the cell's records listed again (recordsRelisted), while what it recovered
@@ -1708,25 +1594,13 @@ GcRelist(i) ==
        /\ UNCHANGED <<bucketVars, hostVars, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
-\* Whether segment s of a branch stays whatever covers it, by e, what a pass took of a recovery
-\* of it (collector::pinned, TASK-388): every position a writer of it, taken over or taking it
-\* over, may still create at. While a writer takes it over, every segment: it may have read the
-\* branch before the last writer's segment landed and fences where it found the end (pinsTakings);
-\* its fences, of every epoch (pinsFences; but the last's alone without pinsOldFences); its void
-\* strays (pinsVoidStrays) and its late ones (pinsLateStrays).
-Pinned(e, s) ==
-    \/ R("pinsTakings") /\ e.taking
-    \/ R("pinsFences") /\ s \in e.fences /\ (R("pinsOldFences") \/ s = Max(e.fences))
-    \/ R("pinsVoidStrays") /\ s \in e.voids
-    \/ R("pinsLateStrays") /\ s \in e.lates
-
 \* Compaction, then deletion, unless a later pass of the cell took its lease: of what was listed,
-\* what the live branches and the fork points kept do not need. A fork point's state is behind
-\* (waysFromSeals): the child names what it inherited where it read it. Then the references of
-\* the cell's deleted children retired, under their parents' cells, once the cell has no live
-\* branch and no reference of its own (referencesHeld): no branch anywhere inherits from them,
-\* a fork of one in the cell by its record, in another cell by its reference. Without the rule,
-\* once the child is deleted.
+\* what the live branches and the fork points kept do not need, nor their heads may yet name
+\* (collectorEpochs). A fork point's state is behind (waysFromSeals): the child names what it
+\* inherited where it read it. Then the references of the cell's deleted children retired, under
+\* their parents' cells, once the cell has no live branch and no reference of its own
+\* (referencesHeld): no branch anywhere inherits from them, a fork of one in the cell by its
+\* record, in another cell by its reference. Without the rule, once the child is deleted.
 GcFinish(i) ==
     LET g == gc[i]
         objs == IF R("candidatesFirst") THEN g.objs ELSE Listing(g.cell)
@@ -1735,72 +1609,71 @@ GcFinish(i) ==
         touched == UNION {L[k].touched : k \in DOMAIN L} \cup UNION {p.touched : p \in g.pts}
         locs == UNION {{<<x, L[k].ext[x]>> : x \in DOMAIN L[k].ext} : k \in DOMAIN L}
                 \cup UNION {{<<x, p.ext[x]>> : x \in DOMAIN p.ext} : p \in g.pts}
-        \* The keys on the way to each extent named, from where a state says it is: the
-        \* objects listed, and the moves listed of each, whose maps say it moved there.
-        reach(l, d) == LET d0 == Depth(l[2]) IN
-                       d >= d0 /\ \A e \in (d0 + 1)..d :
-                           Key(l[2][2], l[2][3], e) \in objs /\ Names(l[2][2], l[2][3], e, l[1])
+        \* The key along the way p from the segment of a location of a segment's or moves'.
+        along(loc, p) == Key(loc[2], loc[3], loc[4], p)
         chained == {l \in locs : l[2][1] # "own"}
-        namedAt(k) == {l[1] : l \in {l \in chained : \E d \in 0..Hops :
-                                         reach(l, d) /\ Key(l[2][2], l[2][3], d) = k}}
+        \* The ways to each extent named, from where a state says it is: the objects listed, and
+        \* the moves listed of each, whose maps say it moved there, any pass's.
+        reached(l) ==
+            LET step(P) == {q \in UNION {On(p) : p \in P} :
+                              along(l[2], q) \in objs /\ Names(l[2][2], l[2][3], l[2][4], q, l[1])}
+                r0 == {Way(l[2])}
+            IN r0 \cup step(r0) \cup step(step(r0))
+        namedAt(k) == {l[1] : l \in {l \in chained : \E p \in reached(l) : along(l[2], p) = k}}
         \* And the moves on the ways there from where they were sealed, of the states whose
         \* writers may be behind them (waysFromSeals).
         behind == UNION {{L[k].ext[x] : x \in DOMAIN L[k].ext} :
                             k \in {k \in DOMAIN L : L[k].behind}}
                   \cup (IF R("waysFromSeals")
                         THEN UNION {{p.ext[x] : x \in DOMAIN p.ext} : p \in g.pts} ELSE {})
-        hops == {Key(l[2][2], l[2][3], d + 1) :
-                   <<l, d>> \in {<<l, d>> \in chained \X (0..(Hops - 1)) :
-                                    reach(l, d) /\ Key(l[2][2], l[2][3], d + 1) \in objs}}
-                \cup ({Key(l[2], l[3], d) : <<l, d>> \in {<<l, d>> \in behind \X (1..Hops) :
-                                                            l[1] = "moves" /\ d <= Depth(l)}}
-                     \cap objs)
-        named == {Key(l[2][2], l[2][3], d) :
-                    <<l, d>> \in {<<l, d>> \in chained \X (0..Hops) :
-                                     reach(l, d) /\ Key(l[2][2], l[2][3], d) \in objs}}
-                 \cup ({<<"own", l[2][2], l[2][3], l[2][4], l[1]>> :
-                          l \in {l \in locs : l[2][1] = "own"}} \cap objs)
-        \* By any recovery of b's.
-        mayLandSeg(b, s) == \E k \in DOMAIN L : k[1] = b /\ s >= L[k].end
-        \* Pinned by any recovery of b's.
-        pinnedAt(b, s) == \E k \in DOMAIN L : k[1] = b /\ Pinned(L[k], s)
-        mayLandOwn(b, e, s, x) ==
-            \E k \in DOMAIN L :
-               /\ k[1] = b
-               /\ LET cur == IF R("orphansAfterSuccessor") THEN L[k].epoch ELSE LeaseEpoch(b)
-                      ahead == IF R("extentKeysNameSegments") THEN s >= L[k].end
-                               ELSE GE2(<<x[2], x[3]>>, L[k].next)
-                  IN e >= cur /\ (e # L[k].epoch \/ ahead)
-        \* Segments no recovery reads, which may not land; moves, but the last hop's
-        \* (compactMoves): each into its moves, if it has none.
-        next(k) == Key(k[2], k[3], Depth(k) + 1)
-        compactable == {k \in named :
-                          /\ k[1] # "own"
+        hops == UNION {{along(l[2], q) : q \in UNION {On(p) : p \in reached(l)}} : l \in chained}
+                \cup UNION {{along(l, SubSeq(Way(l), 1, n)) : n \in 1..Depth(l)} :
+                              l \in {l \in behind : l[1] = "moves"}}
+        named == UNION {{along(l[2], p) : p \in reached(l)} : l \in chained}
+                 \cup {<<"own", l[2][2], l[2][3], l[2][4], l[1]>> :
+                         l \in {l \in locs : l[2][1] = "own"}}
+        \* Whether b's head, as any recovery of b's read it, may yet name its segment or extent of
+        \* its own at s by the writer of epoch e: of the head's epoch, or a later one, at or past
+        \* its end (collectorEpochs). Of an earlier epoch, its writer's swaps all fail.
+        ahead(b, s, e) ==
+            \E k \in DOMAIN L : /\ k[1] = b /\ R("collectorEpochs")
+                                /\ e >= L[k].epoch /\ s >= L[k].end
+        \* Likewise its checkpoint as of s by that writer: newer than the head's, by s, then by
+        \* epoch (a writer taking over may checkpoint what the head's did, at its own key).
+        ckAhead(b, s, e) ==
+            \E k \in DOMAIN L : /\ k[1] = b /\ R("collectorEpochs") /\ e >= L[k].epoch
+                                /\ L[k].ck = <<>> \/ ~GE2(L[k].ck, <<s, e>>)
+        \* The moves of the object at k listed, any pass's: each holds what was named there as
+        \* its pass read it, which no later state names more of.
+        movesOf(k) == {Key(k[2], k[3], k[4], q) : q \in On(Way(k))} \cap objs
+        \* Segments no recovery reads, which no head may yet name; moves, but the last hop's
+        \* (compactMoves): each into moves of this pass's, if none are listed.
+        compactable == {k \in named \cap objs :
+                          /\ k[1] # "own" /\ Obj(k) # None
                           /\ IF k[1] = "seg"
-                             THEN /\ "compact" \in Can /\ seg[k[2]][k[3]] # None
-                                  /\ k \notin touched /\ ~mayLandSeg(k[2], k[3])
-                             ELSE /\ "compactMoves" \in Can /\ Depth(k) < Hops
-                                  /\ moves[k[2]][k[3]][Depth(k)] # None
-                          /\ next(k) \notin objs /\ moves[k[2]][k[3]][Depth(k) + 1] = None}
+                             THEN /\ "compact" \in Can /\ k \notin touched
+                                  /\ ~ahead(k[2], k[3], k[4])
+                             ELSE "compactMoves" \in Can /\ Depth(k) < Hops
+                          /\ movesOf(k) = {}}
         doomedKey(k) ==
-            CASE k[1] = "ckpt" -> k \notin touched
-              [] k[1] = "seg" -> ~mayLandSeg(k[2], k[3]) /\ k \notin touched
-                                 /\ (k \notin named \/ next(k) \in objs)
-                                 /\ ~pinnedAt(k[2], k[3])
-              [] k[1] = "own" -> k \notin named /\ ~mayLandOwn(k[2], k[3], k[4], k[5])
+            CASE k[1] = "ckpt" -> k \notin touched /\ ~ckAhead(k[2], k[3], k[4])
+              [] k[1] = "seg" -> /\ ~ahead(k[2], k[3], k[4]) /\ k \notin touched
+                                 /\ (k \notin named \/ movesOf(k) # {})
+              [] k[1] = "own" -> k \notin named /\ ~ahead(k[2], k[4], k[3])
               \* Moves go once no state's way goes through them, and they are moved in turn, or
               \* what they are of is gone.
               [] k[1] = "moves" ->
                    /\ k \notin hops
-                   /\ IF k \in named THEN Depth(k) < Hops /\ next(k) \in objs
-                      ELSE Key(k[2], k[3], Depth(k) - 1) \notin objs
+                   /\ IF k \in named THEN Depth(k) < Hops /\ movesOf(k) # {}
+                      ELSE Key(k[2], k[3], k[4], SubSeq(Way(k), 1, Depth(k) - 1)) \notin objs
               \* No record (recordsKept): a deleted root's stays too, as a deleted fork's does,
               \* which a slow writer of a parent naming its ID as a fork's child would make again
               \* (TASK-174). Without the rule, a deleted root's goes once no recovery read it.
               [] k[1] = "rec" -> /\ ~R("recordsKept")
                                  /\ recs[k[2]] # None /\ recs[k[2]].deleted
                                  /\ recs[k[2]].kind = "root" /\ k \notin touched
-              [] k[1] = "lease" -> ~(recs[k[2]] # None /\ ~recs[k[2]].deleted)
+              \* Heads stay, as records do: the final one fences a deleted branch's writers.
+              [] k[1] = "head" -> FALSE
         D == IF Fenced(i) THEN {} ELSE {k \in objs : doomedKey(k)}
         dead == /\ \A b \in CellBranches(g.cell) : recs[b] = None \/ recs[b].deleted
                 /\ g.refs = {}
@@ -1815,42 +1688,57 @@ GcFinish(i) ==
         \* The cell's own references listed marked: retired before, or taken back.
         stale == IF Fenced(i) THEN {} ELSE g.stale
     IN /\ g.pc = "finish"
+       \* Its compactions' PUTs in flight, landing whenever (GcLand), though the pass ended.
        /\ \E C \in SUBSET compactable :
-             moves' = [b \in Branches |-> [s \in Seqs |-> [d \in 1..Hops |->
-                         IF Key(b, s, d) \in D THEN None
-                         ELSE IF Key(b, s, d - 1) \in C THEN namedAt(Key(b, s, d - 1))
-                         ELSE moves[b][s][d]]]]
-       /\ seg' = [b \in Branches |-> [s \in Seqs |-> IF <<"seg", b, s>> \in D THEN None
-                                                     ELSE seg[b][s]]]
+             mflight' = mflight \cup {[k |-> Key(k[2], k[3], k[4], Way(k) \o <<KP(i)>>),
+                                       o |-> [pass |-> i, names |-> namedAt(k)]] : k \in C}
+       /\ moves' = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |->
+                      IF Key(b, s, e, p) \in D THEN None ELSE moves[b][s][e][p]]]]]
+       /\ seg' =[b \in Branches |-> [s \in Seqs |-> [e \in Epochs |->
+                    IF <<"seg", b, s, e>> \in D THEN None ELSE seg[b][s][e]]]]
        /\ own' = {o \in own : <<"own", o.b, o.e, o.s, o.x>> \notin D}
-       /\ ckpt' = [b \in Branches |-> [s \in Seqs |-> IF <<"ckpt", b, s>> \in D THEN None
-                                                      ELSE ckpt[b][s]]]
-       /\ lease' = [b \in Branches |-> IF <<"lease", b>> \in D THEN None ELSE lease[b]]
+       /\ ckpt' = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |->
+                     IF <<"ckpt", b, s, e>> \in D THEN None ELSE ckpt[b][s][e]]]]
        /\ rec' = [b \in Branches |-> IF <<"rec", b>> \in D THEN None ELSE rec[b]]
        /\ refs' = refs \ (retiring \cup stale)
        /\ retired' = retired \cup retiring
        /\ marked' = marked \cup Marks(retiring)
        /\ gc' = [gc EXCEPT ![i] = Idle(g)]
-       /\ UNCHANGED <<inflight, hostVars, truthVars, countVars>>
+       /\ UNCHANGED <<head, inflight, written, hostVars, truthVars, countVars>>
+
+\* A compaction's PUT lands, whenever, though its pass ended, or a later one took the cell's
+\* collector lease: created, unless moves are at its key (collector::compact_object's create).
+\* Its key names its pass (movesByPass), so that none is ever there, nor was.
+GcLand(m) ==
+    /\ mflight' = mflight \ {m}
+    /\ IF Obj(m.k) = None THEN
+          /\ moves' = [moves EXCEPT ![m.k[2]][m.k[3]][m.k[4]][m.k[5]] = m.o]
+          /\ written' = written \cup {<<m.k, m.o>>}
+       ELSE UNCHANGED <<moves, written>>
+    /\ UNCHANGED <<seg, own, ckpt, rec, head, inflight, refs, marked, retired, hostVars, gc,
+                   truthVars, countVars>>
 
 GcNext ==
     \/ \E c \in Cells : GcStart(c)
     \/ \E i \in DOMAIN gc : GcRecords(i) \/ GcRecover(i) \/ GcRelist(i) \/ GcFinish(i)
+    \/ \E m \in mflight : GcLand(m)
 
 -----------------------------------------------------------------------------
 
 Init ==
-    /\ seg = [b \in Branches |-> [s \in Seqs |-> None]]
+    /\ seg = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
     /\ own = {}
-    /\ ckpt = [b \in Branches |-> [s \in Seqs |-> None]]
+    /\ ckpt = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> None]]]
     /\ rec = [b \in Branches |-> IF b = Root THEN Record("root", <<>>, 0, <<"root", Root>>, 0)
                                  ELSE None]
-    /\ lease = [b \in Branches |-> None]
-    /\ moves = [b \in Branches |-> [s \in Seqs |-> [d \in 1..Hops |-> None]]]
+    /\ head = [b \in Branches |-> None]
+    /\ moves = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |-> [p \in Ways |-> None]]]]
+    /\ mflight = {}
     /\ inflight = {}
     /\ refs = {}
     /\ marked = {}
     /\ retired = {}
+    /\ written = {}
     /\ ses = [h \in Hosts |-> [b \in Branches |-> None]]
     /\ wal = [h \in Hosts |-> [b \in Branches |-> <<>>]]
     /\ tok = [h \in Hosts |-> [b \in Branches |-> 0]]
@@ -1868,12 +1756,8 @@ Init ==
     /\ placed = [b \in Branches |-> 0]
     /\ errors = {}
     /\ gen = 0 /\ takes = 0 /\ passes = 0 /\ places = 0 /\ crashes = 0 /\ mints = 0
-    /\ freed = {}
 
-\* Every step, and what it freed: the places of segments there before it and gone after.
-Next ==
-    /\ WriterNext \/ HostNext \/ GcNext
-    /\ freed' = freed \cup {<<b, s>> \in Branches \X Seqs : seg[b][s] # None /\ seg'[b][s] = None}
+Next == WriterNext \/ HostNext \/ GcNext
 
 Spec == Init /\ [][Next]_vars
 
@@ -1886,15 +1770,15 @@ HostPerms == Permutations(Hosts)
 \* The branches whose records say they live: roots, forks' children, points.
 LiveRecs == {b \in Branches : LiveRec(b)}
 
-\* Nothing a live branch needs is deleted: it recovers, every extent it names reads back as
-\* itself, and a lease a writer took is there; and the writer whose lease it is reads every
-\* extent its guest holds where its state acknowledged says it is.
+\* Nothing a live branch needs is deleted: it recovers from its head, every extent it names reads
+\* back as itself, and a head a writer took is there; and the writer whose taking the head is
+\* reads every extent its guest holds where its state acknowledged says it is.
 NothingNeededGone ==
     /\ \A b \in LiveRecs :
           LET r == Recover(b, rec[b].origin) IN
           /\ r.ok
           /\ \A x \in DOMAIN r.st.ext : Readable(x, r.st.ext[x])
-          /\ taken[b] >= 0 => lease[b] # None
+          /\ taken[b] >= 0 => head[b] # None
     /\ \A h \in Hosts, b \in LiveRecs :
           (Ready(h, b) /\ Taking(ses[h][b], b)) =>
               \A x \in DOMAIN ses[h][b].st.ext \cap DOMAIN View(h, b).ext :
@@ -1905,32 +1789,32 @@ NothingNeededGone ==
 HistoriesOwn ==
     \A b \in LiveRecs :
         LET r == Recover(b, rec[b].origin) IN
-        r.ok => /\ OwnStart(b, r.st.head) = rec[b].base
+        r.ok => /\ OwnStart(b, r.st.tip) = rec[b].base
                 /\ ~r.st.dup
-                /\ r.st.hist = Anc(r.st.head)
-                /\ DOMAIN r.st.ext = MadeBy(Path(r.st.head), {})
+                /\ r.st.hist = Anc(r.st.tip)
+                /\ DOMAIN r.st.ext = MadeBy(Path(r.st.tip), {})
 
 \* No acknowledged commit is lost: each is in its branch's history, and in the guest's of the
-\* writer whose lease it is.
+\* writer whose taking the head is.
 NoAckedLost ==
     /\ \A b \in LiveRecs :
-          LET r == Recover(b, rec[b].origin) IN r.ok => acked[b] \subseteq Anc(r.st.head)
+          LET r == Recover(b, rec[b].origin) IN r.ok => acked[b] \subseteq Anc(r.st.tip)
     /\ \A h \in Hosts, b \in LiveRecs :
           (Ready(h, b) /\ Taking(ses[h][b], b)) =>
-              acked[b] \subseteq Anc(View(h, b).head)
+              acked[b] \subseteq Anc(View(h, b).tip)
 
 \* No extent ID is minted twice.
 NoIdTwice == ~twice
 
-\* Nothing writes a point: no segment, checkpoint or writer's lease of one.
+\* Nothing writes a point: no segment, checkpoint or writer's head of one.
 PointsUnwritten ==
     \A b \in Branches : rec[b] # None /\ rec[b].kind = "point" =>
-        /\ \A s \in Seqs : seg[b][s] = None /\ ckpt[b][s] = None
-        /\ lease[b] = None \/ lease[b].epoch = Final
+        /\ \A s \in Seqs, e \in Epochs : seg[b][s][e] = None /\ ckpt[b][s][e] = None
+        /\ head[b] = None \/ head[b].epoch = Final
 
 \* No placement takes a branch back from a later one.
-LeasesCurrent == \A b \in Branches : lease[b] # None /\ lease[b].epoch # Final =>
-                                         lease[b].token >= taken[b]
+HeadsCurrent == \A b \in Branches : head[b] # None /\ head[b].epoch # Final =>
+                                        head[b].token >= taken[b]
 
 \* A making told it made a branch loses it only to a deletion of it asked by who may.
 DeletedOnlyByDeletes ==
@@ -1940,33 +1824,15 @@ DeletedOnlyByDeletes ==
 \* One making, not deleted, is told it made each branch.
 OneMaker == \A b \in Branches : Cardinality(makers[b] \ doomed) <= 1
 
-\* Nothing failed that must not: a pass of the collector, a deletion, a WAL rebased, a store opened
-\* (its log ending inside a commit), a WAL diverging from a branch whose last commit is its own.
+\* Nothing failed that must not: a pass of the collector, a deletion, a store opened (its log
+\* ending inside a commit), a WAL diverging from a branch whose last commit is its own.
 NoErrors == errors = {}
 
-\* The places h's writer of b may still create at, and acknowledge what it creates: its creates in
-\* flight; once opened, the segments of its WAL it has yet to upload (stamped by its chain only
-\* then, Opened); and, fencing, its fence's, while the lease is still its (a writer fencing that
-\* finds it another's after stops, Opened). None once it stopped.
-Creatable(h, b) ==
-    LET s == ses[h][b] IN
-    IF s = None \/ s.pc = "stopped" THEN {}
-    ELSE {m.s : m \in {m \in inflight : m.h = h /\ m.b = b /\ m.g = s.gen}}
-         \cup (IF s.pc \in {"ready", "record"}
-                THEN {wal[h][b][i].s : i \in DOMAIN wal[h][b]} \ s.up ELSE {})
-         \cup (IF s.pc = "fence" /\ (Leased(s, b) \/ ~R("epochSequences")) THEN {s.seq}
-                ELSE {})
-
-\* The safety of a writer's creates as its fencing (TASK-371), once (TASK-388): the first place a
-\* writer of a live branch, taken over or taking it over, may still create at was never freed. A
-\* writer creates its segments in order and acknowledges them in order, so it acknowledges
-\* nothing past the first create that fails; where the collector freed a place, its create lands,
-\* below a later writer's fence, or where an earlier writer's acknowledged segment was, and it
-\* or its successor acknowledges what no history holds. The collector's pins keep it (Pinned).
-CreatesNeverFreed ==
-    \A h \in Hosts, b \in Branches :
-        LET C == Creatable(h, b) IN
-        C # {} /\ rec[b] # None /\ ~rec[b].deleted => <<b, Min(C)>> \notin freed
+\* A key names one object, ever (TASK-407): every PUT at a segment's, a checkpoint's or moves' key
+\* writes what every other at it did, if any did, deleted since or not. Readers need no versions of
+\* a key: what the host keeps of it, in memory, in its part cache, or asked of its peers, is of
+\* the one object.
+KeysWrittenOnce == \A p, q \in written : p[1] = q[1] => p[2] = q[2]
 
 \* Every reference is named by its child's record, its origin the reference's fork point, which
 \* the child's cell's pass retires it by once the child is deleted (TASK-395.10); or is of a fork
