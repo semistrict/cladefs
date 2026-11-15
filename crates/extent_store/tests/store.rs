@@ -976,19 +976,15 @@ fn segments_close_for_the_writer_of_their_chain() {
     use extent_frame::segment::{Footer, Location, extent_key, tag};
     let dir = MemDir::new();
     let state = extent_remote::State::new(BRANCH);
-    let store =
-        created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
+    let store = created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
     drop(store);
     let other = extent_remote::State::new(extent_remote::layout::test_branch(BRANCH.id + 1));
     let opening = Opening::new(extent_remote::layout::test_branch(BRANCH.id + 1));
     let refused =
         Store::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
     assert_eq!(refused.err().unwrap().to_string(), "branch 1/1/7 opened as 1/1/8");
-    let store = opened_on(
-        dir.clone(),
-        extent_remote::State::new(BRANCH),
-        Chain::new(BRANCH, 3, 5, 100),
-    );
+    let store =
+        opened_on(dir.clone(), extent_remote::State::new(BRANCH), Chain::new(BRANCH, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
 
@@ -2363,6 +2359,7 @@ fn cached_pages(path: &std::path::Path) -> usize {
     use std::os::fd::AsRawFd as _;
     let file = std::fs::File::open(path).unwrap();
     let len = file.metadata().unwrap().len() as usize;
+    assert_ne!(len, 0, "{} holds nothing", path.display());
     let (prot, flags) = (libc::PROT_READ, libc::MAP_SHARED);
     // SAFETY: Maps the file, unread, to ask the kernel which of its pages it caches, into a byte
     // for each, and unmaps it.
@@ -2376,16 +2373,14 @@ fn cached_pages(path: &std::path::Path) -> usize {
     }
 }
 
-/// fxdax: on Linux, durable commits leave the pages of the open segment's raw file, written through
-/// the host's page cache, in it; its framed file, once synced, lets them go (TASK-92.23).
-///
-/// Synced, the raw file's pages are clean, which the kernel's reclaim may take under memory
-/// pressure whenever it likes: a loaded host's took one of 8 in 2,000 runs (TASK-228). What this
-/// guards against, a sync letting the file go (`POSIX_FADV_DONTNEED`, dir.rs), takes all of them,
-/// so most staying cached is what tells the two apart.
+/// fxdax: on Linux, no file of a store's holds pages in the host's page cache, its writes and its
+/// reads going around it (`O_DIRECT`), what is held held in the process's own page cache
+/// (`extent_store::pages`, TASK-433): the open segment's raw file as durable commits write it, its
+/// log, and the segment's framed file once framed. Until TASK-433 the raw file's pages stayed in the
+/// host's page cache through durable commits (TASK-92.23), which this tested.
 #[cfg(target_os = "linux")]
 #[test]
-fn durable_commits_keep_the_open_segments_pages_cached_on_the_host() {
+fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let store = create(HostDir::new(temp.path(), true).unwrap(), 64 << 20);
     assert!(store.dir().is_direct(), "the host's file system bypasses no page cache");
@@ -2393,19 +2388,15 @@ fn durable_commits_keep_the_open_segments_pages_cached_on_the_host() {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
         store.commit(None).unwrap();
     }
+    // Written back, so that the files hold what was written, written around the host's cache.
+    extent_store::pages::shared().write_back_all().unwrap();
     let path = |kind| temp.path().join(of(kind, BRANCH.id)).join(format!("{:016x}", 0));
-    let (written, cached) =
-        ((8 * BLOCK).div_ceil(page_size()), cached_pages(&path("open-segments")));
-    assert!(cached > written / 2, "{cached} of the open segment's {written} pages cached");
-    // TASK-433.2: its log, appended to at each commit, bypasses the page cache, holding its last
-    // block in memory of the store's own.
+    assert_eq!(cached_pages(&path("open-segments")), 0, "the open segment's pages cached");
     assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");
     store.close_segment().unwrap();
     store.commit(None).unwrap();
-    // Framed, on a thread of its own, which no commit waits for, nothing written since the commit
-    // before (TASK-165.9): its framing's sync lets the pages go.
     settled(&store);
-    assert_eq!(cached_pages(&path("segments")), 0);
+    assert_eq!(cached_pages(&path("segments")), 0, "the framed segment's pages cached");
 }
 
 /// Segments of 64 KiB and extents of 64 KiB at most, so that a segment holds 128 KiB at most.

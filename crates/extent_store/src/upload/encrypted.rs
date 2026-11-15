@@ -1216,6 +1216,8 @@ fn fetched_by(
 /// The paths of the files under `dir`, on the host's disk, that hold any of `data`'s sectors' first
 /// 32 bytes.
 fn clear_files_on_disk(dir: &std::path::Path, data: &[u8]) -> Vec<String> {
+    // As on the disk, what the store's page cache holds written there first (TASK-433).
+    crate::pages::shared().write_back_all().unwrap();
     let pieces: std::collections::HashSet<&[u8]> =
         data.chunks(4096).map(|sector| &sector[..32]).collect();
     let mut found = Vec::new();

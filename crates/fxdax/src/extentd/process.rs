@@ -60,6 +60,9 @@ pub struct AnonBudget {
     /// held at once so far, which the memory governor bounds, letting them go before any tenant's
     /// pages as the host's memory runs short (`super::memory::held_parts`, TASK-400).
     pub held: u64,
+    /// The stores' page cache's: the most it held at once so far, which the memory governor bounds
+    /// as it bounds the parts held (`extent_store::pages`, TASK-433).
+    pub pages: u64,
     /// Its own: [`OWN`].
     pub own: u64,
 }
@@ -67,7 +70,7 @@ pub struct AnonBudget {
 impl AnonBudget {
     /// Its parts together: the budget.
     pub fn total(&self) -> u64 {
-        self.uploads + self.framings + self.fetches + self.rooms + self.held + self.own
+        self.uploads + self.framings + self.fetches + self.rooms + self.held + self.pages + self.own
     }
 }
 
@@ -140,6 +143,7 @@ fn budget(state: &mut State) -> AnonBudget {
         fetches: FETCHES,
         rooms: state.rooms,
         held: super::memory::held_parts().counts().peak,
+        pages: extent_store::pages::shared().usage().peak,
         own: OWN,
     }
 }
@@ -249,7 +253,8 @@ mod tests {
         assert_eq!(FETCHES, 192 << 20);
         let (uploads, framings) = (512 << 20, 2 * FRAMING);
         let (rooms, held) = (0, 40 << 20);
-        let budget = AnonBudget { uploads, framings, fetches: FETCHES, rooms, held, own: OWN };
+        let budget =
+            AnonBudget { uploads, framings, fetches: FETCHES, rooms, held, pages: 0, own: OWN };
         let total = (512 << 20) + 2 * FRAMING + (192 << 20) + (40 << 20) + (64 << 20);
         assert_eq!(budget.total(), total);
     }

@@ -155,7 +155,7 @@ pub fn held_parts() -> &'static Arc<extent_store::HeldParts> {
 /// fxdax: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena holds,
 /// and the parts held ([`held_parts`]).
 pub fn governed_bytes() -> u64 {
-    physmem::arenas_bytes() + held_parts().bytes()
+    physmem::arenas_bytes() + held_parts().bytes() + extent_store::pages::shared().bytes()
 }
 
 /// fxdax: the governor's look at the host's memory (TASK-358): every tenant's memory together, and
@@ -164,13 +164,21 @@ pub fn governed_bytes() -> u64 {
 /// from what the stores hold on disk, whose framings read and pack them again (TASK-400); then each
 /// tenant past its share by weight down to it ([`super::governor::shares`]), then any tenant's,
 /// least recently used first. The tenants are limited to `allowance`: the parts held take no room
-/// from them, but what the headroom leaves between looks.
+/// from them, but what the headroom leaves between looks. fxdax: the stores' page cache
+/// (`extent_store::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty
+/// ones written back to be: what it holds counted as the process's, where the host's page cache
+/// was counted free.
 pub fn govern(allowance: u64) {
     GOVERNED.store(allowance, Ordering::Relaxed);
     let parts = held_parts();
     let room = allowance.saturating_sub(physmem::arenas_bytes());
     if parts.bytes() > room {
         parts.evict_to(room);
+    }
+    let pages = extent_store::pages::shared();
+    let room = room.saturating_sub(parts.bytes());
+    if pages.bytes() > room {
+        pages.evict_to(room);
     }
     let weighted: Vec<(String, u64)> = {
         let registry = REGISTRY.lock().unwrap();

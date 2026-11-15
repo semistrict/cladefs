@@ -196,11 +196,20 @@ impl Disk {
     }
 
     /// Counts it anew: walks its directory, what it takes then, with the writes not done as the
-    /// walk began, and those admitted meanwhile, which the walk may not have found.
+    /// walk began, and those admitted meanwhile, which the walk may not have found. Writes done
+    /// may be held dirty in the stores' page cache (`extent_store::pages`, TASK-433), on no disk
+    /// yet: it writes them back first, after reading what is being written, so that a write done
+    /// meanwhile is either counted being written or written back and walked.
     pub(super) fn recount(&self) {
         let _counting = self.counting.lock().unwrap();
         let before = self.used.load(Ordering::SeqCst);
         let writing = self.writing.load(Ordering::SeqCst);
+        if let Err(err) = extent_store::pages::shared().write_back_all() {
+            log::warn!(
+                "extentd: writing back the stores' page cache to count tenant {}'s disk: {err}",
+                self.name
+            );
+        }
         let walked = walk(&self.dir);
         // Only admissions add to it meanwhile.
         let delta = (walked + writing).wrapping_sub(before);
