@@ -3,9 +3,11 @@ id: TASK-444.9
 title: >-
   Guardrails for agent work as hooks: no editing tests and code in one task,
   weakened tests flagged
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 12:34'
+updated_date: '2026-11-15 13:34'
 labels: []
 dependencies: []
 references:

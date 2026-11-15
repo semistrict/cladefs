@@ -283,6 +283,29 @@ jobs:
           cargo nextest run -p fxdax --lib --run-ignored all --no-capture
           -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
+  # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
+  # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the
+  # commit-msg hook asks it of a clone that installed scripts/hooks; this, of every push and pull
+  # request.
+  test-weakening:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Commits that weaken checks say why
+        env:
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A new branch's push has no before: what it brings beyond main.
+          if [[ $BEFORE == 0000000000000000000000000000000000000000 ]]; then
+            BEFORE=$(git merge-base origin/main "$AFTER")
+          fi
+          scripts/test-weakening.py "$BEFORE..$AFTER"
+
   # guide/: the codebase guide, which cites code by exact snippets. Its build fails when a snippet
   # no longer occurs exactly once in its file, or evidence it cites is gone, so code changes that
   # leave it pointing at nothing fail here, not in a reader's hands.

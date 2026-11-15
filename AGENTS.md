@@ -78,6 +78,27 @@ by TASK-293: the collector never compacted compressed segments, as it measured l
 their compressed size. TASK-175's compaction test had fed it incompressible bytes "so that the
 objects' sizes are their extents'" a week before, with no task filed.
 
+A commit that weakens a check (an assertion gone, a test ignored or removed, a bound loosened, a
+count of cases or seeds lowered, an invariant or mutant dropped) says why in a `Weakens-tests:`
+line of its message: the bug's task, or why it is no weaker. CI's `test-weakening` job fails a push
+without one (`scripts/test-weakening.py`; `git config core.hooksPath scripts/hooks` checks at
+commit).
+
+## Agents check agents: split roles, a second vendor's review
+
+Models make tests and code agree by weakening the tests, and approve their own work (doc-17). So:
+
+- **Split roles** when one agent writes the failing test and another the fix (a bug's reproducer,
+  best-of-N): each session writes its role, `implement` or `test`, to `.agent-role` at its
+  worktree's root before anything else, and `scripts/agent-role-guard.py` (a hook in
+  `.claude/settings.json`) holds it to its side: an implementer can't touch tests, specs, mutants
+  or known failures, nor take an assertion out of code; a test writer can't touch code.
+- **Load-bearing changes** (dax.c and the fs/dax.c patches, the journal and super-block, the
+  extent store's and bucket's commit paths, unsafe code, atomics) get two reviews before landing:
+  the `verifying-reviewer` agent (`.claude/agents/`), and Codex through
+  `scripts/review-change.sh`, given the same instructions. Both report only; a finding counts once
+  its reproducer is written and red.
+
 ## Every bug exposes a blind spot: close it, then look around it
 
 A bug or crash, however it was found and whoever caused it, shows code the tests don't exercise
