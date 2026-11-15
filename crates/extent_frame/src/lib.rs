@@ -197,10 +197,11 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
 pub trait Keys {
     fn dek(&self, id: KeyId) -> Option<&Secret>;
 
-    /// cladefs: whether its reader holds the objects it reads under their branch's DEK, as a reader
-    /// of a branch whose record has a DEK does (TASK-411.3): one authenticated under a key it
-    /// doesn't hold is unread ([`Error::NoKey`]), not read as stored. None by default: a reader of
-    /// metadata alone, as the collector's marking is, which checks CRCs.
+    /// cladefs: whether its reader holds the objects it reads under their branch's DEK, as every
+    /// reader holding keys does, every branch being sealed (TASK-411.3, TASK-411.28): one
+    /// authenticated under a key it doesn't hold is unread ([`Error::NoKey`]), not read as stored.
+    /// None by default: a reader of metadata alone, as the collector's marking is, which checks
+    /// CRCs.
     fn sealed(&self) -> bool {
         false
     }

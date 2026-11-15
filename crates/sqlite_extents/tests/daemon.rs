@@ -247,8 +247,12 @@ fn a_database_is_fenced_with_its_cell() {
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
         let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), None, None).await.unwrap();
-        // Its writer fences the branch (TASK-371).
-        drop(extent_remote::Writer::open(objects.clone(), ours, 0x22, held.epoch).await.unwrap());
+        // Its writer fences the branch (TASK-371), unwrapping the cell's KEK through the host's
+        // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
+        let kms = cladefs::remote::kms();
+        let writer =
+            extent_remote::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
+        drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
     let fenced = control.sync_store(&store).unwrap_err();

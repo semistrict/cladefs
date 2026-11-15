@@ -17,8 +17,10 @@
 //!   every host. Only as strong as the bucket keeps no older version of the object, as for a cell
 //!   shredded (doc-16, Shredding). A KEK object deleted outright, not by [`destroy`], loses what
 //!   its KEK wrapped as shredding does, its keys refused as another KEK's; the tenant's next wrap
-//!   makes it a new KEK, its new cells sealed under it, never in the clear (TASK-411.28: no cell
-//!   is; the sealed marker that refused such a tenant, TASK-411.19, went).
+//!   makes it a new KEK, never a cell in the clear (TASK-411.28: no cell is; the sealed marker
+//!   that refused such a tenant, TASK-411.19, went). But a host's cells made after from KEKs it
+//!   pooled, or wrapped under the old KEK it held, are under the old KEK, and lost with it at
+//!   their next taking, what was written to them too (TASK-411.29).
 //! - **Rotating the master keys** ([`rotate`]): a host given several unwraps under any of them and
 //!   makes KEK objects under the first, the newest; [`rotate`] rewraps every tenant's KEK object
 //!   under it, each by a conditional update, after which the older keys are no longer needed. The

@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 19:09'
+updated_date: '2026-11-15 19:31'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -27,7 +27,13 @@ say of the clear:
   is always keyed (`Packer::new((dek, id))`, `Packer::in_place(sectors)`); parts packed ahead are
   compressed unsealed in memory (`PartPacker::compress`) and sealed as their object is.
   `Error::Downgrade` went with the clear: a seal byte zeroed is caught as corruption, by every
-  reader, holding keys or none.
+  reader, holding keys or none. A reader holding any key refuses an object authenticated under a
+  key it lacks, whatever the object's branch (`keys::View::sealed`): whether a branch was sealed
+  came from its record, which nothing authenticates, so a bucket's writer stripping an ancestor's
+  record of its DEKs could have had a checkpoint of its own, under a key it made up, read as stored
+  (found by TASK-411.28's review; `keys` test
+  `objects_authenticated_under_keys_unheld_are_refused_by_every_ring_holding_keys`). The keyless
+  ring alone, the collector's marking's, reads such objects, checking CRCs.
 - **Every cell has a KEK, every writer's record a DEK.** A cell is made only with a KEK its
   tenant's KEK wraps (`keys::new_cell_kek`, now `(kms, tenant) -> (secret, Kek)`;
   `cell::Object::made`, `cell::create` and `cell::hold`'s making take a `Kek`, never none). A
@@ -49,8 +55,11 @@ say of the clear:
   It told a KEK the KMS forgot from a tenant that never had one, because the second meant the
   clear. With no clear, both refuse the tenant alike, for real KMSes; the bucket KMS shreds by
   tombstone; and a tenant's KEK object deleted outright loses what it wrapped as shredding does,
-  its tenant's next cells sealed under a new KEK (`bucket_kms` test
-  `kek_objects_deleted_outright_lose_what_they_wrapped`), never in the clear.
+  the tenant's next wrap making it a new KEK (`bucket_kms` test
+  `kek_objects_deleted_outright_lose_what_they_wrapped`), never a cell in the clear. A host's
+  cells made after from cell KEKs it pooled, or wrapped under the old KEK it held for
+  `FRESH_FOR`, are under the old KEK and lost with it at their next taking, with what was written
+  to them (TASK-411.29).
 - **The kekless cache went** (TASK-411.10's `KEKLESS_FOR`, `keys::Kms::kekless`): it spared a
   plaintext tenant's openings a wrap each; no tenant is plaintext. A refusal is noted as every
   revocation is (`Kms::revoked`), and a tenant refused asks the KMS again at its next call.

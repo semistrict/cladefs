@@ -186,10 +186,10 @@ pub fn unwrap_inherited(
 }
 
 /// What a reader of a store's objects holds: the DEKs of its branch and its ancestors, by which
-/// they are, and which of those branches are sealed, whose objects authenticated under keys it
-/// lacks it refuses; and the key its writer seals new objects under, its branch's newest, if it
-/// writes. Empty ([`Ring::keyless`]): a reader of metadata alone, as the collector's marking is
-/// ([`compacting`] for its compaction's), checking CRCs.
+/// they are; and the key its writer seals new objects under, its branch's newest, if it writes.
+/// Holding any key, it refuses every object authenticated under a key it lacks ([`View`]). Empty
+/// ([`Ring::keyless`]): a reader of metadata alone, as the collector's marking is ([`compacting`]
+/// for its compaction's), checking CRCs.
 #[derive(Debug, Default)]
 pub struct Ring {
     deks: HashMap<KeyId, Arc<Secret>>,
@@ -236,11 +236,6 @@ impl Ring {
     /// Whether it is a writer's, which seals ([`Ring::sealing`]).
     pub fn seals(&self) -> bool {
         self.sealing.is_some()
-    }
-
-    /// Whether `branch`'s objects are sealed, as its record says.
-    pub fn is_sealed(&self, branch: u64) -> bool {
-        self.sealed.contains(&branch)
     }
 
     /// Whether it holds no key.
@@ -369,8 +364,13 @@ impl Keys for View<'_> {
         (id.branch == self.branch).then(|| self.ring.deks.get(&id).map(|dek| &**dek)).flatten()
     }
 
+    /// Every branch is sealed (TASK-411.28), so a ring holding any key refuses an object
+    /// authenticated under a key it lacks, whatever the object's branch's record says: a record,
+    /// which nothing authenticates, rewritten without its DEKs must not have its branch's objects
+    /// read as stored, a bucket's writer's own bytes passing for them. The keyless ring alone
+    /// reads them so, checking CRCs.
     fn sealed(&self) -> bool {
-        self.ring.is_sealed(self.branch)
+        !self.ring.is_empty()
     }
 }
 
@@ -1481,13 +1481,15 @@ mod tests {
         let ring = Ring::sealing_for_tests(7, 1, Secret::random(), [(other, Secret::random())]);
         assert!(ring.of(7).dek(one).is_some() && ring.of(8).dek(other).is_some());
         assert!(ring.of(7).dek(other).is_none() && ring.of(8).dek(one).is_none());
-        assert!(ring.of(7).sealed() && ring.of(8).sealed() && !ring.of(9).sealed());
+        // Every branch's objects sealed, a branch it holds no key of too (TASK-411.28).
+        assert!(ring.of(7).sealed() && ring.of(8).sealed() && ring.of(9).sealed());
+        assert!(!Ring::keyless().of(7).sealed());
         assert_eq!(ring.sealing().1, one);
         assert!(ring.seals() && !Ring::keyless().seals());
         assert!(of_key(&ring, &layout::segment(test_branch(8), 3, 1)).sealed());
         let moves = layout::moves(&layout::segment(test_branch(7), 3, 1), 1).unwrap();
         assert_eq!(branch_of(&moves), Some(7));
-        assert!(!of_key(&ring, &layout::cell(TEST_CELL)).sealed());
+        assert!(of_key(&ring, &layout::cell(TEST_CELL)).sealed());
 
         let host = HostRing::new();
         assert!(host.ring().is_empty());
@@ -1501,6 +1503,23 @@ mod tests {
         drop(also);
         assert!(host.ring().is_empty());
         drop(host.hold(Ring::keyless()));
+    }
+
+    /// TASK-411.28: an object authenticated under a key a reader holding keys lacks is refused,
+    /// whatever its branch: a bucket's writer that strips an ancestor's record of its DEKs, so
+    /// that no ring holds that branch's, and puts a checkpoint of its own authenticated under a
+    /// key it made up at the ancestor's key, has it refused, not read as stored. The keyless
+    /// ring, the collector's marking's, reads it, checking CRCs.
+    #[test]
+    fn objects_authenticated_under_keys_unheld_are_refused_by_every_ring_holding_keys() {
+        let made_up = KeyId { branch: 8, generation: 99 };
+        let state = crate::State::new(test_branch(8));
+        let forged = crate::checkpoint::encode(&state, (&Secret::random(), made_up));
+        let ring = Ring::sealing_for_tests(7, 1, Secret::random(), []);
+        let read = crate::checkpoint::decode_under(&forged, &ring.of(8));
+        assert!(matches!(read, Err(crate::Error::NoKey(key)) if key == made_up), "{read:?}");
+        let marked = crate::checkpoint::decode_under(&forged, &Ring::keyless().of(8)).unwrap();
+        assert_eq!(marked.branch, test_branch(8));
     }
 
     /// A cell made with a KEK from the host's pool keeps it wrapped; a taking of it by another
