@@ -1156,6 +1156,8 @@ mod tests {
         // Stored on its own, raw, as it doesn't compress.
         let extent = write(&store, 1, &noise(1, 4 << 20));
         store.commit_ordered(None).unwrap();
+        // On the disk, as the store's page cache holds it written (TASK-433).
+        extent_store::pages::shared().write_back_all().unwrap();
         let path =
             dir.path().join(format!("store/extents/{:016x}/{:016x}", branch.id, extent.sequence));
         let mut bytes = std::fs::read(&path).unwrap();
@@ -1163,6 +1165,9 @@ mod tests {
         assert_eq!(stored.encoding, extent_frame::Encoding::Raw);
         bytes[stored.offset as usize + 7] ^= 0x10;
         std::fs::write(&path, bytes).unwrap();
+        // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
+        // so that its reads read the disk (TASK-433).
+        extent_store::pages::shared().evict_to(0);
         assert_eq!(store.commit(None), Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
             let listed = extent_remote::Bucket::list(&*bucket, &prefix);
@@ -1765,7 +1770,10 @@ mod tests {
         assert!(behind >= (segments as u64) << 25, "{behind} bytes behind");
         assert_eq!(memory.budget, BUDGET);
         assert!(memory.max_held <= BUDGET, "{memory:?}");
-        assert!(heap <= BUDGET + FRAMING + SLACK, "{} MiB held", heap >> 20);
+        // cladefs: and the stores' page cache's, which a backlog holds no more of than its bound
+        // (TASK-433): the backlog is on the disk.
+        let pages = extent_store::pages::shared().options().most;
+        assert!(heap <= BUDGET + FRAMING + SLACK + pages, "{} MiB held", heap >> 20);
     }
 
     /// Segments upload at once: a commit made while those before it upload goes up with them.
