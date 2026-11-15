@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 21:47'
-updated_date: '2026-11-15 00:22'
+updated_date: '2026-11-15 01:25'
 labels:
   - task
 dependencies: []
@@ -56,4 +56,6 @@ libmachine (a Rust library VMM, KVM in-process, Python bindings) hosts fxdax's e
 Written: crates/virtio_extent (protocol, config, notices, buffers, store, requests, window, device, persist, README, tests/daemon.rs); fork adapter (extent/{mod,device,worker,window,persist}.rs, vmm_config/extent.rs re-exporting the crate's Config, KvmVm::add_memory_slot/remove_memory_slot replacing KvmMemSlot); fork series rebased onto upstream's vm-memory 0.18 + vhost 0.17 bumps (local branch fxdax-v1.16.1-r7, clean rebase); firecracker-cargo.sh appends virtio_extent; vendor/firecracker.lock relocked; doc-4 says PCI only; guide anchors repointed. macOS: crate clippy clean, 30/30 tests. Linux compile on ubu1 in progress.
 
 ubu1 r t417a (8fea07c16, fork e7c0a413e): workspace 2698/2698 and the other workspace parts pass; default guest suite passes (DAX, crash, docker, pgbench, extent-guest-other-version); firecracker part 19/19 extent + 31/31 KVM; crate 42/42 on Linux. snapshots_serialize_as_before passes: a snapshot taken before restores after. Next: snapshot/migrate/suspend/follow guest cases (t417b), then the series check.
+
+ubu1 t417c: fxfs-guest-snapshot, -snapshot-dax, -snapshot-volumes(-dax), -suspend-dax, -follow-dax, -follow-remount-dax pass; fxfs-guest-migrate-dax fails, as on main (TASK-419). User chose (2026-11-14) the queue seam before landing: the crate owns the workers, pause/resume and reset behind a RequestQueue trait the VMM implements.
 <!-- SECTION:NOTES:END -->
