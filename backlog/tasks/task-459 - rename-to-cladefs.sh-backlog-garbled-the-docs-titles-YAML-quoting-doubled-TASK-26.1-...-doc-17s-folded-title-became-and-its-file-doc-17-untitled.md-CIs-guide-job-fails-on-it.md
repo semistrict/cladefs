@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:39'
-updated_date: '2026-11-15 13:42'
+updated_date: '2026-11-15 14:26'
 labels:
   - backlog
   - ci
@@ -29,14 +29,29 @@ ab1adf06b (TASK-437's 'scripts/rename-to-cladefs.sh --backlog') rewrote the docs
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every doc's title is its old title with fxdax renamed (git show ab1adf06b^ for the old ones), unquoted in value, and doc-17's file named from its title
+- [x] #1 Every doc's title is its old title with fxdax renamed (git show ab1adf06b^ for the old ones), unquoted in value, and doc-17's file named from its title
 - [ ] #2 guide's pnpm test passes; CI's guide job green on main
-- [ ] #3 rename-to-cladefs.sh --backlog takes titles' YAML values (quoted, folded), with a test of each form
+- [x] #3 rename-to-cladefs.sh --backlog takes titles' YAML values (quoted, folded), with a test of each form
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Check main: the rename's session (TASK-437) pushed 1d8c55acb (titles from doc list --plain) and d8741092a (docs' titles restored, doc-17's file renamed) while this ran; my own CLI repair matched theirs byte for byte but for dates, so dropped.
+2. The script reads docs' titles from backlog search --type document --json (versioned fields, as the backlog's guide says for scripts) instead of the plain listing, and sets a title or body only if the rename changes it.
+3. scripts/tests/test_rename_to_cladefs.py: the script in a repo of its own against a fake backlog, a quoted unrenamed title (doc-3's case), a folded one (doc-17's), a quoted renamed one, one untouched; fails on the script as ab1adf06b ran it.
+4. End to end: the real script and CLI on a copy of the backlog before ab1adf06b; guide build, test, check.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Main had moved by the time this ran: the rename's session pushed 1d8c55acb (the script's titles from doc list --plain, only if renamed) and d8741092a (the nine docs' titles restored, doc-17's file named from its title). My CLI repair (backlog doc update --title from ab1adf06b^'s titles through rename-to-cladefs.sh --filter) matched theirs but for updated_date, so I dropped it. Kept from this task: the script reads the docs from backlog search --type document --json (the backlog's versioned output for scripts) instead of the plain listing, and scripts/tests/test_rename_to_cladefs.py (fake backlog; quoted unrenamed, folded, quoted renamed, untouched), which fails on the script as ab1adf06b ran it. End to end: the script with the real CLI on a git archive of backlog/ at ab1adf06b^ left every doc's title its value renamed (doc-17: 'Spending frontier tokens on quality: what the forefront does, and what fits cladefs', its file named from it). Open tasks' titles: none garbled (task list --json; the task path always used JSON values). guide: pnpm install, build, test (42 of 42), check pass. Scripts' tests 320 of 320 pass on the Mac. scripts/upstream-changes.py --check passes.
+<!-- SECTION:NOTES:END -->
