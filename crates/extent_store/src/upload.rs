@@ -131,10 +131,17 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 ///
 /// fxdax: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`extent_remote::cell::forget`, TASK-364).
-pub fn delete_branch(bucket: &Bucket, branch: Branch, token: u64) -> Result<(), Failure> {
+/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). A sealed branch's forks to
+/// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
+/// unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
+pub fn delete_branch(
+    bucket: &Bucket,
+    branch: Branch,
+    token: u64,
+    kms: Option<&Arc<keys::Kms>>,
+) -> Result<(), Failure> {
     Ok(block_on(async {
-        branch::delete(bucket, branch, rand::random(), token).await?;
+        branch::delete_under(bucket, branch, rand::random(), token, kms).await?;
         cell::forget(bucket, branch.cell, branch.id).await
     })??)
 }
@@ -534,8 +541,29 @@ impl<D: Dir> Remote<D> {
     ///
     /// A fork of a point commits nothing: the child's record is the fork, and fails if the point
     /// was deleted ([`Failure::PointDeleted`]; `branch::fork_point`).
-    pub fn forked(&self, epoch: u64, child: Child) -> Result<(), Failure> {
+    ///
+    /// fxdax: a fork into another cell, `inheriting` given ([`Remote::inheriting`]), then gives its
+    /// child its keys, once its record is made: its cell made with the KEK from the host's pool, its
+    /// record given its DEK and those it inherits, rewrapped under that KEK
+    /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
+    pub fn forked(
+        &self,
+        epoch: u64,
+        child: Child,
+        inheriting: Option<keys::Inheriting>,
+    ) -> Result<(), Failure> {
         failing!("remote::forked");
+        self.fork_made(epoch, child)?;
+        if let Some(inheriting) = inheriting {
+            let holder = self.shared.holder();
+            block_on(keys::give_inherited(&*self.bucket, inheriting, holder))??;
+        }
+        Ok(())
+    }
+
+    /// Makes the fork the store made of its branch with its commit `epoch` a fork of the branch in
+    /// object storage, its child's record and checkpoint ([`Remote::forked`]).
+    fn fork_made(&self, epoch: u64, child: Child) -> Result<(), Failure> {
         let shared = &self.shared;
         if let Some(point) = shared.point.get() {
             let (of, origin) = (point.branch, point.origin);
@@ -560,6 +588,21 @@ impl<D: Dir> Remote<D> {
         }
     }
 
+    /// fxdax: what a fork of the store to `child` gives its child, asked for before anything of the
+    /// fork is made, its commit or its record, so that a fork refused makes nothing (TASK-411.4):
+    /// if `child` is of another cell, no point, and the store's keys, which it inherits, are of
+    /// branches of other cells than its own, those keys and a KEK for the child's cell from the
+    /// host's pool; none otherwise, a fork of branches in the clear making no request more.
+    /// Refused if the host's KMS last heard a tenant of theirs revoked or destroyed, if the
+    /// child's tenant has no KEK, its cell in the clear, or as the KMS refuses one
+    /// (`keys::inheriting`). No KMS call is made with the pool not empty.
+    pub fn inheriting(&self, child: Child) -> Result<Option<keys::Inheriting>, Failure> {
+        let store = self.store();
+        let (source, parent) = (store.keys(), store.description().branch);
+        let kms = self.shared.keys.kms.as_ref();
+        Ok(block_on(keys::inheriting(kms, source, parent, child))??)
+    }
+
     /// Deletes `child` in object storage, a fork the store made that [`Remote::forked`] failed to
     /// make: its segment may land after all, its writer taken over before acknowledging it, and the
     /// branch's next writer gives the child a record then, which would keep what it inherited for
@@ -582,8 +625,14 @@ impl<D: Dir> Remote<D> {
             (None, Some(origin), false) => Kind::Fork(origin),
         };
         let (holder, token) = (self.shared.holder(), self.shared.options.token);
-        let deleting =
-            branch::delete_fork(&*self.bucket, child.branch, forked, child.owner, holder, token);
+        let deleting = branch::delete_fork_under(
+            &*self.bucket,
+            child.branch,
+            forked,
+            child.owner,
+            (holder, token),
+            self.shared.keys.kms.as_ref(),
+        );
         if !block_on(deleting)?? {
             log::warn!(
                 "fxdax: leaving branch {} in object storage, another's: a fork to its ID failed \
@@ -1070,6 +1119,13 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
         };
         let cell_keys = keys::held(kms, branch.cell, object, kek);
+        // fxdax: the host serves a sealed cell of the tenant's: its pool of new cell KEKs, which
+        // forks of its stores into new cells take, filled off this path (TASK-411.4).
+        if let Some(kms) = kms
+            && cell_keys.sealed()
+        {
+            kms.refill(branch.cell.tenant);
+        }
         let token = held.epoch;
         // Its state, once it holds the lease, recovered on from what was found before. fxdax:
         // under its keys, its DEK given it first if its cell is sealed and it has none: a new

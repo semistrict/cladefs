@@ -1732,9 +1732,9 @@ impl Pass {
     ) -> Result<Arc<Ring>, Error> {
         let branches: BTreeSet<u64> =
             compactable.iter().filter_map(|object| keys::branch_of(&object.meta.key)).collect();
-        let records: Vec<(Branch, &[keys::Dek])> = (self.records.iter())
+        let records: Vec<(Branch, &Record)> = (self.records.iter())
             .filter(|(branch, _)| branches.contains(&branch.id))
-            .map(|(&branch, record)| (branch, record.deks.as_slice()))
+            .map(|(&branch, record)| (branch, record))
             .collect();
         let sealed = compactable.iter().filter(|object| object.seal.keyed().is_some()).count();
         if sealed == 0 {

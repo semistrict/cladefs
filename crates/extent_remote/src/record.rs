@@ -12,7 +12,7 @@
 //! is asked of it here, not of its flags where it is read; and every change of one goes through
 //! [`crate::branch`]'s one transition.
 
-use crate::keys::Dek;
+use crate::keys::{Dek, Inherited};
 use crate::layout::{Branch, FORMAT, Origin, decode};
 use crate::{Error, rules};
 use serde::{Deserialize, Serialize};
@@ -57,6 +57,7 @@ impl Kind {
             deleted: false,
             shared: false,
             deks: Vec::new(),
+            inherited: Vec::new(),
         }
     }
 
@@ -99,6 +100,13 @@ pub struct Record {
     /// nothing writes (TASK-411.3). Given by its writer ([`crate::keys::with_dek`]), whoever made
     /// the record: the parent's writers recording a fork write none, so that they write the same.
     pub deks: Vec<Dek>,
+    /// fxdax: the DEKs of every ancestor of another cell whose objects the branch reads, each
+    /// generation, rewrapped under its own cell's KEK (doc-16, Forks and shared points;
+    /// TASK-411.4): given with its first DEK, in one conditional update, so that a record with
+    /// DEKs holds all it inherits from other cells, its readers needing no other cell's KEK, nor
+    /// another tenant's KMS. By its fork's host, as it makes the fork
+    /// ([`crate::keys::give_inherited`]), or its first writer ([`crate::keys::with_dek`]).
+    pub inherited: Vec<Inherited>,
 }
 
 impl Record {
@@ -171,7 +179,8 @@ impl Record {
 }
 
 /// A record as object storage holds it (doc-7, Layout): flags, which say its [`Kind`] together,
-/// and whether a point is shared; fxdax: and its DEKs (TASK-411.3).
+/// and whether a point is shared; fxdax: and its DEKs (TASK-411.3) and those it inherits
+/// (TASK-411.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Flags {
     format: u32,
@@ -187,11 +196,13 @@ struct Flags {
     shared: bool,
     /// fxdax: [`Record::deks`].
     deks: Vec<Dek>,
+    /// fxdax: [`Record::inherited`].
+    inherited: Vec<Inherited>,
 }
 
 impl From<Record> for Flags {
     fn from(record: Record) -> Self {
-        let Record { format, owner, kind, deleted, shared, deks } = record;
+        let Record { format, owner, kind, deleted, shared, deks, inherited } = record;
         let flags = Flags {
             format,
             owner,
@@ -203,6 +214,7 @@ impl From<Record> for Flags {
             claimed: false,
             shared,
             deks,
+            inherited,
         };
         match kind {
             Kind::Root | Kind::Own | Kind::Fork(_) => flags,
@@ -232,8 +244,8 @@ impl TryFrom<Flags> for Record {
         if flags.shared && !flags.point {
             return Err(format!("a branch's record shared, no point: {flags:?}"));
         }
-        let Flags { format, owner, deleted, shared, deks, .. } = flags;
-        Ok(Self { format, owner, kind, deleted, shared, deks })
+        let Flags { format, owner, deleted, shared, deks, inherited, .. } = flags;
+        Ok(Self { format, owner, kind, deleted, shared, deks, inherited })
     }
 }
 
@@ -295,6 +307,7 @@ mod tests {
                 claimed: flag(5),
                 shared: flag(6),
                 deks: Vec::new(),
+                inherited: Vec::new(),
             };
             let said = Record::decode(test_branch(2), &encode(&flags)).ok();
             if let Some(record) = said {
@@ -333,11 +346,12 @@ mod tests {
             claimed: false,
             shared: false,
             deks: Vec::new(),
+            inherited: Vec::new(),
         };
         let corrupt = format!(
             "a branch's record of no kind: Flags {{ format: {FORMAT}, owner: 9, origin: None, \
              forked: true, deleted: false, point: true, forking: None, claimed: false, \
-             shared: false, deks: [] }}"
+             shared: false, deks: [], inherited: [] }}"
         );
         let refused = Record::decode(test_branch(2), &encode(&refused));
         assert_eq!(refused, Err(Error::Corrupt(corrupt)));
