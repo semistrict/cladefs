@@ -21,15 +21,26 @@
 #
 # The cases' artifacts are built once, first, into RESULTS/artifacts (CLADEFS_E2E_BUILD_ONLY), and
 # every run boots those (CLADEFS_E2E_PREBUILT): no run builds, nor runs the harness's own tests.
-# Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache and the extent daemon's together.
-# Each run's extent daemon keeps its bucket on disk, in RESULTS/CASE/round-K/bucket, removed once
-# it is done, unless CLADEFS_EXTENTD_REMOTE names one: test-e2e.sh's default, on tmpfs, counts
-# against the run's memory limit, and a working set of gigabytes overran it (TASK-350).
-# Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs, and the fs bench's report as
-# JSON (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
+# Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache, the extent daemon's and its
+# bucket together.
+#
+# A run's numbers are cladefs's on a host's disks, not this host's results' filesystem's (ubu1's
+# home, ZFS, whose syncs a durable sync then measured: bench-fs-fxfs-guest-dax's sync-loop 10.8/s
+# there at 25 ms of bucket latency, 30.1/s as below, TASK-397). Each run's stores and its extent
+# daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
+# fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
+# refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on
+# tmpfs, whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for, unless CLADEFS_EXTENTD_REMOTE names
+# one: it counts against the run's memory, and a case whose working set of gigabytes overruns
+# that (TASK-350) takes more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
+#
+# Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs (e2e, copied there as the run
+# ends, without the stores and the guests' root filesystems), and the fs bench's report as JSON
+# (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
 # round directories. The environment's CLADEFS_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
-# and such.
+# and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
+# artifacts it can't boot) ends the rounds there, as every other would be.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 (( $# >= 3 )) || { sed -n '/^#   scripts/p' "$0" >&2; exit 2; }
@@ -92,12 +103,17 @@ for ((round = 1; round <= rounds; round++)); do
         load_before=$(load) arc_before=$(arc_bytes) started=$(date -u +%FT%TZ)
         stalls_before=()
         for resource in cpu memory io; do stalls_before+=("$(stalled "$resource")"); done
-        outcome=ok
+        outcome=ok ran=0
         fxjob --bench --mem "${CLADEFS_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
             "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" \
-            "CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_E2E_RESULTS=$out/e2e" "CLADEFS_BENCH_RESULTS=$out" \
-            "CLADEFS_EXTENTD_REMOTE=${CLADEFS_EXTENTD_REMOTE:-file://$out/bucket}" \
-            "$repo/scripts/test-e2e.sh" "$case" > "$out/run.log" 2>&1 || outcome=failed
+            "CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \
+            "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case" > "$out/run.log" 2>&1 || ran=$?
+        if (( ran == 2 )); then
+            sudo chown -R "$(id -u):$(id -g)" "$results"
+            echo "round $round $case: refused, and so would every run be: $out/run.log" >&2
+            exit 2
+        fi
+        if (( ran )); then outcome=failed; fi
         load_after=$(load)
         stalls=()
         i=0
@@ -105,8 +121,6 @@ for ((round = 1; round <= rounds; round++)); do
             stalls+=($(( ($(stalled "$resource") - stalls_before[i]) / 1000 )))
             i=$((i + 1))
         done
-        # The run's own bucket, on disk: what it held is no result.
-        sudo rm -r -f "$out/bucket"
         [[ $outcome == ok ]] || status=1
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$round" "$case" "$outcome" \
             "$load_before" "$load_after" "$arc_before" "$(arc_bytes)" "$started" "${stalls[@]}" \
