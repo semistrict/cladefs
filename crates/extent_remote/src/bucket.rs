@@ -239,6 +239,19 @@ pub async fn get(bucket: &impl Bucket, key: &str) -> Option<Object> {
     }
 }
 
+/// fxdax: whether an object is at `key`, by its head, retried while it fails: one request,
+/// reading none of its bytes (TASK-411.19).
+pub async fn exists(bucket: &impl Bucket, key: &str) -> bool {
+    let mut failures = 0;
+    loop {
+        match bucket.head(key).await {
+            Ok(_) => return true,
+            Err(Error::NotFound) => return false,
+            Err(_) => failed(bucket, &mut failures).await,
+        }
+    }
+}
+
 /// Counts a failure, and waits before the request goes again.
 async fn failed(bucket: &impl Bucket, failures: &mut u32) {
     *failures += 1;
@@ -428,6 +441,20 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
                     None => {}
                 }
             }
+            Err(_) => failed(bucket, &mut failures).await,
+        }
+    }
+}
+
+/// fxdax: writes `bytes` at `key` unless an object is there, whatever it holds: for an object
+/// whose being there is all it says, a tenant's sealed marker (TASK-411.19). One request, retried
+/// while it fails: a retry finding the write before landed finds an object there, as good.
+pub(crate) async fn put_if_absent(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) {
+    let bytes = Bytes::from(bytes);
+    let mut failures = 0;
+    loop {
+        match bucket.put(key, bytes.clone(), PutMode::Create).await {
+            Ok(_) | Err(Error::AlreadyExists) => return,
             Err(_) => failed(bucket, &mut failures).await,
         }
     }

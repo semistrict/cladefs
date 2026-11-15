@@ -482,7 +482,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let bucket = Arc::new(Store::from_url(&url).unwrap());
         let shared: extent_keys::kms::Shared = local.clone();
         let host = keys::Kms::new(shared);
-        let kek = keys::new_cell_kek(Some(&host), 1).await.unwrap();
+        let kek = keys::new_cell_kek(&*bucket, Some(&host), 1).await.unwrap();
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
         let (_, object) = cell::hold(&*bucket, parent.cell, (5, 5), making, None).await.unwrap();
         let cell_keys = keys::held(Some(&host), parent.cell, object, kek);

@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 04:05'
+updated_date: '2026-11-15 09:42'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -14,6 +14,8 @@ updated_date: '2026-11-15 05:44'
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
 Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**) are implemented.
+
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**) are implemented.
 
 ## Goals
 
@@ -180,7 +182,8 @@ dropped with its pool, never written out unwrapped.
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
   `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl; and `fxdax-gc`, to
   compact sealed cells (TASK-411.6; marking keyless). A cell is made sealed iff
-  the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear, any
+  the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear (unless
+  the tenant's sealed marker says it had one: TASK-411.19, below), any
   other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
@@ -476,6 +479,74 @@ dropped with its pool, never written out unwrapped.
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
 
+## A forgotten KEK told from none (TASK-411.19)
+
+*(decided 2026-11-15: a tenant marker in the bucket)* A real KMS forgets a deleted key: AWS KMS
+answers `NotFoundException` once a key's deletion waiting period is over, OpenBao Transit a 404 for
+a deleted key, as for a key never made; the backends map both to `NoSuchTenant`, which alone means
+the clear. Without more, a shredded tenant's next cells would be made unencrypted on any host still
+serving it. The tenant's sealed marker tells the two apart, for every backend, with no host
+configuration.
+
+- **The marker.** `tenants/<tenant>/sealed` (`layout::sealed`, doc-7 Layout), its bytes the layout's
+  format, its being there all it says: the tenant had a KEK, and a cell of it was made sealed (or
+  was about to be). Under the tenant's prefix beside `cells/`, no cell's: no collector pass lists
+  it (a pass lists a cell's prefix), `layout::Kind::Sealed` stays if one did, and nothing deletes
+  it.
+- **Written** by `keys::new_cell_kek`, which every maker of a cell asks for its KEK: a store's
+  opening (`extent_store::upload`), a fork into a new cell (`keys::inheriting`), the control API's
+  attaching of a new cell (`fxdax::fuse::control`). A KEK handed out, from the pool or wrapped
+  then, the marker is created first, create-only (`bucket::put_if_absent`: one there already is as
+  good, a retry finding its own write there too), before the function returns. *Why that order:*
+  the maker writes the cell's object, keeping the wrapped KEK, only after it returns; so no sealed
+  cell's object is in the bucket without its tenant's marker, whatever crashes. A crash between
+  leaves a marker of a tenant with a KEK and no sealed cell, which says nothing false. A host that
+  wrote or saw the marker writes it no more (`keys::Kms`'s markers): one PUT per host per tenant,
+  with its first sealed cell.
+- **Read** when the KMS says the tenant has no KEK (`Kms::new_kek` heard `NoSuchTenant`, now or
+  within `KEKLESS_FOR`): a HEAD of the marker. There: the tenant is refused as destroyed, naming it
+  and the marker (`tenant T: its KEK is destroyed: the KMS has none, and tenants/<T>/sealed says it
+  had one`, `Error::Kms`, `EACCES` at fxdax), and noted as a KMS's `Destroyed` is (`Kms::revoked`:
+  its pool and cells' KEKs dropped, forks inheriting its keys refused, until the KMS answers a call
+  for it again). Seen once, the host believes it for good, as nothing deletes it. Not there: the
+  cell is made in the clear, as before, and the absence believed for `KEKLESS_FOR`, as the KMS's
+  word is. *Why not a KEK record per host or in the cell objects:* a host new to the tenant knows
+  nothing, and a new cell has no object yet; the tenant's prefix is the one place every host
+  reads alike.
+- **Pools.** A refill hearing `NoSuchTenant` drops the tenant's pool (as `Revoked` and `Destroyed`
+  drop it), so that no cell is made with a KEK of a key since forgotten; the next take is refused
+  by the marker. KEKs pooled before anything heard of the deletion still make cells, sealed and
+  unreadable from the first, as for any destruction (What TASK-411.4 made).
+- **Cost.** A plaintext tenant on a KMS host: one wrap and one HEAD per host per `KEKLESS_FOR` at
+  most, however many of its stores open. A sealed tenant: one PUT per host, with its first cell;
+  nothing on later cells nor on forks. A forgotten tenant: one HEAD per host, once, and a wrap per
+  `KEKLESS_FOR`.
+- **What it refuses.** A marked tenant whose KEK the KMS says it has none of makes no new cell, nor
+  opens a store that asks for a KEK in case it makes its cell (a new volume; a volume in the clear
+  of a cell made before the tenant had its KEK), as a `Destroyed` answer refused them before. A
+  tenant given a key again (its alias pointed at a new key) is served again, sealed, at the next
+  wrap answered. **An operator who wants a forgotten tenant served in the clear again deletes its
+  marker**; nothing else does. The workaround TASK-411.16 and TASK-411.17 documented
+  (`ForgetTenantKeys` on every host before the key is gone) is needed no more for this; telling
+  hosts still drops at once what they hold of the tenant (What TASK-411.7 made).
+- **Not covered:** a host with no KMS makes cells in the clear, reading no marker, as before
+  (TASK-411.24).
+- **Tests.** `extent_remote` `keys::tests::tenants_whose_kek_the_kms_forgot_are_refused_by_their_sealed_marker`
+  (the bucket's requests counted, `SimBucket::served`: a PUT with a host's first KEK, none after;
+  the KMS forgetting, a HEAD once on a host that never saw the marker, none on one that wrote it;
+  a fork into a new cell refused), `pools_of_tenants_whose_kek_the_kms_forgot_go`,
+  `tenants_never_sealed_have_their_marker_read_once_a_while` (paused clock: one HEAD and one wrap
+  per `KEKLESS_FOR` over ten openings); `extent_store`
+  `upload::encrypted::tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear` (openings of a new
+  cell and of a new volume of its sealed cell refused, a fork into a new cell refused, nothing
+  made; a tenant never sealed in the clear, no marker; a collector sweep of every cell leaves the
+  marker); `fxdax` `remote::tests::tenants_whose_kek_the_kms_forgot_open_no_store_in_the_clear`
+  (`EACCES`, no cell made; a tenant without a marker in the clear). The KMS:
+  `extent_keys::testing::Forgetting`, answering `NoSuchTenant` where its inner KMS says
+  `Destroyed`, as AWS and OpenBao do once a key is deleted. A hand mutant reading no marker failed
+  the first three. The control API's attaching calls the same `new_cell_kek`, untested here (its
+  tests need Linux's FUSE).
+
 ## Real KMSes: AWS KMS
 
 *(TASK-411.17)* `FXDAX_KMS=aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`
@@ -514,7 +585,7 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
 
   | AWS KMS's error | `kms::Error` |
   |---|---|
-  | `NotFoundException` | `NoSuchTenant` |
+  | `NotFoundException` | `NoSuchTenant` (a tenant with its sealed marker: refused as destroyed, TASK-411.19) |
   | `AccessDeniedException` (the grant or policy taken away), `DisabledException` | `Revoked` |
   | `KMSInvalidStateException`, the key pending deletion | `Destroyed` |
   | `KMSInvalidStateException`, any other state (pending import: imported key material deleted; unavailable: a custom key store disconnected; creating, updating) | `Revoked` |
@@ -525,9 +596,9 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   mapping reads. A tenant shreds itself by scheduling its key's deletion: `Destroyed` at once, for
   the waiting period's 7 to 30 days; cancelling it leaves the key disabled (`Revoked`) until
   enabled. Once the period is over AWS has forgotten the key and answers `NotFoundException`, as
-  for a key never made, so the tenant reads as having no KEK: its unwraps still fail, but a host
-  would make its new cells in the clear (TASK-411.19); until that is fixed, forget the tenant's keys
-  on every host (`ForgetTenantKeys`) and stop serving it before the waiting period ends. A tenant
+  for a key never made: its unwraps fail, and its new cells are refused as destroyed by the
+  tenant's sealed marker, never made in the clear (TASK-411.19, A forgotten KEK told from none). A
+  tenant
   with imported key material that deletes it reads as `Revoked` (it may import the same material
   again), never `Destroyed`.
 - **IAM.** fxdax's role needs `kms:Encrypt` and `kms:Decrypt` on each tenant's key, no more (no
@@ -581,7 +652,8 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   same key ID, the second with a second backing key, as its seeding has rotations; it answers a
   ciphertext of another key with `InvalidCiphertextException` where AWS answers
   `IncorrectKeyException` (both `Unauthentic`); it deletes no key, pending deletion for ever, so
-  `NotFoundException` after deletion is untested; its messages are its own, the pending deletion
+  `NotFoundException` after deletion is untested against it (what it leads to, `NoSuchTenant` for a
+  tenant that had a KEK, is tested with `extent_keys::testing::Forgetting`, TASK-411.19); its messages are its own, the pending deletion
   one as AWS's.
 
 ## Real KMSes: OpenBao
@@ -635,12 +707,13 @@ start `bao server -dev` themselves.
   of a missing key with a token that may not create one; the key's metadata says which, and
   `lookup-self` tells a tenant's revocation from fxdax's own token failing, so that an expired host
   token is not read as every tenant revoked (which would drop their keys from every host's memory).
-  Nothing is `NoSuchTenant` but a key OpenBao says it has not, as that one makes cells in the clear.
+  Nothing is `NoSuchTenant` but a key OpenBao says it has not, as that one makes cells in the clear
+  for a tenant never sealed.
   A mount the token has no rights to, there or not, reads as revoked (OpenBao checks the token
-  first). A deleted key is as missing as one never made: unwraps say `Destroyed`, but wraps say
-  `NoSuchTenant`, so a tenant shredded by deleting its key has new cells made in the clear unless
-  its key is made again or the hosts refuse it (`ForgetTenantKeys`); soft-deleting it first, or
-  trimming its versions (which leaves the key, wrapping anew), keeps them refused.
+  first). A deleted key is as missing as one never made: unwraps say `Destroyed`, wraps
+  `NoSuchTenant`, and the tenant's sealed marker then refuses its new cells as destroyed
+  (TASK-411.19, A forgotten KEK told from none): deleting the key shreds the tenant, as
+  soft-deleting it or trimming its versions refuses it.
 - **Calls.** reqwest (rustls over aws-lc-rs; the system's roots by rustls-platform-verifier), on a
   Tokio runtime of its own (one thread), so its futures run under any executor; timeouts 5 s to
   connect, 15 s a request; transport errors, 412, 429 and 5xx retried, 3 tries, 100 then 400 ms

@@ -905,6 +905,68 @@ fn forks_in_the_clear_ask_for_nothing_more_and_sealed_ones_go_into_no_clear_cell
     assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
 }
 
+/// TASK-411.19: a tenant whose KEK the KMS forgot (a real KMS's key deleted, answering as for a
+/// tenant that never had one, [`extent_keys::testing::Forgetting`]) gets no cell in the clear: its
+/// first sealed cell wrote its sealed marker, so a store opening on another host, of a new cell
+/// or of a new volume of its sealed cell, and a fork of its open store into a new cell, are each
+/// refused as destroyed, naming the tenant, nothing made. A tenant that never had a KEK has no
+/// marker, its cells in the clear as before. A collector's sweep of every cell leaves the marker.
+#[test]
+fn tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear() {
+    let dir = tempfile::tempdir().unwrap();
+    let local = LocalKms::open(dir.path().join("kms")).unwrap();
+    local.create(TENANT).unwrap();
+    let world = World::with_kms(extent_keys::testing::Forgetting::new(local));
+    let first = world.host(5);
+    let (store, remote) = open_on(&world, &first, &made(test_branch(7), "a")).unwrap();
+    written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
+    let marker = layout::sealed(TENANT);
+    assert_eq!(world.object(&marker), layout::encode(&layout::FORMAT));
+
+    world.kms.inner().inner().destroy(TENANT).unwrap();
+    let destroyed = "tenant 1: its KEK is destroyed: the KMS has none, and \
+                     tenants/0000000000000001/sealed says it had one";
+    let refused = Failure::Remote(extent_remote::Error::Kms(destroyed.into()));
+    let second = world.host(6);
+    let elsewhere = Branch { cell: Cell { tenant: TENANT, id: 2 }, id: 9 };
+    for branch in [elsewhere, test_branch(8)] {
+        let opened = open_on(&world, &second, &made(branch, "b")).map(drop);
+        assert_eq!(opened, Err(refused.clone()), "{branch}");
+    }
+    assert_eq!(world.cell_of(elsewhere.cell), None);
+    assert_eq!(world.cell().volumes.len(), 1);
+    // The first host's open store forks into a new cell of the tenant's: refused before anything
+    // of the fork is made.
+    let child = child_in(TENANT, 3, 10, false);
+    assert_eq!(forked(&store, &remote, child), Err(refused.clone()));
+    assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
+
+    // A tenant that never had a KEK: in the clear, no marker of its.
+    let clear = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 11 };
+    let (clear_store, clear_remote) = open_on(&world, &second, &made(clear, "c")).unwrap();
+    written(&clear_store, &clear_remote, ExtentId::new(11, 1), &noise(2, 4096));
+    assert!(clear_store.keys().is_empty());
+    assert_eq!(world.cell_of(clear.cell).unwrap().keks, Vec::new());
+    drop((store, remote, clear_store, clear_remote));
+
+    let sweep = extent_remote::sweep::Sweep {
+        options: extent_remote::collector::Options { compact_below: 1.0, grace: 0 },
+        mode: extent_remote::sweep::Mode::Delete,
+        at_once: 1,
+        lease: 60_000,
+        slowest: 0,
+        spawned: false,
+        kms: None,
+    };
+    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
+    assert_eq!(swept.visited, 2);
+    let markers: Vec<String> = (world.objects().into_iter())
+        .map(|(key, _)| key)
+        .filter(|key| matches!(layout::kind(key), layout::Kind::Sealed { .. }))
+        .collect();
+    assert_eq!(markers, [marker]);
+}
+
 /// The paths of the files of `dir` that hold any of `data`'s sectors' first 32 bytes: data the
 /// store wrote, in the clear.
 fn clear_files(dir: &MemDir, data: &[u8]) -> Vec<String> {

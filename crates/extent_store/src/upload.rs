@@ -604,7 +604,7 @@ impl<D: Dir> Remote<D> {
         let store = self.store();
         let (source, parent) = (store.keys(), store.description().branch);
         let kms = self.shared.keys.kms.as_ref();
-        Ok(block_on(keys::inheriting(kms, source, parent, child))??)
+        Ok(block_on(keys::inheriting(&*self.bucket, kms, source, parent, child))??)
     }
 
     /// Deletes `child` in object storage, a fork the store made that [`Remote::forked`] failed to
@@ -1097,7 +1097,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let kms = self.keys.kms.as_ref();
         let kek = match &found {
             Some((record, ..)) if !record.deks.is_empty() => None,
-            _ => keys::new_cell_kek(kms, branch.cell.tenant).await?,
+            _ => keys::new_cell_kek(&**bucket, kms, branch.cell.tenant).await?,
         };
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
         let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, volume);

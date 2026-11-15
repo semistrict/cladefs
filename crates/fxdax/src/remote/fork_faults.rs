@@ -442,15 +442,17 @@ impl World {
                             .is_some_and(|record| record.deleted && !record.may_drop())
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
-                // retired or taken back (TASK-395.13), and every branch's head, a deleted one's
-                // final, fencing its writers (TASK-407).
+                // retired or taken back (TASK-395.13), every branch's head, a deleted one's
+                // final, fencing its writers (TASK-407), and a tenant's sealed marker, for good
+                // (TASK-411.19).
                 Kind::Head { .. }
                 | Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
                 | Kind::Retired { .. }
                 | Kind::Cell { .. }
-                | Kind::ObjectIds { .. } => false,
+                | Kind::ObjectIds { .. }
+                | Kind::Sealed { .. } => false,
                 Kind::Moves { .. } | Kind::Unknown => true,
             })
             .collect();

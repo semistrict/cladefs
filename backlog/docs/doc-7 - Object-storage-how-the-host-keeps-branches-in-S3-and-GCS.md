@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 01:23'
+updated_date: '2026-11-15 09:42'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -174,6 +174,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a clone's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
+| `tenants/<tenant>/sealed` | fxdax: the tenant's sealed marker, its bytes the format, its being there all it says: a cell of the tenant's was made sealed, so a KMS answering that the tenant has no KEK has forgotten it, and its new cells are refused as destroyed, never made in the clear (doc-16, A forgotten KEK told from none; TASK-411.19) | create-only, one there already as good, by a host handing out the tenant's first new cell KEK, before the cell's object; kept for good: no cell's, so no pass lists it, and the collector keeps it (`Kind::Sealed`) if one did |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
 A branch is named by its cell and its ID (`layout::Branch`, displayed `TENANT/CELL/ID`): footers,
@@ -182,7 +183,9 @@ reach a parent or a child in another cell, or another tenant's. An extent's ID n
 the ID alone, as forks share their parents' extents by it and a host's extent cache keys them by
 it, so a branch's ID is unique in its bucket, whatever its cell (Object IDs). The collector lists
 a cell's `branches/` for the records it reads again, a cell at a time (Garbage collection). A checkpoint's table stores its keys front-coded (`extent_frame::table`), as
-a branch's keys share their cell's prefix and their kind's.
+a branch's keys share their cell's prefix and their kind's. A tenant's sealed marker is under its
+prefix beside `cells/`: the delimiter listings of `tenants/` and of a tenant's `cells/` that find
+the cells for a sweep (Sweeps) list it not, nor does any pass, which lists a cell's prefix.
 
 ### Cells
 
