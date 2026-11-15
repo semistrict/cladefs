@@ -1176,18 +1176,33 @@ The rest of a pass, unchanged within the cell:
 **Time** (the grace period, by the store's clock) only spares readers that just looked an extent up
 a round trip; correctness does not depend on it.
 
-**The model's bounds** (`scripts/check-tla.sh`; on a laptop, the new models and mutations under five
-minutes each, BucketForks 14 minutes (17 before cells), BucketOverlap 14 (7 before), BucketStrays 18
-(one cell, unchanged), BucketTakeovers near two hours): the models of before, with a cell each for
-two branches (`CellEach`, every fork, point and clone across cells, as hosts make them) and the
-root's cell shared with branch 2 for three (`Pair`, forks within a cell and across), passes of any
-cell; `BucketCells`, a root, its child and grandchild in three cells, any deleted, three passes of
-any cells one after another, retiring down the chain; `BucketCellsPoints`, a point of the root
-restored to a third cell, point and root deleted, two passes of any cells at once. Passes of
-different cells overlap where a model has "overlap" (BucketOverlap, BucketCellsPoints). Invariant
-`ReferencesStand`: every live branch forked from another cell, and every clone, has its reference.
-The existing rules' mutations keep one cell (`OneCell`), the whole-bucket pass they were written
-against.
+**The model's bounds** (`scripts/check-tla.sh`; on a laptop, every model and mutation of the default
+run under ten minutes): the models of before, with a cell each for two branches (`CellEach`,
+every fork, point and clone across cells, as hosts make them) and the root's cell shared with
+branch 2 for three (`Pair`, forks within a cell and across), passes of any cell; `BucketCells`, a
+root, its child and grandchild in three cells, any deleted, three passes of any cells one after
+another, retiring down the chain; `BucketCellsPoints`, a point of the root restored to a third
+cell, point and root deleted, two passes of any cells at once. Passes of different cells overlap
+where a model has "overlap" (BucketOverlap, BucketCellsPoints). Invariant `ReferencesStand`: every
+live branch forked from another cell, and every clone, has its reference. The existing rules'
+mutations keep one cell (`OneCell`), the whole-bucket pass they were written against.
+
+*Split models (TASK-405, 2026-11-14).* Four models took 14 minutes to hours whole: BucketForks
+(27 million states), BucketOverlap (12.6 million), BucketStrays (36 million) and BucketTakeovers
+(over 200 million, unfinished on ubu1 at 16 GB). Each is now split into parts, each the same
+configuration with constants that fix choices every behaviour makes at most once (Bucket.tla's
+splits): the pattern of the takings' hosts (`Takers`), the step of the first pass as each taking or
+commit happens (`TakePhases`, `CommitPhases`), the takings before each commit (`CommitTakes`), the
+ID of the one fork's child (`ForkTo`), the cells of the passes (`PassCells`). Every behaviour of the
+whole is some part's, so nothing the whole checked goes unchecked; `check-tla.sh cover` shows it
+on each model made small, every state the whole reaches one some part reaches, and a full run
+checks it. BucketForks is 6 parts (its pass's cell, and the takings before it), BucketOverlap 5
+(the point's cell, and the passes'), BucketStrays 20 (the third writer on the first's host or the
+second's, the pass's step as each writer takes the branch, and, the pass late, the takings before
+each commit), each part under eight minutes on a laptop (more while other runs load it); parts cost
+more in all than the whole did (a part checks again the states before its choice).
+BucketTakeovers, the hunt for a fourth way to lose a commit, which found none, is a deep model,
+which the default run skips: its 72 parts, each in minutes, take hours in all (`check-tla.sh deep`).
 
 **Watching before deleting** *(added 2026-11-08, TASK-264).* Two passes delete nothing, for an
 operator to see what the collector would do before trusting it with a bucket:

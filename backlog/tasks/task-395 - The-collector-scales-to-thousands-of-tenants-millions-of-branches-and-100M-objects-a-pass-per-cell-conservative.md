@@ -3,11 +3,11 @@ id: TASK-395
 title: >-
   The collector scales to thousands of tenants, millions of branches and 100M+
   objects: a pass per cell, conservative
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13T08:52:00Z'
-updated_date: '2026-11-13 09:15'
+updated_date: '2026-11-15 00:36'
 labels:
   - bucket
   - collector
@@ -37,9 +37,9 @@ The old whole-bucket pass goes when the per-cell one lands: no two collectors si
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -47,3 +47,15 @@ The old whole-bucket pass goes when the per-cell one lands: no two collectors si
 <!-- SECTION:PLAN:BEGIN -->
 Delegated in dependency order. Wave 1 (parallel, no shared files): 395.1 spec (design of record); 395.5 AC #1/#3 (delimiter listing, concurrent footers/compactions, batch deletes); 395.7 minus AC #3 (shared flag, control API, cross-tenant clone refusal). Wave 2 after 395.1: 395.2 layout, 395.3 references, 395.4 per-cell pass, as one batch. Wave 3: 395.5 sweep (AC #2/#4/#5), 395.6 incremental, 395.7 AC #3, 395.8 usage. One ubu1 workspace run per wave, run by the parent, one job at a time.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Closed (@claude, 2026-11-14): every subtask Done (395.12's cache moved to TASK-412, kept for later). Last verification: ubu1 t39512h workspace 2652/2652 and guest tests, macOS scripts/test.sh (TASK-395.18/.19); TLA+ default set on the current spec (TASK-405); upstream-changes.py --check passes.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The collector runs a pass per cell, conservatively: each pass takes its cell's lease, lists and deletes only under the cell, keeps the parent's whole state at each referenced fork point, and retires a dead child's reference with the one cross-cell DELETE; retirements are marked so late writes are deleted too. Unchanged cells cost a lease and one LIST. fxdax-gc sweeps any number of cells across processes (1M objects in 10k cells: 112 s at 64 at once on ubu1), reports usage per tenant and cell, and exports metrics. Shared points and tenant-0 stores fork across tenants; other tenants' writable stores don't. Bucket.tla models it all, split into short parts.
+<!-- SECTION:FINAL_SUMMARY:END -->

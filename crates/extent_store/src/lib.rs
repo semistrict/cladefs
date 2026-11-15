@@ -196,7 +196,7 @@ pub use layout::{Description, Format, Place, Volume};
 pub use mem::{Io, MemDir, MemFile};
 pub use raw::{RawFile, SECTOR};
 pub use segments::{
-    Unsectored, commits_spanning_segments, segment_closes, segments_framed_in_place,
+    Unsectored, commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,
 };
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;

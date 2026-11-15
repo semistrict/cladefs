@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! fxdax: the case copy-on-write DAX is for (doc-13, TASK-164.5), the user's 400 GB file, scaled to
-//! a GCE n2-standard-4 host: a file four times the guest's memory, in a base, mapped `MAP_SHARED`
+//! a host of 4 vCPUs and 16 GB: a file four times the guest's memory, in a base, mapped `MAP_SHARED`
 //! read-write by a VM on a fork of it, read all over at random, then 5% of its pages written, at
 //! random, and synced. A base VM writes the file, through its page cache; the host forks the base;
 //! a VM on the fork, through a DAX window (fxfs-guest-bigmap-dax), its stores copying on write, or

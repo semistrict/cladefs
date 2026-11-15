@@ -1156,31 +1156,46 @@ fn capacity_resizes() {
     assert_eq!(read(&store, extent(2), 0, 96 << 10), pattern(2, 0, 96 << 10));
 }
 
-/// fxdax: a framing writes its framed file back a MiB at a time as it writes it, so that its sync
-/// leaves little for the host's disk to write at once: a framed segment's whole data, synced at
-/// once, filled the disk's queue, which the syncs of a daemon's turns waited behind, up to a second
-/// under pgbench (GCE r728, TASK-165.9). Each commit's sync, of 16 KiB extents in the open
-/// segment, a MiB of them, writes back no more.
+/// fxdax: a framed copy is written back a MiB at a time, each waited for, before it is synced,
+/// so that its sync leaves little for the host's disk to write at once: a framed segment's whole
+/// data, synced at once, filled the disk's queue, which the syncs of a daemon's turns waited
+/// behind, up to a second under pgbench (GCE r728, TASK-165.9). Its framing writes it, the making
+/// durable after writes it back (TASK-401): waiting for each MiB, a framing waited 1.0-2.7 s behind
+/// a disk VMs share. No sync writes more at once than a commit's, of a quarter MiB of 16 KiB
+/// extents in the open segment. Red, the 12 MiB copy synced at once, with the making durable
+/// syncing it unwritten back.
 #[test]
 fn framings_write_back_as_they_go() {
     let dir = MemDir::new();
-    let options = Options { segment_size: 16 << 20, ..OPTIONS };
+    let options = Options { segment_size: 32 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
     let store = Store::create(dir.clone(), description, options).unwrap();
+    // Half noise, half zeros: a copy of about half the data.
     let len = 16 << 10;
-    for sequence in 1..=512 {
-        store.write(extent(sequence), 0, &noise(sequence, len)).unwrap();
-        if sequence % 64 == 0 {
+    let data = |sequence| {
+        let mut data = noise(sequence, len / 2);
+        data.resize(len, 0);
+        data
+    };
+    let in_place = extent_store::segments_framed_in_place();
+    for sequence in 1..=1536 {
+        store.write(extent(sequence), 0, &data(sequence)).unwrap();
+        if sequence % 16 == 0 {
             store.commit(None).unwrap();
         }
     }
     store.close_segment().unwrap();
     store.commit(None).unwrap();
     store.wait_framed().unwrap();
+    assert_eq!(extent_store::segments_framed_in_place(), in_place, "framed in a copy");
     let framed = dir.open(&format!("{}/{:016x}", of("segments", BRANCH.id), 0), true).unwrap();
     let size = framed.size().unwrap();
-    assert!(size > 8 << 20, "the framed segment holds 8 MiB of noise, not {size} bytes");
-    assert_eq!(dir.io().most_unwritten, 1 << 20);
+    assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
+    // A commit's sync: its 16 extents of 16 KiB, and its record.
+    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 603);
+    for sequence in 1..=1536 {
+        assert_eq!(read(&store, extent(sequence), 0, len), data(sequence));
+    }
 }
 
 /// fxdax: what a guest writes to the open segment is written back as it writes it, its writing
@@ -1829,6 +1844,44 @@ fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
         assert_eq!(synced, 0, "segment {next}'s commits' flush: directories synced");
     }
     for sequence in 1..6 {
+        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+    }
+}
+
+/// fxdax: a preparation of the next segment's log whose segment opened before it was placed, with
+/// a log of its own, goes on as the next's: no opening, nor flush, began another while it ran, and
+/// ended there it left the next segment nothing placed, as `Store::prepared` found it, until a
+/// flush or closing after it began one (TASK-404: commits_reopen_from_their_logs's (1, false, 2)
+/// on loaded hosts, the last flush having found a preparation running). Red so with it ending.
+#[test]
+fn preparations_overtaken_go_on_as_the_next_segments() {
+    use std::sync::Mutex;
+    use std::sync::mpsc::channel;
+    let dir = MemDir::new();
+    let store = create(dir.clone(), 64 << 20);
+    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    settled(&store);
+    store.prepared().unwrap();
+    let next = store.placed().expect("the next segment placed");
+    // The preparation of the segment after it held, as a loaded host's opener thread is, while
+    // commits open it and the one after.
+    let (go, gone) = channel::<()>();
+    let gone = Mutex::new(gone);
+    let held = fail::FailGuard::with_callback("segments::preparing", move || {
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    for sequence in 2..4 {
+        store.close_segment().unwrap();
+        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
+        store.commit(None).unwrap();
+    }
+    drop((go, held));
+    store.prepared().unwrap();
+    assert_eq!(store.placed(), Some(next + 2), "the segment after the open one, placed");
+    settled(&store);
+    for sequence in 1..4 {
         assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }

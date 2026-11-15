@@ -1378,10 +1378,14 @@ fn daemon_line() -> String {
     written.push(format!("written_writes={}", all.writes));
     written.push(format!("stats_written_bytes={}", STATS_WRITTEN.load(Ordering::Relaxed)));
     // fxdax: and how often they wrote a segment's data once, framing it in place, and made a
-    // commit spanning segments (TASK-310, TASK-92.41).
+    // commit spanning segments (TASK-310, TASK-92.41); and the bytes of segments' data their
+    // framings read, and their looks ahead as the segments filled (TASK-400).
+    let (framing_read, seen_ahead) = extent_store::framing_reads();
     let once = [
         format!("segments_framed_in_place={}", extent_store::segments_framed_in_place()),
         format!("commits_spanning_segments={}", extent_store::commits_spanning_segments()),
+        format!("framing_read_bytes={framing_read}"),
+        format!("seen_ahead_bytes={seen_ahead}"),
     ];
     let io = process_io().map(|(name, bytes)| format!("io_{name}={bytes}"));
     format!(

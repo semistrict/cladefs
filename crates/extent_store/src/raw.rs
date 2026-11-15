@@ -87,6 +87,14 @@ pub struct RawFile<F> {
     sealer: Option<Arc<Sealer>>,
 }
 
+impl<F> RawFile<F> {
+    /// The file, if it is in the clear: what a framing in place writes the tail of its frame into
+    /// (TASK-310), which a sealed one never is, its sectors not the sealed object's bytes.
+    pub(crate) fn clear(&self) -> Option<&Arc<F>> {
+        self.sealer.is_none().then_some(&self.file)
+    }
+}
+
 impl<F: File> RawFile<F> {
     /// `file`, raw, sealed by `sealer` if any, in the clear otherwise.
     pub(crate) fn new(file: F, sealer: Option<Arc<Sealer>>) -> Self {
@@ -99,12 +107,6 @@ impl<F: File> RawFile<F> {
     /// [`crate::Write::stored`] gives. Never for writing anything else.
     pub fn file(&self) -> &Arc<F> {
         &self.file
-    }
-
-    /// The file, if it is in the clear: what a framing in place writes the tail of its frame into
-    /// (TASK-310), which a sealed one never is, its sectors not the sealed object's bytes.
-    pub(crate) fn clear(&self) -> Option<&Arc<F>> {
-        self.sealer.is_none().then_some(&self.file)
     }
 
     /// The range of the file a read of the `len` bytes at `offset` in it reads: the sectors they

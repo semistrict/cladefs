@@ -351,8 +351,14 @@ fn keeps_object_storage_and_follower_stats() {
     expected.extend(kinds.map(|kind| format!("written_{kind}_bytes")));
     // And the writes they took, and the stats file's own (TASK-330.2).
     expected.extend(["written_writes", "stats_written_bytes"].map(str::to_owned));
-    // fxdax: segments framed in place, commits spanning segments (TASK-310, TASK-92.41).
-    let once = ["segments_framed_in_place", "commits_spanning_segments"];
+    // fxdax: segments framed in place, commits spanning segments (TASK-310, TASK-92.41); the
+    // bytes framings read, and looks ahead (TASK-400).
+    let once = [
+        "segments_framed_in_place",
+        "commits_spanning_segments",
+        "framing_read_bytes",
+        "seen_ahead_bytes",
+    ];
     expected.extend(once.map(str::to_owned));
     expected.extend(["io_write_bytes", "io_cancelled_write_bytes"].map(str::to_owned));
     assert_eq!(names, expected, "{kept}");

@@ -196,7 +196,7 @@ mod tests {
     use super::*;
 
     /// TASK-111.7: a build of this checkout is of its commit, `-dirty` or not, as builds here
-    /// are from git; or of the commit the source a GCE host builds says, which is too.
+    /// are from git; or of the commit the source a host run's worktree carries says, which is too.
     #[test]
     fn builds_are_stamped_with_their_commit() {
         let commit = BUILD_COMMIT.strip_suffix("-dirty").unwrap_or(BUILD_COMMIT);

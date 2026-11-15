@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-12 10:51'
-updated_date: '2026-11-14 18:31'
+updated_date: '2026-11-14 20:15'
 labels:
   - bug
   - ubu1
@@ -65,4 +65,6 @@ Note: fxdax-work.slice held 2044M shmem before any of this with only t407's job 
 2026-11-14 13:30 EST: queue idle; ran ubu1's step 146 on its own (sudo system-setup.d/146-fxdax_cgroups.sh, not system-setup.sh, which would also run others' pending steps: vscode, cliproxy, fxdax_tla, user_tweaks). /usr/local/bin/fxjob = origin/main 2eda3972 (md5 02aab1a0...; the step said replaced nothing: it was already that). fxjob-check.sh against the installed fxjob: all passed. Remaining for DoD #1: the full Linux workspace suite under the new fxjob (~30 min; cut at 1365/2651, 0 failed).
 
 2026-11-14 13:35 EST, coordinator: ubu1 /tmp held a 2.2G /tmp/fxdax-tla.CnSEeW (BucketForks states, 12:17, no TLC running), scripts/check-tla.sh's work dir: its EXIT trap does not run when the script is killed. Removed; /tmp 2.8G -> 698M, swap 6.9G -> 5.1G. Covered by this task when TLC runs under fxjob (its TMPDIR is reaped); TLC runs on the Mac now anyway.
+
+2026-11-14 (claude, TASK-400/401's agent): the full Linux workspace suite under the new fxjob, ubu1, commit dddfea15e (TASK-400/401 on origin/main 8391d2e3d), scripts/test.sh's workspace part (UCD_ZIP, sims excluded as there), --test-threads 4, fxjob --name t400-suite --mem 12G: 2655 run, 2653 passed, 2 failed, in 553 s (build 1m45s before it). Neither is fxjob's: durable_commits_keep_the_open_segments_pages_cached_on_the_host because the target (its CARGO_TARGET_TMPDIR) was on /home's ZFS (TASK-309), passing with the target on /mnt/fxdax-scratch's ext4; images_dropped_as_their_pass_runs_leave_their_bucket_whole is TASK-328's flake (1 of 3 reruns failed alone). No job left anything in /mnt/fxdax-scratch/fxjob.
 <!-- SECTION:NOTES:END -->

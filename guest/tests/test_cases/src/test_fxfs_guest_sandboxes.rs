@@ -507,11 +507,15 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             ["raw", "copied", "framed", "own", "log"].into_iter().filter_map(kind).sum();
         eprintln!(
             "sandboxes: {host}: guest_gib={:.2} stores_written_gib={:.2} ratio={:.2} \
-             segments_framed_in_place={}",
+             segments_framed_in_place={} framing_read_gib={:.2} seen_ahead_gib={:.2}",
             raw as f64 / GIB as f64,
             written as f64 / GIB as f64,
             written as f64 / raw.max(1) as f64,
             stats.get("segments_framed_in_place").copied().unwrap_or(0),
+            // fxdax: what framings read of segments' data, and looks ahead as they filled
+            // (TASK-400).
+            stats.get("framing_read_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            stats.get("seen_ahead_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
         );
         Ok((raw, written))
     }

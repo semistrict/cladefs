@@ -2159,7 +2159,7 @@ mod tests {
     }
 
     /// As `branches_survive_their_hosts_loss`, in the bucket FXDAX_S3_URL names: RustFS's
-    /// (scripts/test-rustfs.sh), or GCS's, from a GCE host.
+    /// (scripts/test-rustfs.sh), or another S3 store's.
     #[test]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs_branches_survive_their_hosts_loss() {

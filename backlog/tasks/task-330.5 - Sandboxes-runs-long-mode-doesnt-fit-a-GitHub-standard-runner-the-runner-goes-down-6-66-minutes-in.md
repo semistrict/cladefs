@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-11 07:25'
-updated_date: '2026-11-13 15:13'
+updated_date: '2026-11-14 20:46'
 labels:
   - testing
   - ci
@@ -66,4 +66,6 @@ Sized to fit 16 GiB at LangSmith's shape (2 hosts, 16 VMs 8 at a time, 8-vCPU bu
 2026-11-13 (claude): the soak under fxjob --bench, main 10f613290, 11:29:09-11:59:15 UTC (qualify.sh's soak part alone, 1,800 s, RustFS through the faulty proxy): PASSED, clean (zd0's other writes at most 1.4 MB/s, work 0). Bucket faults said: 73 in the full phase, 22 more out of service (95 in all), none answering or slow. Daemon CPU 5.45 ms per guest MiB of the soak's 20 (84.2 s), anon 1,630 of 2,947 MiB, uploads 1,533 of 1,536 MiB, disk 15.2 GiB for the guests' 15,360 MiB (1.008x), stores uploaded 14.6-20.4 s after the bucket answered, longest fsync 251 s (the outage). TASK-382's soak budget confirmed under bench.
 
 2026-11-13 (claude, TASK-336's agent): long mode on ubu1 (fxjob --bench --mem 16G), afternoon, three passes, all failing the framing check alone on the disk: main 487f443a8 5 past 1 s (slowest 1.65 s); main c6ba0d117 19 (slowest 5.77 s; read phases of raw files evicted under the cgroup, TASK-400, and write-back waits, TASK-401); main before TASK-336 (c211ff96) 11 (slowest 2.97 s). Durable lag within 50 ms 36-60%, max 5.1-12.6 s, against this morning's 59-65% and 1.7-4.4 s: ubu1's disk degraded through the day (the same build's short mode 72% -> 36-46% within 50 ms, its I/O stall 3 -> 9-27 s; host swap full, other users' apps resident), so passes hours apart don't compare; compare within ABBA rounds. Everything else passed each time: stores 1.20-1.21x, daemon CPU 14.3-15.3 ms per guest MiB of 20, commands < 100 ms, no memory-guard stop. AC #1 waits on TASK-400 and TASK-401.
+
+2026-11-14 (claude, TASK-400/401's agent): two long-mode passes on ubu1 (fxjob --bench --mem 16G) with TASK-400/401 (14e7f8ae6, 1649d384e): both FAILED the framing check alone, 2 a pass past 1 s on host-b (pass 1: 19.9 s, a 1 MiB copy during a disk stall, durable lag max 25.1 s, and 1.76 s reading a 96 MiB copy back; pass 2: 3.47 s and 1.66 s, copies read back). Everything else passed: VMs 800/781 s, stores 1.20-1.21x, commands within budget. Within 50 ms 50.1/59.4% and 32.7/33.1%. AC #1 still open: TASK-400's copies.
 <!-- SECTION:NOTES:END -->
