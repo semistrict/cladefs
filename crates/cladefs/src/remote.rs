@@ -312,12 +312,14 @@ pub fn upload_memory() -> UploadMemory {
 
 /// The runtime every store's uploader, and its fetches, run on (TASK-34): sized by the host, not
 /// by how many stores it serves, as each store waits on object storage mostly, and does its disk
-/// work in `block_in_place`, which leaves the runtime's threads to the others.
+/// work in `block_in_place`, which leaves the runtime's threads to the others. Its threads hold
+/// their lists of the shared locks they take from their start (`extent_store::shared`).
 static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
     let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
         .thread_name("cladefs remote")
+        .on_thread_start(extent_store::shared::prepare_thread)
         .enable_all()
         .build()
         .expect("the remotes' runtime")
@@ -1062,6 +1064,167 @@ mod tests {
              {waited:.2?}, {stalls} of them waiting for the lag",
             WRITTEN >> 20
         );
+    }
+
+    /// TASK-443.2: a benchmark of what each open, idle fork of a base holds of the process's heap,
+    /// by the extents the base holds, and of how long its opening takes: the heap counted exactly
+    /// as it is allocated (`crate::heap::held`), not read from the process's resident memory. A
+    /// base of each of `CLADEFS_BENCH_EXTENTS` extents (64, 1,024, 32,768 and 300,000 unless set, a
+    /// list by commas) of a block each, in a memory bucket, forked `CLADEFS_BENCH_FORKS` times (100
+    /// unless set), once from the store itself, live, whose writer writes a checkpoint for each
+    /// fork, as `extentd::tests::serves_hundreds_of_forks_of_a_base` makes its forks, and once from
+    /// a point of it, whose forks all start from the point's one state. A line for each count of
+    /// forks open, then one of what holds it ([`fork_extent_memory`]).
+    /// In the sim profile, optimized as a release build is, which this crate's tests, with their
+    /// failpoints, refuse to be (TASK-320): the bytes are any build's, the times this one's.
+    /// `cargo nextest run -p cladefs --cargo-profile sim --run-ignored only
+    /// bench_fork_extent_memory --no-capture`.
+    #[test]
+    #[ignore = "a benchmark (TASK-443.2): --run-ignored only, in the sim profile"]
+    fn bench_fork_extent_memory() {
+        let listed = |name: &str, default: &str| -> Vec<u64> {
+            let list = std::env::var(name).unwrap_or_else(|_| default.to_owned());
+            list.split(',').map(|count| count.trim().parse().expect(name)).collect()
+        };
+        let forks = listed("CLADEFS_BENCH_FORKS", "100")[0] as usize;
+        for extents in listed("CLADEFS_BENCH_EXTENTS", "64,1024,32768,300000") {
+            for point in [false, true] {
+                fork_extent_memory(extents, forks, point);
+            }
+        }
+    }
+
+    /// Opens `forks` forks of a base of `extents` extents, forked from a point of it if `point`,
+    /// from the store itself otherwise, and prints what the heap holds more than before them with
+    /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
+    /// (marginal), and that for each extent of the base; and how long each of those took to open.
+    /// The first 16 forks of a live store read low: each one's checkpoint, decoded, takes the place
+    /// of one the bucket kept decoded before them (`extent_remote::recovery::Decoded`), which
+    /// nothing else held; those after hold their own.
+    /// Then what holds it, each weighed alone: a copy of a fork's store's map of its extents, the
+    /// keys' bytes of it, the table the rest; the writer's persistent map of them, rebuilt sharing
+    /// nothing; and what closing them all leaves held over the heap before them. Opened and closed
+    /// again, the heap is to the byte what the first closing left.
+    fn fork_extent_memory(extents: u64, forks: usize, point: bool) {
+        use crate::heap::held;
+        use crate::host_store::fork_child;
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
+        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        let data = pattern(1, BLOCK);
+        for sequence in 1..=extents {
+            write(&base, sequence, &data);
+            if sequence % 1024 == 0 {
+                base.commit(None).unwrap();
+            }
+        }
+        base.commit(None).unwrap();
+        let parent = match point {
+            false => base,
+            true => {
+                let path = dir.path().join("point");
+                base.point_to(&path, fork_child(base.branch())).unwrap();
+                drop(base);
+                reopened(&path, idle()).unwrap()
+            }
+        };
+        let paths: Vec<_> = (0..forks)
+            .map(|n| {
+                let path = dir.path().join(format!("fork-{n}"));
+                parent.fork_to(&path, fork_child(parent.branch())).unwrap();
+                path
+            })
+            .collect();
+        drop(parent);
+        let open = |path: &std::path::PathBuf| {
+            let opening = crate::extents::Opening { arena: None, profiled: false, keeping: idle() };
+            ExtentStore::open_with(path, opening).unwrap()
+        };
+        let name = if point { "point" } else { "live" };
+
+        let mut stores = Vec::with_capacity(forks);
+        let mut samples = Vec::with_capacity(5);
+        every_task_shard_locked();
+        let before = held();
+        let started = std::time::Instant::now();
+        for (n, path) in paths.iter().enumerate() {
+            stores.push(open(path));
+            if [1, 10, 20, 50, 100].contains(&(n + 1)) {
+                samples.push((n + 1, held() - before, started.elapsed()));
+            }
+        }
+        let (mut last, mut last_held, mut last_took) = (0, 0, Duration::ZERO);
+        for (open, held, took) in samples.drain(..) {
+            let marginal = (held - last_held) / (open - last);
+            let each = (took - last_took) / (open - last) as u32;
+            println!(
+                "fork memory: extents={extents} parent={name} forks={open} held={held} \
+                 per-fork={} marginal-per-fork={marginal} marginal-per-fork-per-extent={:.1} \
+                 open={each:.2?}",
+                held / open,
+                marginal as f64 / extents as f64,
+            );
+            (last, last_held, last_took) = (open, held, took);
+        }
+        let weighed = held();
+        let copy = stores[0].extents_copy();
+        let map = held() - weighed;
+        drop(copy);
+        let branch = stores[0].branch();
+        // The heap once the page cache has let go of the files closed: its list of files names
+        // them by `Weak`, whose allocations stay until the list is next pruned, as its flusher
+        // does every quarter of `pages::Options::expire` and `write_back_all` does at once
+        // (TASK-433).
+        let settled = || {
+            extent_store::pages::shared().write_back_all().unwrap();
+            held()
+        };
+        stores.clear();
+        let closed = settled();
+        stores.extend(paths.iter().map(open));
+        stores.clear();
+        assert_eq!(settled(), closed, "the heap after the forks were opened and closed again");
+
+        let state = futures::executor::block_on(async {
+            let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
+            recover(&*bucket, branch, record.origin()).await.unwrap().state
+        });
+        let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
+        let weighed = held();
+        let mut rebuilt = extent_remote::State::new(branch).extents;
+        for (extent, at) in &state.extents {
+            rebuilt.insert(*extent, at.clone());
+        }
+        let writer = held() - weighed;
+        println!(
+            "fork memory: extents={extents} parent={name} of a fork: store-map={map} (keys={keys} \
+             table={}) writer-map-unshared={writer} (keys={keys} nodes={}); left-after-close={}",
+            map - keys,
+            writer - keys,
+            closed as i64 - before as i64,
+        );
+    }
+
+    /// Has the remotes' runtime (`RUNTIME`) lock each shard of its list of tasks once, so that
+    /// none allocates after: on macOS, a `std::sync::Mutex` allocates its pthread mutex, 64 bytes,
+    /// as it is first locked, and the runtime locks the shard of a task's id, numbered across the
+    /// process, as it spawns the task and as it ends. Its shards are tokio's: four for each worker,
+    /// rounded up to a power of two (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and
+    /// closing forks spawns uploaders, so a heap counted to the byte grew by 64 bytes now and then
+    /// as they reached shards none had (32 at most on this runtime): nothing of the stores'. The
+    /// other such holder, each of its threads' list of the shared locks it holds, it makes as each
+    /// starts (`extent_store::shared::prepare_thread`).
+    fn every_task_shard_locked() {
+        use super::RUNTIME;
+        let shards = RUNTIME.metrics().num_workers().next_power_of_two() * 4;
+        let mut locked = std::collections::HashSet::new();
+        while locked.len() < shards {
+            let task = RUNTIME.spawn(async {});
+            let id: u64 = task.id().to_string().parse().expect("a task's id is its number");
+            locked.insert(id % shards as u64);
+            futures::executor::block_on(task).unwrap();
+        }
     }
 
     /// A store's closed segments are the objects of its branch in the bucket, byte for byte, as

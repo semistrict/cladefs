@@ -3196,6 +3196,13 @@ impl<D: Dir> Store<D> {
         Ok(self.state()?.uncommitted.has_open())
     }
 
+    /// cladefs: a copy of the map the store holds its branch's extents in, with the keys its entries
+    /// own, which a benchmark weighs alone of what an open store holds (TASK-443.2).
+    #[cfg(feature = "testing")]
+    pub fn extents_copy(&self) -> Result<impl Sized + use<D>, Error> {
+        Ok(self.state()?.extents.clone())
+    }
+
     /// The extents the store holds, with their lengths, in order.
     pub fn extents(&self) -> Result<Vec<(ExtentId, u64)>, Error> {
         let state = self.state()?;
