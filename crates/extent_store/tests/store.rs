@@ -8,7 +8,6 @@ mod common;
 
 use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
-use extent_remote::wal::Fenced;
 use extent_store::{
     Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening, Options, Part,
     Place, RemoteData, Spent, Store, TooLong, TooSmall, Unsectored,
@@ -36,7 +35,7 @@ const OPTIONS: Options = Options {
 
 /// The chain of a writer of the branch in object storage, whose segments the store closes: that of
 /// a store opened where the bucket holds nothing of its branch (`Opening::new`).
-const WRITER: Chain = Chain::new(BRANCH, 0, 0, None, 0);
+const WRITER: Chain = Chain::new(BRANCH, 0, 0, 0);
 
 fn extent(sequence: u64) -> ExtentId {
     ExtentId::new(BRANCH.id, sequence)
@@ -58,12 +57,12 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 }
 
 /// fxdax: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
-/// chain `chain` (TASK-165.9).
+/// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
-    let last = state.last_commit;
-    let fenced = Fenced { recovered: last, last_commit: last, chain };
+    let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
+    let taken = extent_remote::Taken::of(head, &state, chain);
     let keys = extent_remote::keys::Ring::clear();
-    let opening = Opening { state, fenced: Some(fenced), cache: None, keys, held: None };
+    let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
@@ -978,7 +977,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     let dir = MemDir::new();
     let state = extent_remote::State::new(BRANCH);
     let store =
-        created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, Some((4, 3)), 100));
+        created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
     drop(store);
     let other = extent_remote::State::new(extent_remote::layout::test_branch(BRANCH.id + 1));
     let opening = Opening::new(extent_remote::layout::test_branch(BRANCH.id + 1));
@@ -988,7 +987,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     let store = opened_on(
         dir.clone(),
         extent_remote::State::new(BRANCH),
-        Chain::new(BRANCH, 3, 5, Some((4, 3)), 100),
+        Chain::new(BRANCH, 3, 5, 100),
     );
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
@@ -1009,7 +1008,6 @@ fn segments_close_for_the_writer_of_their_chain() {
             branch: BRANCH,
             seq: 5,
             epoch: 3,
-            after: Some((4, 3)),
             contents: Contents {
                 commits: vec![tag(3, 1)],
                 extents: vec![(extent(1), 0, BLOCK as u64)],
@@ -1051,7 +1049,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         .unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    assert_eq!((second.footer.seq, second.footer.after), (6, Some((5, 3))));
+    assert_eq!((second.footer.seq, second.footer.epoch), (6, 3));
     assert_eq!(
         (second.footer.contents.commits.clone(), second.footer.contents.forks.clone()),
         (
@@ -2031,7 +2029,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
     let framed = format!("{:016x}", segment.number);
     assert!(!names(&dir, "segments").contains(&framed), "its framed file named its own");
     let mut landed = extent_remote::State::new(BRANCH);
-    assert!(landed.apply(&segment.footer));
+    landed.apply(&segment.footer);
     let chain = WRITER.admit(&segment.footer).unwrap();
     // What a store opened on what the bucket holds, crashed at `seed`, holds: both extents, here,
     // or in the bucket, once it landed there.
@@ -2561,75 +2559,6 @@ fn interval_closings_leave_segments_being_filled() {
     store.write(extent(1), 0, &vec![1; 9 << 20]).unwrap();
     assert!(!store.close_now_unless_filling().unwrap(), "a segment being filled, closed");
     assert!(store.close_now().unwrap(), "a segment being filled, holding a commit, left open");
-}
-
-/// fxdax: a store whose segment ending commit 1 and going on with commit 2 landed alone, its
-/// writer then displaced and the branch taken again, live (`Store::rebase`): its log follows the
-/// branch, whose last commit is 1, and keeps that segment, stamped again after the fence with its
-/// runs of commit 2 alone, then the rest, stamped again too. Commit 1's extent, landed, is read
-/// where it landed from then on, acknowledged or not; commit 2's in that segment, here, then where
-/// it lands again (TASK-345). Before, the rebase failed `Diverged`, though no other writer moved
-/// the branch on, and `fxdaxctl take` dropped commit 2, durable. Red with commit 1's extent left
-/// to be read where the segment lands again, an object whose data the branch holds no more of but
-/// commit 2's, which the collector may compact away.
-#[test]
-fn logs_whose_segment_ending_a_commit_and_going_on_landed_alone_go_on() {
-    use extent_frame::segment::tag;
-    let dir = MemDir::new();
-    let options = Options { max_extent: OPTIONS.segment_size, ..OPTIONS };
-    let description = Description { block_size: BLOCK as u32, capacity: 4 << 20, branch: BRANCH };
-    let store = Store::create(dir.clone(), description, options).unwrap();
-    store.write(extent(1), 0, &noise(1, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    let (extents, len) = (4 * OPTIONS.segment_size as usize / (2 * BLOCK), 2 * BLOCK);
-    for sequence in 2..=extents as u64 {
-        store.write(extent(sequence), 0, &noise(sequence, len)).unwrap();
-    }
-    store.close_segment().unwrap();
-    store.commit(None).unwrap();
-    settled(&store);
-    let closed = store.closed(usize::MAX).unwrap();
-    let first = closed[0].footer.clone();
-    let continued = first.contents.continued.clone().expect("the first goes on with commit 2");
-    assert_eq!((first.contents.commits.clone(), continued.commit), (vec![tag(0, 1)], tag(0, 2)));
-    // It landed, alone; a writer of lease epoch 1 fenced the branch after it.
-    let fence = first.seq + 1;
-    let chain = Chain::new(BRANCH, 1, fence + 1, Some((fence, 1)), first.contents.next_sequence);
-    let last = Some(tag(0, 1));
-    store.rebase(&Fenced { recovered: last, last_commit: last, chain }).unwrap();
-    let rebased = store.closed(usize::MAX).unwrap();
-    let numbers = |closed: &[Closed<MemFile>]| -> Vec<u64> {
-        closed.iter().map(|closed| closed.number).collect()
-    };
-    assert_eq!(numbers(&rebased), numbers(&closed));
-    let again = &rebased[0];
-    let place = (again.footer.seq, again.footer.epoch, again.footer.after, again.restamped);
-    assert_eq!(place, (fence + 1, 1, Some((fence, 1)), true));
-    let next_sequence = again.footer.contents.next_sequence;
-    let continuation =
-        Contents { continued: Some(continued.clone()), next_sequence, ..Contents::default() };
-    assert_eq!(again.footer.contents, continuation);
-    let seqs: Vec<u64> = rebased.iter().map(|closed| closed.footer.seq).collect();
-    assert_eq!(seqs, (fence + 1..fence + 1 + rebased.len() as u64).collect::<Vec<_>>());
-    // Commit 1's extent, where it landed; commit 2's, here.
-    let landed = |run: &(ExtentId, u64, u64)| {
-        let key = extent_remote::layout::segment(BRANCH, first.seq);
-        Some(Place::Remote(Location { key, offset: run.1, len: run.2 }))
-    };
-    let run = first.contents.extents.iter().find(|run| run.0 == extent(1)).unwrap();
-    assert_eq!(store.place(extent(1)).unwrap(), landed(run));
-    for sequence in 2..=extents as u64 {
-        assert!(read(&store, extent(sequence), 0, len) == noise(sequence, len), "{sequence}");
-    }
-    // Acknowledged, landed again: commit 2's runs in it are read where it landed again.
-    for closed in &rebased {
-        store.acknowledged(closed.number).unwrap();
-    }
-    assert_eq!(store.place(extent(1)).unwrap(), landed(run));
-    let ran = &continued.extents[0];
-    let key = extent_remote::layout::segment(BRANCH, fence + 1);
-    let there = Some(Place::Remote(Location { key, offset: ran.1, len: ran.2 }));
-    assert_eq!(store.place(ran.0).unwrap(), there);
 }
 
 /// The open segment takes writes until it holds a segment and an extent, `Options::segment_size`
@@ -3540,6 +3469,10 @@ fn extents_written_in_runs_seal_where_they_are() {
     let second = in_flight(&store, extent(2), MAX_IO as u64, &data(2)[MAX_IO..]);
     second.finish();
     first.finish();
+    // fxdax: the commit's I/O alone: not the framer's reads of the parts written whole, looking at
+    // them ahead as the segment fills, which the writes queued, and which may land in the commit
+    // otherwise (TASK-400, TASK-423).
+    store.wait_looked_ahead();
     let before = dir.io();
     store.commit_ordered(None).unwrap();
     let sealed = dir.io();

@@ -117,11 +117,9 @@ pub struct Child {
 pub struct Footer {
     pub branch: Branch,
     pub seq: u64,
-    /// The epoch of its writer's lease.
+    /// The epoch of its writer's lease, which its key names too: a segment is the branch's only
+    /// once the branch's head names it, by its number and epoch (doc-7, The head; TASK-407).
     pub epoch: u64,
-    /// The segment it follows, by its number and epoch: the last of the branch before it that is
-    /// not void. It is void unless that is the one before it that is not.
-    pub after: Option<(u64, u64)>,
     /// What its commits made.
     pub contents: Contents,
 }
@@ -226,10 +224,10 @@ impl Contents {
     }
 }
 
-/// One writer's footers, in the order its segments close (doc-7, Fencing): numbered on without
-/// gaps, each naming the one before it, the first the segment it was given to follow; all of the
-/// writer's lease epoch, their extents of their own at its keys; the next sequence number each
-/// names never below its floor nor the one before's. Whatever closes a writer's segments, a store
+/// One writer's footers, in the order its segments close (doc-7, The head): numbered on without
+/// gaps from the branch's end as its head named it; all of the writer's lease epoch, their extents
+/// of their own at its keys; the next sequence number each names never below its floor nor the one
+/// before's. Whatever closes a writer's segments, a store
 /// or the writer, stamps their footers with the writer's chain, and the writer admits each footer
 /// only if its chain would have stamped it so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -238,24 +236,16 @@ pub struct Chain {
     epoch: u64,
     /// The number of the next segment.
     next_seq: u64,
-    /// The segment the next follows, by its number and epoch.
-    after: Option<(u64, u64)>,
     /// The next sequence number the next footer names, at least.
     next_sequence: u64,
 }
 
 impl Chain {
     /// The chain of the writer of lease epoch `epoch` of `branch`, whose next segment is numbered
-    /// `next_seq` and follows `after`; the footers it stamps name `next_sequence`, the writer's
-    /// floor, as the branch's next sequence number at least.
-    pub const fn new(
-        branch: Branch,
-        epoch: u64,
-        next_seq: u64,
-        after: Option<(u64, u64)>,
-        next_sequence: u64,
-    ) -> Self {
-        Self { branch, epoch, next_seq, after, next_sequence }
+    /// `next_seq`; the footers it stamps name `next_sequence`, the writer's floor, as the branch's
+    /// next sequence number at least.
+    pub const fn new(branch: Branch, epoch: u64, next_seq: u64, next_sequence: u64) -> Self {
+        Self { branch, epoch, next_seq, next_sequence }
     }
 
     pub fn branch(&self) -> Branch {
@@ -270,11 +260,6 @@ impl Chain {
     /// The number of the next segment.
     pub fn next_seq(&self) -> u64 {
         self.next_seq
-    }
-
-    /// The segment the next follows.
-    pub fn after(&self) -> Option<(u64, u64)> {
-        self.after
     }
 
     /// The branch's next sequence number, as of the last footer: what the writer's guest mints
@@ -296,7 +281,6 @@ impl Chain {
             branch: self.branch,
             seq: self.next_seq,
             epoch: self.epoch,
-            after: self.after,
             contents: Contents { next_sequence, ..contents },
         };
         self.follow(&footer);
@@ -304,13 +288,13 @@ impl Chain {
     }
 
     /// The chain after `footer`, which another closed for it, if it is the next footer it would
-    /// have stamped: of its branch, number and epoch, following the segment it follows.
+    /// have stamped: of its branch, number and epoch.
     pub fn admit(&self, footer: &Footer) -> Result<Self, Corrupt> {
-        let wanted = (self.branch, self.next_seq, self.epoch, self.after);
-        if (footer.branch, footer.seq, footer.epoch, footer.after) != wanted {
+        let wanted = (self.branch, self.next_seq, self.epoch);
+        if (footer.branch, footer.seq, footer.epoch) != wanted {
             return Err(Corrupt(format!(
-                "a segment of branch {}, number {}, epoch {}, after {:?}, not {wanted:?}",
-                footer.branch, footer.seq, footer.epoch, footer.after
+                "a segment of branch {}, number {}, epoch {}, not {wanted:?}",
+                footer.branch, footer.seq, footer.epoch
             )));
         }
         let mut chain = *self;
@@ -321,7 +305,6 @@ impl Chain {
     /// Goes on after `footer`, its next segment's.
     fn follow(&mut self, footer: &Footer) {
         self.next_seq = footer.seq + 1;
-        self.after = Some((footer.seq, footer.epoch));
         self.next_sequence = self.next_sequence.max(footer.contents.next_sequence);
     }
 }
@@ -379,7 +362,6 @@ mod tests {
             branch: branch(2),
             seq: 9,
             epoch: 4,
-            after: Some((7, 3)),
             contents: Contents {
                 commits: vec![tag(4, 11), tag(4, 12)],
                 extents: vec![(ExtentId { branch: 2, sequence: 5 }, 0, 4096)],
@@ -458,13 +440,12 @@ mod tests {
         assert_eq!((writer_of(tag(7, 0)), epoch_of(tag(7, 0))), (7, 0));
     }
 
-    /// A chain numbers the segments it closes on from where it starts, each following the one
-    /// before, of its writer's epoch; the next sequence number each names is the chain's floor at
+    /// A chain numbers the segments it closes on from where it starts, of its writer's epoch; the next sequence number each names is the chain's floor at
     /// least, and never below the one before's.
     #[test]
-    fn chains_number_and_link_what_they_close() {
+    fn chains_number_what_they_close() {
         let own = ExtentId { branch: 2, sequence: 7 };
-        let mut chain = Chain::new(branch(2), 4, 9, Some((8, 3)), 100);
+        let mut chain = Chain::new(branch(2), 4, 9, 100);
         let contents = Contents {
             commits: vec![tag(4, 1)],
             extents: vec![(ExtentId { branch: 2, sequence: 6 }, 0, 4096)],
@@ -478,7 +459,6 @@ mod tests {
                 branch: branch(2),
                 seq: 9,
                 epoch: 4,
-                after: Some((8, 3)),
                 contents: Contents {
                     commits: vec![tag(4, 1)],
                     extents: vec![(ExtentId { branch: 2, sequence: 6 }, 0, 4096)],
@@ -489,63 +469,58 @@ mod tests {
             }
         );
         let second = chain.close(Contents { next_sequence: 200, ..Contents::default() });
-        let place = |footer: &Footer| (footer.seq, footer.after, footer.contents.next_sequence);
-        assert_eq!(place(&second), (10, Some((9, 4)), 200));
+        let place = |footer: &Footer| (footer.seq, footer.contents.next_sequence);
+        assert_eq!(place(&second), (10, 200));
         let third = chain.close(Contents { next_sequence: 150, ..Contents::default() });
-        assert_eq!(place(&third), (11, Some((10, 4)), 200));
-        let place = (chain.branch(), chain.epoch(), chain.next_seq(), chain.after());
-        assert_eq!((place, chain.next_sequence()), ((branch(2), 4, 12, Some((11, 4))), 200));
+        assert_eq!(place(&third), (11, 200));
+        let place = (chain.branch(), chain.epoch(), chain.next_seq());
+        assert_eq!((place, chain.next_sequence()), ((branch(2), 4, 12), 200));
         assert_eq!(chain.tag(5), tag(4, 5));
     }
 
     /// A copy of a chain admits the footer the chain closed, and goes on from it as the chain did;
-    /// it refuses one of another branch, number or epoch, or following another segment, and goes
-    /// on from none.
+    /// it refuses one of another branch, number or epoch, and goes on from none.
     #[test]
     fn chains_admit_only_what_they_would_close() {
-        let start = Chain::new(branch(2), 4, 9, Some((8, 3)), 100);
+        let start = Chain::new(branch(2), 4, 9, 100);
         let mut closing = start;
         let footer = closing.close(Contents { own: vec![(7, 512)], ..Contents::default() });
         assert_eq!(start.admit(&footer), Ok(closing));
         // A footer of another place than the next the chain closes: refused, saying both.
         let misplaced = |place: &str| {
-            format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4, Some((8, 3))))
+            format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4))
         };
         for (wrong, refused) in [
             (
                 Footer { branch: branch(3), ..footer.clone() },
-                misplaced("1/2/3, number 9, epoch 4, after Some((8, 3))"),
+                misplaced("1/2/3, number 9, epoch 4"),
             ),
             (
                 Footer {
                     branch: Branch { cell: Cell { tenant: 1, id: 3 }, ..branch(2) },
                     ..footer.clone()
                 },
-                misplaced("1/3/2, number 9, epoch 4, after Some((8, 3))"),
+                misplaced("1/3/2, number 9, epoch 4"),
             ),
             (
                 Footer { seq: 10, ..footer.clone() },
-                misplaced("1/2/2, number 10, epoch 4, after Some((8, 3))"),
+                misplaced("1/2/2, number 10, epoch 4"),
             ),
             (
-                Footer { epoch: 5, ..footer.clone() },
-                misplaced("1/2/2, number 9, epoch 5, after Some((8, 3))"),
-            ),
-            (
-                Footer { after: Some((8, 4)), ..footer },
-                misplaced("1/2/2, number 9, epoch 4, after Some((8, 4))"),
+                Footer { epoch: 5, ..footer },
+                misplaced("1/2/2, number 9, epoch 5"),
             ),
         ] {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
         }
-        assert_eq!(start, Chain::new(branch(2), 4, 9, Some((8, 3)), 100));
+        assert_eq!(start, Chain::new(branch(2), 4, 9, 100));
     }
 
     /// A footer's extents of their own are the branch's, at the keys of its writer's epoch and its
     /// number: wherever it was closed, no other.
     #[test]
     fn footers_name_their_own_extents_at_their_writers_keys() {
-        let mut chain = Chain::new(branch(2), 4, 9, Some((8, 3)), 100);
+        let mut chain = Chain::new(branch(2), 4, 9, 100);
         let footer = chain.close(Contents { own: vec![(7, 512), (5, 8)], ..Contents::default() });
         let (seven, five) =
             (ExtentId { branch: 2, sequence: 7 }, ExtentId { branch: 2, sequence: 5 });

@@ -109,7 +109,7 @@ mod tests {
     fn state_in(extents: u64, per_object: u64) -> State {
         let mut state = State::new(test_branch(3));
         for sequence in 0..extents {
-            let key = layout::segment(test_branch(3), sequence / per_object);
+            let key = layout::segment(test_branch(3), sequence / per_object, 1);
             let location = Location { key, offset: sequence * 4096, len: 4096 };
             state.extents.insert(ExtentId::new(3, sequence), location);
         }
@@ -245,7 +245,7 @@ mod tests {
         use crate::object::TAIL;
         let state = state_in(2_000_000, 250);
         let bytes = encode(&state);
-        let key = layout::checkpoint(test_branch(3), 7);
+        let key = layout::checkpoint(test_branch(3), 7, 1);
         let bucket = Counting {
             bucket: Direct(SimBucket::new()),
             requests: AtomicU64::new(0),

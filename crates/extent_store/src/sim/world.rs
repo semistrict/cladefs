@@ -418,9 +418,8 @@ struct Restore {
     taken: Option<Branch>,
 }
 
-/// What a segment's footer says of the branch's history: the segment it follows, by its number and
-/// epoch, and its commits' tags.
-type Applied = (Option<(u64, u64)>, Vec<u64>);
+/// What a segment's footer says of the branch's history: its commits' tags.
+type Applied = Vec<u64>;
 
 pub struct World {
     rng: StdRng,
@@ -1634,7 +1633,8 @@ impl World {
                 branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, forks, holder, 0);
             let taking = async {
                 branch::create(&*bucket, sim_branch(child), owner).await?;
-                branch::take_lease(&*bucket, &layout::lease(sim_branch(child)), other, 0).await
+                let taking = extent_remote::head::take(&*bucket, sim_branch(child), other, 0);
+                taking.await.map(|held| held.head.epoch)
             };
             let (deleted, taken) = futures::join!(deleting, taking);
             events.borrow_mut().push(Event::Contested { child, owner, deleted, taken });
@@ -1962,7 +1962,7 @@ impl World {
                         recovered.state.extents.values().map(|location| &location.key).collect();
                     text += &format!(
                         "branch {branch:x} from {origin:?}: checkpoint {:?}, end {}, epoch {}, names {keys:?}\n",
-                        recovered.checkpoint, recovered.end, recovered.state.epoch
+                        recovered.checkpoint(), recovered.end(), recovered.epoch()
                     );
                 }
                 Err(error) => text += &format!("branch {branch:x}: {error}\n"),
@@ -2085,34 +2085,27 @@ impl World {
     // The truth.
 
     /// The commits the segments of the branch `recovered` is since its newest checkpoint make, in
-    /// the order recovering it applied them: each applied segment found by the footer of the one
-    /// after it, from the last.
+    /// the order recovering it applied them: each segment its head names, by its number and epoch.
     fn applied(&self, direct: &Direct, recovered: &Recovered) -> Result<Vec<u64>, String> {
         let branch = recovered.state.branch;
         let mut footers = self.footers.borrow_mut();
         let mut applied = Vec::new();
-        let mut at = recovered.state.last_segment;
-        while let Some((seq, epoch)) = at
-            && recovered.checkpoint.is_none_or(|checkpoint| seq > checkpoint)
-        {
-            let (after, commits) = match footers.entry((branch.id, seq, epoch)) {
+        let from = recovered.checkpoint().map_or(0, |(seq, _)| seq + 1);
+        for (seq, epoch) in recovered.head.iter().flat_map(|head| head.segments(from)) {
+            let commits = match footers.entry((branch.id, seq, epoch)) {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
-                    let key = layout::segment(branch, seq);
+                    let key = layout::segment(branch, seq, epoch);
                     let Some(object) = block_on(extent_remote::bucket::get(direct, &key)) else {
-                        break;
+                        return Err(format!("branch {:x}: segment {seq:x} gone", branch.id));
                     };
-                    let Ok(footer) = layout::Segment::footer(&object.bytes) else { break };
-                    if footer.epoch != epoch {
-                        break;
-                    }
-                    unknown.insert((footer.after, footer.contents.commits))
+                    let footer = layout::Segment::footer(&object.bytes)
+                        .map_err(|error| format!("{key}: {error}"))?;
+                    unknown.insert(footer.contents.commits)
                 }
             };
             applied.push(commits.clone());
-            at = *after;
         }
-        applied.reverse();
         let tags = applied.concat().into_iter();
         tags.map(|tag| Ok(self.truth_of(branch.id, Some(tag))?.unwrap())).collect()
     }
@@ -2132,12 +2125,10 @@ impl World {
             {
                 violations.push(format!("point {id:x} was written"));
             }
-            if let Some(object) =
-                block_on(extent_remote::bucket::get(&*direct, &layout::lease(sim_branch(id))))
-                && layout::Lease::decode(&object.bytes)
-                    .is_ok_and(|lease| lease.epoch != layout::Lease::FINAL)
+            if let Ok(Some(head)) = block_on(extent_remote::head::get(&*direct, sim_branch(id)))
+                && head.epoch != layout::Head::FINAL
             {
-                violations.push(format!("point {id:x} has a writer's lease"));
+                violations.push(format!("point {id:x} has a writer's head"));
             }
         }
         for (&id, branch) in &self.branches {
@@ -2168,11 +2159,10 @@ impl World {
                 violations.push(format!("branch {id:x}, told made, is being made still"));
             }
             // No placement took it back from a later one. fxdax: a placement takes the branch's cell,
-            // and its lease with the cell's epoch, which no taking of the cell by a later
+            // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
             let cell = block_on(extent_remote::cell::read(&*direct, sim_branch(id).cell));
-            let lease =
-                block_on(extent_remote::branch::lease(&*direct, &layout::lease(sim_branch(id))));
+            let lease = block_on(extent_remote::head::get(&*direct, sim_branch(id)));
             match (cell, lease) {
                 (Ok(Some(cell)), Ok(Some(lease))) => {
                     if cell.token < branch.taken {
@@ -2181,8 +2171,8 @@ impl World {
                             cell.token, branch.taken
                         ));
                     }
-                    // A deletion's lease, final, is taken with the highest token there is.
-                    if lease.epoch != layout::Lease::FINAL && lease.token > cell.epoch {
+                    // A deletion's head, final, is taken with the highest token there is.
+                    if lease.epoch != layout::Head::FINAL && lease.token > cell.epoch {
                         violations.push(format!(
                             "branch {id:x}'s lease was taken at epoch {} of its cell, of epoch {}",
                             lease.token, cell.epoch
@@ -2214,8 +2204,10 @@ impl World {
                 }
             }
             for (extent, location) in &state.extents {
-                let moves = layout::moves(&location.key).unwrap();
-                if !keys.contains(&location.key) && !keys.contains(&moves) {
+                // Its moves, any pass's (TASK-407.1).
+                let moves = layout::moves_of(&location.key).unwrap();
+                let moved = keys.iter().any(|key| key.starts_with(&moves));
+                if !keys.contains(&location.key) && !moved {
                     violations.push(format!("{extent:?} of {id:x}: {} is gone", location.key));
                 }
             }
@@ -2235,7 +2227,7 @@ impl World {
             // Its segments since its newest checkpoint apply each commit after the one before, of
             // its history: each once, in order, none another writer's history put after it. A
             // store's segment names the last of the commits it holds.
-            let mut before = recovered.checkpoint.is_none().then_some(branch.base);
+            let mut before = recovered.checkpoint().is_none().then_some(branch.base);
             let applied = match self.applied(&direct, &recovered) {
                 Ok(applied) => applied,
                 Err(violation) => {
@@ -2295,7 +2287,7 @@ impl World {
                 else {
                     continue;
                 };
-                let lease = block_on(branch::lease_epoch(&*direct, &layout::lease(sim_branch(id))));
+                let lease = block_on(extent_remote::head::epoch(&*direct, sim_branch(id)));
                 if writer.stopped().is_some() || lease != Ok(writer.epoch()) {
                     continue;
                 }

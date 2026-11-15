@@ -47,7 +47,7 @@ use crate::layout::{self, Footer, Kind, Location, Moves, PART};
 use crate::moves::MOVES;
 use crate::object::{self, TAIL};
 use crate::peer::{Peer, Peers};
-use crate::{Error, rules};
+use crate::Error;
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::borrow::Cow;
@@ -679,12 +679,8 @@ impl<B: Bucket> Fetcher<B> {
     ) -> Result<Vec<u8>, Error> {
         let mut key = location.key.clone();
         let mut again = true;
-        // Where the object at a key, by its tail, holds the extent: where its footer says; but for
-        // the rule's test, where the reader's index does, as readers read before TASK-79.18.
-        let place = |key: &str, tail: &Tail| match rules().footers || key != location.key {
-            true => tail.extents.get(&extent).copied(),
-            false => Some((location.offset, location.len)),
-        };
+        // Where the object at a key, by its tail, holds the extent: where its footer says.
+        let place = |_: &str, tail: &Tail| tail.extents.get(&extent).copied();
         for _ in 0..MOVES {
             if let Some(tail) = self.shared.tail(&key).await?
                 && let Some((at, held)) = place(&key, &tail)
@@ -783,12 +779,19 @@ impl<B: Bucket> Fetcher<B> {
         Ok(())
     }
 
-    /// The key of the moves of the object at `key`, if the collector moved `extent` there when it
-    /// compacted the object: their footer names it.
+    /// The key of the moves of the object at `key` the collector moved `extent` to when it
+    /// compacted the object, if it did: of its moves listed, each a pass's, the latest whose footer
+    /// names it, as the collector and writers follow them ([`crate::moves::MovesMaps`],
+    /// TASK-407.1).
     async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
-        let moves = layout::moves(key)?;
-        let tail = self.shared.tail(&moves).await?;
-        Ok(tail.is_some_and(|tail| tail.extents.contains_key(&extent)).then_some(moves))
+        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await;
+        for meta in listed.iter().rev() {
+            let tail = self.shared.tail(&meta.key).await?;
+            if tail.is_some_and(|tail| tail.extents.contains_key(&extent)) {
+                return Ok(Some(meta.key.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Reads ahead of a read of parts `first..=last` of the object at `key`: the part after them,
@@ -1160,7 +1163,7 @@ mod tests {
     use std::rc::Rc;
 
     const KEY: &str = "tenants/0000000000000001/cells/0000000000000001/\
-                       segments/0000000000000001/0000000000000000";
+                       segments/0000000000000001/0000000000000001.0000000000000000";
 
     /// Bytes that compress.
     fn pattern(len: u64) -> Vec<u8> {
@@ -1185,7 +1188,7 @@ mod tests {
     /// length.
     fn segment(data: &[u8], extents: Vec<(ExtentId, u64, u64)>) -> Vec<u8> {
         let contents = layout::Contents { extents, ..layout::Contents::default() };
-        let footer = layout::Chain::new(test_branch(1), 1, 0, None, 0).close(contents);
+        let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
         layout::Segment { data: data.to_vec(), footer }.encode()
     }
 
@@ -1692,12 +1695,12 @@ mod tests {
     /// it, then deletes it.
     fn compacted(bucket: &Arc<SimBucket>, data: &[u8]) {
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 10, len: MOVED.1 };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 10, len: MOVED.1 };
         let mut moved = vec![0; 10];
         moved.extend_from_slice(&data[MOVED.0 as usize..][..MOVED.1 as usize]);
         let moves =
             layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
     }
 
@@ -1774,7 +1777,7 @@ mod tests {
         let mut reads = Reads::new();
         let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
         let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
-        let moves = layout::moves(KEY).unwrap();
+        let moves = layout::moves(KEY, 1).unwrap();
         let moved = block_on(Direct(bucket.clone()).get(&moves)).unwrap().bytes;
         let moved = extent_frame::Parts::of(&moved, &extent_frame::NoKeys);
         assert_eq!(
@@ -1782,6 +1785,7 @@ mod tests {
             [
                 format!("get {KEY} 0..3000"),
                 format!("get {KEY} last {TAIL}"),
+                format!("list {}", layout::moves_of(KEY).unwrap()),
                 format!("get {moves} last {TAIL}"),
                 format!("get {moves} {:?}", moved.unwrap().stored[0].range()),
             ]
@@ -1809,24 +1813,25 @@ mod tests {
         assert_eq!(read().0, Some(Ok(want.clone())));
         // Compacted, then a segment far shorter recreated at its key.
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len: at.1 };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len: at.1 };
         let moved = data[at.0 as usize..][..at.1 as usize].to_vec();
         let moves =
             layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let stale = segment(&noise(100), vec![(ExtentId::new(1, 9), 0, 100)]);
         block_on(direct.put(KEY, stale.into(), PutMode::Create)).unwrap();
 
         let (read, asked) = read();
         assert_eq!(read, Some(Ok(want)));
-        let moves = layout::moves(KEY).unwrap();
+        let moves = layout::moves(KEY, 1).unwrap();
         assert_eq!(
             asked,
             [
                 format!("get {KEY} {}..{}", PART, PART + 3000),
                 format!("head {KEY}"),
                 format!("get {KEY} last {TAIL}"),
+                format!("list {}", layout::moves_of(KEY).unwrap()),
                 format!("get {moves} last {TAIL}"),
                 format!("get {moves} 0..{}", at.1),
             ]
@@ -1834,7 +1839,8 @@ mod tests {
     }
 
     /// A read of an extent by a fetcher of its own ([`read`]) asks for its object's tail, then for
-    /// the parts the extent is in; with the object gone, moved nowhere, the extent is lost.
+    /// the parts the extent is in; with the object gone, moved nowhere, its moves listed, none
+    /// (TASK-407.1), the extent is lost.
     #[test]
     fn reads_on_their_own_fetch_the_tail_then_the_parts() {
         let data = noise(PART + 300);
@@ -1848,7 +1854,7 @@ mod tests {
         block_on(Direct(bucket.clone()).delete(KEY)).unwrap();
         let (lost, asked) = bucket.served(read(&bucket, EXTENT, &location));
         assert_eq!(lost, Err(Error::Lost(format!("{EXTENT:?} in {KEY}"))));
-        let moves = format!("get {} last {TAIL}", layout::moves(KEY).unwrap());
+        let moves = format!("list {}", layout::moves_of(KEY).unwrap());
         assert_eq!(asked, [format!("get {KEY} last {TAIL}"), moves]);
     }
 
@@ -1882,7 +1888,7 @@ mod tests {
         let mut state = crate::recovery::State::new(test_branch(1));
         let location = Location { key: KEY.into(), offset: 7, len: 9 };
         state.extents.insert(EXTENT, location.clone());
-        let checkpoint = layout::checkpoint(test_branch(1), 3);
+        let checkpoint = layout::checkpoint(test_branch(1), 3, 1);
         let bytes = crate::checkpoint::encode(&state);
         let bucket = SimBucket::new();
         block_on(Direct(bucket.clone()).put(&checkpoint, bytes.clone().into(), PutMode::Create))
@@ -1995,7 +2001,7 @@ mod tests {
     fn tails_are_kept_for_each_object() {
         let data = noise(100);
         let bucket = bucket(&data);
-        let other = &layout::segment(test_branch(1), 1);
+        let other = &layout::segment(test_branch(1), 1, 1);
         block_on(Direct(bucket.clone()).put(other, whole(&data).into(), PutMode::Create)).unwrap();
         let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
         let mut reads = Reads::new();
@@ -2018,7 +2024,7 @@ mod tests {
         // last; then another read in flight: the other's tail, used least recently, goes, then
         // the first read in flight.
         let kept = |key: &str| fetcher.shared.memory.tails.lock().unwrap().kept.contains_key(key);
-        let key = |number: u64| layout::segment(test_branch(2), number as u64);
+        let key = |number: u64| layout::segment(test_branch(2), number as u64, 1);
         let reading = TAILS / TAIL;
         for number in 0..reading - 1 {
             drop(fetcher.shared.tail(&key(number)));
@@ -2187,7 +2193,7 @@ mod tests {
         const OBJECTS: u64 = 4097;
         let data = noise(100);
         let bucket = SimBucket::new();
-        let key = |object: u64| layout::segment(test_branch(1), object as u64);
+        let key = |object: u64| layout::segment(test_branch(1), object as u64, 1);
         for object in 0..OBJECTS {
             block_on(Direct(bucket.clone()).put(
                 &key(object),
@@ -2317,11 +2323,11 @@ mod tests {
         bucket.complete(0, Fault::None);
 
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len };
         let moved = &data[at as usize..][..len as usize];
         let moves =
             layout::with_footer(moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let other: Vec<u8> = data.iter().map(|byte| byte ^ 0x5a).collect();
         let other_extent = ExtentId::new(1, 9);
@@ -2357,7 +2363,7 @@ mod tests {
         const PARTS: u64 = 24;
         let data = noise(PARTS * PART);
         let bucket = SimBucket::new();
-        let key = |object: u64| layout::segment(test_branch(1), object as u64);
+        let key = |object: u64| layout::segment(test_branch(1), object as u64, 1);
         for object in 0..4 {
             block_on(Direct(bucket.clone()).put(
                 &key(object),
@@ -2393,7 +2399,7 @@ mod tests {
         let fetchers = host(&SimBucket::new(), &cache, 2);
         for (fetcher, branch) in fetchers.iter().zip(2..) {
             for number in 0..TAILS / TAIL {
-                drop(fetcher.shared.tail(&layout::segment(test_branch(branch), number as u64)));
+                drop(fetcher.shared.tail(&layout::segment(test_branch(branch), number as u64, 1)));
             }
         }
         let (_, tails) = held(&fetchers);
@@ -2619,7 +2625,7 @@ mod tests {
         let fetcher = Fetcher::new(bucket, limits(8), Memory::new(), Some(cache))
             .reading_ahead(reads.spawn());
         let streams = || fetcher.streams.lock().unwrap().len();
-        let key = |number: usize| layout::segment(test_branch(1), number as u64);
+        let key = |number: usize| layout::segment(test_branch(1), number as u64, 1);
         for number in 0..STREAMS {
             fetcher.read_ahead(&key(number), 0, 0);
         }

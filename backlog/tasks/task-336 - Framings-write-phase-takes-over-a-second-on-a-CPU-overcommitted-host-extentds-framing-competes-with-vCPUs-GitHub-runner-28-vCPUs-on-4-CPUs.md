@@ -3,11 +3,11 @@ id: TASK-336
 title: >-
   Framings' write phase takes over a second on a CPU-overcommitted host:
   extentd's framing competes with vCPUs (GitHub runner, 28 vCPUs on 4 CPUs)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-10 23:37'
-updated_date: '2026-11-15 02:37'
+updated_date: '2026-11-15 05:07'
 labels:
   - perf
   - extentd
@@ -30,9 +30,9 @@ Found by TASK-330.1's sandboxes run on GitHub's ubuntu-24.04 runner (4 AMD EPYC 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -60,4 +60,12 @@ Not proven: the long mode on ubu1 failed both passes, on what's left, the disk: 
 2026-11-14 (claude, TASK-400/401's agent): the disk part that held TASK-336's ACs. GitHub's 4-CPU runner, sandboxes short mode on 1649d384e's code: three runs, all PASSED (43631859938, 43633697009, 43633701029), the longest write phase 73/158/55 ms, no framing past 1 s (slowest 304, 517, 408 ms, compressing), against main's two the same afternoon failing 3 a run past 1 s, all write phase (2.70, 2.63 s). So AC #1 (no write phase past 1 s on GitHub's short mode over several runs) is met by TASK-401. ubu1's long mode is not clean (2 passes, 2 past 1 s each: copies reading back evicted data, TASK-400's remainder, and one disk stall of 19.9 s).
 
 2026-11-15 (claude, TASK-400's agent): c2daf7630 holds copies' parts packed ahead (TASK-400): sandboxes short mode on ubu1, 2 rounds a side, no framing past 1 s either side; slowest 155-511 ms (fix) vs 133-324 ms (base). The long mode (this task's remaining proof, two clean passes) waits for scratch space on ubu1: TASK-400's notes say how to start it.
+
+Long mode on ubu1, main's code at 4f2a634d (TASK-400 c2daf7630, TASK-401 9c93d8d08, TASK-336 c6ba0d117), fxjob --bench --mem 16G, 2026-11-15 04:35-05:05 UTC, two passes back to back (scripts/qualify.sh, FXDAX_QUALIFY_SANDBOXES=long): both PASSED in ~15 min each (VMs ran 858 s). Framings over 1 s: 0 on every host of both passes (before: 2-19 a pass). Slowest framing host-a/b: pass 1 703/691 ms, pass 2 784/935 ms; slow framings (over 50 ms) 107/104 and 103/117 a host. Read phase: one framing past 0.5 s in all (pass 1 host-a, in place, 16.8 MiB read of 34.8 MiB, its parts packed too late: read 622 ms); maxima 622/200 and 130/343 ms. Held parts peak 71-117 MiB, 0 evicted; framing reads 2.45-2.69 GiB a daemon against 41.5-42.7 GiB looked at ahead. Stores wrote 1.20x the guests; budgets: cpu_per_guest_mib 13.9 ms (budget 20), max_anon 1,060 MiB, io_per_guest_byte 1.207. Host before pass 1: load 5.4, Dirty 453 MB, io some avg60 14%; before pass 2 load 51 (pass 1's VMs ending), io 36%; another session's e2e411 job queued, not running. Results /mnt/fxdax-scratch/t400-long/pass1, pass2.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Framings no longer take over a second on a CPU-overcommitted host or a shared disk: kept part buffers and compressors (c6ba0d117, the CPU part), parts looked at and packed as segments fill, held under extentd's governor (85b163d62, c2daf7630, TASK-400), framings not waiting on write-back (9c93d8d08, TASK-401). Verified: GitHub's 4-CPU short mode passes (AC #1), and ubu1's long mode twice with 0 framings over 1 s. Main's CI green on Linux and macOS workspace with these changes (b4ac3d970, run 43668192071); upstream-changes.py --check passes (2026-11-15).
+<!-- SECTION:FINAL_SUMMARY:END -->

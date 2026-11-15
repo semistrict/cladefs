@@ -273,9 +273,10 @@ mod tests {
         // whose points say nothing of being shared (TASK-395.7); 8's, whose collector's lease
         // and moves are at the bucket's root, its cells' collection under their own prefixes
         // reading neither (TASK-395.2); and 9's, whose records and cells keep no keys, their
-        // objects framed in FORMAT 1 of extent_frame (TASK-411.3).
-        assert_eq!(FORMAT, 10);
-        for format in [1u32, 2, 7, 8, 9] {
+        // objects framed in FORMAT 1 of extent_frame (TASK-411.3); and
+        // 10's, whose keys name no epochs, and whose branches have leases, not heads (TASK-407).
+        assert_eq!(FORMAT, 11);
+        for format in [1u32, 2, 7, 8, 9, 10] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(

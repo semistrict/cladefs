@@ -364,7 +364,7 @@ fn cells_of_tenants_with_no_kek_are_in_the_clear() {
     let object = world.runtime.block_on(cell::read(&*world.bucket, branch.cell)).unwrap().unwrap();
     assert_eq!(object.keks, Vec::new());
     assert_eq!(world.record(branch).deks, Vec::new());
-    let segment = world.object(&layout::segment(branch, 1));
+    let segment = world.object(&layout::segment(branch, 0, 1));
     assert_eq!(extent_frame::Frame::of(&segment).unwrap().seal, extent_frame::Seal::Clear);
     assert_eq!(read(&world, &host, &store, ExtentId::new(branch.id, 1), 4096), Ok(data));
     // The tenant's KEK asked for once, which it has not.
@@ -795,7 +795,7 @@ fn points_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused(
     let record = world.record(clone.branch);
     let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
     assert_eq!(inherited, [test_branch(7)]);
-    assert_eq!(record.origin(), Some(layout::Origin { parent: test_branch(7), at: 2 }));
+    assert_eq!(record.origin(), Some(layout::Origin { parent: test_branch(7), at: 1 }));
     let clone_dir = made(clone.branch, "clone");
     let (clone_store, _clone_remote) = open_on(&world, &forker, &clone_dir).unwrap();
     assert_eq!(read(&world, &forker, &clone_store, a, 4096), Ok(noise(1, 4096)));

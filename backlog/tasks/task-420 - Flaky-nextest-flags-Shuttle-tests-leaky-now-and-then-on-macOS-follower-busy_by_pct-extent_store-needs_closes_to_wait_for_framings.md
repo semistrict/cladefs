@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 02:08'
+updated_date: '2026-11-15 05:35'
 labels:
   - testing
   - flaky
@@ -32,3 +33,11 @@ Found by TASK-400's runs of scripts/test.sh's shuttle part on macOS (2026-11-15)
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15 (claude, TASK-423): a macOS shuttle part run flagged follower_sim sim::tests::catches_followers_skipping_changes LEAK (0.96 s), passed: a third test, same flag.
+
+2026-11-15 (claude, TASK-423): cargo nextest run -p extent_store -p fxdax on macOS flagged 5 non-Shuttle extent_store tests LEAK at ~0.21 s each, early in the run (durability batches_take_the_commits_queued_in_order, syncs_sync_each_file_once_then_the_directories, framed files_close_the_least_lately_read_first, seals pieces_say_why, corrupt flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments), all passed: the leak flag is not Shuttle's alone.
+<!-- SECTION:NOTES:END -->

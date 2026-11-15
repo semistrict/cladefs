@@ -2,6 +2,15 @@
 
 # Decisions
 
+## The extent device as a crate, crates/virtio_extent, which libmachine shares (TASK-417, 2026-11-14)
+
+libmachine asked (its doc-2) for the extent device shared, not copied. Decided without you:
+- **The crate depends on fxdax and holds the device but its transport**: protocol, `Config` (now Firecracker's API type too, `ExtentDeviceConfig` a re-export), `Device` (store, config space, notices, window, snapshots), `Buffers`/`handle`/`Requests`, `persist`. Request handling is generic over a `Store` trait (impl for `RemoteExtentStore`), so it's tested with a fake store, on macOS too. The VMM implements `ConfigInterrupt` and `WindowVm` (reserve/release guest addresses, add/remove a memory slot). *Instead:* the protocol alone in a crate, each VMM keeping its own device: two copies of the snapshot and window logic. *Undo:* move the files back into the fork.
+- **No vm-memory in the crate**: wire structs are zerocopy's, guest memory reaches it as host addresses. The fork still went to vm-memory 0.18 as you decided, by cherry-picking upstream's two Cargo-only bumps (27e968cb1, 88c8f05fd, vhost 0.17 so that only 0.18 is in the lock) at the series' base: series release fxdax-v1.16.1-r7, a rewrite (vendor/firecracker.rewrites).
+- **BSD-3-Clause, fxdax's header**, like the rest of crates/: the fork's files it came from were fxdax's own code under Apache-2.0 headers in Firecracker's tree. *Instead:* keep Apache-2.0 and a license-headers.py exception. *Undo:* headers back.
+- **Snapshots unchanged**: Firecracker's `ExtentState` is `{protocol, virtio_state, device}`, which bitcode serializes as the old flat struct (a test compares the bytes), so snapshots taken before restore after.
+- **`dax_window_at` stays process-wide** (one VM per process, as Firecracker's): with libmachine's several VMs a process, a guest address may be in each one's window, and the diagnostic names the first. *Instead:* key windows by VM, which Firecracker's vCPUs can't name today.
+
 ## TLA+ models split into parts, every behaviour still checked (TASK-405, 2026-11-14)
 
 Decided without you:

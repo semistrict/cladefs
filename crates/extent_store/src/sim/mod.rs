@@ -161,7 +161,8 @@ fn weights(change: impl FnOnce(&mut Weights)) -> Profile {
 }
 
 /// `SIM_SEEDS` seeds (1 by default) from `SIM_SEED` of one profile, as `SIM_PROFILE` says, with
-/// the rules `SIM_OFF` names (separated by commas) off, to debug them.
+/// the rules `SIM_OFF` names (separated by commas) off, to debug them; with `SIM_JOURNAL` set, each
+/// seed's requests of the bucket printed first, in order, as they took effect.
 #[test]
 #[ignore = "debugs one seed (SIM_SEED, SIM_PROFILE, SIM_OFF): the sim part runs the soaks"]
 fn one() {
@@ -171,23 +172,16 @@ fn one() {
         std::env::var("SIM_OFF").unwrap_or_default().split(',').filter(|name| !name.is_empty())
     {
         match name {
-            "pins_fences" => rules.pins_fences = false,
-            "pins_old_fences" => rules.pins_old_fences = false,
-            "pins_void_strays" => rules.pins_void_strays = false,
-            "pins_late_strays" => rules.pins_late_strays = false,
-            "pins_takings" => rules.pins_takings = false,
-            "forks_after_lease" => rules.forks_after_lease = false,
-            "fence" => rules.fence = false,
-            "continuity" => rules.continuity = false,
+            "head_swap" => rules.head_swap = false,
+            "epoch_keys" => rules.epoch_keys = false,
+            "collector_epochs" => rules.collector_epochs = false,
+            "moves_by_pass" => rules.moves_by_pass = false,
             "epoch_sequences" => rules.epoch_sequences = false,
             "records_after_ack" => rules.records_after_ack = false,
             "candidates_first" => rules.candidates_first = false,
-            "newest_checkpoint" => rules.newest_checkpoint = false,
             "forks_from_states" => rules.forks_from_states = false,
-            "orphans_after_successor" => rules.orphans_after_successor = false,
             "tokens" => rules.tokens = false,
             "delete_tokens" => rules.delete_tokens = false,
-            "footers" => rules.footers = false,
             "fork_claims_ids" => rules.fork_claims_ids = false,
             "fork_claims_landed" => rules.fork_claims_landed = false,
             "points_take_no_writer" => rules.points_take_no_writer = false,
@@ -196,19 +190,13 @@ fn one() {
             "collector_abandons" => rules.collector_abandons = false,
             "records_relisted" => rules.records_relisted = false,
             "records_owned" => rules.records_owned = false,
-            "extent_keys_name_segments" => rules.extent_keys_name_segments = false,
             "ways_from_seals" => rules.ways_from_seals = false,
             "moves_taken_first" => rules.moves_taken_first = false,
             "stores_follow_moves" => rules.stores_follow_moves = false,
-            "leases_by_takings" => rules.leases_by_takings = false,
             "passes_fenced_stop" => rules.passes_fenced_stop = false,
             "recoveries_by_origins" => rules.recoveries_by_origins = false,
             "records_kept" => rules.records_kept = false,
-            "deletions_fence" => rules.deletions_fence = false,
-            "deletions_reread" => rules.deletions_reread = false,
             "wal_follows" => rules.wal_follows = false,
-            "wal_after_fence" => rules.wal_after_fence = false,
-            "wal_continues" => rules.wal_continues = false,
             "references" => rules.references = false,
             "references_first" => rules.references_first = false,
             "clones_refer_first" => rules.clones_refer_first = false,
@@ -249,6 +237,13 @@ fn one() {
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
+    if std::env::var_os("SIM_JOURNAL").is_some() {
+        for seed in seed..seed + count {
+            for (at, asked) in replay(seed, profile).0.iter().enumerate() {
+                println!("seed {seed} request {at}: {asked}");
+            }
+        }
+    }
     holds(profile, seed..seed + count);
 }
 
@@ -342,24 +337,6 @@ fn deleted_forking() -> Profile {
 
 test_holds!(branches_deleted_twice_while_forking, deleted_forking());
 
-// The seeds that find it move with every change of the collector's requests: 32,625 and others
-// once a pass read its cell before taking its lease (TASK-395.4's review), 8,363 once record_fork
-// read the child's record again (TASK-395.10), and 113,765 alone of 0..120,000 once passes skipped
-// unchanged cells and held them for a time (TASK-395.5, .6), and 122,627 once a pass's listing of
-// its cell served its first of the records and of each branch's checkpoints (TASK-395.16; none
-// of 110,000..120,000 nor 130,000..150,000; it holds with the rule). Searched from 110,000: seeds
-// 36,924, 76,898 and 99,084 fail without the rule as with it, a store's log found diverged,
-// TASK-403's bug, which says nothing of this rule (TASK-403 names them).
-test_needs!(deletions_need_fences, deletions_fence, deleted_forking(), 120_000..130_000);
-
-// A deletion begun as another marks the branch deleted, recovering once a pass deleted that one's
-// fence and a writer's segment of a fork, taken over, landed where it was: the fork's child,
-// recorded, names the extents the segment stores on their own, which the pass deleted (TASK-380).
-// Its seeds of 0..20,000 went once a pass's listing of its cell served its first of the records
-// and of each branch's checkpoints (TASK-395.16): none of 20,000..69,807; 69,807 fails with the rule
-// as without it, a store's log found diverged (TASK-403); 83,552 the first after that holds with it.
-test_needs!(deletions_need_records_reread, deletions_reread, deleted_forking(), 80_000..90_000);
-
 /// Case 3: forks racing collection and compaction.
 fn collected() -> Profile {
     let mut profile = weights(|weights| {
@@ -434,35 +411,13 @@ fn takeovers() -> Profile {
 
 test_holds!(takeovers_while_uploading, takeovers());
 
-// A writer acknowledging what it created, with no read of its lease (TASK-371), its creates
-// failing where the collector pins the branch (`collector::pinned`, TASK-388): a later writer's
-// fence, which a checkpoint covers, kept for as long as the writer taken over lives...
-test_needs!(takeovers_need_fences_pinned, pins_fences, recreated());
+// A writer acknowledging what it uploaded by swapping the head, with the condition that it is its
+// own taking still (TASK-407): written whatever is there, a writer taken over writes it over its
+// successor's, whose acknowledged commits the branch then holds not.
+test_needs!(takeovers_need_head_swaps, head_swap, takeovers());
 
-// ...those of every epoch, not only the last: a writer taken over by two meets the first's...
-test_needs!(takeovers_need_old_fences_pinned, pins_old_fences, recreated());
-
-// ...and the void strays, earlier writers' segments landed late, where the writer taken over may
-// yet create, its successor fencing past them (TASK-383)...
-test_needs!(takeovers_need_void_strays_pinned, pins_void_strays, recreated());
-
-// ...and the late ones, earlier writers' fences made after their successors', which they follow
-// (TASK-383, TASK-388)...
-test_needs!(takeovers_need_late_strays_pinned, pins_late_strays, recreated());
-
-// ...and what the last writer landed after a later writer read the branch, until that one fenced.
-// A pass landing in a takeover's window: rarer since a pass reads its cell before taking its lease
-// (TASK-395.4's review), none of seeds 0..60,000 finding it, seeds 62,844, 135,431, 192,067,
-// 208,601 and 294,195 of 60,000..300,000 did; so searched from 60,000.
-test_needs!(takeovers_need_takings_pinned, pins_takings, recreated(), 60_000..80_000);
-
-// A deleted branch's writer, taken over, acknowledging a fork only after a read of its lease: the
-// deletion's fence goes with the branch.
-test_needs!(deleted_forks_need_forks_after_lease, forks_after_lease, deleted_bases());
-
-test_needs!(takeovers_need_fences, fence, Profile::default());
-
-test_needs!(takeovers_need_continuity, continuity, takeovers());
+// Keys naming their writers' epochs (TASK-407): two writers' segments of one number at one key.
+test_needs!(takeovers_need_epoch_keys, epoch_keys, takeovers());
 
 /// Case 9: a stale writer's create of a segment in flight while a later writer's takes its place,
 /// which the collector compacts and deletes, landing then: it recreates the segment, holding other
@@ -489,10 +444,13 @@ fn recreated() -> Profile {
 }
 
 // Seed 453: a writer taken over creating where a void segment was, which a pass deleted below its
-// successor's fence (TASK-383).
+// successor's fence (TASK-383), before keys were written once (TASK-407).
 test_holds!(stale_creates_landing_past_deletions, recreated(), [453]);
 
-test_needs!(stale_creates_need_reads_by_footers, footers, recreated());
+// The collector keeping what a live branch's head may yet name (TASK-407): of its epoch, segments
+// and extents of their own at or past its end, checkpoints newer than its own; deleted, a writer's
+// swap names what is gone.
+test_needs!(collection_needs_epochs, collector_epochs, recreated());
 
 /// Writers checkpointing often, taken over with their checkpoints in flight, which land late, past
 /// where the next writer recovered from, while collectors compact what the checkpoints name and
@@ -543,19 +501,8 @@ fn taken() -> Profile {
 
 test_holds!(takeovers_racing_collection, taken());
 
-test_needs!(takeovers_need_orphans_after_successors, orphans_after_successor, taken());
-
 // Case 10: extents minted after a takeover.
 test_needs!(takeovers_need_epoch_sequences, epoch_sequences, takeovers());
-
-// An extent stored on its own, uploaded before the segment naming it, which the store's footer
-// closed between commits covers by its next sequence number: the collector deleting it by that
-// loses it once the segment lands (TASK-79.3), which only the stores' own footers reach (TASK-88).
-test_needs!(
-    collection_needs_extent_keys_naming_segments,
-    extent_keys_name_segments,
-    Profile::default()
-);
 
 /// Case 5: crashes between a segment's upload and the next, and between a fork and its child's
 /// record. Case 6: frees in commits never made durable.
@@ -576,8 +523,8 @@ test_needs!(forks_need_records_after_acks, records_after_ack, crashes());
 /// Hosts crashing, keeping their write-ahead logs or losing them, and taking their branches back,
 /// at once as they start again or later, while other hosts take them over and write, and the
 /// segments of writers gone land late (doc-14): every open on a host with a log puts it after the
-/// branch's end ([`crate::Wal`]). Nothing else: the creates of writers gone land among few
-/// requests, between a recovery and its fence.
+/// branch's end ([`crate::Wal`]). Nothing else: the PUTs of writers gone land among few
+/// requests, between a recovery and its writer's first swap of the head.
 fn wals() -> Profile {
     let mut profile = weights(|weights| {
         weights.crash = 4;
@@ -614,10 +561,6 @@ test_holds!(logs_of_forks_put_after_takeovers, forked_wals());
 // A host's log put after another host's acknowledged commit, which it loses.
 test_needs!(logs_need_to_follow, wal_follows, wals());
 
-// A host's log put after the branch's end as recovery found it, not after the fence: its own
-// segment, landed in between, applied twice.
-test_needs!(logs_need_the_end_after_the_fence, wal_after_fence, wals());
-
 /// fxdax: logs as [`wals`] makes them, their guests writing a segment's worth or more between
 /// commits, most of them: commits spanning segments, the first of which may end the commit before,
 /// landing alone as a host crashes or a writer takes the branch over (TASK-92.41, TASK-345).
@@ -629,11 +572,6 @@ fn spanning_wals() -> Profile {
 }
 
 test_holds!(spanning_logs_put_after_takeovers, spanning_wals());
-
-// fxdax: a host's log whose segment ending a commit and going on with the next landed alone,
-// diverged, though the branch's last commit is the log's: `take` drops the next commit, durable
-// on the host (TASK-345).
-test_needs!(logs_need_to_continue_a_segment_landed_alone, wal_continues, spanning_wals());
 
 /// Forks that fail and are deleted, as their hosts' cleanups delete them, those crashing partway
 /// and going on, while their segments land or not, the parents' next writers give them records,
@@ -835,8 +773,3 @@ fn recovering() -> Profile {
 }
 
 test_holds!(recoveries_racing_collection, recovering());
-
-// Writers recovering as checkpoints land and collectors delete what they cover: with the stores'
-// own segments (TASK-88), no seed of 40,000 of `takeovers` finds the case, nor of 4,000 of
-// `recovering` or `everything`, which seed 1,389 of `recreated` does, a writer's extent lost.
-test_needs!(recoveries_need_newest_checkpoints, newest_checkpoint, recreated());

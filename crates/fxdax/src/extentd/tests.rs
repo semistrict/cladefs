@@ -2477,9 +2477,8 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
             let volume = extent_remote::cell::Volume { branch: branch.id, kind };
             let volumes = std::collections::BTreeMap::from([(name.to_owned(), volume)]);
             assert_eq!((cell.volumes, cell.deleted), (volumes, false), "{name}");
-            let key = extent_remote::layout::lease(branch);
-            let lease = extent_remote::branch::lease(&*bucket, &key).await.unwrap().unwrap();
-            assert_eq!(lease.token, cell.epoch, "{name}: its lease taken with its cell's epoch");
+            let head = extent_remote::head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
 }
@@ -4888,10 +4887,10 @@ fn a_zygotes_restores_open_its_point_once() {
     let point = dir.path().join("point");
     store.fork_quiescent(&point).unwrap();
     drop(store);
-    // How many writers took the point's branch: its lease's epoch.
+    // How many writers took the point's branch: its head's epoch.
     let bucket = super::stores::remote_bucket().unwrap();
-    let lease = extent_remote::layout::lease(branch_at(&point));
-    let takings = || control(extent_remote::branch::lease_epoch(&*bucket, &lease)).unwrap();
+    let branch = branch_at(&point);
+    let takings = || control(extent_remote::head::epoch(&*bucket, branch)).unwrap();
     let taken = takings();
 
     let restoring: Vec<_> = (0..RESTORES)
@@ -6254,8 +6253,9 @@ fn drains_give_up_past_their_bound() {
 }
 /// TASK-237: an image imported through the daemon (`ImportImage`) keeps what the bucket
 /// acknowledged of it in the host's part cache, as the daemon's other stores do, and the import's
-/// check of the filesystem it made reads it there: no ranged GET of the bucket's but recovery's,
-/// of segments' footers, as the import's store is made and as the daemon opens it after. Its
+/// check of the filesystem it made reads it there: no ranged GET of the bucket's at all, the
+/// recoveries as the import's store is made and as the daemon opens it after reading what the
+/// branch's head names, nothing, then the import's checkpoint, whole (TASK-407). Its
 /// store was an image's, whose uploader and fetcher had no cache: its acknowledged segments were
 /// deleted, and the check read the image back from the bucket, 6,183 ranged GETs here (GCE r970:
 /// 6.8 GB downloaded for 11 GB uploaded).
@@ -6284,9 +6284,9 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     let before = ranged();
     let path = dir.path().join("store");
     control(super::stores::import(path.clone(), 256 << 20, image, None, 0)).unwrap();
-    // A footer as the store's writer takes its branch, made; two as the daemon opens it after, its
-    // recovery and its writer's.
-    assert_eq!(ranged() - before, 3, "ranged GETs of the bucket as the import ran");
+    // Before TASK-407, three: a footer as the store's writer took its branch, made, its fence's;
+    // two as the daemon opened it after, its recovery's and its writer's, past the checkpoint.
+    assert_eq!(ranged() - before, 0, "ranged GETs of the bucket as the import ran");
 }
 
 /// TASK-149.17: a compromised VM process beside other tenants, checked against invariants.

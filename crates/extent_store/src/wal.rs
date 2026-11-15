@@ -64,7 +64,6 @@ use anyhow::{Context as _, Error, ensure};
 use extent_frame::segment::{Branch, Chain, Contents, Footer, epoch_of, writer_of};
 use extent_frame::{KeyId, Salt};
 use extent_keys::{MAC_LEN, SALT_LEN};
-use extent_remote::wal::Fenced;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
@@ -956,11 +955,8 @@ fn closed_again(
     let first = records.first().and_then(last_commit);
     let first = first.context("a log closed again holds a commit")?;
     let mut chain = match last {
-        Some(last) => {
-            let after = Some((last.seq, last.epoch));
-            Chain::new(branch, last.epoch, last.seq + 1, after, last.contents.next_sequence)
-        }
-        None => Chain::new(branch, writer_of(first), 0, None, 0),
+        Some(last) => Chain::new(branch, last.epoch, last.seq + 1, last.contents.next_sequence),
+        None => Chain::new(branch, writer_of(first), 0, 0),
     };
     Ok(chain.close(fold(branch.id, records)))
 }
@@ -980,11 +976,6 @@ fn remove<D: Dir>(dir: &D, path: &str) -> Result<(), Error> {
     }
 }
 
-/// fxdax: what putting the queue after a branch's end found ([`Queue::rebase`]): the numbers of
-/// its segments landed; the chain after the rest, stamped anew; and the first of the rest, by its
-/// number, with its footer as it landed, if it ends the branch's last commit and goes on with the
-/// next.
-pub(crate) type Rebased = (Vec<u64>, Chain, Option<(u64, Footer)>);
 
 /// A segment of the WAL, closed, and not yet acknowledged: its number, its footer, stamped by its
 /// writer's chain, and, if its writer's chain stamped it anew after a takeover, which its framed
@@ -1050,40 +1041,6 @@ impl Queue {
             taken.push(&*queued);
         }
         taken
-    }
-
-    /// Puts the queue after the branch's end, as a writer taking the branch again found it,
-    /// `fenced`, by commits (`extent_remote::Wal::rebase`): returns the numbers of its segments
-    /// that landed, the first, to be acknowledged; the rest are stamped anew, to be taken again,
-    /// and the chain after the last of them, which the open segment's footer goes on from. fxdax:
-    /// and the first of the rest, by its number and its footer before, if it landed, ending the
-    /// branch's last commit, and goes on with the next ([`extent_remote::Rebased::ended`],
-    /// TASK-345). `Diverged` if another writer's commits moved the branch past it.
-    pub fn rebase(&mut self, fenced: &Fenced) -> Result<Rebased, extent_remote::Error> {
-        let queued = self.segments.iter().map(|queued| (queued.footer.clone(), queued.number));
-        let mut wal = extent_remote::Wal::of(self.base, queued);
-        let extent_remote::Rebased { landed, ended } = wal.rebase(fenced)?;
-        let landed = landed.into_iter().map(|(_, number)| number).collect();
-        let first = wal.segments().next().map(|(_, number)| *number);
-        let ended = ended.map(|footer| (first.expect("the segment ending the branch"), footer));
-        let mut chain = fenced.chain;
-        let stamped: BTreeMap<u64, &Footer> =
-            wal.segments().map(|(footer, number)| (*number, footer)).collect();
-        for queued in &mut self.segments {
-            let Some(&footer) = stamped.get(&queued.number) else { continue };
-            chain = chain.admit(footer).expect("a log rebased follows the writer's chain");
-            queued.restamped |= *footer != queued.footer;
-            queued.footer = footer.clone();
-            queued.taken = false;
-        }
-        Ok((landed, chain, ended))
-    }
-
-    /// fxdax: the commits of its first segment, through `base`, landed, though the segment goes
-    /// on with the next commit, stamped again with that alone (TASK-345): the queue goes on from
-    /// them.
-    pub fn landed_ending(&mut self, base: Option<u64>) {
-        self.base = base;
     }
 
     /// The first segment, if any.
@@ -1238,7 +1195,8 @@ mod tests {
         let numbers: Vec<u64> = recovered.segments.iter().map(|(_, number)| *number).collect();
         assert_eq!(numbers, [0, 1]);
         assert_eq!(recovered.segments[0].0, footer);
-        assert_eq!(recovered.segments[1].0.after, Some((footer.seq, footer.epoch)));
+        let second = &recovered.segments[1].0;
+        assert_eq!((second.seq, second.epoch), (footer.seq + 1, footer.epoch));
         assert_eq!(recovered.segments[1].0.contents.commits, [tag(2, 2)]);
     }
 
@@ -1687,7 +1645,6 @@ mod tests {
             branch: BRANCH,
             seq,
             epoch: 2,
-            after: None,
             contents: Contents { commits: vec![tag(2, epoch)], ..Contents::default() },
         };
         let mut queue = Queue::new(Some(tag(1, 4)), []);
@@ -1717,7 +1674,6 @@ mod tests {
             branch: BRANCH,
             seq,
             epoch: 2,
-            after: None,
             contents: Contents {
                 commits: commits.into_iter().map(|epoch| tag(2, epoch)).collect(),
                 continued: continued

@@ -57,6 +57,7 @@ pub mod client;
 pub mod collector;
 pub mod faults;
 pub mod fetch;
+pub mod head;
 pub mod keys;
 pub mod layout;
 pub mod local;
@@ -86,7 +87,7 @@ pub use bytes::Bytes;
 pub use fetch::read;
 pub use layout::Location;
 pub use recovery::{Recovered, State, recover};
-pub use wal::{Fenced, Rebased, Wal};
+pub use wal::{Rebased, Taken, Wal};
 pub use writer::{Body, Objects, Writer};
 
 /// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,
@@ -234,46 +235,31 @@ impl Error {
 /// turning it off, and specs/bucket's TLA+ by its mutation removing it (doc-7, Testing).
 #[derive(Clone, Copy, Debug)]
 pub struct Rules {
-    /// The collector's pins ([`collector::pinned`], TASK-388), the positions a writer of a live
-    /// branch, taken over or taking it over, may still create at, each case a rule that a test
-    /// turns off to show it needed: so that a writer acknowledges what it created, its creates the
-    /// fencing, with no read of its lease, a durable commit one round trip (TASK-371). Every fence
-    /// of the branch, the first segment of each epoch its state applied: a writer taken over finds
-    /// its create failing at its successor's fence for as long as it lives (TASK-371).
-    /// TLA+: `specs/bucket/mutations/NoPinsFences.cfg`.
-    pub pins_fences: bool,
-    /// ...those of every epoch, not only the last: a writer taken over by two finds its create
-    /// failing at the first one's fence.
-    /// TLA+: `specs/bucket/mutations/NoPinsOldFences.cfg`.
-    pub pins_old_fences: bool,
-    /// Every void stray, an earlier writer's segment landed late, following none applied, which a
-    /// writer taken over meets where its next create goes, its successor having fenced past it
-    /// (TASK-383).
-    /// TLA+: `specs/bucket/mutations/NoPinsVoidStrays.cfg`.
-    pub pins_void_strays: bool,
-    /// Every late stray, an earlier epoch's segment following the last applied, as an earlier
-    /// writer's fence made after its successor's does (TASK-383).
-    /// TLA+: `specs/bucket/mutations/NoPinsLateStrays.cfg`.
-    pub pins_late_strays: bool,
-    /// Every segment, while a writer takes the branch over, its lease, read after the listing, of
-    /// an epoch past its state's: the writer taking it over, which may have read the branch before
-    /// the last writer's segment landed there, fences where it found the end, which that segment
-    /// must still hold (TASK-371).
-    /// TLA+: `specs/bucket/mutations/NoPinsTakings.cfg`.
-    pub pins_takings: bool,
-    /// A writer acknowledges a segment holding a fork only once a read of its lease that follows
-    /// the segment's creation shows the lease still its: a deleted branch's fences go, and its
-    /// writer, taken over, would record the child of a fork of segments the collector let go of.
-    /// TLA+: `specs/bucket/mutations/NoForksAfterLease.cfg`.
-    pub forks_after_lease: bool,
-    /// A writer taking a branch over first creates an empty segment of its own at its end.
-    /// TLA+: `specs/bucket/mutations/NoFence.cfg`.
-    pub fence: bool,
-    /// Readers skip a segment that does not follow the last one they applied.
-    /// TLA+: `specs/bucket/mutations/NoContinuity.cfg`.
-    pub continuity: bool,
+    /// A writer acknowledges what it uploaded only by swapping the branch's head to name it, with
+    /// the condition that the head is its own taking still ([`head::swap`]): written whatever is
+    /// there, a writer taken over writes the head over its successor's, whose acknowledged commits
+    /// it then names not (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoHeadSwap.cfg`.
+    pub head_swap: bool,
+    /// A segment's and a checkpoint's key names its writer's epoch ([`layout::segment`],
+    /// [`layout::checkpoint`]): without it, two writers' segments of one number land at one key,
+    /// the later over the earlier, which a head may name (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoEpochKeys.cfg`.
+    pub epoch_keys: bool,
+    /// The collector keeps, of a live branch's objects its head does not name, those of the head's
+    /// epoch it may yet name: segments and extents of their own at or past its end, checkpoints
+    /// newer than its own; it deletes the rest, of epochs no swap of whose can succeed (TASK-407).
+    /// TLA+: `specs/bucket/mutations/NoCollectorEpochs.cfg`.
+    pub collector_epochs: bool,
+    /// The key of the moves a pass of the collector makes names the pass, its cell's collector
+    /// epoch, so that two passes' moves of one object never share a key, and readers find them by
+    /// listing the object's moves: keyed by the object alone, a pass slow to create them, after
+    /// later passes made and deleted them, makes them again at their key, of other bytes
+    /// (TASK-407.1).
+    /// TLA+: `specs/bucket/mutations/NoMovesByPass.cfg`.
+    pub moves_by_pass: bool,
     /// A writer mints extents from its epoch's range of sequence numbers, having checked, after
-    /// recovering the branch, that the lease is still its.
+    /// recovering the branch, that the head is still its taking.
     /// TLA+: `specs/bucket/mutations/NoEpochSequences.cfg`.
     pub epoch_sequences: bool,
     /// A fork's child gets its record once the segment holding the fork is acknowledged.
@@ -283,29 +269,15 @@ pub struct Rules {
     /// The collector lists objects before it reads what branches need.
     /// TLA+: `specs/bucket/mutations/NoCandidatesFirst.cfg`.
     pub candidates_first: bool,
-    /// Readers that find a segment missing check that no checkpoint newer than theirs has come;
-    /// those that found none of a branch's and find what it inherited lost, that none has come
-    /// (TASK-177).
-    /// TLA+: `specs/bucket/mutations/NoNewestCheckpoint.cfg`,
-    /// `specs/bucket/mutations/NoNewestCheckpointInherited.cfg`.
-    pub newest_checkpoint: bool,
     /// The collector finds forks in their parents' states, not only by their records.
     /// TLA+: `specs/bucket/mutations/NoForksFromStates.cfg`.
     pub forks_from_states: bool,
-    /// The collector deletes an extent of an earlier writer only once a later one's segment is in
-    /// the branch, not once its lease is.
-    /// TLA+: `specs/bucket/mutations/NoOrphansAfterSuccessor.cfg`.
-    pub orphans_after_successor: bool,
-    /// A writer takes a branch's lease only with a fencing token as high as the lease's.
+    /// A writer takes a branch's head only with a fencing token as high as the head's.
     /// TLA+: `specs/bucket/mutations/NoTokens.cfg`.
     pub tokens: bool,
-    /// A branch is deleted only with a fencing token as high as its lease's (TASK-45.1).
+    /// A branch is deleted only with a fencing token as high as its head's (TASK-45.1).
     /// TLA+: `specs/bucket/mutations/NoDeleteTokens.cfg`.
     pub delete_tokens: bool,
-    /// Readers read an extent where the footer of the object at its key says it is, not where
-    /// their index does (TASK-79.18).
-    /// TLA+: `specs/bucket/mutations/NoFooters.cfg`.
-    pub footers: bool,
     /// The deletion of a failed fork takes its child's ID with a record, before it ends the child's
     /// lease, though its fork's segment never went (TASK-79.82).
     /// TLA+: `specs/bucket/mutations/NoForkClaimsIds.cfg`.
@@ -337,11 +309,6 @@ pub struct Rules {
     /// create reading back what it finds would take for its own (TASK-79.82, TASK-153.9).
     /// TLA+: `specs/bucket/mutations/NoRecordsOwned.cfg`.
     pub records_owned: bool,
-    /// The collector keeps an extent stored on its own, that no state names, while the segment its
-    /// key names may yet land, not while the branch's next sequence number is below it: extents
-    /// are committed in no order of their sequence numbers (TASK-79.3, TASK-153.7).
-    /// TLA+: `specs/bucket/mutations/NoExtentKeysNameSegments.cfg`.
-    pub extent_keys_name_segments: bool,
     /// The collector keeps every moves on the way to an extent from where it was sealed, not only
     /// from where the branch's state says it is, unless that state's checkpoint is by the writer
     /// holding the branch's lease, read after the checkpoint was: a checkpoint of another writer's,
@@ -362,11 +329,6 @@ pub struct Rules {
     /// Simulation only (`sim::stores_need_to_follow_moves`): specs/bucket models the writer's
     /// state, not a store's names.
     pub stores_follow_moves: bool,
-    /// A writer finds the lease still its by its taking, its holder with its epoch, not by its
-    /// epoch alone: a deleted branch's lease removed and taken again restarts its epochs
-    /// (TASK-179).
-    /// TLA+: `specs/bucket/mutations/NoLeasesByTakings.cfg`.
-    pub leases_by_takings: bool,
     /// A pass of the collector that finds what a live branch needs lost stops, without failing, if
     /// a later pass took the collector's lease from it: what it read before may be older than what
     /// that pass, deleting since, read (TASK-180).
@@ -383,36 +345,11 @@ pub struct Rules {
     /// naming what the collector reclaimed (TASK-174).
     /// TLA+: `specs/bucket/mutations/NoRecordsKept.cfg`.
     pub records_kept: bool,
-    /// A deletion that recovered the branch puts an empty segment of the final epoch at the end it
-    /// found, as a writer taking over puts its fence, applying a segment landed there first and
-    /// fencing after it: every segment landing after follows none of the branch's, so that every
-    /// deletion of it finds the forks this one does, whose children have their records before it
-    /// is marked deleted (TASK-183).
-    /// TLA+: `specs/bucket/mutations/NoDeletionsFence.cfg`.
-    pub deletions_fence: bool,
-    /// A deletion reads the branch's record again once its recovery is fenced, before it gives the
-    /// children of the forks it found their records: deleted since, it is done, as the deletion
-    /// that marked it gave the children of the forks before its own fence theirs. A pass reading
-    /// the branch deleted deletes that fence with what no live branch needs, the extents a writer
-    /// taken over stored on their own ahead of its segments among it: one of those segments, of a
-    /// fork, landing where the fence was, the later deletion would record the fork's child, which
-    /// names what the pass deleted (TASK-380).
-    /// TLA+: `specs/bucket/mutations/NoDeletionsReread.cfg`.
-    pub deletions_reread: bool,
     /// A host's write-ahead log is put after the branch's end only if the branch's last commit is
     /// one of the log's or the one it started from: otherwise another writer's commits came after
     /// what the log holds, and it diverged (doc-14, Opening a store).
     /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
     pub wal_follows: bool,
-    /// That last commit is the branch's after the writer's fence, which applied what landed at the
-    /// end since recovery found it, the log's own segments among them, not as recovery found it.
-    /// TLA+: `specs/bucket/mutations/NoWalAfterFence.cfg`.
-    pub wal_after_fence: bool,
-    /// fxdax: that last commit may be the last of a segment of the log's going on with the next
-    /// commit, landed alone: the log keeps it, stamped again with its continuation alone, rather
-    /// than diverging, though no other writer moved the branch on (`Wal::rebase`, TASK-345).
-    /// TLA+: `specs/bucket/mutations/NoWalContinues.cfg`.
-    pub wal_continues: bool,
     /// fxdax: a fork of a branch to a child in another cell, a writable fork or a point's clone,
     /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
     /// keep the parent's state at the fork point: a pass lists nothing of the child's cell, and,
@@ -472,23 +409,16 @@ pub struct Rules {
 
 impl Rules {
     pub const ALL: Self = Self {
-        pins_fences: true,
-        pins_old_fences: true,
-        pins_void_strays: true,
-        pins_late_strays: true,
-        pins_takings: true,
-        forks_after_lease: true,
-        fence: true,
-        continuity: true,
+        head_swap: true,
+        epoch_keys: true,
+        collector_epochs: true,
+        moves_by_pass: true,
         epoch_sequences: true,
         records_after_ack: true,
         candidates_first: true,
-        newest_checkpoint: true,
         forks_from_states: true,
-        orphans_after_successor: true,
         tokens: true,
         delete_tokens: true,
-        footers: true,
         fork_claims_ids: true,
         fork_claims_landed: true,
         points_take_no_writer: true,
@@ -497,19 +427,13 @@ impl Rules {
         collector_abandons: true,
         records_relisted: true,
         records_owned: true,
-        extent_keys_name_segments: true,
         ways_from_seals: true,
         moves_taken_first: true,
         stores_follow_moves: true,
-        leases_by_takings: true,
         passes_fenced_stop: true,
         recoveries_by_origins: true,
         records_kept: true,
-        deletions_fence: true,
-        deletions_reread: true,
         wal_follows: true,
-        wal_after_fence: true,
-        wal_continues: true,
         references: true,
         references_first: true,
         clones_refer_first: true,

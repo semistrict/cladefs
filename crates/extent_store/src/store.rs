@@ -40,7 +40,7 @@ use extent_remote::cache::Cache;
 use extent_remote::keys::Ring;
 use extent_remote::recovery::{Places, Seal};
 use extent_remote::trace;
-use extent_remote::wal::{Fenced, Rebased, Wal};
+use extent_remote::wal::{Rebased, Wal};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -495,15 +495,18 @@ impl<D: Dir> Framer<D> {
     /// its segment fills, as [`Framer::see_here`] does (TASK-400).
     fn see<'a>(
         &'a self,
-        state: Locked<'a, D::File>,
+        mut state: Locked<'a, D::File>,
         number: SegmentId,
         part: u64,
     ) -> Locked<'a, D::File> {
         let Some((raw, look)) = Self::to_see(&state, number) else { return state };
+        state.framing.looking = true;
         drop(state);
         let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
+        state.framing.looking = false;
+        self.idle.notify_all();
         state
     }
 
@@ -718,8 +721,8 @@ pub(crate) const UNMADE: &str = "unmade";
 pub struct Unmade;
 
 /// fxdax: what the bucket holds of the branch a store opens (doc-14, Opening a store;
-/// TASK-165.9): its state, as recovery found it once its writer held its lease and fenced it,
-/// where the writer found its end ([`Fenced`]), which the store's write-ahead log is put after,
+/// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
+/// found taking it ([`extent_remote::Taken`]), the head, which the store's write-ahead log is put after,
 /// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
 /// one, which what the bucket acknowledged of the store's goes into. fxdax: and the store's keys,
@@ -730,7 +733,7 @@ pub struct Unmade;
 /// one of the store's own, which nothing makes let go. A sealed store holds none (TASK-411.5).
 pub struct Opening {
     pub state: extent_remote::State,
-    pub fenced: Option<Fenced>,
+    pub taken: Option<extent_remote::Taken>,
     pub cache: Option<Arc<Cache>>,
     pub keys: Arc<Ring>,
     pub held: Option<Arc<HeldParts>>,
@@ -742,10 +745,10 @@ impl Opening {
     /// follows only if it never had anything acknowledged ([`extent_remote::Error::Diverged`]):
     /// a store of the store's own tests, of a bucket it never reaches.
     pub fn new(branch: Branch) -> Self {
-        let chain = Chain::new(branch, 0, 0, None, 0);
-        let fenced = Fenced { recovered: None, last_commit: None, chain };
+        let chain = Chain::new(branch, 0, 0, 0);
         let state = extent_remote::State::new(branch);
-        Self { state, fenced: Some(fenced), cache: None, keys: Ring::clear(), held: None }
+        let taken = extent_remote::Taken::of(Default::default(), &state, chain);
+        Self { state, taken: Some(taken), cache: None, keys: Ring::clear(), held: None }
     }
 }
 
@@ -806,12 +809,12 @@ impl<D: Dir> Recovering<D> {
         self.wal.segments.is_empty()
     }
 
-    /// Whether its write-ahead log follows the branch whose end a writer found as `fenced` says:
+    /// Whether its write-ahead log follows the branch whose end a writer found as `taken` says:
     /// unless the branch moved on from it ([`extent_remote::Error::Diverged`]). What a store asks
-    /// of the branch as recovery found it before taking its lease, so that a store plainly stale
+    /// of the branch as recovery found it before taking its head, so that a store plainly stale
     /// fences no writer.
-    pub fn follows(&self, fenced: &Fenced) -> bool {
-        self.wal().rebase(fenced).is_ok()
+    pub fn follows(&self, taken: &extent_remote::Taken) -> bool {
+        self.wal().rebase(taken).is_ok()
     }
 
     /// Drops its write-ahead log, the commits it holds never acknowledged lost: what `fxdaxctl
@@ -859,7 +862,7 @@ impl<D: Dir> Recovering<D> {
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
-        let Opening { state, fenced, cache, keys, held } = opening;
+        let Opening { state, taken: found, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
         // before them is (TASK-411.9).
@@ -887,12 +890,12 @@ impl<D: Dir> Recovering<D> {
             recovered.segments.iter().map(|(footer, number)| (*number, footer.clone())).collect();
         let mut wal = Wal::of(recovered.base, recovered.segments);
         let mut base_file = recovered.base_file;
-        let (Rebased { landed, ended }, chain) = match &fenced {
-            Some(fenced) => {
-                let rebased = wal.rebase(fenced)?;
+        let (Rebased { landed }, chain) = match &found {
+            Some(found) => {
+                let rebased = wal.rebase(found)?;
                 base_file.write(&*dir, wal.base())?;
                 // Its footers from now on follow those stamped anew.
-                let mut chain = fenced.chain;
+                let mut chain = found.chain;
                 for (footer, _) in wal.segments() {
                     chain = chain.admit(footer).expect("a log rebased follows the writer's chain");
                 }
@@ -900,21 +903,16 @@ impl<D: Dir> Recovering<D> {
             }
             None => {
                 ensure!(wal.is_empty(), "the store of point {branch} holds commits of its own");
-                (Rebased { landed: Vec::new(), ended: None }, Chain::new(branch, 0, 0, None, 0))
+                (Rebased { landed: Vec::new() }, Chain::new(branch, 0, 0, 0))
             }
         };
-        // What landed is the bucket's: into the host's cache, as an acknowledgement's files go.
-        // fxdax: and the files of the extents stored on their own of the commits a segment ending
-        // the branch ends, which goes on, stamped again with what it goes on with alone; the
-        // extents sealed in it, those commits', the bucket's state holds there (TASK-345).
+        // What the head names is the bucket's: into the host's cache, as an acknowledgement's
+        // files go.
         let mut leaving = Vec::new();
         for (footer, number) in landed {
             let segment = SegmentId { branch: branch.id, number };
-            let key = extent_remote::layout::segment(branch, footer.seq);
+            let key = extent_remote::layout::segment(branch, footer.seq, footer.epoch);
             leaving.push((segment_path(segment), Some(key)));
-            leaving.extend(footer.own().map(|(extent, at)| (extent_path(extent), Some(at.key))));
-        }
-        if let Some(footer) = &ended {
             leaving.extend(footer.own().map(|(extent, at)| (extent_path(extent), Some(at.key))));
         }
         leave(&*dir, cache.as_deref(), leaving);
@@ -928,7 +926,7 @@ impl<D: Dir> Recovering<D> {
         });
         let mut named_own = BTreeSet::new();
         for (footer, number) in wal.segments() {
-            let key = extent_remote::layout::segment(branch, footer.seq);
+            let key = extent_remote::layout::segment(branch, footer.seq, footer.epoch);
             replay.extents.segments.insert(key, SegmentId { branch: branch.id, number: *number });
             replay.apply_contents(footer.seq, footer.epoch, &footer.contents);
             named_own.extend(footer.own().map(|(extent, _)| extent));
@@ -937,7 +935,7 @@ impl<D: Dir> Recovering<D> {
         ensure!(replay.begun.is_none(), "branch {branch}'s log ends inside a commit");
         let head = wal.head().or(replay.last_commit);
         let epoch = head.map_or(0, epoch_of);
-        let restate = replay.capacity.is_none() && fenced.is_some();
+        let restate = replay.capacity.is_none() && found.is_some();
         let capacity = replay.capacity.unwrap_or(capacity);
         let extent_remote::State { extents: Local { extents, .. }, root, spent, .. } = replay;
         // Past every extent of its own the branch holds: fxfs looks for what a crash left below
@@ -1040,7 +1038,7 @@ impl<D: Dir> Recovering<D> {
                     ),
                     unreferenced: Unreferenced::default(),
                     wal: Queue::new(wal.base(), queued),
-                    point: fenced.is_none(),
+                    point: found.is_none(),
                     kept: KeptExtents::default(),
                     sealed: Sealed::default(),
                     standing: Standing::Open,
@@ -2559,6 +2557,19 @@ impl<D: Dir> Store<D> {
         }
     }
 
+    /// fxdax: waits, holding no lock, until no look ahead at a part written whole is queued or
+    /// reading it ([`Store::see_ahead`]): the framer reads each, as its segment fills, beside what
+    /// wrote it and after, whatever comes next (TASK-400). What measures the directory's I/O across
+    /// an operation, as a test does, counts the operation's alone then, for none is queued but by
+    /// writes (TASK-423). Packing a part looked at ahead, on the threads packing ahead, reads no
+    /// file, and may run on.
+    pub fn wait_looked_ahead(&self) {
+        let mut state = self.lock();
+        while state.framing.looks_ahead() {
+            state = state.wait(&self.idle);
+        }
+    }
+
     /// fxdax: `state`, once no segment is being framed ([`Store::frame_behind`]), which it let go
     /// of meanwhile.
     fn framed<'a>(&self, mut state: Locked<'a, D::File>) -> Locked<'a, D::File> {
@@ -2601,60 +2612,6 @@ impl<D: Dir> Store<D> {
             closed.push(Closed { number, footer, file, own, restamped, keys });
         }
         Ok(closed)
-    }
-
-    /// fxdax: puts the write-ahead log after the branch's end as a writer taking it again found
-    /// it, `fenced` (doc-7, Fencing; TASK-204): the segments of it that landed are acknowledged,
-    /// the rest stamped anew in memory, for the writer to take again, and the open segment's footer
-    /// goes on from them. As opening the store does, live: what the guest committed stays the
-    /// store's. Fails `Diverged` if another writer's commits moved the branch past the log.
-    pub fn rebase(&self, fenced: &Fenced) -> Result<(), Error> {
-        let (landed, ended) = {
-            let mut state = self.state()?;
-            let (landed, chain, ended) = state.wal.rebase(fenced)?;
-            state.segments.set_chain(chain);
-            (landed, ended)
-        };
-        for number in landed {
-            self.acknowledged(number)?;
-        }
-        if let Some((number, footer)) = ended {
-            self.landed_ending(number, &footer)?;
-        }
-        Ok(())
-    }
-
-    /// fxdax: the commits segment `number`, the first of the write-ahead log, ends landed in the
-    /// bucket, as `footer`, its footer as it landed, names them, though it goes on with the next
-    /// commit, stamped again with that alone (`extent_remote::Wal::rebase`, TASK-345): as
-    /// [`Store::acknowledged`] does of a segment's commits, the log's base, the last of them, is
-    /// durable first; then their extents are read in the bucket, in the object that landed, their
-    /// own files leaving for the host's cache, and their frees are the bucket's. The segment stays
-    /// the log's first, its file with it. Its extents read where it was stamped again instead,
-    /// once acknowledged, would be read in an object whose data the branch holds no more of but
-    /// what it goes on with, which the collector may compact away.
-    fn landed_ending(&self, number: u64, footer: &Footer) -> Result<(), Error> {
-        let mut base = self.base.with(Mutex::lock);
-        let last = footer.contents.commits.last().copied();
-        if let Err(err) = base.write(&*self.dir, last) {
-            let err = err.context("recording an acknowledgement");
-            self.lock().fail(&err);
-            return Err(err);
-        }
-        let leaving = {
-            let mut state = self.state()?;
-            let state = &mut *state;
-            state.wal.landed_ending(last);
-            state.release_kept(last.map_or(0, epoch_of));
-            state.trim_kept(&self.views.keeping(), state.epoch);
-            let key = extent_remote::layout::segment(self.branch, footer.seq);
-            let extents: Vec<ExtentId> = footer.contents.extents.iter().map(|run| run.0).collect();
-            let own: Vec<_> = footer.own().collect();
-            let segment = SegmentId { branch: self.branch.id, number };
-            state.landed_ending(segment, &key, &extents, &own)
-        };
-        leave(&*self.dir, self.cache.as_deref(), leaving);
-        Ok(())
     }
 
     /// fxdax: the extents `moved` says the collector moved, from where to where, as the uploader's
@@ -2711,7 +2668,7 @@ impl<D: Dir> Store<D> {
             let mut leaving = Vec::new();
             for queued in whole {
                 let footer = &queued.footer;
-                let key = extent_remote::layout::segment(self.branch, footer.seq);
+                let key = extent_remote::layout::segment(self.branch, footer.seq, footer.epoch);
                 let own: Vec<_> = footer.own().collect();
                 let segment = SegmentId { branch: self.branch.id, number: queued.number };
                 leaving.extend(state.acknowledge(segment, (&key, !queued.restamped), &own));

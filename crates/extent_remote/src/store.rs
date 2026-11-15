@@ -1102,7 +1102,7 @@ pub(crate) mod tests {
         let start = tokio::time::Instant::now();
         let creates: Vec<_> = (0..48)
             .map(|seq| {
-                let (store, key) = (store.clone(), layout::segment(test_branch(1), seq));
+                let (store, key) = (store.clone(), layout::segment(test_branch(1), seq, 1));
                 tokio::spawn(async move {
                     let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
                     assert!(matches!(created, crate::bucket::Created::Created), "{key}");
@@ -1146,7 +1146,7 @@ pub(crate) mod tests {
         let objects = Arc::new(object_store::memory::InMemory::new());
         let store = Arc::new(Store::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
-        let key = layout::segment(test_branch(1), 0);
+        let key = layout::segment(test_branch(1), 0, 1);
         let creating = tokio::spawn({
             let (store, key) = (store.clone(), key.clone());
             async move { crate::bucket::create(&*store, &key, vec![1, 2, 3]).await }
@@ -1275,13 +1275,13 @@ pub(crate) mod tests {
         let log = crate::marks::captured();
         let objects: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let (old, marked) =
-            (layout::checkpoint(test_branch(1), 3), layout::checkpoint(test_branch(1), 4));
+            (layout::checkpoint(test_branch(1), 3, 1), layout::checkpoint(test_branch(1), 4, 1));
         let other = Cell { tenant: 1, id: 2 };
-        let theirs = layout::checkpoint(Branch { cell: other, id: 2 }, 1);
+        let theirs = layout::checkpoint(Branch { cell: other, id: 2 }, 1, 1);
         let warned = || -> Vec<String> { log.lock().unwrap().clone() };
         futures::executor::block_on(async {
             let writer = Store::new(objects.clone(), "p");
-            for key in [&old, &marked, &layout::checkpoint(test_branch(1), 5), &theirs] {
+            for key in [&old, &marked, &layout::checkpoint(test_branch(1), 5, 1), &theirs] {
                 writer.put(key, vec![1, 2].into(), PutMode::Create).await.unwrap();
             }
             let unmarked = Store::new(objects.clone(), "p");
@@ -1317,7 +1317,7 @@ pub(crate) mod tests {
 
             let reader = Store::new(objects.clone(), "p");
             // Its first read reads the marks, alongside: what it reads after, it warns of.
-            reader.head(&layout::checkpoint(test_branch(1), 5)).await.unwrap();
+            reader.head(&layout::checkpoint(test_branch(1), 5, 1)).await.unwrap();
             assert_eq!(reader.stats().requests(Request::List), 0);
             assert_eq!(reader.stats().requests(Request::Head), 1);
             reader.get(&old).await.unwrap();
@@ -1341,10 +1341,10 @@ pub(crate) mod tests {
             )
         };
         let ours =
-            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, seq: 4 }";
+            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, seq: 4, epoch: 1 }";
         let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
         let other =
-            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, seq: 1 }";
+            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, seq: 1, epoch: 1 }";
         let theirs = reached("get", &theirs, layout::marks(Cell { tenant: 1, id: 2 }, 3), other, 3);
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
@@ -1355,34 +1355,34 @@ pub(crate) mod tests {
     fn counts_requests_and_bytes() {
         let store = memory();
         futures::executor::block_on(async {
-            let segment = layout::segment(test_branch(1), 0);
+            let segment = layout::segment(test_branch(1), 0, 1);
             let version = store.put(&segment, vec![1; 100].into(), PutMode::Create).await.unwrap();
             assert!(store.put(&segment, vec![2; 7].into(), PutMode::Create).await.is_err());
             store.put(&segment, vec![3; 50].into(), PutMode::Update(version)).await.unwrap();
             store
-                .put(&layout::checkpoint(test_branch(1), 0), vec![4; 30].into(), PutMode::Create)
+                .put(&layout::checkpoint(test_branch(1), 0, 1), vec![4; 30].into(), PutMode::Create)
                 .await
                 .unwrap();
             store
-                .put(&layout::lease(test_branch(1)), vec![5; 9].into(), PutMode::Overwrite)
+                .put(&layout::head(test_branch(1)), vec![5; 9].into(), PutMode::Overwrite)
                 .await
                 .unwrap();
             let extent =
                 layout::extent(layout::TEST_CELL, 1, 0, storage_device::ExtentId::new(1, 5));
             store.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
             store
-                .put(&layout::moves(&segment).unwrap(), vec![7; 13].into(), PutMode::Create)
+                .put(&layout::moves(&segment, 1).unwrap(), vec![7; 13].into(), PutMode::Create)
                 .await
                 .unwrap();
             assert_eq!(store.get(&segment).await.unwrap().bytes.len(), 50);
             let range = ByteRange::Bounded(10..30);
             assert_eq!(store.get_range(&segment, range).await.unwrap().len(), 20);
-            assert!(store.get(&layout::segment(test_branch(1), 9)).await.is_err());
+            assert!(store.get(&layout::segment(test_branch(1), 9, 1)).await.is_err());
             store.head(&segment).await.unwrap();
             store.list("segments/").await.unwrap();
             store.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
             store.delete(&segment).await.unwrap();
-            store.delete_batch(&[&extent, &layout::moves(&segment).unwrap()]).await.unwrap();
+            store.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
         });
         let stats = store.stats();
         let requests: Vec<_> =
@@ -1535,7 +1535,8 @@ pub(crate) mod tests {
 
     /// TASK-92.55: recoveries through a host's bucket decode a checkpoint once: the forks of a
     /// base opened one after another start from its newest checkpoint, the second reading it not
-    /// again, and the same state; one written at the key again is read anew.
+    /// again, but the head, and the same state: kept by its key, which names one object, ever
+    /// (TASK-407).
     #[test]
     fn recoveries_share_the_checkpoints_they_decode() {
         let bucket = memory();
@@ -1556,17 +1557,9 @@ pub(crate) mod tests {
                 states.push(recovery::recover(&*bucket, test_branch(1), None).await.unwrap().state);
                 read.push(gets() - before);
             }
-            assert_eq!(read, [1, 0], "the checkpoint's GETs, by recovery");
+            assert_eq!(read, [2, 1], "the head's and the checkpoint's GETs, by recovery");
             assert_eq!(states[0], states[1]);
             assert_eq!(states[0].extents.keys().copied().collect::<Vec<_>>(), [extent]);
-            // Written again, it is another object.
-            let key = crate::layout::checkpoint(test_branch(1), seq);
-            let bytes = bucket.get(&key).await.unwrap().bytes;
-            bucket.delete(&key).await.unwrap();
-            bucket.put(&key, bytes.into(), PutMode::Create).await.unwrap();
-            let before = gets();
-            recovery::recover(&*bucket, test_branch(1), None).await.unwrap();
-            assert_eq!(gets() - before, 1, "a checkpoint written again is read");
         });
     }
 
@@ -1603,7 +1596,7 @@ pub(crate) mod tests {
         first.acknowledge().await.unwrap();
         assert_eq!(first.checkpoint().await, Ok(Some(seq)));
         // Looked up a block at a time, by ranged reads, by a host's fetcher.
-        let checkpoint = crate::layout::checkpoint(test_branch(root), seq);
+        let checkpoint = crate::layout::checkpoint(test_branch(root), seq, 1);
         let tail = crate::object::tail(&*bucket, &checkpoint).await.unwrap().unwrap();
         let table = crate::checkpoint::Table::decode(tail.footer()).unwrap();
         assert_eq!(table.state().last_commit, Some(2));

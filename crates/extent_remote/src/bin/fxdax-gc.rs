@@ -1002,17 +1002,18 @@ mod tests {
     fn dry_runs_list_what_goes_and_say_it_is_less() {
         let meta = |key: String, size| Meta { key, version: Version::default(), size, modified: 0 };
         let doomed =
-            vec![meta(layout::segment(branch(1), 2), 100), meta(layout::lease(branch(3)), 20)];
-        let compactable = vec![meta(layout::segment(branch(1), 4), 7)];
+            vec![meta(layout::segment(branch(1), 2, 1), 100), meta(layout::checkpoint(branch(3), 1, 1), 20)];
+        let compactable = vec![meta(layout::segment(branch(1), 4, 1), 7)];
         let parent = layout::Branch { cell: layout::Cell { tenant: 1, id: 9 }, id: 4 };
         let retired = vec![layout::reference(parent, 5, branch(6))];
         let (listed, summary) = dry_run(&DryRun { doomed, compactable, retired, fenced: false });
         let at = "tenants/0000000000000001/cells/0000000000000002/";
         let parents = "tenants/0000000000000001/cells/0000000000000009/";
         let expected = format!(
-            "{at}segments/0000000000000001/0000000000000002 segment 100 delete\n\
-             {at}leases/0000000000000003 lease 20 delete\n\
-             {at}segments/0000000000000001/0000000000000004 segment 7 compact\n\
+            "{at}segments/0000000000000001/0000000000000001.0000000000000002 segment 100 delete\n\
+             {at}checkpoints/0000000000000003/0000000000000001.0000000000000001 checkpoint 20 \
+             delete\n\
+             {at}segments/0000000000000001/0000000000000001.0000000000000004 segment 7 compact\n\
              {parents}refs/0000000000000004/0000000000000005/\
              0000000000000001.0000000000000002.0000000000000006 reference - retire\n"
         );

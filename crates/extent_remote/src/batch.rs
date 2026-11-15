@@ -322,7 +322,7 @@ mod tests {
     #[test]
     fn writers_mint_past_what_their_commits_seal() {
         let first = 5 << crate::EPOCH_SHIFT;
-        let mut chain = Chain::new(test_branch(1), 5, 1, Some((0, 5)), first);
+        let mut chain = Chain::new(test_branch(1), 5, 1, first);
         let extents = vec![(ExtentId::new(1, first + 3), b"in".to_vec())];
         assert_eq!(
             next_sequence(Commit { tag: 1, extents, ..Commit::default() }, &mut chain),
@@ -348,7 +348,7 @@ mod tests {
     /// a fork is at its end.
     #[test]
     fn batches_frame_their_commits() {
-        let mut chain = Chain::new(test_branch(1), 2, 0, None, 0);
+        let mut chain = Chain::new(test_branch(1), 2, 0, 0);
         let (small, large, freed) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 1));
         let mut batch = Batch::default();
         assert!(batch.is_empty());
@@ -365,7 +365,7 @@ mod tests {
         let segment = objects.segment.read().unwrap();
         let footer: Footer = layout::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
-        assert_eq!((footer.seq, footer.epoch, footer.after), (0, 2, None));
+        assert_eq!((footer.seq, footer.epoch), (0, 2));
         assert_eq!(footer.contents.commits, [7, 8, 9]);
         assert_eq!(footer.contents.extents, [(small, 0, 5)]);
         let key = layout::extent(layout::TEST_CELL, 2, footer.seq, large);
@@ -384,7 +384,7 @@ mod tests {
         };
         let own = own.read().unwrap();
         assert_eq!((own_key, layout::data(&own).unwrap()), (&key, b"large".to_vec()));
-        assert_eq!((chain.next_seq(), chain.after()), (1, Some((0, 2))));
+        assert_eq!(chain.next_seq(), 1);
     }
 
     /// TASK-165.3: as a store's segment's footer does, a batch's seals what its commits sealed that
@@ -394,7 +394,7 @@ mod tests {
     /// is freed as it is.
     #[test]
     fn batches_free_what_a_commit_before_held() {
-        let mut chain = Chain::new(test_branch(1), 2, 0, None, 0);
+        let mut chain = Chain::new(test_branch(1), 2, 0, 0);
         let (small, large, other) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 5));
         let (written, inherited, kept) =
             (ExtentId::new(1, 6), ExtentId::new(9, 4), ExtentId::new(1, 7));
@@ -438,7 +438,7 @@ mod tests {
             root: root.clone(),
             capacity: Some(1 << 20),
         };
-        let chain = Chain::new(test_branch(1), 2, 0, None, 0);
+        let chain = Chain::new(test_branch(1), 2, 0, 0);
         let batch = Batch::from(commit).close(&mut chain.clone()).frame();
         let mut plan = Plan::default();
         for (extent, own) in [(small, false), (other, false), (large, true)] {

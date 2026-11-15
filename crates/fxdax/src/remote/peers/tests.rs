@@ -36,10 +36,10 @@ pub(crate) fn noise(len: u64) -> Vec<u8> {
 /// A bucket holding a segment of `data`, all of which is [`EXTENT`]: where it is.
 pub(crate) fn holding(data: &[u8]) -> (Arc<Bucket>, Location) {
     let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
-    let key = layout::segment(test_branch(1), 1);
+    let key = layout::segment(test_branch(1), 1, 1);
     let contents =
         Contents { extents: vec![(EXTENT, 0, data.len() as u64)], ..Contents::default() };
-    let footer = layout::Chain::new(test_branch(1), 1, 0, None, 0).close(contents);
+    let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
     let object = layout::Segment { data: data.to_vec(), footer }.encode();
     futures::executor::block_on(bucket.put(&key, object.into(), PutMode::Create)).unwrap();
     (bucket, Location { key, offset: 0, len: data.len() as u64 })
@@ -208,7 +208,7 @@ fn a_peer_without_the_part_stays_up() {
 /// share, from the others, and no part moves among those that stay.
 #[test]
 fn ownership_moves_only_with_the_hosts_added() {
-    let key = layout::segment(test_branch(1), 1);
+    let key = layout::segment(test_branch(1), 1, 1);
     let three = ["10.0.0.1:7070", "10.0.0.2:7070", "10.0.0.3:7070"];
     let four = ["10.0.0.4:7070", "10.0.0.3:7070", "10.0.0.2:7070", "10.0.0.1:7070"];
     let mut moved = 0;
@@ -260,12 +260,12 @@ fn peers_set_again_stay_as_they_were() {
 fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {
     let me = "10.0.0.1:7070";
     let peers = Peers::new(me, |_: &str| -> Arc<dyn Link> { panic!("no link made") });
-    let segment = layout::segment(test_branch(1), 1);
+    let segment = layout::segment(test_branch(1), 1, 1);
     assert!(peers.owner(&segment, 0).is_none(), "asked with no peers");
     peers.set([me]);
     assert!(peers.owner(&segment, 0).is_none(), "asked itself");
     assert_eq!(peers.addresses(), [me]);
-    for key in [layout::record(test_branch(1)), layout::lease(test_branch(1))] {
+    for key in [layout::record(test_branch(1)), layout::head(test_branch(1))] {
         assert!(!extent_remote::peer::served(&key), "{key} served");
     }
     assert!(extent_remote::peer::served(&segment));

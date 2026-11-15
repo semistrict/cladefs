@@ -231,12 +231,10 @@ pub(crate) struct Segments<F> {
     forking: Vec<Child>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
-    /// fxdax: the chain of the footers' writer, the writer of the branch in object storage, if an
-    /// uploader gave one ([`Segments::set_chain`]), which stamps each footer with its place: its
-    /// number, the footer it follows, its writer's lease epoch and its floor of the branch's next
-    /// sequence number. Without, the footers are of epoch 0, numbered on from the segment open as
-    /// the branch was opened, one for each segment closed; each following the last closed since
-    /// the branch was opened.
+    /// fxdax: the chain of the footers' writer, the writer of the branch in object storage, as the
+    /// store opened, which stamps each footer with its place: its number, its writer's lease epoch
+    /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
+    /// numbered on from the segment open as the branch was opened, one for each segment closed.
     chain: Chain,
     /// The closed segments' framed files kept open.
     files: Files<SegmentId, F>,
@@ -618,13 +616,6 @@ impl<F: File> Segments<F> {
             unreachable!("the open segment is open")
         };
         log.clone()
-    }
-
-    /// fxdax: has the footers of the segments closed from now on stamped by `chain`, the chain of
-    /// a writer that took the branch again, after the write-ahead log's last segment stamped anew
-    /// (`Store::rebase`, TASK-204).
-    pub fn set_chain(&mut self, chain: Chain) {
-        self.chain = chain;
     }
 
     /// fxdax: the log of segment `number`'s commits, open or closed since, which a flush appends
@@ -2078,7 +2069,7 @@ mod tests {
     /// The segments of a branch with none closed, `open_files` of whose files stay open.
     fn opened(dir: &MemDir, open_files: usize) -> Segments<MemFile> {
         create_branch_dirs(dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 0, 0, None, 0);
+        let chain = Chain::new(BRANCH, 0, 0, 0);
         Segments::open(
             dir,
             (BRANCH.id, BTreeMap::new()),
@@ -2301,7 +2292,7 @@ mod tests {
     fn sealed_segments_parts_are_neither_seen_nor_held_ahead() {
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 0, 0, None, 0);
+        let chain = Chain::new(BRANCH, 0, 0, 0);
         let dek = extent_frame::Secret::from_bytes(&[3; 32]);
         let keys = Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
         let tracked = (BRANCH.id, BTreeMap::new());
@@ -2345,23 +2336,17 @@ mod tests {
         use extent_frame::segment::tag;
         let dir = MemDir::new();
         create_branch_dirs(&dir, BRANCH.id).unwrap();
-        let chain = Chain::new(BRANCH, 3, 5, Some((4, 3)), 100);
+        let chain = Chain::new(BRANCH, 3, 5, 100);
         let segments =
             Segments::open(&dir, (BRANCH.id, BTreeMap::new()), (0, 2, chain), (64, Ring::clear()));
         let mut segments = segments.unwrap();
         assert_eq!(segments.open_segment(), segment(2));
         let close = |segments: &mut Segments<MemFile>, epoch| {
             let footer = segments.close(&dir, epoch, 7).unwrap().footer;
-            (
-                footer.seq,
-                footer.epoch,
-                footer.after,
-                footer.contents.commits,
-                footer.contents.next_sequence,
-            )
+            (footer.seq, footer.epoch, footer.contents.commits, footer.contents.next_sequence)
         };
-        assert_eq!(close(&mut segments, 3), (5, 3, Some((4, 3)), vec![tag(3, 3)], 100));
-        assert_eq!(close(&mut segments, 4), (6, 3, Some((5, 3)), vec![tag(3, 4)], 100));
+        assert_eq!(close(&mut segments, 3), (5, 3, vec![tag(3, 3)], 100));
+        assert_eq!(close(&mut segments, 4), (6, 3, vec![tag(3, 4)], 100));
         assert_eq!(segments.open_segment(), segment(4));
     }
 

@@ -481,7 +481,7 @@ mod tests {
         let keys = [
             layout::cell(cells[2]),
             layout::record(branch(cells[0], 4)),
-            layout::segment(branch(cells[0], 4), 0),
+            layout::segment(branch(cells[0], 4), 0, 1),
             layout::gc_lease(cells[1]),
             layout::objectid_block(1),
         ];
@@ -668,7 +668,7 @@ mod tests {
     /// (TASK-395.2).
     #[test]
     fn cells_of_other_formats_are_refused() {
-        for format in [FORMAT + 1, 8, 9] {
+        for format in [FORMAT + 1, 8, 9, 10] {
             let bucket = Direct(SimBucket::new());
             let object = Object {
                 format,

@@ -112,7 +112,8 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(sealed, "fxdax.extents"), Some(Value::I64(1)));
 
     // The commit's segment, created, the commit's small extents in it; then the branch's
-    // checkpoint, which follows its forks' moves.
+    // checkpoint, which follows its forks' moves, created, then named by a swap of the branch's
+    // head (TASK-407).
     let upload = the(&spans, "upload.segment");
     assert_eq!(attribute(upload, "fxdax.branch"), Some(hex.clone()));
     assert_eq!(attribute(upload, "fxdax.extents"), Some(Value::I64(0)));
@@ -121,7 +122,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(checkpoint, "fxdax.branch"), Some(hex));
     assert_eq!(
         children(&spans, checkpoint),
-        ["bucket.create", "bucket.list"].map(str::to_owned).into()
+        ["bucket.create", "bucket.list", "bucket.update"].map(str::to_owned).into()
     );
 }
 

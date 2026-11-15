@@ -4,11 +4,12 @@
 # found in the LICENSE file.
 
 # Runs cargo in Firecracker as fxdax builds it: vendor/firecracker, whose `fxdax` feature builds
-# the extent device against fxdax's crate, which the series names nowhere, so that it builds
+# the extent device against fxdax's crates (crates/fxdax, and crates/virtio_extent, the device
+# itself, which the fork adapts), which the series names nowhere, so that it builds
 # outside this checkout as upstream's does (TASK-269, its resources/fxdax/README.md). fxdax's build
 # supplies the rest, in a copy of the tree, target/firecracker, which this keeps and builds in:
 #
-# - fxdax's crate, a dependency appended to the copy's src/vmm/Cargo.toml;
+# - fxdax's crates, dependencies appended to the copy's src/vmm/Cargo.toml;
 # - fxdax's lock, vendor/firecracker.lock, the copy's Cargo.lock: the series' own has none of
 #   fxdax's dependencies. Cargo must find it as it is (as --locked does), unless
 #   FXDAX_FIRECRACKER_UNLOCKED is set;
@@ -56,8 +57,9 @@ manifest=$(mktemp)
 trap 'rm -f "$manifest"' EXIT
 {
     cat "$src/src/vmm/Cargo.toml"
-    printf '\n# fxdax: its crate, which the fxdax feature builds against (scripts/firecracker-cargo.sh).\n'
+    printf '\n# fxdax: its crates, which the fxdax feature builds against (scripts/firecracker-cargo.sh).\n'
     printf '[dependencies.fxdax]\npath = "%s"\n' "$root/crates/fxdax"
+    printf '[dependencies.virtio_extent]\npath = "%s"\n' "$root/crates/virtio_extent"
 } > "$manifest"
 put "$manifest" "$tree/src/vmm/Cargo.toml"
 put "$lock" "$tree/Cargo.lock"
