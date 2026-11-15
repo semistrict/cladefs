@@ -16,8 +16,9 @@
 #   loom-mutants.sh [--check] [NAME...]
 #
 # Each mutant's log is kept in $CLADEFS_MUTANTS_LOGS (default: a new directory, which it names). The
-# tree has the mutant in it while it runs. Each patch applies as it is, with no fuzz. --check runs
-# nothing: it applies and reverses each patch in a copy of what it changes, as CI does.
+# tree has the mutant in it while it runs, and as it was when it ends, stopped or not. Each patch
+# applies as it is, with no fuzz. --check runs nothing: it applies and reverses each patch in a copy
+# of what it changes, as CI does.
 
 set -u -o pipefail
 cd "$(dirname "$0")/.."
@@ -39,7 +40,8 @@ else
     done
 fi
 
-# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses.
+# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses;
+# patch_run, a command run with it in the tree.
 source scripts/lib/patches.sh
 
 broken=0
@@ -67,15 +69,10 @@ for patch in "${patches[@]}"; do
         failed=1
         continue
     fi
-    patch -s -F0 -p1 < "$patch"
     log=$logs/$name.log
     began=$SECONDS
-    cargo nextest run -p "$crate" --features loom --lib --no-fail-fast -E "test(=$test)" \
-        > "$log" 2>&1
+    patch_run "$patch" "$log" cargo nextest run -p "$crate" --features loom --lib --no-fail-fast -E "test(=$test)"
     status=$?
-    patch -s -F0 -R -p1 < "$patch" || { echo "$name: its patch doesn't reverse: the tree has it" >&2; exit 1; }
-    # Its files rewritten, as patch writes them: cargo builds them anew, never the mutant again.
-    sed -n 's|^+++ b/||p' "$patch" | xargs touch
     case $status:$equivalent in
         0:yes) fate="survived, as equivalent" ;;
         0:) fate=MISSED; failed=1 ;;

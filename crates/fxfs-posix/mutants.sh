@@ -10,10 +10,10 @@
 #
 # CASES is how many sequences the model test tries of each mutant: what it finds, it finds without
 # shrinking. A mutant only that finds, and by chance, wants a test that always does: run this at the
-# suite's own 96 to see. The tree has the mutant in it while it runs. Each patch applies as it is,
-# with no fuzz: one that needs any has drifted from the code it changes. --check runs nothing: it
-# applies and reverses each patch in a copy of what it changes, in a second, as CI does. A patch
-# that doesn't apply fails either.
+# suite's own 96 to see. The tree has the mutant in it while it runs, and as it was when it ends,
+# stopped or not. Each patch applies as it is, with no fuzz: one that needs any has drifted from the
+# code it changes. --check runs nothing: it applies and reverses each patch in a copy of what it
+# changes, in a second, as CI does. A patch that doesn't apply fails either.
 
 set -u -o pipefail
 cd "$(dirname "$0")/../.."
@@ -40,7 +40,8 @@ if [[ ${#names[@]} == 0 ]]; then
     done
 fi
 
-# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses.
+# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses;
+# patch_run, a command run with it in the tree.
 source scripts/lib/patches.sh
 
 broken=0
@@ -60,13 +61,10 @@ for name in "${names[@]}"; do
         broken=1
         continue
     fi
-    patch -s -F0 -p1 < "$patch"
     log=$(mktemp)
     began=$SECONDS
-    CLADEFS_MODEL_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
-        cargo nextest run -p fxfs-posix > "$log" 2>&1
+    patch_run "$patch" "$log" env CLADEFS_MODEL_CASES="$cases" PROPTEST_MAX_SHRINK_ITERS=0 cargo nextest run -p fxfs-posix
     status=$?
-    patch -s -F0 -R -p1 < "$patch" || { echo "$name: its patch doesn't reverse: the tree has it" >&2; exit 1; }
     case $status in
         0) found='not caught' ;;
         100) found=$(grep -m1 -E '^ *(FAIL|SIGABRT|TIMEOUT) ' "$log" | sed 's/.*fxfs-posix //') ;;

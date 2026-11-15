@@ -8,6 +8,17 @@ model's litmus tests (tools/memory-model), the natural disposer for an audit of 
 Recommend: allow it as a dev-only checker (nothing linked or shipped). Until answered: TASK-444.2
 audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
 
+## Which model resumes TASK-444.1 and .3? (2026-11-15)
+
+Needed: a model for three delegates that stopped when Claude Opus hit its rate limit (resets in
+about 75 h from 10:30 on 2026-11-15). Their work is uncommitted or unmerged in their worktrees:
+TASK-444.1 journal (`~/.t3/worktrees/fxdax/t3-863ac33f-…`, 6 commits and edits), TASK-444.1
+dax-cow (`t3-e87d4577-…`, 8 commits), and TASK-444.3 (`t3-29dc269c-…`, three dax.c fixes
+reproduced in guest/sim, not yet run on ubu1). Why: T3 doesn't switch a delegate's provider
+unasked. Available: Claude Sonnet 5.5, a second Claude instance (claudeAgent_claude_echophase),
+and Codex. Recommend: the second Claude instance on Opus, else wait for the reset. Until answered:
+the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wait too.
+
 # Decisions
 
 ## loom behind features; orderings stronger than needed left as they are (TASK-444.2, 2026-11-15)

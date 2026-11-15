@@ -11,10 +11,17 @@
 //! **Nodes.** A node is a block of refs, `fanout` of them, then a trailer: [`NODE_MAGIC`], its
 //! level and its index at that level, which its reader checks against where it looked for it.
 //!
+//! **Owners.** An extent a commit writes holds its blocks, then their owners: what each block
+//! holds, a chunk (level 0) or a node, as its level and index packed in 8 bytes
+//! ([`Owner`]), padded to whole blocks ([`owner_blocks`]). A ref's `blocks` counts the blocks
+//! alone. A block is live while the tree names it where its owner says; a commit reads the owners
+//! of the extents it leaves blocks of, to know which live on (TASK-440).
+//!
 //! **The root.** [`ROOT_MAGIC`], a version, the sequence number minting goes on from, the extents
 //! to free once the root is durable, and the extent listing more of them, if any (a device's root
-//! is small: the extent daemon's holds 4 KiB), and each file: its name, size, its tree's height
-//! and the ref to its top node.
+//! is small: the extent daemon's holds 4 KiB), and each file: its name, size, its tree's height,
+//! the ref to its top node, and the extents its last commit left less than half live, to be
+//! compacted by its next, at most [`SPARSE_KEPT`].
 
 use anyhow::{Error, ensure};
 use std::collections::BTreeMap;
@@ -32,8 +39,58 @@ const NODE_MAGIC: u32 = u32::from_le_bytes(*b"FXSN");
 /// What a volume's root starts with.
 const ROOT_MAGIC: &[u8; 8] = b"FXSQLVOL";
 
-/// The version of the root's format.
-const ROOT_VERSION: u32 = 2;
+/// The version of the root's format: 3 since extents end with their blocks' owners, and files
+/// name the extents to compact (TASK-440).
+const ROOT_VERSION: u32 = 3;
+
+/// The most extents a file names to compact at its next commit: more are left as they are until a
+/// later commit leaves blocks of them again.
+pub(crate) const SPARSE_KEPT: usize = 16;
+
+/// The bytes of a block's owner in an extent's list of them.
+const OWNER_BYTES: usize = 8;
+
+/// What a block of an extent holds: chunk `index` at level 0, or node `index` of `level`, packed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct Owner(u64);
+
+impl Owner {
+    const LEVEL_SHIFT: u32 = 58;
+
+    pub fn new(level: u32, index: u64) -> Self {
+        assert!(index >> Self::LEVEL_SHIFT == 0 && level < 63, "node {index} of level {level}");
+        Self((level as u64) << Self::LEVEL_SHIFT | index)
+    }
+
+    pub fn level(self) -> u32 {
+        (self.0 >> Self::LEVEL_SHIFT) as u32
+    }
+
+    pub fn index(self) -> u64 {
+        self.0 & ((1 << Self::LEVEL_SHIFT) - 1)
+    }
+}
+
+/// The blocks after an extent's `blocks` that list their owners, in blocks of `block_size`.
+pub(crate) fn owner_blocks(blocks: u32, block_size: usize) -> u32 {
+    (blocks as usize * OWNER_BYTES).div_ceil(block_size) as u32
+}
+
+/// `owners`' list, padded to whole blocks of `block_size`.
+pub(crate) fn encode_owners(owners: &[Owner], block_size: usize) -> Vec<u8> {
+    let blocks = owner_blocks(owners.len() as u32, block_size) as usize;
+    let mut out: Vec<u8> = owners.iter().flat_map(|owner| owner.0.to_le_bytes()).collect();
+    out.resize(blocks * block_size, 0);
+    out
+}
+
+/// The `count` owners `bytes`, an extent's list of them, lists.
+pub(crate) fn decode_owners(bytes: &[u8], count: u32) -> Result<Vec<Owner>, Error> {
+    let needed = count as usize * OWNER_BYTES;
+    ensure!(bytes.len() >= needed, "{} bytes list {count} owners", bytes.len());
+    let owners = bytes[..needed].as_chunks::<OWNER_BYTES>().0;
+    Ok(owners.iter().map(|owner| Owner(u64::from_le_bytes(*owner))).collect())
+}
 
 /// A block of an extent: what a tree's refs name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,11 +173,14 @@ fn decode_ref(slot: &[u8; REF_BYTES]) -> Result<Option<Ref>, Error> {
 }
 
 /// A file as the root keeps it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct FileRoot {
     pub size: u64,
     pub height: u32,
     pub top: Option<Ref>,
+    /// The extents its last commit left less than half live, and the blocks each holds: its next
+    /// commit writes their live blocks again, so that they die. At most [`SPARSE_KEPT`].
+    pub sparse: Vec<(ExtentId, u32)>,
 }
 
 /// A volume's root.
@@ -181,6 +241,13 @@ impl Root {
             let mut top = [0; REF_BYTES];
             encode_ref(&mut top, file.top);
             out.extend_from_slice(&top);
+            assert!(file.sparse.len() <= SPARSE_KEPT, "{} extents to compact", file.sparse.len());
+            out.extend_from_slice(&(file.sparse.len() as u64).to_le_bytes());
+            for (extent, blocks) in &file.sparse {
+                out.extend_from_slice(&extent.branch.to_le_bytes());
+                out.extend_from_slice(&extent.sequence.to_le_bytes());
+                out.extend_from_slice(&blocks.to_le_bytes());
+            }
         }
         out
     }
@@ -207,7 +274,12 @@ impl Root {
             let size = reader.u64()?;
             let height = reader.u32()?;
             let top = decode_ref(reader.take(REF_BYTES)?.try_into().unwrap())?;
-            files.insert(name, FileRoot { size, height, top });
+            let count = reader.u64()?;
+            ensure!(count as usize <= SPARSE_KEPT, "{name} names {count} extents to compact");
+            let sparse = (0..count)
+                .map(|_| Ok((ExtentId::new(reader.u64()?, reader.u64()?), reader.u32()?)))
+                .collect::<Result<_, Error>>()?;
+            files.insert(name, FileRoot { size, height, top, sparse });
         }
         ensure!(reader.0.is_empty(), "{} bytes past the root", reader.0.len());
         Ok(Some(Self { minted, dying, dying_list, files }))
@@ -263,14 +335,34 @@ mod tests {
     }
 
     #[test]
+    fn owners_read_back_as_written() {
+        let owners = [Owner::new(0, 7), Owner::new(3, 1 << 40), Owner::new(1, 0)];
+        assert_eq!((owners[1].level(), owners[1].index()), (3, 1 << 40));
+        let list = encode_owners(&owners, 512);
+        assert_eq!(list.len(), 512);
+        assert_eq!(decode_owners(&list, 3).unwrap(), owners);
+        assert_eq!(owner_blocks(64, 512), 1);
+        assert_eq!(owner_blocks(65, 512), 2);
+        assert_eq!(owner_blocks(1024, 4096), 2);
+    }
+
+    #[test]
     fn roots_read_back_as_written() {
         let root = Root {
             minted: 1 << 33,
             dying: vec![ExtentId::new(1, 2), ExtentId::new(4, 5)],
             dying_list: Some((ExtentId::new(1, 9), 300)),
             files: BTreeMap::from([
-                ("a.db".into(), FileRoot { size: 8192, height: 1, top: Some(at(7, 2)) }),
-                ("b.db".into(), FileRoot { size: 0, height: 0, top: None }),
+                (
+                    "a.db".into(),
+                    FileRoot {
+                        size: 8192,
+                        height: 1,
+                        top: Some(at(7, 2)),
+                        sparse: vec![(ExtentId::new(3, 4), 12), (ExtentId::new(5, 6), 1)],
+                    },
+                ),
+                ("b.db".into(), FileRoot::default()),
             ]),
         };
         assert_eq!(Root::decode(&root.encode()).unwrap(), Some(root));

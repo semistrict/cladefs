@@ -20,12 +20,15 @@
 //! extents past it a crash left, written for a commit whose root it lost, are freed by the next
 //! opening, as Fxfs's allocator frees its orphans.
 //!
-//! **The window.** A volume opened with a window ([`Volume::open_mapped`]) maps each file it
-//! opens into a region of it, as the file's last commit has it (`window`), and maps again what
-//! commits changed, a batch at a time ([`REMAP_BATCH`]), or as SQLite fetches pages: reads of
-//! what they changed go to the device meanwhile. Reads of the rest copy from the window, and
-//! SQLite's memory-mapped reads ([`Volume::fetch`]) read it in place. While SQLite holds pages it
-//! fetched, nothing is mapped again, as SQLite's own unix VFS remaps nothing while pages are out.
+//! **The window.** A volume opened with a window ([`Volume::open_mapped`]) gives each file it
+//! opens a region of it, which maps what reads and SQLite's fetches reach of the file, as its last
+//! commit has it (`window`), as they first reach it (TASK-440); and maps again what commits
+//! changed, a batch at a time ([`REMAP_BATCH`]), or as SQLite fetches pages: reads of what they
+//! changed go to the device meanwhile. Reads of the rest copy from the window, and SQLite's
+//! memory-mapped reads ([`Volume::fetch`]) read it in place. While SQLite holds pages it fetched,
+//! nothing is mapped again, as SQLite's own unix VFS remaps nothing while pages are out.
+//!
+//! **Opening** reads the root alone: a file's tree is read as it is used (`pages`, TASK-440).
 //!
 //! **Memory files.** Journals and temporary files live in memory: a database's file changes only
 //! at its commits, whole, so that no crash needs a journal to roll it back.
@@ -212,8 +215,7 @@ impl Volume {
         };
         inner.mint = inner.mint.max(root.minted);
         for (name, file) in &root.files {
-            let pages =
-                Pages::open(device, file).await.with_context(|| format!("opening {name}"))?;
+            let pages = Pages::open(block_size, file).with_context(|| format!("opening {name}"))?;
             inner.files.insert(name.clone(), File::new(pages, true));
         }
         let branch = device.branch();
@@ -266,12 +268,14 @@ impl Volume {
         Ok(self.lock()?.files.keys().cloned().collect())
     }
 
-    /// The extents it holds, in order: those its files' last commits reference, and those it has
-    /// yet to free.
+    /// The extents it holds, in order: those its files' last commits reference, every file's
+    /// tree read whole for it, and those it has yet to free.
     pub fn extents(&self) -> Result<Vec<ExtentId>, Error> {
         let inner = self.lock()?;
-        let referenced = inner.files.values().flat_map(|file| file.pages.extents());
-        let mut extents: Vec<_> = referenced.chain(inner.dying.iter().copied()).collect();
+        let mut extents: Vec<_> = inner.dying.clone();
+        for file in inner.files.values() {
+            extents.extend(block_on(file.pages.extents(&**self.device))?);
+        }
         extents.sort();
         Ok(extents)
     }
@@ -293,14 +297,16 @@ impl Volume {
             None => bail!(NotFound(name.to_owned())),
         };
         file.opens += 1;
-        // Mapped as it is first opened, if a region is free.
-        if self.window.is_some()
+        // A region as it is first opened, if one is free, which maps it as it is read.
+        if let Some((window, region_bytes)) = &self.window
             && file.region.is_none()
             && let Some(region) = inner.regions.pop()
         {
             file.region = Some(region);
-            let chunks = file.pages.root().size.div_ceil(block_size as u64);
-            self.remap(name, file, &mut inner.regions, std::iter::once(0..chunks));
+            let (base, _) = window.memory();
+            // SAFETY: within the window, whose memory the region is.
+            let at = unsafe { base.add(region as usize) };
+            file.pages.set_region(Some((at, *region_bytes)));
         }
         Ok(())
     }
@@ -320,33 +326,31 @@ impl Volume {
         };
         let block_size = self.device.block_size() as u64;
         let mapped = region_bytes / block_size;
-        let (mut runs, mut unmapped) = (Vec::new(), Vec::new());
-        for range in changed {
+        let (mut runs, mut unmapped, mut marked) = (Vec::new(), Vec::new(), Vec::new());
+        let device = &**self.device;
+        let made = changed.into_iter().try_for_each(|range| {
             let range = range.start.min(mapped)..range.end.min(mapped);
-            for (chunks, contents) in file.pages.runs(range) {
+            for (chunks, contents) in block_on(file.pages.runs(device, range))? {
                 let (at, len) =
                     (region + chunks.start * block_size, (chunks.end - chunks.start) * block_size);
                 match contents {
                     Some(contents) => runs.push(Run { at, len, contents }),
                     None => unmapped.push((at, len)),
                 }
+                marked.push((chunks, contents.is_some()));
             }
-        }
-        let made = window
-            .map(&**self.device, &runs)
+            Ok::<_, Error>(())
+        });
+        let made = made
+            .and_then(|()| window.map(device, &runs))
             .and_then(|()| unmapped.iter().try_for_each(|(at, len)| window.unmap(*at, *len)));
         match made {
-            Ok(()) => {
-                let (base, _) = window.memory();
-                // SAFETY: within the window, whose memory the region is.
-                let at = unsafe { base.add(region as usize) };
-                file.pages.set_mapped(Some((at, *region_bytes)));
-            }
+            Ok(()) => file.pages.mark_mapped(marked),
             Err(error) => {
                 log::error!(
                     "sqlite_extents: mapping {name}, read from the device from now on: {error:#}"
                 );
-                file.pages.set_mapped(None);
+                file.pages.set_region(None);
                 file.region = None;
                 match window.unmap(region, *region_bytes) {
                     Ok(()) => regions.push(region),
@@ -368,6 +372,27 @@ impl Volume {
         }
     }
 
+    /// Maps what the region of file `name` doesn't yet of the chunks `len` bytes at `offset`
+    /// reach, as its last commit has them.
+    fn map_reached(
+        &self,
+        name: &str,
+        file: &mut File,
+        regions: &mut Vec<u64>,
+        offset: u64,
+        len: u64,
+    ) {
+        if file.region.is_none() || len == 0 {
+            return;
+        }
+        let block_size = self.device.block_size() as u64;
+        let unmapped =
+            file.pages.unmapped(offset / block_size..(offset + len).div_ceil(block_size));
+        if !unmapped.is_empty() {
+            self.remap(name, file, regions, unmapped);
+        }
+    }
+
     /// Where the `len` bytes of file `name` at `offset` are in the window, if it maps them as
     /// they read: for SQLite to read in place until it gives them back ([`Volume::unfetch`]).
     pub fn fetch(&self, name: &str, offset: u64, len: u64) -> Result<Option<*const u8>, Error> {
@@ -378,7 +403,8 @@ impl Volume {
             return Ok(None);
         }
         self.refresh(name, file, &mut inner.regions);
-        let fetched = file.pages.fetch(offset, len);
+        self.map_reached(name, file, &mut inner.regions, offset, len);
+        let fetched = block_on(file.pages.fetch(&**self.device, offset, len))?;
         file.fetches += fetched.is_some() as u32;
         self.fetched.fetch_add(fetched.is_some() as u64, Ordering::Relaxed);
         Ok(fetched)
@@ -416,7 +442,9 @@ impl Volume {
     /// Reads file `name` into `buf` from `offset`, as far as it goes: how many bytes it read.
     pub fn read(&self, name: &str, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         let mut inner = self.lock()?;
-        let file = Self::file(&mut inner, name);
+        let inner = &mut *inner;
+        let file = inner.files.get_mut(name).expect("a file open");
+        self.map_reached(name, file, &mut inner.regions, offset, buf.len() as u64);
         block_on(file.pages.read(&**self.device, offset, buf))
     }
 
@@ -492,7 +520,7 @@ impl Volume {
             }
         }
         if file.committed {
-            let dead: Vec<_> = file.pages.extents().collect();
+            let dead: Vec<_> = block_on(file.pages.extents(&**self.device))?.into_iter().collect();
             self.commit_root(&mut inner, None, dead, None)?;
         }
         Ok(true)
@@ -627,5 +655,46 @@ impl std::fmt::Debug for Volume {
             .field("mint", &inner.mint)
             .field("failed", &inner.failed)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+    use storage_device::fake_device::{FakeDevice, Op};
+
+    const BLOCK: usize = 512;
+
+    /// A volume's opening reads its root and none of its files' trees; a read of a page reads
+    /// the nodes on its path and the page, and the file holds those nodes alone (TASK-440).
+    #[test]
+    fn an_opening_reads_no_tree_and_a_read_one_path() {
+        let mut device = FakeDevice::new(1 << 20, BLOCK as u32).calm();
+        let reads = Arc::new(AtomicU64::new(0));
+        let counted = reads.clone();
+        device.set_op_callback(move |op| {
+            if matches!(op, Op::Read) {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok(())
+        });
+        let volume = Volume::open(DeviceHolder::new(device), Options::default()).unwrap();
+        volume.open_file("a.db", true).unwrap();
+        volume.write("a.db", 0, &vec![3; BLOCK * 401]).unwrap();
+        volume.sync("a.db").unwrap();
+        volume.close_file("a.db");
+
+        let before = reads.load(Ordering::Relaxed);
+        let mut inner = block_on(Volume::recover(&***volume.device())).unwrap();
+        // The root, which the fake device counts as a read, alone.
+        assert_eq!(reads.load(Ordering::Relaxed) - before, 1, "reads at the opening");
+        let file = inner.files.get_mut("a.db").unwrap();
+        assert_eq!((file.pages.root().height, file.pages.nodes_held()), (3, 0));
+        let mut page = vec![0; BLOCK];
+        block_on(file.pages.read(&***volume.device(), BLOCK as u64 * 250, &mut page)).unwrap();
+        assert_eq!(page, vec![3; BLOCK]);
+        assert_eq!(reads.load(Ordering::Relaxed) - before, 1 + 4, "reads of one page");
+        assert_eq!(file.pages.nodes_held(), 3);
     }
 }
