@@ -4,11 +4,11 @@ title: >-
   ubu1: killed jobs' temporary files outlive them in /tmp (tmpfs): 3.2 GB of
   test stores charged to fxdax-work.slice's ended jobs, reclaimable only by
   deleting them
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12 10:51'
-updated_date: '2026-11-14 20:15'
+updated_date: '2026-11-15 03:35'
 labels:
   - bug
   - ubu1
@@ -32,7 +32,7 @@ Seen 2026-11-12 while fixing TASK-378. fxdax-work.slice held 4.0 GB with no job 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -68,3 +68,9 @@ Note: fxdax-work.slice held 2044M shmem before any of this with only t407's job 
 
 2026-11-14 (claude, TASK-400/401's agent): the full Linux workspace suite under the new fxjob, ubu1, commit dddfea15e (TASK-400/401 on origin/main 8391d2e3d), scripts/test.sh's workspace part (UCD_ZIP, sims excluded as there), --test-threads 4, fxjob --name t400-suite --mem 12G: 2655 run, 2653 passed, 2 failed, in 553 s (build 1m45s before it). Neither is fxjob's: durable_commits_keep_the_open_segments_pages_cached_on_the_host because the target (its CARGO_TARGET_TMPDIR) was on /home's ZFS (TASK-309), passing with the target on /mnt/fxdax-scratch's ext4; images_dropped_as_their_pass_runs_leave_their_bucket_whole is TASK-328's flake (1 of 3 reruns failed alone). No job left anything in /mnt/fxdax-scratch/fxjob.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+fxjob gives each job a TMPDIR of its own on /mnt/fxdax-scratch (ext4, not tmpfs, so nothing a job leaves is charged to memory); its reap unmounts every mount under it (fuse and loop), detaches loop devices left on its files and removes it, root's files too; an fxjob killed outright leaves its dir for the next fxjob to remove. Root runs (host.sh, bench-rounds.sh) pass it with sudo env TMPDIR=, since sudo drops TMPDIR (679737d41; TASK-408 fixed alongside). Verified: fxjob-check.sh on ubu1 (SIGKILLed job with files, root files, tmpfs, loop-mounted ext4 and a loop device leaves nothing; a timed-out real test run leaves nothing; slice shmem 65M -> 0M after reap), ubu1 workspace under the new fxjob 2653/2655 (TASK-309's ZFS page-cache test and TASK-328, neither this change), main's CI green on Linux and macOS (efa48fa88), upstream-changes.py --check.
+<!-- SECTION:FINAL_SUMMARY:END -->
