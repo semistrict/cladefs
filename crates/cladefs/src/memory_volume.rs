@@ -43,7 +43,7 @@ impl MemoryVolume {
         let daemon = DaemonConnection::connect(socket)?;
         let opened = daemon.open_memory(store, capacity(size))?;
         let store = Arc::new(opened);
-        let device = DeviceHolder::new(RemoteDevice::new(store.clone())?);
+        let device = DeviceHolder::new(RemoteDevice::new(store.clone()).map_err(Error::new)?);
         let volume = Volume::open(device, Options::default()).map_err(Error::new)?;
         volume.open_file(IMAGE, true).map_err(Error::new)?;
         match volume.size(IMAGE).map_err(Error::new)? {
