@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::{AsRawFd, RawFd};
-use std::os::unix::fs::{FileExt, OpenOptionsExt as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -173,52 +173,59 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A directory of the host's.
 ///
-/// Extents' files are read bypassing the host's page cache where its file system allows
-/// (`O_DIRECT` on Linux, `F_NOCACHE` on macOS), so their reads must be in buffers aligned to
-/// blocks. cladefs: on Linux, they are written through it, so that a write doesn't wait for the
-/// host's disk, which a commit doesn't need (`Store::flush` makes it durable), and its pages leave
-/// the cache once synced: written directly, every `WRITE`, and every commit of an extent written
-/// through a DAX window, waited half a millisecond for a network disk. But the open segment's raw
-/// file's, which every durable commit syncs, and whose pages go with it once it is framed and
-/// removed ([`File::sync_cached`]): letting the whole file's go at each sync had the kernel look
-/// over all of them again for every commit, and maybe drain every CPU's pages yet to be put on its
-/// lists, under a global lock (TASK-92.23). A read bypassing the cache writes back what it reads
-/// first. Syncing a file is `fdatasync` on Linux, and a directory's entries `fsync`, each of which
-/// flushes the drive's cache too. cladefs: on macOS each is an `F_BARRIERFSYNC`, which leaves the
-/// drive's cache to `barrier`, an `F_FULLFSYNC`, but orders what it synced before what is written
-/// after (TASK-92.48). They were std's `sync_data` and `sync_all`, each an `F_FULLFSYNC` there,
-/// which flushed the drive's cache at every sync. Run interleaved, twenty runs of each, by their
-/// medians and quartiles, store-bench's `burst`, whose commit seals 640 extents in files of their
-/// own, flushed in 620 ms (572-664 ms), and 175 ms since (168-209 ms), the host's load average
-/// 4.7-6.4; `durable`'s commits of one in 9.8 ms (7.7-14.9 ms), and 4.1 ms since (3.6-5.2 ms), the
-/// load 6.7-18: measured with `AT_ONCE`'s at those loads. The trade-off: a sync on macOS is durable
-/// as it returns against the store's process or the host's kernel crashing, as on Linux, but
-/// against the drive losing power only once a barrier follows; and each point at which the store
-/// says that what it wrote is durable ends in one: a flush, a closing between commits, a branch's
-/// record, an index's first checkpoint. A plain `fsync` would leave the order to the drive as well,
-/// so that a power loss could keep a commit's record, synced after its data, without the data.
-/// macOS is a development host: stores run on Linux.
-///
-/// cladefs: raw files, which the store reads soon after writing them, are read through the cache on
-/// Linux ([`File::read_cached`]): a read bypassing it would write back the dirty pages it reads
-/// first, waiting for the host's disk (TASK-91.17, TASK-79.93).
+/// cladefs: every file of it bypasses the host's page cache where its file system allows
+/// (`O_DIRECT` on Linux, `F_NOCACHE` on macOS), its reads and writes by the blocks around them,
+/// from memory aligned to them (`extent_remote::direct`), so that no byte of a store's is held in
+/// the host's page cache, a memory no budget of the process's counts (TASK-433). Extents' files
+/// go through the process's page cache instead ([`crate::pages`]): a write lands there and
+/// returns, the disk taking it later, coalesced, as the host's page cache had it, a `WRITE`
+/// waiting for no disk, and what was written lately read back from memory, as framings and
+/// commits copying extents read it (TASK-91.17, TASK-221, TASK-401); and every opening of a file,
+/// by whatever name, shares its pages. A file removed drops its pages, its dirty ones unwritten.
+/// Until TASK-433, they were written through the host's page cache, read around it, and synced
+/// keeping the open segment's pages there (TASK-92.23). Syncing a file is `fdatasync` on Linux,
+/// and a directory's entries `fsync`, each of which flushes the drive's cache too. cladefs: on macOS
+/// each is an `F_BARRIERFSYNC`, which leaves the drive's cache to `barrier`, an `F_FULLFSYNC`, but
+/// orders what it synced before what is written after (TASK-92.48). They were std's `sync_data`
+/// and `sync_all`, each an `F_FULLFSYNC` there, which flushed the drive's cache at every sync. Run
+/// interleaved, twenty runs of each, by their medians and quartiles, store-bench's `burst`, whose
+/// commit seals 640 extents in files of their own, flushed in 620 ms (572-664 ms), and 175 ms since
+/// (168-209 ms), the host's load average 4.7-6.4; `durable`'s commits of one in 9.8 ms (7.7-14.9
+/// ms), and 4.1 ms since (3.6-5.2 ms), the load 6.7-18: measured with `AT_ONCE`'s at those loads.
+/// The trade-off: a sync on macOS is durable as it returns against the store's process or the
+/// host's kernel crashing, as on Linux, but against the drive losing power only once a barrier
+/// follows; and each point at which the store says that what it wrote is durable ends in one: a
+/// flush, a closing between commits, a branch's record, an index's first checkpoint. A plain
+/// `fsync` would leave the order to the drive as well, so that a power loss could keep a commit's
+/// record, synced after its data, without the data. macOS is a development host: stores run on
+/// Linux.
 pub struct HostDir {
     path: PathBuf,
-    /// Whether extents' files are to bypass the page cache.
+    /// Whether its files are to bypass the host's page cache, extents' files going through the
+    /// process's ([`crate::pages::shared`]).
     direct: bool,
-    /// Whether the last extents' file opened bypasses it.
+    /// Whether the last file opened bypasses it.
     bypassing: AtomicBool,
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<std::fs::File>,
+    /// cladefs: its extents' files open, by name, each with its pages, which every opening of it
+    /// shares (TASK-433); a file's pages go with its last opening, its dirty ones written back.
+    cached: Mutex<std::collections::HashMap<String, crate::pages::WeakCached<DiskFile>>>,
 }
 
 impl HostDir {
-    /// The directory at `path`, which exists. Its extents' files bypass the host's page cache if
-    /// `direct` and the host's file system allows.
+    /// The directory at `path`, which exists. Its files bypass the host's page cache if `direct`
+    /// and the host's file system allows, its extents' files then going through the process's.
     pub fn new(path: &Path, direct: bool) -> io::Result<Self> {
         let handle = Arc::new(std::fs::File::open(path)?);
-        Ok(Self { path: path.to_owned(), direct, bypassing: AtomicBool::new(false), handle })
+        Ok(Self {
+            path: path.to_owned(),
+            direct,
+            bypassing: AtomicBool::new(false),
+            handle,
+            cached: Mutex::default(),
+        })
     }
 
     /// The directory's path.
@@ -226,36 +233,38 @@ impl HostDir {
         &self.path
     }
 
-    /// Whether extents' files bypass the host's page cache, as the last one opened does.
+    /// Whether its files bypass the host's page cache, as the last one opened does.
     pub fn is_direct(&self) -> bool {
         self.bypassing.load(Ordering::Relaxed)
     }
 
-    fn file(&self, file: std::fs::File, data: bool) -> io::Result<HostFile> {
-        if !self.direct {
-            return Ok(HostFile { file, written: None, small: None });
+    /// `file`, opened at `path`, as the store's file: bypassing the host's page cache if the
+    /// directory is to; an extents' file, through the process's page cache then, sharing the
+    /// pages of its other openings.
+    fn file(&self, path: &str, file: std::fs::File, data: bool) -> io::Result<HostFile> {
+        let direct = self.direct && extent_remote::direct::bypass(&file);
+        if self.direct {
+            self.bypassing.store(direct, Ordering::Relaxed);
         }
-        // cladefs: a file of no extents' data, a log or the store's description, written a little at
-        // a time, bypasses the page cache whole, its writes merged into the blocks they touch, the
-        // last it wrote held in memory ([`HostFile::small`], TASK-433.2).
-        if !data {
-            let small = extent_remote::direct::bypass(&file).then(Mutex::default);
-            return Ok(HostFile { file, written: None, small });
+        // A file the page cache holds is read and written through it, whoever opens it, and
+        // however: what of it is dirty is there alone.
+        let mut cached = self.cached.lock().unwrap();
+        cached.retain(|_, file| file.upgrade().is_some());
+        if let Some(open) = cached.get(path).and_then(crate::pages::WeakCached::upgrade) {
+            return Ok(HostFile(Repr::Cached(open)));
         }
-        // The same file again, through the page cache, for writes.
-        let written = file.try_clone()?;
-        // A file descriptor of its own, whose flags the clone doesn't share. On macOS, the clone
-        // shares `F_NOCACHE`: its writes bypass the cache too. cladefs: and its reads, which raw
-        // files' are (`File::read_cached`), so that only on Linux they go through the cache.
-        let path = format!("/proc/self/fd/{}", written.as_raw_fd());
-        let written = if cfg!(target_os = "linux") {
-            OpenOptions::new().read(true).write(true).custom_flags(libc::O_CLOEXEC).open(path)?
-        } else {
-            written
-        };
-        let bypassing = bypass_page_cache(file.as_raw_fd());
-        self.bypassing.store(bypassing, Ordering::Relaxed);
-        Ok(HostFile { file, written: bypassing.then_some(written), small: None })
+        let disk = DiskFile { file, direct, tail: Mutex::default() };
+        if !(data && direct) {
+            return Ok(HostFile(Repr::Disk(disk)));
+        }
+        let opened = crate::pages::Cached::new(disk, crate::pages::shared())?;
+        cached.insert(path.to_owned(), opened.downgrade());
+        Ok(HostFile(Repr::Cached(opened)))
+    }
+
+    /// The pages of the file at `path`, if it is an extents' file opened.
+    fn cached(&self, path: &str) -> Option<crate::pages::Cached<DiskFile>> {
+        self.cached.lock().unwrap().get(path).and_then(crate::pages::WeakCached::upgrade)
     }
 }
 
@@ -269,7 +278,12 @@ impl Dir for HostDir {
             .create_new(true)
             .custom_flags(libc::O_CLOEXEC)
             .open(self.path.join(path))?;
-        self.file(file, data)
+        // A file made anew at a name holds nothing of one there before.
+        let gone = self.cached.lock().unwrap().remove(path);
+        if let Some(gone) = gone.as_ref().and_then(crate::pages::WeakCached::upgrade) {
+            gone.cancel();
+        }
+        self.file(path, file, data)
     }
 
     fn open(&self, path: &str, data: bool) -> io::Result<HostFile> {
@@ -278,19 +292,48 @@ impl Dir for HostDir {
             .write(true)
             .custom_flags(libc::O_CLOEXEC)
             .open(self.path.join(path))?;
-        self.file(file, data)
+        self.file(path, file, data)
     }
 
+    /// cladefs: and drops its pages, the dirty ones unwritten, if no other name nor opening has
+    /// them (TASK-433): those still open keep them, written back to the file removed.
     fn remove(&self, path: &str) -> io::Result<()> {
-        std::fs::remove_file(self.path.join(path))
+        std::fs::remove_file(self.path.join(path))?;
+        let mut cached = self.cached.lock().unwrap();
+        if let Some(gone) = cached.remove(path).as_ref().and_then(crate::pages::WeakCached::upgrade)
+            && !cached.values().filter_map(crate::pages::WeakCached::upgrade).any(|o| o.same(&gone))
+            && gone.alone()
+        {
+            gone.cancel();
+        }
+        Ok(())
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::rename(self.path.join(from), self.path.join(to))
+        std::fs::rename(self.path.join(from), self.path.join(to))?;
+        let mut cached = self.cached.lock().unwrap();
+        if let Some(replaced) =
+            cached.remove(to).as_ref().and_then(crate::pages::WeakCached::upgrade)
+            && !cached
+                .values()
+                .filter_map(crate::pages::WeakCached::upgrade)
+                .any(|o| o.same(&replaced))
+        {
+            replaced.cancel();
+        }
+        if let Some(moved) = cached.remove(from) {
+            cached.insert(to.to_owned(), moved);
+        }
+        Ok(())
     }
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::hard_link(self.path.join(from), self.path.join(to))
+        std::fs::hard_link(self.path.join(from), self.path.join(to))?;
+        let mut cached = self.cached.lock().unwrap();
+        if let Some(linked) = cached.get(from).cloned() {
+            cached.insert(to.to_owned(), linked);
+        }
+        Ok(())
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
@@ -308,7 +351,18 @@ impl Dir for HostDir {
         Ok(names)
     }
 
+    /// cladefs: a file handed to the host by its path, as the host's cache of objects takes one
+    /// by renaming it (TASK-165.8), has its dirty pages written back first, and its pages dropped:
+    /// the host reads and moves it around the store's page cache (TASK-433).
     fn host_path(&self, path: &str) -> Option<PathBuf> {
+        if let Some(cached) = self.cached(path) {
+            if let Err(err) = cached.settle(0..u64::MAX) {
+                log::warn!("extent store: writing {path} back for the host: {err}");
+                return None;
+            }
+            self.cached.lock().unwrap().remove(path);
+            cached.cancel();
+        }
         Some(self.path.join(path))
     }
 
@@ -436,138 +490,145 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
     }
 }
 
-/// A file of a [`HostDir`]: read through `file`, which bypasses the page cache if `written` is
-/// given, through which it is written; cladefs: and read, by [`File::read_cached`]. Or, a file of no
-/// extents' data, bypassing the page cache for its reads and writes alike if `small` is given: its
-/// writes, of any length at any offset, merged into the blocks they touch, the block ending the
-/// last held, which a log's next append goes on in without reading it back (TASK-433.2).
-pub struct HostFile {
-    file: std::fs::File,
-    written: Option<std::fs::File>,
-    small: Option<Mutex<extent_remote::direct::Tail>>,
+/// A file of a [`HostDir`]: one of its extents' files, through the process's page cache, or any
+/// other, read and written as it is ([`DiskFile`]).
+pub struct HostFile(Repr);
+
+enum Repr {
+    Disk(DiskFile),
+    Cached(crate::pages::Cached<DiskFile>),
 }
 
 impl HostFile {
-    fn written(&self) -> &std::fs::File {
-        self.written.as_ref().unwrap_or(&self.file)
+    /// The file on the disk, under the page cache, if it is cached.
+    fn disk(&self) -> &DiskFile {
+        match &self.0 {
+            Repr::Disk(disk) => disk,
+            Repr::Cached(cached) => cached.file(),
+        }
+    }
+
+    /// cladefs: writes back the pages the page cache holds dirty in `range` and drops every page
+    /// there, if the file is cached: what an I/O of a caller's own on its descriptor
+    /// ([`AsRawFd`]) is to be preceded by, as an image's device's is, so that it reads what was
+    /// written, and what it writes no page hides (TASK-433).
+    pub fn settle(&self, range: std::ops::Range<u64>) -> io::Result<()> {
+        match &self.0 {
+            Repr::Disk(_) => Ok(()),
+            Repr::Cached(cached) => cached.settle(range),
+        }
+    }
+
+    /// cladefs: as [`HostFile::settle`] does, before a write of a caller's own on its descriptor,
+    /// which also drops the pages there and takes the file to go as far as `range` at least, so
+    /// that what the caller writes no page hides, and reads see all of it (TASK-433).
+    pub fn settle_for_write(&self, range: std::ops::Range<u64>) -> io::Result<()> {
+        match &self.0 {
+            Repr::Disk(_) => Ok(()),
+            Repr::Cached(cached) => cached.settle_for_write(range),
+        }
     }
 }
 
 impl AsRawFd for HostFile {
     fn as_raw_fd(&self) -> RawFd {
-        self.file.as_raw_fd()
+        self.disk().file.as_raw_fd()
     }
 }
 
 impl File for HostFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        if self.small.is_some() {
-            return extent_remote::direct::read_at(&self.file, true, buf, offset);
+        match &self.0 {
+            Repr::Disk(disk) => disk.read_at(buf, offset),
+            Repr::Cached(cached) => cached.read_at(buf, offset),
         }
-        read_fully(&self.file, buf, offset)
     }
 
     fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        if self.small.is_some() {
-            return self.read_at(buf, offset);
-        }
-        read_fully(self.written(), buf, offset)
+        self.read_at(buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if let Some(small) = &self.small {
-            let mut tail = small.lock().unwrap();
-            return extent_remote::direct::write_at(&self.file, true, &mut tail, buf, offset);
+        match &self.0 {
+            Repr::Disk(disk) => disk.write_at(buf, offset),
+            Repr::Cached(cached) => cached.write_at(buf, offset),
         }
-        self.written().write_all_at(buf, offset)
     }
 
     fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let flags = libc::SYNC_FILE_RANGE_WAIT_BEFORE
-                | libc::SYNC_FILE_RANGE_WRITE
-                | libc::SYNC_FILE_RANGE_WAIT_AFTER;
-            let (offset, len) = (offset as libc::off64_t, len as libc::off64_t);
-            // SAFETY: Writes back a range of an open file descriptor's file.
-            let done =
-                unsafe { libc::sync_file_range(self.written().as_raw_fd(), offset, len, flags) };
-            if done != 0 {
-                return Err(io::Error::last_os_error());
-            }
+        match &self.0 {
+            Repr::Disk(disk) => disk.write_back(offset, len),
+            Repr::Cached(cached) => cached.write_back(offset, len),
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = (offset, len);
-        Ok(())
     }
 
     fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
-        #[cfg(target_os = "linux")]
-        {
-            let (offset, len) = (offset as libc::off64_t, len as libc::off64_t);
-            // SAFETY: Begins writing back a range of an open file descriptor's file.
-            let begun = unsafe {
-                libc::sync_file_range(
-                    self.written().as_raw_fd(),
-                    offset,
-                    len,
-                    libc::SYNC_FILE_RANGE_WRITE,
-                )
-            };
-            if begun != 0 {
-                return Err(io::Error::last_os_error());
-            }
+        match &self.0 {
+            Repr::Disk(disk) => disk.write_behind(offset, len),
+            Repr::Cached(cached) => cached.write_behind(offset, len),
         }
-        #[cfg(not(target_os = "linux"))]
-        let _ = (offset, len);
-        Ok(())
     }
 
     fn size(&self) -> io::Result<u64> {
+        match &self.0 {
+            Repr::Disk(disk) => disk.size(),
+            Repr::Cached(cached) => cached.size(),
+        }
+    }
+
+    fn sync(&self) -> io::Result<()> {
+        match &self.0 {
+            Repr::Disk(disk) => disk.sync(),
+            Repr::Cached(cached) => cached.sync(),
+        }
+    }
+
+    fn sync_cached(&self) -> io::Result<()> {
+        self.sync()
+    }
+}
+
+/// cladefs: a file of the host's disk, bypassing its page cache if `direct` ([`HostDir`]): read and
+/// written by the blocks around what is asked, from memory aligned to them, the block ending the
+/// last write held, so that an append, a log's, reads nothing back (`extent_remote::direct`,
+/// TASK-433).
+pub struct DiskFile {
+    file: std::fs::File,
+    direct: bool,
+    tail: Mutex<extent_remote::direct::Tail>,
+}
+
+impl File for DiskFile {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        extent_remote::direct::read_at(&self.file, self.direct, buf, offset)
+    }
+
+    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        let mut tail = self.tail.lock().unwrap();
+        extent_remote::direct::write_at(&self.file, self.direct, &mut tail, buf, offset)
+    }
+
+    /// Taken as no write is in flight: a write of part of a block writes it whole, the file cut
+    /// back after, which a size taken between would see past the file's end.
+    fn size(&self) -> io::Result<u64> {
+        let _writes = self.tail.lock().unwrap();
         Ok(self.file.metadata()?.len())
     }
 
     fn sync(&self) -> io::Result<()> {
-        self.sync_cached()?;
-        // What was written through the page cache leaves it, now clean: the store's pages are
-        // its users' to cache.
-        #[cfg(target_os = "linux")]
-        if let Some(written) = &self.written {
-            // SAFETY: Advises the kernel about an open file descriptor's file.
-            unsafe { libc::posix_fadvise(written.as_raw_fd(), 0, 0, libc::POSIX_FADV_DONTNEED) };
-        }
-        Ok(())
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
         #[cfg(target_os = "macos")]
         {
-            sync_with(self.written(), &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
+            sync_with(&self.file, &[libc::F_BARRIERFSYNC, libc::F_FULLFSYNC])
         }
         #[cfg(not(target_os = "macos"))]
         {
-            self.written().sync_data()
+            self.file.sync_data()
         }
     }
-}
 
-/// Reads `buf.len()` bytes at `offset` in `file`, zeros past its end.
-fn read_fully(file: &std::fs::File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
-    while !buf.is_empty() {
-        match file.read_at(buf, offset) {
-            Ok(0) => {
-                buf.fill(0);
-                return Ok(());
-            }
-            Ok(read) => {
-                buf = &mut buf[read..];
-                offset += read as u64;
-            }
-            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
-            Err(err) => return Err(err),
-        }
+    fn sync_cached(&self) -> io::Result<()> {
+        self.sync()
     }
-    Ok(())
 }
 
 /// cladefs: syncs `file` on macOS by the first of `syncs`, `fcntl`s of macOS's, that its file system

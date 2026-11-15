@@ -692,7 +692,12 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
     };
     let one = |value: String| [(String::new(), value)];
     let ended = now.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs_f64();
-    family("cladefs_gc_sweeps_total", "counter", "Sweeps the process ran.", &one(sweeps.to_string()));
+    family(
+        "cladefs_gc_sweeps_total",
+        "counter",
+        "Sweeps the process ran.",
+        &one(sweeps.to_string()),
+    );
     family(
         "cladefs_gc_sweep_end_timestamp_seconds",
         "gauge",
@@ -1045,8 +1050,10 @@ mod tests {
     #[test]
     fn dry_runs_list_what_goes_and_say_it_is_less() {
         let meta = |key: String, size| Meta { key, version: Version::default(), size, modified: 0 };
-        let doomed =
-            vec![meta(layout::segment(branch(1), 2, 1), 100), meta(layout::checkpoint(branch(3), 1, 1), 20)];
+        let doomed = vec![
+            meta(layout::segment(branch(1), 2, 1), 100),
+            meta(layout::checkpoint(branch(3), 1, 1), 20),
+        ];
         let compactable = vec![meta(layout::segment(branch(1), 4, 1), 7)];
         let parent = layout::Branch { cell: layout::Cell { tenant: 1, id: 9 }, id: 4 };
         let retired = vec![layout::reference(parent, 5, branch(6))];

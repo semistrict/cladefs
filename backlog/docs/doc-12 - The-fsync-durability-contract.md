@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: '2026-10-31 22:17'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 ---
 # What an acknowledged fsync survives (TASK-66)
 

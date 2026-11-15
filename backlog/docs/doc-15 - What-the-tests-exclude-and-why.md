@@ -3,7 +3,7 @@ id: doc-15
 title: 'What the tests exclude, and why'
 type: specification
 created_date: '2026-11-07 13:38'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 13:41'
 ---
 # What the tests exclude, and why (TASK-149.20, 2026-11-07)
 

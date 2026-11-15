@@ -332,7 +332,8 @@ mod tests {
         assert_eq!(ids(&keys), ["2bb56b8197c604e4"]);
         set(MASTER_KEY_FILE_VAR, Some(dir.path().join("missing").as_os_str()));
         let refused = MasterKeys::from_env().unwrap_err();
-        let expected = format!("CLADEFS_MASTER_KEY_FILE {}: ", dir.path().join("missing").display());
+        let expected =
+            format!("CLADEFS_MASTER_KEY_FILE {}: ", dir.path().join("missing").display());
         assert!(refused.starts_with(&expected), "{refused}");
     }
 }

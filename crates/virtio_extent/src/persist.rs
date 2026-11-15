@@ -113,11 +113,13 @@ impl From<&cladefs::WindowMapping> for MappingState {
             window_offset: mapping.window_offset,
             len: mapping.len,
             contents: match mapping.contents {
-                cladefs::MappingContents::Extent { extent, offset } => MappingContentsState::Extent {
-                    branch: extent.branch,
-                    sequence: extent.sequence,
-                    offset,
-                },
+                cladefs::MappingContents::Extent { extent, offset } => {
+                    MappingContentsState::Extent {
+                        branch: extent.branch,
+                        sequence: extent.sequence,
+                        offset,
+                    }
+                }
                 cladefs::MappingContents::Zeros => MappingContentsState::Zeros,
             },
         }

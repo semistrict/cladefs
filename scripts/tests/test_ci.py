@@ -142,8 +142,33 @@ class Ci(unittest.TestCase):
         for name in ["ci.yml", "nightly.yml", "sandboxes.yml"]:
             text = (ROOT / ".github" / "workflows" / name).read_text()
             self.assertNotRegex(text, r"(?i)\bgce\b|gcloud|google", name)
-        self.assertIn("No guest\n# kernels nor VMs, which boot on GitHub's runners too",
+        self.assertIn("Guest\n# kernels and VMs boot on GitHub's runners too, as they have KVM",
                       CI.read_text())
+
+    def test_the_sandboxes_short_mode_runs_on_every_push_to_main(self):
+        """TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology, on every push to main,
+        once main passed it on GitHub's runner (TASK-336, TASK-400, TASK-401): sandboxes.yml,
+        reusable, its job the short mode's, its artifacts' builds and the guest kernel cached, so
+        that it doesn't build them whole each push. Its long mode is ubu1's (TASK-330.5)."""
+        text = CI.read_text()
+        self.assertIn("push:\n    branches: [main]\n", text)
+        self.assertEqual(workflow_job(text, "sandboxes"),
+                         "    if: github.event_name == 'push'\n"
+                         "    uses: ./.github/workflows/sandboxes.yml\n\n")
+        sandboxes = (ROOT / ".github" / "workflows" / "sandboxes.yml").read_text()
+        self.assertIn("on:\n  workflow_call:\n  workflow_dispatch:\n", sandboxes)
+        self.assertIn("scripts/sandboxes.sh short\n", sandboxes)
+        self.assertNotIn("sandboxes.sh long", sandboxes)
+        self.assertIn("uses: ./.github/actions/guest-kernel", sandboxes)
+        key = ("key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock',"
+               " 'vendor/firecracker.lock') }}")
+        restore = sandboxes.index("uses: actions/cache/restore@v6")
+        build = sandboxes.index('CLADEFS_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts"')
+        save = sandboxes.index("uses: actions/cache/save@v6")
+        self.assertLess(restore, build)
+        self.assertLess(build, save)
+        self.assertEqual(sandboxes.count(key), 2)
+        self.assertIn("            target\n            guest/tests/target\n", sandboxes)
 
     def test_macos_runs_what_compiles_for_macos(self):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a

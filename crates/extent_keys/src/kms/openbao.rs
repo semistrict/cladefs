@@ -1139,7 +1139,8 @@ mod tests {
             assert_eq!(again.unwrap(7, &wrapped).await.unwrap().expose(), key.expose());
         });
         // Tenant 8's key, relabelled as its, fails Transit's check.
-        let relabelled = [&header(8, "cladefs-tenant-8")[..], &wrapped.0[header_7.len()..]].concat();
+        let relabelled =
+            [&header(8, "cladefs-tenant-8")[..], &wrapped.0[header_7.len()..]].concat();
         assert_eq!(
             refusal(unwrap(&kms, 8, &Wrapped(relabelled))),
             "tenant 8: not authentic: a wrapped key, by the KMS's integrity check"

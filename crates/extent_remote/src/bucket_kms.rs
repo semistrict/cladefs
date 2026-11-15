@@ -713,7 +713,9 @@ mod tests {
         }
         let bucket = bucket();
         let chosen = |bucket: Option<&Arc<Direct>>| {
-            from_env(|| bucket.cloned().ok_or_else(|| "CLADEFS_EXTENTD_REMOTE names none".to_owned()))
+            from_env(|| {
+                bucket.cloned().ok_or_else(|| "CLADEFS_EXTENTD_REMOTE names none".to_owned())
+            })
         };
         let kind = |chosen: &Result<Option<HostKms<Direct>>, String>| match chosen {
             Ok(None) => "none".to_owned(),

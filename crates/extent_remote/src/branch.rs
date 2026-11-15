@@ -12,10 +12,10 @@
 //! what it found to what it writes (TASK-160.14).
 
 use crate::bucket::{self, Bucket, Created, Object, Updated};
+use crate::head;
 use crate::layout::{self, Branch, Cell, Child, Head, Kind as Key, Origin};
 use crate::record::{Kind, Record};
 use crate::recovery::{self, recover_from};
-use crate::head;
 use crate::{Error, rules};
 use futures::StreamExt as _;
 use serde::Serialize;

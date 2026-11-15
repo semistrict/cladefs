@@ -4,11 +4,11 @@
 
 //! Tests of a filesystem through its public API, as a host uses it.
 
-use futures::executor::block_on;
 use cladefs::{
     DirEntry, Errno, FileType, Filesystem, Node, Owner, RenameFlags, Result, SetAttr, SetTime,
     Storage, VolatileSlice, VolatileSliceMut, XattrMode, pages,
 };
+use futures::executor::block_on;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const OWNER: Owner = Owner { uid: 1000, gid: 100 };
@@ -90,15 +90,15 @@ fn create_then_lookup() {
 fn write_then_read() {
     with_fs(async |fs| {
         let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
-        assert_eq!(file.write(0, b"hello, world").await.expect("write failed"), 12);
-        assert_eq!(file.write(7, b"cladefs").await.expect("write failed"), 5);
-        assert_eq!(file.getattr().await.unwrap().size, 12);
+        assert_eq!(file.write(0, b"hello, friends").await.expect("write failed"), 14);
+        assert_eq!(file.write(7, b"cladefs").await.expect("write failed"), 7);
+        assert_eq!(file.getattr().await.unwrap().size, 14);
 
         let mut buf = [0; 32];
-        assert_eq!(file.read(0, &mut buf).await.expect("read failed"), 12);
-        assert_eq!(&buf[..12], b"hello, cladefs");
+        assert_eq!(file.read(0, &mut buf).await.expect("read failed"), 14);
+        assert_eq!(&buf[..14], b"hello, cladefs");
         assert_eq!(file.read(7, &mut buf[..3]).await.expect("read failed"), 3);
-        assert_eq!(&buf[..3], b"fxd");
+        assert_eq!(&buf[..3], b"cla");
         assert_eq!(file.read(100, &mut buf).await.expect("read failed"), 0);
         assert_eq!(errno(fs.root().read(0, &mut buf).await), Errno::EISDIR);
     })

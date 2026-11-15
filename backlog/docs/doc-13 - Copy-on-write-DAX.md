@@ -3,7 +3,7 @@ id: doc-13
 title: Copy-on-write DAX
 type: specification
 created_date: '2026-11-04 07:55'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 

@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-10 14:00'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 13:39'
 labels:
   - testing
 dependencies: []
@@ -25,14 +25,14 @@ Builds on TASK-310's fxfs-guest-shared-disk case and TASK-311's fxfs-guest-docke
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The run exists, passes on main, and fails on 6a513509a..96c7808b8's write-behind regression put back (TASK-310) as a mutant
+- [x] #1 The run exists, passes on main, and fails on 6a513509a..96c7808b8's write-behind regression put back (TASK-310) as a mutant
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -44,6 +44,8 @@ Builds on TASK-310's fxfs-guest-shared-disk case and TASK-311's fxfs-guest-docke
 4. .github/workflows/sandboxes.yml (reusable, dispatchable): KVM via udev on GitHub's runner, guest kernel cached by scripts/guest-kernel-key.sh, vmstat and RSS logged. Not yet in ci.yml (main fails the framing check: TASK-310, TASK-336) nor nightly.yml (long mode doesn't fit a 16 GB runner: TASK-330.5).
 5. Mutant crates/cladefs/mutants/framed-in-copies.patch, Killer: scripts/sandboxes.sh short; crates/cladefs/mutants.sh runs script killers.
 6. Verified on ubu1 and GitHub's runner; macOS and ubu1 suites; CI.
+
+7. (2026-11-15) Main passing since TASK-336/400/401: sandboxes.yml's short mode on main on GitHub x3 (every check's numbers); the mutant through mutants.sh on ubu1 once, killed, and main's short mode once after it; then ci.yml calls sandboxes.yml on every push to main, its artifacts' builds cached by the lock files (actions/cache restore/save around the build) so it fits the short mode's 10 min as far as GitHub allows; long mode stays ubu1's by hand (TASK-330.5).
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -73,4 +75,19 @@ Final sizes, verified: ubu1 short main x2: round 1 failed one framing (1,233 ms)
 Other flakes met in this task's CI runs, filed: TASK-339 (macOS: forks_read_what_they_inherited_compacted_twice) and TASK-341 (Linux: extent_store::crash openings_cut_at_each_write_open_again, an opening at epoch 22 holding epoch 21's contents); each passed on rerun. Final CI on the code (run 42951885432) green.
 
 Rebased onto main dfd9eb484 (its TASK-276.6 DAX changes, guest dax.c included): a fresh kernel (FXDAX_GUEST_KERNEL_JOBS=4) and artifacts on ubu1, short mode PASSED every check: slowest framing 368/325 ms, stores 1.19x, commands <= 41 ms, daemons' anon 712/722 MiB, VMs 85.5 s. CI on the rebased code (run 42979578798) green after reruns of TASK-341's flake, main's (reproduced on ubu1 with main's extent_store, 1 in 3 runs). Landed on main. Left In Progress: AC #1's pass on main is not steady, the framing check flapping past 1 s on ubu1's disk and on GitHub's runner (TASK-310, TASK-336); the short mode goes in ci.yml and the long in nightly.yml once they pass (TASK-330.5 for the long's size).
+
+2026-11-15 (claude), on main bfdecbc13, after TASK-336/400/401:
+GitHub, sandboxes.yml short x3 at once (43709072839, 43709074493, 43709076157): all PASS, every check. Per run, host-a/host-b:
+- slowest framing 373/303, 213/216, 481/731 ms; framings past 1 s 0/0 in each run; slow framings 10/9, 9/8, 19/15.
+- slowest framing's phases (read/compress/write ms): 51/221/101 and 3/35/266; 26/138/49 and 22/145/49; 113/368/0 (in place) and 259/435/37. Slow framings' summed write phase 658/759, 158/281, 92/130 ms.
+- writes 1.20, 1.19, 1.19x the guests' (4.1-4.3 GiB a host), past 1.5 fails; framed in place 56-62 a host.
+- slowest command 485, 167, 168 ms (budget 1 s).
+- durable lag max 11.5/2.8, 11.3/9.6, 3.9/3.3 s (p50 64-128 ms, p99 512-8192 ms).
+- VMs ran 157, 461, 577 s; builders' docker build round 149.5, 445-452, 560.8 s; the CPUs all guest time through the gap, no IO (filed TASK-447). Step times: kernel built (cache evicted) 9:33/11:17/13:31, artifacts 9:09/10:43/12:27, sandboxes.sh 3:13/8:21/10:08. Jobs 22.5, 31, 36.7 min with the kernel built and no cargo cache.
+ubu1, fxjob --bench, one after the other, kernel ~/src/t400-kernel (key differs from main only by workspace dependency lines and a test comment):
+- mutant framed-in-copies through mutants.sh: killed in 706 s (the tree's build, test-e2e's guest and firecracker parts, the run). Failed checks: 'framings: host-a framed 2 segments slower than 1000 ms, the slowest 1543.9 ms', host-b 1 at 1332.4 ms, 'writes: 1.91 times, past 1.5' (1.90/1.91, framed in place 0). Slow framings 44/46, summing 13.8/13.1 s.
+- main short with prebuilt artifacts: PASS. Slowest framing 568/163 ms, 0 past 1 s, writes 1.19/1.18 (1.19 overall), framed in place 60/60, commands <= 39 ms, VMs 96.6 s, durable lag max 7.1 s.
+Found and filed: TASK-448. The repo's Actions caches are past 10 GB, and the guest kernel's entry, saved at 11:38, was evicted within the hour.
+
+2026-11-15 (claude): landed c95040a89 (on main after TASK-437's rename): ci.yml's sandboxes job (uses: ./.github/workflows/sandboxes.yml) on every push to main; sandboxes.yml caches the artifacts' dependencies (actions/cache restore/save around the build, keyed by the three lock files, 1.5 GB). Measured on branch t3301-ci: cold 24.3 min (kernel built 10.3, cargo 9.8, run 3.0), warm 10.5 min (43718512917: kernel and cargo cache hits, restore 0.6, build 5.9 as cladefs's own crates rebuild twice, for the daemon and in the VMM's copy, run 3.3; all checks passed, slowest framing 246/279 ms, writes 1.20x). A slow runner adds up to ~7 min (TASK-447). The kernel cache is evicted within the hour while the repo's caches are past 10 GB (TASK-448). scripts/test_ci.py tests the job; upstream-changes.py --check passes. AC #1 checked: passes on main (GitHub 3 of 3, ubu1 once), and framed-in-copies is killed. Left: DoD #1 waits on main's CI run 43719878556 (1e74dbf41, the sandboxes job's first), in progress when checked; its guide job had failed on TASK-459 (the rename's doc titles), and the workspace part has TASK-458's race. Mark Done once that run's sandboxes and test jobs are green.
 <!-- SECTION:NOTES:END -->

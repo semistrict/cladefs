@@ -1594,7 +1594,13 @@ impl Pass {
     async fn new(
         bucket: &impl Bucket,
         (cell, epoch): (Cell, u64),
-        found: (BTreeMap<String, Meta>, BTreeMap<Branch, Record>, Live, BTreeSet<Origin>, Recording),
+        found: (
+            BTreeMap<String, Meta>,
+            BTreeMap<Branch, Record>,
+            Live,
+            BTreeSet<Origin>,
+            Recording,
+        ),
     ) -> Result<Self, Error> {
         let (objects, records, live, referenced, recording) = found;
         let Live { branches, touched, located, behind, .. } = live;
@@ -1725,8 +1731,10 @@ impl Pass {
         let mut compactable = self.compactable(bucket, options, trailers).await?;
         let ring = self.compacting(bucket, kms, &mut compactable, report).await?;
         // The compactions' futures made first, as in `bucket::delete_all`.
-        let compactions: Vec<_> =
-            compactable.iter().map(|object| compact_listed(bucket, object, (&ring, self.epoch))).collect();
+        let compactions: Vec<_> = compactable
+            .iter()
+            .map(|object| compact_listed(bucket, object, (&ring, self.epoch)))
+            .collect();
         let compactions = futures::stream::iter(compactions).buffer_unordered(COMPACTIONS_AT_ONCE);
         let mut compactions = std::pin::pin!(compactions);
         let mut compacted = Vec::new();
@@ -2150,9 +2158,7 @@ mod tests {
                 let corrupt = Error::Corrupt("an object's part, by its CRC".into());
                 assert_eq!(collect(&*bucket, 1, &compacting).await, Err(corrupt));
                 let after = keys(&*bucket).await;
-                assert!(
-                    after.contains(&segment) && moves_in(&after, &segment).is_none()
-                );
+                assert!(after.contains(&segment) && moves_in(&after, &segment).is_none());
                 let location = writer.location(kept).unwrap();
                 let read = crate::read(&bucket, kept, &location).await;
                 let corrupt = format!("part 0 of {segment}, by its CRC");
@@ -2204,7 +2210,8 @@ mod tests {
         before.checkpoint().await.unwrap();
         // The fork, freeing what makes the segment mostly freed.
         let forking = Batch::from(Commit { tag: 2, frees: vec![freed], ..Commit::default() });
-        let at = before.add_segment(forking.fork(child(fork), &mut before.chain()).frame()).unwrap();
+        let at =
+            before.add_segment(forking.fork(child(fork), &mut before.chain()).frame()).unwrap();
         before.upload(at).await.unwrap();
         before.acknowledge().await.unwrap();
         // The fork's writer recovers its parent's state at the fork, from the checkpoint before.
@@ -3233,7 +3240,10 @@ mod tests {
                     collect(&*going, 3, &now).await.unwrap();
                     collect(&*going, 4, &now).await.unwrap();
                     let left = keys(&*going).await;
-                    assert!(!left.contains(&segment) && moves(left.clone()).is_empty(), "{left:#?}");
+                    assert!(
+                        !left.contains(&segment) && moves(left.clone()).is_empty(),
+                        "{left:#?}"
+                    );
                 })
             });
             went.join().unwrap();

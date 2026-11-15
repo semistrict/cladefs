@@ -169,6 +169,7 @@ mod kept;
 mod layout;
 mod mem;
 mod on_disk;
+pub mod pages;
 mod raw;
 mod seals;
 mod segments;

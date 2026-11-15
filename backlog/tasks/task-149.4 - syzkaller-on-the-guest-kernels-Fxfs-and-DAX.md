@@ -4,6 +4,7 @@ title: syzkaller on the guest kernel's Fxfs and DAX
 status: To Do
 assignee: []
 created_date: '2026-11-01 06:13'
+updated_date: '2026-11-15 12:34'
 labels: []
 dependencies: []
 parent_task_id: TASK-149
@@ -30,3 +31,9 @@ Scripted operations find what their author thought of. syzkaller explores the sy
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+doc-17 (2026-11-15): KernelGPT and SyzGPT (Apache-2.0) have agents write syzkaller descriptions in a validate-and-repair loop (24 bugs, 11 CVEs); with a KCSAN guest beside it, races labelled by agents but never accepted as benign without an argument in the code (syzbot assessor called every race benign). Item 10 of TASK-444.
+<!-- SECTION:NOTES:END -->

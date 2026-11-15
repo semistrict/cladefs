@@ -4,7 +4,7 @@ title: 'Guest-owned metadata, milestone 1: guest Fxfs on a local extent store'
 status: To Do
 assignee: []
 created_date: '2026-10-13 19:53'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-15 11:35'
 labels: []
 milestone: m-3
 dependencies: []

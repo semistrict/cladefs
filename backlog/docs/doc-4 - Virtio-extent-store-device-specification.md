@@ -3,7 +3,7 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 ---
 # The virtio extent-store device
 

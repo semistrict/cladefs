@@ -13,9 +13,9 @@
 
 mod common;
 
-use common::{cache, copies, holds, memory, pattern};
 use cladefs::extentd::{Tenant, serve, serve_tenant};
 use cladefs::{Errno, ExtentId, ExtentStore, RemoteExtentStore};
+use common::{cache, copies, holds, memory, pattern};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};

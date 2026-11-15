@@ -106,7 +106,8 @@ mod tests {
     #[test]
     fn templates_name_every_tenant_apart() {
         let refused = KeyNames::new("cladefs", None);
-        let why = "the key template \"cladefs\" holds no {tenant}: every tenant would share one KEK";
+        let why =
+            "the key template \"cladefs\" holds no {tenant}: every tenant would share one KEK";
         assert_eq!(refused, Err(why.to_owned()));
     }
 

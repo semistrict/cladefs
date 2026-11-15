@@ -109,6 +109,8 @@ impl ImageDevice {
         needed: usize,
         offset: u64,
     ) -> Result<Aligned, Error> {
+        // What the store's page cache holds dirty there, on the disk first (TASK-433).
+        file.settle(offset..offset + len as u64)?;
         let mut read: Option<Aligned> = None;
         let mut done = 0;
         while done < needed {
@@ -145,6 +147,8 @@ impl ImageDevice {
         data.copy_to_slice(owned.as_mut_slice());
         let stored = write.stored(owned)?;
         let bytes = stored.bytes.as_slice();
+        // No page of the store's page cache left there to hide what this writes (TASK-433).
+        stored.file.settle_for_write(stored.offset..stored.offset + bytes.len() as u64)?;
         let mut done = 0;
         while done < bytes.len() {
             let at = stored.offset + done as u64;
@@ -449,6 +453,9 @@ mod tests {
                 assert_eq!(stored.encoding, *encoding);
                 bytes[(stored.offset + stored.len / 2) as usize] ^= 0x10;
                 std::fs::write(&path, bytes).unwrap();
+                // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
+                // so that its reads read the disk (TASK-433).
+                extent_store::pages::shared().evict_to(0);
 
                 let mut buffer = device.allocate_buffer(BLOCK as usize).await;
                 let at = (3 * MIB + MIB / 2) as u64;
@@ -601,6 +608,8 @@ mod tests {
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);
         let large_data = crate::test_data::noise(2, 5 * MIB);
         let in_the_clear = || {
+            // As on the disk, what the store's page cache holds written there first (TASK-433).
+            extent_store::pages::shared().write_back_all().unwrap();
             let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
             let mut files = vec![dir.path().to_path_buf()];
             let mut held = Vec::new();

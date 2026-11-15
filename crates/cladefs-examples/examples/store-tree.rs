@@ -13,8 +13,8 @@
 //! The store is opened as of its last durable commit, and closed unchanged but for what opening it
 //! recovers.
 
-use futures::executor::block_on;
 use cladefs::{FileType, Filesystem, Storage};
+use futures::executor::block_on;
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).ok_or_else(|| anyhow::anyhow!("usage: store-tree STORE"))?;

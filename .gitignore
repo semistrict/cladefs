@@ -4,3 +4,4 @@ guide/node_modules/
 guide/dist/
 guide/dist-single/
 guide/src/generated/
+.agent-role

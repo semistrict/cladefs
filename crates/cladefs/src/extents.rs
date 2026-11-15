@@ -2426,7 +2426,9 @@ mod tests {
         let follower = store.follow();
         assert_eq!(read(&follower, a, 0, 2 * BLOCK), Ok(data.clone()));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
-        // Nothing of it in the bucket: every file under the store's own.
+        // Nothing of it in the bucket: every file under the store's own, as on the disk, what the
+        // store's page cache holds written there first (TASK-433).
+        extent_store::pages::shared().write_back_all().unwrap();
         let bucket = dir.path().join("store.bucket");
         let mut files = vec![bucket.clone()];
         let mut objects = 0;
@@ -3214,6 +3216,9 @@ mod tests {
             };
             bytes[byte as usize] ^= 0x10;
             std::fs::write(&path, bytes).unwrap();
+            // Damaged behind the store's back: what the store's page cache holds of it, clean, goes,
+            // so that its reads read the disk (TASK-433).
+            extent_store::pages::shared().evict_to(0);
 
             let start = at as u64 * len as u64;
             store.map(*extent, 0, len as u64, start).unwrap();

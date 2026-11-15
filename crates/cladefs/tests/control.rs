@@ -12,10 +12,12 @@
 
 mod common;
 
-use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
-use common::pattern;
+use cladefs::Errno;
 use cladefs::Errno;
 use cladefs::extentd::control::proto::*;
+use cladefs::extentd::control::proto::*;
+use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
+use common::pattern;
 use std::path::Path;
 use tonic::Code;
 

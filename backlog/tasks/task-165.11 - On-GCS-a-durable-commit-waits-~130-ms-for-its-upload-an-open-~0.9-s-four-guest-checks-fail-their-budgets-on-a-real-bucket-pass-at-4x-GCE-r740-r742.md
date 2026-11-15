@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-06 09:22'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 labels:
   - real-bucket
   - perf

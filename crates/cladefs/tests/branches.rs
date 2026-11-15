@@ -8,8 +8,8 @@
 //! that alone until TASK-149.20, which found `cladefsctl take` of a new copy at a later placement
 //! refused (`ESTALE`): nothing ran them.
 
-use extent_remote::store::Store as Bucket;
 use cladefs::{ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
+use extent_remote::store::Store as Bucket;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;

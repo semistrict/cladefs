@@ -550,7 +550,8 @@ mod tests {
         assert_eq!(StoreFile::parse(&kept.text()).unwrap(), kept);
         // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
-        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 10"] {
+        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 10"]
+        {
             let refused = StoreFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
             assert_eq!(found, older);

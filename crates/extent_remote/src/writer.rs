@@ -142,7 +142,6 @@ struct Pending {
     objects: Option<(Body, Vec<(String, Body)>)>,
 }
 
-
 impl<B: Bucket> Writer<B> {
     /// Takes `branch` over: its head, as `holder`, which must differ from every other taking's, of
     /// the placement whose fencing token is `token` ([`head::take`]); then its state, recovered from
@@ -618,7 +617,8 @@ impl<B: Bucket> Writer<B> {
         {
             let mut held = self.held.lock().await;
             if held.head.checkpoint.is_none_or(|(at, _)| at < seq) {
-                let next = layout::Head { checkpoint: Some((seq, self.epoch)), ..held.head.clone() };
+                let next =
+                    layout::Head { checkpoint: Some((seq, self.epoch)), ..held.head.clone() };
                 match head::swap(&*self.bucket, self.branch, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
@@ -1100,7 +1100,10 @@ mod tests {
             };
             for (wrong, refused) in [
                 (Footer { seq: seq + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),
-                (Footer { epoch: writer.epoch() + 1, ..footer.clone() }, misplaced("number 0, epoch 2")),
+                (
+                    Footer { epoch: writer.epoch() + 1, ..footer.clone() },
+                    misplaced("number 0, epoch 2"),
+                ),
             ] {
                 assert_eq!(writer.add_segment(objects(&wrong, owns())), Err(refused), "{wrong:?}");
             }

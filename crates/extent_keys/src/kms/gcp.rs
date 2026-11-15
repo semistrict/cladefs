@@ -529,7 +529,10 @@ mod tests {
         let (ring, names) =
             parse(&format!("gcp-kms://{RING}?key=cladefs-tenant-{{tenant}}")).unwrap();
         assert_eq!(ring, RING);
-        assert_eq!(qualified(&ring, &names.of(0x2a)), format!("{RING}/cryptoKeys/cladefs-tenant-2a"));
+        assert_eq!(
+            qualified(&ring, &names.of(0x2a)),
+            format!("{RING}/cryptoKeys/cladefs-tenant-2a")
+        );
         let (_, percent) = parse(&format!("gcp-kms://{RING}?key=t-%7Btenant%7D")).unwrap();
         assert_eq!(percent.of(1), "t-1");
     }

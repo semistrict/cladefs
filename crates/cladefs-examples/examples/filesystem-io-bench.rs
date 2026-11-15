@@ -18,8 +18,8 @@
 //! (default 5), each on a filesystem of its own. Prints the time a read and a write take on each
 //! thread: the median over the rounds.
 
-use futures::executor::block_on;
 use cladefs::{Filesystem, Node, Owner, Storage};
+use futures::executor::block_on;
 use std::time::Instant;
 
 /// The pages of each thread's file.

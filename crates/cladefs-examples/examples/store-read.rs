@@ -11,8 +11,8 @@
 //! ```
 
 use anyhow::Context as _;
-use futures::executor::block_on;
 use cladefs::{Filesystem, Storage};
+use futures::executor::block_on;
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();

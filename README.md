@@ -1,5 +1,11 @@
 # cladefs
 
+A clade is an ancestor and all its descendants: here, a base image and every
+fork grown from it. cladefs was fxdax (Fxfs plus DAX, the first prototype's
+name) until TASK-437; records of what ran before, such as `docs/measurements`
+and closed backlog tasks, keep the old name, and `scripts/rename-to-cladefs.sh`
+renames a branch begun before.
+
 Fuchsia's Fxfs filesystem, running in a virtual machine's own Linux kernel,
 on extents its host keeps for it, so that the guest's file data is mapped
 straight from the host's memory (DAX), one copy shared by every VM that maps
@@ -470,11 +476,12 @@ before stay wrapped under them (TASK-411.21).
 
 ### `vendor/firecracker`: the VMM
 
-The VMM is a submodule: branch `fxdax-v1.16.1-pci` of
+The VMM is a submodule: branch `cladefs-v1.16.1-r8` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker), Firecracker's
 v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one linear series,
-each release of it tagged `fxdax-v1.16.1-rN` (TASK-269; r2, TASK-273, the one
-with the extent device over virtio-PCI alone). Its first commits are general
+each release of it a branch `cladefs-v1.16.1-rN` (TASK-269; r2, TASK-273, the one
+with the extent device over virtio-PCI alone; r8, TASK-437, r7 renamed, the
+releases before it named `fxdax-v1.16.1-rN`). Its first commits are general
 fixes, each standing alone, among them the PCI transport's shared memory
 regions; everything else is behind its `cladefs` feature, so that a build without
 it is upstream's. Every cladefs VM, on x86-64 and aarch64 alike, runs its devices
@@ -668,11 +675,11 @@ running pgbench, working git repositories and writing large and small files, eac
 sandbox's commands all the while. It fails on a guest kernel's report, a VM let go, a framing past
 a second, a command past its budget, or a daemon past its own; LangSmith's pin's double writes,
 put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
-minutes, runs on GitHub's runners' nested KVM (`.github/workflows/sandboxes.yml`), by hand until
-main's framings pass it (TASK-310, TASK-336), then on every push. The long mode is LangSmith's
-controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by hand, in the
-qualification before each pin (below), as no CI runner has its memory (TASK-330.5). Each run keeps
-what the host and the run spent every 30 s (`resources.log`):
+minutes, runs on GitHub's runners' nested KVM on every push to main
+(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
+LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
+hand, in the qualification before each pin (below), as no CI runner has its memory (TASK-330.5).
+Each run keeps what the host and the run spent every 30 s (`resources.log`):
 
 ```sh
 scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all

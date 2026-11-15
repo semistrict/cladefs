@@ -39,6 +39,7 @@
 //! ([`Error::Downgrade`]); and an extent's own object whose footer names another extent than its
 //! key, or a moves' that names another object than its key's, is no object of theirs.
 
+use crate::Error;
 use crate::bucket::{self, Bucket, ByteRange};
 use crate::cache::Cache;
 use crate::checkpoint::Table;
@@ -47,7 +48,6 @@ use crate::layout::{self, Footer, Kind, Location, Moves, PART};
 use crate::moves::MOVES;
 use crate::object::{self, TAIL};
 use crate::peer::{Peer, Peers};
-use crate::Error;
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::borrow::Cow;
@@ -967,7 +967,9 @@ impl<B: Bucket> Fetching<B> {
             Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(Some(fetched)),
             Ok(None) => Ok(None),
             Ok(Some(_)) => Err(Error::Corrupt(format!("part {part} of {key}, by its CRC"))),
-            Err(bucket::Past { .. }) => Err(Error::Corrupt(format!("part {part} of {key}, past its end"))),
+            Err(bucket::Past { .. }) => {
+                Err(Error::Corrupt(format!("part {part} of {key}, past its end")))
+            }
         }
     }
 
@@ -1600,7 +1602,8 @@ mod tests {
         moved.extend_from_slice(&data[MOVED.0 as usize..][..MOVED.1 as usize]);
         let moves =
             layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create))
+            .unwrap();
         block_on(direct.delete(KEY)).unwrap();
     }
 
@@ -2528,5 +2531,4 @@ mod tests {
         let past = serving(2);
         assert_eq!(pool.run_until(past), Ok(None), "the tail kept: no GET");
     }
-
 }

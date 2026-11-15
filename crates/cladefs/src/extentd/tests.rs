@@ -1168,7 +1168,9 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
     let commit = crate::BUILD_COMMIT;
     let daemon = format!("cladefs_extentd_build_info{{commit=\"{commit}\"}} 1");
     let vms = |branch: u64, count: usize| {
-        format!("cladefs_extentd_vm_build_info{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}")
+        format!(
+            "cladefs_extentd_vm_build_info{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}"
+        )
     };
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 24);
@@ -3341,8 +3343,9 @@ fn metrics_count_requests_as_they_are_served() {
     }
     assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
     let metrics = get("/metrics");
-    let requests =
-        |kind: &str| metric(&metrics, &format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}}"));
+    let requests = |kind: &str| {
+        metric(&metrics, &format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}}"))
+    };
     assert_eq!(
         [requests("open"), requests("transfer"), requests("write"), requests("read")],
         [1, 1, 3, 1]

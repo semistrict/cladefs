@@ -4,7 +4,7 @@ title: extent_remote's GCS test runs nowhere
 status: To Do
 assignee: []
 created_date: '2026-11-07 13:37'
-updated_date: '2026-11-15 14:29'
+updated_date: '2026-11-15 11:36'
 labels:
   - testing
 dependencies: []

@@ -9,7 +9,7 @@
 //! another process maps a page of by its [`PhysLocation`].
 //!
 //! Lifted, with as little change to its logic as could be, from the physical memory manager of
-//! cladefs's port of the Zircon kernel, which was fxdax's own: host memory as physical memory
+//! cladefs's port of the Zircon kernel, which was cladefs's own: host memory as physical memory
 //! (`physmap`), arenas taking it a chunk ([`CHUNK_SIZE`]) at a time, under caps of their own and
 //! in total (`pmm::arenas`), the relief of arenas starved by them ([`relieve_with`]), and the
 //! quarantine of freed pages a second stage of another process may map still

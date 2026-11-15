@@ -86,7 +86,7 @@ fi
 if [[ $mode == backlog ]]; then
     backlog config set projectName cladefs
     RENAME="$rename" python3 - << 'EOF'
-import glob, json, os, subprocess
+import json, os, subprocess
 
 def renamed(text):
     return subprocess.run(["perl", "-pe", os.environ["RENAME"]], input=text, capture_output=True,
@@ -95,20 +95,17 @@ def renamed(text):
 def backlog(*args):
     return subprocess.run(["backlog", *args], capture_output=True, text=True, check=True).stdout
 
-# Docs: their titles as the CLI reads them (the front matter's YAML may quote or fold one), each
-# changed only if it says the old name; the body after the front matter.
-titles = dict(line.split(" - ", 1) for line in backlog("doc", "list", "--plain").splitlines()
-              if line.startswith("doc-"))
-for path in sorted(glob.glob("backlog/docs/doc-*.md")):
-    doc = os.path.basename(path).split(" - ", 1)[0]
-    body = open(path).read().split("---\n", 2)[2]
+# Docs: each title as the backlog reads it, its front matter's YAML value (quoted, folded), not the
+# YAML's text, and set only if the rename changes it; each body, after the front matter.
+docs = json.loads(backlog("search", "--type", "document", "--json"))["results"]
+for doc in sorted((r["data"] for r in docs), key=lambda d: int(d["id"].removeprefix("doc-"))):
+    body = open(doc["path"]).read().split("---\n", 2)[2]
     args = []
-    if renamed(titles[doc]) != titles[doc]:
-        args += ["--title", renamed(titles[doc])]
-    if renamed(body) != body:
-        args += ["--content", renamed(body)]
+    for flag, text in (("--title", doc["title"]), ("--content", body)):
+        if renamed(text) != text:
+            args += [flag, renamed(text)]
     if args:
-        backlog("doc", "update", doc, *args)
+        backlog("doc", "update", doc["id"], *args)
 
 # Open tasks, but the rename's own, which names both.
 listed = json.loads(backlog("task", "list", "--exclude-status", "Done", "--json"))["tasks"]

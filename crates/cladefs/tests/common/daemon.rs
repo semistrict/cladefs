@@ -228,7 +228,8 @@ impl Daemon {
 }
 
 /// A branch to make anew: of a new cell of no tenant's, a new ID there (TASK-364).
-pub const NEW: cladefs::Branch = cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
+pub const NEW: cladefs::Branch =
+    cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
 
 pub const CAPACITY: u64 = 1 << 26;
 

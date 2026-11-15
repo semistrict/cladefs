@@ -4,10 +4,10 @@
 
 //! Tests of importing container images into filesystems (TASK-39.5).
 
-use futures::executor::block_on;
 use cladefs::import::testing::{Entry, Kind, MTIME, gzip, layer, oci_layout, opaque, whiteout};
 use cladefs::import::{Importer, OciImage};
 use cladefs::{Attr, Errno, FileType, Filesystem, Node, Storage};
+use futures::executor::block_on;
 use std::future::poll_fn;
 use std::path::Path;
 use std::pin::pin;
@@ -785,7 +785,8 @@ fn cladefsctl_makes_stores_of_images() {
     oci_layout(&layout, "sample:1", &layers).unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
 
-    let (ok, stderr) = cladefsctl(&["import", &path("oci"), "67108864", &path("image"), "sample:1"]);
+    let (ok, stderr) =
+        cladefsctl(&["import", &path("oci"), "67108864", &path("image"), "sample:1"]);
     assert!(ok, "{stderr}");
     assert_eq!(store_manifest(Path::new(&path("oci"))), import_layout(&layout, None));
 

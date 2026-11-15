@@ -3,7 +3,7 @@ id: doc-1
 title: libkrun virtio-fs server interface
 type: specification
 created_date: '2026-09-28 02:44'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 13:42'
 ---
 **Status: historical.** cladefs's virtio-fs (FUSE) server over host Fxfs was removed in 610923b34 (2026-10-15), and libkrun, with `vendor/libkrun`, in 5ba394977 (TASK-40, 2026-10-17). Fxfs runs in the guest's kernel over the virtio extent-store device (doc-4) in Firecracker (`vendor/firecracker`), DAX copying on write (doc-13). The survey below is kept as written.
 

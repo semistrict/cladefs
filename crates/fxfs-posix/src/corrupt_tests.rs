@@ -1103,7 +1103,8 @@ async fn try_case(image: &Image, case: Case) -> Outcome {
 fn flips_never_panic(barriers: bool, ending: Ending) {
     let number =
         |name, default| std::env::var(name).map_or(default, |n: String| n.parse().unwrap());
-    let (cases, first) = (number("CLADEFS_CORRUPT_CASES", CASES), number("CLADEFS_CORRUPT_SEED", 0));
+    let (cases, first) =
+        (number("CLADEFS_CORRUPT_CASES", CASES), number("CLADEFS_CORRUPT_SEED", 0));
     let image = run_case(Image::new(barriers, ending)).expect("an image");
     count_panics();
     let watched = watch_sequences(CASE_LIMIT);

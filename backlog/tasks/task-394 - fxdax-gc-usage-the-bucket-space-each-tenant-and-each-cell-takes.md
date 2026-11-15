@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-13T08:25:00Z'
-updated_date: '2026-11-15 14:28'
+updated_date: '2026-11-15 11:36'
 labels:
   - tools
   - extent_remote

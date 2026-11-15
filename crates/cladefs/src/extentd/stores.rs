@@ -1599,9 +1599,11 @@ mod tests {
         set("1");
         assert_eq!(
             cache_config(),
-            Err("CLADEFS_EXTENTD_CACHE_BYTES is set, but CLADEFS_EXTENTD_CACHE names no directory \
+            Err(
+                "CLADEFS_EXTENTD_CACHE_BYTES is set, but CLADEFS_EXTENTD_CACHE names no directory \
                  for the cache"
-                .to_owned())
+                    .to_owned()
+            )
         );
         // SAFETY: as above.
         unsafe { std::env::set_var("CLADEFS_EXTENTD_CACHE", dir.path()) };

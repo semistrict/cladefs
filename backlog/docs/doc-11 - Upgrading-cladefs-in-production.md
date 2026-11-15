@@ -3,7 +3,7 @@ id: doc-11
 title: Upgrading cladefs in production
 type: other
 created_date: '2026-10-31 20:30'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 ---
 # Upgrading cladefs in production (TASK-141)
 

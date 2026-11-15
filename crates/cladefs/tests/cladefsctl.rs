@@ -171,8 +171,10 @@ fn points_are_shared_and_unshared_locally() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    let cladefsctl =
-        Cladefsctl::with_env(&[("CLADEFS_EXTENTD_REMOTE", &bucket), ("CLADEFS_EXTENTD_TOKEN", "1")]);
+    let cladefsctl = Cladefsctl::with_env(&[
+        ("CLADEFS_EXTENTD_REMOTE", &bucket),
+        ("CLADEFS_EXTENTD_TOKEN", "1"),
+    ]);
     let (base, point) = (dir.path().join("base"), dir.path().join("point"));
     cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
     let printed =
@@ -244,13 +246,15 @@ fn stores_open_elsewhere_are_left_alone_through_the_daemon() {
 /// the import's memory would have taken with it (TASK-165.8).
 #[test]
 fn images_imported_where_no_daemon_is_fork_there() {
-    use futures::executor::block_on;
     use cladefs::import::testing::{Entry, Kind, layer};
     use cladefs::{Filesystem, Storage};
+    use futures::executor::block_on;
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let cladefsctl =
-        Cladefsctl::with_env(&[("CLADEFS_EXTENTD_REMOTE", &bucket), ("CLADEFS_EXTENTD_TOKEN", "1")]);
+    let cladefsctl = Cladefsctl::with_env(&[
+        ("CLADEFS_EXTENTD_REMOTE", &bucket),
+        ("CLADEFS_EXTENTD_TOKEN", "1"),
+    ]);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));

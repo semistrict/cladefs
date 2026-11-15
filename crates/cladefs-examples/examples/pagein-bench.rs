@@ -21,8 +21,8 @@
 //! process spends on it, on every thread, which other work on the host disturbs less: the median of
 //! each kind's over the rounds.
 
-use futures::executor::block_on;
 use cladefs::{Access, ExtentId, ExtentStore, VolatileSlice};
+use futures::executor::block_on;
 use std::time::Instant;
 
 /// The parts of an extent.

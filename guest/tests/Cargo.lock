@@ -846,6 +846,56 @@ dependencies = [
 ]
 
 [[package]]
+name = "cladefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-task",
+ "async-trait",
+ "bitflags",
+ "event-listener",
+ "extent_frame",
+ "extent_keys",
+ "extent_remote",
+ "extent_store",
+ "fail",
+ "flate2",
+ "fuchsia-async",
+ "futures",
+ "fxfs",
+ "fxfs-posix",
+ "humantime",
+ "hyper-util",
+ "io-uring",
+ "libc",
+ "log",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "physmem",
+ "pin-project-lite",
+ "prost",
+ "protox",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "siphasher",
+ "storage_device",
+ "tar",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "url",
+ "zerocopy",
+]
+
+[[package]]
 name = "clap"
 version = "4.5.60"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1512,56 +1562,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "cladefs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-task",
- "async-trait",
- "bitflags",
- "event-listener",
- "extent_frame",
- "extent_keys",
- "extent_remote",
- "extent_store",
- "fail",
- "flate2",
- "fuchsia-async",
- "futures",
- "fxfs",
- "fxfs-posix",
- "humantime",
- "hyper-util",
- "io-uring",
- "libc",
- "log",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "physmem",
- "pin-project-lite",
- "prost",
- "protox",
- "rand 0.10.3",
- "serde",
- "serde_json",
- "sha2",
- "siphasher",
- "storage_device",
- "tar",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-health",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
- "url",
- "zerocopy",
 ]
 
 [[package]]
@@ -3763,13 +3763,13 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "cladefs",
  "extent_frame",
  "extent_keys",
  "extent_remote",
  "extent_store",
  "follower_history",
  "futures",
- "cladefs",
  "fxfs-automount",
  "http-body-util",
  "hyper",

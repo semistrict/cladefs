@@ -7,8 +7,8 @@
 //! Images live under the build's temporary directory, which is on the repository's filesystem,
 //! where direct I/O works, rather than on a `/tmp` that may be a tmpfs.
 
-use futures::executor::block_on;
 use cladefs::{Filesystem, Owner, Storage};
+use futures::executor::block_on;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 

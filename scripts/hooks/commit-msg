@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Copyright 2026 The cladefs Authors. All rights reserved.
+# Use of this source code is governed by a BSD-style license that can be
+# found in the LICENSE file.
+
+# Refuses a commit that weakens a check (an assertion gone, a test ignored, a count lowered...)
+# unless its message says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9).
+# `git config core.hooksPath scripts/hooks` installs it.
+set -euo pipefail
+exec "$(dirname "$0")/../test-weakening.py" --staged --message "$1"

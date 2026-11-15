@@ -4,8 +4,8 @@
 
 //! Tests of images and their volumes: filesystems of their own on one image.
 
-use futures::executor::block_on;
 use cladefs::{Errno, Filesystem, Image, Owner, RenameFlags, Storage, VolumeMetadata};
+use futures::executor::block_on;
 
 const OWNER: Owner = Owner { uid: 1000, gid: 100 };
 

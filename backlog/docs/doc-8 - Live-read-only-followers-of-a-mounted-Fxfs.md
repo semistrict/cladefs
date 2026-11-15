@@ -3,7 +3,7 @@ id: doc-8
 title: Live read-only followers of a mounted Fxfs
 type: specification
 created_date: '2026-10-17 22:17'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 11:34'
 ---
 # Live read-only followers of a mounted Fxfs
 

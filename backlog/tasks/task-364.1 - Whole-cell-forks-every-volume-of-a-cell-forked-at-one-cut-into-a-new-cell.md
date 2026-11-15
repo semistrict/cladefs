@@ -4,7 +4,7 @@ title: 'Whole-cell forks: every volume of a cell forked at one cut into a new ce
 status: To Do
 assignee: []
 created_date: '2026-11-12 02:16'
-updated_date: '2026-11-15 14:28'
+updated_date: '2026-11-15 11:36'
 labels:
   - bucket
   - host
