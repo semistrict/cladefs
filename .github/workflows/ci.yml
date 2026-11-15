@@ -23,11 +23,14 @@ on:
         options: [auto, full, smoke]
         default: auto
 
-# cladefs: a newer run of a ref replaces an older one still going: a push to main, or a land-X branch
-# pushed again, makes the older run's result moot.
+# cladefs: one run of a ref at a time. On main a run goes on to its end, and of the pushes made
+# meanwhile only the latest waits (GitHub keeps one pending run a group, the newer replacing the
+# older): main is tested at every point a run can reach, and a stream of pushes from many sessions no
+# longer cancels every run before its slow jobs end, as it did five in a row on 2026-11-15. A
+# branch's newer run still replaces its older one still going, whose result is moot.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
