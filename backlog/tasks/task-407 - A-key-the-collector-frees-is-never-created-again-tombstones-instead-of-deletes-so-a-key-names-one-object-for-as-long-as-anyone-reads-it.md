@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 16:01'
-updated_date: '2026-11-15 02:22'
+updated_date: '2026-11-15 10:08'
 labels:
   - bucket
   - collector
@@ -27,19 +27,19 @@ Decided with the user (2026-11-14), over tombstones (the collector leaving a tin
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 specs/bucket models the head: keys written once, commits by the head's swap, takeover and deletion by it; an invariant holds that no key ever names two objects; NoAckedLost and the other invariants hold; mutations of the head's rules each find their violation
-- [ ] #2 The rules that only guarded key reuse are gone from the spec and the code: fencing by create, fences, gaps, void and late segments, pins (CreatesNeverFreed, collector::pinned), forks_after_lease's lease read
-- [ ] #3 Writers commit by PUT then head swap; takeover, recovery, deletion and forks go by the head; the collector deletes unreachable objects of older epochs at once
-- [ ] #4 The fetcher, part cache, in-flight reads and peers key on the object key alone: footer-over-index, Flown's Stored, the read again by a tail fetched anew and peers' not-as-asked are removed
-- [ ] #5 Durable commit latency measured on ubu1 at 25 ms (sync loop), against TASK-371's 30/s
-- [ ] #6 doc-7 describes the head and the rule: a key is written once
+- [x] #1 specs/bucket models the head: keys written once, commits by the head's swap, takeover and deletion by it; an invariant holds that no key ever names two objects; NoAckedLost and the other invariants hold; mutations of the head's rules each find their violation
+- [x] #2 The rules that only guarded key reuse are gone from the spec and the code: fencing by create, fences, gaps, void and late segments, pins (CreatesNeverFreed, collector::pinned), forks_after_lease's lease read
+- [x] #3 Writers commit by PUT then head swap; takeover, recovery, deletion and forks go by the head; the collector deletes unreachable objects of older epochs at once
+- [x] #4 The fetcher, part cache, in-flight reads and peers key on the object key alone: footer-over-index, Flown's Stored, the read again by a tail fetched anew and peers' not-as-asked are removed
+- [x] #5 Durable commit latency measured on ubu1 at 25 ms (sync loop), against TASK-371's 30/s
+- [x] #6 doc-7 describes the head and the rule: a key is written once
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -66,4 +66,6 @@ Pins under tombstones: each NoPins* mutation with "tombstones" added (NoPinsFenc
 Keys that can be created again once freed (AC2): segments (a taken-over writer's late create; recovery's fence) and checkpoints (a stale writer's checkpoint create) - tombstones cover both, modelled; moves only by their segment's being created again, covered with it. Not: own extents (one key, one content), records, leases, cells, references, marks (changed in place, never read by parts).
 
 2026-11-14, spec done (471b009b1, 02d6a931a and after, Mac): specs/bucket rewritten around the head. All 20 designed models hold (Bucket 131K states 7-11 s, was 1.27M; BucketForks 4.9M 214 s, was 35M; BucketTakeovers 5.5M 575 s, was 207M 1 h 47 min; BucketCells resized to one segment, its fence's gone: 1.58M 78 s); all 36 mutations find their violations, new: NoHeadSwap (NoAckedLost), NoEpochKeys and NoMovesByPass (KeysWrittenOnce), NoCollectorEpochs (NothingNeededGone). Removed with the user's leave: 22 mutations of rules gone (pins x5, tombstones, forksAfterLease, fence, continuity, newestCheckpoint x2, footers, leasesByTakings, orphansAfterSuccessor, extentKeysNameSegments, deletionsFence, deletionsReread, walAfterFence, spansFenced, walBetweenCommits, walContinues, spansHeld). Re-modelled: NoCandidatesFirst and NoForkClaimsLanded need a second commit (their old scenarios went through a lease deleted, a fence); NoMovesTakenFirst needs the swap's answer before the moves are taken (a step of its own); NoWaysFromSeals's scenario is a fork's now (a stale writer's checkpoint is no head's, but forks list their parents' checkpoints).
+
+All ACs verified (subtasks 407.1-.5 done, TASK-424/429/430 done): spec 56 models and mutations passing; code pushed through 664e48aca; macOS gate 2488/2488, sim 50/50, go, scripts; ubu1 workspace 2786/2787 (TASK-315 only), Shuttle passing; durable commit ~60 ms vs ~33 ms at 25 ms (one round trip more). Left: TASK-407.6 (fork-point checkpoint re-creatable after retirement: garbage, not a wrong read).
 <!-- SECTION:NOTES:END -->
