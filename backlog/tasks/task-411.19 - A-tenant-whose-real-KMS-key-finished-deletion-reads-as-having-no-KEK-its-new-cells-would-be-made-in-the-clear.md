@@ -6,11 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 03:58'
-updated_date: '2026-11-15 04:22'
+updated_date: '2026-11-15 09:23'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
-priority: medium
+priority: high
 type: bug
 ordinal: 817000
 ---
@@ -38,4 +38,6 @@ Found in TASK-411.17 (AWS KMS backend). A real KMS forgets a deleted key: AWS KM
 
 <!-- SECTION:NOTES:BEGIN -->
 TASK-411.16 found the same with OpenBao: a deleted Transit key is forgotten, so wrap says NoSuchTenant and new cells of a shredded tenant would be made in the clear (OpenBao has no scheduled-deletion state). GCP Cloud KMS likely similar once a key's versions are all destroyed. The fix belongs above the backends, in how a cell chooses encryption (doc-16).
+
+The user's decision (2026-11-15): a tenant marker in the bucket. The first sealed cell of a tenant writes tenants/<tenant>/sealed (create-only); a tenant with the marker never gets a cell in the clear: the KMS's 'no such key' then refuses, as destroyed. Works for every backend, no host config.
 <!-- SECTION:NOTES:END -->
