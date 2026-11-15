@@ -77,3 +77,9 @@ AC evidence: #1 extent_store encrypted::points_fork_into_other_tenants_cells_rew
 Plaintext twin: forks_in_the_clear_ask_for_nothing_more_and_sealed_ones_go_into_no_clear_cell (inheriting None, no KMS call, takes no bucket; record keyless; sealed into a clear tenant's cell refused Inherited, nothing made).
 Filed: TASK-411.14 (fxdax-gc --delete-branch of a sealed branch with an unrecorded fork into another cell needs a KMS).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Forks into other cells keep the DEKs they inherit rewrapped under the child's cell KEK, in Record.inherited (FORMAT 10 extended, unreleased), given with the child's first DEK in one conditional update, so a record with DEKs needs no other cell's KEK or tenant's KMS. The fork's host asks Remote::inheriting before anything is made (store's ring in memory, cell KEK from the host's pool: no KMS call; refused for a revoked source tenant or a child tenant without a KEK) and, after the record, makes the child's cell with that KEK and gives the record its keys (2 round trips). Points keep no key; their copies read across cells and their clones rewrap. Rings cross cells only for records without keys; writers of clear cells inherit nothing sealed. Pools refill in batches off the path and are dropped when the tenant's KEK is revoked or destroyed. Fork-point checkpoints are now sealed under the parent's DEK (they were written in the clear). Plaintext forks unchanged. Verified on macOS: 962/963 tests across the six crates (the one failure is the known flake TASK-328), new tests per AC with KMS calls counted, a 10-seed sim sample over 10 profiles, clippy/fmt clean; fork latency measured with fork-bench (numbers in notes). Linux runs remain the user's.
+<!-- SECTION:FINAL_SUMMARY:END -->
