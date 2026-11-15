@@ -13,8 +13,6 @@
 mod common;
 
 use cladefs::Errno;
-use cladefs::Errno;
-use cladefs::extentd::control::proto::*;
 use cladefs::extentd::control::proto::*;
 use common::daemon::{CAPACITY, Daemon, NEW, failure, name, write};
 use common::pattern;
