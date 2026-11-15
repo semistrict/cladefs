@@ -3,11 +3,11 @@ id: TASK-407
 title: >-
   Keys written once, commits published by swapping the branch's head: no key is
   ever reused, so nothing reads by versions
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 16:01'
-updated_date: '2026-11-15 10:08'
+updated_date: '2026-11-15 10:18'
 labels:
   - bucket
   - collector
@@ -69,3 +69,9 @@ Keys that can be created again once freed (AC2): segments (a taken-over writer's
 
 All ACs verified (subtasks 407.1-.5 done, TASK-424/429/430 done): spec 56 models and mutations passing; code pushed through 664e48aca; macOS gate 2488/2488, sim 50/50, go, scripts; ubu1 workspace 2786/2787 (TASK-315 only), Shuttle passing; durable commit ~60 ms vs ~33 ms at 25 ms (one round trip more). Left: TASK-407.6 (fork-point checkpoint re-creatable after retirement: garbage, not a wrong read).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Keys written once, commits published by swapping the branch's head (format 11): spec rewritten around the head (KeysWrittenOnce, HeadsCurrent; 56 models and mutations), 22 rules and their code gone; writers commit by PUT then head swap; takeover, recovery, deletion and forks by the head; the collector's epoch rule; moves keyed by their pass; readers key on the object key alone. Verified on macOS (gate, sim, go, scripts) and ubu1 (workspace, Shuttle); a durable commit costs one round trip more (~60 ms vs ~33 ms at 25 ms). doc-7 and doc-14 describe it. TASK-407.6 left filed, low (garbage only), with the user.
+<!-- SECTION:FINAL_SUMMARY:END -->
