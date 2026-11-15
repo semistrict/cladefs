@@ -130,6 +130,52 @@ class TestWeakeningTest(unittest.TestCase):
         self.commit("truncates ignored")
         self.assert_flags("test-ignored", '#[ignore = "flaky"]')
 
+    def test_a_test_added_ignored_or_expecting_a_panic_is_not(self):
+        # A benchmark run by hand, and a test of a panic: nothing checked before is checked less
+        # (TASK-468: 669ed6892, c563138a6, 880a20f59).
+        self.edit("crates/log/src/tests.rs", "#[test]\nfn truncates",
+                  '#[test]\n#[ignore = "a benchmark: --run-ignored only"]\nfn bench_appends() {\n'
+                  '    Log::new().append(b"a");\n}\n\n'
+                  '#[should_panic(expected = "closed")]\n#[test]\nfn appends_closed() {\n'
+                  '    Log::closed().append(b"a");\n}\n\n#[test]\nfn truncates')
+        self.write("scripts/tests/test_zloop.py", "import unittest\n\n\n"
+                   "class TestZloop(unittest.TestCase):\n    def test_soak(self):\n"
+                   '        self.skipTest("an hour: by hand")\n')
+        self.commit("a benchmark, a panic's test and a soak")
+        self.assertEqual(self.check(), (0, ""))
+
+    def test_an_existing_test_ignored_beside_one_added_is_flagged(self):
+        self.edit("crates/log/src/tests.rs", "#[test]\nfn truncates",
+                  '#[test]\nfn appends_twice() {\n    Log::new().append(b"ab");\n}\n\n'
+                  '#[test]\n#[ignore = "flaky"]\nfn truncates')
+        self.commit("appends twice; truncates ignored")
+        self.assert_flags("test-ignored", '#[ignore = "flaky"]')
+
+    def test_a_test_renamed_or_moved_and_ignored_is_flagged(self):
+        self.edit("crates/log/src/tests.rs", "#[test]\nfn truncates",
+                  '#[test]\n#[ignore = "flaky"]\nfn truncates_to_nothing')
+        self.commit("truncates renamed, ignored")
+        self.assert_flags("test-ignored", '#[ignore = "flaky"]')
+        self.base = self.commit("past it")
+        text = (self.repo / "crates/log/src/tests.rs").read_text()
+        cut = text.index("\n#[test]\n#[ignore") + 1
+        self.write("crates/log/src/tests.rs", text[:cut])
+        self.write("crates/log/tests/truncate.rs",
+                   text[cut:].replace('#[ignore = "flaky"]', '#[ignore = "slow"]'))
+        self.commit("truncates in a file of its own, ignored for another reason")
+        self.assert_flags("test-ignored", '#[ignore = "slow"]')
+
+    def test_an_ignored_test_moved_as_it_is_is_not(self):
+        self.edit("crates/log/src/tests.rs", "#[test]\nfn truncates",
+                  '#[test]\n#[ignore = "flaky"]\nfn truncates')
+        self.base = self.commit("truncates ignored")
+        text = (self.repo / "crates/log/src/tests.rs").read_text()
+        cut = text.index("\n#[test]\n#[ignore") + 1
+        self.write("crates/log/src/tests.rs", text[:cut])
+        self.write("crates/log/tests/truncate.rs", text[cut:])
+        self.commit("truncates in a file of its own")
+        self.assertEqual(self.check(), (0, ""))
+
     def test_a_removed_test_is_flagged(self):
         text = (self.repo / "crates/log/src/tests.rs").read_text()
         self.write("crates/log/src/tests.rs", text[:text.index("\n#[test]\nfn truncates") + 1])
