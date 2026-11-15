@@ -610,11 +610,11 @@ running pgbench, working git repositories and writing large and small files, eac
 sandbox's commands all the while. It fails on a guest kernel's report, a VM let go, a framing past
 a second, a command past its budget, or a daemon past its own; LangSmith's pin's double writes,
 put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
-minutes, runs on GitHub's runners' nested KVM (`.github/workflows/sandboxes.yml`), by hand until
-main's framings pass it (TASK-310, TASK-336), then on every push. The long mode is LangSmith's
-controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by hand, in the
-qualification before each pin (below), as no CI runner has its memory (TASK-330.5). Each run keeps
-what the host and the run spent every 30 s (`resources.log`):
+minutes, runs on GitHub's runners' nested KVM on every push to main
+(`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
+LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
+hand, in the qualification before each pin (below), as no CI runner has its memory (TASK-330.5).
+Each run keeps what the host and the run spent every 30 s (`resources.log`):
 
 ```sh
 scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all
