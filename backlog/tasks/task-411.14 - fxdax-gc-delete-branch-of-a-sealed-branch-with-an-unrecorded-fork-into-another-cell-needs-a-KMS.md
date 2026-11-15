@@ -3,9 +3,11 @@ id: TASK-411.14
 title: >-
   fxdax-gc --delete-branch of a sealed branch with an unrecorded fork into
   another cell needs a KMS
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 00:17'
+updated_date: '2026-11-15 01:06'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -21,8 +23,8 @@ TASK-411.4 seals the parent's checkpoint at a fork point under the parent's DEK,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 fxdax-gc --delete-branch deletes a sealed branch whose fork into another cell has no record yet, the checkpoint at the fork point sealed under the branch's DEK, given FXDAX_KMS
-- [ ] #2 Without a KMS it fails naming the tenant and what it needs, leaving the branch as a deletion stopped partway
+- [x] #1 fxdax-gc --delete-branch deletes a sealed branch whose fork into another cell has no record yet, the checkpoint at the fork point sealed under the branch's DEK, given FXDAX_KMS
+- [x] #2 Without a KMS it fails naming the tenant and what it needs, leaving the branch as a deletion stopped partway
 <!-- AC:END -->
 
 ## Definition of Done
@@ -31,3 +33,19 @@ TASK-411.4 seals the parent's checkpoint at a fork point under the parent's DEK,
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. fxdax-gc --delete-branch reads FXDAX_KMS (the kms() its sweeps read) and calls branch::delete_under with a keys::Kms over it (delete_branch fn); a bad FXDAX_KMS stops it before deleting.
+2. With no KMS, an Error::Kms from the deletion becomes 'deleting branch B: tenant T: cell C is encrypted, and this host has no KMS: fxdax-gc reads it from FXDAX_KMS, which names none; the deletion stopped partway: run it again with FXDAX_KMS to finish it'. delete_under ends the lease first and marks the record deleted only after recording the forks, so the branch is left as a deletion stopped partway; other errors name the branch.
+3. Test (extent_remote tests/gc.rs, the binary, file bucket): sealed cell with LocalKms, branch 1 with DEK, a sealed segment, then a fork segment into cell 1/2 uploaded but never acknowledged (child unrecorded). Without FXDAX_KMS: exact stderr, exit 1, record not deleted, child unrecorded, no checkpoint. With FXDAX_KMS=local://DIR: success, record deleted, child recorded at Origin{1, at}, one checkpoint, Authenticated under KeyId{1,1}.
+4. Docs: fxdax-gc module docs, doc-16 (TASK-411.4 bullet, keys table), doc-7 (--delete-branch).
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Branch t3/cache-tenant-keys-gc. fxdax-gc already read FXDAX_KMS for sweeps since TASK-411.6 (doc-16's 'fxdax-gc needs none' predated it); --delete-branch went through branch::delete (no KMS). Now delete_branch(bucket, branch, kms()?) -> delete_under(.., Some(keys::Kms::new(kms))). The KMS is asked only when a checkpoint at a fork point is to be written (keys::Parents::Kms), so clear branches and sealed ones with recorded forks ask nothing, as before. Error mapping only when no KMS was given: an Error::Kms then can only be the missing KMS; refusals of a given KMS (revoked, destroyed) pass through as 'deleting branch B: tenant T: its KEK is revoked'.
+Test: extent_remote tests/gc.rs deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms passes; the old code fails its second run (branch::delete has no KMS). The run showed 'LEAK' on the untouched collects_a_bucket_once (nextest leak detection of the child process's handles; passes).
+<!-- SECTION:NOTES:END -->

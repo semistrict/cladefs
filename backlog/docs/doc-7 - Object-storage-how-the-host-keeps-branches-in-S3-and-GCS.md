@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 01:00'
+updated_date: '2026-11-15 01:04'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -787,7 +787,8 @@ listing (Passes that skip, below).
 `fxdax-gc` is the only thing that deletes; writers only add. A live branch is one whose record says
 so, whether or not a host holds it, which only hosts know: `fxdax-gc URL --branches --held FILE`
 lists those no host holds, FILE naming what they do, and `fxdax-gc URL --delete-branch ID` deletes
-one for the next pass to reclaim.
+one for the next pass to reclaim (a sealed one whose fork into another cell it records, the child
+unrecorded, under `FXDAX_KMS`'s KMS, failing partway without one: doc-16, TASK-411.14).
 
 **Decided with the user (2026-11-13, TASK-395):** the collector may be **conservative**, reclaiming
 late and wasting space for a time; **the unit of collection is the cell**, not the tenant, so that a

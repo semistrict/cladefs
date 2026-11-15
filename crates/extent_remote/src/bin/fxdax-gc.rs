@@ -73,7 +73,10 @@
 //! those FILE names, as `fxdaxctl stat` calls them, separated by white space: with FILE naming
 //! every branch every host holds, those left are no host's, or newer than FILE. `--delete-branch`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
-//! frees what only it held (TASK-79.85).
+//! frees what only it held (TASK-79.85). A sealed branch's deletion that records a fork of it into
+//! another cell, whose child has no record yet, seals its checkpoint at the fork point under the
+//! branch's DEK, through `FXDAX_KMS`'s KMS; without one it fails, naming the tenant, and stops
+//! partway, as a deletion may, until run again with it (TASK-411.14).
 //!
 //! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as
 //! the collector's last pass over each cell to end found it, writing nothing (TASK-394,
@@ -439,8 +442,9 @@ async fn collect(
 
 /// The KMS `FXDAX_KMS` names, as every fxdax process reads it (TASK-411.3): what passes unwrap
 /// their cells' KEKs through, to compact what is sealed (TASK-411.6). None if it names none: passes
-/// compact what is in the clear alone, leaving what is sealed and saying so. One it names that
-/// can't be had stops fxdax-gc before it collects anything.
+/// compact what is in the clear alone, leaving what is sealed and saying so; and what a deletion
+/// seals its checkpoints at fork points under (TASK-411.14). One it names that can't be had stops
+/// fxdax-gc before it collects or deletes anything.
 fn kms() -> Result<Option<extent_keys::kms::Shared>, String> {
     match std::env::var("FXDAX_KMS") {
         Ok(url) if !url.is_empty() => {
@@ -449,6 +453,31 @@ fn kms() -> Result<Option<extent_keys::kms::Shared>, String> {
             Ok(Some(kms))
         }
         _ => Ok(None),
+    }
+}
+
+/// Deletes `branch` of `bucket`, whichever placement took it last, as an operator does, under
+/// `kms`, `FXDAX_KMS`'s, if it names one (TASK-411.14): a sealed branch's forks into other cells
+/// that it records, their children having no record yet (their writer died between the fork's
+/// acknowledgement and recording it), get its checkpoint at their fork points sealed under its DEK,
+/// its cell's KEK unwrapped by the KMS, as their children refuse one in the clear. Without one, such
+/// a deletion fails, naming the tenant and what it needs, the branch left as a deletion stopped
+/// partway, its lease ended: running it again with `FXDAX_KMS` finishes it.
+async fn delete_branch(
+    bucket: &Store,
+    branch: layout::Branch,
+    kms: Option<extent_keys::kms::Shared>,
+) -> Result<(), String> {
+    let keys = kms.map(extent_remote::keys::Kms::new);
+    // Whichever placement took it last: u64::MAX is no lower than any's token.
+    let deleted = branch::delete_under(bucket, branch, rand::random(), u64::MAX, keys.as_ref());
+    match deleted.await {
+        Ok(()) => Ok(()),
+        Err(err @ extent_remote::Error::Kms(_)) if keys.is_none() => Err(format!(
+            "deleting branch {branch}: {err}: fxdax-gc reads it from FXDAX_KMS, which names none; \
+             the deletion stopped partway: run it again with FXDAX_KMS to finish it"
+        )),
+        Err(err) => Err(format!("deleting branch {branch}: {err}")),
     }
 }
 
@@ -875,10 +904,7 @@ fn main() -> Result<(), String> {
                 print!("{}", listed(&live, &held));
                 Ok(())
             }
-            // Whichever placement took it last: u64::MAX is no lower than any's token.
-            Command::DeleteBranch(id) => branch::delete(&*bucket, id, rand::random(), u64::MAX)
-                .await
-                .map_err(|err| err.to_string()),
+            Command::DeleteBranch(id) => delete_branch(&bucket, id, kms()?).await,
             Command::Usage { tenant } => {
                 say_usage(&bucket, tenant, &mut std::io::stdout().lock()).await
             }

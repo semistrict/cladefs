@@ -359,7 +359,7 @@ impl Collector {
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
         let mut report = Report::default();
         let mut failed = None;
-        let heard = self.heard.clone().unwrap_or_else(Heard::new);
+        let heard = self.heard.clone().unwrap_or_default();
         while let Some(cell) = cells.next().await {
             match self.collect_hearing(bucket, cell, holder, &heard).await {
                 Ok(done) => report += done,
@@ -384,7 +384,7 @@ impl Collector {
         cell: Cell,
         holder: u64,
     ) -> Result<Report, Error> {
-        let heard = self.heard.clone().unwrap_or_else(Heard::new);
+        let heard = self.heard.clone().unwrap_or_default();
         self.collect_hearing(bucket, cell, holder, &heard).await
     }
 

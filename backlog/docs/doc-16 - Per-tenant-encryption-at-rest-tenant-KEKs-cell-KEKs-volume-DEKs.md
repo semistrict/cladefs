@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 01:00'
+updated_date: '2026-11-15 01:04'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**) and TASK-411.9 (recovery frames nothing before keys) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
 
 ## Goals
 
@@ -112,6 +112,7 @@ GCM's authentication key. A salt per object makes every subkey new.
 | extentd, a cell's holder | the cell's KEK; its volumes' DEKs; inherited DEKs | reads and writes the volumes |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
 | `fxdax-gc`, marking | none | reads metadata only |
+| `fxdax-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
 | `fxdax-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
 | the control API | whatever a fork across cells needs | rewraps (below) |
 
@@ -315,10 +316,15 @@ dropped with its pool, never written out unwrapped.
   writers' are: a child holding the parent's keys refuses one in the clear. Its writer's ring seals
   them (`branch::record_fork_under`, `keys::Parents::Held`); a deletion recording a sealed
   branch's forks, the host's KMS (`branch::delete_under`, `extent_store::upload::delete_branch`):
-  with none, it fails rather than write one the child refuses (so `fxdax-gc --delete-branch`,
-  which has no KMS, deletes no sealed branch with an unrecorded fork into another cell); a failed
-  fork's claim, the host's KMS (`branch::delete_fork_under`). Asked for only when one is to be
-  written.
+  with none, it fails rather than write one the child refuses; a failed fork's claim, the host's
+  KMS (`branch::delete_fork_under`). Asked for only when one is to be written. *(TASK-411.14)*
+  `fxdax-gc --delete-branch` deletes under `FXDAX_KMS`'s KMS, as its passes compact: a sealed
+  branch with an unrecorded fork into another cell (its writer died between the fork's
+  acknowledgement and recording it) is deleted given one, the checkpoint at the fork point
+  authenticated under the branch's DEK. Without one the deletion fails naming the tenant and
+  `FXDAX_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
+  running it again with the KMS finishes (`extent_remote` `tests/gc.rs`
+  `deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms`).
 - **Rotation** rewraps a record's inherited DEKs with its own; `add_generation` keeps them.
 - **Generations a child reads.** A child keeps the generations its parent's lineage had when it
   was given its keys; what it reads of its parent was sealed under them (segments up to the fork
