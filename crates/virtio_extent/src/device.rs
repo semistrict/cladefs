@@ -23,6 +23,7 @@ use crate::protocol::{
 };
 use crate::requests::Requests;
 use crate::window::{DaxWindow, DaxWindowError, PrefaultGuestMemory, WindowVm};
+use crate::workers::{RequestQueue, WorkerQueue, Workers};
 
 /// What the VMM does as a device's extent daemon goes: stops the VM, the guest's disk gone,
 /// rather than going on with every request failing (TASK-50.2). Firecracker exits, saying why.
@@ -288,10 +289,22 @@ impl Device {
         self.store.as_ref().expect("the device's store is closed")
     }
 
-    /// The requests of one of its queues, served with its store, while the device is activated,
-    /// for a worker of the VMM's to take off the queue.
+    /// The requests of one of its queues, served with its store, while the device is activated:
+    /// for a worker taking them off the queue, as [`Device::start_workers`]'s do.
     pub fn requests(&self) -> Requests {
         Requests::new(self.store().clone(), self.notices.clone(), self.config.cache_type)
+    }
+
+    /// Starts the workers serving `queues`, those the driver set up, the device activated
+    /// ([`Device::activate`]): a thread each, named `name` and its queue's index, all of them or
+    /// none. As the VM is paused for a snapshot, or the device reset, the VMM stops them
+    /// ([`Workers::stop`]), and takes their queues back; it starts them again as the VM resumes.
+    pub fn start_workers<Q: RequestQueue>(
+        &self,
+        queues: Vec<WorkerQueue<Q>>,
+        name: &str,
+    ) -> std::io::Result<Workers<Q>> {
+        Workers::start(queues, name, || self.requests())
     }
 
     /// Activates the device, the driver having taken features `acked`, every one offered, and its

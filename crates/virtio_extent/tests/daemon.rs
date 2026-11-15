@@ -711,3 +711,118 @@ fn windows_are_where_snapshots_had_them() {
         ]
     );
 }
+
+/// A request queue as a VMM's transport has one, in the test's memory: the requests made
+/// available, and those returned, with their lengths, which the test hears of as they are.
+struct FakeQueue {
+    available: std::collections::VecDeque<virtio_extent::Popped>,
+    returned: mpsc::Sender<(u16, u32)>,
+    used: Vec<(u16, u32)>,
+}
+
+impl virtio_extent::RequestQueue for FakeQueue {
+    fn pop(&mut self) -> Result<Option<virtio_extent::Popped>, BoxError> {
+        Ok(self.available.pop_front())
+    }
+
+    fn complete(&mut self, index: u16, len: u32) -> Result<bool, BoxError> {
+        self.used.push((index, len));
+        self.returned.send((index, len)).unwrap();
+        Ok(true)
+    }
+}
+
+/// A queue's interrupt that counts how often it is raised.
+#[derive(Default)]
+struct CountedQueue(AtomicUsize);
+
+impl virtio_extent::QueueInterrupt for CountedQueue {
+    fn notify(&self) -> Result<(), BoxError> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+/// The buffers of a request of `readable` bytes, with `writable` bytes for the device to write, in
+/// memory that lives as long as the test.
+fn leaked(readable: &[u8], writable: usize) -> (Buffers, &'static [u8]) {
+    let readable = Box::leak(readable.to_vec().into_boxed_slice());
+    let written: &'static mut [u8] = Box::leak(vec![0xa5; writable].into_boxed_slice());
+    let ptr = written.as_ptr();
+    let buffers = buffers(readable, written, usize::MAX);
+    // SAFETY: Read once the device returned the request, which wrote it then.
+    (buffers, unsafe { std::slice::from_raw_parts(ptr, writable) })
+}
+
+/// The device's workers take the requests the driver makes available as it notifies their
+/// queue's event, serve them, return each to the driver with the length the device wrote,
+/// interrupting it, and, stopped, give their queues back as they left them; a request whose chain
+/// is none is returned with nothing written. Started again, they serve the same queue on.
+#[test]
+fn workers_take_serve_and_return_requests() {
+    let dir = daemon();
+    let lost: virtio_extent::OnLost = Arc::new(|| panic!("the daemon went"));
+    let vm: Arc<dyn WindowVm> = Arc::new(FakeVm::default());
+    let mut device = Device::new(config(&dir, "store"), 1, vm, lost).unwrap();
+    device.activate(device.features(), Arc::new(Counted::default())).unwrap();
+
+    let info = bytes::<Info>(VIRTIO_EXTENT_T_INFO, 0, None, &[]);
+    let (info_buffers, info_written) = leaked(&info, size_of::<Info>() + RESPONSE);
+    let (returned, returns) = mpsc::channel();
+    let queue = FakeQueue {
+        available: [
+            virtio_extent::Popped { index: 3, buffers: Ok(info_buffers) },
+            virtio_extent::Popped { index: 4, buffers: Err("not guest memory".into()) },
+        ]
+        .into(),
+        returned,
+        used: Vec::new(),
+    };
+    // SAFETY: A plain system call, whose result is checked.
+    let event = unsafe { libc::eventfd(0, libc::EFD_NONBLOCK | libc::EFD_CLOEXEC) };
+    assert!(event >= 0);
+    // SAFETY: A new descriptor, the test's alone.
+    let event = unsafe { <std::os::fd::OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(event) };
+    let kick = || {
+        let one = 1u64;
+        // SAFETY: Writes `one`'s 8 bytes to the eventfd.
+        let written = unsafe {
+            libc::write(std::os::fd::AsRawFd::as_raw_fd(&event), (&raw const one).cast(), 8)
+        };
+        assert_eq!(written, 8);
+    };
+    let interrupt = Arc::new(CountedQueue::default());
+    let queues = vec![virtio_extent::WorkerQueue {
+        index: 0,
+        queue,
+        event: event.try_clone().unwrap(),
+        interrupt: interrupt.clone(),
+    }];
+    let workers = device.start_workers(queues, "test_extent_q").unwrap();
+    kick();
+    let mut got = [returns.recv().unwrap(), returns.recv().unwrap()];
+    got.sort_unstable();
+    assert_eq!(got, [(3, (size_of::<Info>() + RESPONSE) as u32), (4, 0)]);
+    let response = Response::read_from_bytes(&info_written[size_of::<Info>()..]).unwrap();
+    assert_eq!(response.status, 0);
+    assert_eq!(u64::from_le(read::<Info>(info_written).capacity), 1 << 20);
+    assert_eq!(interrupt.0.load(Ordering::Relaxed), 2);
+
+    let mut back = workers.stop();
+    assert_eq!(back.len(), 1);
+    let (index, mut queue) = back.pop().unwrap();
+    assert_eq!((index, queue.used.len()), (0, 2));
+    // Started again on the queue as it was left, they serve what was made available meanwhile.
+    let (buffers, _) = leaked(&info, size_of::<Info>() + RESPONSE);
+    queue.available.push_back(virtio_extent::Popped { index: 5, buffers: Ok(buffers) });
+    let queues = vec![virtio_extent::WorkerQueue {
+        index: 0,
+        queue,
+        event: event.try_clone().unwrap(),
+        interrupt,
+    }];
+    let workers = device.start_workers(queues, "test_extent_q").unwrap();
+    kick();
+    assert_eq!(returns.recv().unwrap(), (5, (size_of::<Info>() + RESPONSE) as u32));
+    assert_eq!(workers.stop()[0].1.used.len(), 3);
+}

@@ -17,10 +17,11 @@ adapter) and libmachine.
   its configuration space, hears the daemon's notices (capacity, a follower's commits, asks for
   the guest's stats) and has the VMM raise a configuration change interrupt for them, makes and
   creates the DAX window, and takes snapshots of the store and restores from them.
-- **Requests** (`Buffers`, `handle`, `Requests`): a request's buffers, built from its
+- **Requests** (`Buffers`, `handle`, `Requests`, `Workers`): a request's buffers, built from its
   descriptors' guest memory in their order, served over any `Store` (fxdax's
   `RemoteExtentStore` on Linux, a fake in tests); `Requests` serves a queue's on the threads
-  receiving the daemon's replies, counting those in flight and what each type took.
+  receiving the daemon's replies, counting those in flight and what each type took; `Workers`, a
+  thread each queue, take them off the VMM's `RequestQueue`s as the driver notifies them.
 - **Snapshots** (`persist`): the device's state as plain serializable values, and doc-4's
   freeze, point and fork protocol (`Device::take_snapshot`, `Device::restore`).
 
@@ -39,17 +40,22 @@ Its transport and queues:
 - Reads the configuration space with `Device::read_config`; ignores the driver's writes to it.
 - As the driver activates the device: checks the features, sets up the queues the driver made
   ready, calls `Device::activate` with a `ConfigInterrupt` that raises the transport's
-  configuration change interrupt, then starts its workers.
-- Its workers take requests off the queues, turn each descriptor chain into `Buffers`
-  (`push_readable`/`push_writable`, in descriptor order, marking writable guest memory dirty if
-  it tracks it), and serve them with a `Requests` of the device's (`Device::requests`, one per
-  queue). `Requests::serve` calls back with the length written; the worker puts the request on
-  the used ring (with event idx, as its queue does) and signals the queue's interrupt. Before
-  stopping, a worker waits for its requests in flight (`Requests::wait_idle`).
-- On a reset: stops its workers, then `Device::reset`.
-- Does the activation and the reset on threads under the VMM's own seccomp filter, not a
-  vCPU's (Firecracker uses `fxdax::thread`'s spawner). The daemon's client threads, and those
-  serving the window's faults, are fxdax's; the adapter chooses which threads take requests.
+  configuration change interrupt, then `Device::start_workers` with each ready queue: a
+  `RequestQueue` of its transport's, the eventfd the driver notifies it through, and a
+  `QueueInterrupt` (its MSI-X vector).
+- Its `RequestQueue` pops the chains the driver made available (re-enabling notifications, with
+  event idx, before it finds none) and turns each into `Buffers` (`push_readable` and
+  `push_writable`, in descriptor order, marking writable guest memory dirty if it tracks it); and
+  returns a request to the used ring, saying whether the driver is to be interrupted. The crate's
+  workers, a thread each queue, take the requests and serve them, several at once, each returned on
+  the thread receiving the daemon's reply.
+- To pause for a snapshot: `Workers::stop`, which waits for the requests in flight and gives the
+  queues back as they were left, for the VMM to save; `Device::start_workers` again as the VM
+  resumes.
+- On a reset: `Workers::stop`, then `Device::reset`.
+- Sets `fxdax::thread`'s spawner, which starts the workers, the daemon's client threads and those
+  serving the window's faults, if they are to run confined (Firecracker's start under its VMM
+  thread's seccomp filter); and does the activation and the reset on such a thread, not a vCPU's.
 
 The DAX window:
 

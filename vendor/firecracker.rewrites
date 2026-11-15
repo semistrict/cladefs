@@ -13,4 +13,4 @@
 # TASK-417: fxdax-v1.16.1-r7 (branch fxdax-v1.16.1-r7), vm-memory 0.18 at the series' base
 # (upstream's 27e968cb1 and 1faca2f70 as one commit, and 88c8f05fd), before the fxdax feature,
 # and the extent device on fxdax's crates/virtio_extent at its tip.
-527247f75a1db52cfed4bbdd16c83602446e0900 e7c0a413e5d7c60e91591915ced7ceb844d54454
+527247f75a1db52cfed4bbdd16c83602446e0900 88143b43b90dce5cff5405ef0c02f6de5be64924
