@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:22'
-updated_date: '2026-11-15 00:53'
+updated_date: '2026-11-15 01:14'
 labels: []
 dependencies:
   - TASK-411.3
@@ -32,7 +32,7 @@ TASK-411.3: a cell chooses encryption iff a KMS is configured and the tenant has
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
@@ -52,4 +52,12 @@ Branch t3/cache-tenant-keys-gc (from 979ecd28f). The brief called this TASK-411.
 keys::Kms.kekless: tenant -> tokio::time::Instant of the NoSuchTenant heard (new_kek's inline wrap, or a pool refill's fill). Kms::new_kek: pooled KEK first; then kekless within KEKLESS_FOR (60 s) -> Ok(None), no call; else wrap. Kms::answered (any Ok of the KMS for the tenant) forgets it. tokio's Instant so tests drive a paused clock; outside a runtime it is std's.
 Bound 60 s: the cost of a plaintext tenant drops from a round trip per store opening to one per host per minute (openings are what call: every opening of a store whose record has no DEK asks new_cell_kek in case it makes the cell); the price is that a tenant given a KEK gets sealed new cells within 60 s, cells made in the clear meanwhile staying clear for good (a cell's sealing is chosen at making). A minute is short beside onboarding a tenant's BYOK and long beside a zygote's burst of restores. Not shared between concurrent first askers: a wrap's KEK belongs to the cell it makes, so a shared probe would need a second wrap anyway; a burst asks once per concurrent opening, then nothing for 60 s.
 Tests: extent_remote keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while (paused current-thread runtime: 3 asks -> 1 wrap; KEK created, advance 59 s -> None, no call; +1 s -> Some, generation 1, 2 wraps; next take wraps as before); extent_store upload::encrypted::cells_of_tenants_with_no_kek_are_in_the_clear extended (host opens a second volume of the cell, a volume of a new cell, the first again: calls stay (1, 0); another host asks once: (2, 0)). Both pass.
+
+Validation (macOS, branch t3/cache-tenant-keys-gc at fb253eb4a): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 960/960 passed (extent_keys 27, extent_frame 33, extent_remote 323, extent_store 223, fxdax 354; 1 leaky: faults::tests::faults_say_their_words, untouched). sim::one SIM_SEEDS=10 over collectors, everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax): no warning in touched files. fmt clean on touched crates. scripts/upstream-changes.py --check passes. No dependency change. Linux not run (no ubu1 per brief): DoD #1 open.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+keys::Kms believes a NoSuchTenant for KEKLESS_FOR (60 s) from the wrap that heard it (new_kek's or a pool refill's): new_kek answers None (cell in the clear) with no KMS call meanwhile; any answer of the KMS for the tenant forgets it. A plaintext tenant's store openings cost one wrap per host per minute instead of one per opening; a tenant given a KEK gets sealed new cells within 60 s (cells made clear before stay clear). Documented in doc-16. Verified by keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while (paused clock: 3 asks 1 wrap; KEK given, 59 s still none and no call, 60 s sealed) and extent_store cells_of_tenants_with_no_kek_are_in_the_clear (four openings on a host, 1 wrap; another host 1 more); 960 macOS tests and a 10-seed sim sample over 10 profiles pass; Linux not run.
+<!-- SECTION:FINAL_SUMMARY:END -->

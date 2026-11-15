@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:52'
-updated_date: '2026-11-15 01:01'
+updated_date: '2026-11-15 01:14'
 labels: []
 dependencies:
   - TASK-411.6
@@ -32,7 +32,7 @@ TASK-411.6: a pass over a cell whose KEK the KMS refuses (revoked, destroyed, fa
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
@@ -55,4 +55,12 @@ Safety: only compaction depends on the KEK; a skip compacts nothing and deletes 
 Format: GcLease's Passed gains a u64 (bincode, fixed width; counting_itself unchanged); no migration (unreleased FORMAT 10, memory no-existing-buckets).
 Report: a skip over a locked digest reports skipped 1, locked 1, uncompacted N, so fxdax_gc_sweep_locked_cells stays the number of cells left locked; fxdax-gc prints no per-pass line for it (it did nothing new), only the sweep's.
 Tests (extent_remote, all 322 pass): collector::tests::cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted: no-KMS pass locked (deleted 1); next full (listing changed); next skipped: report {skipped 1, locked 1, uncompacted 3}, requests exactly [Get 1, List 1, Update 1], KMS (0,0). Revoked with KMS: two skips, same requests, 1 refused wrap each (2,0). Checkpoint written: full (locked, deleted 1), full, then skip (3,2). Unrevoked: full, compacted 3, read back under the ring (4,3). Then delete pass, full pass, skip with no KMS call (4,3). collector::tests::tenants_keks_are_asked_for_once_a_sweep (tenant 1 twice, 2 revoked twice, 3 unknown: 3 wraps; no KMS: none). fxdax-gc tests::passes_say_what_they_did_if_anything gains the locked skip (None).
+
+Validation (macOS, branch t3/cache-tenant-keys-gc at fb253eb4a): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 960/960 passed (extent_keys 27, extent_frame 33, extent_remote 323, extent_store 223, fxdax 354; 1 leaky: faults::tests::faults_say_their_words, untouched). sim::one SIM_SEEDS=10 over collectors, everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax): no warning in touched files. fmt clean on touched crates. scripts/upstream-changes.py --check passes. No dependency change. Linux not run (no ubu1 per brief): DoD #1 open.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A pass leaving sealed objects uncompacted for want of its cell's KEK now records its listing's digest and how many it left (Passed::uncompacted). A pass after it whose listing matches skips the cell while the tenant's KEK is still not to be had, asked once per tenant per sweep by a wrap of a throwaway key (collector::Heard, shared by a sweep's or a collect()'s passes; none without a KMS), and goes over it in full, compacting, once the KMS answers; a changed listing passes in full as before. Skips report locked/uncompacted so fxdax-gc's sweep line and metrics still count locked cells; no per-pass line for them. doc-7 (Passes that skip) and doc-16 updated. Verified by collector::tests::cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted (a skip costs exactly GET+LIST+UPDATE and 0 KMS calls without KMS / 1 refused wrap with one; a write makes it pass in full; unrevoked, the next pass compacts) and tenants_keks_are_asked_for_once_a_sweep; 960 macOS tests and a 10-seed sim sample over 10 profiles pass; Linux not run.
+<!-- SECTION:FINAL_SUMMARY:END -->

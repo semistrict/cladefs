@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 00:17'
-updated_date: '2026-11-15 01:06'
+updated_date: '2026-11-15 01:14'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -30,7 +30,7 @@ TASK-411.4 seals the parent's checkpoint at a fork point under the parent's DEK,
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
@@ -48,4 +48,12 @@ TASK-411.4 seals the parent's checkpoint at a fork point under the parent's DEK,
 <!-- SECTION:NOTES:BEGIN -->
 Branch t3/cache-tenant-keys-gc. fxdax-gc already read FXDAX_KMS for sweeps since TASK-411.6 (doc-16's 'fxdax-gc needs none' predated it); --delete-branch went through branch::delete (no KMS). Now delete_branch(bucket, branch, kms()?) -> delete_under(.., Some(keys::Kms::new(kms))). The KMS is asked only when a checkpoint at a fork point is to be written (keys::Parents::Kms), so clear branches and sealed ones with recorded forks ask nothing, as before. Error mapping only when no KMS was given: an Error::Kms then can only be the missing KMS; refusals of a given KMS (revoked, destroyed) pass through as 'deleting branch B: tenant T: its KEK is revoked'.
 Test: extent_remote tests/gc.rs deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms passes; the old code fails its second run (branch::delete has no KMS). The run showed 'LEAK' on the untouched collects_a_bucket_once (nextest leak detection of the child process's handles; passes).
+
+Validation (macOS, branch t3/cache-tenant-keys-gc at fb253eb4a): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 960/960 passed (extent_keys 27, extent_frame 33, extent_remote 323, extent_store 223, fxdax 354; 1 leaky: faults::tests::faults_say_their_words, untouched). sim::one SIM_SEEDS=10 over collectors, everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax): no warning in touched files. fmt clean on touched crates. scripts/upstream-changes.py --check passes. No dependency change. Linux not run (no ubu1 per brief): DoD #1 open.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+fxdax-gc --delete-branch now deletes through branch::delete_under with a keys::Kms over FXDAX_KMS (the KMS its sweeps already read), asked only when a checkpoint at a fork point is to be written: a sealed branch whose fork into another cell has no record yet gets that checkpoint authenticated under its DEK and its child recorded. Without a KMS it fails ('deleting branch B: tenant T: cell C is encrypted, and this host has no KMS: fxdax-gc reads it from FXDAX_KMS, which names none; the deletion stopped partway: run it again with FXDAX_KMS to finish it'), lease ended, record not yet deleted, child unrecorded; running it again with the KMS finishes. doc-16 and doc-7 updated. Verified by tests/gc.rs deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms (the binary over a file bucket, both runs); 960 macOS tests and a 10-seed sim sample over 10 profiles pass; Linux not run.
+<!-- SECTION:FINAL_SUMMARY:END -->
