@@ -3,13 +3,13 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-14 22:14'
+updated_date: '2026-11-15 11:34'
 ---
 # The virtio extent-store device
 
 Specification, 2026-10-13 (TASK-26.2, revised the same day). This is the only interface between the
 guest's Fxfs and the host's extent store (doc-2). The guest's driver is TASK-26.5, and the VMM's
-device is crates/virtio_extent, which every VMM hosting it shares: fxdax's Firecracker
+device is crates/virtio_extent, which every VMM hosting it shares: cladefs's Firecracker
 (vendor/firecracker, its adapter) and libmachine (TASK-417); first libkrun's (TASK-26.4; libkrun was
 removed in TASK-40).
 
@@ -74,7 +74,7 @@ Settled in a design review on 2026-10-13:
 | Mutability | Write-once, sealed by the next barrier | Appendable extents; extents the host versions |
 | IDs | Branch and sequence, 128 bits | Host-granted 64-bit ranges; content hashes |
 | Freeing | By the guest, of whole extents: dead parts stay stored until the extent dies or Fxfs rewrites the file | Freeing byte ranges; the guest reporting live ranges for the host to trim |
-| Fxfs's format | Extents only: fxdax's image files become a local extent store | Fxfs keeping its block-device mode too; a separate Fxfs for the guest |
+| Fxfs's format | Extents only: cladefs's image files become a local extent store | Fxfs keeping its block-device mode too; a separate Fxfs for the guest |
 
 ## Device
 
@@ -87,7 +87,7 @@ Settled in a design review on 2026-10-13:
 
 The configuration's first field, `version`, is the device's protocol version, `VIRTIO_EXTENT_VERSION`,
 1 (TASK-141.3). A change to any request, flag, feature, configuration field or what it means makes a
-new one: fxdax migrates nothing (AGENTS.md), so a driver and a device of different versions refuse
+new one: cladefs migrates nothing (AGENTS.md), so a driver and a device of different versions refuse
 each other rather than serve with what both happen to know. The driver reads `version` first, as it
 probes, and refuses a device of another, naming both (`-EPROTONOSUPPORT`). No version moves it.
 A VMM restoring a snapshot refuses one whose device was of another version: its guest's driver goes
@@ -146,25 +146,25 @@ The configuration never changes while the device runs, but for `capacity` and `a
 
 ### Resizing
 
-*Added 2026-10-17 (TASK-37).* The host resizes a store while its guest runs (`fxdaxctl
+*Added 2026-10-17 (TASK-37).* The host resizes a store while its guest runs (`cladefsctl
 resize`, through the extent daemon). It grows it at once, sets `capacity`, and raises a
 configuration change: the guest's filesystem takes the larger size, its device's block count and
 its allocator's budget, while mounted. A shrink needs the guest, whose filesystem may have
 reserved more than the store holds: the host sets `asked` and raises a configuration change; the
 guest shrinks if its filesystem holds less than `asked`, with room left for its transactions
-(16 MiB, in fxdax's Fxfs), and answers with `RESIZED`, whether it took it; the store shrinks only
+(16 MiB, in cladefs's Fxfs), and answers with `RESIZED`, whether it took it; the store shrinks only
 then, never below what its extents hold. The host waits 10 s for the answer. A store no VM has
 open grows, and does not shrink.
 
 ### Stats
 
 *Added 2026-11-05 (TASK-111.4).* The host takes one snapshot of what its extent daemon, each VM's
-process and each guest counted (`fxdaxctl stats --json`, the control API's `GetSnapshot`). With
+process and each guest counted (`cladefsctl stats --json`, the control API's `GetSnapshot`). With
 `F_STATS`, the device asks the guest for its part: it sets `stats_asked` to a new number and raises
 a configuration change; the guest answers with `STATS`, naming the ask, its data its stats as UTF-8
 text, `VIRTIO_EXTENT_MAX_STATS` (64 KiB) at most: lines of a name and a value, a number or a
 histogram's numbers between commas (`NAME_hist`), and `commit COMMIT`, the commit its filesystem
-was built of. fxdax's guest says what its `/proc/fs/fxfs/TAG` says, and `/proc/fs/fxfs/build`. An
+was built of. cladefs's guest says what its `/proc/fs/fxfs/TAG` says, and `/proc/fs/fxfs/build`. An
 answer answers the asks before it too, as the guest may see only the latest. A guest with nothing
 mounted answers with no text. The host waits for the answer a while (2 s by default), and reports
 the guest as not having answered past it. The device asks only once the driver acked `F_STATS`, and
@@ -193,7 +193,7 @@ zeros; or a **private page**, the VM's own, which no extent names. A store to ei
 two makes it private, holding what it held, at the same address, mapped writable: nothing the guest
 maps moves, and no guest page table changes for a store. Only a `MAP` or `UNMAP` over a private
 page, which the guest sends, ends it. The device holds at most `private_max` private pages: a store
-past them is refused, and the VM stops (fxdax's Firecracker: 159, `AccessRefused`). The guest keeps
+past them is refused, and the VM stops (cladefs's Firecracker: 159, `AccessRefused`). The guest keeps
 under the bound, and writes back what it stored: its dirty pages' bytes, read from the window, are
 `WRITE`s to new extents, then a commit; once a commit seals those, it maps the pages back to them,
 which frees the private pages. A commit changes nothing in any window.
@@ -354,7 +354,7 @@ in any window.
 - **With `COMMIT_DURABLE`** (bit 0), it completes once everything before it is durable: on local
   disk in milestone 1, uploaded once object storage arrives (milestone 3). Unmount and `sync` use
   it.
-- fxdax: the extent daemon's wire has a third level, which no guest's device asks for:
+- cladefs: the extent daemon's wire has a third level, which no guest's device asks for:
   `COMMIT_LOCAL` (`WRITE_LOCAL` for a write's commit), which completes once everything before it is
   durable on the host's disk, not waiting for object storage: what a database on the daemon
   commits with, as SQLite's own on a local filesystem does (crates/sqlite_extents, the user's
@@ -493,14 +493,14 @@ is the host's lag, bounded by its configuration (doc-2, requirement 11).
 
 ## When the host's daemon goes
 
-A host's extent daemon (fxdax's `fxdax-extentd`) serves every VM's device on the host; the VMM
+A host's extent daemon (cladefs's `cladefs-extentd`) serves every VM's device on the host; the VMM
 holds nothing of a store itself. If the daemon goes, by a crash, a kill or running out of memory,
 each VM sees it as follows (TASK-50.2):
 
 - **At once:** the device's connection to the daemon closes. Every request waiting fails, as does
   every one made after, with `EIO`; the DAX window's faults are no longer served.
 - **The VM stops.** The VMM is told as the connection closes, and stops the VM, with an exit
-  status of its own (fxdax's Firecracker: 158, `ExtentdLost`), rather than let the guest go on
+  status of its own (cladefs's Firecracker: 158, `ExtentdLost`), rather than let the guest go on
   with a disk whose every request fails. Its host's VM manager sees the VMM exit, and why.
 - **What the guest committed** is what the daemon made durable: everything before some barrier
   (see Ordering and durability), as after any crash. A store whose daemon went is opened again by
@@ -537,7 +537,7 @@ The guest sees none of this except a different `branch` in its configuration aft
 ## Snapshots
 
 A VMM snapshots a VM with the device, and restores the snapshot, as many times as it likes, each
-restored VM with a store of its own (fxdax's TASK-39.1): a zygote's children, suspend-to-RAM, a
+restored VM with a store of its own (cladefs's TASK-39.1): a zygote's children, suspend-to-RAM, a
 VM moved to another host. Extent IDs carry their branch, and the restored guest has the branch it
 had in its memory, so the snapshot is taken at a point nothing is open:
 
@@ -547,9 +547,9 @@ had in its memory, so the snapshot is taken at a point nothing is open:
   `FREEZE_FROZEN`. Freezing writes back every dirty page and maps every private page back to the
   extent that now holds it, so that the window maps extents and zeros alone. A VMM refuses to
   snapshot a device whose guest isn't frozen, and the host refuses the snapshot's point while the
-  window holds a private page, whose bytes no extent holds (`EBUSY`; fxdax's extent store, saying
+  window holds a private page, whose bytes no extent holds (`EBUSY`; cladefs's extent store, saying
   how many in the daemon's log, TASK-203): the guest's freeze couldn't rebind it, as when a
-  writeback found no memory. fxdax's Firecracker takes the point before it records the window's
+  writeback found no memory. cladefs's Firecracker takes the point before it records the window's
   mappings, so a refused snapshot leaves nothing behind.
 - **The snapshot** holds the device's state, its window's place in guest memory and what each
   mapping of the window maps (an extent's bytes, or zeros), and a point of the store: the host
@@ -571,7 +571,7 @@ This section describes how the host stores extents. It is not part of the protoc
   about 16-64 MiB. Extents of 4 MiB and more are stored on their own, as objects of their own.
 - **The index.** An index maps each extent ID to its segment and offset, or to its own object. Each
   upload adds to it, with periodic checkpoints.
-- **Cleaning.** The bucket's collector (`fxdax-gc`, crates/extent_remote/src/collector.rs), the
+- **Cleaning.** The bucket's collector (`cladefs-gc`, crates/extent_remote/src/collector.rs), the
   only cleaner, compacts objects that are mostly freed extents, copying the live small extents
   into new objects. Large extents are deleted whole and never copied. The host cleans nothing
   locally (TASK-165.8).
@@ -584,8 +584,8 @@ This section describes how the host stores extents. It is not part of the protoc
 
 ## What Fxfs becomes
 
-One on-disk format: extents only (TASK-26.3). The same Fxfs runs on the host, where fxdax builds
-images and imports container images into stores (crates/fxdax/src/image.rs, import.rs), each a
+One on-disk format: extents only (TASK-26.3). The same Fxfs runs on the host, where cladefs builds
+images and imports container images into stores (crates/cladefs/src/image.rs, import.rs), each a
 local extent store, and in the guest.
 
 | Fxfs | Becomes |
@@ -598,8 +598,8 @@ local extent store, and in the guest.
 | Overwrite mode for preallocated files | Copy-on-write |
 | `Device::flush` | `COMMIT` |
 | `PRE_BARRIER` writes | `WRITE_BARRIER` |
-| `POST_BARRIER` writes (fxdax: a sync's journal flush, whose barrier is its flush) | `WRITE_COMMIT` |
+| `POST_BARRIER` writes (cladefs: a sync's journal flush, whose barrier is its flush) | `WRITE_COMMIT` |
 | Closing | `COMMIT_DURABLE` |
-| fxdax's snapshots (frozen data owners) | References to the same extents |
+| cladefs's snapshots (frozen data owners) | References to the same extents |
 
 Fxfs runs with barriers enabled.

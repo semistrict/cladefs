@@ -1,9 +1,9 @@
 ---
 id: doc-10
-title: 'Shared volumes: Fxfs volumes over read-only bases'
+title: '''Shared volumes: Fxfs volumes over read-only bases'''
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-09 05:56'
+updated_date: '2026-11-15 11:34'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
@@ -199,7 +199,7 @@ Built. `AttachBase` names a generation, pinned by an ordinary fork of the base's
 collection applies, and sandboxes on one generation share one pin, one `ExtentStore` the daemon
 opens the first time any of them reads through to it. `READ` and `MAP` of an extent of a
 branch in the fork's ancestry, and not the sandbox's own, go to it, by a lookup of the branch in the
-extent's ID (`Bases`, `crates/fxdax/src/extents.rs`). The extent cache is keyed by extent ID, so
+extent's ID (`Bases`, `crates/cladefs/src/extents.rs`). The extent cache is keyed by extent ID, so
 pages stay one copy. However many are attached, each costs a line and map entries until it is read.
 
 This changes doc-4's rule that an extent is the guest's or inherited, in the VM attachment, not the
@@ -237,7 +237,7 @@ stays attached (TASK-136.5's record).
   of a name on one wait while the daemon mounts it, so that concurrent lookups of a repo attach it
   once; it lets the daemon's process group alone through the directory unmounted (the daemon makes
   a group of its own); and it finds the mounts idle for the timeout, which the daemon unmounts as
-  it asks (`AUTOFS_IOC_EXPIRE_MULTI`). No kernel code of fxdax's is involved. Firecracker's CI
+  it asks (`AUTOFS_IOC_EXPIRE_MULTI`). No kernel code of cladefs's is involved. Firecracker's CI
   configuration of its guests builds autofs in.
 - **The upcall:** the daemon asks the sandbox manager over vsock (the host's port 5054), a
   connection for each ask, so that a VM restored from a snapshot, whose connections are gone, asks
@@ -313,7 +313,7 @@ is in `docs/measurements/linux-checkout-2026-11-07.md`. There is no overlayfs co
 dropped it on 2026-10-31. ext4 on virtio-blk is the baseline instead.
 
 - **Host:** an n2-standard-8 (Cascade Lake, 32 GB), Ubuntu 7.0.0-1011-gcp, nested KVM.
-- **Guest:** fxdax's kernel, 6.18.54 of amzn2023 with the series, x86_64, release, with 4 vCPUs and
+- **Guest:** cladefs's kernel, 6.18.54 of amzn2023 with the series, x86_64, release, with 4 vCPUs and
   4 GiB. Its own extent daemon has its default 1 GiB of memory, and the DAX window is 1 GiB.
 - **Checkout:** Linux v6.18 at one commit: 91,166 tracked files, 6,059 directories and 1.83 GB, of
   which `.git`, one pack, is 296 MB.

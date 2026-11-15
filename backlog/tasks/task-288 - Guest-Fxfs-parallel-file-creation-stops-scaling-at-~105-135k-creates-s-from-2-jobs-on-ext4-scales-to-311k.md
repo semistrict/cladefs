@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09 08:05'
-updated_date: '2026-11-09 09:04'
+updated_date: '2026-11-15 11:35'
 labels:
   - perf
   - fxfs
@@ -33,7 +33,7 @@ TASK-276 baseline (GCE c3-standard-8, nested KVM, main 0f011561a, fs bench scali
 | 8 | fxfs-guest | 71k | 105k | 128k | 107k |
 | 8 | fxfs-guest-dax | 70k | 135k | 124k | 108k |
 
-Fxfs gains from a second thread, then holds or falls, at every vCPU count, while ext4 keeps scaling with vCPUs. The device is not it: create sends the extent device no requests at 1 job, and at most 2-3 of its queues see any at 8 jobs (flushes); TASK-276's queue and interrupt changes leave it within drift. So it is inside the guest's Fxfs: something every create in the filesystem serializes on (a store- or volume-wide lock, the journal, object-id allocation, the LSM's mutable layer), not per directory, as each thread has its own. The host profile (perf record-all) sees only the vCPU threads; a guest kernel profile (FXDAX_BENCH_GUEST_PERF) of scale-create-j1 against -j8 says where; see the notes.
+Fxfs gains from a second thread, then holds or falls, at every vCPU count, while ext4 keeps scaling with vCPUs. The device is not it: create sends the extent device no requests at 1 job, and at most 2-3 of its queues see any at 8 jobs (flushes); TASK-276's queue and interrupt changes leave it within drift. So it is inside the guest's Fxfs: something every create in the filesystem serializes on (a store- or volume-wide lock, the journal, object-id allocation, the LSM's mutable layer), not per directory, as each thread has its own. The host profile (perf record-all) sees only the vCPU threads; a guest kernel profile (CLADEFS_BENCH_GUEST_PERF) of scale-create-j1 against -j8 says where; see the notes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

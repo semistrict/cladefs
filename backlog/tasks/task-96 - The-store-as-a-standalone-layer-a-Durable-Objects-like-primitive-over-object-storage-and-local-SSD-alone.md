@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-24 15:24'
-updated_date: '2026-11-04 07:34'
+updated_date: '2026-11-15 11:36'
 labels: []
 dependencies: []
 priority: low
@@ -16,7 +16,7 @@ ordinal: 382000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Below Fxfs, fxdax's storage is a primitive of its own: a fenced, forkable, transactional store of write-once extents with an atomic root and one writer per branch, kept in object storage. It is grown as a general infrastructure layer in the shape of Cloudflare's Durable Objects, but with storage more general than SQLite: anything built from extents and a root (a filesystem, a log, a KV store, a database's pages). The one constraint: object storage plus each machine's own SSD and memory, and no other infrastructure (no coordination service, no database, no membership service). Fxfs and the VM attachment stay clients of it, and the filesystem work goes on.
+Below Fxfs, cladefs's storage is a primitive of its own: a fenced, forkable, transactional store of write-once extents with an atomic root and one writer per branch, kept in object storage. It is grown as a general infrastructure layer in the shape of Cloudflare's Durable Objects, but with storage more general than SQLite: anything built from extents and a root (a filesystem, a log, a KV store, a database's pages). The one constraint: object storage plus each machine's own SSD and memory, and no other infrastructure (no coordination service, no database, no membership service). Fxfs and the VM attachment stay clients of it, and the filesystem work goes on.
 
 Settled with the user in a design interview on 2026-10-24. These are decisions, not proposals:
 
@@ -32,22 +32,22 @@ Settled with the user in a design interview on 2026-10-24. These are decisions, 
 - **Readers (views, followers on other machines):** read uploaded segments from the bucket into their own daemon's SSD cache, and ask the writer's daemon only for the tail newer than the bucket.
 - **Idle branches:** after an idle time, the writer uploads everything, releases the lease and its peer, and keeps its SSD copy as a cache, evicted under pressure. The next open anywhere claims the lease again, warm if it lands here.
 - **History:** any commit can be pinned as a named snapshot, kept until deleted; unpinned commits stay readable for a retention window, for point-in-time restore (a fork from that epoch). Garbage collection respects both.
-- **Garbage collection:** a separate `fxdax-gc` process per bucket prefix, as today.
+- **Garbage collection:** a separate `cladefs-gc` process per bucket prefix, as today.
 - **Process shape:** one daemon per machine (extentd, generalized) owns the SSD, the caches, the uploads, the peer log and the leases.
-- **Protocol:** one framed binary protocol: a core that every client gets, and fxdax's VM attachment (MAP, window, faults, stage ops) as a negotiated extension on the same connection. It runs over the local Unix socket, and over TCP for remote clients and between daemons (the peer log, readers' tails, handoff).
+- **Protocol:** one framed binary protocol: a core that every client gets, and cladefs's VM attachment (MAP, window, faults, stage ops) as a negotiated extension on the same connection. It runs over the local Unix socket, and over TCP for remote clients and between daemons (the peer log, readers' tails, handoff).
 - **Tenancy and trust:** a daemon serves isolated tenants (grants, memory and disk caps, as in TASK-43 and TASK-94). Encryption and authentication are the infrastructure's (a mesh, WireGuard), which hands the daemon each connection's verified identity; the daemon maps identity to tenant and enforces grants.
 - **Bucket layout:** a fresh layout, no compatibility (there are no existing buckets to keep): leases gain the writer's address, its peer and the renewal time; `members/` and the name mapping are new.
 - **Home:** its own crates in this repository, with its own specification document (a successor to doc-7, as doc-4 is the device's).
 
 Left as parameters, not decisions: the lease time T and the skew bound, the upload-lag bounds, the retention window, and the idle time.
 
-Prior art in the repo: doc-7 (object storage layout, leases, fencing, forks, collection), doc-8 (followers), doc-4 (the device protocol), crates/extent_store, crates/extent_remote, crates/fxdax/src/extentd (wire.rs, the gRPC control API in crates/fxdax/proto).
+Prior art in the repo: doc-7 (object storage layout, leases, fencing, forks, collection), doc-8 (followers), doc-4 (the device protocol), crates/extent_store, crates/extent_remote, crates/cladefs/src/extentd (wire.rs, the gRPC control API in crates/cladefs/proto).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A specification document (backlog doc) defines the core store API, the three commit levels, the lease, peer-log, placement, discovery, membership, naming, retention and watch protocols, the bucket layout, and each operation's object-storage request cost
-- [ ] #2 The store core, the daemon and the protocol are crates of their own, and the VM attachment is a negotiated protocol extension that fxdax's device uses unchanged
+- [ ] #2 The store core, the daemon and the protocol are crates of their own, and the VM attachment is a negotiated protocol extension that cladefs's device uses unchanged
 - [ ] #3 A commit asking for 'replicated' completes only once on the writer's SSD and its peer's; a test that kills the writer's machine after such a commit and before its upload shows a taker recovers it from the peer
 - [ ] #4 Losing the peer stalls replicated commits until a new peer holds the tail and the lease names it; a test shows no replicated commit is acknowledged on one copy meanwhile
 - [ ] #5 Leases expire by object storage's time: a test with a silent holder shows another daemon takes the branch after T plus the skew bound, and a holder cut off stops writing by its own clock, with fencing voiding anything it lands late
@@ -56,7 +56,7 @@ Prior art in the repo: doc-7 (object storage layout, leases, fencing, forks, col
 - [ ] #8 Readers on other machines read uploaded data from the bucket into their own cache and only the newer tail from the writer; clients can watch a branch's commits from an epoch at a chosen level: each shown by a test
 - [ ] #9 An idle branch is uploaded and its lease and peer released, its SSD copy kept as a cache; named snapshots and a retention window are kept by garbage collection and restorable by fork: each shown by a test
 - [ ] #10 The protocol runs over TCP between daemons and for remote clients, and the daemon maps the connection identity the infrastructure gives to a tenant and enforces its grants, shown by a test
-- [ ] #11 fxdax's guest suites, crash and pgbench tests pass on GCE over the new layer
+- [ ] #11 cladefs's guest suites, crash and pgbench tests pass on GCE over the new layer
 <!-- AC:END -->
 
 ## Definition of Done

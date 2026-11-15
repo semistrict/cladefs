@@ -4,6 +4,7 @@ title: A crash on a shared host (ubu1) leaves its stacks in the results
 status: To Do
 assignee: []
 created_date: '2026-11-11 08:03'
+updated_date: '2026-11-15 11:35'
 labels:
   - testing
 dependencies: []
@@ -14,7 +15,7 @@ ordinal: 740000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-scripts/lib/test-linux-host.sh sets kernel.core_pattern to the run's results and eu-stack's each core into RESULTS/cores (a VMM's SIGSEGV in a soak said nothing otherwise, 2026-10-31). On a host of one's own (FXDAX_HOST_PROVISIONED=1, scripts/lib/host.sh's runs on ubu1) the core pattern is every process's there, other agents' runs and apport's, so TASK-344 left it alone: a crash there keeps no stacks. Collect a run's crashes without the global pattern: e.g. apport/systemd-coredump's cores of the run's processes (by its fxjob cgroup or executable path), or a per-process pattern.
+scripts/lib/test-linux-host.sh sets kernel.core_pattern to the run's results and eu-stack's each core into RESULTS/cores (a VMM's SIGSEGV in a soak said nothing otherwise, 2026-10-31). On a host of one's own (CLADEFS_HOST_PROVISIONED=1, scripts/lib/host.sh's runs on ubu1) the core pattern is every process's there, other agents' runs and apport's, so TASK-344 left it alone: a crash there keeps no stacks. Collect a run's crashes without the global pattern: e.g. apport/systemd-coredump's cores of the run's processes (by its fxjob cgroup or executable path), or a per-process pattern.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09 07:45'
-updated_date: '2026-11-09 08:07'
+updated_date: '2026-11-15 11:36'
 labels:
   - ci
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 706000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Main CI run 42579391459 (f824ffd50): macos (workspace) failed in 'Run taiki-e/install-action@v2', curl (56) 'The requested URL returned error: 504' on 11 tries over 62 s, exit 56; every other job passed. An outage of the download host, not fxdax's code; a run dispatched by hand reran it. Consider caching the installed tools, or a retry over a longer window, so that a short outage doesn't fail the job.
+Main CI run 42579391459 (f824ffd50): macos (workspace) failed in 'Run taiki-e/install-action@v2', curl (56) 'The requested URL returned error: 504' on 11 tries over 62 s, exit 56; every other job passed. An outage of the download host, not cladefs's code; a run dispatched by hand reran it. Consider caching the installed tools, or a retry over a longer window, so that a short outage doesn't fail the job.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Definition of Done

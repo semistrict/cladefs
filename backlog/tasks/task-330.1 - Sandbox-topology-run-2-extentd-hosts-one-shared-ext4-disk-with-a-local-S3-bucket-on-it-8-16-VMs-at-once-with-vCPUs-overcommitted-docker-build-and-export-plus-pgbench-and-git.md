@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-10 14:00'
-updated_date: '2026-11-11 10:32'
+updated_date: '2026-11-15 11:34'
 labels:
   - testing
 dependencies: []
@@ -40,9 +40,9 @@ Builds on TASK-310's fxfs-guest-shared-disk case and TASK-311's fxfs-guest-docke
 <!-- SECTION:PLAN:BEGIN -->
 1. Guest case fxfs-guest-sandboxes: two extentd hosts (tokens 1, 2) sharing one S3 bucket (RustFS) whose data the case checks is on its own ext4 disk; each host imports the sandboxes' image (Alpine+PostgreSQL+git, Docker static+buildx+BusyBox archive) once and boots each VM on a fork (Fxfs root); roles in turn, each host each role: builder (8 vCPUs, DAX root, fxfs-guest-docker-build-dax's guest), pgbench (fxfs-guest-pgbench's guest), git (new), writer (fxfs-guest-shared-disk's guest); DAX windows on every other round's own stores; vCPUs at once > host CPUs checked; each guest times echo/uname/cat every second.
 2. Checks: kernel reports (the runner's consoles check), each VM ending well, 'letting a VM process go', any framing > 1000 ms, any command > 1000 ms, the run's stores writing > 1.5x the guests' bytes; budgets.py over both daemons.
-3. scripts/sandboxes.sh [short|long]: RustFS 1.0.4 (Apache-2.0) in a container, its data on FXDAX_SANDBOX_DISK (ext4), the bucket made, test-e2e.sh fxfs-guest-sandboxes; prints the case's summary.
+3. scripts/sandboxes.sh [short|long]: RustFS 1.0.4 (Apache-2.0) in a container, its data on CLADEFS_SANDBOX_DISK (ext4), the bucket made, test-e2e.sh fxfs-guest-sandboxes; prints the case's summary.
 4. .github/workflows/sandboxes.yml (reusable, dispatchable): KVM via udev on GitHub's runner, guest kernel cached by scripts/guest-kernel-key.sh, vmstat and RSS logged. Not yet in ci.yml (main fails the framing check: TASK-310, TASK-336) nor nightly.yml (long mode doesn't fit a 16 GB runner: TASK-330.5).
-5. Mutant crates/fxdax/mutants/framed-in-copies.patch, Killer: scripts/sandboxes.sh short; crates/fxdax/mutants.sh runs script killers.
+5. Mutant crates/cladefs/mutants/framed-in-copies.patch, Killer: scripts/sandboxes.sh short; crates/cladefs/mutants.sh runs script killers.
 6. Verified on ubu1 and GitHub's runner; macOS and ubu1 suites; CI.
 <!-- SECTION:PLAN:END -->
 

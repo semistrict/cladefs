@@ -1,9 +1,9 @@
 ---
 id: doc-14
-title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
+title: '''Local disk as the bucket''''s write-ahead log and cache: one storage engine'''
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-15 09:48'
+updated_date: '2026-11-15 11:34'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -30,7 +30,7 @@ Since TASK-45 every store has a bucket, yet a host keeps each branch twice:
   file, an index of checkpoints and deltas, its own cleaning, and `rebuild`;
 - `crates/extent_remote` (12.3k with its simulation) is doc-7's protocol: records, leases, forks,
   points, checkpoints, recovery, the collector;
-- `crates/fxdax/src/remote.rs` (1.7k of code, 3.8k of tests with `fork_faults.rs` and
+- `crates/cladefs/src/remote.rs` (1.7k of code, 3.8k of tests with `fork_faults.rs` and
   `restore_faults.rs`) keeps the two agreeing, with three files of its own in each store's
   directory (`remote-<branch>`, `fence-<branch>`, `origin-<branch>`).
 
@@ -67,19 +67,19 @@ Per store directory (one branch, `<b>` its ID; `extent_store::layout`):
 |---|---|---|
 | `store` | the description (`layout::FORMAT`, local format 11): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the volume of its cell it is, by name and kind (`volume`, `kind`), which its opening adds to the cell | the store is deleted |
 | `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the store is whole; opening refuses a store holding it (TASK-196) | the store is whole |
-| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; fxdax: a sealed store's encrypted, AES-256-XTS by 4 KiB sector (doc-16, TASK-411.5) | it closes and its framed file is synced |
-| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit durable, whether the segment is open or being framed; fxdax: a sealed store's header names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16) | as above |
-| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; fxdax: a sealed store's encrypted as open segments are, its salt in memory alone | sealed |
+| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: a sealed store's encrypted, AES-256-XTS by 4 KiB sector (doc-16, TASK-411.5) | it closes and its framed file is synced |
+| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit durable, whether the segment is open or being framed; cladefs: a sealed store's header names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16) | as above |
+| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: a sealed store's encrypted as open segments are, its salt in memory alone | sealed |
 | `segments/<b>/<n>` | a closed segment, framed, numbered locally, its footer stamped by the writer's chain as it closed: the object `segments/<branch>/<seq>` byte for byte, but for a rebase's restamping, which is in memory, the upload restamping the bytes (`extent_frame::restamp`) | acknowledged, then moved into the part cache |
 | `extents/<b>/<sequence>` | its extents stored on their own, framed: the objects `extents/<branch>/<epoch>.<seq>.<sequence>` | likewise |
 | `wal` | the WAL's base, the commit its first segment was stamped over: two 4 KiB slots, written durably before what an acknowledgement let go of leaves (`wal::BASE`) | the store is deleted |
 
-Beside them, fxdax's own records of the store (`fxdax::store_dir`, TASK-160.13): what is attached
+Beside them, cladefs's own records of the store (`cladefs::store_dir`, TASK-160.13): what is attached
 to it, what it was forked from (`ancestry`), the branches marked public (`public-<b>`) and boot
 profiles, each written whole and synced. An image's own file bucket is beside its directory,
 `<image>.bucket`, which its clones share and which outlives it (Decisions).
 
-Per host (`FXDAX_EXTENTD_CACHE`), shared by every store: `fxdax-parts/<key>`, the part cache
+Per host (`CLADEFS_EXTENTD_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
 (`extent_remote::cache`), kept across restarts and taking whole objects in (`Cache::adopt`).
 
 Gone from a store's directory: `branches/`, `segments/`, `extents/`, `index/`, `open-segments/`,
@@ -120,9 +120,9 @@ TASK-165.1-165.9 commits alone.
 | `extent_store/src/state.rs` | 988 | ~400 go | 1,109 | garbage, the 3x bound and `Unreferenced`'s file keys went; one replay over the branch's state, `Life` and `Standing` (TASK-160.18, 160.19) came |
 | `extent_store/src/store.rs` | 2,304 | ~1,100 go | 2,316 | `fork*`, `rebuild`, `clean*`, `adopt`, `spend`, `snapshot`, `upload`, `release`, lineage plumbing went; opening by recovery, `rebase`, the WAL's leaving into the cache, framings as one queue and flush timings came |
 | `extent_store/src/wal.rs`, `upload.rs`, `timings.rs` | 0 | ~1.3k come, with the file bucket and the cache | 469, 1,112, 160 | the WAL's recovery and base; the uploader, moved from remote.rs; flush timings |
-| `fxdax/src/remote.rs` | 1,687 | ~1,300 go, ~400 move | 178 | 1,509 went: `Marker`, `InFlight`, `Claim`/`Forked` and their files, `Plan`, `diff`, `take`, `take_parent`, `record`, `start_point`; the uploader moved to `extent_store::upload` |
-| `fxdax/src/extents.rs` | (part) | ~120 go | | `fork_durable`'s claims, disclaims and unforks went, `fork_durable` now a call of `host_store::fork`; `copy_bases` went too (TASK-165.7): what is attached to a store stays attached to its fork by what the fork's directory inherits (`store_dir::inherit`) |
-| `fxdax/src/host_store.rs` | 191 | | 443 | every store's bucket, forks in the bucket, `unmade` |
+| `cladefs/src/remote.rs` | 1,687 | ~1,300 go, ~400 move | 178 | 1,509 went: `Marker`, `InFlight`, `Claim`/`Forked` and their files, `Plan`, `diff`, `take`, `take_parent`, `record`, `start_point`; the uploader moved to `extent_store::upload` |
+| `cladefs/src/extents.rs` | (part) | ~120 go | | `fork_durable`'s claims, disclaims and unforks went, `fork_durable` now a call of `host_store::fork`; `copy_bases` went too (TASK-165.7): what is attached to a store stays attached to its fork by what the fork's directory inherits (`store_dir::inherit`) |
+| `cladefs/src/host_store.rs` | 191 | | 443 | every store's bucket, forks in the bucket, `unmade` |
 | `extent_remote` `local.rs`, `wal.rs`, `cache.rs` | 0, 0, 316 | | 212, 147, 905 | the file bucket; `Wal::rebase`; the part cache kept across restarts and adopting objects |
 
 extent_store's code went from 10,757 lines to 9,580 (1,177 fewer; the design's estimate was 4.1k
@@ -198,7 +198,7 @@ the commits in turn.
      chain after the head's end (`wal_follows`) (their data parts unchanged; a new tail; their own
      extents at the new writer's keys), and upload as any closed segment;
    - otherwise another writer's commits moved the branch on: the WAL **diverged**, the store refuses to open
-     (`extent_remote::Error::Diverged`, `ESTALE`) until `fxdaxctl take` drops its WAL, losing what
+     (`extent_remote::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops its WAL, losing what
      the guest was never promised (doc-7, Recovery on the same host). An empty WAL never diverges:
      opening a store directory of an empty WAL is how a branch is taken, here or on any host.
    Restamping writes each new file and syncs it before removing the old; a WAL holding both after a
@@ -281,7 +281,7 @@ fetcher.
 |---|---|---|
 | Make a store | local lineage + `branch::create` at attach | `branch::create` (a root), then the directory |
 | Open | local index replay, then attach: marker, `Plan`, `diff`, `take` | Opening a store, above |
-| Take elsewhere (`fxdaxctl take`) | an empty store adopting every extent, a local checkpoint, a marker | a directory naming the branch; opening it |
+| Take elsewhere (`cladefsctl take`) | an empty store adopting every extent, a local checkpoint, a marker | a directory naming the branch; opening it |
 | Fork | `Remote::claim` (a GET and a claim file), a local fork (record, layers, handle), then `Remote::forked` waits for the record | a GET of the child's record (taken: `EEXIST`, `Remote::child_free`), a commit whose segment names the child (`Store::commit_fork`, `Footer::forks`), then waiting for its acknowledgement and the child's record (`Remote::forked`, the writer's `record_forks`); then the child's directory (`host_store::fork`) |
 | Fork of a point | a claim, a local fork of the point's copy, `branch::fork_point` | `branch::fork_point`, then the child's directory |
 | Point | a fork to a point | a fork to a point (the record says `point`) |
@@ -326,14 +326,14 @@ grace period after its free, which cuts the view off (`CutOff`), as lagging too 
 development, tests and images. It is `object_store`'s `LocalFileSystem` (fsync on) with conditional
 updates added: `LocalFileSystem` refuses `PutMode::Update`. What replaces or removes an object (an
 update, an overwrite, a delete) holds the lock of the object's directory, a `flock` of one of 64
-files `.fxdax-lock.NN` in the bucket's directory (`local::lock_of`, by a hash of the directory's
+files `.cladefs-lock.NN` in the bucket's directory (`local::lock_of`, by a hash of the directory's
 path; TASK-395.15: one lock for the bucket made a collector's passes at once wait on each other's
 `fsync`s), each holding opening the file anew, so that it excludes other processes and other
 holdings in its own; an update compares the object's e-tag with the one given (`LocalFileSystem`'s:
 inode, modification time and size), and writes by rename. Creates are `LocalFileSystem`'s, a hard link, which fails where an object is.
 `Store::from_url` takes it like any URL, so stats, probing and the latency throttle apply.
 
-**Images** (`Storage`, the fxdax CLI's) keep their branches in a file bucket named in their
+**Images** (`Storage`, the cladefs CLI's) keep their branches in a file bucket named in their
 description, `<image>.bucket` beside the image, which their clones share and which outlives it;
 their collector runs in-process after commits (`storage::collect`, TASK-165.6), only for an
 image's own bucket.
@@ -343,12 +343,12 @@ image's own bucket.
 - Footers and checkpoints gain the capacity; `layout::FORMAT` becomes 2, and a reader refuses
   objects of other formats, older ones too (`Error::Format`).
 - Local stores: a new format, 6 at TASK-165.6, 7 at TASK-165.7 and 8 at TASK-165.9, described
-  above (`extent_store::layout::FORMAT`, "fxdax extent store 10", whose footers and logs'
+  above (`extent_store::layout::FORMAT`, "cladefs extent store 10", whose footers and logs'
   records name the runs of a commit spanning segments in each it spans, TASK-92.41, and whose
   logs' headers name their segments, TASK-341). Stores of
   another format are not opened, and nothing converts them.
 
-No migration: nothing uses fxdax yet (AGENTS.md).
+No migration: nothing uses cladefs yet (AGENTS.md).
 
 ## Tests
 
@@ -426,7 +426,7 @@ holds, and each step's notes list what each removed test became.
 
 Each lands green (macOS `scripts/test.sh` with `workspace shuttle`, Linux in Docker or GCE), with
 its own tests. 1 to 5 change nothing a guest sees and don't wait for TASK-164; 6 to 9 do, and touch
-`fxdax/src/extents.rs` and `extentd/stores.rs`, so they start after TASK-164 and TASK-160.8 land.
+`cladefs/src/extents.rs` and `extentd/stores.rs`, so they start after TASK-164 and TASK-160.8 land.
 
 1. **The local-filesystem bucket** (TASK-165.1): `file://`, the bucket conformance suite.
 2. **TLA+ of doc-7 with the WAL** (TASK-165.2).
@@ -489,7 +489,7 @@ Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else w
 
 - TASK-160.8 (extentd's store table): steps 7 to 9 change how extentd makes, takes, places,
   forks and deletes stores (`extentd/stores.rs`); they start once 160.8 has landed.
-- TASK-164 (copy-on-write DAX) and its guest work (160.2, 160.4): `fxdax/src/extents.rs` and
+- TASK-164 (copy-on-write DAX) and its guest work (160.2, 160.4): `cladefs/src/extents.rs` and
   `crate::cache` change in both; this waits for 164, as the task says.
 - TASK-157 (fork tests failing under load): `fork_faults.rs` and the extentd fork tests are
   rewritten in step 7.

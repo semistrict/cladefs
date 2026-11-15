@@ -3,7 +3,7 @@ id: doc-8
 title: Live read-only followers of a mounted Fxfs
 type: specification
 created_date: '2026-10-17 22:17'
-updated_date: '2026-11-09 09:10'
+updated_date: '2026-11-15 11:34'
 ---
 # Live read-only followers of a mounted Fxfs
 
@@ -96,7 +96,7 @@ Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view,
 ### extentd and the device protocol (doc-4)
 
 Built (TASK-42.3): `ExtentStore::{follow, advance, let_go, pin, unpin, newer, take_over}`
-(crates/fxdax/src/extents.rs), extentd's read-only connections (`extentd/{server, stores,
+(crates/cladefs/src/extents.rs), extentd's read-only connections (`extentd/{server, stores,
 client}.rs`), doc-4's Followers.
 
 - A follower is an `ExtentStore` of its own (`ExtentStore::follow`), sharing its writer's store
@@ -126,7 +126,7 @@ client}.rs`), doc-4's Followers.
   tells the guest with a configuration change (doc-4's `committed`).
 - A read-only feature bit: the driver offers no write, and Fxfs mounts read-only.
 - Firecracker's `extent` configuration takes `read_only: true` (a commit in the fxdax-v1.16.1
-  series, the branch vendor/firecracker tracks; branch fxdax, on Firecracker's main, is
+  series, the branch vendor/firecracker tracks; branch cladefs, on Firecracker's main, is
   superseded by it and has none of the changes since TASK-37).
 
 ### The follower in Fxfs (crates/fxfs, guest/rust/fxfs-linux)

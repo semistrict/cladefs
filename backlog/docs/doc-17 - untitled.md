@@ -1,11 +1,9 @@
 ---
 id: doc-17
-title: >-
-  Spending frontier tokens on quality: what the forefront does, and what fits
-  fxdax
+title: '>-'
 type: guide
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-15 12:34'
+updated_date: '2026-11-15 13:30'
 ---
 Web research of 2026-11-15 (four parallel research agents, ~200 searches and fetches), checked
 against main (36f194bbc). The ranked list in §2 is what to do; §1 is the evidence; §3 what not to
@@ -21,7 +19,7 @@ signal-to-noise near 1:50; agents grading their own work approve mediocre work (
 syzbot's LLM KCSAN assessor called every race benign; independent auditor agents that *edited*
 code made results worse (Dan Luu, Sep 2026).
 
-fxdax's comparative advantage is that it already owns cheap, deterministic disposers: guest/sim
+cladefs's comparative advantage is that it already owns cheap, deterministic disposers: guest/sim
 seeds under ASan/UBSan, Shuttle schedules, the model test's oracle and power cuts, TLC, cargo-mutants
 and guest/mutants. A token-hungry hunt at 1:50 is affordable only behind such a verifier. So every
 practice below has the same gate: **no reproducer in one of the project's oracles, no finding**.
@@ -41,11 +39,11 @@ practice below has the same gate: **no reproducer in one of the project's oracle
   coverage of the target against AFL's 92%.
 - SysMoBench (ICLR 2026): LLMs model "the textbook protocol, not the implementation" (15%
   conformance on etcd raft): models must be checked against code, never trusted.
-- fxdax has this for followers only (specs/follower/trace, crates/follower/src/shuttle_trace.rs).
+- cladefs has this for followers only (specs/follower/trace, crates/follower/src/shuttle_trace.rs).
   Bucket is TASK-44.5, To Do. Journal and dax-cow have none.
 
 **Memory ordering.** Shuttle models every atomic as SeqCst (its docs, and it warns at runtime), so
-no fxdax test can see an Acquire/Release/Relaxed bug. The host crates (fxdax, physmem,
+no cladefs test can see an Acquire/Release/Relaxed bug. The host crates (cladefs, physmem,
 extent_store, extent_remote, follower, virtio_extent) hold 450 non-SeqCst orderings. LLMs reason
 poorly about weak memory (arXiv 2501.14326), so an audit alone is not evidence; loom (MIT) is the
 disposer. AtomVChecker's classes (ordering too weak to publish related state; AtomicPtr data
@@ -65,7 +63,7 @@ supported): staged review, then verification; LSF/MM 2026 sample of ~1,500 threa
 ~10% false positives, ~97% accuracy on critical/high. Lessons: run several times and aggregate;
 keep a known-issues file so accepted risks stop recurring; reviews are swayed by commit-message
 claims; netdev maintainers spend ~50% of their time disproving AI reviews without a reproducer
-gate. Mason's `dax.md` is pmem-only (10 rules): fxdax would write its own. Darrick Wong posted
+gate. Mason's `dax.md` is pmem-only (10 rules): cladefs would write its own. Darrick Wong posted
 12+ "LLM-inspired bug fixes" series to XFS scrub in 2026 by sweeping whole files for
 pre-existing bugs. semcode (Apache-2.0) indexes C and Rust for agents.
 
@@ -73,7 +71,7 @@ pre-existing bugs. semcode (Apache-2.0) indexes C and Rust for agents.
 recent fixes. KNighter (SOSP 2025, Apache-2.0): an LLM turns fix commits into Clang Static
 Analyzer checkers refined against pre- and post-fix code; 92 new kernel bugs, 30 CVEs. An LLM +
 Coccinelle study (arXiv 2611.16215): one small rule per variant, deterministic syntax repair,
-compile-check or reject. fxdax already puts past bugs back as mutants (guest/mutants,
+compile-check or reject. cladefs already puts past bugs back as mutants (guest/mutants,
 guest/sim/mutants.sh) and has one Coccinelle rule (scripts/cocci/region-lock.cocci, TASK-44.17).
 
 **Semantic mutants.** Meta ACH (FSE 2025): engineers state fault concerns in prose; the model
@@ -104,9 +102,9 @@ style", verify before reporting. Dan Luu (160 runs a condition): generic techniq
 TDD/TLA+/Kani") were neutral or harmful; only 30 of 160 TLA+ models covered the risky parts;
 Verus proofs often vacuous; structured fuzz inputs found real bugs half the time they were used.
 
-## 2. Ranked for fxdax
+## 2. Ranked for cladefs
 
-Ranked by expected bugs found per effort, given what fxdax already has. Item N is TASK-444.N;
+Ranked by expected bugs found per effort, given what cladefs already has. Item N is TASK-444.N;
 item 10 is TASK-149.4, filed before.
 
 1. **Trace-validate the journal and dax-cow specs against the code; generate tests from the
@@ -122,7 +120,7 @@ item 10 is TASK-149.4, filed before.
    that's a missing test. dax.c's barriers would want LKMM litmus tests (herd7), licence pending
    (§4).
 3. **Kernel review agents on guest/linux/fs/fxfs and the fs/dax.c patches.** review-prompts (orc)
-   and Sashiko, both on Claude, with an fxfs/DAX context file of fxdax's invariants (doc-4, doc-9,
+   and Sashiko, both on Claude, with an fxfs/DAX context file of cladefs's invariants (doc-4, doc-9,
    doc-13, the dax-cow spec, dead-ends) and a known-issues file. First a whole-tree sweep for
    pre-existing bugs, 3-5 runs, findings kept only when they recur or a verifier confirms them;
    then on every change. A finding enters the backlog only with a guest/sim seed, a scenario, or a
@@ -140,7 +138,7 @@ item 10 is TASK-149.4, filed before.
    (Rust). Gate: flags the pre-fix tree, silent on the fix, few hits elsewhere, each triaged. A
    static rule applies the lesson at every call site, for good, where a mutant or seed covers one
    path.
-7. **Concern-driven semantic mutants.** cargo-mutants changes operators; fxdax's real bugs are
+7. **Concern-driven semantic mutants.** cargo-mutants changes operators; cladefs's real bugs are
    orderings (truncate before fsync, publish before seal, a missing fence, a lost wakeup).
    Agents write mutants from a list of concerns drawn from the backlog's bug classes, an
    equivalence filter drops no-ops, survivors become tasks under TASK-149 with a killing test.

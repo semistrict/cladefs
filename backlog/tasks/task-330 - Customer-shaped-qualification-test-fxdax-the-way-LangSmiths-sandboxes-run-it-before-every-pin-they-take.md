@@ -1,11 +1,12 @@
 ---
 id: TASK-330
 title: >-
-  Customer-shaped qualification: test fxdax the way LangSmith's sandboxes run
+  Customer-shaped qualification: test cladefs the way LangSmith's sandboxes run
   it, before every pin they take
 status: To Do
 assignee: []
 created_date: '2026-11-10 14:00'
+updated_date: '2026-11-15 11:34'
 labels:
   - testing
 dependencies: []

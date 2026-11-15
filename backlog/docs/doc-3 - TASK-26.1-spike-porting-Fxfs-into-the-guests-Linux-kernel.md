@@ -1,9 +1,9 @@
 ---
 id: doc-3
-title: 'TASK-26.1 spike: porting Fxfs into the guest''s Linux kernel'
+title: '''TASK-26.1 spike: porting Fxfs into the guest''''s Linux kernel'''
 type: other
 created_date: '2026-10-13 21:31'
-updated_date: '2026-11-06 06:43'
+updated_date: '2026-11-15 11:34'
 ---
 # TASK-26.1: porting Fxfs into the guest's Linux kernel
 
@@ -32,7 +32,7 @@ device, is about 9-14 engineer-weeks; the estimate is below.
 | std for the kernel, for crates written for std | `guest/rust/std` | 2,200 |
 | Kernel build: libkrunfw's, with fs/fxfs and the Rust built in | `scripts/build-guest-kernel.sh` | |
 | Guest test: boots that kernel, mounts fxfs, lists and reads it | libkrun `fxfs-guest`, `scripts/test-guest-kernel.sh` | |
-| Fxfs's stack use, by operation | `crates/fxdax/examples/fxfs-stack.rs`, docs/measurements/fxfs-stack-2026-10-13 | |
+| Fxfs's stack use, by operation | `crates/cladefs/examples/fxfs-stack.rs`, docs/measurements/fxfs-stack-2026-10-13 | |
 | Fxfs's third-party crates against the kernel's std | `guest/std-probe`, `scripts/probe-guest-std.sh` | |
 
 `fxfs-guest` passes on macOS (HVF, arm64). The kernel also builds for x86-64, with the Rust
@@ -166,7 +166,7 @@ A sysroot that holds it as `std` makes crates written for std build unchanged. F
 nothing std-only outside its tests beyond collections, locks, time and `io`, so it should build
 unchanged too.
 
-Against that std, with fxdax's features, 44 of Fxfs's 61 third-party crates for the target build
+Against that std, with cladefs's features, 44 of Fxfs's 61 third-party crates for the target build
 unchanged (`scripts/probe-guest-std.sh`). Seven fail, and about ten more wait on them:
 
 | Crates | Need | Fix |

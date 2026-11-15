@@ -4,7 +4,7 @@ title: 'One memory system: the host''s page cache holds none of the stores'' dat
 status: In Progress
 assignee: []
 created_date: '2026-11-15 10:26'
-updated_date: '2026-11-15 10:48'
+updated_date: '2026-11-15 11:35'
 labels:
   - memory
 dependencies: []
@@ -15,7 +15,7 @@ ordinal: 823000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-fxdax owns caching (its extent cache, the governor's budget, held parts, fetch budgets); the OS page cache is a second, unbudgeted memory system holding the same bytes. User, 2026-11-15: none of the uses have good reasons; all data I/O bypasses the page cache, our own memory budgeting holds what is held. FUSE mounts' FOPEN_KEEP_CACHE stays (the kernel's FUSE client is the consumer).
+cladefs owns caching (its extent cache, the governor's budget, held parts, fetch budgets); the OS page cache is a second, unbudgeted memory system holding the same bytes. User, 2026-11-15: none of the uses have good reasons; all data I/O bypasses the page cache, our own memory budgeting holds what is held. FUSE mounts' FOPEN_KEEP_CACHE stays (the kernel's FUSE client is the consumer).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Definition of Done

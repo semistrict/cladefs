@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:34'
+updated_date: '2026-11-15 13:32'
 labels: []
 dependencies: []
 references:
@@ -19,7 +20,7 @@ ordinal: 856000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-cargo-mutants changes operators; fxdax real bugs are orderings and lifetimes (truncate before fsync, publish before seal, a missing fence, a lost wakeup). Meta ACH (FSE 2025) has a model write realistic mutants from prose concerns and tests that kill survivors (73% of tests accepted); an LLM equivalent-mutant filter reaches ~0.95 precision.
+cargo-mutants changes operators; cladefs real bugs are orderings and lifetimes (truncate before fsync, publish before seal, a missing fence, a lost wakeup). Meta ACH (FSE 2025) has a model write realistic mutants from prose concerns and tests that kill survivors (73% of tests accepted); an LLM equivalent-mutant filter reaches ~0.95 precision.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

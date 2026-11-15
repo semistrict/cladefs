@@ -1,19 +1,19 @@
 ---
 id: doc-16
-title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
+title: '''Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'''
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 02:38'
+updated_date: '2026-11-15 11:34'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`cladefs-gc --delete-branch` under `CLADEFS_KMS`) are implemented.
 
 ## Goals
 
 *(decided)* Three, and no more:
 
-1. **BYOK.** A tenant's root key (its KEK) lives in a KMS, possibly the tenant's own; fxdax gets
+1. **BYOK.** A tenant's root key (its KEK) lives in a KMS, possibly the tenant's own; cladefs gets
    wrap and unwrap rights only, which the tenant can revoke.
 2. **Crypto-shredding.** Destroying a tenant's KEK leaves its data unreadable everywhere it is:
    the bucket, its object versions and copies, hosts' disks.
@@ -22,7 +22,7 @@ Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TAS
 **Not a goal:** keeping plaintext from a compromised host. The extent cache holds plaintext pages,
 as DAX needs: one copy, mapped into every VM's window (README, doc-13). Keeping the host blind needs
 encryption in the guest (Fxfs's fscrypt), and Linux turns DAX off for encrypted inodes, which
-loses fxdax's reason to be. Guest-side encryption stays possible as a tenant's opt-in without DAX;
+loses cladefs's reason to be. Guest-side encryption stays possible as a tenant's opt-in without DAX;
 it is not this design.
 
 ## Keys
@@ -63,7 +63,7 @@ GCM's authentication key. A salt per object makes every subkey new.
 
 - **Data parts:** each part of a framed object (`extent_frame::PART`, 1 MiB) is compressed
   first, as now, then sealed with AES-256-GCM under the object's subkey
-  (`dek.derive(salt, ["fxdax frame parts"])`); the nonce is the part's index, the associated data
+  (`dek.derive(salt, ["cladefs frame parts"])`); the nonce is the part's index, the associated data
   its index, encoding, stored and unpacked lengths. The table's entry holds the tag (every FORMAT 2
   entry has one, zeros in the clear: 33 bytes a part). Compression keeps working; ciphertext is the
   same length. *(TASK-411.2)* Nothing is bound to the object's key: a rebase renumbers and restamps
@@ -77,7 +77,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   GMAC under the object's parts subkey, its footer and table MACed, so that the collector reads it
   holding no key and a key-holding reader checks every byte), which key-holding readers check (a
   frame's footer and its table, which covers the trailer's seal and the footer's MAC, each have an
-  HMAC-SHA256 under `dek.derive(salt, ["fxdax frame mac"])` in the trailer; restamping a footer
+  HMAC-SHA256 under `dek.derive(salt, ["cladefs frame mac"])` in the trailer; restamping a footer
   needs the key and keeps the salt). The
   collector reads them without keys, checking CRCs, as now. They show extent IDs, sizes, the fork
   tree and live bytes; Fxfs's own metadata (names, inodes, directories) is data inside extents, so
@@ -95,7 +95,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   derived from the DEK and a salt of the file's own, kept in its log's header (TASK-411.5, below). *(found
   2026-11-14)* Every write reaching it is whole sectors, so XTS needs no read-modify-write: with an
   assert that each length given `Segments::reserve` and `Segments::append` is a multiple of 4096,
-  every test of `extent_store`, `sqlite_extents` and `fxdax` on macOS passed (574) but the 62 of
+  every test of `extent_store`, `sqlite_extents` and `cladefs` on macOS passed (574) but the 62 of
   `extent_store`'s simulation, whose writes are of 512 bytes (`sim/world.rs`, `BLOCK`); the guest's
   writes are aligned to the device's `block_size`, 4096 (doc-4). So the store refuses a write that
   is not whole sectors, and the simulation writes 4 KiB blocks (TASK-411.8). Large extents' own raw
@@ -111,9 +111,9 @@ GCM's authentication key. A salt per object makes every subkey new.
 |---|---|---|
 | extentd, a cell's holder | the cell's KEK; its volumes' DEKs; inherited DEKs | reads and writes the volumes |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
-| `fxdax-gc`, marking | none | reads metadata only |
-| `fxdax-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
-| `fxdax-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
+| `cladefs-gc`, marking | none | reads metadata only |
+| `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
+| `cladefs-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
 | the control API | whatever a fork across cells needs | rewraps (below) |
 
 ## Forks and shared points
@@ -164,17 +164,17 @@ dropped with its pool, never written out unwrapped.
   `keks: Vec<Kek { generation, wrapped }>`, its KEK's generations wrapped by the tenant's KEK in
   the KMS, oldest first; none: a cell in the clear. A record gains `deks: Vec<Dek { generation,
   kek, wrapped }>`, each generation of the branch's DEK wrapped by the cell's KEK of generation
-  `kek`, with AES-KW under `HKDF(cell KEK, info = "fxdax dek wrap" || tenant || cell || branch ||
+  `kek`, with AES-KW under `HKDF(cell KEK, info = "cladefs dek wrap" || tenant || cell || branch ||
   generation)`: a wrapped DEK copied to another record, or relabelled, fails AES-KW. `Record` is no
   longer `Copy`. An own extent's footer is its `ExtentId`, a moves' footer names the key it is the
   moves of (`Moves::of`): a whole object copied to another key of its branch is refused there, its
   footer under the MAC.
-- **The KMS and how a cell chooses.** `FXDAX_KMS=local:///DIR` (a `LocalKms` directory, the only
+- **The KMS and how a cell chooses.** `CLADEFS_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
-  `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl; and `fxdax-gc`, to
+  `cladefs::remote::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
   compact sealed cells (TASK-411.6; marking keyless). A cell is made sealed iff
   the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear, any
-  other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
+  other refusal (revoked, destroyed, unreachable, a bad `CLADEFS_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
   *(TASK-411.10)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
@@ -254,10 +254,10 @@ dropped with its pool, never written out unwrapped.
   tenant for all its cells (`collector::Heard`, a wrap of a key of no use; none without a KMS), and
   goes over it in full, compacting, once it is, or once the cell changes. (TASK-411.6 recorded no
   digest: every pass over a revoked tenant's idle cells went in full.)
-  `fxdax-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
-  their cell's KEK`) and in `--metrics` (`fxdax_gc_sweep_objects{action="uncompacted"}`,
-  `fxdax_gc_sweep_locked_cells`).
-- **`fxdax-gc` reads `FXDAX_KMS`** as every fxdax process does (`extent_keys::kms::from_url`); one it
+  `cladefs-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
+  their cell's KEK`) and in `--metrics` (`cladefs_gc_sweep_objects{action="uncompacted"}`,
+  `cladefs_gc_sweep_locked_cells`).
+- **`cladefs-gc` reads `CLADEFS_KMS`** as every cladefs process does (`extent_keys::kms::from_url`); one it
   names that can't be had stops it before it collects (a CLI fails at once rather than leave every
   sealed cell uncompacted); `--dry-run` reads none.
 
@@ -267,7 +267,7 @@ dropped with its pool, never written out unwrapped.
 - **Format.** A record gains `inherited: Vec<Inherited { branch, dek: Dek { generation, kek,
   wrapped } }>`: the DEK of every ancestor of another cell whose objects the branch reads, each
   generation, wrapped by the record's own cell's KEK of generation `kek`, with AES-KW under
-  `HKDF(cell KEK, info = "fxdax inherited dek wrap" || holder (tenant, cell, id) || ancestor
+  `HKDF(cell KEK, info = "cladefs inherited dek wrap" || holder (tenant, cell, id) || ancestor
   (tenant, cell, id) || generation)`: copied to another record, or of another ancestor, or
   relabelled, it fails AES-KW. `layout::FORMAT` 10 is extended, not bumped: it is unreleased (main
   is at 7), as FORMAT 2 of `extent_frame` was for TASK-411.2. They are given with the branch's
@@ -282,7 +282,7 @@ dropped with its pool, never written out unwrapped.
   placement takes it; the host's `keys::Kms` keeps the KEK for the cell's first taking here, so
   that the child's store opening here unwraps nothing), and gives the child's record its first DEK
   and the parent's keys rewrapped under the new KEK (`keys::give_inherited`). A failure there fails
-  the fork, which fxdax deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
+  the fork, which cladefs deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
   child's writer gives its own DEK as before, and with it what the parent's record inherits), for
   a point, nor for a fork of branches in the clear: plaintext forks make no request more, no KMS
   call. A child its fork's host did not give keys to (its host died between the record and the
@@ -304,7 +304,7 @@ dropped with its pool, never written out unwrapped.
 - **KMS calls on the fork's path: none**, its cell KEK from the pool, the parent's keys in memory.
   The child's first opening on the forking host: none. On another host: one unwrap of the child's
   cell KEK, as for any cell taken.
-- **Pools** (`keys::Pooling`; fxdax: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
+- **Pools** (`keys::Pooling`; cladefs: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
   a take leaving a pool low, or a sealed store of the tenant opening, refills it in a batch of
   wraps at once, off the fork's path (`Kms::refill`, `Kms::filled`); an empty pool wraps one on the
   path. `Kms::revoked(tenant)`, called on every revoked or destroyed answer of the KMS (a refill's,
@@ -320,11 +320,11 @@ dropped with its pool, never written out unwrapped.
   branch's forks, the host's KMS (`branch::delete_under`, `extent_store::upload::delete_branch`):
   with none, it fails rather than write one the child refuses; a failed fork's claim, the host's
   KMS (`branch::delete_fork_under`). Asked for only when one is to be written. *(TASK-411.14)*
-  `fxdax-gc --delete-branch` deletes under `FXDAX_KMS`'s KMS, as its passes compact: a sealed
+  `cladefs-gc --delete-branch` deletes under `CLADEFS_KMS`'s KMS, as its passes compact: a sealed
   branch with an unrecorded fork into another cell (its writer died between the fork's
   acknowledgement and recording it) is deleted given one, the checkpoint at the fork point
   authenticated under the branch's DEK. Without one the deletion fails naming the tenant and
-  `FXDAX_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
+  `CLADEFS_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
   running it again with the KMS finishes (`extent_remote` `tests/gc.rs`
   `deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms`).
 - **Rotation** rewraps a record's inherited DEKs with its own; `add_generation` keeps them.
@@ -346,11 +346,11 @@ dropped with its pool, never written out unwrapped.
   cell object is no object a pass keeps or deletes, the checkpoint at the fork point is written
   where and when it was, and a deletion refused for want of a KMS is a deletion stopping partway,
   which the model has.
-- **Fork latency** (`cargo run --release -p fxdax-examples --example fork-bench`, on a Mac, a
+- **Fork latency** (`cargo run --release -p cladefs-examples --example fork-bench`, on a Mac, a
   memory bucket, 2026-11-14): a fork of a store of 64 extents into a new cell, median, sealed 32-34
   ms, in the clear 31-35 ms, with a KMS or none: the same within noise; 3 bucket requests more a
   sealed fork (the cell's create, the record's read beside it, its update), 47.5 against 44.5. With
-  10 ms a request (`FXDAX_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
+  10 ms a request (`CLADEFS_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
   more. No KMS call. Linux numbers: the user's, later.
 
 ## What TASK-411.5 made
@@ -363,7 +363,7 @@ dropped with its pool, never written out unwrapped.
 - **Raw files.** `extent_store::RawFile`: a sealed store's (its ring seals, `Ring::sealing`) open
   segments' and large extents' raw files are encrypted a sector at a time (`SECTOR`, 4096), the
   sector's place in the file its tweak (the data unit number), under
-  `Xts::derive(dek, salt, "fxdax raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
+  `Xts::derive(dek, salt, "cladefs raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
   of the branch's newest DEK and a salt drawn for the file. Writes are whole sectors (TASK-411.8;
   a sealed store refuses writes to large extents that are not, `Unsectored`, as it always refused
   them to segments), encrypted through a buffer; reads decrypt the sectors they are in. A large
@@ -372,7 +372,7 @@ dropped with its pool, never written out unwrapped.
 - **Logs.** A sealed store's segment's log is headed `FXLOG\0\0\x03` (`wal::SEALED_LOG_MAGIC`):
   after the clear header's fields (record salt, branch, number), the DEK's branch (u64) and
   generation (u32) and the raw file's 32-byte salt, then an HMAC-SHA256 of the header so far under
-  `dek.derive(salt, ["fxdax raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
+  `dek.derive(salt, ["cladefs raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
   followed by an HMAC of its offset in the log (u64) and the payload, inside the salted hash's
   frame. The runs a record holds or checksums (`Runs::Held`, `Runs::Checked`) are the raw file's
   stored bytes, encrypted: recovery, holding no key, works on stored bytes as before (salted
@@ -414,7 +414,7 @@ dropped with its pool, never written out unwrapped.
   back, and leaves no plaintext in any file; its clear twin holds its parts and reads its last
   alone).
 - **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
-  `Write::stored` gives a caller doing its own I/O (fxdax's image device) the file, the offset and
+  `Write::stored` gives a caller doing its own I/O (cladefs's image device) the file, the offset and
   the bytes encrypted, which it writes again from the last whole sector written after a short
   write. `Part::Data` carries the `RawFile`: such a reader reads `RawFile::read_range` and
   decrypts it (`RawFile::decrypt`).
@@ -434,10 +434,10 @@ dropped with its pool, never written out unwrapped.
   left uncompacted, not a corrupt pass), and so is `add_kek`. `CellKeys` of a shredded cell are
   sealed and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
   given. Its holder, if any, goes on changing its volumes until told: every change keeps the mark.
-- **A host told** (`fxdax::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
+- **A host told** (`cladefs::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
   control API (`ShredCell`, which shreds then forgets, idempotent, to be called on every host;
   `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
-  fxdaxctl (`shred-cell`, `forget-tenant-keys`):
+  cladefsctl (`shred-cell`, `forget-tenant-keys`):
   - fences every store of the scope open in the process (`fence::fence_stores`, fences listed by
     branch): each request fails with `EACCES` from then on, as its reopening does; extentd refuses
     its VM process's requests so;
@@ -465,6 +465,6 @@ dropped with its pool, never written out unwrapped.
   (two hosts, open segment, part cache on disk, a cross-tenant fork reading on) and
   `shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable` (the collector
   locked, the old cell object put back reading again: why versions must expire); `extent_remote`
-  `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `fxdax`
+  `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `cladefs`
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.

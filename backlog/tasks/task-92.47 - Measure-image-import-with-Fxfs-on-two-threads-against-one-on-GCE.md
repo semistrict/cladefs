@@ -4,7 +4,7 @@ title: 'Measure image import with Fxfs on two threads against one, on GCE'
 status: To Do
 assignee: []
 created_date: '2026-10-23 06:12'
-updated_date: '2026-11-10 11:05'
+updated_date: '2026-11-15 11:36'
 labels:
   - review-2026-10-21
 dependencies: []
@@ -17,7 +17,7 @@ ordinal: 332000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-92.44 (round 2a) found an import's per-file cost grows within Fxfs; fxdax::import's filesystem (Filesystem::format) runs Fxfs on one thread, a default decided on GCE. Whether two threads help the small-files layer needs the same host: FXDAX_EXAMPLE=import-bench FXDAX_EXAMPLE_ARGS="100000 256 1024 2" scripts/example-gce.sh against "... 1024 1".
+TASK-92.44 (round 2a) found an import's per-file cost grows within Fxfs; cladefs::import's filesystem (Filesystem::format) runs Fxfs on one thread, a default decided on GCE. Whether two threads help the small-files layer needs the same host: CLADEFS_EXAMPLE=import-bench CLADEFS_EXAMPLE_ARGS="100000 256 1024 2" scripts/example-gce.sh against "... 1024 1".
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -3,7 +3,7 @@ id: doc-13
 title: Copy-on-write DAX
 type: specification
 created_date: '2026-11-04 07:55'
-updated_date: '2026-11-11 01:59'
+updated_date: '2026-11-15 11:34'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -148,7 +148,7 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   for: a snapshot is refused while the device has a private page (the guest's freeze rebinds them
   all, below), so a snapshot's window still maps only extents and zeros. *As built:* the store
   refuses a snapshot's point (`EBUSY`, saying how many), and the window's mappings, while its window
-  holds a private page (`ExtentStore::point`, `window_mappings`, TASK-203): fxdax's Firecracker
+  holds a private page (`ExtentStore::point`, `window_mappings`, TASK-203): cladefs's Firecracker
   takes the point first, so its snapshot fails before anything is made, and the VM goes on as it
   was. The guest's freeze warns of the private pages it couldn't rebind (`no snapshot`): those a
   writeback that found no memory kept dirty (TASK-207), or a rebind refused.

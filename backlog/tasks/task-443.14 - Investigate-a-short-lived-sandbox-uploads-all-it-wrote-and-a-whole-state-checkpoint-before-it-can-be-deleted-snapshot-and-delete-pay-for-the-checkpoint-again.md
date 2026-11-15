@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:26'
+updated_date: '2026-11-15 13:31'
 labels:
   - perf
   - review-2026-11-15
@@ -21,7 +22,7 @@ ordinal: 848000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-crates/fxdax/src/store_table.rs cuts a closing store's upload drain short for a Claim::Writer alone, so a delete waits CLOSING_WAIT and returns EBUSY while the dead VM's store uploads up to its lag bound; crates/extent_store/src/upload.rs writes a checkpoint of the whole state, inherited extents included, on every clean stop, after one serial LIST per key prefix (MovesMaps::read). A resume then downloads and decodes that checkpoint (recovery.rs keeps 16 decoded, first in first out); branch::delete_under recovers the whole state to list forks; a snapshot waits for the backlog with the VM paused (take_snapshot -> wait_uploaded), then re-reads its own state and writes its checkpoint twice (recovery::checkpoint_at, writer.checkpoint). Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+crates/cladefs/src/store_table.rs cuts a closing store's upload drain short for a Claim::Writer alone, so a delete waits CLOSING_WAIT and returns EBUSY while the dead VM's store uploads up to its lag bound; crates/extent_store/src/upload.rs writes a checkpoint of the whole state, inherited extents included, on every clean stop, after one serial LIST per key prefix (MovesMaps::read). A resume then downloads and decodes that checkpoint (recovery.rs keeps 16 decoded, first in first out); branch::delete_under recovers the whole state to list forks; a snapshot waits for the backlog with the VM paused (take_snapshot -> wait_uploaded), then re-reads its own state and writes its checkpoint twice (recovery::checkpoint_at, writer.checkpoint). Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
