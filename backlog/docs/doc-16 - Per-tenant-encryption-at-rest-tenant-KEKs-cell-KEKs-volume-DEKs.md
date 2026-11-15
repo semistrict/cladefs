@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 02:18'
+updated_date: '2026-11-15 02:38'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -395,6 +395,24 @@ dropped with its pool, never written out unwrapped.
   writes. TASK-401's writing back holds for sealed framed files as for clear copies: the framing
   writes its copy to the page cache, `make_durable` writes it back a MiB at a time before it
   syncs it, and the uploader reads it through the cache (`read_object`).
+  Nor are a sealed segment's parts packed ahead and held in memory (TASK-400's held parts,
+  c2daf7630, merged from main): holding rides on the look ahead, which a sealed segment has none
+  of, so nothing of it is queued, packed or held, and its framing reads every part back through
+  `RawFile`, decrypting, then packs and seals it, as before. Chosen over packing and sealing ahead
+  because that would need the framed object's key (`Packer::new(sealing)` draws its salt and
+  derives its `ObjectKey` at framing) drawn when the segment opens, kept with it across the
+  framer's queue, the threads packing ahead, eviction and a framing that fails and runs again,
+  each part's nonce (its index) under it never reused for other bytes; and the parts held would be
+  ciphertext the governor evicts and a framing re-reads anyway. Not holding adds no key's
+  lifetime, no plaintext anywhere but the framing's own buffers, and keeps the bytes framed what
+  they were. The cost: a sealed store's framings in a copy read their raw file back as clear
+  stores' did before TASK-400, from disk once the host let its pages go (TASK-421).
+  `Store`'s look ahead asserts it is of a clear raw file; `Packer::push_stored` asserts a part is
+  sealed as its object is, so a clear held part could never reach a sealed object. Tests:
+  `sealed_segments_parts_are_neither_seen_nor_held_ahead`,
+  `sealed_stores_hold_no_parts_packed_ahead` (a sealed store holds nothing, reads all its parts
+  back, and leaves no plaintext in any file; its clear twin holds its parts and reads its last
+  alone).
 - **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
   `Write::stored` gives a caller doing its own I/O (fxdax's image device) the file, the offset and
   the bytes encrypted, which it writes again from the last whole sector written after a short
