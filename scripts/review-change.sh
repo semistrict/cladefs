@@ -17,7 +17,8 @@
 # names one; whoever acts on it writes it first.
 set -euo pipefail
 
-root=$(git rev-parse --show-toplevel)
+# The checkout this script is in, which needn't be a git repository for its arguments to be read.
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 agent="$root/.claude/agents/verifying-reviewer.md"
 name="" change="" task="" out=""
 while (($#)); do

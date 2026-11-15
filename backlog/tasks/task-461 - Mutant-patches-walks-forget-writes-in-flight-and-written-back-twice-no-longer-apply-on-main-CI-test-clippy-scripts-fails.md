@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 14:26'
-updated_date: '2026-11-15 14:37'
+updated_date: '2026-11-15 15:17'
 labels: []
 dependencies: []
 priority: high
@@ -46,4 +46,6 @@ Main CI run 43722206629 (9d814644b) failed test (clippy scripts) on its mutant c
 
 <!-- SECTION:NOTES:BEGIN -->
 Both patches regenerated from the current code with their headers kept (written-back-twice's says where it now writes again). ubu1 (fxjob, 07acd7087 plus the patches): mutants.sh walks-forget-writes-in-flight written-back-twice: killed both, the first at disk.rs:433 (left 4096, right 1052672), the second by 'the kernel wrote 2263 MiB for the store, which says 783 MiB in 5109 writes: 803 MiB at most'; without them both killers pass (writes_not_done_stay_counted_across_walks, a_hosts_store_writes_what_its_design_says). CLADEFS_TEST_PARTS=scripts scripts/test.sh on the Mac: exit 0, 350 tests OK, mutants 40, 4, 22, 2, 58 checked, 0 broken. scripts/upstream-changes.py --check passes.
+
+CI on main, run 43725423025 (9da162ff0), at 15:17 UTC: test (workspace, clippy scripts, sim, shuttle, guest, firecracker, go), guide, guest-sim, guest-sim-sweep, soak, object-stores, pjdfstest-fuse, sandboxes (short), firecracker-forward, firecracker-series, test-weakening and macos (shuttle) green; macos (workspace) still running, unread (the API's limit spent by every session till 15:51 UTC). Run 43724391112 (1cff819be) was cancelled by the next push, its clippy scripts failing only on TASK-461's two patches. DoD #1 waits on macos (workspace). test (clippy scripts) green: the patches apply.
 <!-- SECTION:NOTES:END -->

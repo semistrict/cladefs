@@ -1,0 +1,31 @@
+# TASK-444.2.1 put back: an occurrence told by a store and a load on each side, the daemon-lost
+# handoff as extentd's client had it (lost stored, then on_lost loaded; on_lost set, then lost
+# loaded): store buffering, each side's load missing the other's store, the listener untold.
+# Killer: cladefs hearing::loom::occurrences_are_told_once
+--- a/crates/cladefs/src/hearing.rs
++++ b/crates/cladefs/src/hearing.rs
+@@ -48,10 +48,9 @@ impl Occurrence {
+     /// It happened: the listener is told, if it listened before; one that listens later is told
+     /// as it does. Again, nothing more.
+     pub(crate) fn happen(&self) {
+-        // Acquiring: a listener seen listening, its `listen` published it.
+-        let before = self.state.fetch_or(HAPPENED, Ordering::Acquire);
+-        if before & (HAPPENED | LISTENING) == LISTENING {
+-            (self.listener.get().expect("the listener of an occurrence listened to"))();
++        self.state.store(HAPPENED, Ordering::Release);
++        if let Some(listener) = self.listener.get() {
++            listener();
+         }
+     }
+ 
+@@ -60,9 +59,7 @@ impl Occurrence {
+         if self.listener.set(listener).is_err() {
+             panic!("an occurrence listened to twice");
+         }
+-        // Releasing: publishes the listener to a `happen` that sees it listening.
+-        let before = self.state.fetch_or(LISTENING, Ordering::Release);
+-        if before & HAPPENED != 0 {
++        if self.state.load(Ordering::Acquire) & HAPPENED != 0 {
+             (self.listener.get().unwrap())();
+         }
+     }

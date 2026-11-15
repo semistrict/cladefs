@@ -274,9 +274,10 @@ impl Device {
     /// they are now; and a follower's writer's latest commit; and the daemon's latest ask for the
     /// guest's stats.
     pub fn read_config(&self, offset: u64, data: &mut [u8]) {
+        let (capacity, asked) = self.notices.resizing.known();
         let config = ConfigSpace {
-            capacity: self.notices.resizing.capacity().to_le(),
-            asked: self.notices.resizing.asked().to_le(),
+            capacity: capacity.to_le(),
+            asked: asked.to_le(),
             committed: self.following.latest().to_le(),
             stats_asked: self.notices.stats.latest().to_le(),
             ..self.config_space
@@ -489,8 +490,7 @@ fn connect(
 /// one its view is as of.
 fn hear_commits(store: &RemoteExtentStore, following: &Arc<Following>) {
     let heard = following.clone();
-    store.on_committed(move |epoch| heard.committed(epoch));
-    following.committed(store.committed());
+    following.committed(store.on_committed(move |epoch| heard.committed(epoch)));
 }
 
 /// cladefs: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,

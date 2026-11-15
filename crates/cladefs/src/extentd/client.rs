@@ -14,6 +14,7 @@ use super::wire::*;
 use crate::dax::Faults;
 use crate::dax::uffd::{FaultThread, UffdSecondStage};
 use crate::error::{Errno, Error, Result};
+use crate::hearing::{Latest, Occurrence};
 use crate::{
     Access, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage, VolatileSlice,
     VolatileSliceMut, WindowMapping, WriteBarriers,
@@ -121,7 +122,7 @@ impl RemoteExtentStore {
         // Its tenant's arena, and the default one, read-only.
         let memories = vec![(arena, own), (crate::pages::ArenaId::DEFAULT, public)];
         // A follower's view's commit, which it has heard of.
-        client.committed.fetch_max(epoch, Ordering::AcqRel);
+        client.committed.rise(epoch);
         // cladefs: its build, which the daemon's metrics show (TASK-111.7).
         client.request_blocking(&Request::Build(crate::BUILD_COMMIT)).map_err(|errno| {
             Error::new(anyhow::Error::new(errno).context("saying this VM process's build"))
@@ -141,14 +142,17 @@ impl RemoteExtentStore {
     /// cladefs: the epoch of the latest commit of a follower's writer it has heard of: its view's,
     /// or one after ([`RemoteExtentStore::on_committed`]).
     pub fn committed(&self) -> u64 {
-        self.client.committed.load(Ordering::Acquire)
+        self.client.committed.latest()
     }
 
     /// cladefs: calls `committed` with the epoch of each commit of a follower's writer it hears
-    /// of, after its view's: the latest of each run of them, which the follower may advance to.
-    /// What it heard of before, [`RemoteExtentStore::committed`] says.
-    pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) {
-        let _ = self.client.on_committed.set(Box::new(committed));
+    /// of from now on: the latest of each run of them, which the follower may advance to. Returns
+    /// the latest heard of as it began: each commit is heard of from one or the other, or a later
+    /// one, one as it begins perhaps from both; a second read, of
+    /// [`RemoteExtentStore::committed`], might miss one that the call misses (TASK-444.2.2). Once,
+    /// of a store.
+    pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) -> u64 {
+        self.client.committed.listen(Box::new(committed))
     }
 
     /// cladefs: moves a follower's view to its writer's latest commit, holding what the commits
@@ -565,7 +569,7 @@ impl RemoteExtentStore {
     /// cladefs: whether its daemon went, closing the connection: what fails from then on fails for
     /// that (TASK-231).
     pub fn daemon_lost(&self) -> bool {
-        self.client.lost.load(Ordering::Acquire)
+        self.client.lost.happened()
     }
 
     /// Has `lost` called once the daemon goes, closing the connection: at once if it went already.
@@ -574,7 +578,7 @@ impl RemoteExtentStore {
     /// [`DaemonConnection::on_lost`] says it before the store opens, so that a daemon going as it
     /// opens is told of too (TASK-232). Called once, of the store and its connection.
     pub fn on_daemon_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
-        self.client.on_lost(Box::new(lost));
+        self.client.lost.listen(Box::new(lost));
     }
 
     /// Creates the store's window in the `size` bytes of this process's memory at `base`, which
@@ -679,7 +683,7 @@ impl DaemonConnection {
     /// which can't go on, visibly to its host (TASK-50.2), as it creates the VM too (TASK-232).
     /// Called once, of the connection and its store ([`RemoteExtentStore::on_daemon_lost`]).
     pub fn on_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
-        self.client().on_lost(Box::new(lost));
+        self.client().lost.listen(Box::new(lost));
     }
 
     /// The store at `store`, created with `capacity` bytes if it doesn't exist.
@@ -733,7 +737,7 @@ impl DaemonConnection {
     ) -> Result<RemoteExtentStore, Error> {
         let client = self.client.take().expect("a connection opens one store");
         RemoteExtentStore::open(client.clone(), store, opening).map_err(|err| {
-            let err = match client.lost.load(Ordering::Acquire) {
+            let err = match client.lost.happened() {
                 true => err.context("the extent daemon went"),
                 false => err,
             };
@@ -816,14 +820,12 @@ struct Client {
     stats_asked: OnceLock<Box<dyn Fn(u64) -> bool + Send + Sync>>,
     /// cladefs: the latest commit of a follower's writer heard of, and what hears of the next
     /// ([`RemoteExtentStore::on_committed`]).
-    committed: AtomicU64,
-    on_committed: OnceLock<Box<dyn Fn(u64) + Send + Sync>>,
+    committed: Latest,
     /// Whether the VM process is closing the connection itself ([`Client::close`]).
     closing: std::sync::atomic::AtomicBool,
     /// Whether the daemon went, closing the connection, and what is told of it
     /// ([`DaemonConnection::on_lost`], TASK-50.2).
-    lost: std::sync::atomic::AtomicBool,
-    on_lost: OnceLock<Box<dyn Fn() + Send + Sync>>,
+    lost: Occurrence,
 }
 
 impl Client {
@@ -838,25 +840,13 @@ impl Client {
             stage_counts: StageCosts::default(),
             capacity: OnceLock::new(),
             stats_asked: OnceLock::new(),
-            committed: AtomicU64::new(0),
-            on_committed: OnceLock::new(),
+            committed: Latest::new(),
             closing: Default::default(),
-            lost: Default::default(),
-            on_lost: OnceLock::new(),
+            lost: Occurrence::new(),
         });
         let receiving = client.clone();
         crate::thread::spawn("extentd client", move || receiving.receive(Receiver::new(stream)))?;
         Ok(client)
-    }
-
-    /// Has `lost` called once the daemon goes ([`DaemonConnection::on_lost`]).
-    fn on_lost(&self, lost: Box<dyn Fn() + Send + Sync>) {
-        if self.on_lost.set(lost).is_err() {
-            panic!("told twice what to do once the extent daemon goes");
-        }
-        if self.lost.load(Ordering::Acquire) {
-            (self.on_lost.get().unwrap())();
-        }
     }
 
     /// Closes the connection itself: its end is no daemon's going.
@@ -993,11 +983,7 @@ impl Client {
                     continue;
                 }
                 Ok(Told::Committed { epoch }) => {
-                    if self.committed.fetch_max(epoch, Ordering::AcqRel) < epoch
-                        && let Some(committed) = self.on_committed.get()
-                    {
-                        committed(epoch);
-                    }
+                    self.committed.rise(epoch);
                     continue;
                 }
                 // cladefs: no guest asked, it answers with none (TASK-111.4).
@@ -1062,11 +1048,8 @@ impl Client {
         // of then too, so that a VMM stops its VM for it, rather than for what fails, a store's
         // open as its VM is created among them (TASK-232).
         if !self.closing.load(Ordering::Acquire) {
-            self.lost.store(true, Ordering::Release);
             log::error!("the extent daemon went: the store's requests fail from now on");
-            if let Some(lost) = self.on_lost.get() {
-                lost();
-            }
+            self.lost.happen();
         }
         // The requests waiting fail, as do those made from now on.
         self.waiting.lock().unwrap().take();
@@ -1093,7 +1076,7 @@ impl Client {
             );
         // A daemon gone counts nothing more.
         if let Err(err) = told
-            && !self.lost.load(Ordering::Acquire)
+            && !self.lost.happened()
         {
             log::warn!("telling the extent daemon what the window's changes cost: {err}");
         }
@@ -1418,6 +1401,6 @@ impl Faults for RemoteFaults {
     }
 
     fn lost(&self) -> bool {
-        self.client.lost.load(Ordering::Acquire)
+        self.client.lost.happened()
     }
 }

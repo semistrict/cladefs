@@ -40,9 +40,10 @@ jobs:
         # The workspace's suite, a quarter of an hour of tests; the simulation of the bucket's
         # protocol, extent_store's (TASK-88), whose
         # seed searches took most of an hour in the suite's unoptimized build, an optimized build of
-        # its own (TASK-188); the Shuttle suites, each built with its crate's feature, a build of
-        # their own; the guest tests' own, a workspace of their own; the Go client, its generated
-        # code checked against the .proto, and its tests against the daemon, which it builds
+        # its own (TASK-188); the Shuttle suites and the loom models (docs/memory-ordering.md),
+        # each built with its crate's feature, a build of their own; the guest tests' own, a
+        # workspace of their own; the Go client, its generated code checked against the .proto,
+        # and its tests against the daemon, which it builds
         # (TASK-219); the VMM's own that cladefs adds to, vendor/firecracker's workspace, which ran
         # on hosts of guests alone and broke unseen there (TASK-220); the rest, minutes.
         parts: [workspace, sim, shuttle, clippy scripts, guest, go, firecracker]

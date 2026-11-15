@@ -1,0 +1,14 @@
+# An occurrence's happening acquires nothing: it may see its listener listening and find no
+# listener, its listen's publication of it unordered before.
+# Killer: cladefs hearing::loom::occurrences_are_told_once
+--- a/crates/cladefs/src/hearing.rs
++++ b/crates/cladefs/src/hearing.rs
+@@ -49,7 +49,7 @@ impl Occurrence {
+     /// as it does. Again, nothing more.
+     pub(crate) fn happen(&self) {
+         // Acquiring: a listener seen listening, its `listen` published it.
+-        let before = self.state.fetch_or(HAPPENED, Ordering::Acquire);
++        let before = self.state.fetch_or(HAPPENED, Ordering::Relaxed);
+         if before & (HAPPENED | LISTENING) == LISTENING {
+             (self.listener.get().expect("the listener of an occurrence listened to"))();
+         }

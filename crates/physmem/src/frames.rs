@@ -15,7 +15,7 @@
 //! own. Its staged mark, that a second stage of another process mapped it since it was allocated
 //! (`pmm::quarantine`), is set by whoever holds the page, without the lock.
 
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+use crate::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 /// No frame: the end of a list.
 const NONE: u32 = u32::MAX;
@@ -453,5 +453,34 @@ mod tests {
         let (mut first, mut second) = (FrameList::new(), FrameList::new());
         first.push_back(&frames, 0);
         second.push_back(&frames, 0);
+    }
+}
+
+/// The frames under loom, its every interleaving of their threads and weak orderings.
+#[cfg(all(test, feature = "loom"))]
+mod loom {
+    use super::*;
+    use ::loom::sync::{Arc, Mutex};
+
+    /// A page's staged mark, set with no ordering by whoever holds the page as a second stage maps
+    /// it, is seen as the page is freed, on whichever thread frees it: the page's handing over,
+    /// here a lock, as a window holds its pages, orders the mark before the free
+    /// (`quarantine::sift`), so that the page freed waits for the stages (TASK-79.9).
+    #[test]
+    fn staged_marks_reach_the_free_of_their_page() {
+        ::loom::model(|| {
+            let frames = Arc::new(Frames::new(1));
+            frames.allocate(0);
+            let held = Arc::new(Mutex::new(Some(0)));
+            let staging = ::loom::thread::spawn({
+                let (frames, held) = (frames.clone(), held.clone());
+                move || held.lock().unwrap().inspect(|&frame| frames.stage(frame)).is_some()
+            });
+            let frame = held.lock().unwrap().take().unwrap();
+            let staged = frames.take_staged(frame);
+            frames.free(frame);
+            let marked = staging.join().unwrap();
+            assert_eq!(staged, marked, "a mark made before the page was let go, unseen");
+        });
     }
 }

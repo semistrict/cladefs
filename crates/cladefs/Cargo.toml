@@ -24,6 +24,11 @@ shuttle = ["dep:shuttle", "physmem/shuttle"]
 # release build refuses it (extent_remote, TASK-320). This crate's tests have it, and so its
 # examples would: they are cladefs-examples'.
 failpoints = ["fail/failpoints"]
+# The protocols of atomics in `sync`'s terms (`hearing`) on loom's atomics, whose model then runs
+# every interleaving of their models' threads under the orderings each access asks for
+# (docs/memory-ordering.md, TASK-444.2). Only for those models, as loom's atomics work only in one:
+# `cargo nextest run -p cladefs --features loom --lib loom::`.
+loom = ["dep:loom"]
 
 [dependencies]
 anyhow.workspace = true
@@ -60,6 +65,7 @@ opentelemetry = { version = "0.33.1", default-features = false, features = ["tra
 opentelemetry_sdk = { version = "0.33.1", default-features = false, features = ["trace"] }
 opentelemetry-otlp = { version = "0.33.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
 humantime = "2.4.0"
+loom = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait.workspace = true

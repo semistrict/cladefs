@@ -123,6 +123,8 @@ pub mod faults;
 mod fence;
 mod filesystem;
 pub mod fuse;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod hearing;
 #[cfg(test)]
 mod heap;
 mod host_store;
@@ -139,6 +141,7 @@ pub mod request;
 mod shuttle_testing;
 pub mod stats;
 mod storage;
+mod sync;
 // The extent daemon's (Linux), and its tests' everywhere.
 #[cfg(target_os = "linux")]
 pub mod signals;

@@ -1,0 +1,15 @@
+# TASK-444.2.2 put back: listening reads the latest with a load, as virtio_extent's hear_commits read
+# RemoteExtentStore::committed after on_committed: store buffering against the rise, which may find
+# no listener as the load misses it, the rise unheard.
+# Killer: cladefs hearing::loom::listeners_hear_of_every_rise
+--- a/crates/cladefs/src/hearing.rs
++++ b/crates/cladefs/src/hearing.rs
+@@ -106,7 +106,7 @@ impl Latest {
+         }
+         // A read-modify-write, which a rise's comes before or after: before, this returns what it
+         // rose to; after, the rise's acquires this, releasing, and with it the listener.
+-        self.latest.fetch_max(0, Ordering::Release)
++        self.latest.load(Ordering::Acquire)
+     }
+ }
+ 

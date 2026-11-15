@@ -10,6 +10,14 @@ audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
 
 # Decisions
 
+## loom behind features; orderings stronger than needed left as they are (TASK-444.2, 2026-11-15)
+
+Decided without you:
+- **loom 0.7.3 (MIT) behind a `loom` feature** of cladefs, physmem and virtio_extent, through each crate's `sync` module, as the `shuttle` feature works. Models run in scripts/test.sh's shuttle part. *Instead:* `--cfg loom`, loom's convention, but tokio's own `cfg(loom)` code then fails to build. *Undo:* drop the features and the `sync` modules.
+- **Only the protocols whose orderings carry an argument are modelled.** These are small owners the production code uses: `cladefs::hearing`, virtio_extent's `Resizing::known`, physmem's staged mark. The other ~320 sites are recorded in docs/memory-ordering.md: counters, hints, and orderings ordered by a lock or a syscall. *Instead:* models of every site, which would need stand-ins for sockets, eventfds and tokio's Notify (TASK-444.2.3 holds that).
+- **Orderings stronger than needed stay as written** (14 groups, docs/memory-ordering.md). Weakening them would rest on an argument no model checks, for no measurable gain. *Instead:* weaken them to Relaxed now. *Undo:* TASK-444.2.3, once its models exist.
+- **`RemoteExtentStore::on_committed` returns the latest commit heard as it began listening** (TASK-444.2.2), and a second call panics. That closes the gap that two calls (listen, then `committed()`) left. *Undo:* none needed; `committed()` stays.
+
 ## Kani excluded: its backend CBMC is BSD-4-Clause (doc-17, 2026-11-15)
 
 Kani (Apache-2.0) runs on CBMC, whose LICENSE has the 4-clause BSD advertising clause, not

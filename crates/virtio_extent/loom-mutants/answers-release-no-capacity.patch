@@ -1,0 +1,14 @@
+# An answer's capacity taken releases nothing: the driver may read it with the ask answered still
+# there, as nothing orders the ask's clearing before it.
+# Killer: virtio_extent notices::loom::capacities_taken_are_read_with_their_asks_answered
+--- a/crates/virtio_extent/src/notices.rs
++++ b/crates/virtio_extent/src/notices.rs
+@@ -120,7 +120,7 @@ impl Resizing {
+         self.asked.store(0, Ordering::Release);
+         if took {
+             // Releasing the ask cleared with it ([`Resizing::known`]).
+-            self.capacity.store(capacity, Ordering::Release);
++            self.capacity.store(capacity, Ordering::Relaxed);
+         }
+     }
+ }

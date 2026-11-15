@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:37'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-15 15:17'
 labels:
   - testing
   - flake
@@ -52,4 +52,6 @@ Main's CI run 43712981845 (836047da0, 2026-11-15) failed test (workspace) on thi
 <!-- SECTION:NOTES:BEGIN -->
 Decision: the code's order is right. Shared::complete (crates/virtio_extent/src/workers.rs) adds the used element, then notifies, as virtio orders them (used ring before the interrupt); a driver polling the ring may see a request before its interrupt, which is what FakeQueue's send models. So the test reads the count after workers.stop(): stop joins the worker after Requests::wait_idle, whose serving count drops only after complete() returned (element and interrupt), under the same mutex, so the count is settled then. The second start's count (3) is asserted too.
 Evidence, ubu1 under fxjob, stress-ng --cpu 4 in the same job, the test binary run alone in a loop: old test 3 of 400 and 167 of 5000 failed (3.3%, left 1 right 2); new test 0 of 400 and 0 of 5000. Mutant sleeping 20 ms between element and interrupt: old test 20 of 20 failed (left 0), new 20 of 20 passed. Mutant skipping the interrupt of a request with nothing written (len > 0): new test 5 of 5 failed (left 1, right 2, at the count after stop). cargo nextest run -p virtio_extent on ubu1: 43 of 43 passed. scripts/upstream-changes.py --check passes. TASK-457 (filed the same hour by the rename's session) is the same failure, closed as its duplicate.
+
+CI on main, run 43725423025 (9da162ff0), at 15:17 UTC: test (workspace, clippy scripts, sim, shuttle, guest, firecracker, go), guide, guest-sim, guest-sim-sweep, soak, object-stores, pjdfstest-fuse, sandboxes (short), firecracker-forward, firecracker-series, test-weakening and macos (shuttle) green; macos (workspace) still running, unread (the API's limit spent by every session till 15:51 UTC). Run 43724391112 (1cff819be) was cancelled by the next push, its clippy scripts failing only on TASK-461's two patches. DoD #1 waits on macos (workspace).
 <!-- SECTION:NOTES:END -->

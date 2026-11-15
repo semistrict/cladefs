@@ -20,9 +20,10 @@
   libkrun's copyright and its Apache-2.0 license (guest/tests/LICENSE.libkrun), with cladefs's
   copyright for its changes; the test cases cladefs wrote there are cladefs's own.
 
-Not checked: hand mutants' patches (`*/mutants/*.patch`), whose leading comment is the mutant's
-fields, which its runner reads (`# Killer:`, `# Kind:`): a mutant is a change to a file whose own
-header covers it, not a source of its own.
+Not checked: hand mutants' patches (`*/mutants/*.patch`, and the ordering mutants of
+`*/loom-mutants/*.patch`), whose leading comment is the mutant's fields, which its runner reads
+(`# Killer:`, `# Kind:`): a mutant is a change to a file whose own header covers it, not a source
+of its own.
 
 Without the Fuchsia checkout at the revision the root Cargo.toml records, as in CI, a file citing
 Fuchsia is checked for The Fuchsia Authors' copyright and one license notice; the year, which
@@ -66,7 +67,7 @@ SUFFIXES = (".rs", ".go", ".c", ".h", ".sh", ".py", ".patch")
 BUILD_FILES = ("Makefile", "Kconfig")
 # Hand mutants' patches: changes to files whose headers cover them, their leading comments their
 # fields (the module's docs).
-MUTANT = re.compile(r"(^|/)mutants/[^/]+\.patch$")
+MUTANT = re.compile(r"(^|/)(loom-)?mutants/[^/]+\.patch$")
 # Under the kernel's license as well as cladefs's: guest/linux's, and what runs it outside the kernel.
 DUAL = ("guest/linux/", "guest/sim/", "crates/fxfs-sim-diff/shim/")
 
