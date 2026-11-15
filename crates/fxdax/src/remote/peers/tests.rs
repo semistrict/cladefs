@@ -54,12 +54,12 @@ struct Host {
 }
 
 /// A link to a host of this process, by its serving fetcher: failing every request, if told to;
-/// or asking for each part as stored otherwise than asked, which it has not.
+/// or answering that it has no such part, as a host whose read of the object found none would.
 struct InProcess {
     serving: Arc<Fetcher<Bucket>>,
     calls: AtomicU64,
     failing: AtomicBool,
-    mismatching: AtomicBool,
+    missing: AtomicBool,
 }
 
 impl Link for InProcess {
@@ -68,12 +68,13 @@ impl Link for InProcess {
         if self.failing.load(Ordering::Relaxed) {
             return futures::future::ready(Err("unreachable".to_owned())).boxed();
         }
-        let (serving, mismatching) =
-            (self.serving.clone(), self.mismatching.load(Ordering::Relaxed));
+        if self.missing.load(Ordering::Relaxed) {
+            return futures::future::ready(Ok(None)).boxed();
+        }
+        let serving = self.serving.clone();
         async move {
-            let Asked { key, part, mut stored } = asked;
-            stored.crc ^= u32::from(mismatching);
-            let served = serving.stored_part(&key, part, &stored).await;
+            let Asked { key, part } = asked;
+            let served = serving.stored_part(&key, part).await;
             served.map(|bytes| bytes.map(|bytes| bytes.to_vec())).map_err(|err| err.to_string())
         }
         .boxed()
@@ -104,7 +105,7 @@ fn hosts(
                 serving: serving.clone(),
                 calls: AtomicU64::new(0),
                 failing: AtomicBool::new(false),
-                mismatching: AtomicBool::new(false),
+                missing: AtomicBool::new(false),
             };
             ((*address).to_owned(), Arc::new(link))
         })
@@ -186,8 +187,8 @@ fn a_peer_that_fails_is_asked_nothing_for_a_while() {
     assert!(member.health.up_at(Instant::now() + DOWN));
 }
 
-/// A peer without the part as asked, as one whose tail is of another object at its key, is no
-/// failure: the part comes from the bucket, and the peer is asked for the next.
+/// A peer without the part is no failure: the part comes from the bucket, and the peer is asked
+/// for the next.
 #[test]
 fn a_peer_without_the_part_stays_up() {
     let data = noise(PARTS * PART);
@@ -197,7 +198,7 @@ fn a_peer_without_the_part_stays_up() {
     let owned = owned(&addresses, addresses[1], &location.key);
     assert!(owned > 1, "the test needs two parts owned");
     let other = &links[addresses[1]];
-    other.mismatching.store(true, Ordering::Relaxed);
+    other.missing.store(true, Ordering::Relaxed);
     assert!(read_all(&hosts[0], &location) == data);
     assert_eq!(other.calls.load(Ordering::Relaxed), owned);
     let counts = hosts[0].peers.counts();
@@ -239,7 +240,7 @@ fn peers_set_again_stay_as_they_were() {
         )),
         calls: AtomicU64::new(0),
         failing: AtomicBool::new(false),
-        mismatching: AtomicBool::new(false),
+        missing: AtomicBool::new(false),
     });
     let peers = Peers::new(addresses[0], move |_| link.clone());
     peers.set(addresses);

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The daemon's peers over gRPC: parts served as asked, refusals, and a peer out of reach. What
+//! The daemon's peers over gRPC: parts served, refusals, and a peer out of reach. What
 //! asking peers saves, and how it falls back, `crate::remote::peers`' tests show, and two daemons
 //! `tests/peers.rs`.
 
@@ -33,7 +33,7 @@ fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, String
     crate::remote::runtime().handle.block_on(link(address, url).get(asked))
 }
 
-/// Part `part` of the object at `location`'s key in `bucket`, as its tail says it is stored, and
+/// Part `part` of the object at `location`'s key in `bucket`, asked for by its key and number, and
 /// its stored bytes.
 fn asked(bucket: &Bucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
     let object = crate::remote::runtime().handle.block_on(async {
@@ -43,7 +43,7 @@ fn asked(bucket: &Bucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
     let parts = extent_frame::Parts::of(&object, &extent_frame::NoKeys).unwrap();
     let stored = parts.part(part).unwrap().stored;
     let bytes = object[stored.range().start as usize..stored.range().end as usize].to_vec();
-    (Asked { key: location.key.clone(), part, stored }, bytes)
+    (Asked { key: location.key.clone(), part }, bytes)
 }
 
 /// A part is served as stored, fetched from the bucket once, its object's tail and itself, and
@@ -62,16 +62,14 @@ fn peers_are_served_parts_over_grpc() {
     assert_eq!(SERVED.load(Ordering::Relaxed), 2);
 }
 
-/// A part asked for as stored otherwise than the host's tail says, as by a peer whose tail is of
-/// another object at the key, isn't there to give: NOT_FOUND, no failure.
+/// A part the object holds not, past its end, isn't there to give: NOT_FOUND, no failure.
 #[test]
-fn parts_asked_otherwise_are_not_found() {
+fn parts_the_object_holds_not_are_not_found() {
     let (bucket, location) = holding(&noise(2 * layout::PART));
     let dir = tempfile::tempdir().unwrap();
     let address = serving(&bucket, dir.path());
-    let (mut asked, _) = asked(&bucket, &location, 0);
-    asked.stored.crc ^= 1;
-    assert_eq!(ask(&address, URL, asked), Ok(None));
+    let past = Asked { key: location.key.clone(), part: 5 };
+    assert_eq!(ask(&address, URL, past), Ok(None));
     assert_eq!(SERVED_MISSING.load(Ordering::Relaxed), 1);
 }
 
@@ -90,13 +88,9 @@ fn peers_asking_wrongly_are_refused() {
     assert_eq!(refused(URL, not_served), format!("InvalidArgument: {record}: no parts served"));
     let other = "memory:///other";
     assert_eq!(
-        refused(other, asked.clone()),
+        refused(other, asked),
         format!("FailedPrecondition: asked of {other}, this host's bucket being {URL}")
     );
-    let mut empty = asked;
-    empty.stored.len = 0;
-    let key = &location.key;
-    assert_eq!(refused(URL, empty), format!("InvalidArgument: part 0 of {key}, of 0 bytes"));
 }
 
 /// A peer out of reach fails within the time to connect, not the request's deadline.

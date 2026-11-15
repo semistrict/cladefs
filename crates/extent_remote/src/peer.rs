@@ -7,15 +7,14 @@
 //! fetched it, so that a part many hosts read, as the forks of a popular base booting on many cold
 //! hosts do, comes from the bucket about once for them all, not once for each.
 //!
-//! What a peer gives is checked as what the bucket gives is, against the CRC the asker's own tail
-//! gives the part ([`Stored::check`]), and a part that fails it, as any failure of the peer's, is
+//! A part is asked for by its object's key and its number alone: an object's key names it for good,
+//! written once (TASK-407), and so does a part of it. What a peer gives is checked as what the
+//! bucket gives is, against the CRC the asker's own tail gives the part
+//! ([`extent_frame::Stored::check`]), and a part that fails it, as any failure of the peer's, is
 //! fetched from the bucket: a peer is trusted with no more than the bucket's latency. Only parts
-//! are asked of peers, never tails: a tail is what checks a part, and a stale one, of an object
-//! deleted and created again at its key, would have a reader fail the part twice, as corrupt
-//! ([`crate::fetch`]), rather than read the object anew from the bucket.
+//! are asked of peers, never tails: a tail is what checks a part.
 
 use crate::layout::{self, Kind};
-use extent_frame::Stored;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
@@ -28,9 +27,9 @@ pub trait Peers: Send + Sync {
 
 /// A host its peers ask for parts.
 pub trait Peer: Send + Sync {
-    /// The stored bytes of part `part` of the object at `key`, stored as `stored` says: none if it
-    /// has no such part, or failed to give it, in time.
-    fn part(&self, key: &str, part: u64, stored: Stored) -> BoxFuture<'static, Option<Vec<u8>>>;
+    /// The stored bytes of part `part` of the object at `key`: none if it has no such part, or
+    /// failed to give it, in time.
+    fn part(&self, key: &str, part: u64) -> BoxFuture<'static, Option<Vec<u8>>>;
 
     /// A part it gave failed the CRC the asker's tail gives it: it is no peer to ask for a while.
     fn failed(&self);
@@ -38,7 +37,8 @@ pub trait Peer: Send + Sync {
 
 /// Whether the object at `key` is one whose parts peers give each other: one of extents' data, or
 /// of their places, framed and checked by its tail, which a fetcher reads by parts. Never a branch's
-/// record, a lease, a cell's object or a reference, which are no frames and change in place.
+/// record, a head, a cell's object or a reference, which are no frames, and the first two change in
+/// place.
 pub fn served(key: &str) -> bool {
     matches!(
         layout::kind(key),

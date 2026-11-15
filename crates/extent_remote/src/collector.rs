@@ -2151,8 +2151,8 @@ mod tests {
                 );
                 let location = writer.location(kept).unwrap();
                 let read = crate::read(&bucket, kept, &location).await;
-                let twice = format!("part 0 of {segment}, by its CRC, twice");
-                assert_eq!(read, Err(Error::Corrupt(twice)));
+                let corrupt = format!("part 0 of {segment}, by its CRC");
+                assert_eq!(read, Err(Error::Corrupt(corrupt)));
             });
         }
     }
