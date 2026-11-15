@@ -29,6 +29,14 @@ Decided without you:
 - **Orderings stronger than needed stay as written** (14 groups, docs/memory-ordering.md). Weakening them would rest on an argument no model checks, for no measurable gain. *Instead:* weaken them to Relaxed now. *Undo:* TASK-444.2.3, once its models exist.
 - **`RemoteExtentStore::on_committed` returns the latest commit heard as it began listening** (TASK-444.2.2), and a second call panics. That closes the gap that two calls (listen, then `committed()`) left. *Undo:* none needed; `committed()` stays.
 
+## bench-rounds.sh's runs keep their stores on ext4 and their bucket on tmpfs (TASK-397, 2026-11-15)
+
+Its results' directory, ubu1's home, is ZFS, and held each run's stores and file bucket: a durable sync measured ZFS's syncs. Decided without you:
+- **Each run writes in its job's temporary directory** (fxjob's TMPDIR, on the scratch disk), through a new `scripts/test-e2e-job.sh`, which copies the results back without stores, caches and root filesystems: RESULTS holds what it did but for those (some 500 MB a run less). Nothing names /mnt/fxdax-scratch. *Instead:* a work directory bench-rounds.sh names itself, which would have to name the scratch disk. *Undo:* revert the commit.
+- **Another filesystem than ext4 is refused** (exit 2, before the run; the rounds stop there), as sandboxes.sh refuses its disk: no fallback to wherever TMPDIR is, and no knob to measure on ZFS or XFS on purpose. *Instead:* record the filesystem beside the numbers and go on.
+- **The bucket is test-e2e.sh's default again, on tmpfs**, where TASK-350 had moved it to disk as it overran the run's memory: it counts against `CLADEFS_ROUNDS_MEM` (16G) again, and a case of a working set of gigabytes needs more of that, or `CLADEFS_EXTENTD_REMOTE=file://DIR` on a disk. *Instead:* a file bucket on the scratch disk, whose own syncs and writes the numbers would then hold.
+- **ab-guest-cases.sh not changed** (TASK-445): it keeps stores in OUT by its own code and has `CLADEFS_AB_KEEP_DATA`. bench.sh, the A/B, the qualification and gc-sweep run under host.sh's run directory, on the scratch disk, and needed nothing.
+
 ## Kani excluded: its backend CBMC is BSD-4-Clause (doc-17, 2026-11-15)
 
 Kani (Apache-2.0) runs on CBMC, whose LICENSE has the 4-clause BSD advertising clause, not

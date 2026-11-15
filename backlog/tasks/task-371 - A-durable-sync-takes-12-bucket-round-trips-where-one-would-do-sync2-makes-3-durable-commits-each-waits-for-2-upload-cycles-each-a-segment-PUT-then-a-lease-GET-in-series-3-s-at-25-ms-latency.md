@@ -8,7 +8,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12 01:53'
-updated_date: '2026-11-13 10:19'
+updated_date: '2026-11-15 12:38'
 labels:
   - bug
   - extentd
@@ -78,6 +78,8 @@ Re-run on main 3037d0772, bench lock, IO cap in force (2026-11-12 09:43Z, ~/src/
 - bench-rounds.sh's default, store and file bucket both on ZFS home: sync-loop 10.8/s (91 ms), syncfs 13.1/s, freeze 3.7/s. Bucket on /dev/shm, store still on ZFS: 15.9/s (62 ms).
 The 25 ms bucket costs one round trip a sync, as asked; what's left in the default layout is ZFS home's syncs for the file bucket and the store, no part of fxdax (TASK-397 filed for the bench's default). Results: ubu1 /mnt/fxdax-scratch/t371e, ~/src/fxdax-t350-results/t371c and t371d.
 DoD #1: main CI 43200591789 (macOS and Linux) green on 693849713 with TASK-371 in; #2 scripts/upstream-changes.py --check passes on 10f613290.
+
+2026-11-15 (claude, TASK-397): the rates above measured through scripts/bench-rounds.sh with results under ~/src/fxdax-t350-results (t371, t371b, t371c: 15.9/s, 6.1/s, 10.8/s; and the description's 3.2/s) had the store, and but for t371d the file bucket, on ubu1's home, ZFS: they are ZFS's syncs' as much as fxdax's. The note of 2026-11-12 saying the bench's stores were on /mnt/fxdax-scratch was wrong for them. bench-rounds.sh now keeps each run's stores in the job's ext4 temporary directory and its bucket on tmpfs (scripts/test-e2e-job.sh).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
