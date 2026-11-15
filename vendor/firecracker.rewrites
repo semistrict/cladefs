@@ -10,7 +10,9 @@
 # general vsock fix (a snapshot resets the connections in the RX queue, ahead of TRANSPORT_RESET)
 # among the fixes at the series' base, before the fxdax feature.
 68d5971759373a2b2edb9e698bed44a56cda1a54 14dc26674a5ae0f8626433c689b2517357da80e2
-# TASK-417: fxdax-v1.16.1-r7 (branch fxdax-v1.16.1-r7), vm-memory 0.18 at the series' base
-# (upstream's 27e968cb1 and 1faca2f70 as one commit, and 88c8f05fd), before the fxdax feature,
-# and the extent device on fxdax's crates/virtio_extent at its tip.
-527247f75a1db52cfed4bbdd16c83602446e0900 88143b43b90dce5cff5405ef0c02f6de5be64924
+# TASK-417: fxdax-v1.16.1-r7 (branch fxdax-v1.16.1-r7), vm-memory 0.18 first, at the series' base
+# (upstream's 27e968cb1 and 1faca2f70 as one commit, then 88c8f05fd), before the general fixes and
+# the fxdax feature, whose extent commits import GuestMemoryBackend, and those before TASK-364's
+# call fork_quiescent(point) as fxdax's crate has it since (TASK-422); and the extent device on
+# fxdax's crates/virtio_extent at its tip.
+527247f75a1db52cfed4bbdd16c83602446e0900 e27792aef7c3a7084bd014469edf0eedd60cc0a0
