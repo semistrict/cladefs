@@ -3,9 +3,11 @@ id: TASK-444.1
 title: >-
   Trace-validate the journal and dax-cow specs against the code, and generate
   tests from the specs state graphs
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 12:33'
+updated_date: '2026-11-15 14:30'
 labels: []
 dependencies: []
 references:
@@ -39,3 +41,15 @@ TLC and the spec mutations check the designs; nothing checks that the code is th
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+journal: 1. Journal.tla: records become transactions (a set of objects mutated, or a flush's BeginFlush alone, or its EndFlush with the parent's mutations), as the code commits them atomically at one offset; BeginFlush/EndFlush as the code's Checkpoints transitions; a Recover action (cut, replay folding records from each object's offset, as Journal::replay does) with its own rule and mutation. TLC and every mutation pass. 2. fxfs feature journal_trace: a Tracer passed in JournalOptions records commits (offsets, objects, checkpoints after), write_super_block's pad/flush/save, the journal's durable offset, and replay's result; storage_device Crashes calls a hook as it records a crash. 3. Model test: traced sequences (short every-cut ones, the store flushed around a super-block, remounts) write TraceJournalData modules: byte offsets mapped to spec indices, each cut's replay a Cut check at the barrier it was recorded at, each remount a Recover. 4. specs/journal/trace/TraceJournal.tla; check-tla.sh runs journal/traces, with a mutant's traces (offsets read after the flush, TASK-149.5's bug) that must be rejected. 5. AC4: path cover of a small model's state graph driving the journal, or a dead end saying why. 6. Divergences filed with replaying tests.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+journal: trace validation built (AC #1, #3, #6). fxfs feature journal_trace (crates/fxfs/src/object_store/journal/trace.rs): a JournalTrace given in JournalOptions records each transaction (offsets, objects mutated, BeginFlush/EndFlush, every object's checkpoints after), write_super_block's Pad/Flush/Save, the journal's durable offset (device flush or barrier), and replay's result; storage_device's Crashes::on_record marks each recorded crash in the trace. crates/fxfs-posix/src/model_tests/journal_trace.rs maps byte offsets to the spec's transaction numbers, each cut's replay a Cut step (stuttering, checks the super-block found, d >= durable, the objects' offsets replay rebuilt, nothing lost), each remount a Recover; specs/journal/trace/TraceJournal.tla; scripts/check-tla.sh journal/traces (13 sequences: the store flushed around a super-block, compactions racing, crashes and remounts, 6 random, 4 short cut everywhere; plus a mutant reading offsets after the flush, TASK-149.5's bug, which TLC rejects). Spec changes to match the code (TASK-444.1.2, .3): transactions of several objects at one offset; BeginFlush with its parent's mutations, rule beginFlushApart; replay's offset+1 skip; Recover (cut and mount) with rule replayFromOffsets; every mutation (4) fails, Journal holds (MaxLen 5, symmetric objects, 1.3M states, ~60 s; JournalDeep MaxLen 6, deep). Divergence in the code: TASK-444.1.1 (a compaction's super-block between format's two), fixed: write_super_block takes a SuperBlockSlot. Next: AC #4 (JournalCover: path cover of a one-object state graph driven through gates).
+<!-- SECTION:NOTES:END -->
