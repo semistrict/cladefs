@@ -12,10 +12,17 @@ publish = false
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
 aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
+# fxdax: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
+aws-config.workspace = true
+aws-sdk-kms.workspace = true
 serde.workspace = true
 storage_ptr_slice.workspace = true
 storage_xts.workspace = true
+# The emulator's directory, for the `testing` feature's (`testing::LocalAwsKms`).
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
+tokio.workspace = true
+url.workspace = true
 zerocopy.workspace = true
 zeroize.workspace = true
 
@@ -30,5 +37,6 @@ workspace = true
 
 [features]
 # fxdax: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
-# counts the calls made of it (`testing::Counted`).
-testing = []
+# counts the calls made of it (`testing::Counted`); AWS KMS's emulator, started for a test
+# (`testing::LocalAwsKms`, TASK-411.17).
+testing = ["dep:tempfile"]

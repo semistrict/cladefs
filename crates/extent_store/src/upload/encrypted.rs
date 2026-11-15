@@ -1415,3 +1415,79 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
     let (store, _remote) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
     assert_eq!(read(&world, &host, &store, *ours_extent, 4096), Ok(noise(7, 4096)));
 }
+
+/// A host of placement `token` as [`World::host`] makes one, but its KMS the one `url` names, as
+/// `FXDAX_KMS` names a host's: made anew, as another process's would be.
+fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
+    let memory = Memory::new();
+    let kms = extent_keys::kms::from_url(url).unwrap();
+    let keys = keys::Host { kms: Some(keys::Kms::new(kms)), ring: memory.keys().clone() };
+    let uploads = Budget::new(Limits::UNBOUNDED);
+    Host {
+        runtime: Runtime { handle: world.runtime.handle().clone(), uploads, keys },
+        memory,
+        token,
+    }
+}
+
+/// TASK-411.17 AC #4: a store of a sealed cell opened end to end through AWS KMS, as
+/// `FXDAX_KMS=aws-kms://REGION?key=alias/fxdax-tenant-{tenant}&endpoint=...` names it, over
+/// local-kms, its emulator (scripts/test-local-kms.sh): the cell's KEK wrapped under the tenant's
+/// KMS key, its header naming the backend and the key; its segments sealed; another host taking
+/// the cell unwraps it there and reads; the key disabled, no host opens it (revoked) until it is
+/// enabled again; scheduled for deletion, none does (destroyed).
+#[test]
+#[ignore = "needs local-kms: scripts/test-local-kms.sh, CI's object-stores job"]
+fn local_kms_sealed_stores_open_through_aws_kms() {
+    let world = World::new();
+    let emulator = extent_keys::testing::LocalAwsKms::start();
+    let key_id = emulator.create_key();
+    emulator.create_alias("alias/fxdax-tenant-1", &key_id);
+    let url = emulator.url("alias/fxdax-tenant-{tenant}");
+    let branch = test_branch(7);
+    let extent = ExtentId::new(branch.id, 1);
+    let dir = made(branch, "a");
+    let first = host_of_kms(&world, &url, 5);
+    let (store, remote) = open_on(&world, &first, &dir).unwrap();
+    let data = noise(1, 4 * 4096);
+    written(&store, &remote, extent, &data);
+    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: branch.id, generation: 1 });
+    drop((store, remote));
+
+    let object = world.cell();
+    let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
+    assert_eq!(&kek.wrapped.0[..27], b"fxka\x01\x00\x14alias/fxdax-tenant-1");
+    let segment = world.object(&layout::segment(branch, 1));
+    let seal = extent_frame::Frame::of(&segment).unwrap().seal;
+    assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{seal:?}");
+    for (key, bytes) in world.objects() {
+        assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
+    }
+
+    let second = host_of_kms(&world, &url, 6);
+    let (store, _remote) = open_on(&world, &second, &dir.crash(0)).unwrap();
+    assert_eq!(world.cell().epoch, 2);
+    assert_eq!(read(&world, &second, &store, extent, 4 * 4096), Ok(data.clone()));
+    drop((store, _remote));
+
+    emulator.disable(&key_id);
+    let refused = open_on(&world, &host_of_kms(&world, &url, 7), &dir.crash(0)).map(drop);
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        refused,
+        Failure::Remote(extent_remote::Error::Kms("tenant 1: its KEK is revoked".into()))
+    );
+    emulator.enable(&key_id);
+    let third = host_of_kms(&world, &url, 8);
+    let (store, _remote) = open_on(&world, &third, &dir.crash(0)).unwrap();
+    assert_eq!(read(&world, &third, &store, extent, 4 * 4096), Ok(data));
+    drop((store, _remote));
+
+    emulator.schedule_deletion(&key_id);
+    let refused = open_on(&world, &host_of_kms(&world, &url, 9), &dir.crash(0)).map(drop);
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        refused,
+        Failure::Remote(extent_remote::Error::Kms("tenant 1: its KEK is destroyed".into()))
+    );
+}

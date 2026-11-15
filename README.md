@@ -384,7 +384,8 @@ cloud bucket. fxdaxctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 **Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
-host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
+host's KMS (`local:///DIR`, a fake for tests and development, or AWS KMS,
+below), the cells of a tenant whose KEK it holds
 are sealed: the bucket, the stores' directories and the part cache hold their
 data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
 every host (`fxdaxctl forget-tenant-keys TENANT`, the control API's
@@ -402,6 +403,28 @@ old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
 versioning off needs nothing. A host told either fences the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
 a fenced store's own keys stay in memory until its VM process closes it.
+
+**AWS KMS** (doc-16, Real KMSes: AWS KMS). `FXDAX_KMS=aws-kms://REGION?key=TEMPLATE`,
+say `aws-kms://us-east-1?key=alias/fxdax-tenant-{tenant}`: each tenant's KEK is a
+symmetric KMS key, named by the template with `{tenant}` in hexadecimal (a key
+ID, key ARN, alias name or alias ARN), and `&keys=FILE` names a file of
+overrides, lines `TENANT_HEX NAME`, for tenants that bring their own key, in
+their own account by its key ARN. `&endpoint=URL` names a VPC endpoint (or an
+emulator). Credentials are the standard AWS chain's: the environment, the
+shared profile (SSO, `credential_process`), web identity, the ECS task's or
+the instance's role. fxdax's role needs `kms:Encrypt` and `kms:Decrypt` on each
+tenant's key, and nothing else; every call carries the encryption context
+`fxdax-tenant` = the tenant in hexadecimal, so a policy can tie each key to its
+tenant with the condition `"StringEquals": {"kms:EncryptionContext:fxdax-tenant": "2a"}`.
+A tenant bringing a key in another account allows fxdax's role those two
+actions under that condition in its key policy, fxdax's IAM policy allows them
+on the key's ARN, and the overrides file names it. A tenant revokes fxdax's use
+by disabling its key or removing that statement, and shreds itself by
+scheduling its key's deletion (every host refuses its cells from then on);
+forget its keys on every host and stop serving it before the waiting period
+ends, as AWS then forgets the key (TASK-411.19). Rotating a key needs nothing
+of fxdax: what its older versions wrapped still unwraps. The tests run against
+local-kms, an emulator (`scripts/test-local-kms.sh`, Go to install it).
 
 ### `vendor/firecracker`: the VMM
 

@@ -72,7 +72,8 @@ pub type Shared = std::sync::Arc<dyn Dyn>;
 /// - `local:///DIR`: a [`LocalKms`] keeping its tenants' KEKs under the directory `DIR`;
 /// - `openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE]` (`openbaos://` over TLS): OpenBao's
 ///   Transit engine mounted at `MOUNT` (TASK-411.16);
-/// - `aws-kms://REGION?key=TEMPLATE[&keys=FILE]`: AWS KMS in `REGION` (TASK-411.17);
+/// - `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`: AWS KMS in `REGION`, at
+///   `endpoint` if given (a VPC endpoint, an emulator) (TASK-411.17);
 /// - `gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`: Google Cloud KMS
 ///   (TASK-411.18).
 ///

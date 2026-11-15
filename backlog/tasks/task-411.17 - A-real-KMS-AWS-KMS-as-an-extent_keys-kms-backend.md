@@ -1,9 +1,11 @@
 ---
 id: TASK-411.17
 title: 'A real KMS: AWS KMS as an extent_keys::kms backend'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 03:35'
+updated_date: '2026-11-15 04:01'
 labels: []
 dependencies: []
 documentation:
@@ -37,3 +39,28 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Client: aws-sdk-kms + aws-config (Apache-2.0, AWS's own): the full credential chain (env, shared profile/SSO/credential_process, web identity, ECS, IMDSv2), retries with backoff and error codes maintained upstream; a hand-made SigV4 REST client would still need aws-config for credentials, so it saves little and adds a protocol to maintain. Calls run on a runtime of the backend's own (one worker thread), so the futures poll on any executor and the HTTP client's connections never outlive a caller's runtime; the client is made lazily on it.
+2. kms/aws.rs: AwsKms; from_url parses aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL] (KeyNames::of_query). Wrap = Encrypt(KeyId = the tenant's key name, plaintext 32 bytes, EncryptionContext {fxdax-tenant: tenant hex}); Wrapped = header (magic 'fxka', format 1, key name length u16 BE, key name) + CiphertextBlob. Unwrap: header checked (magic, format, key name == KeyNames::of(tenant)) before any call, else Unauthentic; Decrypt(KeyId = key name, same context); plaintext must be 32 bytes.
+3. Error mapping by the service's error code: NotFoundException -> NoSuchTenant; AccessDeniedException, DisabledException -> Revoked; KMSInvalidStateException 'pending deletion' -> Destroyed, other states -> Revoked; InvalidCiphertextException, IncorrectKeyException -> Unauthentic; everything else (throttling, KeyUnavailable, KMSInternal, dispatch/timeout, credentials) -> Io naming operation and key, no secrets. Unit tests of the mapping on synthetic SDK errors (AccessDenied, throttling: the emulator has no IAM nor throttling).
+4. Emulator: nsmithuk/local-kms (MIT), pinned pseudo-version, installed by scripts/test-local-kms.sh into target/local-kms with go install; extent_keys::testing::LocalAwsKms (testing feature) starts it on PORT=0 in a temp dir, reads the bound port from its log, seeds keys, admin calls (create key/alias, disable, schedule deletion). Tests #[ignore = needs local-kms: scripts/test-local-kms.sh] as the RustFS/Azurite ones (the repo's pattern), named local_kms_*: wrap/unwrap, rotation (two instances seeded with one then two backing keys of the same key ID: old wraps unwrap), disabled -> Revoked, pending deletion -> Destroyed, not found -> NoSuchTenant, wrong tenant/context/backend/tamper -> Unauthentic, alias name/alias ARN/key ID/key ARN naming, overrides; extent_store: a sealed store opened end to end through kms::from_url(aws-kms://...&endpoint=...).
+5. CI: object-stores job gains setup-go and scripts/test-local-kms.sh (dummy env credentials, no AWS account).
+6. Lock files: Cargo.lock, vendor/firecracker.lock (scripts/firecracker-cargo.sh --lock), guest/tests check. Licenses of every new crate checked from cargo metadata.
+7. Docs: doc-16 'Real KMSes: AWS KMS', README encryption paragraph (configuration, IAM policy with kms:EncryptionContext:fxdax-tenant condition, cross-account BYOK through overrides).
+8. Verify: narrow nextest, then the four-package run; clippy, fmt.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Client: aws-sdk-kms 1.131.0 + aws-config 1.13.2 (both Apache-2.0, AWS's own). Why: the full standard credential chain (env, shared profile, SSO, credential_process, web identity, ECS, IMDSv2) with refresh, retries/backoff and error codes are maintained upstream; a hand SigV4 client over reqwest would still need aws-config (or object_store's providers, which lack profiles/SSO) for credentials and would add a JSON protocol to keep. aws-sdk-kms with default-features = false, features [default-https-client, rt-tokio]: its default 'rustls' feature pulls the legacy client (hyper 0.14, rustls 0.21, h2 0.3); this way it is hyper 1 / rustls 0.23 / aws-lc-rs, already in the build.
+New crates and licenses (cargo metadata): arc-swap MIT OR Apache-2.0; aws-config, aws-credential-types, aws-runtime, aws-sdk-kms, aws-sdk-sso, aws-sdk-ssooidc, aws-sdk-sts, aws-sigv4, aws-smithy-async, aws-smithy-http, aws-smithy-http-client, aws-smithy-json, aws-smithy-observability, aws-smithy-query, aws-smithy-runtime, aws-smithy-runtime-api, aws-smithy-runtime-api-macros, aws-smithy-schema, aws-smithy-types, aws-smithy-xml, aws-types: Apache-2.0; base64-simd MIT; block-buffer MIT OR Apache-2.0; bytes-utils Apache-2.0/MIT; cpufeatures MIT OR Apache-2.0; deranged MIT OR Apache-2.0; num-conv MIT OR Apache-2.0; outref MIT; powerfmt MIT OR Apache-2.0; regex-lite MIT OR Apache-2.0; sha1 MIT OR Apache-2.0; signal-hook-registry MIT OR Apache-2.0; time, time-core, time-macros MIT OR Apache-2.0; urlencoding MIT; vsimd MIT; xmlparser MIT/Apache-2.0. extent_keys also uses url, tokio (workspace, already in the lock) and tempfile (optional, testing feature). Emulator: nsmithuk/local-kms, MIT (LICENSE checked), pinned pseudo-version v0.0.0-20260228092603-2a5e92d09ab6 (no module-path release tag), Go-installed into target/local-kms by scripts/test-local-kms.sh, not a dependency of the build.
+Lock files: Cargo.lock, vendor/firecracker.lock (scripts/firecracker-cargo.sh --lock; --check passes), guest/tests/Cargo.lock (cargo metadata --locked failed before, passes after update). scripts/upstream-changes.py --check passes.
+Wrapped format: 'fxka', format 1, key name length u16 BE, key name, CiphertextBlob. Encryption context {fxdax-tenant: tenant hex}. Decrypt names KeyId. Calls on a 1-thread runtime of the backend's own (client made lazily there), dropped with shutdown_background; attempt timeout 10 s, call 30 s.
+Deviation from the brief: the emulator tests are #[ignore = needs local-kms: scripts/test-local-kms.sh] and named local_kms_*, as the RustFS/Azurite ones are (the repo's pattern), and fail loudly when run without FXDAX_LOCAL_KMS or credentials, rather than passing silently with a printed skip. Each still starts its own emulator on a free port (PORT=0, port read from its log).
+Mutation checks (hand mutants, restored): Decrypt without context or KeyId -> 7/8 emulator tests fail; Decrypt without KeyId -> the another-key test failed only after it was rewritten to use a ciphertext under another key with the tenant's own context (the first version's relabelled blob was refused by context alone); constant context -> the shared-key cross-tenant test fails.
+Filed: TASK-411.19 (a tenant whose key finished deletion reads NoSuchTenant: new cells in the clear), TASK-411.20 (changing a tenant's key name leaves earlier wraps unauthentic; no rewrap path).
+<!-- SECTION:NOTES:END -->

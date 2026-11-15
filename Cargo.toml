@@ -41,6 +41,13 @@ aws-lc-rs = "1.18.2"
 # aws-lc's, an implementation of its own (TASK-411.5). A dev-dependency alone.
 aws-lc-sys = "0.46.0"
 assert_matches = "1.5.0"
+# AWS KMS as a KMS backend (TASK-411.17): AWS's own SDK, Apache-2.0, for its client of KMS's
+# Encrypt and Decrypt and for the standard credential chain (env, shared profile, SSO,
+# credential_process, web identity, ECS, IMDSv2), which aws-config keeps as AWS changes it. Its
+# HTTPS client hyper 1's over rustls 0.23 (`default-https-client`), as the build's is: not the
+# SDK's default `rustls`, its legacy client over hyper 0.14 and rustls 0.21.
+aws-config = "1.13.2"
+aws-sdk-kms = { version = "1.131.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 async-trait = "0.1.92"
 base64 = "0.22.1"
 byteorder = "1.5.0"
