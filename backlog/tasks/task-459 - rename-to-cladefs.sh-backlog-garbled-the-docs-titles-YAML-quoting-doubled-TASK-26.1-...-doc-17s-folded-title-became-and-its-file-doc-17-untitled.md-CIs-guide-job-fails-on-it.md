@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:39'
-updated_date: '2026-11-15 14:26'
+updated_date: '2026-11-15 15:17'
 labels:
   - backlog
   - ci
@@ -30,7 +30,7 @@ ab1adf06b (TASK-437's 'scripts/rename-to-cladefs.sh --backlog') rewrote the docs
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Every doc's title is its old title with fxdax renamed (git show ab1adf06b^ for the old ones), unquoted in value, and doc-17's file named from its title
-- [ ] #2 guide's pnpm test passes; CI's guide job green on main
+- [x] #2 guide's pnpm test passes; CI's guide job green on main
 - [x] #3 rename-to-cladefs.sh --backlog takes titles' YAML values (quoted, folded), with a test of each form
 <!-- AC:END -->
 
@@ -54,4 +54,6 @@ ab1adf06b (TASK-437's 'scripts/rename-to-cladefs.sh --backlog') rewrote the docs
 
 <!-- SECTION:NOTES:BEGIN -->
 Main had moved by the time this ran: the rename's session pushed 1d8c55acb (the script's titles from doc list --plain, only if renamed) and d8741092a (the nine docs' titles restored, doc-17's file named from its title). My CLI repair (backlog doc update --title from ab1adf06b^'s titles through rename-to-cladefs.sh --filter) matched theirs but for updated_date, so I dropped it. Kept from this task: the script reads the docs from backlog search --type document --json (the backlog's versioned output for scripts) instead of the plain listing, and scripts/tests/test_rename_to_cladefs.py (fake backlog; quoted unrenamed, folded, quoted renamed, untouched), which fails on the script as ab1adf06b ran it. End to end: the script with the real CLI on a git archive of backlog/ at ab1adf06b^ left every doc's title its value renamed (doc-17: 'Spending frontier tokens on quality: what the forefront does, and what fits cladefs', its file named from it). Open tasks' titles: none garbled (task list --json; the task path always used JSON values). guide: pnpm install, build, test (42 of 42), check pass. Scripts' tests 320 of 320 pass on the Mac. scripts/upstream-changes.py --check passes.
+
+CI on main, run 43725423025 (9da162ff0), at 15:17 UTC: test (workspace, clippy scripts, sim, shuttle, guest, firecracker, go), guide, guest-sim, guest-sim-sweep, soak, object-stores, pjdfstest-fuse, sandboxes (short), firecracker-forward, firecracker-series, test-weakening and macos (shuttle) green; macos (workspace) still running, unread (the API's limit spent by every session till 15:51 UTC). Run 43724391112 (1cff819be) was cancelled by the next push, its clippy scripts failing only on TASK-461's two patches. DoD #1 waits on macos (workspace). guide green on both runs (1cff819be, 9da162ff0).
 <!-- SECTION:NOTES:END -->
