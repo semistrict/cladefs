@@ -23,9 +23,9 @@
 # (scripts/lib/host-remote.sh, which does what a run does there). Its job, the host script
 # (host_command), runs apart from the SSH session, under fxjob, in a cgroup of its own and within
 # CLADEFS_HOST_MEM (default 12G), and with fxjob --bench, alone and on CPUs of its own, if it is a
-# measurement (host_bench=1); as root, as its tests need, with the user's Rust; its builds, and
-# nextest's tests, at most CLADEFS_HOST_JOBS at once (default 4), a non-measurement's at niceness
-# CLADEFS_HOST_NICE (default 19); its guest kernels taken from the host's cache of those built from
+# measurement (host_bench=1), which builds first, in a job of work of its own (host_job); as root,
+# as its tests need, with the user's Rust; its builds, and nextest's tests, at most
+# CLADEFS_HOST_JOBS at once (default 4), at niceness CLADEFS_HOST_NICE (default 19); its guest kernels taken from the host's cache of those built from
 # the same sources (host_kernel, scripts/lib/linux-host-setup.sh); and nothing of it left running
 # once it ends, root's processes too (host-remote.sh's reap). The driver waits for the job, reconnecting,
 # fetches the results, and removes the run's directory, its worktrees with it, whatever happens:
@@ -56,10 +56,9 @@ host_mark=$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')
 # What a run's name looks like, for those given one (host_actions).
 host_run_pattern='^run-([a-z0-9]+-)?[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$'
 # Whether the run is a measurement, which fxjob --bench runs alone: a timed driver's always, any
-# other's with CLADEFS_HOST_BENCH=1 (as scripts/perf-gate-host.sh's runs of test-host.sh). A run may
-# hold several jobs, one after another, each host_job's: a driver runs one of them as work, its
-# builds, by `host_bench=0 host_job ...`, so that compiling holds no measurement's cores
-# (scripts/bench-ab-host.sh's sides).
+# other's with CLADEFS_HOST_BENCH=1 (as scripts/perf-gate-host.sh's runs of test-host.sh). A
+# measurement's host_job is two jobs of the run, its builds as work, then the measurement alone,
+# building nothing (host_job, TASK-368).
 host_bench=${CLADEFS_HOST_BENCH:-0}
 [[ $host_bench =~ ^[01]$ ]] || { echo "CLADEFS_HOST_BENCH is 0 or 1" >&2; exit 2; }
 # Where the run stands: '' (nothing of it on the host), prepared (its directory made), launched
@@ -181,7 +180,7 @@ host_command() {
     local i j
     [[ $jobs =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_HOST_JOBS is a count" >&2; return 2; }
     [[ $nice =~ ^[0-9]+$ ]] || { echo "CLADEFS_HOST_NICE is a niceness" >&2; return 2; }
-    # A measurement's builds at the niceness its own script chooses (bench-ab-linux-host.sh's).
+    # A measurement at the host's own niceness: it builds nothing, and runs alone.
     if (( host_bench )); then nice=0; fi
     given=("CLADEFS_GUEST_KERNEL_JOBS=$jobs")
     for name in ${!CLADEFS_@} ${!PJDFSTEST_@}; do
@@ -268,15 +267,41 @@ host_env_local() {
 
 # host_job [NAME=VALUE...] SCRIPT [ARG...] runs the host script SCRIPT as the run's job
 # (host_command), and waits for it (host_wait): its log, once it ends, is its output, and its exit
-# status is this function's. A job whose launching SSH failed is waited for only if a fresh
-# connection finds it launched, its pid kept: that SSH may drop once the job runs, as GCE r942's
-# did (TASK-235); one that didn't start returns that SSH's status.
+# status is this function's.
+#
+# A measurement's (host_bench=1) is two jobs, one after the other, each SCRIPT's, which tells them
+# apart by CLADEFS_HOST_PHASE (scripts/lib/linux-host-setup.sh's host_phase): `build`, ordinary
+# work beside others' (fxjob without --bench, at CLADEFS_HOST_NICE, in 12G), its builds alone,
+# into the run's work directory, its log RESULTS/remote-build.log; then, if it passed, `measure`,
+# alone under fxjob --bench, against what the build made, building nothing, which
+# scripts/lib/measurement.sh refuses there. A build inside the measurement held its cores and
+# memory from every other measurement for as long as it compiled, an hour on 4 cores (TASK-330.4,
+# TASK-368). A driver stopped while its run builds leaves its `resume` the build alone: run the
+# driver again. Any other run's is one job, of no phase.
 host_job() {
-    local command launched=0
+    if (( ! host_bench )); then
+        host_launch "${CLADEFS_HOST_MEM:-12G}" CLADEFS_HOST_PHASE= "$@"
+        return
+    fi
+    # The builds in a work job's memory, whatever the measurement takes (CLADEFS_HOST_MEM, 16G
+    # for the qualification's).
+    host_bench=0 host_launch 12G CLADEFS_HOST_PHASE=build "$@" \
+        > "$results/remote-build.log" 2>&1 || return
+    host_launch "${CLADEFS_HOST_MEM:-12G}" CLADEFS_HOST_PHASE=measure "$@"
+}
+
+# host_launch MEMORY [NAME=VALUE...] SCRIPT [ARG...] runs one job of the run, in MEMORY, as a
+# measurement if host_bench is 1, and waits for it, as host_job says. A job whose launching SSH
+# failed is waited for only if a fresh connection finds it launched, its pid kept: that SSH may
+# drop once the job runs, as GCE r942's did (TASK-235); one that didn't start returns that SSH's
+# status.
+host_launch() {
+    local memory=$1 command launched=0
+    shift
     command=$(host_command "$@") || return
     host_put <(printf '%s\n' "$command") "$host_dir/job/command" || return
     host_state=launched
-    host_side launch "$host_dir" "$host_run" "$host_bench" "${CLADEFS_HOST_MEM:-12G}" || launched=$?
+    host_side launch "$host_dir" "$host_run" "$host_bench" "$memory" || launched=$?
     if (( launched )) && ! host_ssh "test -e $(printf %q "$host_dir/job/pid")"; then
         host_state=prepared
         return "$launched"

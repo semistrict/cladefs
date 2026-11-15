@@ -19,8 +19,11 @@
 #
 #   scripts/bench-rounds.sh RESULTS ROUNDS CASE...
 #
-# The cases' artifacts are built once, first, into RESULTS/artifacts (CLADEFS_E2E_BUILD_ONLY), and
-# every run boots those (CLADEFS_E2E_PREBUILT): no run builds, nor runs the harness's own tests.
+# The cases' artifacts are built once, first, into RESULTS/artifacts (CLADEFS_E2E_BUILD_ONLY), as
+# ordinary work (fxjob without --bench, at niceness 19, CARGO_BUILD_JOBS at once, 4 unless the
+# caller says, into the caller's CARGO_TARGET_DIR if one is set), and every run boots those
+# (CLADEFS_E2E_PREBUILT): no run builds, which a measurement refuses to (scripts/lib/measurement.sh,
+# TASK-368), nor runs the harness's own tests.
 # Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache, the extent daemon's and its
 # bucket together.
 #
@@ -43,7 +46,8 @@
 # comparison's timings. The environment's CLADEFS_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
 # and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
-# artifacts it can't boot) ends the rounds there, as every other would be.
+# artifacts it can't boot) ends the rounds there, as every other would be. CLADEFS_HOST_PROC and
+# CLADEFS_HOST_SYS name the host's /proc and /sys, for the tests.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 (( $# >= 3 )) || { sed -n '/^#   scripts/p' "$0" >&2; exit 2; }
@@ -55,14 +59,15 @@ mkdir -p "$results"
 results=$(cd "$results" && pwd)
 command -v fxjob > /dev/null || { echo "fxjob not found: this runs on a host with fxjob (ubu1)" >&2; exit 2; }
 
-load() { cut -d' ' -f1 /proc/loadavg; }
+proc=${CLADEFS_HOST_PROC:-/proc} sys=${CLADEFS_HOST_SYS:-/sys}
+load() { cut -d' ' -f1 "$proc/loadavg"; }
 arc_bytes() {
-    awk '$1 == "size" { print $3 }' /proc/spl/kstat/zfs/arcstats 2> /dev/null || echo -
+    awk '$1 == "size" { print $3 }' "$proc/spl/kstat/zfs/arcstats" 2> /dev/null || echo -
 }
 
 # The time, in µs, fxdax-bench.slice's tasks have stalled on RESOURCE (cpu, memory, io), some
 # of them at least.
-bench=/sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/fxdax.slice/fxdax-bench.slice
+bench=$sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/fxdax.slice/fxdax-bench.slice
 stalled() {
     sed -n 's/^some .*total=//p' "$bench/$1.pressure"
 }
@@ -79,13 +84,20 @@ done < <(compgen -e | grep '^CLADEFS_' || true)
 # shellcheck disable=SC2016 # Expanded by the job's shell.
 as_root=(bash -c 'exec sudo env TMPDIR="${TMPDIR:-/tmp}" "$@"' as-root)
 
-# Built as root, as the runs boot it, then given back.
+# Built as root, as the runs boot it, then given back: with the caller's bounds on cargo, which sudo
+# would drop (TASK-446), as scripts/lib/host.sh's runs build, 4 jobs at once by default.
 artifacts=$results/artifacts
+cargo_env=("CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-4}")
+built=("$repo" "$HOME/.cargo" "$HOME/.rustup" "$results")
+if [[ -n ${CARGO_TARGET_DIR:-} ]]; then
+    cargo_env+=("CARGO_TARGET_DIR=$CARGO_TARGET_DIR")
+    built+=("$CARGO_TARGET_DIR")
+fi
 fxjob --name rounds-build --mem 8G -- nice -n 19 \
-    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" "CLADEFS_E2E_BUILD_ONLY=$artifacts" \
-    "$repo/scripts/test-e2e.sh" "${cases[@]}" > "$results/build.log" 2>&1 ||
-    { echo "building failed: $results/build.log" >&2; exit 1; }
-sudo chown -R "$(id -u):$(id -g)" "$repo" "$HOME/.cargo" "$HOME/.rustup" "$results"
+    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${cargo_env[@]}" ${passed[@]+"${passed[@]}"} \
+    "CLADEFS_E2E_BUILD_ONLY=$artifacts" "$repo/scripts/test-e2e.sh" "${cases[@]}" \
+    > "$results/build.log" 2>&1 || { echo "building failed: $results/build.log" >&2; exit 1; }
+sudo chown -R "$(id -u):$(id -g)" "${built[@]}"
 
 [[ -f $results/runs.tsv ]] ||
     printf 'round\tcase\toutcome\tload_before\tload_after\tarc_before\tarc_after\tstarted\t%s\n' \
@@ -102,13 +114,14 @@ for ((round = 1; round <= rounds; round++)); do
         out=$results/$case/round-$round
         mkdir -p "$out"
         sync
-        sudo sh -c 'echo 3 > /proc/sys/vm/drop_caches'
+        # shellcheck disable=SC2016 # For sh to expand.
+        sudo sh -c 'echo 3 > "$1"' drop "$proc/sys/vm/drop_caches"
         load_before=$(load) arc_before=$(arc_bytes) started=$(date -u +%FT%TZ)
         stalls_before=()
         for resource in cpu memory io; do stalls_before+=("$(stalled "$resource")"); done
         outcome=ok ran=0
         fxjob --bench --mem "${CLADEFS_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
-            "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" \
+            "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" ${passed[@]+"${passed[@]}"} \
             "CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_BENCH_RESULTS=$out" \
             "$repo/scripts/test-e2e-job.sh" "$out/e2e" "$case" > "$out/run.log" 2>&1 || ran=$?
         if (( ran == 2 )); then

@@ -24,10 +24,11 @@
 #
 # Usage: bench-ab-linux-host.sh TOOLS RESULTS A_SOURCE B_SOURCE ROUNDS A_NAME B_NAME
 #
-# CLADEFS_AB_PHASE is what of it runs: `build` builds the sides (and the qualification's harness)
-# into the work directory, and stops; `rounds` runs the rounds of what a build there made, and
-# compares them; unset, both. scripts/bench-ab-host.sh runs the build as work and the rounds alone
-# as a measurement (fxjob --bench), so that compiling takes no measurement's cores.
+# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
+# sides (and the qualification's harness) into the work directory, and stops; `measure` runs the
+# rounds of what a build there made, and compares them; unset, both. scripts/bench-ab-host.sh runs
+# the build as work and the rounds alone as a measurement (fxjob --bench, scripts/lib/host.sh's
+# host_job), so that compiling takes no measurement's cores (TASK-330.4, TASK-368).
 #
 # TOOLS is the tree whose scripts run, this one's: the sides' trees may be of before them (an
 # A/B's base), and build and boot their own code (test-e2e.sh's CLADEFS_E2E_ROOT). B_SOURCE `same`
@@ -35,9 +36,7 @@
 # apart: NAME=VALUE words each side's rounds run with, such as
 # CLADEFS_GUEST_CMDLINE=virtio_extent.affine=0. CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS,
 # CLADEFS_BENCH_ITERATIONS (each round's, default 2) and the like are the same for both sides.
-# CLADEFS_GUEST_KERNEL_BUILD is the guest kernels' build (default release). CLADEFS_AB_BUILD_NICE is
-# the niceness the sides build at (default 0), the rounds' unchanged: on a host others share, with
-# CARGO_BUILD_JOBS and CLADEFS_GUEST_KERNEL_JOBS (scripts/build-guest-kernel.sh) to bound them.
+# CLADEFS_GUEST_KERNEL_BUILD is the guest kernels' build (default release).
 set -euo pipefail
 
 # Prints the sides' order of each of ROUNDS rounds, a line each: `a b`, then `b a`, and so on, so
@@ -52,9 +51,6 @@ ab_order() {
 # Sourced, as by the scripts' tests, it defines its functions and does nothing else.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 
-phase=${CLADEFS_AB_PHASE:-all}
-[[ $phase == all || $phase == build || $phase == rounds ]] ||
-    { echo "CLADEFS_AB_PHASE is build or rounds, or unset for both" >&2; exit 2; }
 tools=$(cd "${1:?tools required}" && pwd)
 results=${2:?results directory required}
 a_source=${3:?A source required} b_source=${4:?B source required}
@@ -72,30 +68,21 @@ suite=${CLADEFS_AB_SUITE:-fs}
 [[ $suite == fs || $suite == qualify ]] || { echo "CLADEFS_AB_SUITE is fs or qualify" >&2; exit 2; }
 read -ra a_env <<< "${CLADEFS_AB_A_ENV:-}"
 read -ra b_env <<< "${CLADEFS_AB_B_ENV:-}"
-# The sides' builds' niceness, their guest kernels' too (host_kernel).
-host_build_nice=${CLADEFS_AB_BUILD_NICE:-0}
 
 # Each side's tree, by side, which build makes.
 declare -A trees
 
 # Builds side SIDE from SOURCE once: its tree, trees[SIDE], its guest kernel and its artifacts, in
-# $work/ab-artifacts-SIDE.
+# $work/ab-artifacts-SIDE (host_artifacts).
 build() {
-    local side=$1 source=$2 tree
+    local side=$1 source=$2
     repo=$source
     host_tree "bench-ab-$side"
-    tree=$repo
     echo "Building side $side from $source" >&2
     host_kernel_log=$results/guest-kernel-$side.log \
         host_kernel "$kernel_build" "$work/guest-kernel-ab-$side-$kernel_build"
-    rm -rf "$work/ab-artifacts-$side"
-    nice -n "$host_build_nice" env CLADEFS_E2E_ROOT="$tree" \
-        CLADEFS_E2E_BUILD_ONLY="$work/ab-artifacts-$side" CLADEFS_E2E_RESULTS="$results/build-$side" \
-        "$tools/scripts/test-e2e.sh" > "$results/build-$side.log" 2>&1
-    cp "$host_kernel_image" "$work/ab-artifacts-$side/vmlinux"
-    sha256sum "$work/ab-artifacts-$side/vmlinux" >> "$work/ab-artifacts-$side/artifacts.txt"
-    cp "$work/ab-artifacts-$side/artifacts.txt" "$results/artifacts-$side.txt"
-    trees[$side]=$tree
+    host_artifacts "$work/ab-artifacts-$side" "$side" "$host_kernel_image"
+    trees[$side]=$repo
 }
 
 # What a build made, which the rounds run: each side's tree, and the harness.
@@ -127,9 +114,7 @@ build_sides() {
         if [[ -z $harness ]]; then
             harness=$work/ab-harness
             echo "Building the harness from $tools" >&2
-            nice -n "$host_build_nice" env CLADEFS_E2E_BUILD_ONLY="$harness" \
-                CLADEFS_E2E_RESULTS="$results/build-harness" "$tools/scripts/test-e2e.sh" \
-                > "$results/build-harness.log" 2>&1
+            repo=$tools host_artifacts "$harness" harness
         fi
         cp "$harness/artifacts.txt" "$results/artifacts-harness.txt"
     fi
@@ -146,7 +131,7 @@ build_sides() {
 # Reads what a build made from $built.
 load_build() {
     local key value
-    [[ -f $built ]] || { echo "$work holds no build: CLADEFS_AB_PHASE=build first" >&2; exit 2; }
+    [[ -f $built ]] || { echo "$work holds no build: CLADEFS_HOST_PHASE=build first" >&2; exit 2; }
     while read -r key value; do
         case $key in
             a | b) trees[$key]=$value ;;
@@ -155,12 +140,12 @@ load_build() {
     done < "$built"
 }
 
-if [[ $phase == rounds ]]; then
+if [[ $host_phase == measure ]]; then
     load_build
 else
     build_sides
 fi
-if [[ $phase == build ]]; then
+if [[ $host_phase == build ]]; then
     echo "Built in ${SECONDS}s." | tee -a "$results/host.txt"
     exit 0
 fi

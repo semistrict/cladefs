@@ -7,13 +7,16 @@ cases' stores among it, in the job's temporary directory, on ext4, and copies th
 (TASK-397): here in a tree of its own, test-e2e-job.sh as it is, and in place of test-e2e.sh one
 that says where it ran and leaves what a case leaves, of findmnt one that says the filesystem
 given, and of scripts/contamination.py, under which the cases run (TASK-375), one that says how it
-was run; and of scripts/bench-rounds.sh's runs, which go through it."""
+was run; and of scripts/bench-rounds.sh's runs, which go through it, and its build, which they
+boot."""
 
+import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from fake_ssh import FXJOB
 from script import SCRIPTS
 
 # test-e2e.sh, which says in its results what it was given, leaves a case's log, its store, its
@@ -179,8 +182,100 @@ class Job(unittest.TestCase):
                          (2, "#   scripts/test-e2e-job.sh RESULTS [ARG...]\n"))
 
 
+# test-e2e.sh for bench-rounds.sh: says, a line of $CLADEFS_FAKE_SAID (a CLADEFS_* variable, which
+# bench-rounds.sh passes through sudo), how it was run, building or booting what was built, as work
+# or a measurement (scripts/lib/measurement.sh), and with what bounds on cargo; builds, as the real
+# one does, refusing to inside a measurement, artifacts.txt its build.
+ROUNDS_CASES = """#!/bin/bash
+set -euo pipefail
+source "$(dirname "$0")/lib/measurement.sh"
+where=work
+if measuring; then where=bench; fi
+if [[ -n ${CLADEFS_E2E_BUILD_ONLY:-} ]]; then
+    measurement_refuses test-e2e.sh
+    mkdir -p "$CLADEFS_E2E_BUILD_ONLY"
+    echo "source x" > "$CLADEFS_E2E_BUILD_ONLY/artifacts.txt"
+    mode=build
+else
+    [[ -f $CLADEFS_E2E_PREBUILT/artifacts.txt ]]
+    mode=prebuilt
+fi
+echo "$mode $where $* jobs=${CARGO_BUILD_JOBS:-} target=${CARGO_TARGET_DIR:-}" >> "$CLADEFS_FAKE_SAID"
+"""
+# test-e2e-job.sh for bench-rounds.sh: test-e2e.sh's run of its arguments.
+ROUNDS_JOB = """#!/bin/bash
+shift
+exec "$(dirname "$0")/test-e2e.sh" "$@"
+"""
+# sudo, which runs its command in an environment of its own, as sudo does, but for the cgroup the
+# fake fxjob says the caller is in, which a process keeps under sudo.
+ROUNDS_SUDO = """#!/bin/bash
+exec env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin \\
+    ${CLADEFS_SELF_CGROUP:+CLADEFS_SELF_CGROUP=$CLADEFS_SELF_CGROUP} "$@"
+"""
+
+
 class Rounds(unittest.TestCase):
-    """scripts/bench-rounds.sh's runs, by its text: it runs on a host with fxjob alone, as root."""
+    """scripts/bench-rounds.sh's runs: in a tree of its own, with fxjob, sudo, test-e2e.sh and
+    test-e2e-job.sh that say how they ran, and the host's /proc and /sys a tree of their own
+    (CLADEFS_HOST_PROC, CLADEFS_HOST_SYS); and by its text."""
+
+    def rounds(self, env=None):
+        """Runs bench-rounds.sh for one round of the case fxfs-guest: its status, errors and the
+        tree it ran in."""
+        tree = Path(tempfile.mkdtemp()).resolve()
+        scripts, bin = tree / "scripts", tree / "bin"
+        (scripts / "lib").mkdir(parents=True)
+        bin.mkdir()
+        (scripts / "bench-rounds.sh").symlink_to(SCRIPTS / "bench-rounds.sh")
+        (scripts / "lib" / "measurement.sh").symlink_to(SCRIPTS / "lib" / "measurement.sh")
+        for path, text in [(scripts / "test-e2e.sh", ROUNDS_CASES),
+                           (scripts / "test-e2e-job.sh", ROUNDS_JOB),
+                           (bin / "fxjob", FXJOB), (bin / "sudo", ROUNDS_SUDO)]:
+            path.write_text(text)
+            path.chmod(0o755)
+        home = tree / "home"
+        for directory in [home / ".cargo", home / ".rustup", tree / "proc" / "sys" / "vm"]:
+            directory.mkdir(parents=True)
+        (tree / "proc" / "loadavg").write_text("1.50 1.20 1.00 2/300 4000\n")
+        (tree / "proc" / "sys" / "vm" / "drop_caches").write_text("")
+        uid = os.getuid()
+        slice = (tree / "sys" / "fs" / "cgroup" / "user.slice" / f"user-{uid}.slice" /
+                 f"user@{uid}.service" / "fxdax.slice" / "fxdax-bench.slice")
+        slice.mkdir(parents=True)
+        for resource in ["cpu", "memory", "io"]:
+            (slice / f"{resource}.pressure").write_text(
+                "some avg10=0.00 avg60=0.00 avg300=0.00 total=5000\n")
+        done = subprocess.run(
+            ["/bin/bash", scripts / "bench-rounds.sh", tree / "results", "1", "fxfs-guest"],
+            env={"PATH": f"{bin}:/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home),
+                 "CLADEFS_FAKE_SAID": str(tree / "said"), "CLADEFS_HOST_PROC": str(tree / "proc"),
+                 "CLADEFS_HOST_SYS": str(tree / "sys"), **(env or {})},
+            capture_output=True, text=True)
+        return done.returncode, done.stderr, tree
+
+    def test_the_cases_build_as_work_and_each_run_boots_them_alone(self):
+        """TASK-368: the build an fxjob of work, the run a measurement that builds nothing."""
+        status, errors, tree = self.rounds()
+        self.assertEqual(status, 0, errors)
+        calls = (tree / "home" / "fxjob-calls").read_text().splitlines()
+        self.assertEqual([call.split(" -- ")[0] for call in calls],
+                         ["--name rounds-build --mem 8G", "--bench --mem 16G --name rounds-fxfs-guest-1"])
+        self.assertEqual((tree / "said").read_text().splitlines(),
+                         ["build work fxfs-guest jobs=4 target=",
+                          "prebuilt bench fxfs-guest jobs= target="])
+        self.assertEqual((tree / "proc" / "sys" / "vm" / "drop_caches").read_text(), "3\n")
+        self.assertEqual((tree / "results" / "runs.tsv").read_text().splitlines()[1].split("\t")[:4],
+                         ["1", "fxfs-guest", "ok", "1.50"])
+
+    def test_the_build_takes_the_callers_bounds_on_cargo(self):
+        """TASK-446: sudo dropped CARGO_BUILD_JOBS and CARGO_TARGET_DIR, and the build ran a job a
+        CPU, in the worktree's target."""
+        target = tempfile.mkdtemp()
+        status, errors, tree = self.rounds({"CARGO_BUILD_JOBS": "2", "CARGO_TARGET_DIR": target})
+        self.assertEqual(status, 0, errors)
+        self.assertEqual((tree / "said").read_text().splitlines()[0],
+                         f"build work fxfs-guest jobs=2 target={target}")
 
     def test_each_run_goes_through_the_job_with_no_bucket_or_store_of_the_results(self):
         text = (SCRIPTS / "bench-rounds.sh").read_text()

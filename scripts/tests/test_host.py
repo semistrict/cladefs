@@ -251,14 +251,27 @@ class HostCommand(unittest.TestCase):
             ["timeout", "--signal=TERM", "--kill-after=30s", "30m"])
 
 
-# A host script, as the tests' hosts have every one of them: says how it was run, its arguments
-# and the variables it was given, in RESULTS/ran.txt; and does as CLADEFS_FAKE_HOST says: fail;
-# block until it is ended (signal.pause); or a phase of a migration, the source's leaving its
-# snapshot in the bundle, the target's taking it from there.
+# A host script, as the tests' hosts have every one of them: says each job of it, its phase
+# (CLADEFS_HOST_PHASE, all if none) and whether it ran as work or a measurement, a line of
+# RESULTS/jobs.txt; builds, as the host scripts do, unless it measures, which a measurement refuses
+# (scripts/lib/measurement.sh, TASK-368); and, but for a build alone, says how it was run, its
+# arguments and the variables it was given, in RESULTS/ran.txt, and does as CLADEFS_FAKE_HOST says:
+# fail; block until it is ended (signal.pause); or a phase of a migration, the source's leaving its
+# snapshot in the bundle, the target's taking it from there. CLADEFS_FAKE_HOST=fail-build fails its
+# build.
 FAKE_HOST_SCRIPT = f"""#!/bin/bash
 set -euo pipefail
 source=$1 results=$2
 shift 2
+source "$source/scripts/lib/measurement.sh"
+phase=${{CLADEFS_HOST_PHASE:-all}} where=work
+if measuring; then where=bench; fi
+echo "$(basename "$0") $phase $where" >> "$results/jobs.txt"
+if [[ $phase != measure ]]; then
+    measurement_refuses "$(basename "$0")'s build"
+    [[ ${{CLADEFS_FAKE_HOST:-}} != fail-build ]] || exit 4
+fi
+if [[ $phase == build ]]; then exit 0; fi
 {{
     echo "$(basename "$0") $*"
     echo "source $source"
@@ -281,8 +294,9 @@ esac
 HOST_SCRIPTS = ["test", "bench", "bench-ab", "gets", "mutants", "fork-time", "gc-sweep"]
 # The drivers, and what they run, as the origin has them.
 DRIVERS = ["test-host.sh", "bench-host.sh", "bench-ab-host.sh", "gets-host.sh", "mutants-host.sh",
-           "fork-time-host.sh", "gc-sweep-host.sh", "migrate-host.sh", "build-commit.sh", "lib/host.sh",
-           "lib/host-remote.sh"]
+           "fork-time-host.sh", "gc-sweep-host.sh", "migrate-host.sh", "perf-gate-host.sh",
+           "soak-host.sh", "build-commit.sh", "lib/host.sh", "lib/host-remote.sh",
+           "lib/measurement.sh"]
 # Copied, not linked: they find the tree they keep their results in by where they are.
 COPIED = ["bench-history.py", "bench_results.py"]
 IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t",
@@ -569,18 +583,62 @@ class Runs(unittest.TestCase):
         self.assertEqual(fleet.calls(), ["ubu1 bash -s -- prepare", "ubu1 bash -s -- clean"])
         self.assertIn(f"Removing {fleet.scratch}/", errors.splitlines()[-1])
 
-    def test_a_job_runs_under_fxjob_and_a_measurement_alone(self):
-        for bench, said in [("0", "--name RUN --mem 12G -- bash"),
-                            ("1", "--name RUN --bench --mem 8G -- bash")]:
+    def test_a_job_runs_under_fxjob_and_a_measurement_alone_after_its_build_as_work(self):
+        """TASK-368: a measurement's run is two jobs, its build as work, in work's memory, then
+        the measurement alone under fxjob --bench, in its own, building nothing; any other run's
+        one job of work, of no phase."""
+        for bench, said, jobs in [
+            ("0", ["--name RUN --mem 12G -- bash"], ["test-linux-host.sh all work"]),
+            ("1", ["--name RUN --mem 12G -- bash", "--name RUN --bench --mem 16G -- bash"],
+             ["test-linux-host.sh build work", "test-linux-host.sh measure bench"]),
+        ]:
             with self.subTest(bench=bench):
                 fleet = Fleet()
-                memory = {} if bench == "0" else {"CLADEFS_HOST_MEM": "8G"}
-                status, _, _ = fleet.drive(RAN, environment={"CLADEFS_HOST_BENCH": bench, **memory})
-                self.assertEqual(status, 0)
-                run = (fleet.directory / "results" / "run.txt").read_text().split()[1]
+                memory = {} if bench == "0" else {"CLADEFS_HOST_MEM": "16G"}
+                status, out, errors = fleet.drive(
+                    RAN, environment={"CLADEFS_HOST_BENCH": bench, **memory})
+                self.assertEqual((status, out), (0, "status 0\n"), errors)
+                results = fleet.directory / "results"
+                run = (results / "run.txt").read_text().split()[1]
                 calls = (fleet.home("ubu1") / "fxjob-calls").read_text()
-                self.assertEqual(calls.replace(run, "RUN"),
-                                 f"{said} {fleet.scratch}/RUN/job/command\n")
+                self.assertEqual(calls.replace(run, "RUN").splitlines(),
+                                 [f"{call} {fleet.scratch}/RUN/job/command" for call in said])
+                self.assertEqual((results / "jobs.txt").read_text().splitlines(), jobs)
+                # The build's log apart, the measurement's the run's own.
+                self.assertEqual((results / "remote-build.log").exists(), bench == "1")
+                self.assertEqual((results / "remote.log").read_text(), "ran test-linux-host.sh a b\n")
+
+    def test_a_measurement_whose_build_failed_measures_nothing(self):
+        fleet = Fleet()
+        status, out, errors = fleet.drive(
+            RAN, environment={"CLADEFS_HOST_BENCH": "1", "CLADEFS_FAKE_HOST": "fail-build"})
+        self.assertEqual((status, out), (0, "status 4\n"), errors)
+        results = fleet.directory / "results"
+        self.assertEqual((results / "jobs.txt").read_text().splitlines(),
+                         ["test-linux-host.sh build work"])
+        self.assertNotIn("--bench", (fleet.home("ubu1") / "fxjob-calls").read_text())
+        self.assertEqual(fleet.runs(), [])
+
+    def test_a_measurement_that_would_build_is_refused(self):
+        """The guard (scripts/lib/measurement.sh): a driver that runs its host script whole as one
+        measurement, its builds in it, as before TASK-368, is refused, saying why, at once."""
+        fleet = Fleet()
+        status, out, errors = fleet.drive(
+            "host_start\nstatus=0\n"
+            'host_launch 12G test-linux-host.sh a b > "$results/remote.log" 2>&1 || status=$?\n'
+            'if [[ $host_state == ended ]]; then host_fetch || status=$?; fi\necho "status $status"\n',
+            environment={"CLADEFS_HOST_BENCH": "1"})
+        self.assertEqual((status, out), (0, "status 2\n"), errors)
+        results = fleet.directory / "results"
+        self.assertEqual((results / "jobs.txt").read_text().splitlines(),
+                         ["test-linux-host.sh all bench"])
+        self.assertFalse((results / "ran.txt").exists())
+        refusal = (results / "remote.log").read_text()
+        self.assertRegex(refusal, r"^test-linux-host.sh's build would build inside a measurement "
+                                  r"\(fxjob --bench, 0::/user.slice/user-1000.slice/user@1000.service/"
+                                  r"fxdax.slice/fxdax-bench.slice/fxjob-\d+.scope\), holding its "
+                                  r"cores and memory from every other measurement")
+        self.assertTrue(refusal.endswith("(TASK-368)\n"), refusal)
 
 
 class Source(unittest.TestCase):
@@ -936,9 +994,10 @@ class Drivers(unittest.TestCase):
                          f"bench-ab-linux-host.sh {trees}/base {trees}/change 2 base change")
         self.assertEqual((results / "base" / "source.txt").read_text().splitlines()[0],
                          f"revision {base}")
-        self.assertIn("CLADEFS_AB_BUILD_NICE=19", (results / "ran.txt").read_text().splitlines())
         # Its sides built as work, then its rounds alone measured, jobs of one run.
-        self.assertIn("CLADEFS_AB_PHASE=rounds", (results / "ran.txt").read_text().splitlines())
+        self.assertIn("CLADEFS_HOST_PHASE=measure", (results / "ran.txt").read_text().splitlines())
+        self.assertEqual((results / "jobs.txt").read_text().splitlines(),
+                         ["bench-ab-linux-host.sh build work", "bench-ab-linux-host.sh measure bench"])
         calls = (fleet.home("ubu1") / "fxjob-calls").read_text().splitlines()
         self.assertEqual([("--bench" in call, f"--name {run}" in call) for call in calls],
                          [(False, True), (True, True)])
@@ -950,6 +1009,47 @@ class Drivers(unittest.TestCase):
         self.assertEqual(status, 0, errors)
         self.assertRegex((fleet.directory / "same" / "ran.txt").read_text().splitlines()[0],
                          r"^bench-ab-linux-host.sh \S+/trees/base same 3 base knob$")
+
+    def test_every_timed_driver_builds_as_work_then_measures_alone(self):
+        """TASK-368: no driver's fxjob --bench job builds. Each measures in two jobs of its run, its
+        builds as work, then the measurement alone, which would refuse to build (FAKE_HOST_SCRIPT,
+        scripts/lib/measurement.sh); perf-gate-host.sh's and soak-host.sh's through test-host.sh."""
+        for driver, args, environment, outs in [
+            ("bench-host.sh", ["RESULTS"], {}, {".": "bench-linux-host.sh"}),
+            ("fork-time-host.sh", ["RESULTS", "main=HEAD"], {}, {".": "fork-time-linux-host.sh"}),
+            ("gets-host.sh", ["RESULTS"], {"CLADEFS_GETS_URL": "file:///gets/"},
+             {".": "gets-linux-host.sh"}),
+            ("gc-sweep-host.sh", ["RESULTS"], {}, {".": "gc-sweep-linux-host.sh"}),
+            ("bench-ab-host.sh", ["RESULTS"], {"CLADEFS_AB_A": "a=HEAD", "CLADEFS_AB_B": "b=same"},
+             {".": "bench-ab-linux-host.sh"}),
+            ("test-host.sh", ["RESULTS"], {"CLADEFS_HOST_BENCH": "1"}, {".": "test-linux-host.sh"}),
+            ("perf-gate-host.sh", ["RESULTS", "single", "density"], {},
+             {"single": "test-linux-host.sh", "density": "test-linux-host.sh"}),
+            ("soak-host.sh", ["RESULTS", "1024:2:2048"], {"CLADEFS_HOST_BENCH": "1"},
+             {"1024m-2c-2048w": "test-linux-host.sh"}),
+        ]:
+            with self.subTest(driver=driver):
+                fleet = Fleet()
+                # Where bench-host.sh's history finds it.
+                results = fleet.origin / "docs" / "measurements" / "ubu1-x"
+                args = [str(results) if arg == "RESULTS" else arg for arg in args]
+                status, _, errors = fleet.run_driver(driver, *args, environment=environment)
+                self.assertEqual(status, 0, errors)
+                for out, script in outs.items():
+                    self.assertEqual((results / out / "jobs.txt").read_text().splitlines(),
+                                     [f"{script} build work", f"{script} measure bench"], out)
+                calls = (fleet.home("ubu1") / "fxjob-calls").read_text().splitlines()
+                self.assertEqual(["--bench" in call for call in calls], [False, True] * len(outs))
+                self.assertEqual(fleet.runs(), [])
+
+    def test_a_driver_that_is_no_measurement_runs_one_job_of_work(self):
+        fleet = Fleet()
+        results = fleet.directory / "soaked"
+        status, _, errors = fleet.run_driver("soak-host.sh", str(results), "1024:2:2048")
+        self.assertEqual(status, 0, errors)
+        self.assertEqual((results / "1024m-2c-2048w" / "jobs.txt").read_text().splitlines(),
+                         ["test-linux-host.sh all work"])
+        self.assertNotIn("--bench", (fleet.home("ubu1") / "fxjob-calls").read_text())
 
     def test_an_ab_needs_its_sides(self):
         fleet = Fleet()

@@ -33,7 +33,10 @@ physical host others' agents share, through the `scripts/*-host.sh` drivers
 `mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
 `fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
 tree by default, `CLADEFS_HOST_COMMIT` names another), its own target directories, its job under
-`fxjob` (`--bench` for measurements), results copied back, worktree removed. Guest kernels come
+`fxjob` (`--bench` for measurements), results copied back, worktree removed. A measurement builds
+nothing inside `fxjob --bench`: its run builds first as a job of work, then measures what that
+built (`host_job`'s `CLADEFS_HOST_PHASE`), and anything that would build inside a measurement
+refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
 from a cache on the host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
 number as `CLADEFS_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a

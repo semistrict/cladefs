@@ -17,16 +17,7 @@
 # downloaded and checksummed on first use.
 set -euo pipefail
 
-VERSION=12.1.0
-SHA256=25ba51a0d4c6fa41047b7a5e5733068d4a734588f055f61e85f450097834a0a6
 root="$(cd "$(dirname "$0")/.." && pwd)"
-zip="$root/target/UCD-$VERSION.zip"
-
-if [ ! -f "$zip" ]; then
-    mkdir -p "$root/target"
-    curl -fsSL -o "$zip" "https://www.unicode.org/Public/$VERSION/ucd/UCD.zip"
-fi
-echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
 
 # glibc's fatal errors (a heap found corrupted, a stack smashed) on standard error, which the tests
 # keep, rather than the terminal they have none of: an abort said nothing else (TASK-100).
@@ -38,6 +29,22 @@ parts=${CLADEFS_TEST_PARTS:-$parts}
 part() { # name: whether CLADEFS_TEST_PARTS has it
     [[ " $parts " == *" $1 "* ]]
 }
+# Every part but the scripts' compiles, which a measurement (fxjob --bench) refuses to (TASK-368).
+source "$root/scripts/lib/measurement.sh"
+read -ra listed <<< "$parts"
+if [[ ${listed[*]} != scripts ]]; then
+    measurement_refuses "scripts/test.sh's parts ${listed[*]}"
+fi
+
+VERSION=12.1.0
+SHA256=25ba51a0d4c6fa41047b7a5e5733068d4a734588f055f61e85f450097834a0a6
+zip="$root/target/UCD-$VERSION.zip"
+
+if [ ! -f "$zip" ]; then
+    mkdir -p "$root/target"
+    curl -fsSL -o "$zip" "https://www.unicode.org/Public/$VERSION/ucd/UCD.zip"
+fi
+echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
 
 # Clippy's rules the code keeps (clippy.toml): no blocking call in async code unless allowed, with
 # why (TASK-44.20); and the compiler's warnings, as errors, the Shuttle builds' too (below), whose
