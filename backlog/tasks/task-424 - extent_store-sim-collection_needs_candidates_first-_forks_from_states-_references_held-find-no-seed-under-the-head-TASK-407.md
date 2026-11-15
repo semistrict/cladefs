@@ -3,10 +3,10 @@ id: TASK-424
 title: >-
   extent_store sim: collection_needs_candidates_first finds no seed under the
   head (TASK-407)
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-15 05:07'
-updated_date: '2026-11-15 05:39'
+updated_date: '2026-11-15 06:11'
 labels:
   - sim
   - task-407
@@ -27,3 +27,9 @@ After TASK-407's head design, every holds profile of extent_store's simulation p
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Resolved by 3f500554b (the pass reads a kept fork point by its checkpoint's key): scripts/test.sh's sim part on macOS then passes 50/50, collection_needs_candidates_first finding its seed (it had found none in 0..20000 before).
+<!-- SECTION:FINAL_SUMMARY:END -->
