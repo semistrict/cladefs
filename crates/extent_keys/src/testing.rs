@@ -4,12 +4,15 @@
 
 //! fxdax's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
 //! KMS that counts the calls made of it ([`Counted`]), so that a test can say how many a path
-//! costs: none on a fork's, one for a host taking a cell.
+//! costs: none on a fork's, one for a host taking a cell; and an OpenBao dev server
+//! ([`openbao::DevServer`], TASK-411.16), the real KMS a test can start.
 
 use crate::kms::{Error, Kms};
 use crate::{Secret, Wrapped};
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub mod openbao;
 
 /// A KMS that counts the wraps and unwraps asked of it, refused or not, as they are asked: each is
 /// a call a real KMS would be made, and billed for.

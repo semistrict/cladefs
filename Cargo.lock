@@ -890,12 +890,18 @@ dependencies = [
  "assert_matches",
  "aws-lc-rs",
  "aws-lc-sys",
+ "base64 0.22.1",
+ "bytes",
  "futures",
+ "reqwest",
  "serde",
+ "serde_json",
  "storage_ptr_slice",
  "storage_xts",
  "tempfile",
  "thiserror",
+ "tokio",
+ "url",
  "zerocopy",
  "zeroize",
 ]
@@ -4717,6 +4723,9 @@ name = "zeroize"
 version = "1.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "zerotrie"
