@@ -3,11 +3,11 @@ id: TASK-444.2.2
 title: >-
   A follower's guest may miss a writer's commit made as its device starts
   hearing of commits
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:48'
-updated_date: '2026-11-15 14:01'
+updated_date: '2026-11-15 15:23'
 labels: []
 dependencies: []
 parent_task_id: TASK-444.2
@@ -24,16 +24,16 @@ Found by TASK-444.2's loom model hearing::loom::listeners_hear_of_every_rise (20
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A loom model (rise vs listen) shows every rise heard, from the listener or from what listening returns, under every interleaving and ordering
-- [ ] #2 The bug put back (a loom-mutants patch) turns the model red
-- [ ] #3 Notes record the blind spot, the class test, what a look around found, and the structure question
+- [x] #1 A loom model (rise vs listen) shows every rise heard, from the listener or from what listening returns, under every interleaving and ordering
+- [x] #2 The bug put back (a loom-mutants patch) turns the model red
+- [x] #3 Notes record the blind spot, the class test, what a look around found, and the structure question
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -44,3 +44,9 @@ Blind spot: as TASK-444.2.1: Shuttle's SeqCst, and no test committed as a follow
 Class test: the model checks that every rise is heard from the listener or from what listening returns. Fix: Latest::listen returns the latest through fetch_max(0, Release), an RMW ordered against the rise's; RemoteExtentStore::on_committed returns it; virtio_extent's hear_commits passes it to Following::committed (a fetch_max, so a rise heard twice is harmless). Bug back: crates/fxdax/loom-mutants/latest-listening-loads.patch, killed; latest-rises-relaxed, latest-listens-relaxed, killed.
 Look around and structure: as TASK-444.2.1's notes (same owner, hearing; TASK-444.2.4 filed for on_capacity's gap).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+hearing::Latest::listen returns the latest value through an RMW, ordered against each rise's (rise Acquire, listen Release). RemoteExtentStore::on_committed returns it and virtio_extent's hear_commits uses it. Verified: loom model hearing::loom::listeners_hear_of_every_rise passes; it failed (a rise unheard) on the old logic, put back by latest-listening-loads.patch (killed), and each ordering weakened is killed too. Workspace tests pass on macOS and on ubu1 (t4442c).
+<!-- SECTION:FINAL_SUMMARY:END -->

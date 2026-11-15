@@ -4,7 +4,7 @@ title: 'Agents with external oracles: the quality program of doc-17'
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-15 13:31'
+updated_date: '2026-11-15 15:23'
 labels: []
 dependencies: []
 references:
@@ -33,3 +33,9 @@ The user has a large surplus of frontier-model tokens to spend on quality (2026-
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-444.2 (2026-11-15): two real weak-memory/handoff bugs found by loom and fixed (TASK-444.2.1, .2.2); 10 ordering mutants, 8 killed and 2 equivalent; inventory in docs/memory-ordering.md. Fits doc-17's rank: two bugs for one delegate's day, both confirmed only by the model.
+<!-- SECTION:NOTES:END -->

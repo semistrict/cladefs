@@ -1,11 +1,11 @@
 ---
 id: TASK-444.2.1
 title: 'A VM process''s daemon-lost listener may go untold, or be told twice'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:48'
-updated_date: '2026-11-15 14:01'
+updated_date: '2026-11-15 15:23'
 labels: []
 dependencies: []
 parent_task_id: TASK-444.2
@@ -22,16 +22,16 @@ Found by TASK-444.2's loom model hearing::loom::occurrences_are_told_once (2026-
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A loom model of the protocol (lost vs listen) shows exactly one call under every interleaving and ordering
-- [ ] #2 The bug put back (a loom-mutants patch) turns the model red
-- [ ] #3 Notes record the blind spot, the class test, what a look around found, and the structure question
+- [x] #1 A loom model of the protocol (lost vs listen) shows exactly one call under every interleaving and ordering
+- [x] #2 The bug put back (a loom-mutants patch) turns the model red
+- [x] #3 Notes record the blind spot, the class test, what a look around found, and the structure question
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -43,3 +43,9 @@ Class test: the model checks exactly one call under every interleaving and order
 Look around: the same shape in the commit handoff (TASK-444.2.2, found and fixed alongside); on_capacity drops news before its listener (TASK-444.2.4, a plain race, unreproduced); on_stats_asked drops likewise but answers itself, as documented; physmem's QUARANTINE OnceLock is set at the first connection, before any window stages a page; event_listener's listen-then-check (InFlight::take) is safe as 5.4.2's notify always takes the list lock (docs/memory-ordering.md).
 Structure: the class is now impossible where it is used: hearing owns each handoff, the news and the listener meet in one RMW of one atomic, and the API has no store-then-load to get wrong. Nothing architectural.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+hearing::Occurrence owns the handoff: the news and the listener meet in one fetch_or of one atomic (happen Acquire, listen Release), so the listener is told exactly once. Verified: loom model hearing::loom::occurrences_are_told_once passes. It failed (told 0 times) on the old logic, which crates/cladefs/loom-mutants/occurrence-told-by-a-store-and-a-load.patch puts back (killed), as each of the two orderings weakened is. Workspace tests pass on macOS and on ubu1 (run t4442c, 2797/2797).
+<!-- SECTION:FINAL_SUMMARY:END -->
