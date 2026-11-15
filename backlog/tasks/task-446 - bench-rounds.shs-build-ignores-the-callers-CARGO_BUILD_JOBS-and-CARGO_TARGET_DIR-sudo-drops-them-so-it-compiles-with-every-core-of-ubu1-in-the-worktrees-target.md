@@ -4,10 +4,11 @@ title: >-
   bench-rounds.sh's build ignores the caller's CARGO_BUILD_JOBS and
   CARGO_TARGET_DIR: sudo drops them, so it compiles with every core of ubu1, in
   the worktree's target
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 12:37'
-updated_date: '2026-11-15 14:52'
+updated_date: '2026-11-15 23:05'
 labels:
   - bench
   - ubu1
@@ -27,14 +28,20 @@ scripts/bench-rounds.sh builds the cases' artifacts as root, `fxjob --name round
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 bench-rounds.sh's build runs at most 4 cargo jobs at once on ubu1 by default, or as many as the caller says, as host.sh's runs do
-- [ ] #2 A caller's CARGO_TARGET_DIR is where the build goes, or the script says it takes none
-- [ ] #3 A test in scripts/tests fails without the change
+- [x] #1 bench-rounds.sh's build runs at most 4 cargo jobs at once on ubu1 by default, or as many as the caller says, as host.sh's runs do
+- [x] #2 A caller's CARGO_TARGET_DIR is where the build goes, or the script says it takes none
+- [x] #3 A test in scripts/tests fails without the change
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15 (claude): fixed in TASK-368's commit (d82edf385, branch t368): bench-rounds.sh's build passes CARGO_BUILD_JOBS (default 4) and CARGO_TARGET_DIR through sudo, and chowns that target back. scripts/tests/test_e2e_job.py's Rounds runs bench-rounds.sh under fakes (a sudo that resets the environment as sudo does): test_the_cases_build_as_work_and_each_run_boots_them_alone (jobs=4 by default) and test_the_build_takes_the_callers_bounds_on_cargo (jobs=2, the target given), both red with the change taken out. On ubu1 the build ran with CARGO_TARGET_DIR in the home, the target there, and 1,425 s of CPU over 530 s wall (about 2.7 CPUs, within 4).
+<!-- SECTION:NOTES:END -->
