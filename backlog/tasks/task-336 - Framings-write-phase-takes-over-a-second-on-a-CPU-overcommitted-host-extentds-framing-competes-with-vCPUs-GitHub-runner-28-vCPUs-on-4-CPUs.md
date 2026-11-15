@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-10 23:37'
-updated_date: '2026-11-14 20:46'
+updated_date: '2026-11-15 02:37'
 labels:
   - perf
   - extentd
@@ -58,4 +58,6 @@ Cause of the CPU part: page faults and copying on the framer's thread, and compr
 Not proven: the long mode on ubu1 failed both passes, on what's left, the disk: 487f443a8 (long1): 5 past 1 s (slowest 1.53/1.65 s), every one write phase or read with ~0 runnable, flushes' log syncs taking 2.6-5.3 s meanwhile; c6ba0d117 (long2, ~16:20 UTC): 19 past 1 s (slowest 5.77 s), most the read phase 0.7-5.7 s with ~0 runnable (raw files evicted under the 16 GiB cgroup, read back from the disk: TASK-400), others write phase 1.0-1.5 s (TASK-401); durable lag within 50 ms 36/39%, max 12.4 s. Main before TASK-336 in the same afternoon (longbase): also failed, 11 past 1 s (slowest 2.97 s), 677/701 slow framings (sum 109/114 s; c6ba0d117 456/431, 77/87 s), within 50 ms 41%, max 7.1/7.7 s, daemon CPU 1,137 s (c6ba0d117 1,079 s, 14.5 ms per guest MiB). ubu1's disk degraded through the day (the same base build's short mode: 72% within 50 ms at 12:00, 36-46% by 15:00; host swap full), so morning passes (949/1,045 ms) aren't comparable. GitHub's short mode on 487f443a8 (run 43435575870): 1 a host past 1 s (1,085, 1,549 ms; was 2 a host, 1.26-1.42 s), both write phase with 68-190 ms runnable, slow framings' sums 11.8/11.8 s (were 20.8/21.3 s): TASK-401. Structure: the framer's CPU cost was an accident of buffers and compressors made per framing; kept in one place (framing::Kept) the class goes. Tests: macOS scripts/test.sh green on 487f443a8 (2297, sim, shuttle, scripts after re-anchoring crates/fxdax/mutants/framed-in-copies.patch); ubu1 extent_frame, extent_store, fxdax 832/832, test_cases host 127/127, on each commit; CI 43435481101 green.
 
 2026-11-14 (claude, TASK-400/401's agent): the disk part that held TASK-336's ACs. GitHub's 4-CPU runner, sandboxes short mode on 1649d384e's code: three runs, all PASSED (43631859938, 43633697009, 43633701029), the longest write phase 73/158/55 ms, no framing past 1 s (slowest 304, 517, 408 ms, compressing), against main's two the same afternoon failing 3 a run past 1 s, all write phase (2.70, 2.63 s). So AC #1 (no write phase past 1 s on GitHub's short mode over several runs) is met by TASK-401. ubu1's long mode is not clean (2 passes, 2 past 1 s each: copies reading back evicted data, TASK-400's remainder, and one disk stall of 19.9 s).
+
+2026-11-15 (claude, TASK-400's agent): c2daf7630 holds copies' parts packed ahead (TASK-400): sandboxes short mode on ubu1, 2 rounds a side, no framing past 1 s either side; slowest 155-511 ms (fix) vs 133-324 ms (base). The long mode (this task's remaining proof, two clean passes) waits for scratch space on ubu1: TASK-400's notes say how to start it.
 <!-- SECTION:NOTES:END -->
