@@ -39,7 +39,9 @@ use crate::store_dir;
 use extent_remote::cell::Kind;
 use extent_remote::layout::{Branch, Cell};
 use extent_remote::trace;
-use extent_store::{HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned};
+use extent_store::{
+    HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned, Unsectored,
+};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -454,7 +456,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
-    } else if error.is::<Unaligned>() || error.is::<TooLong>() {
+    } else if error.is::<Unaligned>() || error.is::<Unsectored>() || error.is::<TooLong>() {
         Errno::EINVAL
     } else {
         log::error!("fxdax: extent store: {error:#}");
@@ -676,6 +678,7 @@ impl ExtentStore {
         let forked_from = Arc::new(store_dir::ancestry(path)?);
         let fetcher = crate::remote::Fetcher::new(bucket.clone(), keeping.cache.clone());
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
+        let branch = store.description().branch;
         Ok(Self {
             profiling: profiling.flatten(),
             arenas,
@@ -691,7 +694,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(path),
+            fence: Fence::new(path, branch),
             fetcher,
         })
     }
@@ -719,7 +722,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(&self.path),
+            fence: Fence::new(&self.path, self.branch()),
             fetcher: self.fetcher.clone(),
         }
     }
@@ -745,11 +748,19 @@ impl ExtentStore {
         self.fence.fence(why);
     }
 
-    /// fxdax: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`.
+    /// fxdax: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`,
+    /// or `EACCES` once its host forgot its tenant's or cell's keys (`crate::remote::forget`).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn is_fenced(&self) -> bool {
         self.fence.is_fenced()
+    }
+
+    /// fxdax: the errno the store's requests fail with, if it is fenced ([`ExtentStore::is_fenced`]).
+    // The extent daemon's (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn fenced(&self) -> Option<Errno> {
+        self.fence.errno()
     }
 
     /// fxdax: makes the store a new writer's, which its followers go on following: one opened for
@@ -2203,7 +2214,7 @@ mod tests {
     #[test]
     fn each_store_error_has_its_errno() {
         let extent = ExtentId { branch: 1, sequence: 2 }.into();
-        let cases: [(anyhow::Error, Errno); 12] = [
+        let cases: [(anyhow::Error, Errno); 13] = [
             (extent_store::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
@@ -2213,6 +2224,7 @@ mod tests {
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),
             (Unaligned { offset: 1, len: 2 }.into(), Errno::EINVAL),
+            (Unsectored { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (TooLong { offset: 1, len: 2 }.into(), Errno::EINVAL),
             (remote_data(extent).into(), Errno::EIO),
             (anyhow::anyhow!("the disk"), Errno::EIO),
@@ -2387,6 +2399,93 @@ mod tests {
         assert_eq!(store.root(), Ok(b"root".to_vec()));
         assert_eq!(read(&store, b, BLOCK as u64, BLOCK), Ok(pattern(2, BLOCK)));
         assert_eq!(read(&store, id(&store, 3), 0, BLOCK), Err(Errno::ENOENT));
+    }
+
+    /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`FXDAX_KMS`, set here as
+    /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
+    /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
+    /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
+    /// inherits; the store, the common tenant's, forks into no cell of a tenant with no KEK, in the
+    /// clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
+    /// forking as before.
+    #[test]
+    fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+        kms.create(5).unwrap();
+        kms.create(host_store::NO_TENANT).unwrap();
+        crate::remote::set_kms(Arc::new(kms)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store");
+        let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
+        assert!(!store.store.keys().is_empty());
+        let store = Arc::new(store);
+        let a = id(&store, 1);
+        let data = crate::test_data::noise(1, 2 * BLOCK);
+        write(&store, a, 0, &data).unwrap();
+        store.commit(Some(b"root")).unwrap();
+        let follower = store.follow();
+        assert_eq!(read(&follower, a, 0, 2 * BLOCK), Ok(data.clone()));
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
+        // Nothing of it in the bucket: every file under the store's own.
+        let bucket = dir.path().join("store.bucket");
+        let mut files = vec![bucket.clone()];
+        let mut objects = 0;
+        while let Some(at) = files.pop() {
+            match at.is_dir() {
+                true => files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path())),
+                false => {
+                    let bytes = std::fs::read(&at).unwrap();
+                    let held = bytes.windows(64).any(|window| window == &data[..64]);
+                    assert!(!held, "{} holds the store's data", at.display());
+                    objects += 1;
+                }
+            }
+        }
+        assert!(objects > 3, "{objects} objects");
+        let child = host_store::fork_child(store.branch());
+        store.fork_to(dir.path().join("fork"), child).unwrap();
+        let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
+        assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
+        let record =
+            extent_store::upload::block_on(extent_remote::branch::record(&**fork.bucket(), child));
+        let record = record.unwrap().unwrap().unwrap();
+        let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
+        assert_eq!((record.deks.len(), inherited), (1, vec![store.branch()]));
+        drop(fork);
+        drop(follower);
+        let branch = store.branch();
+        drop(Arc::into_inner(store).unwrap());
+        let store = ExtentStore::open(&path).unwrap();
+        assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
+
+        let clear =
+            ExtentStore::create_in(dir.path().join("clear"), 1 << 20, host_store::new_cell(6));
+        let clear = clear.unwrap();
+        assert!(clear.store.keys().is_empty());
+        write(&clear, id(&clear, 1), 0, &pattern(1, BLOCK)).unwrap();
+        clear.commit(None).unwrap();
+        clear.fork_to(dir.path().join("forked"), host_store::fork_child(clear.branch())).unwrap();
+        let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
+        assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+
+        // The common tenant's, sealed, into a cell of a tenant with no KEK.
+        let common = dir.path().join("common");
+        let common =
+            ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));
+        let common = common.unwrap();
+        assert!(!common.store.keys().is_empty());
+        write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
+        common.commit(None).unwrap();
+        let into =
+            crate::Branch { cell: host_store::new_cell(6), id: rand::random::<u64>().max(1) };
+        let refused = common.fork_to(dir.path().join("into-clear"), into).unwrap_err();
+        assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
+        assert!(!dir.path().join("into-clear").exists());
+        let found =
+            extent_store::upload::block_on(extent_remote::branch::record(&**common.bucket(), into));
+        assert_eq!(found.unwrap().unwrap(), None);
     }
 
     /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base
@@ -3050,7 +3149,9 @@ mod tests {
                 .path()
                 .join(format!("store/extents/{:016x}/{:016x}", extent.branch, extent.sequence));
             let mut bytes = std::fs::read(&path).unwrap();
-            let (place, stored) = extent_frame::Parts::of(&bytes).unwrap().part(2).unwrap();
+            let parts = extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap();
+            let opened = parts.part(2).unwrap();
+            let (place, stored) = (opened.place, opened.stored);
             assert_eq!(stored.encoding, *encoding);
             let offset = place.start + 5 * ps + 7;
             let byte = match stored.encoding {

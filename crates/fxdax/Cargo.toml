@@ -44,6 +44,7 @@ async-trait.workspace = true
 event-listener.workspace = true
 extent_remote.workspace = true
 extent_frame.workspace = true
+extent_keys.workspace = true
 extent_store.workspace = true
 tokio.workspace = true
 url.workspace = true
@@ -67,6 +68,8 @@ fxdax = { path = ".", features = ["failpoints", "testing"] }
 extent_store = { workspace = true, features = ["testing"] }
 # Tests' branches, of a cell of their own (`layout::test_branch`, TASK-364).
 extent_remote = { workspace = true, features = ["testing"] }
+# A KMS counting its calls (TASK-411.3).
+extent_keys = { workspace = true, features = ["testing"] }
 # What the hostile VM process test looks for in the memory it is given (TASK-149.17).
 memchr.workspace = true
 object_store.workspace = true

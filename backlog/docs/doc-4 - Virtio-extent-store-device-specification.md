@@ -3,13 +3,14 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-09 11:53'
+updated_date: '2026-11-14 22:14'
 ---
 # The virtio extent-store device
 
 Specification, 2026-10-13 (TASK-26.2, revised the same day). This is the only interface between the
 guest's Fxfs and the host's extent store (doc-2). The guest's driver is TASK-26.5, and the VMM's
-device is fxdax's Firecracker's (vendor/firecracker), first libkrun's (TASK-26.4; libkrun was
+device is crates/virtio_extent, which every VMM hosting it shares: fxdax's Firecracker
+(vendor/firecracker, its adapter) and libmachine (TASK-417); first libkrun's (TASK-26.4; libkrun was
 removed in TASK-40).
 
 *Revised 2026-11-04 (TASK-164, doc-13):* the DAX window maps sealed extents and zeros alone,
@@ -77,8 +78,9 @@ Settled in a design review on 2026-10-13:
 
 ## Device
 
-- **Device ID:** `0x4658` ("FX"), outside the virtio IDs OASIS assigns. The transport is virtio 1.x,
-  over MMIO in fxdax's Firecracker.
+- **Device ID:** `0x4658` ("FX"), outside the virtio IDs OASIS assigns. The transport is virtio 1.x
+  over PCI alone (since TASK-273): the DAX window is a 64-bit BAR of the device's own, which
+  `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities describe, as MMIO can't.
 - **Byte order:** every field is little-endian.
 
 ### Version

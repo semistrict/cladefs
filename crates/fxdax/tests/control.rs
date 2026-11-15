@@ -355,3 +355,74 @@ fn health_follows_whether_the_daemon_serves() {
         assert_eq!(status(api).await, ServingStatus::NotServing);
     });
 }
+
+/// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of a sealed cell through its
+/// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`FXDAX_KMS`) keeps, each
+/// written by its VM, read back, no file of their directories holding what they wrote in the
+/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and fences its store,
+/// its VM's reads failing with EACCES, the other's reading on; called again, it finds the cell
+/// shredded and fences nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
+/// KMS, fences the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
+#[test]
+fn sealed_stores_served_and_shredded_through_the_control_api() {
+    let keys = tempfile::tempdir().unwrap();
+    let kms_dir = keys.path().join("kms");
+    let kms = extent_keys::kms::LocalKms::open(&kms_dir).unwrap();
+    kms.create(1).unwrap();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe { std::env::set_var("FXDAX_KMS", format!("local://{}", kms_dir.display())) };
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (ours, sibling) = (dir.path().join("ours"), dir.path().join("sibling"));
+    let of_tenant = fxdax::Branch { cell: fxdax::Cell { tenant: 1, id: 0 }, id: 0 };
+    let branch = daemon.create(&ours, of_tenant, None).unwrap();
+    let other = daemon.create(&sibling, of_tenant, None).unwrap();
+    assert_ne!(branch.cell, other.cell);
+    let vms = [daemon.open(&ours, CAPACITY), daemon.open(&sibling, CAPACITY)];
+    for (seed, vm) in (1..).zip(&vms) {
+        write(vm, &pattern(seed), b"sealed");
+    }
+    let read = |vm: &fxdax::RemoteExtentStore, seed: u64| {
+        let mut data = vec![0; 64 << 10];
+        let extent = fxdax::ExtentId { branch: vm.branch(), sequence: 1 };
+        let done = vm.read(extent, 0, &mut [fxdax::VolatileSliceMut::from(&mut data[..])]);
+        done.map(|()| data == pattern(seed))
+    };
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
+    daemon.sync(&ours).unwrap();
+    daemon.sync(&sibling).unwrap();
+    for (seed, path) in (1..).zip([&ours, &sibling]) {
+        let mut paths = vec![path.to_path_buf()];
+        while let Some(at) = paths.pop() {
+            if at.is_dir() {
+                paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+                continue;
+            }
+            let bytes = std::fs::read(&at).unwrap();
+            let held = bytes.windows(64).any(|window| window == &pattern(seed)[..64]);
+            assert!(!held, "{} holds what its VM wrote", at.display());
+        }
+    }
+
+    let shred = |daemon: &mut Daemon| {
+        let request = ShredCellRequest { tenant: 1, cell: branch.cell.id };
+        let shredded = daemon.runtime.block_on(daemon.client.shred_cell(request)).unwrap();
+        let ShredCellResponse { keks_removed, forgotten } = shredded.into_inner();
+        (keks_removed, forgotten.unwrap().stores)
+    };
+    assert_eq!(shred(&mut daemon), (1, 1));
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Ok(true)));
+    assert_eq!(shred(&mut daemon), (0, 0));
+
+    kms.destroy(1).unwrap();
+    let request = ForgetTenantKeysRequest { tenant: 1, why: "tenant 1: destroyed".into() };
+    let forgotten = daemon.runtime.block_on(daemon.client.forget_tenant_keys(request)).unwrap();
+    assert_eq!(forgotten.into_inner().forgotten.unwrap().stores, 1);
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Err(Errno::EACCES)));
+
+    drop(vms);
+    let denied = (Code::PermissionDenied, Errno::EACCES);
+    assert_eq!(failure(daemon.stat(&ours)), denied);
+    assert_eq!(failure(daemon.stat(&sibling)), denied);
+}

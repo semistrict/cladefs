@@ -3,9 +3,10 @@ id: TASK-395.12
 title: >-
   A pass in full over a written cell with many fork points recovers each every
   pass: cache their states under the cell
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-13 18:08'
+updated_date: '2026-11-14 19:01'
 labels:
   - bucket
   - collector
@@ -34,3 +35,17 @@ TASK-395.6 skips cells unchanged since their last pass, but a cell that is writt
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Measured (docs/measurements/macos-gc-fork-points-2026-11-14; fxdax-gc-fill --vm 1024 P, fxdax-gc --cell 1/1, 3 runs): a 164k-extent branch, P fork points. Before .18/.19: P=1 0.26 s (get 8, list 5), P=10 0.53 s (get 17, list 14), P=100 3.6 s (get 108, list 104); checkpoint bytes 0.75 / 4.2 / 38.5 MB a pass. After .18/.19: 0.24 / 0.44 / 2.9 s, list 4. Each fork point costs a GET (~4.6 B an extent) and ~26 ms of a core: ~1 + P/9 times the one-point pass. Decision (OPEN_QUESTIONS.md): cache not built now, the task left To Do; worth it once written VMs commonly keep dozens of live snapshots (30: ~4x).
+
+Moved to TASK-412 (@claude, 2026-11-14): the user chose to keep the cache for later, outside TASK-395 so it can close; its ACs, description and measurements are there. Nothing built here beyond TASK-395.18 and .19.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Measured, not built: each fork point costs a written cell's pass a checkpoint GET and ~26 ms (2.9 s at 100 points, after TASK-395.18/.19 cut it from 3.6 s). The cache moved to TASK-412, kept for later by the user's choice; ACs not met here.
+<!-- SECTION:FINAL_SUMMARY:END -->

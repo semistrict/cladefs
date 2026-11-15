@@ -10,7 +10,7 @@ use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_store::{
     Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening, Options, Part,
-    Place, RemoteData, Spent, Store, TooLong, TooSmall,
+    Place, RemoteData, Spent, Store, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -61,7 +61,8 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
     let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
     let taken = extent_remote::Taken::of(head, &state, chain);
-    let opening = Opening { state, taken: Some(taken), cache: None };
+    let keys = extent_remote::keys::Ring::clear();
+    let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
@@ -308,7 +309,7 @@ fn segments_close_framed_by_the_commits_flush() {
     assert_eq!(reads().collect::<Vec<_>>(), written);
     let closed = store.closed(usize::MAX).unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    let data = extent_frame::data(&segment.bytes().unwrap()).unwrap();
+    let data = extent_frame::data(&segment.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
     assert_eq!(&data[..BLOCK], &pattern(0, 0, BLOCK)[..]);
 }
 
@@ -366,8 +367,11 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     // Freed: the store's users read them not, the log holds them, which the uploader reads.
     error_is(store.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
     let [(_, own_bytes)] = &writing.own_bytes().unwrap()[..] else { panic!("no extent's own") };
-    assert_eq!(extent_frame::data(own_bytes).unwrap(), pattern(17, 0, 32 << 10));
-    let data = extent_frame::data(&writing.bytes().unwrap()).unwrap();
+    assert_eq!(
+        extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap(),
+        pattern(17, 0, 32 << 10)
+    );
+    let data = extent_frame::data(&writing.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
     assert_eq!(&data[2 * BLOCK..3 * BLOCK], &pattern(3, 0, BLOCK)[..]);
     store.commit(None).unwrap();
     assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
@@ -621,7 +625,7 @@ fn closed_segments_hold_the_branchs_history() {
     let file = dir.open(&format!("{}/{number:016x}", of("segments", BRANCH.id)), true).unwrap();
     let mut bytes = vec![0; extent_store::File::size(&file).unwrap() as usize];
     extent_store::File::read_at(&file, &mut bytes, 0).unwrap();
-    let data = extent_frame::data(&bytes).unwrap();
+    let data = extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap();
     assert_eq!(data[offset as usize..][..BLOCK], pattern(40, 0, BLOCK));
 
     // Old.
@@ -886,7 +890,8 @@ fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_
         assert_eq!(store.epoch().unwrap(), 2, "seed {seed}");
         assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
         let framed = extent_store::read_whole(&crashed.open(&path("segments"), true).unwrap());
-        let footer = extent_frame::footer(&framed.unwrap()).unwrap().to_vec();
+        let footer =
+            extent_frame::footer(&framed.unwrap(), &extent_frame::NoKeys).unwrap().to_vec();
         let footer = Footer::decode(&footer).unwrap();
         assert_eq!(footer.contents.commits, [tag(0, 2)], "seed {seed}");
     }
@@ -1020,11 +1025,18 @@ fn segments_close_for_the_writer_of_their_chain() {
     assert_eq!(first.footer.own().collect::<Vec<_>>(), [(extent(2), own.clone())]);
     // Its file is the object, footer and all; its extent of its own's, the extent's object.
     let bytes = first.bytes().unwrap();
-    let footer = Footer::decode(extent_frame::footer(&bytes).unwrap()).unwrap();
+    let footer =
+        Footer::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
     assert_eq!(footer, first.footer);
-    assert_eq!(extent_frame::data(&bytes).unwrap()[..BLOCK], pattern(1, 0, BLOCK));
+    assert_eq!(
+        extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()[..BLOCK],
+        pattern(1, 0, BLOCK)
+    );
     let [(key, own_bytes)] = &first.own_bytes().unwrap()[..] else { panic!("no extent's own") };
-    assert_eq!((key, extent_frame::data(own_bytes).unwrap()), (&own.key, pattern(2, 0, 32 << 10)));
+    assert_eq!(
+        (key, extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap()),
+        (&own.key, pattern(2, 0, 32 << 10))
+    );
 
     // The next follows it; a fork's names the fork.
     store.write(extent(3), 0, &pattern(3, 0, BLOCK)).unwrap();
@@ -1142,31 +1154,46 @@ fn capacity_resizes() {
     assert_eq!(read(&store, extent(2), 0, 96 << 10), pattern(2, 0, 96 << 10));
 }
 
-/// fxdax: a framing writes its framed file back a MiB at a time as it writes it, so that its sync
-/// leaves little for the host's disk to write at once: a framed segment's whole data, synced at
-/// once, filled the disk's queue, which the syncs of a daemon's turns waited behind, up to a second
-/// under pgbench (GCE r728, TASK-165.9). Each commit's sync, of 16 KiB extents in the open
-/// segment, a MiB of them, writes back no more.
+/// fxdax: a framed copy is written back a MiB at a time, each waited for, before it is synced,
+/// so that its sync leaves little for the host's disk to write at once: a framed segment's whole
+/// data, synced at once, filled the disk's queue, which the syncs of a daemon's turns waited
+/// behind, up to a second under pgbench (GCE r728, TASK-165.9). Its framing writes it, the making
+/// durable after writes it back (TASK-401): waiting for each MiB, a framing waited 1.0-2.7 s behind
+/// a disk VMs share. No sync writes more at once than a commit's, of a quarter MiB of 16 KiB
+/// extents in the open segment. Red, the 12 MiB copy synced at once, with the making durable
+/// syncing it unwritten back.
 #[test]
 fn framings_write_back_as_they_go() {
     let dir = MemDir::new();
-    let options = Options { segment_size: 16 << 20, ..OPTIONS };
+    let options = Options { segment_size: 32 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
     let store = Store::create(dir.clone(), description, options).unwrap();
+    // Half noise, half zeros: a copy of about half the data.
     let len = 16 << 10;
-    for sequence in 1..=512 {
-        store.write(extent(sequence), 0, &noise(sequence, len)).unwrap();
-        if sequence % 64 == 0 {
+    let data = |sequence| {
+        let mut data = noise(sequence, len / 2);
+        data.resize(len, 0);
+        data
+    };
+    let in_place = extent_store::segments_framed_in_place();
+    for sequence in 1..=1536 {
+        store.write(extent(sequence), 0, &data(sequence)).unwrap();
+        if sequence % 16 == 0 {
             store.commit(None).unwrap();
         }
     }
     store.close_segment().unwrap();
     store.commit(None).unwrap();
     store.wait_framed().unwrap();
+    assert_eq!(extent_store::segments_framed_in_place(), in_place, "framed in a copy");
     let framed = dir.open(&format!("{}/{:016x}", of("segments", BRANCH.id), 0), true).unwrap();
     let size = framed.size().unwrap();
-    assert!(size > 8 << 20, "the framed segment holds 8 MiB of noise, not {size} bytes");
-    assert_eq!(dir.io().most_unwritten, 1 << 20);
+    assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
+    // A commit's sync: its 16 extents of 16 KiB, and its record.
+    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 603);
+    for sequence in 1..=1536 {
+        assert_eq!(read(&store, extent(sequence), 0, len), data(sequence));
+    }
 }
 
 /// fxdax: what a guest writes to the open segment is written back as it writes it, its writing
@@ -1306,7 +1333,9 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.write(extent(1), 0, &data).unwrap();
     let before = extent_store::written();
     store.commit(None).unwrap();
-    let framed = extent_frame::framed(&data, &[]);
+    // fxdax: its footer names it (TASK-411.3).
+    let footer = extent_remote::layout::encode(&extent(1));
+    let framed = extent_frame::framed(&data, &footer, None);
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1465,6 +1494,97 @@ fn segments_of_noise_then_holes_are_framed_compressed() {
     }
 }
 
+/// fxdax TASK-400: a segment that compresses has its parts packed as they are written whole, held
+/// in memory, and its framing in a copy reads none of them back, but its last part, never whole;
+/// one whose parts were let go of to make room, as a daemon's governor lets them go, reads them
+/// back and packs them as before: framed alike, byte for byte, either way. Held parts are derived:
+/// a crash as a closing between commits frames it, before its framed file is durable, keeps the
+/// commits in the raw file and log, as before, whatever was held. Before, a framing in a copy read its whole raw file back as it closed, seconds
+/// after the guest wrote it, from a disk eight VMs keep busy once the host had let its pages go.
+#[test]
+fn segments_framed_in_copies_take_their_parts_held() {
+    use extent_store::HeldParts;
+    use std::sync::Mutex;
+    const MIB: usize = 1 << 20;
+    let options = Options {
+        max_extent: 8 * MIB as u64,
+        segment_size: 8 * MIB as u64,
+        large_extent: 8 * MIB as u64,
+        ..OPTIONS
+    };
+    // Letters at random, sixteen of them: compresses by about half, as a build's files do.
+    let text = |seed: u64, len: usize| -> Vec<u8> {
+        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
+    };
+    let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { BLOCK });
+    let framed = |evicted: bool, dir: MemDir| {
+        let description =
+            Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+        Store::make(&dir, description, None, None).unwrap();
+        let held = HeldParts::new();
+        let opening = Opening { held: Some(held.clone()), ..Opening::new(BRANCH) };
+        let store = Store::recover_unmade(dir.clone()).unwrap().open(options, opening).unwrap();
+        store.made().unwrap();
+        assert!(Arc::ptr_eq(store.held_parts(), &held));
+        for sequence in 1..=7 {
+            store.write(extent(sequence), 0, &data(sequence)).unwrap();
+        }
+        store.commit(None).unwrap();
+        let holding = held.counts();
+        if evicted {
+            assert_eq!(held.evict_to(0), holding.bytes);
+        }
+        // Crashes as the framed file is written, not yet durable.
+        let crashes = Arc::new(Mutex::new(Vec::new()));
+        let guard = {
+            let (crashes, dir) = (crashes.clone(), dir.clone());
+            fail::FailGuard::with_callback("segments::making_durable", move || {
+                crashes.lock().unwrap().extend((0..4).map(|seed| dir.crash(seed)));
+            })
+            .unwrap()
+        };
+        let before = extent_store::framing_reads().0;
+        assert!(store.close_now().unwrap(), "closed between commits");
+        settled(&store);
+        drop(guard);
+        let read_back = extent_store::framing_reads().0 - before;
+        for sequence in 1..=7 {
+            assert!(read(&store, extent(sequence), 0, data(sequence).len()) == data(sequence));
+        }
+        let segments = names(&dir, "segments");
+        assert_eq!(segments.len(), 1, "{segments:?}");
+        let path = format!("{}/{}", of("segments", BRANCH.id), segments[0]);
+        let bytes = extent_store::read_whole(&dir.open(&path, true).unwrap()).unwrap();
+        assert!(bytes.len() < 4 * MIB, "a copy, compressed: {} bytes", bytes.len());
+        drop(store);
+        let crashes = std::mem::take(&mut *crashes.lock().unwrap());
+        assert_eq!(crashes.len(), 4);
+        for (seed, crashed) in crashes.into_iter().enumerate() {
+            let reopened = Store::open(crashed, options).unwrap();
+            assert_eq!(reopened.epoch().unwrap(), 1, "seed {seed}");
+            for sequence in 1..=7 {
+                let read = read(&reopened, extent(sequence), 0, data(sequence).len());
+                assert!(read == data(sequence), "seed {seed}, evicted {evicted}, {sequence}");
+            }
+        }
+        (bytes, read_back, holding, held.counts())
+    };
+    let (bytes, read_back, holding, after) = framed(false, MemDir::serial());
+    assert_eq!(read_back, BLOCK as u64, "the last part alone read");
+    assert!(holding.bytes > 2 * MIB as u64 && holding.bytes < 4 * MIB as u64, "{holding:?}");
+    assert_eq!((after.bytes, after.taken, after.evicted), (0, holding.held, 0));
+    let (evicted_bytes, evicted_read_back, _, evicted_after) = framed(true, MemDir::serial());
+    assert_eq!(evicted_read_back, 6 * MIB as u64 + BLOCK as u64, "every part read back");
+    assert_eq!((evicted_after.evicted_parts, evicted_after.taken), (6, 0));
+    assert!(bytes == evicted_bytes, "framed otherwise, held or not");
+    // A directory whose I/O runs on the store's threads: its parts packed ahead on threads of
+    // their own, at the host's lowest priority, held as they are packed, or read and packed by the
+    // framing, if not yet: framed alike whichever.
+    let (concurrent_bytes, _, _, concurrent_after) = framed(false, MemDir::new());
+    assert!(bytes == concurrent_bytes, "framed otherwise, packed ahead on threads");
+    assert_eq!(concurrent_after.bytes, 0, "{concurrent_after:?}");
+}
+
 /// fxdax: extents not one run in a segment filled since the last commit, written in pieces
 /// interleaved with others', or across two segments, are copied by the commit into the open
 /// segment, and past its room into the next, it full in turn, which the commit goes on with: none
@@ -1519,7 +1639,8 @@ fn compressible_large_extents_are_framed_in_copies() {
         store.write(extent(sequence), 0, data).unwrap();
         let before = extent_store::written();
         store.commit(None).unwrap();
-        let framed = extent_frame::framed(data, &[]);
+        let footer = extent_remote::layout::encode(&extent(sequence));
+        let framed = extent_frame::framed(data, &footer, None);
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -1812,6 +1933,44 @@ fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
         assert_eq!(synced, 0, "segment {next}'s commits' flush: directories synced");
     }
     for sequence in 1..6 {
+        assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
+    }
+}
+
+/// fxdax: a preparation of the next segment's log whose segment opened before it was placed, with
+/// a log of its own, goes on as the next's: no opening, nor flush, began another while it ran, and
+/// ended there it left the next segment nothing placed, as `Store::prepared` found it, until a
+/// flush or closing after it began one (TASK-404: commits_reopen_from_their_logs's (1, false, 2)
+/// on loaded hosts, the last flush having found a preparation running). Red so with it ending.
+#[test]
+fn preparations_overtaken_go_on_as_the_next_segments() {
+    use std::sync::Mutex;
+    use std::sync::mpsc::channel;
+    let dir = MemDir::new();
+    let store = create(dir.clone(), 64 << 20);
+    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
+    store.commit(None).unwrap();
+    settled(&store);
+    store.prepared().unwrap();
+    let next = store.placed().expect("the next segment placed");
+    // The preparation of the segment after it held, as a loaded host's opener thread is, while
+    // commits open it and the one after.
+    let (go, gone) = channel::<()>();
+    let gone = Mutex::new(gone);
+    let held = fail::FailGuard::with_callback("segments::preparing", move || {
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    for sequence in 2..4 {
+        store.close_segment().unwrap();
+        store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
+        store.commit(None).unwrap();
+    }
+    drop((go, held));
+    store.prepared().unwrap();
+    assert_eq!(store.placed(), Some(next + 2), "the segment after the open one, placed");
+    settled(&store);
+    for sequence in 1..4 {
         assert_eq!(read(&store, extent(sequence), 0, BLOCK), pattern(sequence as u8, 0, BLOCK));
     }
 }
@@ -2133,8 +2292,9 @@ fn raw_files_are_read_through_the_page_cache() {
     let store = Store::open(dir.clone(), OPTIONS).unwrap();
     assert_eq!(of_raw_files(dir.direct()), BTreeMap::new());
     // And extent 4's block, read back by its flush, whose record holds it (TASK-301), and the
-    // open segment left raw, read once by the opening, which closes it again.
-    assert_eq!(of_raw_files(dir.cached()), cached(14 * BLOCK));
+    // open segment left raw, read twice by the opening, which closes it again: by its recovery,
+    // which finds what it holds, and by its framing, once the store's keys are known (TASK-411.9).
+    assert_eq!(of_raw_files(dir.cached()), cached(15 * BLOCK));
     for (sequence, len) in [(1, 2 * BLOCK), (2, 2 * BLOCK), (3, large), (4, BLOCK)] {
         assert!(read(&store, extent(sequence), 0, len) == pattern(sequence as u8, 0, len));
     }
@@ -2272,7 +2432,11 @@ fn segment_data(dir: &MemDir) -> Vec<u64> {
             let file = dir.open(&format!("{}/{name}", of(kind, BRANCH.id)), true).unwrap();
             let mut bytes = vec![0; file.size().unwrap() as usize];
             file.read_at(&mut bytes, 0).unwrap();
-            let data = if kind == "segments" { extent_frame::data(&bytes).unwrap() } else { bytes };
+            let data = if kind == "segments" {
+                extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()
+            } else {
+                bytes
+            };
             lens.push(data.len() as u64);
         }
     }
@@ -2489,7 +2653,7 @@ fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000000004"]);
     assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), segments);
     for closed in store.closed(usize::MAX).unwrap() {
-        let data = extent_frame::data(&closed.bytes().unwrap()).unwrap();
+        let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
         assert_eq!(data.len(), 0, "segment {}, no extent's data in it, framed", closed.number);
     }
     let store = reopened(store, &dir);
@@ -2824,7 +2988,7 @@ fn in_flight<'a>(
     data: &[u8],
 ) -> extent_store::Write<'a, MemDir> {
     let write = store.begin_write(extent, offset, data.len() as u64).unwrap();
-    write.file().write_at(data, write.offset()).unwrap();
+    write.write(data, 0).unwrap();
     write
 }
 
@@ -3335,7 +3499,7 @@ fn extents_larger_than_a_framing_chunk_seal_whole() {
     let file = dir.open(&format!("{}/{:016x}", of("extents", BRANCH.id), 1), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
     file.read_at(&mut framed, 0).unwrap();
-    assert_eq!(extent_frame::data(&framed).unwrap().len(), data.len());
+    assert_eq!(extent_frame::data(&framed, &extent_frame::NoKeys).unwrap().len(), data.len());
     drop(store);
     let store = Store::open(dir, OPTIONS).unwrap();
     assert!(read(&store, extent(1), 0, data.len()) == data, "the extent reads other data");
@@ -3369,6 +3533,43 @@ fn io_ends_within_the_most_an_extent_holds() {
     // To its end, the most.
     store.write(extent(1), MAX_EXTENT - BLOCK as u64, &[1; BLOCK]).unwrap();
     assert_eq!(store.extents().unwrap(), [(extent(1), MAX_EXTENT)]);
+}
+
+/// fxdax: what goes to the open segment is whole sectors of 4 KiB, which it is to be encrypted in
+/// (doc-16, TASK-411.8): a write of an extent stored in segments at an offset, or of a length, that
+/// is not, though whole blocks of a store of smaller blocks, is refused, writing nothing; a large
+/// extent, in a file of its own, takes it.
+#[test]
+fn writes_to_segments_are_whole_sectors() {
+    let description = Description { block_size: 512, capacity: 1 << 30, branch: BRANCH };
+    let store = Store::create(MemDir::new(), description, OPTIONS).unwrap();
+    let refused = |offset: u64, len: usize| {
+        let error = store.write(extent(1), offset, &vec![1; len]).expect_err("succeeded");
+        (error.downcast_ref::<Unsectored>().copied(), error.to_string())
+    };
+    let message = |offset, len| {
+        format!(
+            "{len} bytes at {offset}: not whole sectors of 4096 bytes, as an open segment takes"
+        )
+    };
+    let at = Unsectored { offset: 512, len: BLOCK as u64 };
+    assert_eq!(refused(512, BLOCK), (Some(at), message(512, BLOCK)));
+    let of = Unsectored { offset: 0, len: BLOCK as u64 + 512 };
+    assert_eq!(refused(0, BLOCK + 512), (Some(of), message(0, BLOCK + 512)));
+    assert_eq!(store.extents().unwrap(), []);
+    // Whole sectors go where the first would have, at the open segment's start.
+    store.write(extent(1), 0, &[1; BLOCK]).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(
+        store.place(extent(1)).unwrap(),
+        Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
+    );
+    // Large, in a file of its own: not a segment's.
+    let large = OPTIONS.large_extent as usize + 512;
+    store.write(extent(2), 0, &vec![2; large]).unwrap();
+    store.commit(None).unwrap();
+    assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Own));
+    assert_eq!(read(&store, extent(2), 0, large), vec![2; large]);
 }
 
 /// What is read past an extent's end, or where nothing was written, reads as zeros, whatever the

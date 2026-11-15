@@ -18,8 +18,13 @@
 //! The collector deletes what no reader starting now needs: of what a head names, segments only
 //! once its checkpoint covers them. A reader that finds something the head named gone reads the
 //! head again: if it changed, a newer checkpoint may cover what went, and the reader starts again.
+//!
+//! fxdax: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
+//! checkpoints are checked against their MACs under the keys it holds, and those of a branch it
+//! holds sealed refused in the clear. The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Meta};
+use crate::keys::Ring;
 use crate::layout::{self, Branch, Cell, Contents, Footer, Fork, Head, Location, Origin};
 use crate::record::Record;
 use crate::{Error, head, object};
@@ -337,6 +342,9 @@ impl Places for Layered {
 /// How often recovery starts again before it gives up on a branch as lost.
 const RESTARTS: usize = 64;
 
+/// The ring of a recovery holding no key.
+static CLEAR: std::sync::LazyLock<Arc<Ring>> = std::sync::LazyLock::new(Ring::clear);
+
 /// How many segments' footers recovery reads at once, at most: their keys are known, the head
 /// naming them, so that a recovery reads none it needs not.
 const AT_ONCE: usize = 32;
@@ -352,27 +360,39 @@ impl From<Error> for Attempt {
     }
 }
 
-/// The state of `branch`, forked from `origin`, as its head names it.
+/// The state of `branch`, forked from `origin`, as its head names it, read holding no key.
 pub async fn recover(
     bucket: &impl Bucket,
     branch: Branch,
     origin: Option<Origin>,
 ) -> Result<Recovered, Error> {
-    Ok(recover_layers(&Checkpoints::new(bucket, 0), branch, origin).await?.flatten())
+    recover_under(bucket, branch, origin, &Ring::clear()).await
+}
+
+/// fxdax: the state of `branch`, forked from `origin`, read holding `ring` (TASK-411.3).
+pub async fn recover_under(
+    bucket: &impl Bucket,
+    branch: Branch,
+    origin: Option<Origin>,
+    ring: &Ring,
+) -> Result<Recovered, Error> {
+    let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
+    Ok(recover_layers(&checkpoints, branch, origin).await?.flatten())
 }
 
 /// The state of `branch`, forked from `origin`, as `head` names it, a head its reader holds, as a
 /// writer that took it does, or a deletion that ended it: nothing it names goes while it holds it,
 /// but for a takeover since, which fails the writer at its next swap ([`Error::Fenced`]). What it
 /// inherited may go meanwhile, a fork point's state its parent's checkpoint covers: it starts
-/// again.
+/// again. fxdax: read holding `ring` (TASK-411.3).
 pub async fn recover_from(
     bucket: &impl Bucket,
     branch: Branch,
     origin: Option<Origin>,
     head: Option<Head>,
+    ring: &Ring,
 ) -> Result<Recovered, Error> {
-    let checkpoints = Checkpoints::new(bucket, 0);
+    let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
     for _ in 0..RESTARTS {
         match attempt(&checkpoints, branch, origin, head.clone()).await {
             Ok(recovered) => return Ok(recovered.flatten()),
@@ -417,7 +437,7 @@ pub(crate) async fn recover_at<B: Bucket>(
 ) -> Result<(Arc<State>, BTreeSet<String>), Error> {
     for _ in 0..RESTARTS {
         let mut touched = BTreeSet::new();
-        match state_at(checkpoints, branch, at, &mut touched, branch.cell).await {
+        match state_at(checkpoints, branch, at, &mut touched, branch.cell, true).await {
             Ok(state) => return Ok((state, touched)),
             Err(Attempt::Restart) => {}
             Err(Attempt::Failed(error)) => return Err(error),
@@ -437,10 +457,13 @@ pub(crate) struct Checkpoints<'a, B: Bucket> {
     /// How many of those read it keeps, the last read.
     keep: usize,
     read: Mutex<Read<'a>>,
-    /// fxdax: a listing of the cell, taken before the recoveries began, and the branches whose
-    /// checkpoints it gave a listing of once (TASK-395.16, [`Checkpoints::listed`]).
+    /// fxdax: a listing of the cell, taken before the recoveries began, and those it gave a
+    /// listing of checkpoints once: each branch's, and each fork point's a pass keeps (TASK-395.16,
+    /// TASK-395.19, [`Checkpoints::listed`]).
     listed: Option<&'a BTreeMap<String, Meta>>,
-    served: Mutex<BTreeSet<Branch>>,
+    served: Mutex<BTreeSet<(Branch, Option<u64>)>>,
+    /// fxdax: the keys it reads under ([`Checkpoints::holding`], TASK-411.3).
+    keys: &'a Ring,
 }
 
 /// The reads of checkpoints [`Checkpoints`] keeps, or that are in flight, by their keys; and the
@@ -457,7 +480,14 @@ type Flight<'a> = Shared<BoxFuture<'a, Result<Option<Arc<State>>, Error>>>;
 impl<'a, B: Bucket> Checkpoints<'a, B> {
     /// Reads checkpoints from `bucket`, keeping the last `keep` read.
     pub(crate) fn new(bucket: &'a B, keep: usize) -> Self {
-        Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default() }
+        let keys = &**CLEAR;
+        Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default(), keys }
+    }
+
+    /// fxdax: these, reading their checkpoints and the footers of their segments holding `keys`
+    /// (TASK-411.3).
+    pub(crate) fn holding(self, keys: &'a Ring) -> Self {
+        Self { keys, ..self }
     }
 
     /// fxdax: these, the first listing of each branch's checkpoints served by `listed`, a listing
@@ -467,16 +497,29 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
     /// finding one gone, lists the checkpoints again, starting over if a newer one has come; and a
     /// recovery starting over lists them anew, from the bucket. Each branch's once: what started
     /// over may be what the listing shows.
+    ///
+    /// And the first of each fork point's state a pass keeps for the references and forks to other
+    /// cells ([`recover_at`]), apart from its branch's and from one another's (TASK-395.19): a LIST
+    /// less a fork point, which a pass over a cell whose branch was forked at many points made for
+    /// each. A state as of a segment is the same from any checkpoint up to there, the newest listed
+    /// then as the newest listed now, its segments to there read after it: one it finds gone, a
+    /// newer checkpoint covering it, starts it over, listing anew. A checkpoint made since the
+    /// listing, at or before the fork point, which the recovery doesn't read, the pass doesn't
+    /// delete either: what it deletes it listed. An origin's state a branch's recovery starts from
+    /// goes by the branch's listing, as before: served anew, it would read none of the checkpoints
+    /// made during the pass, keeping their segments instead, safe but hiding what the test
+    /// `children_restored_from_points_keeping_their_origins_need_recoveries_by_origins` shows.
     pub(crate) fn listed(self, listed: Option<&'a BTreeMap<String, Meta>>) -> Self {
         Self { listed, ..self }
     }
 
-    /// fxdax: the checkpoints of `branch`, in the order of their keys: as the listing of its cell
-    /// shows them, the first time it is asked of `branch`, if it has one; listed now otherwise.
-    async fn list(&self, branch: Branch) -> Vec<Meta> {
+    /// fxdax: the checkpoints of `branch`, in the order of their keys, for a recovery of it, or of
+    /// the state of it as of its segment `at` a pass keeps: as the listing of its cell shows them,
+    /// the first time one of that is asked, if it has one; listed now otherwise.
+    async fn list(&self, branch: Branch, at: Option<u64>) -> Vec<Meta> {
         let prefix = layout::checkpoints(branch);
         match self.listed {
-            Some(listed) if self.served.lock().unwrap().insert(branch) => {
+            Some(listed) if self.served.lock().unwrap().insert((branch, at)) => {
                 bucket::under(listed, &prefix)
             }
             _ => bucket::list(self.bucket, &prefix).await,
@@ -497,7 +540,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
             match read.flights.get(key) {
                 Some(flight) => flight.clone(),
                 None => {
-                    let bucket = self.bucket;
+                    let (bucket, keys) = (self.bucket, self.keys);
                     let owned = key.to_owned();
                     let flight = async move {
                         let key = owned;
@@ -508,7 +551,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
                         let Some(object) = bucket::get(bucket, &key).await else {
                             return Ok(None);
                         };
-                        let state = Arc::new(checkpoint(&key, &object.bytes, branch)?);
+                        let state = Arc::new(checkpoint(&key, &object.bytes, branch, keys)?);
                         if let Some(decoded) = decoded {
                             decoded.keep(&key, &state);
                         }
@@ -580,11 +623,13 @@ impl Decoded {
 /// applied to its state, rather than its state read anew. As recovering anew would find; but if
 /// the head names a checkpoint as of `before`'s end or later, which may cover segments gone, it
 /// recovers anew.
+/// fxdax: read holding `ring` (TASK-411.3).
 pub async fn recover_on(
     bucket: &impl Bucket,
     origin: Option<Origin>,
     before: Recovered,
     head: Option<Head>,
+    ring: &Ring,
 ) -> Result<Recovered, Error> {
     let Recovered { state, head: was, touched } = before;
     let branch = state.branch;
@@ -592,12 +637,12 @@ pub async fn recover_on(
     // A checkpoint since, covering what it would follow on from: the collector, going by it, may
     // have deleted those segments, and it recovers anew.
     if head.as_ref().and_then(|head| head.checkpoint).is_some_and(|(seq, _)| seq >= from) {
-        return recover_from(bucket, branch, origin, head).await;
+        return recover_from(bucket, branch, origin, head, ring).await;
     }
     let mut recovered = Recovered { state: Layered::of(state), head: head.clone(), touched };
-    match follow(bucket, &mut recovered, from).await {
+    match follow((bucket, ring), &mut recovered, from).await {
         Ok(()) => Ok(recovered.flatten()),
-        Err(Attempt::Restart) => recover_from(bucket, branch, origin, head).await,
+        Err(Attempt::Restart) => recover_from(bucket, branch, origin, head, ring).await,
         Err(Attempt::Failed(error)) => Err(error),
     }
 }
@@ -628,7 +673,8 @@ async fn attempt<B: Bucket>(
             None => Layered::of(State::new(branch)),
             Some(origin) => {
                 let at =
-                    state_at(checkpoints, origin.parent, origin.at, &mut touched, branch.cell).await;
+                    state_at(checkpoints, origin.parent, origin.at, &mut touched, branch.cell, false)
+                        .await;
                 match at {
                     Ok(at) => Layered::inheriting(at, branch),
                     // A checkpoint of its own since, which the collector going by may have let
@@ -646,15 +692,15 @@ async fn attempt<B: Bucket>(
     };
     let from = state.through.map_or(0, |seq| seq + 1);
     let mut recovered = Recovered { state, head, touched };
-    follow(bucket, &mut recovered, from).await?;
+    follow((bucket, checkpoints.keys), &mut recovered, from).await?;
     Ok(recovered)
 }
 
 /// `recovered`, the segments its head names from `from` on applied, read by their tails,
-/// [`AT_ONCE`] at most at once. One gone, the head is read again: changed, a checkpoint newer may
+/// [`AT_ONCE`] at most at once, holding `keys`. One gone, the head is read again: changed, a checkpoint newer may
 /// cover it, and the recovery starts again; else what it names is lost.
 async fn follow<B: Bucket>(
-    bucket: &B,
+    (bucket, keys): (&B, &Ring),
     recovered: &mut Recovered<Layers>,
     from: u64,
 ) -> Result<(), Attempt> {
@@ -664,7 +710,7 @@ async fn follow<B: Bucket>(
     let mut footers = futures::stream::iter(named.segments(from))
         .map(|(seq, epoch)| async move {
             let key = layout::segment(branch, seq, epoch);
-            let footer = segment_footer(bucket, branch, seq, epoch).await?;
+            let footer = segment_footer((bucket, keys), branch, seq, epoch).await?;
             Ok::<_, Error>((key, footer))
         })
         .buffered(AT_ONCE);
@@ -691,15 +737,19 @@ async fn moved(bucket: &impl Bucket, branch: Branch, head: Option<&Head>) -> Att
 
 /// The footer of segment `seq` of `branch` by the writer of `epoch`, if it is there: read by its
 /// object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
-/// segment whole.
+/// segment whole. fxdax: checked against its MAC if `keys` hold its key, and refused in the clear
+/// if they hold its branch sealed (TASK-411.3).
 async fn segment_footer(
-    bucket: &impl Bucket,
+    (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
     seq: u64,
     epoch: u64,
 ) -> Result<Option<Footer>, Error> {
     let key = layout::segment(branch, seq, epoch);
     let Some(tail) = object::tail(bucket, &key).await? else { return Ok(None) };
+    if !keys.is_empty() {
+        tail.open(&keys.of(branch.id)).map_err(|err| err.reading(&key))?;
+    }
     Ok(Some(placed(&key, layout::decode(tail.footer())?, branch, seq, epoch)?))
 }
 
@@ -715,9 +765,11 @@ fn placed(key: &str, footer: Footer, branch: Branch, seq: u64, epoch: u64) -> Re
     Ok(footer)
 }
 
-/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds.
-fn checkpoint(key: &str, bytes: &[u8], branch: Branch) -> Result<State, Error> {
-    let state = crate::checkpoint::decode(bytes)?;
+/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds: fxdax: read holding
+/// `keys` (TASK-411.3).
+fn checkpoint(key: &str, bytes: &[u8], branch: Branch, keys: &Ring) -> Result<State, Error> {
+    let state = crate::checkpoint::decode_under(bytes, &keys.of(branch.id))
+        .map_err(|err| err.reading(key))?;
     if state.branch != branch {
         return Err(Error::Corrupt(format!("{key} holds a checkpoint of {}", state.branch)));
     }
@@ -746,12 +798,17 @@ fn newest_to(listed: &[Meta], at: u64) -> Option<&Meta> {
 /// (TASK-395.4): whoever records a fork across cells writes it first ([`checkpoint_at`]), and the
 /// parent's cell keeps it, the fork point's state, while the fork's reference stands. Gone, what
 /// the fork inherited is.
+///
+/// fxdax: `kept`, a fork point's state a pass keeps ([`recover_at`]), its own first listing of the
+/// checkpoints served by the pass's listing of the cell ([`Checkpoints::listed`]); else, an
+/// origin's state a recovery of a branch starts from, the branch's listing.
 fn state_at<'a, B: Bucket>(
     checkpoints: &'a Checkpoints<'_, B>,
     branch: Branch,
     at: u64,
     touched: &'a mut BTreeSet<String>,
     from: Cell,
+    kept: bool,
 ) -> BoxFuture<'a, Result<Arc<State>, Attempt>> {
     Box::pin(async move {
         let bucket = checkpoints.bucket;
@@ -759,6 +816,12 @@ fn state_at<'a, B: Bucket>(
         let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
             return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
         };
+        // fxdax: a fork point's a pass keeps for the forks to other cells: the checkpoint at it,
+        // which they read by its key alone, kept whatever this reads, as it may be a later
+        // writer's, of another key (TASK-407).
+        if kept {
+            touched.insert(layout::checkpoint(branch, at, epoch));
+        }
         if branch.cell != from {
             let key = layout::checkpoint(branch, at, epoch);
             let Some(state) = checkpoints.read_key(&key, branch).await? else {
@@ -770,7 +833,7 @@ fn state_at<'a, B: Bucket>(
             touched.insert(key);
             return Ok(state);
         }
-        let listed = checkpoints.list(branch).await;
+        let listed = checkpoints.list(branch, kept.then_some(at)).await;
         let mut state = match newest_to(&listed, at) {
             Some(meta) => {
                 let Some(state) = checkpoints.read(meta, branch).await? else {
@@ -792,9 +855,16 @@ fn state_at<'a, B: Bucket>(
                             None => Ok(None),
                             Some(origin) => {
                                 let from = branch.cell;
-                                state_at(checkpoints, origin.parent, origin.at, touched, from)
-                                    .await
-                                    .map(Some)
+                                state_at(
+                                    checkpoints,
+                                    origin.parent,
+                                    origin.at,
+                                    touched,
+                                    from,
+                                    false,
+                                )
+                                .await
+                                .map(Some)
                             }
                         }
                     }
@@ -813,7 +883,7 @@ fn state_at<'a, B: Bucket>(
         let mut footers = futures::stream::iter(named.segments(from).take_while(|&(seq, _)| seq <= at))
             .map(|(seq, epoch)| async move {
                 let key = layout::segment(branch, seq, epoch);
-                Ok::<_, Error>((key, segment_footer(bucket, branch, seq, epoch).await?))
+                Ok::<_, Error>((key, segment_footer((bucket, checkpoints.keys), branch, seq, epoch).await?))
             })
             .buffered(AT_ONCE);
         while let Some((key, footer)) = footers.try_next().await? {
@@ -836,10 +906,15 @@ fn state_at<'a, B: Bucket>(
 /// after: the state any reader finds there, its extents named where they were sealed, never
 /// further along their moves than a reader names them. One there stands, any writer's (TASK-407.6).
 /// [`Error::Lost`] if the state there is gone: no reader recovers a fork from there either.
+///
+/// fxdax: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
+/// writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in the
+/// clear (TASK-411.4). Asked for only if it is to be written.
 pub(crate) async fn checkpoint_at(
     bucket: &impl Bucket,
     branch: Branch,
     at: u64,
+    keys: crate::keys::Parents<'_>,
 ) -> Result<(), Error> {
     let head = head::get(bucket, branch).await?;
     let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
@@ -850,11 +925,14 @@ pub(crate) async fn checkpoint_at(
     if listed.iter().any(|meta| meta.key == key) {
         return Ok(());
     }
+    let keys = keys.ring(bucket, branch).await?;
+    debug_assert!(keys.sealing().is_none_or(|(_, id)| id.branch == branch.id));
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
-        match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell).await {
+        match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell, false).await {
             Ok(state) => {
-                bucket::create(bucket, &key, crate::checkpoint::encode(&*state)).await;
+                let checkpoint = crate::checkpoint::encode_under(&state, keys.sealing());
+                bucket::create(bucket, &key, checkpoint).await;
                 return Ok(());
             }
             Err(Attempt::Restart) => {}
@@ -898,13 +976,15 @@ pub(crate) async fn holds_fork(
     let Some(epoch) = head::get(bucket, parent).await?.and_then(|head| head.epoch_of(at)) else {
         return Ok(false);
     };
-    let Some(footer) = segment_footer(bucket, parent, at, epoch).await? else { return Ok(false) };
+    let Some(footer) = segment_footer((bucket, &**CLEAR), parent, at, epoch).await? else {
+        return Ok(false);
+    };
     let forked = |fork: &layout::Child| fork.branch == child && fork.owner == owner;
     if !footer.contents.forks.iter().any(forked) {
         return Ok(false);
     }
     let checkpoints = Checkpoints::new(bucket, 0);
-    match state_at(&checkpoints, parent, at, &mut BTreeSet::new(), parent.cell).await {
+    match state_at(&checkpoints, parent, at, &mut BTreeSet::new(), parent.cell, false).await {
         Ok(_) => Ok(true),
         Err(Attempt::Restart | Attempt::Failed(Error::Lost(_))) => Ok(false),
         Err(Attempt::Failed(error)) => Err(error),
@@ -977,7 +1057,7 @@ mod tests {
 
         committed(&bucket, &writer, 6, 2);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now));
+        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!(rounds, [tails(5..7)]);
         let anew = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
@@ -999,7 +1079,7 @@ mod tests {
         let seq = bucket.served(writer.checkpoint()).0.unwrap().unwrap();
         committed(&bucket, &writer, 4, 1);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now));
+        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!((on.checkpoint(), on.end(), on.state.last_commit), (Some((seq, 1)), 4, Some(4)));
         let checkpoint = vec![format!("get {}", layout::checkpoint(test_branch(1), seq, 1))];

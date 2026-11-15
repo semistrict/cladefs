@@ -55,14 +55,15 @@ class FirecrackerCargoTest(unittest.TestCase):
     def cargo_calls(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
-    def test_builds_in_a_copy_with_fxdaxs_crate_and_lock(self):
+    def test_builds_in_a_copy_with_fxdaxs_crates_and_lock(self):
         done = self.run_script("build", "-p", "firecracker", "--features", "fxdax")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertEqual(
             (self.tree / "src/vmm/Cargo.toml").read_text(),
-            VMM_MANIFEST + "\n# fxdax: its crate, which the fxdax feature builds against "
+            VMM_MANIFEST + "\n# fxdax: its crates, which the fxdax feature builds against "
             "(scripts/firecracker-cargo.sh).\n"
-            f'[dependencies.fxdax]\npath = "{self.root}/crates/fxdax"\n')
+            f'[dependencies.fxdax]\npath = "{self.root}/crates/fxdax"\n'
+            f'[dependencies.virtio_extent]\npath = "{self.root}/crates/virtio_extent"\n')
         self.assertEqual((self.tree / "Cargo.lock").read_text(), "fxdax's lock\n")
         self.assertEqual((self.tree / "README.md").read_text(), "upstream\n")
         self.assertFalse((self.tree / ".git").exists())

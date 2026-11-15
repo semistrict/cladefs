@@ -21,10 +21,15 @@
 //! The bytes of the objects it uploads are read only as their uploads go ([`Body`]), within a
 //! budget it may share with other writers, a host's ([`Writer::uploading_within`]), and held only
 //! while they go: what a host's writers hold at once is bounded, however far behind they are.
+//!
+//! fxdax: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
+//! branch reading under it, and seals its fences and authenticates its checkpoints under its
+//! branch's newest DEK; the segments it is given come sealed by their store.
 
 use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
 use crate::head::{self, Held};
+use crate::keys::Ring;
 use crate::layout::{self, Branch, Chain, Child, Footer, Location, Origin};
 use crate::moves::MovesMaps;
 use crate::record::Record;
@@ -105,6 +110,8 @@ pub struct Writer<B: Bucket> {
     inner: Mutex<Inner>,
     /// What follows the collector's moves with it, if anything does ([`Writer::following`]).
     mover: std::sync::OnceLock<Mover>,
+    /// fxdax: the keys it reads and seals under (TASK-411.3).
+    keys: Arc<Ring>,
 }
 
 struct Inner {
@@ -146,22 +153,34 @@ impl<B: Bucket> Writer<B> {
         holder: u64,
         token: u64,
     ) -> Result<Self, Error> {
+        Self::open_keyed(bucket, branch, (holder, token), Ring::clear()).await
+    }
+
+    /// fxdax: takes `branch` over as [`Writer::open`] does, holding `keys`, its store's ring
+    /// (TASK-411.3).
+    pub async fn open_keyed(
+        bucket: Arc<B>,
+        branch: Branch,
+        (holder, token): (u64, u64),
+        keys: Arc<Ring>,
+    ) -> Result<Self, Error> {
         let record = branch::record(&*bucket, branch).await?.ok_or(Error::NoBranch)?;
-        Self::take(bucket, branch, record, (None, None), holder, token).await
+        Self::take(bucket, branch, record, (None, None), (holder, token), keys).await
     }
 
     /// Takes over the branch `before` recovered, whose record is `record`, as [`Writer::open`]
     /// does, having found both before it takes the head: its state, once it holds it, is
     /// `before`'s recovered on ([`recovery::recover_on`]), which reads only what came since.
+    /// fxdax: holding `keys` (TASK-411.3).
     pub async fn open_recovered(
         bucket: Arc<B>,
         record: Record,
         before: Recovered,
-        holder: u64,
-        token: u64,
+        (holder, token): (u64, u64),
+        keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         let branch = before.state.branch;
-        Self::take(bucket, branch, record, (Some(before), None), holder, token).await
+        Self::take(bucket, branch, record, (Some(before), None), (holder, token), keys).await
     }
 
     /// Takes over the branch `before` recovered as [`Writer::open_recovered`] does, its head taken
@@ -171,11 +190,12 @@ impl<B: Bucket> Writer<B> {
         bucket: Arc<B>,
         record: Record,
         (before, read): (Recovered, head::Read),
-        holder: u64,
-        token: u64,
+        (holder, token): (u64, u64),
+        keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         let branch = before.state.branch;
-        Self::take(bucket, branch, record, (Some(before), Some(read)), holder, token).await
+        let found = (Some(before), Some(read));
+        Self::take(bucket, branch, record, found, (holder, token), keys).await
     }
 
     /// Takes `branch`, whose record is `record`, over, as [`Writer::open`] says: its state
@@ -186,8 +206,8 @@ impl<B: Bucket> Writer<B> {
         branch: Branch,
         record: Record,
         (before, read): (Option<Recovered>, Option<head::Read>),
-        holder: u64,
-        token: u64,
+        (holder, token): (u64, u64),
+        keys: Arc<Ring>,
     ) -> Result<Self, Error> {
         // Before the head: a point has none, and nothing writes it, whoever asks.
         record.writable()?;
@@ -203,9 +223,11 @@ impl<B: Bucket> Writer<B> {
         // branch, recovered from the head it took, which nothing changes but a later taking.
         let recovering = async {
             match before {
-                None => recovery::recover_from(&*bucket, branch, record.origin(), named).await,
+                None => {
+                    recovery::recover_from(&*bucket, branch, record.origin(), named, &keys).await
+                }
                 Some(before) => {
-                    recovery::recover_on(&*bucket, record.origin(), before, named).await
+                    recovery::recover_on(&*bucket, record.origin(), before, named, &keys).await
                 }
             }
         };
@@ -239,6 +261,7 @@ impl<B: Bucket> Writer<B> {
                 stopped: None,
             }),
             mover: std::sync::OnceLock::new(),
+            keys,
         };
         // Forks acknowledged by the writers before, whose children may lack their records.
         writer.record_forks().await?;
@@ -269,6 +292,11 @@ impl<B: Bucket> Writer<B> {
 
     pub fn branch(&self) -> Branch {
         self.branch
+    }
+
+    /// fxdax: the keys it reads and seals under (TASK-411.3).
+    pub fn keys(&self) -> &Arc<Ring> {
+        &self.keys
     }
 
     pub fn epoch(&self) -> u64 {
@@ -371,7 +399,9 @@ impl<B: Bucket> Writer<B> {
             return Err(self.stop(error));
         }
         let key = layout::segment(self.branch, seq, self.epoch);
-        let taken = |bytes: &[u8]| match layout::footer::<Footer>(bytes)? == footer {
+        let keys = self.keys.of(self.branch.id);
+        let read = |bytes: &[u8]| layout::footer_under::<Footer>(bytes, &keys);
+        let taken = |bytes: &[u8]| match read(bytes)? == footer {
             true => Ok(()),
             false => Err(Error::Corrupt(format!("{key} ends with another footer than taken"))),
         };
@@ -482,7 +512,8 @@ impl<B: Bucket> Writer<B> {
             .map(|fork| async move {
                 let origin = Origin { parent: self.branch, at: fork.at };
                 let child = Child { branch: fork.child, owner: fork.owner, point: fork.point };
-                match branch::record_fork(&*self.bucket, child, origin).await {
+                let keys = crate::keys::Parents::Held(&self.keys);
+                match branch::record_fork_under(&*self.bucket, child, origin, keys).await {
                     Ok(()) => {}
                     Err(Error::IdTaken(child)) => drop(self.inner().refused.insert(child)),
                     Err(error) => return Err(error),
@@ -582,7 +613,8 @@ impl<B: Bucket> Writer<B> {
         let key = layout::checkpoint(self.branch, seq, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
-        bucket::create(&*self.bucket, &key, crate::checkpoint::encode(&state)).await;
+        let checkpoint = crate::checkpoint::encode_under(&state, self.keys.sealing());
+        bucket::create(&*self.bucket, &key, checkpoint).await;
         {
             let mut held = self.held.lock().await;
             if held.head.checkpoint.is_none_or(|(at, _)| at < seq) {
@@ -673,7 +705,7 @@ mod tests {
             let (again, other) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
             let again_key =
                 layout::extent(layout::TEST_CELL, writer.epoch(), writer.chain().next_seq(), again);
-            let again_bytes = layout::with_footer(b"again", &());
+            let again_bytes = layout::own_extent(again, b"again", None);
             bucket::create(&*bucket, &again_key, again_bytes).await;
             let own = vec![(again.sequence, b"again".to_vec())];
             let seq = add(&writer, Commit { tag: 1, own, ..Commit::default() }).unwrap();
@@ -931,7 +963,8 @@ mod tests {
         assert_eq!(before.end(), 1);
         // Committed in between.
         commit(2);
-        let opening = Writer::open_recovered(bucket.clone(), record, before, 11, 0);
+        let opening =
+            Writer::open_recovered(bucket.clone(), record, before, (11, 0), Ring::clear());
         let (second, rounds) = bucket.served_in_rounds(opening);
         let second = second.unwrap();
         assert_eq!(second.last_commit(), Some(2));
@@ -975,7 +1008,13 @@ mod tests {
             (record, before, read)
         };
         let (record, before, read) = found();
-        let opening = Writer::open_recovered_from(bucket.clone(), record, (before, read), 11, 0);
+        let opening = Writer::open_recovered_from(
+            bucket.clone(),
+            record,
+            (before, read),
+            (11, 0),
+            Ring::clear(),
+        );
         let (second, rounds) = bucket.served_in_rounds(opening);
         let second = second.unwrap();
         assert_eq!(second.epoch(), 2);
@@ -984,7 +1023,13 @@ mod tests {
         let (record, before, read) = found();
         let (third, _) = bucket.served(Writer::open(bucket.clone(), test_branch(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);
-        let opening = Writer::open_recovered_from(bucket.clone(), record, (before, read), 13, 0);
+        let opening = Writer::open_recovered_from(
+            bucket.clone(),
+            record,
+            (before, read),
+            (13, 0),
+            Ring::clear(),
+        );
         let (fourth, rounds) = bucket.served_in_rounds(opening);
         assert_eq!(fourth.unwrap().epoch(), 4);
         // Its update refused, its answer read back, as an update whose answer was lost is told
@@ -1039,7 +1084,7 @@ mod tests {
             let segment = |footer: &Footer| -> Vec<u8> {
                 Segment { data: b"abc".to_vec(), footer: footer.clone() }.encode()
             };
-            let own = layout::with_footer(b"large", &());
+            let own = layout::own_extent(large, b"large", None);
             let owns = || vec![(own_key.clone(), own.clone().into())];
             let objects = |footer: &Footer, own| Objects {
                 footer: footer.clone(),

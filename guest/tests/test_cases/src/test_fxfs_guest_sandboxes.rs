@@ -507,11 +507,29 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             ["raw", "copied", "framed", "own", "log"].into_iter().filter_map(kind).sum();
         eprintln!(
             "sandboxes: {host}: guest_gib={:.2} stores_written_gib={:.2} ratio={:.2} \
-             segments_framed_in_place={}",
+             segments_framed_in_place={} framing_read_gib={:.2} seen_ahead_gib={:.2} \
+             held_parts_gib={:.2} held_parts_taken_gib={:.2} held_parts_peak_mib={:.1} \
+             held_parts_evicted_gib={:.2} held_parts_evicted={} held_parts_late={} \
+             held_parts_skipped={}",
             raw as f64 / GIB as f64,
             written as f64 / GIB as f64,
             written as f64 / raw.max(1) as f64,
             stats.get("segments_framed_in_place").copied().unwrap_or(0),
+            // fxdax: what framings read of segments' data, and looks ahead as they filled
+            // (TASK-400).
+            stats.get("framing_read_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            stats.get("seen_ahead_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            // fxdax: the parts packed as segments filled, held until their framings: in all, taken
+            // by them, at most at once, and let go of by the memory governor (TASK-400).
+            stats.get("held_parts_held_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            stats.get("held_parts_taken_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            stats.get("held_parts_peak_bytes").copied().unwrap_or(0) as f64 / (1 << 20) as f64,
+            stats.get("held_parts_evicted_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
+            stats.get("held_parts_evicted").copied().unwrap_or(0),
+            // fxdax: and those their framings found not packed yet, or never packed, the packing
+            // ahead behind, which they read and packed (TASK-400).
+            stats.get("held_parts_late").copied().unwrap_or(0),
+            stats.get("held_parts_skipped").copied().unwrap_or(0),
         );
         Ok((raw, written))
     }
@@ -653,11 +671,18 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 );
                 // Where their time went: each phase, summed, and that of the slowest and of each
                 // past the budget (TASK-336).
-                eprintln!("sandboxes: {}: slow framings' phases: {}", host.name, phases_summed(&slow));
+                eprintln!(
+                    "sandboxes: {}: slow framings' phases: {}",
+                    host.name,
+                    phases_summed(&slow)
+                );
                 let slowest_one = slow.iter().max_by(|a, b| a.ms.total_cmp(&b.ms));
                 for framing in past.iter().copied().chain(slowest_one.filter(|_| over == 0)) {
                     let phases = phases_summed([framing]);
-                    eprintln!("sandboxes: {}: a framing of {:.1} ms: {phases}", host.name, framing.ms);
+                    eprintln!(
+                        "sandboxes: {}: a framing of {:.1} ms: {phases}",
+                        host.name, framing.ms
+                    );
                 }
                 if over > 0 {
                     tally.failed.push(format!(

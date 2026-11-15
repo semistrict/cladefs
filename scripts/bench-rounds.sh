@@ -59,10 +59,16 @@ while IFS= read -r name; do
     passed+=("$name=${!name}")
 done < <(compgen -e | grep '^FXDAX_' || true)
 
+# as_root COMMAND...: COMMAND as root, inside a job, with the job's TMPDIR, fxjob's, which it
+# removes with the job: sudo, set-user-ID, never passes it on (glibc drops it), so env sets it,
+# expanded by the job's shell.
+# shellcheck disable=SC2016 # Expanded by the job's shell.
+as_root=(bash -c 'exec sudo env TMPDIR="${TMPDIR:-/tmp}" "$@"' as-root)
+
 # Built as root, as the runs boot it, then given back.
 artifacts=$results/artifacts
 fxjob --name rounds-build --mem 8G -- nice -n 19 \
-    sudo env "PATH=$PATH" "HOME=$HOME" "${passed[@]}" "FXDAX_E2E_BUILD_ONLY=$artifacts" \
+    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" "FXDAX_E2E_BUILD_ONLY=$artifacts" \
     "$repo/scripts/test-e2e.sh" "${cases[@]}" > "$results/build.log" 2>&1 ||
     { echo "building failed: $results/build.log" >&2; exit 1; }
 sudo chown -R "$(id -u):$(id -g)" "$repo" "$HOME/.cargo" "$HOME/.rustup" "$results"
@@ -88,7 +94,7 @@ for ((round = 1; round <= rounds; round++)); do
         for resource in cpu memory io; do stalls_before+=("$(stalled "$resource")"); done
         outcome=ok
         fxjob --bench --mem "${FXDAX_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
-            sudo env "PATH=$PATH" "HOME=$HOME" "${passed[@]}" \
+            "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" \
             "FXDAX_E2E_PREBUILT=$artifacts" "FXDAX_E2E_RESULTS=$out/e2e" "FXDAX_BENCH_RESULTS=$out" \
             "FXDAX_EXTENTD_REMOTE=${FXDAX_EXTENTD_REMOTE:-file://$out/bucket}" \
             "$repo/scripts/test-e2e.sh" "$case" > "$out/run.log" 2>&1 || outcome=failed

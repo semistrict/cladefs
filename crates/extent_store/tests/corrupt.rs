@@ -88,7 +88,8 @@ fn stored(dir: &MemDir, store: &Store<MemDir>, extent: ExtentId, offset: u64) ->
         place => panic!("{extent:?} is {place:?}"),
     };
     let bytes = extent_store::read_whole(&dir.open(&path, true).unwrap()).unwrap();
-    let (place, part) = Parts::of(&bytes).unwrap().part(at / PART).unwrap();
+    let opened = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().part(at / PART).unwrap();
+    let (place, part) = (opened.place, opened.stored);
     let at = match part.encoding {
         Encoding::Raw => part.offset + (at - place.start),
         Encoding::Zstd => part.offset + part.len / 2,
@@ -164,7 +165,7 @@ fn flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments() {
     store.write(extent(2), BLOCK as u64, &noise(3, BLOCK)).unwrap();
     let segment = format!("segments/{:016x}/{:016x}", BRANCH.id, 0);
     let bytes = extent_store::read_whole(&dir.open(&segment, true).unwrap()).unwrap();
-    let part = Parts::of(&bytes).unwrap().stored[0];
+    let part = Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
     assert_eq!(part.encoding, Encoding::Raw);
     // Extent 2's first block follows extent 1's.
     flip(
@@ -189,7 +190,7 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         store.flush().unwrap();
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
-        assert_eq!(extent_frame::data(&bytes).unwrap(), data);
+        assert_eq!(extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap(), data);
         let byte = stored(&dir, &store, extent(1), MIB as u64 + 5);
         flip(&dir, &byte);
         let Err(error) = closed.bytes() else { panic!("took a flipped byte") };

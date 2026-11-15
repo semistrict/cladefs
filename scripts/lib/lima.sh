@@ -9,8 +9,11 @@
 # content, as a host's tree is (host_tree, scripts/lib/linux-host-setup.sh);
 # what the script leaves behind stays in the VM.
 #
-# LIBCLANG_PATH, which building Firecracker's bindings needs where llvm-config doesn't find
-# libclang, passes through if set.
+# The script takes this environment's fxdax settings, FXDAX_* but FXDAX_LIMA_INSTANCE, as they
+# are (a path among them names the VM's file, absolute: FXDAX_GUEST_KERNEL a kernel
+# build-guest-kernel.sh built there), and LIBCLANG_PATH, which building Firecracker's bindings
+# needs where llvm-config doesn't find libclang. Its builds are of the checkout's commit
+# (FXDAX_BUILD_COMMIT, scripts/build-commit.sh), as the VM's copy has no .git to say.
 set -euo pipefail
 
 instance="${FXDAX_LIMA_INSTANCE:-default}"
@@ -21,13 +24,20 @@ args=
 if (( $# > 0 )); then args=$(printf ' %q' "$@"); fi
 library=$(printf '%q' "$repo/scripts/lib/linux-host-setup.sh")
 source=$(printf '%q' "$repo")
-libclang=$(printf '%q' "${LIBCLANG_PATH:-}")
+export FXDAX_BUILD_COMMIT=${FXDAX_BUILD_COMMIT:-$("$repo/scripts/build-commit.sh" "$repo")}
+settings=
+for name in $(compgen -e); do
+    case $name in
+        FXDAX_LIMA_INSTANCE) ;;
+        FXDAX_* | LIBCLANG_PATH) settings+="export $name=$(printf '%q' "${!name}"); " ;;
+    esac
+done
 
 limactl shell "$instance" -- bash -lc "
     set -euo pipefail
     source $library
     work=~ repo=$source
     host_tree fxdax-test
-    if [[ -n $libclang ]]; then export LIBCLANG_PATH=$libclang; fi
+    $settings
     ~/fxdax-test/scripts/$script$args
 "

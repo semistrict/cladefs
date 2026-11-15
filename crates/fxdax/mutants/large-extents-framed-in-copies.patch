@@ -6,12 +6,12 @@
 # Killer: remote::write_budgets::a_hosts_store_writes_what_its_design_says
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -1723,10 +1723,6 @@ impl<D: Dir> Store<D> {
+@@ -2111,10 +2111,6 @@ impl<D: Dir> Store<D> {
              raw.read_cached(buf, at)?;
              let end = packer.end();
              let packed = packer.push(buf);
 -            // As they are, where they are, as those before.
--            if framed.is_none() && end == at && packed[..] == buf[..] {
+-            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
 -                continue;
 -            }
              let file = match &mut framed {

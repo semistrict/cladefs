@@ -143,11 +143,35 @@ pub fn set_weight(tenant: &str, weight: u64) -> Result<(), Errno> {
     Ok(())
 }
 
-/// fxdax: the governor's look at the host's memory (TASK-358): every tenant's memory together
-/// limited to `allowance` bytes, and held past it, evicted at once: each tenant past its share by
-/// weight down to it ([`super::governor::shares`]), then any tenant's, least recently used first.
+/// fxdax: the parts of segments the daemon's stores pack as they fill, held until their framings,
+/// which they share (`extent_store::HeldParts`, TASK-400): memory the daemon holds, which the
+/// governor lets go of before any tenant's ([`govern`]).
+pub fn held_parts() -> &'static Arc<extent_store::HeldParts> {
+    static HELD: std::sync::LazyLock<Arc<extent_store::HeldParts>> =
+        std::sync::LazyLock::new(extent_store::HeldParts::new);
+    &HELD
+}
+
+/// fxdax: the memory the governor governs ([`govern`]), in bytes: what every tenant's arena holds,
+/// and the parts held ([`held_parts`]).
+pub fn governed_bytes() -> u64 {
+    physmem::arenas_bytes() + held_parts().bytes()
+}
+
+/// fxdax: the governor's look at the host's memory (TASK-358): every tenant's memory together, and
+/// the parts held ([`held_parts`]), limited to `allowance` bytes, and held past it, evicted at
+/// once: parts held first, newest first, down to what the tenants leave of it, as they are derived
+/// from what the stores hold on disk, whose framings read and pack them again (TASK-400); then each
+/// tenant past its share by weight down to it ([`super::governor::shares`]), then any tenant's,
+/// least recently used first. The tenants are limited to `allowance`: the parts held take no room
+/// from them, but what the headroom leaves between looks.
 pub fn govern(allowance: u64) {
     GOVERNED.store(allowance, Ordering::Relaxed);
+    let parts = held_parts();
+    let room = allowance.saturating_sub(physmem::arenas_bytes());
+    if parts.bytes() > room {
+        parts.evict_to(room);
+    }
     let weighted: Vec<(String, u64)> = {
         let registry = REGISTRY.lock().unwrap();
         registry.apply_total();

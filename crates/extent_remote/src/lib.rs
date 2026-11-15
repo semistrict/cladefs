@@ -58,6 +58,7 @@ pub mod collector;
 pub mod faults;
 pub mod fetch;
 pub mod head;
+pub mod keys;
 pub mod layout;
 pub mod local;
 pub mod marks;
@@ -127,6 +128,29 @@ pub enum Error {
     Lost(String),
     #[error("corrupt: {0}")]
     Corrupt(String),
+    /// fxdax: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
+    /// unwrapped by none, or revoked; or the collector's marking, which reads none of the data of
+    /// objects sealed, its compaction reading them under their keys (TASK-411.6).
+    #[error("{}", extent_frame::Error::NoKey(*.0))]
+    NoKey(extent_frame::KeyId),
+    /// fxdax: an object in the clear, of a branch whose record has a DEK, its objects sealed: a
+    /// downgrade, its seal, MACs and tags zeroed by one who can write the bucket, or another's
+    /// object put there (TASK-411.3). It names the object.
+    #[error("{0}: in the clear, of a branch whose objects are sealed")]
+    Downgrade(String),
+    /// fxdax: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
+    /// revoked or destroyed, none there, or the KMS failed.
+    #[error("{0}")]
+    Kms(String),
+    /// fxdax: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
+    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them, or its cell
+    /// is in the clear, which keeps no key, as no sealed data goes into the clear. A fork so is
+    /// refused before anything of it is made (`keys::inheriting`).
+    #[error(
+        "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed, \
+         and its record holds not their keys"
+    )]
+    Inherited { branch: layout::Branch, from: layout::Branch },
     /// The branch's record says its objects are of another format than this one's, newer or
     /// older, which reads none of them (doc-11, rule 1; TASK-141.2, TASK-165.3).
     #[error(
@@ -184,6 +208,26 @@ pub enum Left {
 impl From<extent_frame::Corrupt> for Error {
     fn from(corrupt: extent_frame::Corrupt) -> Self {
         Self::Corrupt(corrupt.0)
+    }
+}
+
+impl From<extent_frame::Error> for Error {
+    fn from(error: extent_frame::Error) -> Self {
+        match error {
+            extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
+            extent_frame::Error::NoKey(key) => Self::NoKey(key),
+            extent_frame::Error::Clear => Self::Downgrade("an object".into()),
+        }
+    }
+}
+
+impl Error {
+    /// fxdax: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
+    pub fn reading(self, key: &str) -> Self {
+        match self {
+            Self::Downgrade(_) => Self::Downgrade(key.to_owned()),
+            error => error,
+        }
     }
 }
 

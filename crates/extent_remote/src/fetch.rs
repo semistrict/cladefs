@@ -29,10 +29,20 @@
 //! and an object that holds no longer what a reader's index says is read as one gone: where its
 //! moves say. The footer and the table are tied to one version of an object by their CRCs, which
 //! the trailer and the table hold, and the parts by theirs, which the table holds.
+//!
+//! fxdax: what a host's fetchers keep, they keep as stored, sealed or not, as a reader holding no
+//! key reads it, and open with the keys of every store the host serves ([`Memory::keys`],
+//! `keys::HostRing`, TASK-411.3): an object's tail is opened, its MACs checked, once the host holds
+//! its key, and a part unpacked by the tail so opened; a part sealed under a key the host doesn't
+//! hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear, of a
+//! branch whose objects the host's keys say are sealed, is refused, naming it
+//! ([`Error::Downgrade`]); and an extent's own object whose footer names another extent than its
+//! key, or a moves' that names another object than its key's, is no object of theirs.
 
 use crate::bucket::{self, Bucket, ByteRange};
 use crate::cache::Cache;
 use crate::checkpoint::Table;
+use crate::keys::{self, HostRing};
 use crate::layout::{self, Footer, Kind, Location, Moves, PART};
 use crate::moves::MOVES;
 use crate::object::{self, TAIL};
@@ -40,6 +50,7 @@ use crate::peer::{Peer, Peers};
 use crate::Error;
 use futures::channel::oneshot;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::Range;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -189,10 +200,14 @@ impl Budget {
 }
 
 /// An object's frame, where its parts are stored, and where in its data each extent it holds is,
-/// as its footer says, or, a checkpoint's, its table: its tail.
+/// as its footer says, or, a checkpoint's, its table: its tail. fxdax: as read, by a reader
+/// holding no key, which a peer's asking goes by; and opened under the host's keys once they hold
+/// its key (TASK-411.3).
 #[derive(Debug)]
 struct Tail {
-    parts: extent_frame::Parts,
+    raw: object::Tail,
+    /// Its parts as a reader holding its key reads them, its MACs checked: once the host holds it.
+    opened: OnceLock<extent_frame::Parts>,
     /// Each extent's offset in its data, and its length.
     extents: HashMap<ExtentId, (u64, u64)>,
     /// A checkpoint's table, which its footer is.
@@ -203,9 +218,11 @@ impl Tail {
     /// The tail of the object at `key`, as read, `tail`: a segment's footer names the extents
     /// sealed in it, and moves' those the collector moved there; an extent stored on its own is
     /// its object's whole data, which its key names; a checkpoint's footer is its table. Other
-    /// objects hold no extents.
+    /// objects hold no extents. fxdax: an extent's footer names it, and moves' the object they are
+    /// of: one naming another is refused, a whole object copied to another key (TASK-411.3).
     fn of(key: &str, tail: object::Tail) -> Result<Self, Error> {
-        let (footer, parts) = (tail.footer(), &tail.parts);
+        let parts = &tail.parts;
+        let footer = tail.footer();
         let (extents, table) = match layout::kind(key) {
             // fxdax: and those of the commit it goes on with, sealed in it too (TASK-92.41).
             Kind::Segment { .. } => (
@@ -214,29 +231,54 @@ impl Tail {
                     .collect(),
                 None,
             ),
-            Kind::Moves { .. } => (
-                (layout::decode::<Moves>(footer)?.extents.into_iter())
-                    .map(|(extent, to)| (extent, (to.offset, to.len)))
-                    .collect(),
-                None,
-            ),
-            Kind::Extent { branch, sequence, .. } => (
-                HashMap::from([(ExtentId::new(branch.id, sequence), (0, parts.frame.data_len))]),
-                None,
-            ),
+            Kind::Moves { .. } => {
+                let moves = layout::decode::<Moves>(footer)?;
+                if Some(&moves.of) != layout::moved_from(key).as_ref() {
+                    return Err(Error::Corrupt(format!("{key} holds the moves of {}", moves.of)));
+                }
+                let extents = moves.extents.into_iter();
+                (extents.map(|(extent, to)| (extent, (to.offset, to.len))).collect(), None)
+            }
+            Kind::Extent { branch, sequence, .. } => {
+                let extent = ExtentId::new(branch.id, sequence);
+                let named: ExtentId = layout::decode(footer)?;
+                if named != extent {
+                    return Err(Error::Corrupt(format!("{key} holds extent {named:?}")));
+                }
+                (HashMap::from([(extent, (0, parts.frame.data_len))]), None)
+            }
             Kind::Checkpoint { .. } => (HashMap::new(), Some(Table::decode(footer)?)),
             _ => (HashMap::new(), None),
         };
-        Ok(Self { parts: tail.parts, extents, table })
+        Ok(Self { raw: tail, opened: OnceLock::new(), extents, table })
     }
 
-    /// Where part `part` of the object at `key` is stored, and how long it is unpacked.
-    fn stored(&self, key: &str, part: u64) -> Result<(extent_frame::Stored, u64), Error> {
-        let (place, stored) = self
-            .parts
-            .part(part)
-            .map_err(|_| Error::Corrupt(format!("part {part} of {key}, past its end")))?;
-        Ok((stored, place.end - place.start))
+    /// Where its parts are stored, as read.
+    fn parts(&self) -> &extent_frame::Parts {
+        &self.raw.parts
+    }
+
+    /// Part `part` of the object at `key`, as read: where it is stored, and how long it is
+    /// unpacked.
+    fn part(&self, key: &str, part: u64) -> Result<extent_frame::Part, Error> {
+        part_of(self.parts(), key, part)
+    }
+
+    /// fxdax: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
+    /// table and footer checked against their MACs, under its key if `ring` holds it, and kept so;
+    /// as read otherwise, a sealed one's unread. Refused if it is in the clear and `ring` holds the
+    /// object's branch sealed ([`Error::Downgrade`]), or authenticated under a key it doesn't hold
+    /// (TASK-411.3).
+    fn opened(&self, ring: &HostRing, key: &str) -> Result<Cow<'_, extent_frame::Parts>, Error> {
+        if let Some(opened) = self.opened.get() {
+            return Ok(Cow::Borrowed(opened));
+        }
+        let ring = ring.ring();
+        let parts = self.raw.open(&keys::of_key(&ring, key)).map_err(|err| err.reading(key))?;
+        match parts.opens() {
+            true => Ok(Cow::Borrowed(self.opened.get_or_init(|| parts))),
+            false => Ok(Cow::Owned(parts)),
+        }
     }
 
     /// About the bytes it takes in memory: where its parts are stored, where its extents are, and
@@ -245,10 +287,17 @@ impl Tail {
         use std::mem::size_of;
         // A map's entries, and a byte of control each, in a table an eighth larger than they fill.
         let extents = self.extents.capacity() * (size_of::<(ExtentId, (u64, u64))>() + 1) * 8 / 7;
-        let parts = self.parts.stored.capacity() * size_of::<extent_frame::Stored>();
-        let table = self.table.as_ref().map_or(0, |_| self.parts.frame.footer_len as usize);
-        (size_of::<Self>() + extents + parts + table) as u64
+        // fxdax: as read, and opened, and its bytes as read (TASK-411.3).
+        let parts = 2 * self.parts().stored.capacity() * size_of::<extent_frame::Stored>();
+        let table = self.table.as_ref().map_or(0, |_| self.parts().frame.footer_len as usize);
+        (size_of::<Self>() + extents + parts + table + self.raw.bytes.len()) as u64
     }
+}
+
+/// Part `part` of `parts`, the object at `key`'s: where it is stored, how long it is unpacked, and
+/// how it is opened.
+fn part_of(parts: &extent_frame::Parts, key: &str, part: u64) -> Result<extent_frame::Part, Error> {
+    (parts.part(part)).map_err(|_| Error::Corrupt(format!("part {part} of {key}, past its end")))
 }
 
 /// What a host's fetchers keep in memory, which they share, as they share its budget and its
@@ -264,11 +313,48 @@ pub struct Memory {
     tails: Mutex<Tails>,
     recent: Mutex<Recent>,
     parts: Mutex<Parts>,
+    /// fxdax: the keys of the stores the host serves, which what it keeps is opened with
+    /// (TASK-411.3).
+    keys: Arc<HostRing>,
 }
 
 impl Memory {
     pub fn new() -> Arc<Self> {
         Arc::default()
+    }
+
+    /// fxdax: the keys of the stores the host serves, which its stores hold theirs in as they open
+    /// (`extent_store::upload`, TASK-411.3).
+    pub fn keys(&self) -> &Arc<HostRing> {
+        &self.keys
+    }
+
+    /// fxdax: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's KEK
+    /// is revoked or destroyed, or a cell shredded, does (doc-16, Shredding; TASK-411.7): their
+    /// tails, opened under keys it may hold no more, and the parts fetched last, unpacked, in the
+    /// clear. Read again, they are opened under the keys the host holds then: those other stores
+    /// hold, as a fork of another tenant's keeps what it inherited, and no others
+    /// ([`HostRing::forget`]). GETs in flight finish as they would. Returns how many tails and
+    /// parts it dropped.
+    pub fn forget_kept(&self, scope: keys::Scope) -> usize {
+        let of = |key: &str| layout::cell_of(key).is_some_and(|cell| scope.covers(cell));
+        let tails = {
+            let mut tails = self.tails.lock().unwrap();
+            let doomed: Vec<String> = tails.kept.keys().filter(|key| of(key)).cloned().collect();
+            for key in &doomed {
+                tails.remove(key, None);
+            }
+            doomed.len()
+        };
+        let mut recent = self.recent.lock().unwrap();
+        let doomed: Vec<(String, u64)> =
+            recent.parts.keys().filter(|(key, _)| of(key)).cloned().collect();
+        for id in &doomed {
+            let (used, dropped) = recent.parts.remove(id).expect("a part kept");
+            recent.by_use.remove(&used);
+            recent.bytes -= dropped.size();
+        }
+        tails + doomed.len()
     }
 }
 
@@ -364,38 +450,56 @@ enum Part {
 }
 
 /// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
-/// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21).
+/// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). fxdax:
+/// opened then, if sealed, in a copy: its stored bytes are what the cache keeps and peers are
+/// served (TASK-411.2); by the part as its tail is opened then, under the host's keys, a read
+/// failing so, its key not held yet, kept for none (TASK-411.3).
 struct Fetched {
-    stored: extent_frame::Stored,
-    /// How long it is unpacked.
-    len: u64,
+    /// The part, as its tail says it is stored, read holding no key.
+    part: extent_frame::Part,
     bytes: Arc<[u8]>,
-    unpacked: OnceLock<Result<Arc<[u8]>, Error>>,
+    unpacked: OnceLock<Arc<[u8]>>,
 }
 
 impl Fetched {
-    /// Part `part` of the object at `key`, of `bytes`, which are as `stored` says, checked.
-    fn new(stored: extent_frame::Stored, len: u64, bytes: Vec<u8>) -> Self {
-        Self { stored, len, bytes: bytes.into(), unpacked: OnceLock::new() }
+    /// `part` of the object at `key`, of `bytes`, which are as it says it is stored, checked.
+    fn new(part: extent_frame::Part, bytes: Vec<u8>) -> Self {
+        Self { part, bytes: bytes.into(), unpacked: OnceLock::new() }
     }
 
-    /// Its bytes, unpacked, those of part `part` of the object at `key`.
-    fn unpacked(&self, key: &str, part: u64) -> Result<Arc<[u8]>, Error> {
-        let unpacked = self.unpacked.get_or_init(|| match self.stored.encoding {
-            extent_frame::Encoding::Raw => Ok(self.bytes.clone()),
-            extent_frame::Encoding::Zstd => match self.stored.unpack(&self.bytes, self.len) {
-                Ok(unpacked) => Ok(unpacked.into()),
-                Err(err) => Err(Error::Corrupt(format!("part {part} of {key}: {err}"))),
+    /// Its bytes, unpacked, those of part `part` of the object at `key`, as `opened`, the part as
+    /// its tail is opened, opens them.
+    fn unpacked(
+        &self,
+        opened: &extent_frame::Part,
+        key: &str,
+        part: u64,
+    ) -> Result<Arc<[u8]>, Error> {
+        if let Some(unpacked) = self.unpacked.get() {
+            return Ok(unpacked.clone());
+        }
+        if opened.stored != self.part.stored {
+            return Err(Error::Corrupt(format!("part {part} of {key}, opened as another")));
+        }
+        let unpacked: Arc<[u8]> = match opened.as_is() {
+            true => self.bytes.clone(),
+            false => match opened.unpack(&self.bytes) {
+                Ok(unpacked) => unpacked.into(),
+                Err(extent_frame::Error::Corrupt(err)) => {
+                    return Err(Error::Corrupt(format!("part {part} of {key}: {err}")));
+                }
+                Err(err) => return Err(Error::from(err).reading(key)),
             },
-        });
-        unpacked.clone()
+        };
+        Ok(self.unpacked.get_or_init(|| unpacked).clone())
     }
 
-    /// The bytes it takes, unpacked too: a raw part's unpacked bytes are its stored bytes.
+    /// The bytes it takes, unpacked too: the unpacked bytes of a part stored as it is are its
+    /// stored bytes.
     fn size(&self) -> u64 {
-        match self.stored.encoding {
-            extent_frame::Encoding::Raw => self.len,
-            extent_frame::Encoding::Zstd => self.bytes.len() as u64 + self.len,
+        match self.part.as_is() {
+            true => self.part.len(),
+            false => self.bytes.len() as u64 + self.part.len(),
         }
     }
 }
@@ -420,7 +524,7 @@ impl Recent {
     fn get(&mut self, key: &str, part: u64, stored: &extent_frame::Stored) -> Option<Arc<Fetched>> {
         let id = (key.to_owned(), part);
         let (used, fetched) = self.parts.get_mut(&id)?;
-        if fetched.stored != *stored {
+        if fetched.part.stored != *stored {
             return None;
         }
         self.clock += 1;
@@ -632,17 +736,21 @@ impl<B: Bucket> Fetcher<B> {
         range: Range<u64>,
         priority: Priority,
     ) -> Result<Found, Error> {
-        if range.start > range.end || range.end > tail.parts.frame.data_len {
+        if range.start > range.end || range.end > tail.parts().frame.data_len {
             return Err(Error::Corrupt(format!("{range:?} past the end of {key}")));
         }
-        let numbers = tail.parts.frame.parts_of(range.clone());
+        // fxdax: opened under the host's keys (TASK-411.3).
+        let opened = tail.opened(&self.shared.memory.keys, key)?;
+        let numbers = tail.parts().frame.parts_of(range.clone());
         let parts = numbers.clone().map(|part| self.part(key, part, tail, priority));
         let parts = futures::future::try_join_all(parts).await?;
         let Range { start, end } = range;
         let mut bytes = Vec::with_capacity((end - start) as usize);
         for (number, part) in numbers.zip(parts) {
             let part = match part {
-                Part::Data(fetched) => fetched.unpacked(key, number)?,
+                Part::Data(fetched) => {
+                    fetched.unpacked(&part_of(&opened, key, number)?, key, number)?
+                }
                 Part::Gone => return Ok(Found::Gone),
                 Part::Changed => return Ok(Found::Changed(number)),
             };
@@ -716,9 +824,9 @@ impl<B: Bucket> Fetcher<B> {
         spawn(Box::pin(async move {
             // None past the object's end.
             let Ok(Some(tail)) = this.shared.tail(&key).await else { return };
-            let parts = parts.start..parts.end.min(tail.parts.frame.parts());
-            let held = |part: &u64| match (&this.shared.cache, tail.stored(&key, *part)) {
-                (Some(cache), Ok((stored, _))) => cache.holds(&key, *part, &stored),
+            let parts = parts.start..parts.end.min(tail.parts().frame.parts());
+            let held = |part: &u64| match (&this.shared.cache, tail.part(&key, *part)) {
+                (Some(cache), Ok(opened)) => cache.holds(&key, *part, &opened.stored),
                 _ => false,
             };
             let parts = parts.filter(|part| !held(part));
@@ -743,7 +851,7 @@ impl<B: Bucket> Fetcher<B> {
         stored: &extent_frame::Stored,
     ) -> Result<Option<Arc<[u8]>>, Error> {
         let Some(tail) = self.shared.tail(key).await? else { return Ok(None) };
-        if tail.stored(key, part).ok().is_none_or(|(ours, _)| ours != *stored) {
+        if tail.part(key, part).ok().is_none_or(|ours| ours.stored != *stored) {
             return Ok(None);
         }
         if let Some(fetched) = self.shared.recent_part(key, part, stored) {
@@ -770,7 +878,7 @@ impl<B: Bucket> Fetcher<B> {
         tail: &Arc<Tail>,
         priority: Priority,
     ) -> Result<Part, Error> {
-        let stored = tail.stored(key, part)?.0;
+        let stored = tail.part(key, part)?.stored;
         if let Some(fetched) = self.shared.recent_part(key, part, &stored) {
             return Ok(Part::Data(fetched));
         }
@@ -790,7 +898,7 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
         owner: Option<Arc<dyn Peer>>,
     ) -> Result<Part, Error> {
-        let stored = tail.stored(key, part)?.0;
+        let stored = tail.part(key, part)?.stored;
         let id: Flown = (key.to_owned(), part, stored, owner.is_some());
         let parts = &self.shared.memory.parts;
         let flight = {
@@ -857,7 +965,8 @@ impl<B: Bucket> Fetching<B> {
         granted: impl Future<Output = Grant>,
         owner: Option<Arc<dyn Peer>>,
     ) -> Result<Part, Error> {
-        let (stored, len) = tail.stored(key, part)?;
+        let opened = tail.part(key, part)?;
+        let stored = opened.stored;
         if let Some(fetched) = self.recent_part(key, part, &stored) {
             return Ok(Part::Data(fetched));
         }
@@ -875,7 +984,7 @@ impl<B: Bucket> Fetching<B> {
                 fetched
             }
         };
-        let fetched = Arc::new(Fetched::new(stored, len, bytes));
+        let fetched = Arc::new(Fetched::new(opened, bytes));
         if let Some(mut recent) = self.recent() {
             recent.put(key, part, fetched.clone());
         }
@@ -948,7 +1057,7 @@ impl<B: Bucket> Fetching<B> {
 
     /// Keeps `bytes`, part `part`'s stored bytes, checked, in the cache.
     fn keep(&self, key: &str, tail: &Tail, part: u64, bytes: &[u8]) {
-        let stored = &tail.parts.stored[part as usize];
+        let stored = &tail.parts().stored[part as usize];
         if let Some(Err(err)) = self.cached(|cache| cache.keep_part(key, part, stored, bytes)) {
             log::warn!("fxdax: keeping part {part} of {key} in the cache: {err}");
         }
@@ -1457,7 +1566,8 @@ mod tests {
         let tail = format!("get {KEY} last {TAIL}");
         assert_eq!(complete_all(&bucket, &mut reads), std::slice::from_ref(&part));
         assert_eq!(reads.result(read), Some(Ok(data[..10].to_vec())));
-        let stored = extent_frame::Parts::of(&whole(&data)).unwrap().stored[0];
+        let stored =
+            extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap().stored[0];
         assert_eq!(cache.part(KEY, 0, &stored).unwrap(), Some(data.clone()));
 
         // Neither is.
@@ -1540,7 +1650,7 @@ mod tests {
     fn compressed_parts_are_fetched_and_kept_so() {
         let data = pattern(2 * PART);
         let bucket = bucket(&data);
-        let parts = extent_frame::Parts::of(&whole(&data)).unwrap();
+        let parts = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap();
         let stored = parts.stored[1];
         assert_eq!(stored.encoding, extent_frame::Encoding::Zstd);
         let dir = tempfile::tempdir().unwrap();
@@ -1581,7 +1691,8 @@ mod tests {
         let to = Location { key: layout::moves(KEY).unwrap(), offset: 10, len: MOVED.1 };
         let mut moved = vec![0; 10];
         moved.extend_from_slice(&data[MOVED.0 as usize..][..MOVED.1 as usize]);
-        let moves = layout::with_footer(&moved, &Moves { extents: vec![(EXTENT, to)] });
+        let moves =
+            layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
         block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
     }
@@ -1660,8 +1771,8 @@ mod tests {
         let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
         let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
         let moves = layout::moves(KEY).unwrap();
-        let moved =
-            extent_frame::Parts::of(&block_on(Direct(bucket.clone()).get(&moves)).unwrap().bytes);
+        let moved = block_on(Direct(bucket.clone()).get(&moves)).unwrap().bytes;
+        let moved = extent_frame::Parts::of(&moved, &extent_frame::NoKeys);
         assert_eq!(
             complete_all(&bucket, &mut reads),
             [
@@ -1696,7 +1807,8 @@ mod tests {
         let direct = Direct(bucket.clone());
         let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len: at.1 };
         let moved = data[at.0 as usize..][..at.1 as usize].to_vec();
-        let moves = layout::with_footer(&moved, &Moves { extents: vec![(EXTENT, to)] });
+        let moves =
+            layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
         block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let stale = segment(&noise(100), vec![(ExtentId::new(1, 9), 0, 100)]);
@@ -1776,7 +1888,8 @@ mod tests {
         let fetcher = Fetcher::new(bucket.clone(), limits(8), Memory::new(), Some(cache));
         let lookup = |key: &str, extent| bucket.served(fetcher.lookup(key, extent));
 
-        let stored = extent_frame::Parts::of(&bytes).unwrap().stored[0].range();
+        let stored =
+            extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0].range();
         let read =
             [format!("get {checkpoint} last {TAIL}"), format!("get {checkpoint} {stored:?}")];
         assert_eq!(lookup(&checkpoint, EXTENT), (Ok(Some(location.clone())), read.to_vec()));
@@ -1930,7 +2043,7 @@ mod tests {
         let fetcher = Fetcher::new(bucket.clone(), limits(8), Memory::new(), Some(cache.clone()));
         let fetcher = Rc::new(fetcher.reading_ahead(reads.spawn()));
         let location = location(4 * PART);
-        let parts = extent_frame::Parts::of(&whole(&data)).unwrap();
+        let parts = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap();
         let get = |part: usize| format!("get {KEY} {:?}", parts.stored[part].range());
         let mut read_at = |at: u64| {
             let read = reads.read(&fetcher, location.clone(), at, 10, Priority::Demand);
@@ -2027,7 +2140,7 @@ mod tests {
             }
             asked
         };
-        let parts = extent_frame::Parts::of(&whole(&data)).unwrap();
+        let parts = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap();
         let get = |part: usize| format!("get {KEY} {:?}", parts.stored[part].range());
         assert_eq!(read(&[5]), [format!("get {KEY} last {TAIL}"), get(0)]);
         assert_eq!(read(&[5]), Vec::<String>::new());
@@ -2202,7 +2315,8 @@ mod tests {
         let direct = Direct(bucket.clone());
         let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len };
         let moved = &data[at as usize..][..len as usize];
-        let moves = layout::with_footer(moved, &Moves { extents: vec![(EXTENT, to)] });
+        let moves =
+            layout::with_footer(moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
         block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let other: Vec<u8> = data.iter().map(|byte| byte ^ 0x5a).collect();
@@ -2304,7 +2418,7 @@ mod tests {
         assert_eq!(complete_all(&bucket, &mut reads), Vec::<String>::new());
         assert_eq!(reads.result(read), want);
         // One copy of the parts, each as stored and unpacked.
-        let stored = extent_frame::Parts::of(&whole(&data)).unwrap().stored;
+        let stored = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap().stored;
         assert_eq!(held(&fetchers).0, stored.iter().map(|stored| stored.len + PART).sum::<u64>());
     }
 
@@ -2633,7 +2747,8 @@ mod tests {
         let bucket = bucket(&data);
         let fetcher = Arc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
         let mut pool = LocalPool::new();
-        let (_, stored) = extent_frame::Parts::of(&whole(&data)).unwrap().part(1).unwrap();
+        let parts = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap();
+        let stored = parts.part(1).unwrap().stored;
         let mut other = stored;
         other.crc ^= 1;
         let spawner = pool.spawner();

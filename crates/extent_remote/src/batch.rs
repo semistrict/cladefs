@@ -181,7 +181,7 @@ pub fn objects(footer: Footer, read: Read) -> Objects {
             let body = Body::new(len, move || {
                 let mut data = vec![0; len as usize];
                 read(extent, &mut data)?;
-                Ok(own_object(&data))
+                Ok(layout::own_extent(extent, &data, None))
             });
             (location.key.clone(), body)
         })
@@ -197,11 +197,6 @@ pub fn objects(footer: Footer, read: Read) -> Objects {
         Ok(Segment { data, footer: framed.clone() }.encode())
     });
     Objects { footer, segment, own }
-}
-
-/// The object of an extent stored on its own, whose data is `data`: framed, with no footer.
-fn own_object(data: &[u8]) -> Vec<u8> {
-    layout::with_footer(data, &())
 }
 
 /// Commits for one segment, in order: what they make ([`Plan`]), its data, and that of the
@@ -270,7 +265,12 @@ pub struct Unframed {
 impl Unframed {
     /// Its objects, framed: the segment's, and its extents of their own's, at their keys.
     pub fn frame(self) -> Objects {
-        self.data.frame(&self.footer)
+        self.frame_under(None)
+    }
+
+    /// fxdax: its objects, framed, sealed as `sealing` says (TASK-411.3).
+    pub fn frame_under(self, sealing: layout::Sealing<'_>) -> Objects {
+        self.data.frame_under(&self.footer, sealing)
     }
 }
 
@@ -289,14 +289,19 @@ impl Data {
     /// The objects of the segment `footer` stamps, holding this data: the segment's, and its
     /// extents of their own's, at the keys `footer` names them at.
     pub fn frame(&self, footer: &Footer) -> Objects {
+        self.frame_under(footer, None)
+    }
+
+    /// fxdax: its objects, as [`Data::frame`], sealed as `sealing` says (TASK-411.3).
+    pub fn frame_under(&self, footer: &Footer, sealing: layout::Sealing<'_>) -> Objects {
         let own = (footer.own())
             .map(|(extent, location)| {
                 let data = self.own.get(&extent.sequence).expect("sealed on its own");
-                (location.key.clone(), own_object(data).into())
+                (location.key.clone(), layout::own_extent(extent, data, sealing).into())
             })
             .collect();
         let segment = Segment { data: self.segment.clone(), footer: footer.clone() };
-        Objects { footer: footer.clone(), segment: segment.encode().into(), own }
+        Objects { footer: footer.clone(), segment: segment.encode_under(sealing).into(), own }
     }
 }
 

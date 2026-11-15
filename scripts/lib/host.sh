@@ -218,7 +218,10 @@ host_command() {
     if (( nice )); then printf 'nice -n %d ' "$nice"; fi
     # shellcheck disable=SC2016 # For the host's shell to expand.
     # Root's git, in the user's worktrees, which it would refuse as another's (safe.directory).
-    printf '%s' 'sudo env PATH="$HOME/.cargo/bin:$PATH" HOME="$HOME"' " CARGO_BUILD_JOBS=$jobs" \
+    # The job's TMPDIR, fxjob's, which it removes with the job: sudo, set-user-ID, never passes it
+    # on (glibc drops it, whatever sudo keeps).
+    printf '%s' 'sudo env PATH="$HOME/.cargo/bin:$PATH" HOME="$HOME" TMPDIR="${TMPDIR:-/tmp}"' \
+        " CARGO_BUILD_JOBS=$jobs" \
         " NEXTEST_TEST_THREADS=$jobs GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory" \
         " GIT_CONFIG_VALUE_0='*'" \
         ${assignments[@]+"${assignments[@]/#/ }"}

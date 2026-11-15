@@ -9,7 +9,7 @@ the guest's Fxfs, with and without DAX, and shared as a volume over a read-only 
 
     scripts/linux-checkout-report.py RESULTS
 
-RESULTS is scripts/test-e2e.sh's results directory (a GCE run's `e2e`), with a directory for each
+RESULTS is scripts/test-e2e.sh's results directory (a ubu1 run's `e2e`), with a directory for each
 case run: `linux-checkout-ext4`, `linux-checkout-ext4-pmem`, `linux-checkout-fxfs` and
 `linux-checkout-fxfs-dax`. Each case's
 guests say `measure ROLE NAME VALUE UNIT` on its standard output (stdout.txt) and the host

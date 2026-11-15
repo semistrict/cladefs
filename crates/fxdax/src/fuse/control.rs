@@ -15,6 +15,7 @@ use crate::error::{Errno, Error};
 use crate::extentd::control::{channel, errno, saying};
 use crate::{Branch, BranchOf, Cell, Filesystem, SetAttr, Storage};
 use extent_remote::cell::{self, Kind};
+use extent_remote::keys;
 use proto::mount_client::MountClient;
 use proto::mount_server::MountServer;
 use proto::*;
@@ -218,7 +219,20 @@ impl proto::mount_server::Mount for Control {
                         Some(token) => token,
                         None => crate::host_store::token().map_err(Error::new)?,
                     };
-                    let holding = cell::hold(&*bucket, cell, (placement, placement), make, None);
+                    // fxdax: a cell made gets a KEK its tenant's wrapped, if the host has a KMS
+                    // and the tenant a KEK there (TASK-411.3).
+                    let holding = async {
+                        let kms = crate::remote::kms();
+                        let kek = match make {
+                            true => keys::new_cell_kek(kms.as_ref(), cell.tenant).await?,
+                            false => None,
+                        };
+                        let making = (make, kek.as_ref().map(|(_, kek)| kek));
+                        let held = cell::hold(&*bucket, cell, (placement, placement), making, None);
+                        let (held, object) = held.await?;
+                        drop(keys::held(kms.as_ref(), cell, object.clone(), kek));
+                        Ok::<_, extent_remote::Error>((held, object))
+                    };
                     let held = extent_store::upload::block_on(holding).map_err(Error::new)?;
                     let (_, object) = held.map_err(|err| {
                         let errno = cell_errno(&err);

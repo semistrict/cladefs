@@ -26,7 +26,7 @@
 
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Version};
-use crate::collector::{Collector, Holding, Marking, Options, Report};
+use crate::collector::{Collector, Heard, Holding, Marking, Options, Report};
 use crate::layout::Cell;
 use crate::store::Request;
 use crate::{Error, Left};
@@ -47,7 +47,7 @@ pub enum Mode {
 }
 
 /// A sweep over every cell of a bucket. See the module docs.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Sweep {
     pub options: Options,
     pub mode: Mode,
@@ -64,6 +64,10 @@ pub struct Sweep {
     /// or all of them the sweep's own task's, one at a time between their requests (tests, a
     /// runtime of one thread).
     pub spawned: bool,
+    /// fxdax: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
+    /// any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not to
+    /// be had at a pass before is now ([`Heard`], TASK-411.13).
+    pub kms: Option<extent_keys::kms::Shared>,
 }
 
 /// The requests made, of each kind, as a [`crate::store::Store`] counts them: a batch of deletes
@@ -217,12 +221,15 @@ impl Sweep {
         let started = Instant::now();
         // What another pass did after this, it leaves be.
         let since = bucket.now();
+        // fxdax: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
+        // (TASK-411.13).
+        let heard = Heard::new();
         let mut swept = Swept::default();
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
-            let (sweep, bucket) = (*self, bucket.clone());
-            let pass = async move { sweep.pass(&bucket, cell, since).await };
+            let (sweep, bucket, heard) = (self.clone(), bucket.clone(), heard.clone());
+            let pass = async move { sweep.pass(&bucket, cell, since, heard).await };
             match self.spawned {
                 false => pass.boxed(),
                 true => {
@@ -246,11 +253,19 @@ impl Sweep {
         swept
     }
 
-    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own.
-    async fn pass<B: Bucket>(&self, bucket: &Arc<B>, cell: Cell, since: u64) -> Ran {
+    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, hearing of
+    /// its tenant's KEK by `heard`, the sweep's.
+    async fn pass<B: Bucket>(
+        &self,
+        bucket: &Arc<B>,
+        cell: Cell,
+        since: u64,
+        heard: Arc<Heard>,
+    ) -> Ran {
         let counted = Counted::new(bucket.clone());
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let mut collector = Collector::new(self.options).holding(holding);
+        let collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
+        let mut collector = collector.heard(heard);
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {
@@ -485,7 +500,15 @@ mod tests {
     }
 
     fn sweep(at_once: usize) -> Sweep {
-        Sweep { options: NOW, mode: Mode::Delete, at_once, lease: LEASE, slowest: 3, spawned: false }
+        Sweep {
+            options: NOW,
+            mode: Mode::Delete,
+            at_once,
+            lease: LEASE,
+            slowest: 3,
+            spawned: false,
+            kms: None,
+        }
     }
 
     /// Two processes sweeping one bucket at once split its cells: each cell passed over once, by
@@ -765,8 +788,7 @@ mod tests {
         let before = block_on(sizes(&*bucket));
         let counted = bucket.stats();
         let compacting = Options { compact_below: 0.5, grace: 0 };
-        let sweep =
-            Sweep { options: compacting, at_once: 4, ..sweep(1) };
+        let sweep = Sweep { options: compacting, at_once: 4, ..sweep(1) };
         let mut passes = Vec::new();
         let swept = block_on(sweep.run(&bucket, |passed| passes.push(passed.clone())));
         let stats = bucket.stats();
@@ -787,6 +809,8 @@ mod tests {
             deleted_bytes: gone.iter().map(|(_, size)| **size).sum(),
             compacted_bytes,
             skipped: 0,
+            locked: 0,
+            uncompacted: 0,
         };
         assert_eq!(swept.report, expected);
         // Of each cell: the segment holding what the next freed, that one, and the one freeing

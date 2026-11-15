@@ -74,6 +74,9 @@ pub struct Io {
     /// fxdax: the most bytes a file held written, but neither written back ([`File::write_back`])
     /// nor synced since, at any time: what a sync of it would have had to write (TASK-165.9).
     pub most_unwritten: u64,
+    /// fxdax: the most bytes a sync of a file found written, but neither written back nor synced
+    /// since: what it wrote at once (TASK-401).
+    pub most_synced_unwritten: u64,
     /// fxdax: the syncs of directories, and of files (TASK-369, TASK-333).
     pub synced_dirs: u64,
     pub synced_files: u64,
@@ -205,6 +208,20 @@ impl MemDir {
     pub fn failed_elsewhere(&self) -> bool {
         let fs = self.fs.lock().unwrap();
         fs.failed_on.is_some() && fs.failed_on != fs.limited_on
+    }
+
+    /// fxdax: every file in it, by its path, with what it holds now, durable or not: what tests
+    /// search for bytes that must be in no file of a host's (TASK-411.9).
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let fs = self.fs.lock().unwrap();
+        let mut files = Vec::new();
+        for (dir, entries) in &fs.dirs {
+            for (name, inode) in entries {
+                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+                files.push((path, fs.inodes[inode].data.clone()));
+            }
+        }
+        files
     }
 
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
@@ -418,8 +435,9 @@ impl File for MemFile {
         let inode = fs.inodes.get_mut(&self.inode).unwrap();
         inode.durable = inode.data.clone();
         inode.writes.clear();
-        inode.unwritten = 0;
+        let unwritten = std::mem::take(&mut inode.unwritten);
         fs.io.synced_files += 1;
+        fs.io.most_synced_unwritten = fs.io.most_synced_unwritten.max(unwritten);
         Ok(())
     }
 

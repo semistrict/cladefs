@@ -28,7 +28,7 @@
 //! FXDAX_SEED replays a run, round by round: its first round's seed, which the run's outcomes say;
 //! FXDAX_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
 //! FXDAX_SOAK_LOAD_SECS fixes the loads' time; FXDAX_SOAK_STATE is where runs keep their state,
-//! /var/tmp/fxdax-soak by default: on disk, as /tmp may be memory (tmpfs, as on GCE's Ubuntu 26.04,
+//! /var/tmp/fxdax-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
 //! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is FXDAX_EXTENTD_REMOTE's, under
 //! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
 //! with failpoints (scripts/test-e2e.sh's FXDAX_EXTENTD_FAILPOINTS).

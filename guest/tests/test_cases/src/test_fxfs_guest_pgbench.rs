@@ -186,7 +186,7 @@ mod host {
     }
 
     /// fxdax: the memory of a density case's VMs, in MiB: FXDAX_PGBENCH_DENSITY_MEMORY_MIB, or
-    /// 1024, as many of them as a GCE n2-standard-4 host holds at once (TASK-164.5).
+    /// 1024, as many of them as a host of 4 vCPUs and 16 GB holds at once (TASK-164.5).
     fn density_memory() -> anyhow::Result<u32> {
         Ok(u32::try_from(setting("FXDAX_PGBENCH_DENSITY_MEMORY_MIB", 1024)?)?)
     }

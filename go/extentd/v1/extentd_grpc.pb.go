@@ -105,30 +105,32 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Extentd_CreateStore_FullMethodName     = "/fxdax.extentd.v1.Extentd/CreateStore"
-	Extentd_ImportImage_FullMethodName     = "/fxdax.extentd.v1.Extentd/ImportImage"
-	Extentd_ForkStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/ForkStore"
-	Extentd_DeleteStore_FullMethodName     = "/fxdax.extentd.v1.Extentd/DeleteStore"
-	Extentd_DropStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/DropStore"
-	Extentd_ResizeStore_FullMethodName     = "/fxdax.extentd.v1.Extentd/ResizeStore"
-	Extentd_PlaceStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/PlaceStore"
-	Extentd_MakePublic_FullMethodName      = "/fxdax.extentd.v1.Extentd/MakePublic"
-	Extentd_SharePoint_FullMethodName      = "/fxdax.extentd.v1.Extentd/SharePoint"
-	Extentd_AttachBase_FullMethodName      = "/fxdax.extentd.v1.Extentd/AttachBase"
-	Extentd_SyncStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/SyncStore"
-	Extentd_StatStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/StatStore"
-	Extentd_ListStores_FullMethodName      = "/fxdax.extentd.v1.Extentd/ListStores"
-	Extentd_GetStats_FullMethodName        = "/fxdax.extentd.v1.Extentd/GetStats"
-	Extentd_GetSnapshot_FullMethodName     = "/fxdax.extentd.v1.Extentd/GetSnapshot"
-	Extentd_Grant_FullMethodName           = "/fxdax.extentd.v1.Extentd/Grant"
-	Extentd_Revoke_FullMethodName          = "/fxdax.extentd.v1.Extentd/Revoke"
-	Extentd_SetMemoryLimit_FullMethodName  = "/fxdax.extentd.v1.Extentd/SetMemoryLimit"
-	Extentd_SetMemoryWeight_FullMethodName = "/fxdax.extentd.v1.Extentd/SetMemoryWeight"
-	Extentd_SetTenantRoom_FullMethodName   = "/fxdax.extentd.v1.Extentd/SetTenantRoom"
-	Extentd_ShrinkMemory_FullMethodName    = "/fxdax.extentd.v1.Extentd/ShrinkMemory"
-	Extentd_SetDiskLimit_FullMethodName    = "/fxdax.extentd.v1.Extentd/SetDiskLimit"
-	Extentd_GetTenantDisk_FullMethodName   = "/fxdax.extentd.v1.Extentd/GetTenantDisk"
-	Extentd_SetPeers_FullMethodName        = "/fxdax.extentd.v1.Extentd/SetPeers"
+	Extentd_CreateStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/CreateStore"
+	Extentd_ImportImage_FullMethodName      = "/fxdax.extentd.v1.Extentd/ImportImage"
+	Extentd_ForkStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/ForkStore"
+	Extentd_DeleteStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/DeleteStore"
+	Extentd_DropStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/DropStore"
+	Extentd_ResizeStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/ResizeStore"
+	Extentd_PlaceStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/PlaceStore"
+	Extentd_MakePublic_FullMethodName       = "/fxdax.extentd.v1.Extentd/MakePublic"
+	Extentd_SharePoint_FullMethodName       = "/fxdax.extentd.v1.Extentd/SharePoint"
+	Extentd_AttachBase_FullMethodName       = "/fxdax.extentd.v1.Extentd/AttachBase"
+	Extentd_SyncStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/SyncStore"
+	Extentd_StatStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/StatStore"
+	Extentd_ListStores_FullMethodName       = "/fxdax.extentd.v1.Extentd/ListStores"
+	Extentd_GetStats_FullMethodName         = "/fxdax.extentd.v1.Extentd/GetStats"
+	Extentd_GetSnapshot_FullMethodName      = "/fxdax.extentd.v1.Extentd/GetSnapshot"
+	Extentd_Grant_FullMethodName            = "/fxdax.extentd.v1.Extentd/Grant"
+	Extentd_Revoke_FullMethodName           = "/fxdax.extentd.v1.Extentd/Revoke"
+	Extentd_SetMemoryLimit_FullMethodName   = "/fxdax.extentd.v1.Extentd/SetMemoryLimit"
+	Extentd_SetMemoryWeight_FullMethodName  = "/fxdax.extentd.v1.Extentd/SetMemoryWeight"
+	Extentd_SetTenantRoom_FullMethodName    = "/fxdax.extentd.v1.Extentd/SetTenantRoom"
+	Extentd_ShrinkMemory_FullMethodName     = "/fxdax.extentd.v1.Extentd/ShrinkMemory"
+	Extentd_SetDiskLimit_FullMethodName     = "/fxdax.extentd.v1.Extentd/SetDiskLimit"
+	Extentd_GetTenantDisk_FullMethodName    = "/fxdax.extentd.v1.Extentd/GetTenantDisk"
+	Extentd_SetPeers_FullMethodName         = "/fxdax.extentd.v1.Extentd/SetPeers"
+	Extentd_ShredCell_FullMethodName        = "/fxdax.extentd.v1.Extentd/ShredCell"
+	Extentd_ForgetTenantKeys_FullMethodName = "/fxdax.extentd.v1.Extentd/ForgetTenantKeys"
 )
 
 // ExtentdClient is the client API for Extentd service.
@@ -243,6 +245,23 @@ type ExtentdClient interface {
 	// without FXDAX_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(ctx context.Context, in *SetPeersRequest, opts ...grpc.CallOption) (*SetPeersResponse, error)
+	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
+	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
+	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
+	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
+	// versions. A cell with no object, NOT_FOUND (ENOENT).
+	ShredCell(ctx context.Context, in *ShredCellRequest, opts ...grpc.CallOption) (*ShredCellResponse, error)
+	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
+	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
+	// here are fenced, each request of their VM processes failing with EACCES, as their openings do;
+	// their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
+	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
+	// for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+	// their VM processes close them.
+	ForgetTenantKeys(ctx context.Context, in *ForgetTenantKeysRequest, opts ...grpc.CallOption) (*ForgetTenantKeysResponse, error)
 }
 
 type extentdClient struct {
@@ -493,6 +512,26 @@ func (c *extentdClient) SetPeers(ctx context.Context, in *SetPeersRequest, opts 
 	return out, nil
 }
 
+func (c *extentdClient) ShredCell(ctx context.Context, in *ShredCellRequest, opts ...grpc.CallOption) (*ShredCellResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShredCellResponse)
+	err := c.cc.Invoke(ctx, Extentd_ShredCell_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *extentdClient) ForgetTenantKeys(ctx context.Context, in *ForgetTenantKeysRequest, opts ...grpc.CallOption) (*ForgetTenantKeysResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ForgetTenantKeysResponse)
+	err := c.cc.Invoke(ctx, Extentd_ForgetTenantKeys_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExtentdServer is the server API for Extentd service.
 // All implementations must embed UnimplementedExtentdServer
 // for forward compatibility.
@@ -605,6 +644,23 @@ type ExtentdServer interface {
 	// without FXDAX_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error)
+	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
+	// daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+	// takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
+	// tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+	// shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
+	// version of the cell's object: with versioning on, a lifecycle rule must expire non-current
+	// versions. A cell with no object, NOT_FOUND (ENOENT).
+	ShredCell(context.Context, *ShredCellRequest) (*ShredCellResponse, error)
+	// Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
+	// the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
+	// here are fenced, each request of their VM processes failing with EACCES, as their openings do;
+	// their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+	// a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
+	// tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
+	// for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+	// their VM processes close them.
+	ForgetTenantKeys(context.Context, *ForgetTenantKeysRequest) (*ForgetTenantKeysResponse, error)
 	mustEmbedUnimplementedExtentdServer()
 }
 
@@ -686,6 +742,12 @@ func (UnimplementedExtentdServer) GetTenantDisk(context.Context, *GetTenantDiskR
 }
 func (UnimplementedExtentdServer) SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SetPeers not implemented")
+}
+func (UnimplementedExtentdServer) ShredCell(context.Context, *ShredCellRequest) (*ShredCellResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShredCell not implemented")
+}
+func (UnimplementedExtentdServer) ForgetTenantKeys(context.Context, *ForgetTenantKeysRequest) (*ForgetTenantKeysResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ForgetTenantKeys not implemented")
 }
 func (UnimplementedExtentdServer) mustEmbedUnimplementedExtentdServer() {}
 func (UnimplementedExtentdServer) testEmbeddedByValue()                 {}
@@ -1140,6 +1202,42 @@ func _Extentd_SetPeers_Handler(srv interface{}, ctx context.Context, dec func(in
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Extentd_ShredCell_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShredCellRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExtentdServer).ShredCell(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Extentd_ShredCell_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExtentdServer).ShredCell(ctx, req.(*ShredCellRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _Extentd_ForgetTenantKeys_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ForgetTenantKeysRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExtentdServer).ForgetTenantKeys(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Extentd_ForgetTenantKeys_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExtentdServer).ForgetTenantKeys(ctx, req.(*ForgetTenantKeysRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Extentd_ServiceDesc is the grpc.ServiceDesc for Extentd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1242,6 +1340,14 @@ var Extentd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SetPeers",
 			Handler:    _Extentd_SetPeers_Handler,
+		},
+		{
+			MethodName: "ShredCell",
+			Handler:    _Extentd_ShredCell_Handler,
+		},
+		{
+			MethodName: "ForgetTenantKeys",
+			Handler:    _Extentd_ForgetTenantKeys_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

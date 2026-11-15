@@ -18,14 +18,29 @@
 #   (crates/fxfs's write_super_block, TASK-149.11): a super-block claims only what its journal
 #   flushed, which the objects' offsets read after the device's flush broke (TASK-149.5);
 #
-#   check-tla.sh [MODEL...]
+#   check-tla.sh [MODEL...|deep]
+#   check-tla.sh cover MODEL [NAME=VALUE...]
 #
 # checks each model, by its configuration's name, or SPEC/NAME (specs/SPEC/NAME.cfg, or
-# specs/SPEC/mutations/NAME.cfg): by default all of them. A model of a spec as designed must hold:
-# TLC finds no violation. A mutation, the spec with one of its rules removed, must not: TLC must
-# find the violation of the invariant its configuration names (`\* expect: NAME`), or of the
-# temporal property it names and checks alone (`\* expect: property NAME`), or a deadlock
-# (`\* expect: deadlock`), or the check fails, as a check that never fails proves nothing.
+# specs/SPEC/mutations/NAME.cfg): by default all of them but the deep ones, each in minutes on a
+# laptop (TASK-405: under ten). A model of a spec as designed must hold: TLC finds no violation.
+# A mutation, the spec with one of its rules removed, must not: TLC must find the violation of the
+# invariant its configuration names (`\* expect: NAME`), or of the temporal property it names and
+# checks alone (`\* expect: property NAME`), or a deadlock (`\* expect: deadlock`), or the check
+# fails, as a check that never fails proves nothing.
+#
+# A model too large to check at once is split (TASK-405): its configuration's `\* part:` lines,
+# each constants set on top of the others (`\* part: Takers = 121; TakePhases = {11, 21, 32}`),
+# are models of their own, checked one after another, `MODEL` all of them, `MODEL#K` the K-th,
+# `MODEL#whole` the whole. Each part fixes choices every behaviour makes at most once (Bucket.tla's
+# splits: Takers, TakePhases, CommitPhases, CommitTakes, ForkTo, PassCells), so that its parts
+# check between them every behaviour the whole does. `cover MODEL [NAME=VALUE...]` shows it, on
+# the model made small by the constants given or its `\* cover:` lines': every state the whole
+# reaches, one of its parts does (states that a symmetry, of Hosts, relates counted as one), and,
+# without a symmetry, they reach no other. A full run checks every split model's covers.
+#
+# A deep model, its configuration tagged `\* deep`, an occasional check of hours in all, runs only
+# by name, or with any others as `deep`, its covers with it.
 #
 # Trace validation (TASK-42.1): runs of crates/follower's Shuttle tests, traced, are behaviors of
 # specs/follower (specs/follower/trace): each trace must be matched to its end. It runs with every
@@ -69,10 +84,63 @@ configs=()
 for cfg in "$specs"/*/*.cfg "$specs"/*/mutations/*.cfg; do
     [[ -f $cfg ]] && configs+=("$cfg")
 done
-chosen=()
+# A configuration's parts, a line each: its `\* part:` lines' overrides.
+parts() { sed -n 's/^\\\* part: //p' "$1"; }
+# Whether a configuration is a deep model's.
+deep() { grep -q '^\\\* deep$' "$1"; }
+# The runs chosen: each a configuration, and the part of it (a line of its parts), or none for
+# the whole.
+run_cfg=()
+run_part=()
+# The deep models whose covers are checked too.
+covering=()
+# choose CFG [K|whole]: its K-th part, or the whole; with neither, every part, or the whole if it
+# has none.
+choose() {
+    local cfg=$1 which=${2:-} part k=0
+    if [[ $which == whole ]] || [[ -z $which && -z $(parts "$cfg") ]]; then
+        run_cfg+=("$cfg")
+        run_part+=("")
+        return
+    fi
+    while IFS= read -r part; do
+        k=$((k + 1))
+        if [[ -z $which || $which == "$k" ]]; then
+            run_cfg+=("$cfg")
+            run_part+=("$part")
+        fi
+    done < <(parts "$cfg")
+    [[ -z $which ]] || (( which >= 1 && which <= k )) ||
+        { echo "$cfg has no part $which" >&2; exit 2; }
+}
+# The configuration of the model named NAME or SPEC/NAME.
+find_cfg() {
+    local found=() cfg rel name
+    for cfg in "${configs[@]}"; do
+        rel=${cfg#"$specs"/}
+        name=$(basename "$cfg" .cfg)
+        if [[ $1 == "$name" || $1 == "${rel%%/*}/$name" ]]; then
+            found+=("$cfg")
+        fi
+    done
+    (( ${#found[@]} == 1 )) ||
+        { echo "${#found[@]} models match $1: name it SPEC/NAME" >&2; exit 2; }
+    echo "${found[0]}"
+}
+# with_part CFG PART: CFG's text, PART's overrides among its constants.
+with_part() {
+    printf '%s\n' "$2" | tr ';' '\n' | sed 's/^ */    /' | sed "/^CONSTANTS\$/r /dev/stdin" "$1"
+}
 traces=0
-if (( $# == 0 )); then
-    chosen=("${configs[@]}")
+if [[ ${1:-} == cover ]]; then
+    (( $# >= 2 )) || { echo "cover names a model" >&2; exit 2; }
+    cover=$(find_cfg "$2")
+    shift 2
+    [[ -n $(parts "$cover") ]] || { echo "$cover has no parts" >&2; exit 2; }
+elif (( $# == 0 )); then
+    for cfg in "${configs[@]}"; do
+        deep "$cfg" || choose "$cfg"
+    done
     traces=1
 else
     for model in "$@"; do
@@ -80,42 +148,154 @@ else
             traces=1
             continue
         fi
-        found=()
-        for cfg in "${configs[@]}"; do
-            rel=${cfg#"$specs"/}
-            spec=${rel%%/*}
-            name=$(basename "$cfg" .cfg)
-            if [[ $model == "$name" || $model == "$spec/$name" ]]; then
-                found+=("$cfg")
-            fi
-        done
-        (( ${#found[@]} == 1 )) ||
-            { echo "${#found[@]} models match $model: name it SPEC/NAME" >&2; exit 2; }
-        chosen+=("${found[0]}")
+        if [[ $model == deep ]]; then
+            for cfg in "${configs[@]}"; do
+                if deep "$cfg"; then
+                    choose "$cfg"
+                    covering+=("$cfg")
+                fi
+            done
+            continue
+        fi
+        which=
+        if [[ $model == *#* ]]; then
+            which=${model#*#}
+            model=${model%%#*}
+        fi
+        choose "$(find_cfg "$model")" "$which"
     done
 fi
 
 work=$(mktemp -d "${TMPDIR:-/tmp}/fxdax-tla.XXXXXX")
 trap 'rm -r "$work"' EXIT
+
+# reached NAME CFG TLA: the states CFG's model reaches, each a digest of its variables' values
+# but the splits' history's (takers), sorted, into $work/NAME.reached. Under a symmetry, of Hosts
+# (TLC lists one state of each orbit, whichever it found first), a state's digest is its orbit's:
+# of the least of its texts, its hosts permuted.
+reached() {
+    local name=$1 cfg=$2 hosts=
+    if grep -q '^SYMMETRY' "$cfg"; then
+        hosts=$(sed -n 's/^    Hosts = {\(.*\)}$/\1/p' "$cfg" | tr -d ' ')
+        [[ -n $hosts ]] || { echo "$cfg's symmetry is of no Hosts" >&2; exit 2; }
+    fi
+    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -noGenerateSpecTE \
+        -metadir "$work/$name.states" -dump "$work/$name" -config "$cfg" "$3" \
+        > "$work/$name.log" 2>&1 ||
+        { echo "TLC failed on $name:"; sed -n '/^Error:/,$p' "$work/$name.log"; return 1; }
+    python3 -I -c '
+import hashlib, itertools, re, sys
+hosts = [h for h in sys.argv[2].split(",") if h]
+word = re.compile(r"\b(" + "|".join(map(re.escape, hosts)) + r")\b") if hosts else None
+perms = [dict(zip(hosts, p)) for p in itertools.permutations(hosts)]
+states, state, skip = set(), [], False
+def done():
+    if state:
+        text = "".join(state)
+        if word:
+            text = min(word.sub(lambda m: p[m.group(1)], text) for p in perms)
+        states.add(hashlib.sha1(text.encode()).hexdigest())
+for line in open(sys.argv[1]):
+    if line.startswith("State "):
+        done()
+        state, skip = [], False
+        continue
+    if line.startswith("/\\ "):
+        skip = line.startswith("/\\ takers =")
+    if not skip and line.strip():
+        state.append(line)
+done()
+print("\n".join(sorted(states)))' "$work/$name.dump" "$hosts" > "$work/$name.reached"
+    rm -r "$work/$name.dump" "$work/$name.states"
+}
+
+# covers CFG SETS: whether the parts of CFG's model, its constants set by SETS (as a part's
+# overrides: small enough for TLC to list what they reach), reach between them every state the
+# whole does: that its split is exact, its parts checking every behaviour it does.
+covers() {
+    local cfg=$1 sets=${2:-} name k=0 part whole missed extra start=$SECONDS tla
+    tla=("$(dirname "$cfg")"/*.tla)
+    local small="$work/cover.cfg" model
+    model="${cfg#"$specs"/}"
+    model="${model%%/*}/$(basename "$cfg" .cfg)"
+    cp "$cfg" "$small"
+    while IFS= read -r set; do
+        name=$(echo "${set%%=*}" | tr -d ' ')
+        [[ -n $name ]] || continue
+        grep -qE "^    $name (=|<-) " "$small" || { echo "$cfg sets no $name" >&2; exit 2; }
+        sed -i.bak -E "s/^    $name (=|<-) .*/    $name = $(echo "${set#*=}" | sed 's/^ *//')/" \
+            "$small"
+    done < <(printf '%s\n' "$sets" | tr ';' '\n')
+    rm -f "$work"/cover-*.reached
+    reached cover-whole "$small" "${tla[0]}" || return 1
+    while IFS= read -r part; do
+        k=$((k + 1))
+        with_part "$small" "$part" > "$work/cover-$k.cfg"
+        reached "cover-$k" "$work/cover-$k.cfg" "${tla[0]}" || return 1
+    done < <(parts "$cfg")
+    sort -u "$work"/cover-[0-9]*.reached > "$work/cover-parts.reached"
+    whole=$(wc -l < "$work/cover-whole.reached")
+    missed=$(comm -23 "$work/cover-whole.reached" "$work/cover-parts.reached" | wc -l)
+    # Parts only restrict the whole's steps, so they reach no state it does not: that is checked
+    # without a symmetry (or with one host), but not under one, as a function of hosts permuted,
+    # its text keeping its order, needn't be the text TLC prints for it: a state may have two
+    # digests.
+    extra=0
+    if ! grep -q '^SYMMETRY' "$small" ||
+        (( $(sed -n 's/^    Hosts = {\(.*\)}$/\1/p' "$small" | tr ',' '\n' | wc -l) <= 1 )); then
+        extra=$(comm -13 "$work/cover-whole.reached" "$work/cover-parts.reached" | wc -l)
+    fi
+    if (( missed == 0 && extra == 0 )); then
+        echo "PASS $model covered: its $k parts reach the $((whole)) states the whole does" \
+            "[$sets], $((SECONDS - start))s"
+        return 0
+    fi
+    echo "FAIL $model covered: of the whole's $((whole)) states [$sets], its $k parts miss" \
+        "$((missed)) and reach $((extra)) more"
+    return 1
+}
+
+# covered CFG: whether CFG's model's parts cover it, on each model its `\* cover:` lines make.
+covered() {
+    local sets ok=0
+    while IFS= read -r sets; do
+        covers "$1" "$sets" || ok=1
+    done < <(sed -n 's/^\\\* cover: //p' "$1")
+    return $ok
+}
+
+if [[ -n ${cover:-} ]]; then
+    if (( $# > 0 )); then covers "$cover" "$(IFS=';'; echo "$*")"; else covered "$cover"; fi
+    exit
+fi
 status=0
-# (Empty, if only the traces are chosen: bash 3 calls an empty array unbound.)
-for cfg in ${chosen[@]+"${chosen[@]}"}; do
+for (( r = 0; r < ${#run_cfg[@]}; r++ )); do
+    cfg=${run_cfg[r]}
+    part=${run_part[r]}
     rel=${cfg#"$specs"/}
     spec_dir="$specs/${rel%%/*}"
     tla=("$spec_dir"/*.tla)
     (( ${#tla[@]} == 1 )) || { echo "$spec_dir holds no single spec" >&2; exit 2; }
     model="${rel%%/*}/$(basename "$cfg" .cfg)"
+    key=$model
+    if [[ -n $part ]]; then
+        # The part's configuration: the whole's, its overrides among the constants.
+        key="$model-$(printf '%s' "$part" | tr -c 'A-Za-z0-9' '_')"
+        model="$model [$part]"
+        with_part "$cfg" "$part" > "$work/${key//\//-}.cfg"
+        cfg="$work/${key//\//-}.cfg"
+    fi
     expect=
     if [[ $cfg == */mutations/* ]]; then
         expect=$(sed -n 's/^\\\* expect: //p' "$cfg")
         [[ -n $expect ]] || { echo "$cfg names no expected violation" >&2; exit 2; }
     fi
-    log="$work/${model//\//-}.log"
+    log="$work/${key//\//-}.log"
     start=$SECONDS
     # TLC exits nonzero when it finds a violation, whose trace it prints rather than writing it
     # beside the spec (-noGenerateSpecTE).
     "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -noGenerateSpecTE \
-        -metadir "$work/${model//\//-}.states" -config "$cfg" "${tla[0]}" > "$log" 2>&1 &&
+        -metadir "$work/${key//\//-}.states" -config "$cfg" "${tla[0]}" > "$log" 2>&1 &&
         found=0 || found=$?
     took=$((SECONDS - start))
     states=$(sed -n 's/.* \([0-9,]*\) distinct states found.*/\1/p' "$log" | sed -n '$p')
@@ -140,6 +320,16 @@ for cfg in ${chosen[@]+"${chosen[@]}"}; do
         grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
         status=1
     fi
+done
+
+# Each split model's cover, in a full run, and each deep one's with them.
+if (( $# == 0 )); then
+    for cfg in "${configs[@]}"; do
+        deep "$cfg" || covered "$cfg" || status=1
+    done
+fi
+for cfg in ${covering[@]+"${covering[@]}"}; do
+    covered "$cfg" || status=1
 done
 
 # Each traced run's trace, matched to its end by specs/follower/trace/FollowerTrace.

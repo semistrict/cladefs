@@ -957,7 +957,7 @@ mod tests {
     impl Object {
         /// The object of `data` at `key`.
         fn new(key: &str, data: &[u8]) -> Self {
-            let bytes = extent_frame::framed(data, b"footer");
+            let bytes = extent_frame::framed(data, b"footer", None);
             let start = Frame::of(&bytes).unwrap().tail().start as usize;
             let tail = object::Tail::of(key, bytes[start..].to_vec()).unwrap();
             Self { key: key.to_owned(), bytes, tail }

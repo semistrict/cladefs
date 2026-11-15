@@ -411,26 +411,32 @@ pub(crate) fn encode<R: Serialize>(record: &R) -> Vec<u8> {
 /// fxdax: `record`, encoded as [`encode`] does, its hash salted with `salt`: what reads it with
 /// another salt finds torn, as a log reused finds what it held before (TASK-301).
 pub(crate) fn encode_salted<R: Serialize>(record: &R, salt: u64) -> Vec<u8> {
-    let payload = bincode::serialize(record).expect("records serialize");
+    frame_salted(&bincode::serialize(record).expect("records serialize"), salt)
+}
+
+/// fxdax: `payload`, a record's, as a log holds it, its hash salted with `salt`: its header, then
+/// it ([`encode_salted`]).
+pub(crate) fn frame_salted(payload: &[u8], salt: u64) -> Vec<u8> {
     let len = u32::try_from(payload.len()).expect("a record is under 4 GiB");
     let mut bytes = Vec::with_capacity(HEADER + payload.len());
     bytes.extend_from_slice(&len.to_le_bytes());
-    bytes.extend_from_slice(&(hash(&payload) ^ salt).to_le_bytes());
-    bytes.extend_from_slice(&payload);
+    bytes.extend_from_slice(&(hash(payload) ^ salt).to_le_bytes());
+    bytes.extend_from_slice(payload);
     bytes
 }
 
 /// The records at the start of `bytes` that are whole and intact, and how many bytes they take.
 pub(crate) fn decode<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> (Vec<R>, usize) {
-    decode_with(bytes, 0, |payload| bincode::deserialize(payload).ok())
+    decode_with(bytes, 0, |_, payload| bincode::deserialize(payload).ok())
 }
 
 /// fxdax: the records at the start of `bytes` that are whole and intact, their hashes salted with
-/// `salt` ([`encode_salted`]), each payload's as `parse` reads it, and how many bytes they take.
+/// `salt` ([`encode_salted`]), each payload's as `parse` reads it, given where in `bytes` its
+/// record starts, and how many bytes they take.
 pub(crate) fn decode_with<R>(
     bytes: &[u8],
     salt: u64,
-    parse: impl Fn(&[u8]) -> Option<R>,
+    parse: impl Fn(usize, &[u8]) -> Option<R>,
 ) -> (Vec<R>, usize) {
     let mut records = Vec::new();
     let mut at = 0;
@@ -441,7 +447,7 @@ pub(crate) fn decode_with<R>(
         if len == 0 || hash(payload) ^ salt != expected {
             break;
         }
-        let Some(record) = parse(payload) else { break };
+        let Some(record) = parse(at, payload) else { break };
         records.push(record);
         at += HEADER + len;
     }

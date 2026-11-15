@@ -200,7 +200,7 @@ fn on_path(command: &str) -> bool {
     })
 }
 
-/// fxdax: how a case runs on `host`. Root, as on the GCE hosts, unshares its network itself:
+/// fxdax: how a case runs on `host`. Root, as on ubu1, unshares its network itself:
 /// `buildah unshare` as root, with no subordinate IDs, entered user namespace after user namespace
 /// till its memfd's name, which grows with each, was past the kernel's 249 bytes (`memfd_create:
 /// invalid argument`), which once had the hosts run every case unisolated (FXDAX_NO_UNSHARE). A case
@@ -746,7 +746,7 @@ fn run_tests(
     let extra_msg =
         if extra.is_empty() { String::new() } else { format!(" ({})", extra.join(", ")) };
 
-    // fxdax: a case asked for by name that skips fails: it was to run. Fresh GCE hosts without a
+    // fxdax: a case asked for by name that skips fails: it was to run. Fresh hosts without a
     // guest kernel skipped every guest case asked for, and the run passed, round after round.
     let skipped_asked = test_case != "all" && num_skip > 0;
     if num_fail > 0 || skipped_asked {
@@ -924,7 +924,7 @@ mod tests {
     }
 
     /// TASK-149.20.6: root unshares its network itself, as `buildah unshare` failed as root on the
-    /// GCE hosts; another user maps its IDs with buildah first; a case whose daemons reach a bucket
+    /// hosts; another user maps its IDs with buildah first; a case whose daemons reach a bucket
     /// over the network, or a host told not to, isolates nothing.
     #[test]
     fn cases_run_in_a_network_of_their_own_but_where_they_need_one() {
@@ -974,7 +974,7 @@ mod tests {
     }
 
     /// fxdax: a round's outcome as data: the run's knobs and those the case chose, which its
-    /// replay runs it with, alone, on a GCE host.
+    /// replay runs it with, alone, on ubu1.
     #[test]
     fn an_outcome_says_how_to_replay_it() {
         let ran = Ran {

@@ -383,6 +383,26 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. fxdaxctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
+**Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
+host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
+are sealed: the bucket, the stores' directories and the part cache hold their
+data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
+every host (`fxdaxctl forget-tenant-keys TENANT`, the control API's
+`ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
+version of every object, was wrapped by it. To shred a **cell**, run
+`fxdaxctl shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon:
+it takes the cell's wrapped KEKs out of its object `<C>cell` and has each host
+forget them. That is only as strong as the bucket keeps no older version of
+that object, so a bucket with versioning on needs a lifecycle rule expiring
+non-current versions: on S3, `NoncurrentVersionExpiration` (with
+`NoncurrentDays` as short as the deployment's recovery needs allow); on GCS,
+object versioning off, or a lifecycle rule deleting non-current versions
+(`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
+old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
+versioning off needs nothing. A host told either fences the stores of the
+tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
+a fenced store's own keys stay in memory until its VM process closes it.
+
 ### `vendor/firecracker`: the VMM
 
 The VMM is a submodule: branch `fxdax-v1.16.1-pci` of
@@ -639,7 +659,7 @@ find the violation of: `specs/dax-cow`'s include a writeback leaving a fault's
 PTE writable, which guest/sim found (`guest/sim`).
 
 ```sh
-make check-tla             # about 20 minutes, on Java; fetches TLC once
+make check-tla             # about two hours, each model in minutes, on Java; fetches TLC once
 ```
 
 ## Benchmarks

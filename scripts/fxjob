@@ -25,6 +25,10 @@
 # "Memory cgroup out of memory". Work may swap (its slice's 6G), so it slows down before it is
 # killed; a measurement never swaps. Each job that ran adds a line to
 # ~/.local/state/fxjob/jobs.jsonl: what it asked for, what it took, how long it waited and ran.
+# Each job has a temporary directory of its own, its TMPDIR, on the scratch disk
+# (/mnt/fxdax-scratch/fxjob/PID), which goes once it ends, killed or not, with what is mounted in
+# it and the loop devices on its files. sudo never passes TMPDIR on: a root run gets it with
+# `sudo env TMPDIR="$TMPDIR" ...`, expanded inside the job.
 #
 # The source is the fxdax repo's scripts/fxjob; the host's setup (~/docs/system-setup.d/
 # 146-fxdax_cgroups.sh on ubu1) installs it as /usr/local/bin/fxjob, and its slices, and
@@ -137,8 +141,9 @@ reserved() {
       END { printf "%d %d %d\n", total_mem, total_cpus, jobs }'
 }
 
-# alive ENTRY: whether the waiting job ENTRY (queue/SEQ-PID) is: its process, the same one (its
-# start time the entry's), not a later one given its PID.
+# alive ENTRY: whether the fxjob of ENTRY (a waiting job's, queue/SEQ-PID, or a job's temporary
+# directory's, job-PID) is: its process, the same one (its start time the entry's), not a later
+# one given its PID.
 alive() {
   local pid=${1##*-} stat started
   stat=$(cat "/proc/$pid/stat" 2> /dev/null) || return 1
@@ -154,7 +159,7 @@ waiting() {
     if alive "$entry"; then echo "$entry"; fi
   done
 }
-# field ENTRY KEY: the waiting job ENTRY's KEY.
+# field ENTRY KEY: ENTRY's KEY.
 field() { sed -n "s/^$2=//p" "$1"; }
 
 if [[ ${1:-} == ps ]]; then
@@ -251,11 +256,93 @@ if (( cpus > cpu_budget )); then
   exit 2
 fi
 
+# The jobs' temporary directories, each job's TMPDIR, $tmp_root/PID (PID its fxjob's), each beside
+# job-PID, which says whose it is: its fxjob (its start time, as a waiting job's entry does) and
+# its scope. On the scratch disk, ext4 (system-setup.d/143-fxdax_ext4_scratch.sh), not in /tmp, a
+# tmpfs, whose files are memory: charged to the job that wrote them, swapped out at best, and held
+# by work's slice past the job's end for as long as they are there; killed tests' stores, up to
+# 4.6 GB each, filled ubu1's swap twice (TASK-379). On disk, a job's files need no room in its
+# --mem, and those of a job whose fxjob was killed, which the next job's fxjob removes (sweep),
+# take disk until then, not memory. ext4, as scripts/sandboxes.sh's default disk (TMPDIR's) must
+# be; short, as the guest tests' sockets need (guest/tests/runner's MAX_TMPDIR, 40 bytes):
+# /mnt/fxdax-scratch/fxjob/PID is 32 at most. Work's IO there is capped while a measurement runs,
+# as its builds' on that disk already are. Without the scratch disk, /tmp/fxjob.
+tmp_root=${FXJOB_TMP:-}
+if [[ -z $tmp_root ]]; then
+  tmp_root=/tmp/fxjob
+  if mountpoint -q "$scratch"; then tmp_root=$scratch/fxjob; fi
+fi
+mkdir -p "$tmp_root"
+
+# mounts DIR: what is mounted at DIR or under it, deepest first (findmnt's escapes undone).
+mounts() {
+  local target
+  findmnt -rn -o TARGET | while read -r target; do
+    printf -v target %b "$target"
+    if [[ $target == "$1" || $target == "$1"/* ]]; then echo "$target"; fi
+  done | LC_ALL=C sort -r
+}
+# loops DIR: the loop devices on files under DIR, deleted ones too.
+loops() {
+  local file backing
+  for file in /sys/block/loop*/loop/backing_file; do
+    backing=$(cat "$file" 2> /dev/null) || continue
+    backing=${backing% (deleted)}
+    if [[ $backing == "$1"/* ]]; then file=${file#/sys/block/}; echo "/dev/${file%%/*}"; fi
+  done
+}
+# clean PID removes the temporary directory of the job PID, which nothing of it runs in any more,
+# and its job-PID: first the loop devices on its files, such as a root run's images, those mounted
+# let go of once they are unmounted (autoclear), while their files' paths still say they are its
+# (one on a file system unmounted lazily names it from that file system's root); then what is
+# mounted in it, lazily, deepest first, such as a killed FUSE test's mount, whose daemon is gone
+# ("Transport endpoint is not connected"); then all of it, root's files too. With sudo for what
+# only root may do, and only then. Nothing is removed while anything is still mounted there: rm
+# would go on into it.
+clean() {
+  local dir=$tmp_root/$1 targets devices tries
+  if [[ -e $dir ]]; then
+    mapfile -t devices < <(loops "$dir")
+    if (( ${#devices[@]} )); then sudo -n losetup -d "${devices[@]}" || return 1; fi
+    for (( tries = 0; tries < 10; tries++ )); do
+      mapfile -t targets < <(mounts "$dir")
+      (( ${#targets[@]} )) || break
+      sudo -n umount -l -- "${targets[@]}" || true
+    done
+    mapfile -t targets < <(mounts "$dir")
+    if (( ${#targets[@]} )); then
+      echo "fxjob: $dir stays, still mounted: ${targets[*]}" >&2
+      return 1
+    fi
+    rm -r --one-file-system -- "$dir" 2> /dev/null ||
+      sudo -n rm -r --one-file-system -- "$dir" || return 1
+  fi
+  rm -f "$tmp_root/job-$1"
+}
+# sweep cleans the temporary directories no fxjob will: those of jobs whose fxjob is gone, killed
+# outright, before its reap, once their scopes hold no process; and any no job-PID claims. Under
+# the queue's lock, as directories are made.
+sweep() {
+  local claim dir
+  for claim in "$tmp_root"/job-*; do
+    if [[ ! -e $claim ]] || alive "$claim" ||
+      [[ $(cat "$(field "$claim" scope)/cgroup.events" 2> /dev/null) == *'populated 1'* ]]; then
+      continue
+    fi
+    clean "${claim##*-}" || true
+  done
+  for dir in "$tmp_root"/[0-9]*; do
+    if [[ -d $dir && ! -e $tmp_root/job-${dir##*/} ]]; then clean "${dir##*/}" || true; fi
+  done
+}
+
 props=(-p MemoryMax="$mem")
-entry='' isolated='' stats=''
+entry='' isolated='' stats='' tmp=''
 # shellcheck disable=SC2329 # The EXIT trap's.
 leave() {
   if [[ -n $entry ]]; then rm -f "$entry"; fi
+  # A job whose command never started.
+  if [[ -n $tmp ]]; then clean $$ || true; fi
   if [[ -n $stats ]]; then rm -f "$stats" "$ran"; fi
   if [[ -n $isolated ]]; then
     sudo -n /usr/local/libexec/fxjob-isolate off
@@ -317,21 +404,22 @@ isolate() {
 # it, so it would wait for itself behind whatever waits for its parent's room, and the parent's
 # room stands for it.
 submitted=$(now)
+read -ra stat <<< "$(sed 's/.*) //' /proc/$$/stat)"
+started=${stat[19]}
 parent=$(sed -n 's|^0::.*/\(fxjob-[^/]*\.scope\)$|\1|p' /proc/self/cgroup)
 mkdir -p "$run/queue"
 chmod 700 "$run"
 exec 8> "$run/lock"
+flock 8
+sweep
 if [[ -n $parent ]]; then
   echo "fxjob: started inside $parent, $unit starts without waiting its turn" >&2
-  flock 8
 else
-  flock 8
   seq=$(( $(cat "$run/seq" 2> /dev/null || echo 0) + 1 ))
   echo $seq > "$run/seq"
-  read -ra stat <<< "$(sed 's/.*) //' /proc/$$/stat)"
   entry=$run/queue/$(printf %010d $seq)-$$
   printf 'name=%s\nmem=%s\ncpus=%s\nbench=%d\nsubmitted=%s\nstarted=%s\n' "$name" "$mem_bytes" \
-    "$cpus" "${measuring:-0}" "$submitted" "${stat[19]}" > "$entry"
+    "$cpus" "${measuring:-0}" "$submitted" "$started" > "$entry"
   said=''
   while :; do
     # The jobs whose fxjob is gone wait no more.
@@ -365,12 +453,19 @@ fi
 admitted=$(now)
 isolate
 
-# reap kills what is left in the job's scope once its command ended, root's processes among it
-# (sudo's), which the user's manager can neither stop nor kill: a scope an OOM kill or a stop
+# The job's temporary directory, made while the lock is held, as sweep runs: anyone's to write in,
+# as /tmp is, a jailed VM's user too (scripts/test-e2e.sh's FXDAX_FIRECRACKER_JAIL).
+mkdir -m 1777 "$tmp_root/$$"
+tmp=$tmp_root/$$
+printf 'started=%s\nscope=%s\n' "$started" "$cgroups/$slice/$unit" > "$tmp_root/job-$$"
+export TMPDIR=$tmp
+
+# kill_rest kills what is left in the job's scope once its command ended, root's processes among
+# it (sudo's), which the user's manager can neither stop nor kill: a scope an OOM kill or a stop
 # ended ("Failed to kill control group ... Operation not permitted") ran on as root (TASK-353).
 # cgroup.kill takes the scope's descendants too, and what they fork as it kills. It succeeds
 # once the scope holds no process, giving up after 30 s.
-reap() {
+kill_rest() {
   local scope=$cgroups/$slice/$unit events tries
   for (( tries = 0; tries < 300; tries++ )); do
     events=$(cat "$scope/cgroup.events" 2> /dev/null) || return 0
@@ -384,6 +479,9 @@ reap() {
     "$(find "$scope" -name cgroup.procs -exec cat {} + | paste -sd ' ')" >&2
   return 1
 }
+# reap leaves nothing of the job: its processes, then its temporary directory, which, were any of
+# them left, stays for a later fxjob's sweep.
+reap() { kill_rest && clean $$; }
 
 # The watcher holds the lock, fd 8 shared with it, until the scope is up (30 s at most); this
 # shell lets go of its own fd 8 before systemd-run, which must not inherit it, nor the command:
@@ -435,14 +533,17 @@ props+=(--description="fxjob cpus=$cpus: ${command:0:200}")
 # gets too, is waited out: bash runs the trap once the command ends, then the reap.
 trap : HUP INT TERM
 status=0
-systemd-run --user --scope --quiet --collect --slice="$slice" --unit="$unit" "${props[@]}" \
-  -- bash -c "$measure" fxjob "$stats" "$@" || status=$?
+# The command as it was given: systemd-run would expand $VAR and ${VAR} in it, and $$ to $
+# (TASK-408).
+systemd-run --user --scope --quiet --collect --expand-environment=no --slice="$slice" \
+  --unit="$unit" "${props[@]}" -- bash -c "$measure" fxjob "$stats" "$@" || status=$?
 : > "$ran"
 wait "$watcher" || true
 rm -f "$ran"
 ended=$(now)
 reaped=0
 reap || reaped=$?
+tmp=''
 if (( reaped && ! status )); then status=1; fi
 
 # The history: a line of JSON per job, appended in one write, whatever else appends.

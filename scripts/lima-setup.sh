@@ -51,6 +51,18 @@ echo 'KERNEL=="userfaultfd", GROUP="kvm", MODE="0660"' |
     sudo tee /etc/udev/rules.d/99-userfaultfd.rules >/dev/null
 sudo udevadm control --reload && sudo udevadm trigger --name-match=userfaultfd
 
+# The guests' interrupts, under Apple's nested virtualization: since Linux 6.19 (73c9726975af) KVM
+# clears an LPI's active bit in its list registers as a vCPU exits, and in a VM of Apple's the
+# guest's EOI then leaves its active priority (ICH_AP1R0_EL2) set, so that no interrupt of that
+# priority reaches it again: a guest stops for good a few seconds into its boot, its timer and
+# virtio interrupts pending. Trapping its group 1 EOIs has KVM drop the priority itself.
+grub=/etc/default/grub.d/60-fxdax-kvm.cfg
+if [[ ! -f $grub ]]; then
+    echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX kvm-arm.vgic_v3_group1_trap=1"' |
+        sudo tee "$grub" >/dev/null
+    sudo update-grub
+fi
+
 if [[ ! -x ~/.cargo/bin/cargo ]]; then
     curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable
 fi
@@ -73,8 +85,10 @@ fi
 echo "provisioned: $(rustc --version), $(cargo nextest --version | head -n 1)"
 EOF
 
-# Lima's shells reuse one login, which a group added since lacks: a restart starts another.
-if ! limactl shell "$instance" -- id -nG | grep -qw kvm; then
+# Lima's shells reuse one login, which a group added since lacks: a restart starts another. The
+# kernel takes its command line as it boots.
+if ! limactl shell "$instance" -- id -nG | grep -qw kvm ||
+    ! limactl shell "$instance" -- grep -qw kvm-arm.vgic_v3_group1_trap=1 /proc/cmdline; then
     limactl stop "$instance"
     limactl start --tty=false "$instance"
 fi
