@@ -1,13 +1,13 @@
 ---
 id: TASK-435
 title: >-
-  A snapshot's memory file on a cell's Fxfs volume through fxdax-mount:
+  A snapshot's memory file on a cell's Fxfs volume through cladefs-mount:
   Firecracker's File backend snapshots to it and restores from it
 status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 11:12'
-updated_date: '2026-11-15 12:59'
+updated_date: '2026-11-15 13:35'
 labels:
   - snapshot
   - fuse
@@ -19,13 +19,13 @@ ordinal: 783000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The user (2026-11-15) is exploring keeping a VM snapshot's memory file, today on a GCS FUSE mount, as a volume in the same cell as the VM's disk, so a cell is everything for one VM. Before choosing between serving it through fxdax-mount (Firecracker's File backend, MAP_PRIVATE of the file) or a UFFD handler, the FUSE path must be shown to work: no test mmaps a file of the mount, nor has Firecracker written or restored guest RAM through it.
+The user (2026-11-15) is exploring keeping a VM snapshot's memory file, today on a GCS FUSE mount, as a volume in the same cell as the VM's disk, so a cell is everything for one VM. Before choosing between serving it through cladefs-mount (Firecracker's File backend, MAP_PRIVATE of the file) or a UFFD handler, the FUSE path must be shown to work: no test mmaps a file of the mount, nor has Firecracker written or restored guest RAM through it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A guest test snapshots a VM (extent device, DAX window) with mem_file_path a file of a volume of a cell attached through fxdax-mount --control, and restores it twice (zygote) with the File backend from that file, each restored guest checking what it wrote before the snapshot
-- [ ] #2 scripts/test-e2e.sh builds fxdax-mount and hands it to the cases (FXDAX_MOUNT_BIN), prebuilt artifacts included
+- [ ] #1 A guest test snapshots a VM (extent device, DAX window) with mem_file_path a file of a volume of a cell attached through cladefs-mount --control, and restores it twice (zygote) with the File backend from that file, each restored guest checking what it wrote before the snapshot
+- [ ] #2 scripts/test-e2e.sh builds cladefs-mount and hands it to the cases (CLADEFS_MOUNT_BIN), prebuilt artifacts included
 <!-- AC:END -->
 
 ## Definition of Done
