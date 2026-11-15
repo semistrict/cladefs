@@ -199,141 +199,101 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// `fsync` would leave the order to the drive as well, so that a power loss could keep a commit's
 /// record, synced after its data, without the data. macOS is a development host: stores run on
 /// Linux.
-pub struct HostDir {
+pub type HostDir = crate::CachedDir<DiskDir>;
+
+/// cladefs: a file of a [`HostDir`]: one of its extents' files, through the process's page cache,
+/// or any other, read and written as it is ([`DiskFile`]).
+pub type HostFile = crate::CachedFile<DiskFile>;
+
+impl HostDir {
+    /// The directory at `path`, which exists, its extents' files through the process's page cache
+    /// ([`crate::pages::shared`]). Its files are opened bypassing the host's page cache, or not
+    /// at all: a file system that refuses to fails their openings (`EINVAL`), never falling back to
+    /// the host's cache, a second memory (TASK-433).
+    pub fn new(path: &Path) -> io::Result<Self> {
+        Ok(Self::over(DiskDir::new(path)?, crate::pages::shared().clone()))
+    }
+
+    /// The directory's path.
+    pub fn path(&self) -> &Path {
+        &self.under().path
+    }
+
+    /// Whether its files bypass the host's page cache, as the last one opened did: as each must,
+    /// once one was.
+    pub fn is_direct(&self) -> bool {
+        self.under().bypassing.load(Ordering::Relaxed)
+    }
+}
+
+/// cladefs: a directory of the host's, its files bypassing the host's page cache: what a
+/// [`HostDir`] holds its extents' files in a page cache of the process's over.
+pub struct DiskDir {
     path: PathBuf,
-    /// Whether its files are to bypass the host's page cache, extents' files going through the
-    /// process's ([`crate::pages::shared`]).
-    direct: bool,
     /// Whether the last file opened bypasses it.
     bypassing: AtomicBool,
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<std::fs::File>,
-    /// cladefs: its extents' files open, by name, each with its pages, which every opening of it
-    /// shares (TASK-433); a file's pages go with its last opening, its dirty ones written back.
-    cached: Mutex<std::collections::HashMap<String, crate::pages::WeakCached<DiskFile>>>,
 }
 
-impl HostDir {
-    /// The directory at `path`, which exists. Its files bypass the host's page cache if `direct`
-    /// and the host's file system allows, its extents' files then going through the process's.
-    pub fn new(path: &Path, direct: bool) -> io::Result<Self> {
+impl DiskDir {
+    /// The directory at `path`, which exists.
+    pub fn new(path: &Path) -> io::Result<Self> {
         let handle = Arc::new(std::fs::File::open(path)?);
-        Ok(Self {
-            path: path.to_owned(),
-            direct,
-            bypassing: AtomicBool::new(false),
-            handle,
-            cached: Mutex::default(),
-        })
+        Ok(Self { path: path.to_owned(), bypassing: AtomicBool::new(false), handle })
     }
 
-    /// The directory's path.
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    /// Whether its files bypass the host's page cache, as the last one opened does.
-    pub fn is_direct(&self) -> bool {
-        self.bypassing.load(Ordering::Relaxed)
-    }
-
-    /// `file`, opened at `path`, as the store's file: bypassing the host's page cache if the
-    /// directory is to; an extents' file, through the process's page cache then, sharing the
-    /// pages of its other openings.
-    fn file(&self, path: &str, file: std::fs::File, data: bool) -> io::Result<HostFile> {
-        let direct = self.direct && extent_remote::direct::bypass(&file);
-        if self.direct {
-            self.bypassing.store(direct, Ordering::Relaxed);
+    /// `file`, opened at `path`, bypassing the host's page cache, or refused if its file system
+    /// refuses that.
+    fn file(&self, path: &str, file: std::fs::File) -> io::Result<DiskFile> {
+        let direct = extent_remote::direct::bypass(&file);
+        self.bypassing.store(direct, Ordering::Relaxed);
+        if !direct {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE)",
+                    self.path.join(path).display()
+                ),
+            ));
         }
-        // A file the page cache holds is read and written through it, whoever opens it, and
-        // however: what of it is dirty is there alone.
-        let mut cached = self.cached.lock().unwrap();
-        cached.retain(|_, file| file.upgrade().is_some());
-        if let Some(open) = cached.get(path).and_then(crate::pages::WeakCached::upgrade) {
-            return Ok(HostFile(Repr::Cached(open)));
-        }
-        let disk = DiskFile { file, direct, tail: Mutex::default() };
-        if !(data && direct) {
-            return Ok(HostFile(Repr::Disk(disk)));
-        }
-        let opened = crate::pages::Cached::new(disk, crate::pages::shared())?;
-        cached.insert(path.to_owned(), opened.downgrade());
-        Ok(HostFile(Repr::Cached(opened)))
-    }
-
-    /// The pages of the file at `path`, if it is an extents' file opened.
-    fn cached(&self, path: &str) -> Option<crate::pages::Cached<DiskFile>> {
-        self.cached.lock().unwrap().get(path).and_then(crate::pages::WeakCached::upgrade)
+        Ok(DiskFile { file, tail: Mutex::default() })
     }
 }
 
-impl Dir for HostDir {
-    type File = HostFile;
+impl Dir for DiskDir {
+    type File = DiskFile;
 
-    fn create(&self, path: &str, data: bool) -> io::Result<HostFile> {
+    fn create(&self, path: &str, _data: bool) -> io::Result<DiskFile> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .custom_flags(libc::O_CLOEXEC)
             .open(self.path.join(path))?;
-        // A file made anew at a name holds nothing of one there before.
-        let gone = self.cached.lock().unwrap().remove(path);
-        if let Some(gone) = gone.as_ref().and_then(crate::pages::WeakCached::upgrade) {
-            gone.cancel();
-        }
-        self.file(path, file, data)
+        self.file(path, file)
     }
 
-    fn open(&self, path: &str, data: bool) -> io::Result<HostFile> {
+    fn open(&self, path: &str, _data: bool) -> io::Result<DiskFile> {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .custom_flags(libc::O_CLOEXEC)
             .open(self.path.join(path))?;
-        self.file(path, file, data)
+        self.file(path, file)
     }
 
-    /// cladefs: and drops its pages, the dirty ones unwritten, if no other name nor opening has
-    /// them (TASK-433): those still open keep them, written back to the file removed.
     fn remove(&self, path: &str) -> io::Result<()> {
-        std::fs::remove_file(self.path.join(path))?;
-        let mut cached = self.cached.lock().unwrap();
-        if let Some(gone) = cached.remove(path).as_ref().and_then(crate::pages::WeakCached::upgrade)
-            && !cached.values().filter_map(crate::pages::WeakCached::upgrade).any(|o| o.same(&gone))
-            && gone.alone()
-        {
-            gone.cancel();
-        }
-        Ok(())
+        std::fs::remove_file(self.path.join(path))
     }
 
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::rename(self.path.join(from), self.path.join(to))?;
-        let mut cached = self.cached.lock().unwrap();
-        if let Some(replaced) =
-            cached.remove(to).as_ref().and_then(crate::pages::WeakCached::upgrade)
-            && !cached
-                .values()
-                .filter_map(crate::pages::WeakCached::upgrade)
-                .any(|o| o.same(&replaced))
-        {
-            replaced.cancel();
-        }
-        if let Some(moved) = cached.remove(from) {
-            cached.insert(to.to_owned(), moved);
-        }
-        Ok(())
+        std::fs::rename(self.path.join(from), self.path.join(to))
     }
 
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
-        std::fs::hard_link(self.path.join(from), self.path.join(to))?;
-        let mut cached = self.cached.lock().unwrap();
-        if let Some(linked) = cached.get(from).cloned() {
-            cached.insert(to.to_owned(), linked);
-        }
-        Ok(())
+        std::fs::hard_link(self.path.join(from), self.path.join(to))
     }
 
     fn create_dir(&self, path: &str) -> io::Result<()> {
@@ -351,18 +311,7 @@ impl Dir for HostDir {
         Ok(names)
     }
 
-    /// cladefs: a file handed to the host by its path, as the host's cache of objects takes one
-    /// by renaming it (TASK-165.8), has its dirty pages written back first, and its pages dropped:
-    /// the host reads and moves it around the store's page cache (TASK-433).
     fn host_path(&self, path: &str) -> Option<PathBuf> {
-        if let Some(cached) = self.cached(path) {
-            if let Err(err) = cached.settle(0..u64::MAX) {
-                log::warn!("extent store: writing {path} back for the host: {err}");
-                return None;
-            }
-            self.cached.lock().unwrap().remove(path);
-            cached.cancel();
-        }
         Some(self.path.join(path))
     }
 
@@ -458,7 +407,7 @@ static CLAIMED: Mutex<BTreeSet<DirId>> = Mutex::new(BTreeSet::new());
 /// A directory's device and inode, which name it however a path names it.
 type DirId = (u64, u64);
 
-impl HostDir {
+impl DiskDir {
     /// The directory's device and inode.
     fn id(&self) -> io::Result<DirId> {
         use std::os::unix::fs::MetadataExt as _;
@@ -490,122 +439,28 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
     }
 }
 
-/// A file of a [`HostDir`]: one of its extents' files, through the process's page cache, or any
-/// other, read and written as it is ([`DiskFile`]).
-pub struct HostFile(Repr);
-
-enum Repr {
-    Disk(DiskFile),
-    Cached(crate::pages::Cached<DiskFile>),
-}
-
-impl HostFile {
-    /// The file on the disk, under the page cache, if it is cached.
-    fn disk(&self) -> &DiskFile {
-        match &self.0 {
-            Repr::Disk(disk) => disk,
-            Repr::Cached(cached) => cached.file(),
-        }
-    }
-
-    /// cladefs: writes back the pages the page cache holds dirty in `range` and drops every page
-    /// there, if the file is cached: what an I/O of a caller's own on its descriptor
-    /// ([`AsRawFd`]) is to be preceded by, as an image's device's is, so that it reads what was
-    /// written, and what it writes no page hides (TASK-433).
-    pub fn settle(&self, range: std::ops::Range<u64>) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(_) => Ok(()),
-            Repr::Cached(cached) => cached.settle(range),
-        }
-    }
-
-    /// cladefs: as [`HostFile::settle`] does, before a write of a caller's own on its descriptor,
-    /// which also drops the pages there and takes the file to go as far as `range` at least, so
-    /// that what the caller writes no page hides, and reads see all of it (TASK-433).
-    pub fn settle_for_write(&self, range: std::ops::Range<u64>) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(_) => Ok(()),
-            Repr::Cached(cached) => cached.settle_for_write(range),
-        }
-    }
-}
-
-impl AsRawFd for HostFile {
-    fn as_raw_fd(&self) -> RawFd {
-        self.disk().file.as_raw_fd()
-    }
-}
-
-impl File for HostFile {
-    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.read_at(buf, offset),
-            Repr::Cached(cached) => cached.read_at(buf, offset),
-        }
-    }
-
-    fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        self.read_at(buf, offset)
-    }
-
-    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.write_at(buf, offset),
-            Repr::Cached(cached) => cached.write_at(buf, offset),
-        }
-    }
-
-    fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.write_back(offset, len),
-            Repr::Cached(cached) => cached.write_back(offset, len),
-        }
-    }
-
-    fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.write_behind(offset, len),
-            Repr::Cached(cached) => cached.write_behind(offset, len),
-        }
-    }
-
-    fn size(&self) -> io::Result<u64> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.size(),
-            Repr::Cached(cached) => cached.size(),
-        }
-    }
-
-    fn sync(&self) -> io::Result<()> {
-        match &self.0 {
-            Repr::Disk(disk) => disk.sync(),
-            Repr::Cached(cached) => cached.sync(),
-        }
-    }
-
-    fn sync_cached(&self) -> io::Result<()> {
-        self.sync()
-    }
-}
-
-/// cladefs: a file of the host's disk, bypassing its page cache if `direct` ([`HostDir`]): read and
-/// written by the blocks around what is asked, from memory aligned to them, the block ending the
-/// last write held, so that an append, a log's, reads nothing back (`extent_remote::direct`,
-/// TASK-433).
+/// cladefs: a file of the host's disk, bypassing its page cache ([`DiskDir`]): read and written by
+/// the blocks around what is asked, from memory aligned to them, the block ending the last write
+/// held, so that an append, a log's, reads nothing back (`extent_remote::direct`, TASK-433).
 pub struct DiskFile {
     file: std::fs::File,
-    direct: bool,
     tail: Mutex<extent_remote::direct::Tail>,
+}
+
+impl AsRawFd for DiskFile {
+    fn as_raw_fd(&self) -> RawFd {
+        self.file.as_raw_fd()
+    }
 }
 
 impl File for DiskFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        extent_remote::direct::read_at(&self.file, self.direct, buf, offset)
+        extent_remote::direct::read_at(&self.file, true, buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut tail = self.tail.lock().unwrap();
-        extent_remote::direct::write_at(&self.file, self.direct, &mut tail, buf, offset)
+        extent_remote::direct::write_at(&self.file, true, &mut tail, buf, offset)
     }
 
     /// Taken as no write is in flight: a write of part of a block writes it whole, the file cut

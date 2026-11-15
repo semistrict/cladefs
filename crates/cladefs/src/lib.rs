@@ -170,6 +170,8 @@ mod store_table;
 mod test_checkpoints;
 #[cfg(test)]
 mod test_data;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 #[cfg(target_os = "linux")]
 pub mod thread;
 mod volume;

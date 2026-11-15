@@ -26,9 +26,8 @@ pub fn create_host(
     description: Description,
     bucket: &str,
     volume: Volume,
-    direct: bool,
 ) -> Result<(), Error> {
-    Store::make(&HostDir::new(path, direct)?, description, Some(bucket), Some(volume))
+    Store::make(&HostDir::new(path)?, description, Some(bucket), Some(volume))
 }
 
 /// cladefs: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
@@ -90,7 +89,7 @@ pub fn delete_host(
         return remove_store(path);
     }
     let branch = host_branch(path)?;
-    let dir = HostDir::new(path, false)?;
+    let dir = HostDir::new(path)?;
     dir.take().context("taking the store's directory")?;
     let removed = dir.claim().context("taking the store's directory").and_then(|()| {
         let removed = before(branch).and_then(|()| {
@@ -291,7 +290,7 @@ mod tests {
 
     /// The store at `path`, opened where the bucket holds nothing of its branch.
     fn open(path: &Path) -> Result<Store<HostDir>, Error> {
-        Store::open(HostDir::new(path, true)?, Options::default())
+        Store::open(HostDir::new(path)?, Options::default())
     }
 
     /// A store at `store` in `temp`, holding an extent: its path.
@@ -308,10 +307,9 @@ mod tests {
             description,
             BUCKET,
             crate::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
-            true,
         )
         .unwrap();
-        let store = Store::recover_unmade(HostDir::new(&path, true).unwrap()).unwrap();
+        let store = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
         let store = store
             .open(Options::default(), crate::Opening::new(extent_remote::layout::test_branch(3)))
             .unwrap();

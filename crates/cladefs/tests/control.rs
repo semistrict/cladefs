@@ -392,17 +392,10 @@ fn sealed_stores_served_and_shredded_through_the_control_api() {
     assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
     daemon.sync(&ours).unwrap();
     daemon.sync(&sibling).unwrap();
+    // Beside the daemon's stores, which work on behind its API (TASK-463).
     for (seed, path) in (1..).zip([&ours, &sibling]) {
-        let mut paths = vec![path.to_path_buf()];
-        while let Some(at) = paths.pop() {
-            if at.is_dir() {
-                paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
-                continue;
-            }
-            let bytes = std::fs::read(&at).unwrap();
-            let held = bytes.windows(64).any(|window| window == &pattern(seed)[..64]);
-            assert!(!held, "{} holds what its VM wrote", at.display());
-        }
+        let held = cladefs::testing::files_holding_beside(path, &[&pattern(seed)[..64]]);
+        assert_eq!(held, Vec::<String>::new(), "files holding what their VM wrote");
     }
 
     let shred = |daemon: &mut Daemon| {

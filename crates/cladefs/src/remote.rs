@@ -2424,7 +2424,7 @@ mod tests {
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
         let volume =
             extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs };
-        extent_store::create_host(path, description, &url_of(bucket), volume, true).unwrap();
+        extent_store::create_host(path, description, &url_of(bucket), volume).unwrap();
         extent_store::made_host(path).unwrap();
     }
 
@@ -2807,18 +2807,9 @@ mod tests {
             [Err(Some(crate::Errno::EACCES)), Err(Some(crate::Errno::EACCES)), Ok(())]
         );
 
-        let mut files = vec![dir.path().to_path_buf()];
-        while let Some(at) = files.pop() {
-            if at.is_dir() {
-                files.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
-                continue;
-            }
-            let bytes = std::fs::read(&at).unwrap();
-            for data in &written[..2] {
-                let held = bytes.windows(64).any(|window| window == &data[..64]);
-                assert!(!held, "{} holds a store's data", at.display());
-            }
-        }
+        let pieces: Vec<&[u8]> = written[..2].iter().map(|data| &data[..64]).collect();
+        let held = crate::testing::files_holding(dir.path(), &pieces);
+        assert_eq!(held, Vec::<String>::new(), "files holding a store's data");
     }
 
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its

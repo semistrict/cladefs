@@ -36,10 +36,6 @@ use std::sync::{Arc, Mutex};
 /// of it.
 pub(crate) const BLOCK_SIZE: u32 = 4096;
 
-/// Whether stores' files bypass the host's page cache, where the host's file system allows: the
-/// extent cache (`crate::cache`) caches their pages already.
-const DIRECT: bool = true;
-
 /// The tenant of stores made for no tenant of the host's (TASK-364), the common tenant: the cladefs
 /// CLI's images, an ungranted caller's stores, public bases, tests'. Its stores with writers alone
 /// fork into other tenants' cells ([`may_fork_into`], TASK-395.9).
@@ -302,7 +298,7 @@ pub(crate) fn create_unmade(
             BranchOf::Named(branch) => branch,
         };
         let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-        extent_store::create_host(path, description, &url, volume, DIRECT)?;
+        extent_store::create_host(path, description, &url, volume)?;
         let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
         let synced = std::fs::File::open(parent.unwrap_or(Path::new(".")))
             .and_then(|parent| parent.sync_all());
@@ -328,7 +324,7 @@ pub(crate) fn open(path: &Path, keeping: upload::Options) -> Result<Opened, Fail
 
 /// The directory of the store at `path`.
 fn host_dir(path: &Path) -> Result<HostDir, Failure> {
-    HostDir::new(path, DIRECT).map_err(|err| Failure::local(err, format!("{}", path.display())))
+    HostDir::new(path).map_err(|err| Failure::local(err, format!("{}", path.display())))
 }
 
 /// Opens the store at `path` as [`open`] does, its write-ahead log dropped if another writer's
@@ -513,7 +509,7 @@ fn make_child(
         anyhow::anyhow!("{} is no volume of a cell", parent.dir().path().display())
     })?;
     let description = Description { block_size: BLOCK_SIZE, capacity, branch };
-    extent_store::create_host(path, description, &url, volume, DIRECT)?;
+    extent_store::create_host(path, description, &url, volume)?;
     extent_store::made_host(path)?;
     let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
     std::fs::File::open(parent.unwrap_or(Path::new(".")))?.sync_all()?;

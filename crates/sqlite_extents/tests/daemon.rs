@@ -127,16 +127,8 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
         drop(registration);
         volume.close().unwrap();
     }
-    let mut found = Vec::new();
-    let mut paths = vec![store];
-    while let Some(at) = paths.pop() {
-        if at.is_dir() {
-            paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
-        } else if std::fs::read(&at).unwrap().windows(64).any(|window| window == &marker[..64]) {
-            found.push(at.display().to_string());
-        }
-    }
-    found
+    // Beside the daemon's store, which works on behind its API (TASK-463).
+    cladefs::testing::files_holding_beside(&store, &[&marker[..64]])
 }
 
 /// A volume on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its

@@ -3,8 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Sourced by the mutant scripts (crates/*/mutants.sh): whether a mutant's patch applies as it is,
-# the same on every host, run from the repository's root. A patch applies with no fuzz, as GNU
+# Sourced by the mutant scripts (crates/*/mutants.sh, scripts/loom-mutants.sh), run from the
+# repository's root: whether a mutant's patch applies as it is, the same on every host, and putting
+# it into the tree while its killer runs (patch_run, below). A patch applies with no fuzz, as GNU
 # patch takes it (`-F0`), and BSD patch (macOS) is laxer: it takes a hunk whose header counts other
 # lines than it has, and one with more context on one side of its changes than the other away from
 # the file's ends, which GNU patch then anchors to the file's start or end. A patch re-anchored by
@@ -106,4 +107,97 @@ patch_round_trip() {
     fi
     rm -r "$copy"
     return $status
+}
+
+# Mutants in the tree. A runner puts a mutant into its working tree, runs the mutant's killer, and
+# takes it out. Stopped in between (a run cancelled mid-build, ^C), it left the mutant in, and all
+# built there from then on had the bug, to be committed with whatever else changed (TASK-444.2.5).
+# patch_run takes the mutant out whatever stops the runner that it can see. For what it can't see
+# (SIGKILL, a host gone), $MUTANT_MARK, at the tree's root, names the mutant while it is in, and the
+# next patch_run takes it out first. A runner puts a patch into its tree only through patch_run
+# (scripts/tests/test_patches.py checks).
+
+MUTANT_MARK=.mutant-in
+
+# patch_run PATCH LOG COMMAND...: COMMAND's status, run with PATCH in the tree and its output in
+# LOG, the patch put in and taken out again. A SIGTERM, SIGINT or SIGHUP meanwhile stops COMMAND and all
+# it started, takes the patch out, and exits the runner (143, 130, 129). Exits the runner (1) if the
+# patch doesn't apply or reverse, or a mutant left in the tree can't be taken out.
+patch_run() {
+    local patch=$1 log=$2 status
+    shift 2
+    patch_recover || exit 1
+    _patch_in="" _patch_child=""
+    trap '_patch_stop 143' TERM
+    trap '_patch_stop 130' INT
+    trap '_patch_stop 129' HUP
+    echo "$$ $patch" > "$MUTANT_MARK"
+    if ! patch -s -F0 -p1 < "$patch"; then
+        rm "$MUTANT_MARK"
+        echo "$patch doesn't apply" >&2
+        exit 1
+    fi
+    _patch_in=$patch
+    # In a process group of its own, so that a stop reaches what COMMAND started (cargo's tests, a
+    # script's builds), and the terminal's ^C reaches the runner, which stops COMMAND. Never the
+    # terminal's own group, so not reading it: a read would stop it.
+    set -m
+    "$@" < /dev/null > "$log" 2>&1 &
+    _patch_child=$!
+    set +m
+    wait "$_patch_child"
+    status=$?
+    _patch_child=""
+    _patch_out
+    trap - TERM INT HUP
+    return $status
+}
+
+# patch_recover: takes out the mutant that a runner stopped by SIGKILL left in the tree, which
+# $MUTANT_MARK names. Fails while a live runner holds the tree, or if the mutant doesn't reverse.
+patch_recover() {
+    local pid patch
+    [[ -e $MUTANT_MARK ]] || return 0
+    read -r pid patch < "$MUTANT_MARK"
+    if kill -0 "$pid" 2> /dev/null; then
+        echo "runner $pid has $patch in this tree; if it is gone, $MUTANT_MARK is stale: remove it" >&2
+        return 1
+    fi
+    if ! patch -s -F0 -R -p1 < "$patch"; then
+        echo "$patch, left in the tree by runner $pid, doesn't reverse:" \
+            "take it out by hand, then remove $MUTANT_MARK" >&2
+        return 1
+    fi
+    _patch_touch "$patch"
+    rm "$MUTANT_MARK"
+    echo "took out $patch, which runner $pid left in the tree when it was stopped" >&2
+}
+
+# _patch_stop STATUS: a signal's trap in patch_run. Stops COMMAND's process group, takes the patch
+# out, exits with STATUS.
+_patch_stop() {
+    trap '' TERM INT HUP
+    if [[ -n $_patch_child ]]; then
+        kill -TERM -- "-$_patch_child" 2> /dev/null
+        wait "$_patch_child"
+    fi
+    [[ -z $_patch_in ]] || _patch_out
+    exit "$1"
+}
+
+# _patch_out: takes out the patch patch_run put in, or exits the runner, which then leaves the tree
+# with it and $MUTANT_MARK naming it.
+_patch_out() {
+    if ! patch -s -F0 -R -p1 < "$_patch_in"; then
+        echo "$_patch_in doesn't reverse: the tree has it" >&2
+        exit 1
+    fi
+    # Its files rewritten, as patch writes them: cargo builds them anew, never the mutant again.
+    _patch_touch "$_patch_in"
+    _patch_in=""
+    rm "$MUTANT_MARK"
+}
+
+_patch_touch() {
+    sed -n 's|^+++ b/||p' "$1" | xargs touch
 }

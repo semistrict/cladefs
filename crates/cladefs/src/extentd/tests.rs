@@ -2547,7 +2547,7 @@ fn earlier_placements_open_no_stores() {
     let description =
         extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
     let volume = extent_store::Volume { name: "earlier".into(), kind: Kind::Fxfs };
-    extent_store::create_host(&earlier, description, "memory:///branches", volume, true).unwrap();
+    extent_store::create_host(&earlier, description, "memory:///branches", volume).unwrap();
     extent_store::made_host(&earlier).unwrap();
     ExtentStore::place(&earlier, 3).unwrap();
     let refused = RemoteExtentStore::connect(&socket, &earlier, 1 << 24);

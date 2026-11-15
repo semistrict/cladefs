@@ -33,10 +33,9 @@ fn create(path: &Path) -> extent_store::Store<HostDir> {
         description,
         "memory:///host",
         extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
-        false,
     )
     .unwrap();
-    let store = Store::recover_unmade(HostDir::new(path, false).unwrap()).unwrap();
+    let store = Store::recover_unmade(HostDir::new(path).unwrap()).unwrap();
     let store = store.open(OPTIONS, Opening::new(BRANCH)).unwrap();
     store.made().unwrap();
     store
@@ -44,7 +43,7 @@ fn create(path: &Path) -> extent_store::Store<HostDir> {
 
 /// The store at `path`, opened where the bucket holds nothing of its branch.
 fn open_host(path: &Path) -> anyhow::Result<Store<HostDir>> {
-    Store::open(HostDir::new(path, false)?, OPTIONS)
+    Store::open(HostDir::new(path)?, OPTIONS)
 }
 
 /// cladefs: a host's store names its branch, and the bucket it is kept in (TASK-165.6), which its
@@ -95,10 +94,9 @@ fn stores_unmade_refuse_to_open() {
         description,
         "memory:///host",
         extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
-        false,
     )
     .unwrap();
-    let making = Store::recover_unmade(HostDir::new(&path, false).unwrap()).unwrap();
+    let making = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
     let store = making.open(OPTIONS, Opening::new(BRANCH)).unwrap();
     store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; BLOCK]).unwrap();
     store.commit(None).unwrap();
@@ -106,7 +104,7 @@ fn stores_unmade_refuse_to_open() {
     drop(store);
     let refused = open_host(&path).err().expect("an unmade store opened");
     assert_eq!(refused.downcast_ref::<Unmade>(), Some(&Unmade), "{refused:#}");
-    let making = Store::recover_unmade(HostDir::new(&path, false).unwrap()).unwrap();
+    let making = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
     let store = making.open(OPTIONS, Opening::new(BRANCH)).unwrap();
     store.made().unwrap();
     drop(store);
@@ -127,7 +125,7 @@ fn placements_name_their_token_in_the_description() {
     assert_eq!(host_token(&path).unwrap(), Some(9));
     let store = open_host(&path).unwrap();
     assert_eq!(store.bucket(), Some("memory:///host"));
-    let recovering = Store::recover(HostDir::new(dir.path(), false).unwrap());
+    let recovering = Store::recover(HostDir::new(dir.path()).unwrap());
     assert!(recovering.is_err(), "the store's parent opened");
 }
 
@@ -156,7 +154,7 @@ fn directories_are_taken_one_at_a_time() {
     let others = std::fs::File::open(dir.path()).unwrap();
     // SAFETY: Plain system call on the directory's descriptor.
     assert_eq!(unsafe { libc::flock(others.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) }, 0);
-    let ours = HostDir::new(dir.path(), false).unwrap();
+    let ours = HostDir::new(dir.path()).unwrap();
     std::thread::scope(|scope| {
         // Let go once ours is waiting: well within the wait, and after its first try.
         scope.spawn(|| {
@@ -175,7 +173,7 @@ fn directories_are_taken_one_at_a_time() {
 #[test]
 fn removed_files_are_gone() {
     let dir = tempfile::tempdir().unwrap();
-    let host = HostDir::new(dir.path(), false).unwrap();
+    let host = HostDir::new(dir.path()).unwrap();
     host.create("file", false).unwrap().write_at(b"data", 0).unwrap();
     assert_eq!(host.list("").unwrap(), ["file"]);
     host.remove("file").unwrap();

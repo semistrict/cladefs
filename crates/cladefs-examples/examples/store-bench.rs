@@ -201,7 +201,7 @@ fn close_now(mib: u64) {
     let temp = tempfile::tempdir().unwrap();
     // Segments close between commits alone.
     let options = Options { segment_size: 1 << 30, ..Options::default() };
-    let store = Arc::new(create(HostDir::new(temp.path(), true).unwrap(), options));
+    let store = Arc::new(create(HostDir::new(temp.path()).unwrap(), options));
     let done = Arc::new(AtomicBool::new(false));
     let guest = {
         let (store, done) = (store.clone(), done.clone());
@@ -243,7 +243,7 @@ fn close_now(mib: u64) {
 fn burst(mib: u64) {
     const EXTENT: usize = 256 << 10;
     let temp = tempfile::tempdir().unwrap();
-    let store = create(HostDir::new(temp.path(), true).unwrap(), Options::default());
+    let store = create(HostDir::new(temp.path()).unwrap(), Options::default());
     store.write(extent(0), 0, &data(0, BLOCK)).unwrap();
     store.commit(None).unwrap();
     let mut writes = Waits::default();
@@ -289,7 +289,7 @@ fn durable(files: u64) {
     const WRITE: usize = 64 << 10;
     let temp = tempfile::tempdir().unwrap();
     let options = Options::default();
-    let store = create(HostDir::new(temp.path(), true).unwrap(), options);
+    let store = create(HostDir::new(temp.path()).unwrap(), options);
     let mut flushes = Waits::default();
     let mut sequence = 0;
     for _ in 0..COMMITS {
@@ -459,7 +459,7 @@ fn writes(mib: u64) {
     let extent_kib = env("EXTENT", 1024u64);
     let host = Host::from_env();
     let temp = temp_dir();
-    let dir = HostDir::new(temp.path(), true).unwrap();
+    let dir = HostDir::new(temp.path()).unwrap();
     // Segments close at commits alone.
     let options = Options { segment_size: 1 << 30, ..Options::default() };
     let (store, _remote) = match &host {
@@ -543,7 +543,7 @@ fn framing(segments: u64) {
                 std::fs::create_dir(&temp).unwrap();
                 // Segments close between commits alone, a commit after each 32 MiB.
                 let options = Options { segment_size: 1 << 30, ..Options::default() };
-                let dir = HostDir::new(&temp, true).unwrap();
+                let dir = HostDir::new(&temp).unwrap();
                 let (store, _remote) = match host {
                     Some(host) => {
                         let (store, remote) = host.open(dir, store + 1, options, held.clone());

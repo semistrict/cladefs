@@ -8,8 +8,9 @@ license.workspace = true
 publish = false
 
 [features]
-# Images for tests of importing them, here and in the guest's (`import::testing`); the tests' KMS,
-# which tests' processes and benches seal under (`remote::testing`, TASK-411.28).
+# Images for tests of importing them, here and in the guest's (`import::testing`); what tests,
+# here and in sqlite_extents', look for on the host's disk beside stores (`testing`); and the
+# tests' KMS, which tests' processes and benches seal under (`remote::testing`, TASK-411.28).
 testing = ["extent_keys/testing"]
 # The extent daemon's registry of open stores and its requests on them (open_stores and
 # store_requests, TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
