@@ -71,19 +71,11 @@ impl Host {
     /// The host crashes: what it had going reaches the bucket no more, as a dead host's work does
     /// not, but its writes landed so far. Its stores and uploaders, which go on until dropped,
     /// write to what it reached before; what opens on it from now on reaches a copy of that, as
-    /// it is now.
+    /// it is at one instant ([`InMemory::fork`], under its lock). Copied key by key, the uploader
+    /// going on, a segment put after the listing and the head swapped before it was read left a
+    /// copy whose head named a segment it lacked (TASK-432).
     fn crash(&self) {
-        let before = self.memory.borrow().clone();
-        let copy = Arc::new(InMemory::new());
-        self.runtime.block_on(async {
-            use futures::StreamExt as _;
-            use object_store::{ObjectStore as _, ObjectStoreExt as _};
-            for meta in before.list(None).collect::<Vec<_>>().await {
-                let location = meta.unwrap().location;
-                let bytes = before.get(&location).await.unwrap().bytes().await.unwrap();
-                copy.put(&location, bytes.into()).await.unwrap();
-            }
-        });
+        let copy = Arc::new(self.memory.borrow().fork());
         *self.bucket.borrow_mut() = Arc::new(Bucket::new(copy.clone(), ""));
         *self.memory.borrow_mut() = copy;
     }
