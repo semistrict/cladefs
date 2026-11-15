@@ -202,7 +202,7 @@ static void write_module(unsigned long stores)
 		 "\\* A run of guest/sim/tests/traced.c as specs/dax-cow's actions (guest/sim/kernel/spec_trace.c).\n"
 		 "\\* sources: %s\n"
 		 "\\* seed: %llu\n"
-		 "EXTENDS Sequences\n"
+		 "EXTENDS Naturals, Sequences\n"
 		 "TracePages == 1..%lu\n"
 		 "TracePrivateMax == %lu\n"
 		 "TraceMaxStores == %lu\n"

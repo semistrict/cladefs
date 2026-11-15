@@ -20,7 +20,7 @@
 
 #define WINDOW_LEN (64UL << 20)
 #define STORERS 2
-#define MOST_PAGES 4
+#define MOST_PAGES 12
 
 #define check(cond, ...) do { if (!(cond)) sim_panic(__VA_ARGS__); } while (0)
 
@@ -145,9 +145,12 @@ int main(int argc, char **argv)
 	}
 	sim_init(seed);
 	sim_device_init(WINDOW_LEN);
-	pages = between(2, MOST_PAGES);
-	/* Few, so that the storers wait for the budget, and the worker writes back and rebinds. */
-	private_max = between(2, 2 * MOST_PAGES);
+	pages = between(4, MOST_PAGES);
+	/*
+	 * Fewer than the pages, often, so that the storers wait for the budget, and the worker writes
+	 * back and rebinds: as few as a mount takes (fxfs_dax_create's 8).
+	 */
+	private_max = between(8, 10);
 	sim_device_private_max(private_max);
 	mount = sim_mount_new();
 	file = sim_file_new(mount);
