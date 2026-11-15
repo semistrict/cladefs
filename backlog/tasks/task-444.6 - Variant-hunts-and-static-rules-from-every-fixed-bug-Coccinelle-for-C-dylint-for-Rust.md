@@ -3,10 +3,11 @@ id: TASK-444.6
 title: >-
   Variant hunts and static rules from every fixed bug: Coccinelle for C, dylint
   for Rust
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 12:33'
-updated_date: '2026-11-15 13:32'
+updated_date: '2026-11-15 20:35'
 labels: []
 dependencies: []
 references:
@@ -37,3 +38,25 @@ Big Sleep first real bug came from variant analysis of recent fixes; KNighter (S
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+C half (890dafe16, af4de78a4; branch land-444-6, gates pending):
+
+Approach: each guest mutant (guest/mutants, 58) is a past bug put back. A rule in scripts/cocci names the mutants of its kind (// Mutants:), and scripts/cocci-guest.py --mutants fails unless it matches each in a copy of the guest's C, and unless every mutant has a rule or a why in scripts/cocci/unruled. That makes AC#1 and AC#2 a check, not a one-off.
+
+Rules (12 mutants): dropped-error (164.4 commit failure), unwoken (149.18 x2), listing-dropped (230 x4), lock-not-held (44.9, 164.4 writeback-unlocked, swap-shared, rebind-shared), guarded-fields (44.19), error-logged-and-cleared (164.9). The other 46 are values, conditions or choices of their algorithm (each why in unruled), the kernel's fs/dax.c, or guest/sim's model.
+
+Variant hunt at HEAD (AC#3): dropped-error found 2 results dropped that can't fail (cast to void). unwoken: 2 writes making a wait's condition false (argued). lock-not-held: 11 at first; fxfs_dax_map_all's comment-only contract now asserted; the rest are locks held by an external caller (VFS, the follower's Rust), a callee returning holding the lock (fxfs_dax_get_range), or for(;;) loops breaking with the lock held, which Coccinelle takes as possibly not run: argued in scripts/cocci/safe, by rule, file, function and line; an entry matching nothing fails the check. guarded-fields: put_region's last-reference read (argued). Writing lock-not-held turned five comment-only lock contracts into lockdep assertions (map_all, rebind_range's wb_lock, release, range_dirty, dirty_ranges, write_pages' wb_lock) and the dirty-set swap into fxfs_dax_range_swap, asserting the semaphore exclusive.
+
+Log-and-continue sites (the kind 164.9 was), surveyed by hand: the budget worker's (rebinding, sealing, writing back: no caller, pages stay dirty and the next round retries), evict's writeback (can't fail upward; given up on as an I/O error's are, by design, TASK-207), resize work, the follower's invalidations and freeze/thaw on volume leave (void callbacks). None filed.
+
+Structure: the class 'a lock contract only in a comment' is now made checkable: a function says its lock with an assertion, and the rule checks every caller.
+
+Coccinelle gotchas (Homebrew spatch 1.3.3): =~ regexes match nothing, use {a, b} sets; <+... ...+> misses nested calls in a rule with no *; a header's prototypes bind only if the .h goes to spatch with the .c files.
+
+Tests: scripts/tests/test_cocci_guest.py (the guest's C passes, every rule finds its mutants, the safe and unruled lists' semantics).
+
+Left: the Rust half (AC#1 for the host crates' 74 mutants and loom's 10; clippy.toml's disallowed-methods is how cladefs already turns bugs into rules, TASK-98; dylint where that can't express one); CI wiring is via the clippy scripts part, which runs scripts/tests with Coccinelle installed (AC#4).
+<!-- SECTION:NOTES:END -->
