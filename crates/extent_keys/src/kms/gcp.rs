@@ -605,7 +605,7 @@ mod tests {
     }
 
     /// The key the bodies Cloud KMS answered with name (TASK-411.18's notes).
-    const KEY: &str = "projects/echophase-connectome-test/locations/us-central1/keyRings/cladefs-test/cryptoKeys/cladefs-probe";
+    const KEY: &str = "projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test/cryptoKeys/fxdax-probe";
 
     fn mapped(op: Op, code: u16, body: &str) -> (String, bool) {
         let Failure { error, transient } = refusal(9, KEY, op, code, body.as_bytes());

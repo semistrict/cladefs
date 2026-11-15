@@ -26,7 +26,9 @@ pub const RING_VAR: &str = "CLADEFS_KMS_GCP_TEST_RING";
 /// The key ring the tests keep their keys in, unless [`RING_VAR`] names another: the user's test
 /// project's (TASK-411.18's notes).
 pub const RING: &str =
-    "projects/echophase-connectome-test/locations/us-central1/keyRings/cladefs-test";
+    // Named before the project was renamed cladefs (TASK-437): Cloud KMS key rings and keys are
+    // never deleted, so the test ring and its keys keep their names (TASK-411.18).
+    "projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test";
 
 /// How long [`eventually`] waits for the KMS to say what a test expects, and between asking.
 const PATIENCE: Duration = Duration::from_secs(240);

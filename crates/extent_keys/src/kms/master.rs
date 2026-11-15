@@ -241,10 +241,10 @@ mod tests {
     #[test]
     fn ids_are_short_hashes_of_their_keys() {
         let keys = MasterKeys::parse(ONE, "test").unwrap();
-        assert_eq!(ids(&keys), ["2bb56b8197c604e4"]);
-        assert_eq!(keys.newest().id().to_string(), "2bb56b8197c604e4");
-        assert_eq!(format!("{keys:?}"), "MasterKeys([MasterKeyId(2bb56b8197c604e4)])");
-        assert_eq!(format!("{:?}", keys.newest()), "MasterKey(2bb56b8197c604e4)");
+        assert_eq!(ids(&keys), ["8b1917a7f2bf1306"]);
+        assert_eq!(keys.newest().id().to_string(), "8b1917a7f2bf1306");
+        assert_eq!(format!("{keys:?}"), "MasterKeys([MasterKeyId(8b1917a7f2bf1306)])");
+        assert_eq!(format!("{:?}", keys.newest()), "MasterKey(8b1917a7f2bf1306)");
         assert_eq!(keys.newest().key().expose(), &std::array::from_fn(|at| at as u8));
     }
 
@@ -255,7 +255,7 @@ mod tests {
         {
             let keys = MasterKeys::parse(&text, "test").unwrap();
             let [two, one] = &ids(&keys)[..] else { panic!("{keys:?}") };
-            assert_eq!(one, "2bb56b8197c604e4");
+            assert_eq!(one, "8b1917a7f2bf1306");
             assert_eq!(keys.newest().id().to_string(), *two);
             assert_eq!(keys.get(keys.ids()[1]).unwrap().id().to_string(), *one);
         }
@@ -278,7 +278,7 @@ mod tests {
         );
         assert_eq!(
             refused(&format!("{ONE},{TWO},{ONE}")),
-            "CLADEFS_MASTER_KEY: key 3 is key 1 again (2bb56b8197c604e4)"
+            "CLADEFS_MASTER_KEY: key 3 is key 1 again (8b1917a7f2bf1306)"
         );
         for refusal in [refused(short), refused(&bad)] {
             assert!(!refusal.contains(&ONE[..16]), "{refusal}");
@@ -288,7 +288,7 @@ mod tests {
     #[test]
     fn files_hold_one_raw_key_or_keys_in_hex() {
         let raw: [u8; KEY_LEN] = std::array::from_fn(|at| at as u8);
-        assert_eq!(ids(&MasterKeys::of_file(&raw, "file").unwrap()), ["2bb56b8197c604e4"]);
+        assert_eq!(ids(&MasterKeys::of_file(&raw, "file").unwrap()), ["8b1917a7f2bf1306"]);
         let text = format!("{TWO}\n{ONE}\n");
         assert_eq!(MasterKeys::of_file(text.as_bytes(), "file").unwrap().ids().len(), 2);
         assert_eq!(
@@ -329,7 +329,7 @@ mod tests {
         );
         set(MASTER_KEY_VAR, None);
         let keys = MasterKeys::from_env().unwrap().unwrap();
-        assert_eq!(ids(&keys), ["2bb56b8197c604e4"]);
+        assert_eq!(ids(&keys), ["8b1917a7f2bf1306"]);
         set(MASTER_KEY_FILE_VAR, Some(dir.path().join("missing").as_os_str()));
         let refused = MasterKeys::from_env().unwrap_err();
         let expected =

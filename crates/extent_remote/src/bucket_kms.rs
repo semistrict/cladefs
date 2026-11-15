@@ -729,7 +729,7 @@ mod tests {
         let host = chosen(Some(&bucket)).unwrap().unwrap();
         let kms = host.bucket().unwrap();
         assert!(Arc::ptr_eq(kms.bucket(), &bucket));
-        assert_eq!(kms.keys().named_ids(), "2bb56b8197c604e4");
+        assert_eq!(kms.keys().named_ids(), "8b1917a7f2bf1306");
         let key = Secret::random();
         let wrapped = block_on(host.shared().wrap_dyn(7, &key)).unwrap();
         assert_eq!(unwrap(&**kms, 7, &wrapped).unwrap().expose(), key.expose());

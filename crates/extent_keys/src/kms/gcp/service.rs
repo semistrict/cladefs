@@ -4,7 +4,7 @@
 
 //! TASK-411.18 AC #4: the backend against real Google Cloud KMS, through [`kms::from_url`], as a
 //! host configures it; each test its own key of the tests' key ring ([`Admin`]), as tenants'
-//! keys are named, `cladefs-test-<tenant>`. Skipped, saying why, without an access token.
+//! keys are named, `fxdax-test-<tenant>`. Skipped, saying why, without an access token.
 
 use super::SCHEME;
 use crate::kms::{self, Error, Kms as _, LocalKms, real};
@@ -12,7 +12,7 @@ use crate::testing::gcp::{Admin, eventually};
 use crate::{Secret, Wrapped};
 
 /// How the tests' tenants' keys are named.
-const TEMPLATE: &str = "cladefs-test-{tenant}";
+const TEMPLATE: &str = "fxdax-test-{tenant}";
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
@@ -51,11 +51,11 @@ async fn destroy_all_but(admin: &Admin, key: &str, kept: u32) {
 fn keys_wrap_unwrap_and_bind_their_tenant() {
     let Some(admin) = Admin::from_env("keys_wrap_unwrap_and_bind_their_tenant") else { return };
     runtime().block_on(async {
-        let name = admin.key("cladefs-test-1").await;
+        let name = admin.key("fxdax-test-1").await;
         let dir = tempfile::tempdir().unwrap();
         let overrides = dir.path().join("keys");
         let foreign = "projects/cloud-samples-data/locations/global/keyRings/r/cryptoKeys/k";
-        std::fs::write(&overrides, format!("11 cladefs-test-1\nbeef {foreign}\n")).unwrap();
+        std::fs::write(&overrides, format!("11 fxdax-test-1\nbeef {foreign}\n")).unwrap();
         let kms = kms_of(&admin, Some(&overrides));
         let key = Secret::random();
         let wrapped = kms.wrap_dyn(1, &key).await.unwrap();
@@ -85,7 +85,7 @@ fn keys_wrap_unwrap_and_bind_their_tenant() {
         assert_eq!(refused(local.unwrap(1, &wrapped).await), unauthentic(1, by_header));
 
         assert_eq!(refused(kms.wrap_dyn(0xdead, &key).await), "tenant 57005: no KEK in the KMS");
-        let missing = format!("{}/cryptoKeys/cladefs-test-dead", admin.ring());
+        let missing = format!("{}/cryptoKeys/fxdax-test-dead", admin.ring());
         let ciphertext = &wrapped.0[header.0.len()..];
         let naming_missing = real::wrapped(SCHEME, &missing, ciphertext);
         let no_kek = refused(kms.unwrap_dyn(0xdead, &naming_missing).await);
@@ -105,7 +105,7 @@ fn rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed() {
     let test = "rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed";
     let Some(admin) = Admin::from_env(test) else { return };
     runtime().block_on(async {
-        let name = admin.key("cladefs-test-2").await;
+        let name = admin.key("fxdax-test-2").await;
         let old = admin.primary(&name).await;
         destroy_all_but(&admin, &name, old).await;
         let kms = kms_of(&admin, None);
@@ -137,7 +137,7 @@ fn rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed() {
 fn disabled_versions_revoke_until_enabled() {
     let Some(admin) = Admin::from_env("disabled_versions_revoke_until_enabled") else { return };
     runtime().block_on(async {
-        let name = admin.key("cladefs-test-3").await;
+        let name = admin.key("fxdax-test-3").await;
         let version = admin.primary(&name).await;
         destroy_all_but(&admin, &name, version).await;
         let kms = &kms_of(&admin, None);
@@ -176,7 +176,7 @@ fn disabled_versions_revoke_until_enabled() {
 fn destroyed_primaries_destroy() {
     let Some(admin) = Admin::from_env("destroyed_primaries_destroy") else { return };
     runtime().block_on(async {
-        let name = admin.key("cladefs-test-4").await;
+        let name = admin.key("fxdax-test-4").await;
         let version = admin.rotate(&name).await;
         destroy_all_but(&admin, &name, version).await;
         let kms = &kms_of(&admin, None);

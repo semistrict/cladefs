@@ -2498,8 +2498,8 @@ mod tests {
     fn sealed_stores_open_through_google_cloud_kms() {
         let test = "sealed_stores_open_through_google_cloud_kms";
         let Some(admin) = extent_keys::testing::gcp::Admin::from_env(test) else { return };
-        let url = admin.url("cladefs-test-{tenant}", None);
-        extent_store::upload::block_on(admin.key("cladefs-test-5")).unwrap();
+        let url = admin.url("fxdax-test-{tenant}", None);
+        extent_store::upload::block_on(admin.key("fxdax-test-5")).unwrap();
         // SAFETY: nextest runs each test in a process of its own, this one's other threads not
         // reading the environment yet.
         unsafe { std::env::set_var("CLADEFS_KMS", &url) };

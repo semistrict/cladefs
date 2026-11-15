@@ -1031,7 +1031,12 @@ fn segments_closed_again_are_never_in_the_clear() {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
         if let layout::Kind::Segment { .. } = layout::kind(&key) {
             let seal = extent_frame::Frame::of(&bytes).unwrap().seal;
-            assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+            // Sealed: GCM parts in a copy, or the raw file's XTS sectors framed in place (TASK-411.23).
+            let sealed = matches!(
+                seal,
+                extent_frame::Seal::Sealed { .. } | extent_frame::Seal::Sectors { .. }
+            );
+            assert!(sealed, "{key}: {seal:?}");
             segments += 1;
         }
     }
@@ -1767,7 +1772,10 @@ fn sealed_stores_open_through_the_bucket_kms_on_two_hosts() {
     assert!(!segments.is_empty(), "no segment of {branch}");
     for (key, segment) in segments {
         let seal = extent_frame::Frame::of(segment).unwrap().seal;
-        assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+        // Sealed: GCM parts in a copy, or the raw file's XTS sectors framed in place (TASK-411.23).
+        let sealed =
+            matches!(seal, extent_frame::Seal::Sealed { .. } | extent_frame::Seal::Sectors { .. });
+        assert!(sealed, "{key}: {seal:?}");
     }
     for (key, bytes) in &objects {
         assert!(!holds(bytes, master.expose()), "{key} holds the master key");
@@ -1834,7 +1842,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
 
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    assert_eq!(&kek.wrapped.0[..27], b"fxka\x01\x00\x14alias/cladefs-tenant-1");
+    assert_eq!(&kek.wrapped.0[..29], b"fxka\x01\x00\x16alias/cladefs-tenant-1");
     // Every segment of the branch sealed, whatever its number and its writer's epoch (TASK-407).
     let objects = world.objects();
     let segments: Vec<_> =
@@ -1902,7 +1910,7 @@ fn sealed_stores_open_through_openbao() {
     drop((store, remote));
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x0ecladefs-tenant-1"];
+    let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x10cladefs-tenant-1"];
     assert!(kek.wrapped.0.starts_with(&header.concat()), "{:?}", kek.wrapped);
     assert!(kek.wrapped.0[header.concat().len()..].starts_with(b"vault:v1:"));
 
