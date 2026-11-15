@@ -742,7 +742,7 @@ Installing it is ubu1's setup, a `~/docs/system-setup.d` step that runs, as the 
 fxjob, flock, cargo-nextest, Backlog.md's `backlog` and a fetch without a prompt are there):
 
 ```sh
-# ~/docs/system-setup.d/148-cladefs_nightly.sh
+# ~/docs/system-setup.d/151-cladefs_nightly.sh
 sudo -u ramon -H bash -lc '~/src/fxdax/scripts/nightly-install.sh'
 ```
 
