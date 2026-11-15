@@ -1,11 +1,12 @@
 ---
 id: TASK-424
 title: >-
-  extent_store sim: collection_needs_candidates_first, _forks_from_states,
-  _references_held find no seed under the head (TASK-407)
+  extent_store sim: collection_needs_candidates_first finds no seed under the
+  head (TASK-407)
 status: To Do
 assignee: []
 created_date: '2026-11-15 05:07'
+updated_date: '2026-11-15 05:39'
 labels:
   - sim
   - task-407
@@ -17,7 +18,7 @@ ordinal: 817000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-After TASK-407's head design (and the fork-point checkpoint fix, the pass keeping checkpoint(parent, at, epoch_of(at))), every holds profile of extent_store's simulation passes on macOS (dev profile), but three needed-rule searches run past 25 minutes without a seed violating with their rule off: sim::collection_needs_candidates_first, sim::collection_needs_forks_from_states, sim::collection_needs_references_held. specs/bucket's NoCandidatesFirst, NoForksFromStates and NoReferencesHeld still find their violations in TLC, so the rules are needed; the profiles likely no longer reach the case (e.g. a fence or a void segment they relied on). Find a profile (or seed range) that makes each case under the head, in the sim cargo profile.
+After TASK-407's head design, every holds profile of extent_store's simulation passes, and in the sim cargo profile (scripts/test.sh's sim part, macOS, 2026-11-15) every needed-rule search finds its seed but sim::collection_needs_candidates_first: 'no seed of 0..20000 needed the rule' (706 s). specs/bucket's NoCandidatesFirst still finds its violation in TLC, so the rule is needed; the simulation's profile likely no longer reaches the case (e.g. a fence or a void segment it relied on). Find a profile or seed range that makes it under the head.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Definition of Done
