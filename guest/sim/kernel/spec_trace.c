@@ -120,21 +120,35 @@ static bool storer(const struct actor *a)
 	return a && a->name[0] == 'S';
 }
 
-/* A record, of the actor running, or `env` if it is none of the run's: `fields` after its name. */
-static void record(const char *action, const char *format, ...)
+/* A record of actor `a`, or `env` if NULL: `fields` after its name. */
+static void vrecord(const struct actor *a, const char *action, const char *format, va_list args)
 {
-	struct actor *a = actor();
 	char fields[300] = "";
-	va_list args;
 
-	if (format) {
-		va_start(args, format);
+	if (format)
 		vsnprintf(fields, sizeof(fields), format, args);
-		va_end(args);
-	}
 	append("%s[a |-> \"%s\", t |-> \"%s\"%s%s]\n", trace.records ? ", " : "  ", action,
 	       a ? a->name : "env", *fields ? ", " : "", fields);
 	trace.records++;
+}
+
+/* A record of the actor running, or `env` if it is none of the run's. */
+static void record(const char *action, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vrecord(actor(), action, format, args);
+	va_end(args);
+}
+
+static void record_by(const struct actor *a, const char *action, const char *format, ...)
+{
+	va_list args;
+
+	va_start(args, format);
+	vrecord(a, action, format, args);
+	va_end(args);
 }
 
 bool sim_spec_tracing(void)
@@ -242,10 +256,18 @@ void sim_spec_trace_end(unsigned long stores)
 void sim_spec_trace_panicked(void)
 {
 	static bool writing;
+	int i;
 
 	if (!trace.on || writing)
 		return;
 	writing = true;
+	/* A rebind's look, which its MAP, the panic's, would have written. */
+	if (trace.worker.rebind && trace.worker.look[0])
+		looked(&trace.worker);
+	for (i = 0; i < trace.nr_actors; i++) {
+		if (trace.actors[i].rebind && trace.actors[i].look[0])
+			looked(&trace.actors[i]);
+	}
 	trace.on = false;
 	append("\\* the run panicked here\n");
 	/* As many stores as a run of its operations may start: the trace's own are fewer. */
@@ -306,7 +328,7 @@ static void looked(struct actor *a)
 {
 	if (a->looked)
 		return;
-	record("RbLook", "ps |-> %s", a->look[0] ? a->look : "{}");
+	record_by(a, "RbLook", "ps |-> %s", a->look[0] ? a->look : "{}");
 	a->looked = true;
 }
 
