@@ -66,18 +66,33 @@ def matches(rule, source):
 
 def matched_lines(found):
     """The code a context diff of spatch's matched: (file name, function, line), a match of several
-    lines by its first, stripped."""
-    lines, file, function, previous = [], None, None, ""
+    lines by its first, stripped. The function is the one the line is in, as the source has it:
+    the function a hunk's header names is diff's guess, which differs between spatch's builds."""
+    lines, path, number, previous = [], None, 0, ""
     for line in found.splitlines():
         if line.startswith("--- "):
-            file = Path(line[4:].split()[0]).name
+            path = Path(line[4:].split("\t")[0].strip())
+        elif line.startswith("+++ "):
+            pass
         elif line.startswith("@@"):
-            called = re.search(r"(\w+)\(", line.split("@@")[2])
-            function = called[1] if called else None
-        elif line.startswith("-") and not previous.startswith("-"):
-            lines.append((file, function, line[1:].strip()))
+            number = int(re.match(r"@@ -(\d+)", line)[1])
+        elif line.startswith((" ", "-")):
+            if line.startswith("-") and not previous.startswith("-"):
+                lines.append((path.name, function_at(path, number), line[1:].strip()))
+            number += 1
         previous = line
     return lines
+
+
+def function_at(path, number):
+    """The function line `number` of C file `path` is in: the name of the nearest definition at or
+    above it, a line at the margin naming a function, not a declaration's, which ends in `;`."""
+    source = path.read_text().splitlines()
+    for line in reversed(source[:number]):
+        defined = re.match(r"[A-Za-z_][^;=]*?\b(\w+)\(", line)
+        if defined and not line.rstrip().endswith(";"):
+            return defined[1]
+    return None
 
 
 def safe():

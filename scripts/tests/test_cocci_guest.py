@@ -115,6 +115,16 @@ class Lists(unittest.TestCase):
         self.assertEqual(cocci.matched_lines(found),
                          [("w.c", "wakes_none", "atomic_long_inc(&d->count);")])
 
+    def test_the_function_is_the_sources_not_the_hunk_headers(self):
+        """Linux's spatch names the function a hunk's context starts in, wakes; macOS's the one
+        its match is in: the source says which."""
+        source = self.root / "src/w.c"
+        found = (f"--- {source}\n+++ /tmp/cocci-output-w.c\n"
+                 "@@ -10,7 +10,6 @@ static void wakes(struct d *d)\n"
+                 " }\n \n static void wakes_none(struct d *d)\n {\n-\tatomic_long_inc(&d->count);\n }\n")
+        self.assertEqual(cocci.matched_lines(found),
+                         [("w.c", "wakes_none", "atomic_long_inc(&d->count);")])
+
     def test_an_argued_match_passes_and_an_argued_match_gone_fails(self):
         (self.root / "rules/safe").write_text(
             "# comment\n"
