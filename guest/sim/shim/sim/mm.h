@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Memory management, faked at the level fs/dax.c meets it: pages of the window, with the
  * references and map counts it reads; and a mapping's page tables, a PTE and a PMD array in each

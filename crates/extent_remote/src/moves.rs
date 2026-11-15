@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -67,7 +67,7 @@ impl MovesMaps {
         self.read_listed(bucket, unread).await
     }
 
-    /// fxdax: reads the moves of the objects at the keys `listed` gives, each with the keys of its
+    /// cladefs: reads the moves of the objects at the keys `listed` gives, each with the keys of its
     /// moves a listing found, in the order of their keys, which is their passes' (TASK-407.1), the
     /// objects not read yet, [`READ_AT_ONCE`] at once (TASK-395.5): the collector's, which listed
     /// every object before. Moves gone since read as none, as they would one at a time.
@@ -87,7 +87,7 @@ impl MovesMaps {
         Ok(())
     }
 
-    /// fxdax: whether the collector moved `extent` from the object at `key`, and where to, of
+    /// cladefs: whether the collector moved `extent` from the object at `key`, and where to, of
     /// moves read before ([`MovesMaps::read_listed`]).
     pub(crate) fn moved_read(&self, extent: ExtentId, key: &str) -> Moved {
         match self.maps.get(key).unwrap_or_else(|| panic!("{key}: its moves not read")) {
@@ -128,7 +128,7 @@ impl MovesMaps {
     }
 }
 
-/// fxdax: where the moves at `keys`, of one object, each a pass's, in the order of their passes,
+/// cladefs: where the moves at `keys`, of one object, each a pass's, in the order of their passes,
 /// moved its extents (TASK-407.1): each extent where the latest that has it put it, which every
 /// reader and the collector follow alike; none if none of them is there. One pass's alone, but for
 /// a pass slow to create them, whose moves of the extents it found live are a copy of them as

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -34,7 +34,7 @@ pub fn init_started_ns() -> Option<u64> {
     })
 }
 
-/// fxdax: the guest's stacks, its CPUs', blocked tasks' and every task's (sysrq l, w and t), each
+/// cladefs: the guest's stacks, its CPUs', blocked tasks' and every task's (sysrq l, w and t), each
 /// record as "kernel: RECORD": the kernel's hung task reports name only tasks in uninterruptible
 /// sleep, not one looping, or sleeping killably, holding what they wait for (load_during_move's,
 /// GCE r526).

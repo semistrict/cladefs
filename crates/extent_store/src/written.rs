@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the bytes this process's stores wrote to their files, by kind (TASK-310): what a host's
+//! cladefs: the bytes this process's stores wrote to their files, by kind (TASK-310): what a host's
 //! disk is asked to take of a store, each byte a guest writes once in a segment's raw file, as the
 //! write-ahead log, and once more framed, in the closed segment's framed file, which object storage
 //! keeps. Written through the host's page cache: what of a raw file goes before it is written back,

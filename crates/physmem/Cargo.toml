@@ -2,7 +2,7 @@
 name = "physmem"
 version = "0.1.0"
 edition.workspace = true
-# Its physical memory manager is fxdax's own code lifted from fxdax's port of the Zircon kernel,
+# Its physical memory manager is cladefs's own code lifted from cladefs's port of the Zircon kernel,
 # which was MIT licensed, as Zircon is: the crate is too (its LICENSE).
 license = "MIT"
 

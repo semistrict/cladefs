@@ -1,4 +1,4 @@
-# fxdax's own: how objects holding extents' data are framed, locally and in object storage
+# cladefs's own: how objects holding extents' data are framed, locally and in object storage
 # (backlog doc-7).
 [package]
 name = "extent_frame"

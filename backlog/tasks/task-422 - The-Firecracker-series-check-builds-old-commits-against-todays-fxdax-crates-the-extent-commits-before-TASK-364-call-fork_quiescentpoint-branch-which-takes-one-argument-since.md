@@ -1,12 +1,13 @@
 ---
 id: TASK-422
 title: >-
-  The Firecracker series check builds old commits against today's fxdax crates:
-  the extent commits before TASK-364 call fork_quiescent(point, branch), which
-  takes one argument since
+  The Firecracker series check builds old commits against today's cladefs
+  crates: the extent commits before TASK-364 call fork_quiescent(point, branch),
+  which takes one argument since
 status: To Do
 assignee: []
 created_date: '2026-11-15 03:07'
+updated_date: '2026-11-15 11:36'
 labels:
   - bug
 dependencies: []
@@ -17,13 +18,13 @@ ordinal: 810000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by TASK-417's series check on ubu1: scripts/firecracker-series-check.sh builds every commit of vendor/firecracker's series with --features fxdax against the fxdax crates of the checkout running it. TASK-364 changed RemoteExtentStore::fork_quiescent to take the point alone, and appended a fork commit using it; the series' commits before it (from "the extent-store device (virtio-extent)" on) still call it with a branch, so they no longer build, and the check fails on main as well. CI did not notice: the run of the series check for bd6ac11a1 (TASK-364) was cancelled, and later runs skip it as the submodule did not move. Structural question: any API change of fxdax's breaks every older commit of the series, so either each such change ports the series (a rewrite), or the check builds older commits against what they were written against.
+Found by TASK-417's series check on ubu1: scripts/firecracker-series-check.sh builds every commit of vendor/firecracker's series with --features cladefs against the cladefs crates of the checkout running it. TASK-364 changed RemoteExtentStore::fork_quiescent to take the point alone, and appended a fork commit using it; the series' commits before it (from "the extent-store device (virtio-extent)" on) still call it with a branch, so they no longer build, and the check fails on main as well. CI did not notice: the run of the series check for bd6ac11a1 (TASK-364) was cancelled, and later runs skip it as the submodule did not move. Structural question: any API change of cladefs's breaks every older commit of the series, so either each such change ports the series (a rewrite), or the check builds older commits against what they were written against.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 The series check passes on main, every commit both ways
-- [ ] #2 A change to fxdax's API the fork uses cannot land with the series check failing unseen (CI runs it, or the rule for porting the series is written down)
+- [ ] #2 A change to cladefs's API the fork uses cannot land with the series check failing unseen (CI runs it, or the rule for porting the series is written down)
 <!-- AC:END -->
 
 ## Definition of Done

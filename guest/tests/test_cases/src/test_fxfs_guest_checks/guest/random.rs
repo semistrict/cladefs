@@ -1,27 +1,27 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the random checks, of a script's operations on a file (random_ops) and of threads' on
+//! cladefs: the random checks, of a script's operations on a file (random_ops) and of threads' on
 //! several (torture), against models of their bytes.
 
 use super::*;
 
-/// fxdax: the seed of the run's random checks (FXDAX_RANDOM_OPS_SEED, which the host picks
+/// cladefs: the seed of the run's random checks (CLADEFS_RANDOM_OPS_SEED, which the host picks
 /// anew each run, or 1).
 pub(crate) fn seed() -> u64 {
     std::env::var(script::SEED_VAR).ok().and_then(|s| s.parse().ok()).unwrap_or(1)
 }
 
-/// fxdax: a file's random operations, as fsx makes them (TASK-44.15): write(2)s, appends,
+/// cladefs: a file's random operations, as fsx makes them (TASK-44.15): write(2)s, appends,
 /// stores through a mapping, reads, truncations, holes punched and fsyncs, at random offsets
-/// and lengths, a script made from a seed (FXDAX_RANDOM_OPS_SEED, which the host picks anew
+/// and lengths, a script made from a seed (CLADEFS_RANDOM_OPS_SEED, which the host picks anew
 /// each run, or 1) and run by `script_run` (TASK-149.2), each read, and every 256th operation
 /// and the last the whole file, through read(2) and the mapping, checked against what a model
 /// of its bytes says it holds. A mismatch names the seed, the operation and those before it,
 /// and the host shrinks the script. The file stays, and the model beside it, which the host
 /// compares it with, as its Fxfs reads them from the store (TASK-119.2), and the operations
-/// made, its history (TASK-119.15). fxdax: the file reaches across two 2 MiB chunks, the
+/// made, its history (TASK-119.15). cladefs: the file reaches across two 2 MiB chunks, the
 /// offsets drawn near a chunk's end, a page's, and the file's as often as anywhere, and one
 /// mapping of it is kept across every operation, seals and truncations among them, which its
 /// stores and reads go through (TASK-119.15).
@@ -47,7 +47,7 @@ pub(super) fn test_random_ops() {
     assert!(fs::read(&name).unwrap() == *model, "seed {seed}: the file evicted differs");
 }
 
-/// fxdax: several threads' random operations on several small files at once (TASK-119.5):
+/// cladefs: several threads' random operations on several small files at once (TASK-119.5):
 /// write(2)s, stores through mappings kept across them, reads, fdatasyncs and fsyncs, msyncs,
 /// while another thread fsyncs another file and syncs the filesystem, writing back and sealing
 /// again and again under one another's stores.
@@ -210,7 +210,7 @@ pub(super) fn test_torture() {
     }
 }
 
-/// fxdax: a phase of test_torture's thread `thread`: `ops` random operations on the bytes it
+/// cladefs: a phase of test_torture's thread `thread`: `ops` random operations on the bytes it
 /// owns (`owned`) of the files `names`, as `models` has them, through write(2), and stores
 /// through mappings of the files it keeps for the phase, checked through both; and fdatasyncs,
 /// fsyncs and msyncs. `log` keeps what it did, for a mismatch to say.

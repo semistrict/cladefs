@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 //! phase (`extent_store::timings`); and, for scale, what an fsync of a block appended to a file
 //! takes on the same disk, and a commit of SQLite's own WAL with `synchronous=FULL`.
 //!
-//! Configurations: `image`, the volume on an in-process image (`fxdax::Storage`); on Linux,
+//! Configurations: `image`, the volume on an in-process image (`cladefs::Storage`); on Linux,
 //! `daemon`, on a store an extent daemon on a thread of this process serves, its files mapped
 //! into its window.
 //!
@@ -15,7 +15,7 @@
 
 use anyhow::Error;
 use async_trait::async_trait;
-use fxdax::Storage;
+use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_extents::{Options, Volume, register};
 use std::path::{Path, PathBuf};
@@ -270,10 +270,10 @@ fn main() {
     // SAFETY: before this process starts any other thread.
     unsafe {
         std::env::set_var(
-            "FXDAX_EXTENTD_REMOTE",
+            "CLADEFS_EXTENTD_REMOTE",
             format!("file://{}/", root.join("bucket").display()),
         );
-        std::env::set_var("FXDAX_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
     }
     println!("Under {}.", root.display());
     for blocks in [1, 5] {
@@ -297,13 +297,14 @@ fn main() {
     {
         let socket = root.join("extentd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::thread::spawn(move || fxdax::extentd::serve(listener));
+        std::thread::spawn(move || cladefs::extentd::serve(listener));
         let store =
-            fxdax::RemoteExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
+            cladefs::RemoteExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);
         let window = sqlite_extents::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device =
-            DeviceHolder::new(Timing(DeviceHolder::new(fxdax::RemoteDevice::new(store).unwrap())));
+        let device = DeviceHolder::new(Timing(DeviceHolder::new(
+            cladefs::RemoteDevice::new(store).unwrap(),
+        )));
         let volume =
             Volume::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
                 .unwrap();

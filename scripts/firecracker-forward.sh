@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -15,11 +15,11 @@
 # or be ahead of.
 #
 # Usage: firecracker-forward.sh OLD NEW
-# FXDAX_FIRECRACKER_REPO names the fork on GitHub (default semistrict/firecracker).
+# CLADEFS_FIRECRACKER_REPO names the fork on GitHub (default semistrict/firecracker).
 set -euo pipefail
 
 [[ $# == 2 ]] || { echo "Usage: $0 OLD NEW" >&2; exit 2; }
-repo=${FXDAX_FIRECRACKER_REPO:-semistrict/firecracker}
+repo=${CLADEFS_FIRECRACKER_REPO:-semistrict/firecracker}
 old=$(git rev-parse "$1:vendor/firecracker")
 new=$(git rev-parse "$2:vendor/firecracker")
 [[ $old == "$new" ]] && exit 0

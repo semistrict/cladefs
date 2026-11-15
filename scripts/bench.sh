@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Benchmark the guest kernel's Fxfs against ext4 on this host: guests in fxdax's
-# Firecracker boot fxdax's guest kernel (FXDAX_GUEST_KERNEL) and run the same
-# workloads on its Fxfs, on an extent-store device that fxdax's extent daemon
+# Benchmark the guest kernel's Fxfs against ext4 on this host: guests in cladefs's
+# Firecracker boot cladefs's guest kernel (CLADEFS_GUEST_KERNEL) and run the same
+# workloads on its Fxfs, on an extent-store device that cladefs's extent daemon
 # serves, with a DAX window and without, and on ext4 on the same kernel, on
 # virtio-blk and with DAX on writable virtio-pmem
 # (guest/tests/test_cases/src/test_fs_bench.rs), then scripts/bench-report.py
@@ -14,37 +14,37 @@
 #
 # Usage: scripts/bench.sh [ITERATIONS]   (default 3)
 #
-# FXDAX_BENCH_CASES selects the cases to run, as scripts/test-e2e.sh's arguments do, by name or
+# CLADEFS_BENCH_CASES selects the cases to run, as scripts/test-e2e.sh's arguments do, by name or
 # by tag, separated by spaces (default: --tag bench, the ext4 and Fxfs cases of one VM each),
-# and FXDAX_BENCH_GROUPS the groups of workloads (default: all; see
+# and CLADEFS_BENCH_GROUPS the groups of workloads (default: all; see
 # test_fs_bench.rs).
 #
 # Needs what scripts/test-e2e.sh needs, and podman to build the guests' Alpine
 # root filesystem. The measurements and the guests' logs are kept under
-# $FXDAX_BENCH_RESULTS (default: a new temporary directory), which holds no
+# $CLADEFS_BENCH_RESULTS (default: a new temporary directory), which holds no
 # earlier run's.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 iterations=${1:-3}
-cases=${FXDAX_BENCH_CASES:---tag bench}
-results=${FXDAX_BENCH_RESULTS:-$(mktemp -d "${TMPDIR:-/tmp}/fxdax-bench.XXXXXX")}
+cases=${CLADEFS_BENCH_CASES:---tag bench}
+results=${CLADEFS_BENCH_RESULTS:-$(mktemp -d "${TMPDIR:-/tmp}/cladefs-bench.XXXXXX")}
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
 # The report is of every measurement and log there: an earlier run's would be
 # this one's, those of a case that failed now, which writes none, among them.
 if compgen -G "$results/bench-*.json" > /dev/null || [[ -e $results/logs ]]; then
-    echo "$results holds an earlier run's results: name a new directory in FXDAX_BENCH_RESULTS." >&2
+    echo "$results holds an earlier run's results: name a new directory in CLADEFS_BENCH_RESULTS." >&2
     exit 2
 fi
 
 status=0 report=0
 # The extent daemon holds as much memory as the sandbox team's does, 8 GiB, unless
-# FXDAX_EXTENTD_MEMORY says otherwise: with its default, 1 GiB, a DAX guest's working set
+# CLADEFS_EXTENTD_MEMORY says otherwise: with its default, 1 GiB, a DAX guest's working set
 # doesn't fit, and its faults page in again what was evicted, which measures that (TASK-109.3).
-export FXDAX_EXTENTD_MEMORY=${FXDAX_EXTENTD_MEMORY:-$((8 << 30))}
+export CLADEFS_EXTENTD_MEMORY=${CLADEFS_EXTENTD_MEMORY:-$((8 << 30))}
 # shellcheck disable=SC2086 # The cases' selectors are words separated by spaces.
-FXDAX_BENCH_ITERATIONS=$iterations FXDAX_BENCH_RESULTS=$results \
-    FXDAX_E2E_RESULTS=$results/logs "$root/scripts/test-e2e.sh" $cases >&2 || status=$?
+CLADEFS_BENCH_ITERATIONS=$iterations CLADEFS_BENCH_RESULTS=$results \
+    CLADEFS_E2E_RESULTS=$results/logs "$root/scripts/test-e2e.sh" $cases >&2 || status=$?
 echo "Results: $results" >&2
 "$root/scripts/bench-report.py" "$results" || report=$?
 exit $(( status ? status : report ))

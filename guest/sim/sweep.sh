@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # The sweep (TASK-149.15): each run of one, every test of one run and every scenario, run as it is
 # to count the calls of the code under test that may fail (kernel/sweep.c), then again for each N

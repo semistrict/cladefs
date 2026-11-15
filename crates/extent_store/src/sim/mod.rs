@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -123,7 +123,7 @@ macro_rules! test_needs {
     };
 }
 
-/// fxdax: a test that `$rule` keeps the bucket from holding for ever what no pass collects: that
+/// cladefs: a test that `$rule` keeps the bucket from holding for ever what no pass collects: that
 /// one of 20,000 seeds of `$profile` without it leaves a reference no record names
 /// ([`leaked`], TASK-395.10), a lesser failure than those [`test_needs`] finds.
 macro_rules! test_leaks {
@@ -329,7 +329,7 @@ fn deleted_forking() -> Profile {
         weights.delete = 3;
         weights.collect = 8;
     });
-    // fxdax: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
+    // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
     // passes over every cell, none in 20,000 seeds with half the passes over one cell.
     profile.one_cell = 0.0;
     profile
@@ -363,7 +363,7 @@ fn children() -> Profile {
     })
 }
 
-/// fxdax: forks whose children open at once, passes over one branch's cell alone, the child's
+/// cladefs: forks whose children open at once, passes over one branch's cell alone, the child's
 /// among them, which may have no record yet as the pass starts, and requests slow to complete, so
 /// that a pass spans the child's opening and first upload (TASK-395.4).
 fn fresh_cells() -> Profile {
@@ -382,7 +382,7 @@ fn fresh_cells() -> Profile {
 
 test_holds!(forks_with_children_opening, children());
 
-// fxdax: a pass over a child's cell begun before the child's record, which lists the child's
+// cladefs: a pass over a child's cell begun before the child's record, which lists the child's
 // segments after it read no record (TASK-395.4): every fork is to a cell of its own here, so a
 // pass over the parent's cell finds no such child (upload's Shuttle test finds one within a cell).
 test_holds!(passes_over_cells_being_made, fresh_cells());
@@ -435,7 +435,7 @@ fn recreated() -> Profile {
         weights.tick = 6;
     });
     profile.hold = 1.0;
-    // fxdax: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
+    // cladefs: sweeps alone (TASK-395.4): the searches of this profile's rules find their cases with
     // passes over every cell, none in 20,000 seeds with half the passes over one cell.
     profile.one_cell = 0.0;
     profile.options.compact_below = 0.9;
@@ -561,7 +561,7 @@ test_holds!(logs_of_forks_put_after_takeovers, forked_wals());
 // A host's log put after another host's acknowledged commit, which it loses.
 test_needs!(logs_need_to_follow, wal_follows, wals());
 
-/// fxdax: logs as [`wals`] makes them, their guests writing a segment's worth or more between
+/// cladefs: logs as [`wals`] makes them, their guests writing a segment's worth or more between
 /// commits, most of them: commits spanning segments, the first of which may end the commit before,
 /// landing alone as a host crashes or a writer takes the branch over (TASK-92.41, TASK-345).
 fn spanning_wals() -> Profile {
@@ -637,7 +637,7 @@ test_needs!(restores_need_records_saying_they_are_being_made, forks_pending, res
 
 test_needs!(collection_needs_abandoning_restores, collector_abandons, restores());
 
-/// fxdax: restores as [`restores`] makes them, half of those a crash stopped forgotten, as a host
+/// cladefs: restores as [`restores`] makes them, half of those a crash stopped forgotten, as a host
 /// deleting the directory it left unmade knows nothing of the child (TASK-395.10): what they wrote
 /// is the collector's alone, a record being made given up on once its point goes, and the
 /// reference written after it retired by it.
@@ -699,7 +699,7 @@ test_holds!(forks_ids_taken_by_roots_deleted, usurped());
 
 test_needs!(collection_needs_records_kept, records_kept, usurped());
 
-// fxdax: the per-cell collector's rules (TASK-395.3, TASK-395.4), every fork of the simulation's
+// cladefs: the per-cell collector's rules (TASK-395.3, TASK-395.4), every fork of the simulation's
 // to a cell of its own. A base's cell's pass, the base deleted, keeps what its forks inherited only
 // by their references...
 test_needs!(collection_needs_references, references, deleted_bases());

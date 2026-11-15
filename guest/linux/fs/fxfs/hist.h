@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
- * fxdax: latency histograms (TASK-111.6): how many of something took each power of two of time,
+ * cladefs: latency histograms (TASK-111.6): how many of something took each power of two of time,
  * so that a run's tails and shifts show, not only its totals. Bucket k counts those under 1.024 us
  * times 2 to the k: the first, under 1.024 us; the last, the rest, from 4.3 s. The filesystem's
  * Rust counts its own the same (guest/rust/fxfs-linux's device module, Timed). Shown as the name

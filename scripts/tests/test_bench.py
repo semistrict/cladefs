@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -27,7 +27,7 @@ PGBENCH = {
 }
 # test-e2e.sh, whose cases write $FAKE_MEASURED's measurements and end with $FAKE_STATUS.
 CASES = """#!/bin/bash
-cp "$FAKE_MEASURED"/*.json "$FXDAX_BENCH_RESULTS" 2> /dev/null
+cp "$FAKE_MEASURED"/*.json "$CLADEFS_BENCH_RESULTS" 2> /dev/null
 exit "$FAKE_STATUS"
 """
 
@@ -54,7 +54,7 @@ class Bench(unittest.TestCase):
             env={
                 # This python3 first, for bench-report.py.
                 "PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin",
-                "FXDAX_BENCH_RESULTS": str(tree / "results"),
+                "CLADEFS_BENCH_RESULTS": str(tree / "results"),
                 "FAKE_MEASURED": str(tree / "measured"),
                 "FAKE_STATUS": str(status),
             },
@@ -96,7 +96,7 @@ class Bench(unittest.TestCase):
                         "",
                         [
                             f"{self.tree / 'results'} holds an earlier run's results: name a new "
-                            "directory in FXDAX_BENCH_RESULTS."
+                            "directory in CLADEFS_BENCH_RESULTS."
                         ],
                     ),
                 )

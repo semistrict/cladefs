@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -38,9 +38,9 @@ class SoakWorkloads(unittest.TestCase):
         (root / "scripts").mkdir()
         shutil.copy2(SOAK, root / "scripts" / SOAK.name)
         fake = root / "scripts" / "test-host.sh"
-        fake.write_text('#!/bin/bash\nmkdir -p "$1"\necho "$(basename "$1") $FXDAX_E2E_TEST '
-                        'rounds=$FXDAX_E2E_ROUNDS kernel=$FXDAX_GUEST_KERNEL_BUILD '
-                        'follow=$FXDAX_FOLLOW_SECONDS failpoints=${FXDAX_EXTENTD_FAILPOINTS:-}" '
+        fake.write_text('#!/bin/bash\nmkdir -p "$1"\necho "$(basename "$1") $CLADEFS_E2E_TEST '
+                        'rounds=$CLADEFS_E2E_ROUNDS kernel=$CLADEFS_GUEST_KERNEL_BUILD '
+                        'follow=$CLADEFS_FOLLOW_SECONDS failpoints=${CLADEFS_EXTENTD_FAILPOINTS:-}" '
                         '>> "$(dirname "$1")/../ran.txt"\n')
         fake.chmod(0o755)
         (root / "scripts" / "guest_results.py").write_text("#!/bin/sh\n")
@@ -52,13 +52,13 @@ class SoakWorkloads(unittest.TestCase):
         return (root / "ran.txt").read_text().splitlines()
 
     def test_each_group_one_run_after_another(self):
-        self.assertEqual(self.soaked("crash", "mixed", FXDAX_SOAK_ROUNDS="2"), [
+        self.assertEqual(self.soaked("crash", "mixed", CLADEFS_SOAK_ROUNDS="2"), [
             "crash --tag soak-crash rounds=100 kernel=release follow=20 failpoints=",
             "mixed --tag soak-mixed rounds=80 kernel=release follow=0 failpoints=1",
         ])
 
     def test_a_cap_bounds_each_groups_rounds(self):
-        self.assertEqual(self.soaked("sanitized", "replicas", FXDAX_SOAK_CAP="1"), [
+        self.assertEqual(self.soaked("sanitized", "replicas", CLADEFS_SOAK_CAP="1"), [
             "sanitized --tag soak-sanitized rounds=1 kernel=debug follow=20 failpoints=",
             "replicas --tag soak-replicas rounds=1 kernel=release follow=600 failpoints=",
         ])

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Small files in one sealed extent whose size Fxfs doesn't count, as a volume over a base counts
  * none of the base's (an attached generation's, whose filesystem's allocator counts them), read as

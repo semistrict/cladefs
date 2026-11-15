@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! The device's DAX window: guest physical addresses the VMM reserves for it (a BAR of the
 //! device's own, which a virtio-PCI transport describes with a shared memory capability), backed
-//! by anonymous host memory that the hypervisor maps there, a memory slot of its own. fxdax's
+//! by anonymous host memory that the hypervisor maps there, a memory slot of its own. cladefs's
 //! extent daemon owns the window: the device hands the host memory to the store's connection,
 //! which maps the window's pages there from the daemon's memory, and serves the faults the
 //! hypervisor takes on the rest.
@@ -91,7 +91,7 @@ impl Drop for Slot {
 }
 
 /// Anonymous host memory of the window's size, aligned as the window is, so that the hypervisor
-/// maps it for the guest with huge pages where the daemon's are. Unmapped on drop. fxdax:
+/// maps it for the guest with huge pages where the daemon's are. Unmapped on drop. cladefs:
 /// inaccessible until the store's connection takes it over, as once it lets it go (TASK-79.8): a
 /// guest's accesses meanwhile, as before it sets DRIVER_OK, fault, rather than growing its VMM's
 /// memory by the window's size.
@@ -211,11 +211,11 @@ impl DaxWindow {
     /// memory: the store is dropped first.
     pub(crate) unsafe fn create(
         &self,
-        store: &fxdax::RemoteExtentStore,
+        store: &cladefs::RemoteExtentStore,
         prefault: Option<Arc<dyn PrefaultGuestMemory>>,
         private_max: u64,
-    ) -> Result<(), fxdax::Error> {
-        let prefault = prefault.map(|prefault| -> Arc<dyn fxdax::Prefault> {
+    ) -> Result<(), cladefs::Error> {
+        let prefault = prefault.map(|prefault| -> Arc<dyn cladefs::Prefault> {
             Arc::new(WindowPrefault { guest_addr: self.guest_addr(), prefault })
         });
         // SAFETY: The window's host memory is the device's, which only the guest accesses, and
@@ -239,14 +239,14 @@ impl Drop for DaxWindow {
     }
 }
 
-/// fxdax: the DAX windows of this process's guests, as their guest physical addresses, lengths
+/// cladefs: the DAX windows of this process's guests, as their guest physical addresses, lengths
 /// and host memory: where a vCPU whose access keeps failing finds what it failed at
 /// ([`dax_window_at`]).
 static WINDOWS: Mutex<Vec<(u64, u64, usize)>> = Mutex::new(Vec::new());
 
-/// fxdax: the DAX window guest physical address `gpa` is in, if any: its offset there, and the
-/// host address the hypervisor maps there, which fxdax's second stage of the window is in
-/// (`fxdax::describe_windows`). For a vCPU to say where an access that kept failing failed: of
+/// cladefs: the DAX window guest physical address `gpa` is in, if any: its offset there, and the
+/// host address the hypervisor maps there, which cladefs's second stage of the window is in
+/// (`cladefs::describe_windows`). For a vCPU to say where an access that kept failing failed: of
 /// a process's one VM, as Firecracker's are; with several, a guest address may be in each one's
 /// window, and this names the first made.
 pub fn dax_window_at(gpa: u64) -> Option<(u64, usize)> {
@@ -263,7 +263,7 @@ struct WindowPrefault {
     prefault: Arc<dyn PrefaultGuestMemory>,
 }
 
-impl fxdax::Prefault for WindowPrefault {
+impl cladefs::Prefault for WindowPrefault {
     fn prefault(&self, offset: u64, len: u64) {
         self.prefault.prefault(self.guest_addr + offset, len);
     }

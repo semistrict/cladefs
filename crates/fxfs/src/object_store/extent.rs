@@ -40,7 +40,7 @@ impl TryFrom<SerdeExtent> for Extent {
 #[serde(try_from = "SerdeExtent")]
 pub struct Extent(pub Range<u64>);
 
-// fxdax: aligned, as what deserializes is: an extent that couldn't be read is no input to fuzz.
+// cladefs: aligned, as what deserializes is: an extent that couldn't be read is no input to fuzz.
 #[cfg(fuzz)]
 impl<'a> arbitrary::Arbitrary<'a> for Extent {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {

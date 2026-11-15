@@ -1,11 +1,12 @@
 ---
 id: TASK-414
 title: >-
-  fxdax's frees_make_room hung 36 min on macOS: an image's collector pass never
-  ended, its Collecting's drop joining it for ever
+  cladefs's frees_make_room hung 36 min on macOS: an image's collector pass
+  never ended, its Collecting's drop joining it for ever
 status: To Do
 assignee: []
 created_date: '2026-11-14 20:45'
+updated_date: '2026-11-15 11:36'
 labels:
   - testing
   - gc
@@ -18,7 +19,7 @@ ordinal: 805000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Seen 2026-11-14 in scripts/test.sh's workspace part on macOS (commit dddfea15e, TASK-400/401 on origin/main 8391d2e3d; the Mac loaded by other sessions' sim runs): fxdax storage::image::tests::frees_make_room ran 36 min at 0.31 s of CPU, killed by hand. Its stacks (sample): the test thread in ImageDevice's drop -> Kept -> Collecting::drop, joining the collector's thread; the collector thread ('fxdax collect') in storage::collect::pass -> extent_store::upload::block_on(Collector::collect(bucket, ..)), parked in the current-thread runtime's kevent (a timer pending), no task runnable; the blocking pool's thread idle (condvar wait_timeout); the uploader idle in block_in_place; no store framer or durable thread alive. Collector::collect awaits the file:// bucket alone (take the cell's lease, list, collect, release: TASK-395.6's cells and passes, landed the same day). Not reproduced: 20 runs alone and 40 more 8 at a time, all passed in seconds. Find what the pass waits for (a lost wakeup, a lease wait, a blocking task's result) and make the drop unable to hang.
+Seen 2026-11-14 in scripts/test.sh's workspace part on macOS (commit dddfea15e, TASK-400/401 on origin/main 8391d2e3d; the Mac loaded by other sessions' sim runs): cladefs storage::image::tests::frees_make_room ran 36 min at 0.31 s of CPU, killed by hand. Its stacks (sample): the test thread in ImageDevice's drop -> Kept -> Collecting::drop, joining the collector's thread; the collector thread ('cladefs collect') in storage::collect::pass -> extent_store::upload::block_on(Collector::collect(bucket, ..)), parked in the current-thread runtime's kevent (a timer pending), no task runnable; the blocking pool's thread idle (condvar wait_timeout); the uploader idle in block_in_place; no store framer or durable thread alive. Collector::collect awaits the file:// bucket alone (take the cell's lease, list, collect, release: TASK-395.6's cells and passes, landed the same day). Not reproduced: 20 runs alone and 40 more 8 at a time, all passed in seconds. Find what the pass waits for (a lost wakeup, a lease wait, a blocking task's result) and make the drop unable to hang.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

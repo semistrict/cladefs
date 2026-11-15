@@ -1,8 +1,8 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
-//! pjdfstest (BSD-2-Clause) on fxdax's guest kernel's Fxfs, on an extent-store device on a new
+//! pjdfstest (BSD-2-Clause) on cladefs's guest kernel's Fxfs, on an extent-store device on a new
 //! store: libkrun's pjdfstest case (TASK-40), run on Fxfs only.
 
 use macros::{guest, host};
@@ -25,7 +25,7 @@ const FXFS_SKIPPED: &[(&str, &str)] = &[];
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::ffi::CString;
@@ -53,7 +53,7 @@ mod host {
             {
                 return ShouldRun::No("PJDFSTEST_REPO/PJDFSTEST_COMMIT not set");
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -67,9 +67,9 @@ mod host {
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let host_os = if cfg!(target_os = "macos") { "Darwin" } else { "Linux" };
             let host_os_env = CString::new(format!("PJDFSTEST_HOST_OS={host_os}"))?;
-            // FXDAX_PJDFSTEST_TESTS names pjdfstest's directories of tests to run, separated by
+            // CLADEFS_PJDFSTEST_TESTS names pjdfstest's directories of tests to run, separated by
             // commas (such as `open,chmod`), for a quick run: all of them otherwise.
-            let only = std::env::var("FXDAX_PJDFSTEST_TESTS").unwrap_or_default();
+            let only = std::env::var("CLADEFS_PJDFSTEST_TESTS").unwrap_or_default();
             let only_env = CString::new(format!("PJDFSTEST_ONLY={only}"))?;
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;

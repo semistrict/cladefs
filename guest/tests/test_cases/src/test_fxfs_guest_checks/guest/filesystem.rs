@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// fxdax: /proc/fs/fxfs/<tag> says what the filesystem waited on and its device's requests
+/// cladefs: /proc/fs/fxfs/<tag> says what the filesystem waited on and its device's requests
 /// took, which the guest counts as idle (TASK-91.7): an fsync's commit and its seal among them.
 pub(super) fn test_stats() {
     let before = stats();
@@ -57,7 +57,7 @@ fn writer_waits(name: &str, data: &'static [u8], what: &str) -> std::thread::Joi
     writer
 }
 
-/// fxdax: a thaw that fails leaves the filesystem frozen, as the VFS leaves the superblock, and
+/// cladefs: a thaw that fails leaves the filesystem frozen, as the VFS leaves the superblock, and
 /// the next goes on from the step it stopped at, never taking one twice (TASK-200): failing
 /// before it tells the device it thaws (fxfs.fail_thaw_at 1), and before it renews the journal's
 /// tail, the device told, and open again (2). Writers wait meanwhile, and write once it thaws,
@@ -109,7 +109,7 @@ impl Drop for MountedWritable {
     }
 }
 
-/// fxdax: a volume remounted read-only, or mounted so, freezes its filesystem as a writable one
+/// cladefs: a volume remounted read-only, or mounted so, freezes its filesystem as a writable one
 /// does, which tells the device, and thaws it (TASK-202): the VFS freezes a read-only superblock
 /// without a call to its filesystem, which waited for it for ever, and its VM was never
 /// snapshotted, though fsfreeze returned 0. Remounted writable, it takes writes again; what was
@@ -242,14 +242,14 @@ pub(super) fn test_unsupported() {
     assert_eq!(refused, Some(libc::EOPNOTSUPP), "MAP_SYNC");
 }
 
-/// fxdax: a soft lockup dumps every CPU's stack, as the guest's command line asks (vm::CMDLINE),
+/// cladefs: a soft lockup dumps every CPU's stack, as the guest's command line asks (vm::CMDLINE),
 /// which a kernel without the setting would ignore but for a line in its log (TASK-133).
 pub(super) fn test_lockups_show_every_cpu() {
     let setting = fs::read_to_string("/proc/sys/kernel/softlockup_all_cpu_backtrace").unwrap();
     assert_eq!(setting, "1\n");
 }
 
-/// fxdax: the filesystem filled, each way a guest fills it, fails what doesn't fit with
+/// cladefs: the filesystem filled, each way a guest fills it, fails what doesn't fit with
 /// ENOSPC, and stays mounted and whole: a panic took the guest's kernel down with it (TASK-60,
 /// the sandbox team's pgbench, TASK-58). What fitted is written back, and read back as it was
 /// written: in the page cache, a write reserves room as it dirties pages, and fails then if

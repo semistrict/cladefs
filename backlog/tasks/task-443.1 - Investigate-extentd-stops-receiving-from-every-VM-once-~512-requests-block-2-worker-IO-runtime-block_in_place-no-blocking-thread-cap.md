@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:24'
+updated_date: '2026-11-15 13:31'
 labels:
   - perf
   - review-2026-11-15
@@ -20,7 +21,7 @@ ordinal: 835000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-crates/fxdax/src/extentd/server.rs builds the IO runtime with worker_threads(2) and no max_blocking_threads, and serves every request in tokio::task::block_in_place (8 a connection, WORKERS). A READ of data not in memory sleeps in futures::executor::block_on(bring_in) (crates/fxdax/src/cache.rs); durable and lagging commits wait likewise. At tokio's default cap of 512 blocking threads the worker hand-off queues and no connection's requests or faults are received: ~65 VMs with 8 cold reads each, or a slow bucket with a few hundred VMs. Three reviewers found it independently; the stall itself rests on tokio 1.53.1's behaviour at its cap, unconfirmed. TASK-92.20 fixed this for FAULT alone. It contradicts doc-12: a VM needing only local data should go on. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+crates/cladefs/src/extentd/server.rs builds the IO runtime with worker_threads(2) and no max_blocking_threads, and serves every request in tokio::task::block_in_place (8 a connection, WORKERS). A READ of data not in memory sleeps in futures::executor::block_on(bring_in) (crates/cladefs/src/cache.rs); durable and lagging commits wait likewise. At tokio's default cap of 512 blocking threads the worker hand-off queues and no connection's requests or faults are received: ~65 VMs with 8 cold reads each, or a slow bucket with a few hundred VMs. Three reviewers found it independently; the stall itself rests on tokio 1.53.1's behaviour at its cap, unconfirmed. TASK-92.20 fixed this for FAULT alone. It contradicts doc-12: a VM needing only local data should go on. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -14,7 +14,7 @@
 // free, is the extent table's (`extent_table`), whose transitions give the records the tree holds
 // of it. A compaction merges the tree's newer layers, as an object store's does, rather than all of
 // them: the tree holds a record or more for each extent, which never coalesce (see "Compactions"
-// below). fxdax snapshots (volume snapshots that share their source's layers and extents) deviate
+// below). cladefs snapshots (volume snapshots that share their source's layers and extents) deviate
 // from upstream too: allocations are recorded under a store's current data owner, which a snapshot
 // changes; a snapshot freezes the source's owner, whose extents the stores sharing them never
 // deallocate one by one, and which is deleted once no store shares it (AllocatorInfoV60, the
@@ -76,7 +76,7 @@
 //! to find such an extent by. Each compaction keeps the extents dead or freed since the last flush,
 //! which might yet be on the device, in AllocatorInfo (`dying`), and a mount frees them again.
 //!
-//! fxdax: `extent_table` describes the states an extent goes through, from its minting to the seal
+//! cladefs: `extent_table` describes the states an extent goes through, from its minting to the seal
 //! of its free, and keeps them.
 //!
 //! ## Allocated but uncommitted extents
@@ -85,7 +85,7 @@
 //! file allocations, but are not stored on persistent storage until their transaction is committed
 //! and safely flushed to disk.
 //!
-//! ## Shared extents (fxdax)
+//! ## Shared extents (cladefs)
 //!
 //! Small allocations share extents, so that a directory of many small files doesn't take an extent
 //! each (`allocate_shared`, as writeback's small writes allocate: `write_many`): they take the next
@@ -114,7 +114,7 @@
 //! allocations only once its extents have been freed, and merges all the tree's layers then (see
 //! "Compactions").
 //!
-//! ## Compactions (fxdax)
+//! ## Compactions (cladefs)
 //!
 //! Upstream, a compaction merges all the tree's layers into one: allocations coalesce into runs of
 //! the device's blocks, which keeps the tree small. Over an extent store, each allocation is an
@@ -397,11 +397,11 @@ impl SortByU64 for AllocatorKey {
     }
 }
 
-/// fxdax: the most sequence numbers a mount looks for orphans among in each of its windows
+/// cladefs: the most sequence numbers a mount looks for orphans among in each of its windows
 /// ([`orphan_windows`]).
 const MAX_ORPHANS_SOUGHT: u64 = 1 << 16;
 
-/// fxdax: the sequence numbers a mount looks for orphans among, those from `start`, past the
+/// cladefs: the sequence numbers a mount looks for orphans among, those from `start`, past the
 /// allocations the tree holds, to the device's `next`: the first [`MAX_ORPHANS_SOUGHT`] of them,
 /// where a crash's orphans follow what it allocated; and the last as many, where a mount that
 /// crashed minted its own, past its floor, another writer's range, far past the last. One window,
@@ -416,10 +416,10 @@ fn orphan_windows(start: u64, next: u64) -> Vec<std::ops::Range<u64>> {
 
 const EXTENT_HASH_BUCKET_SIZE: BlockSize = BlockSize::SIZE_1MIB;
 
-/// fxdax: the most bytes a staging extent holds (see "Shared extents").
+/// cladefs: the most bytes a staging extent holds (see "Shared extents").
 pub const STAGING_SIZE: u64 = 2 << 20;
 
-/// fxdax: the most bytes one shared allocation takes.
+/// cladefs: the most bytes one shared allocation takes.
 pub const STAGED_MAX: u64 = 256 << 10;
 
 pub struct AllocatorKeyPartitionIterator {
@@ -528,7 +528,7 @@ impl LayerKey for AllocatorKey {
         self.extent == other.extent && self.range.overlaps(&other.range)
     }
 
-    /// fxdax: an allocator's item is what its value says it may be
+    /// cladefs: an allocator's item is what its value says it may be
     /// (`AllocatorValue::is_valid_for`).
     fn is_valid_item<V: 'static>(&self, value: &V, block_size: BlockSize) -> bool {
         let value: &dyn Any = value;
@@ -570,13 +570,13 @@ pub enum AllocatorValueV32 {
     // Used when we know there are no possible allocations below us in the stack.
     // This is currently all the time. We used to have a related Delta type but
     // it has been removed due to correctness issues (https://fxbug.dev/42179428).
-    // fxdax: a count of 0 is a deallocated range of an extent another range of which is still
+    // cladefs: a count of 0 is a deallocated range of an extent another range of which is still
     // allocated.
     Abs { count: u64, owner_object_id: u64 },
 }
 
 impl AllocatorValue {
-    /// fxdax: whether this is what an allocator's item of `key` may hold, in a filesystem of
+    /// cladefs: whether this is what an allocator's item of `key` may hold, in a filesystem of
     /// `block_size` blocks: a range on blocks, of an owner, as the journal's allocations must be
     /// (`Journal::validate_mutation`), checked of a layer's items as they're read
     /// (`LayerKey::is_valid_item`).
@@ -600,29 +600,29 @@ pub struct AllocatorInfoV60 {
     pub layers: Vec<u64>,
     /// Maps from owner_object_id to bytes allocated.
     pub allocated_bytes: BTreeMap<u64, u64>,
-    /// Set of owner_object_id that we should ignore if found in layer files. fxdax: an owner stays
+    /// Set of owner_object_id that we should ignore if found in layer files. cladefs: an owner stays
     /// here until a compaction of all the layers filters out its allocations, which waits for its
     /// extents to be freed (see "Compactions").
     pub marked_for_deletion: HashSet<u64>,
     /// The limit for the number of allocates bytes per `owner_object_id` whereas the value. If
     /// there is no limit present here for an `owner_object_id` assume it is max u64.
     pub limit_bytes: BTreeMap<u64, u64>,
-    /// fxdax: the current data owner of each store a snapshot gave a new one, by store object id.
+    /// cladefs: the current data owner of each store a snapshot gave a new one, by store object id.
     /// A store not here allocates under its own object id.
     pub data_owners: BTreeMap<u64, u64>,
-    /// fxdax: the owners snapshots froze, with the number of stores sharing their extents. Their
+    /// cladefs: the owners snapshots froze, with the number of stores sharing their extents. Their
     /// extents are never deallocated one by one; they are freed once no store shares them.
     pub frozen_owners: BTreeMap<u64, u64>,
-    /// fxdax: the frozen owners whose extents each store shares, by store object id.
+    /// cladefs: the frozen owners whose extents each store shares, by store object id.
     pub shared_owners: BTreeMap<u64, Vec<u64>>,
-    /// fxdax: one more than the highest sequence number of any extent allocated, of any branch.
+    /// cladefs: one more than the highest sequence number of any extent allocated, of any branch.
     pub next_sequence: u64,
-    /// fxdax: the extents that died before the compaction that wrote this, and that the device
+    /// cladefs: the extents that died before the compaction that wrote this, and that the device
     /// might hold, as it might not have their frees, which a mount repeats.
     pub dying: Vec<ExtentId>,
 }
 
-/// fxdax: the info holds the extents dying, as many as freeing files leaves between compactions,
+/// cladefs: the info holds the extents dying, as many as freeing files leaves between compactions,
 /// which can take more than a record's usual limit: it has none, and is read whole.
 impl Versioned for AllocatorInfoV60 {
     fn max_serialized_size() -> Option<u64> {
@@ -652,10 +652,10 @@ struct AllocatorCounters {
 pub struct Allocator {
     filesystem: Weak<FxFilesystem>,
     block_size: BlockSize,
-    /// The device's capacity. fxdax: it changes while mounted, as the extent store is resized
+    /// The device's capacity. cladefs: it changes while mounted, as the extent store is resized
     /// ([`Allocator::set_device_size`]).
     device_size: AtomicU64,
-    /// The branch whose extents the allocator mints. fxdax: it changes as the filesystem thaws in
+    /// The branch whose extents the allocator mints. cladefs: it changes as the filesystem thaws in
     /// a VM restored from a snapshot, whose store is a fork of its own ([`Allocator::set_branch`]).
     branch: AtomicU64,
     object_id: u64,
@@ -664,13 +664,13 @@ pub struct Allocator {
     inner: Mutex<Inner>,
     counters: Mutex<AllocatorCounters>,
     allocations_allowed: AtomicBool,
-    /// fxdax: the frees of the extents the last device flush let die, in progress
+    /// cladefs: the frees of the extents the last device flush let die, in progress
     /// (`did_flush_device`), and of those before them. Held while waiting for them, so that all
     /// who wait do.
     freeing: futures::lock::Mutex<Option<fasync::Task<Result<(), Error>>>>,
 }
 
-/// fxdax: the allocator's used bytes, divided (`Allocator::usage`): they are the sum of these.
+/// cladefs: the allocator's used bytes, divided (`Allocator::usage`): they are the sum of these.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Usage {
     /// The bytes each owner's extents alive take, whole: a store's for the objects in it (the
@@ -720,7 +720,7 @@ impl ByteTracking {
     }
 }
 
-/// fxdax: counts of an extent's ranges, which don't overlap, by where they start: a range not in
+/// cladefs: counts of an extent's ranges, which don't overlap, by where they start: a range not in
 /// it counts none.
 #[derive(Debug, Default)]
 pub(crate) struct RangeCounts(BTreeMap<u64, (u64, u64)>);
@@ -786,9 +786,9 @@ impl RangeCounts {
 
 struct Inner {
     info: AllocatorInfo,
-    /// fxdax: `info`'s next sequence number before replay, where orphans may start.
+    /// cladefs: `info`'s next sequence number before replay, where orphans may start.
     next_sequence_opened: u64,
-    /// fxdax: the sequence numbers the mount sought orphans among ([`orphan_windows`]).
+    /// cladefs: the sequence numbers the mount sought orphans among ([`orphan_windows`]).
     orphans_sought: Vec<std::ops::Range<u64>>,
 
     /// The allocator can only be opened if there have been no allocations and it has not already
@@ -803,14 +803,14 @@ struct Inner {
     /// particular volume.
     unattributed_reserved_bytes: u64,
 
-    /// fxdax: the extents, from their minting to the seal of their frees.
+    /// cladefs: the extents, from their minting to the seal of their frees.
     extents: ExtentTable,
 
-    /// fxdax: the branches of the bases of the stores opened (backlog doc-10), whose extents the
+    /// cladefs: the branches of the bases of the stores opened (backlog doc-10), whose extents the
     /// tree never holds, nor does `extents`. In memory: only their stores touch those extents.
     base_branches: HashSet<u64>,
 
-    /// fxdax: the ranges of shared extents that allocations which dropped took, with their owners,
+    /// cladefs: the ranges of shared extents that allocations which dropped took, with their owners,
     /// which the journal doesn't yet record (`record_reaches`, TASK-213).
     unrecorded_reaches: Vec<(ExtentRange, u64)>,
 
@@ -852,14 +852,14 @@ impl Inner {
         (Saturating(limit) - used).0
     }
 
-    /// fxdax: whether `range`'s extent is a frozen owner's, shared with stores a snapshot made.
+    /// cladefs: whether `range`'s extent is a frozen owner's, shared with stores a snapshot made.
     fn is_frozen(&self, range: &ExtentRange) -> bool {
         self.extents
             .owner(range.extent)
             .is_some_and(|owner| self.info.frozen_owners.contains_key(&owner))
     }
 
-    /// fxdax: the owner that allocations for `owner_object_id`, a store or another owner, are
+    /// cladefs: the owner that allocations for `owner_object_id`, a store or another owner, are
     /// recorded and counted under: a store's current data owner, which a snapshot changes, and
     /// otherwise the owner itself.
     fn data_owner(&self, owner_object_id: u64) -> u64 {
@@ -914,7 +914,7 @@ impl Inner {
         };
     }
 
-    /// fxdax: commits the allocation of `range` for `owner_object_id`, a data owner, as a
+    /// cladefs: commits the allocation of `range` for `owner_object_id`, a data owner, as a
     /// transaction applied in `context` does, and returns its record (`ExtentTable::commit`).
     fn commit(
         &mut self,
@@ -941,7 +941,7 @@ impl Inner {
         Ok(records)
     }
 
-    /// fxdax: changes how many times each part of `range` is referenced by `delta`, as a
+    /// cladefs: changes how many times each part of `range` is referenced by `delta`, as a
     /// transaction applied in `context` does, and returns the records of it
     /// (`ExtentTable::recount`).
     fn recount(
@@ -1014,7 +1014,7 @@ impl Allocator {
     }
 
     /// Returns an iterator that yields all allocations, filtering out tombstones and any
-    /// owner_object_id that have been marked as deleted. fxdax: dead ranges of extents still alive
+    /// owner_object_id that have been marked as deleted. cladefs: dead ranges of extents still alive
     /// (count 0) are yielded too.
     pub async fn filter<'a>(
         &self,
@@ -1084,7 +1084,7 @@ impl Allocator {
             {
                 let mut inner = self.inner.lock();
 
-                // fxdax: the bytes allocated are checked against the device once replay is done
+                // cladefs: the bytes allocated are checked against the device once replay is done
                 // (`on_replay_complete`), not here: the device may have shrunk below those the last
                 // compaction recorded, as the deallocations replay finds made room for the shrink.
                 for (&owner_object_id, &bytes) in &info.allocated_bytes {
@@ -1108,7 +1108,7 @@ impl Allocator {
         Ok(())
     }
 
-    /// fxdax: finds the extents the tree holds, before replay: those alive, and those of owners
+    /// cladefs: finds the extents the tree holds, before replay: those alive, and those of owners
     /// marked for deletion, which are dead.
     async fn load_extents(&self) -> Result<(), Error> {
         let mut loading = Loading::default();
@@ -1131,7 +1131,7 @@ impl Allocator {
         Ok(())
     }
 
-    /// fxdax: `discarded`, the extents named by what replay read of the journal but discarded,
+    /// cladefs: `discarded`, the extents named by what replay read of the journal but discarded,
     /// which a replay after may read again, settles when what the mount found dead may be freed
     /// (`extent_table::ExtentTable::settle_replay`).
     pub async fn on_replay_complete(
@@ -1145,13 +1145,13 @@ impl Allocator {
         // journal records the discard, and the flush (see `Journal::flush_device`): replay
         // verifies the checksums of writes to them otherwise. The rest are freed now, and their
         // frees sealed, before the mount writes past its floor (below).
-        // fxdax: and past the device's floor, another writer's range's start, which no extent the
+        // cladefs: and past the device's floor, another writer's range's start, which no extent the
         // device holds need reach: orphans are looked for below what it holds only.
         let device_next_sequence = filesystem.device().next_sequence().await?;
         let floor = filesystem.device().sequence_floor().await?;
         let orphans = {
             let mut inner = self.inner.lock();
-            // Check allocated_bytes fits within the device. fxdax: as replay leaves them, which a
+            // Check allocated_bytes fits within the device. cladefs: as replay leaves them, which a
             // shrink holds to (`set_device_size`), and not as the last compaction recorded them.
             ensure!(
                 inner.allocated_bytes().0 <= self.device_size(),
@@ -1191,7 +1191,7 @@ impl Allocator {
             self.free_dead(&*filesystem.device(), 0, false)
                 .await
                 .context("Failed to free dead extents")?;
-            // fxdax: the orphans' frees sealed before the mount writes anything, which it does past
+            // cladefs: the orphans' frees sealed before the mount writes anything, which it does past
             // its floor, another writer's range, as a lease may move at any mount: orphans are
             // sought below the device's next alone, so that a mount cut short after writing there
             // left those it had found, of the range before, unfreed and never sought again, in room
@@ -1409,7 +1409,7 @@ impl Allocator {
         self.allocate_in(transaction, owner_object_id, len, false).await
     }
 
-    /// fxdax: as `allocate`, but of at most STAGED_MAX bytes, which share the staging extent with
+    /// cladefs: as `allocate`, but of at most STAGED_MAX bytes, which share the staging extent with
     /// other allocations (see "Shared extents"): open until the device's next barrier, so that
     /// they can be written until then.
     pub async fn allocate_shared(
@@ -1421,14 +1421,14 @@ impl Allocator {
         self.allocate_in(transaction, owner_object_id, len.min(STAGED_MAX), true).await
     }
 
-    /// fxdax: the bytes the allocator counts `extent` taking, alive or pending, which the device
+    /// cladefs: the bytes the allocator counts `extent` taking, alive or pending, which the device
     /// mustn't hold more of: for the staging extent, while it is open, as far as it may yet reach.
     pub fn extent_counted(&self, extent: ExtentId) -> u64 {
         let device = self.filesystem.upgrade().unwrap().device();
         self.inner.lock().extents.counted(extent, &*device)
     }
 
-    /// fxdax: how far `extent` reaches, as allocated, or for the staging extent, while it is open,
+    /// cladefs: how far `extent` reaches, as allocated, or for the staging extent, while it is open,
     /// may yet be.
     pub fn extent_size(&self, extent: ExtentId) -> Option<u64> {
         let device = self.filesystem.upgrade().unwrap().device();
@@ -1520,7 +1520,7 @@ impl Allocator {
                 .sync(SyncOptions {
                     flush_device: true,
                     precondition: Some(Box::new(|| self.needs_sync(len))),
-                    // fxdax: the journal's own transaction's, as a commit makes room (TASK-233).
+                    // cladefs: the journal's own transaction's, as a commit makes room (TASK-233).
                     holding_commits: transaction.holding_commits,
                     ..Default::default()
                 })
@@ -1580,7 +1580,7 @@ impl Allocator {
         debug_assert_ne!(owner_object_id, INVALID_OBJECT_ID);
         {
             let len = device_range.range.length().map_err(|_| FxfsError::InvalidArgs)?;
-            // fxdax: an empty range allocates nothing. The extent table refuses to commit one, as
+            // cladefs: an empty range allocates nothing. The extent table refuses to commit one, as
             // inconsistent, which is fatal once the transaction applies: it is refused here, as a
             // malformed range is, before anything is journaled.
             ensure!(len > 0, FxfsError::InvalidArgs);
@@ -1626,7 +1626,7 @@ impl Allocator {
         Ok(())
     }
 
-    /// fxdax: records the ranges of shared extents alive that allocations which dropped took
+    /// cladefs: records the ranges of shared extents alive that allocations which dropped took
     /// (`AllocatorMutation::Reach`), in transactions of their own: before a sync, whose barrier
     /// seals what was written there with nothing in the journal to say how far the extent reaches.
     /// A mount counted such an extent only as far as its allocations that committed, short of what
@@ -1707,7 +1707,7 @@ impl Allocator {
     ) -> Result<u64, Error> {
         debug!(device_range:? = dealloc_range; "deallocate");
         ensure!(dealloc_range.range.is_valid(), FxfsError::InvalidArgs);
-        // fxdax: the extents frozen owners hold are shared by stores a snapshot made (see
+        // cladefs: the extents frozen owners hold are shared by stores a snapshot made (see
         // `snapshot`), and stay allocated, and a base's are not held here at all; only the rest are
         // the store's to deallocate. Of those, the parts referenced more than once lose a reference
         // (see "References").
@@ -1727,19 +1727,19 @@ impl Allocator {
         Ok(deallocated)
     }
 
-    /// fxdax: whether `range`'s extent is more than its store's to deallocate: a frozen owner's, or
+    /// cladefs: whether `range`'s extent is more than its store's to deallocate: a frozen owner's, or
     /// a base's (backlog doc-10).
     fn is_held_beyond_the_store(&self, range: &ExtentRange) -> bool {
         self.inner.lock().base_branches.contains(&range.extent.branch)
             || self.frozen_owner(range).is_some()
     }
 
-    /// fxdax: notes that a store opened has a base whose extents are in `branches`.
+    /// cladefs: notes that a store opened has a base whose extents are in `branches`.
     pub fn add_base_branches(&self, branches: &[u64]) {
         self.inner.lock().base_branches.extend(branches);
     }
 
-    /// fxdax: fails unless a store may have a base whose extents are in `branches`: none may be
+    /// cladefs: fails unless a store may have a base whose extents are in `branches`: none may be
     /// the device's own, or one the allocator holds extents of, as if they were a base's the
     /// allocator would lose count of those.
     pub fn check_base_branches(&self, branches: &[u64]) -> Result<(), Error> {
@@ -1752,7 +1752,7 @@ impl Allocator {
         Ok(())
     }
 
-    /// fxdax: the branches of the extents `owners` hold.
+    /// cladefs: the branches of the extents `owners` hold.
     pub fn branches_of(&self, owners: &[u64]) -> Vec<u64> {
         let inner = self.inner.lock();
         let branches: HashSet<u64> = inner
@@ -1764,14 +1764,14 @@ impl Allocator {
         branches.into_iter().collect()
     }
 
-    /// fxdax: the frozen owner holding `range`'s extent, if one does.
+    /// cladefs: the frozen owner holding `range`'s extent, if one does.
     fn frozen_owner(&self, range: &ExtentRange) -> Option<u64> {
         let inner = self.inner.lock();
         let owner = inner.extents.owner(range.extent)?;
         inner.info.frozen_owners.contains_key(&owner).then_some(owner)
     }
 
-    /// fxdax: the parts of `range` that frozen owners hold, in order, with their owners. Their
+    /// cladefs: the parts of `range` that frozen owners hold, in order, with their owners. Their
     /// data does not change while their owners are frozen.
     pub async fn frozen_ranges(
         &self,
@@ -1780,7 +1780,7 @@ impl Allocator {
         Ok(self.frozen_owner(&range).map(|owner| (range, owner)).into_iter().collect())
     }
 
-    /// fxdax: whether `range` is shared, and must not be overwritten in place: its extent is a
+    /// cladefs: whether `range` is shared, and must not be overwritten in place: its extent is a
     /// frozen owner's, shared with other stores, or a base's, or some of it is referenced more than
     /// once (see "References").
     pub async fn is_shared(&self, range: ExtentRange) -> Result<bool, Error> {
@@ -1790,7 +1790,7 @@ impl Allocator {
         Ok(self.inner.lock().extents.is_referenced_more_than_once(&range))
     }
 
-    /// fxdax: references `range`, which `owner_object_id`'s store has allocated, once more: for
+    /// cladefs: references `range`, which `owner_object_id`'s store has allocated, once more: for
     /// another extent of a file to share it (a reflink, `DataObjectHandle::txn_clone_range`). A
     /// frozen owner's range is shared already, and stays allocated while the store does, and a
     /// base's is never freed.
@@ -1805,7 +1805,7 @@ impl Allocator {
         }
     }
 
-    /// fxdax: snapshots the store `source_store_object_id` into the new store
+    /// cladefs: snapshots the store `source_store_object_id` into the new store
     /// `new_store_object_id`, which shares all of the source's extents. The source's current data
     /// owner is frozen: both stores share its extents, which neither deallocates, until no store
     /// shares them. From then on, the source allocates under `new_owner_object_id`, which must be
@@ -1827,38 +1827,38 @@ impl Allocator {
         );
     }
 
-    /// fxdax: the owner the store `store_object_id` allocates under.
+    /// cladefs: the owner the store `store_object_id` allocates under.
     pub fn data_owner(&self, store_object_id: u64) -> u64 {
         self.inner.lock().data_owner(store_object_id)
     }
 
-    /// fxdax: the frozen owners whose extents the store `store_object_id` shares.
+    /// cladefs: the frozen owners whose extents the store `store_object_id` shares.
     pub fn shared_owners(&self, store_object_id: u64) -> Vec<u64> {
         self.inner.lock().info.shared_owners.get(&store_object_id).cloned().unwrap_or_default()
     }
 
-    /// fxdax: whether any owner is frozen.
+    /// cladefs: whether any owner is frozen.
     pub fn has_frozen_owners(&self) -> bool {
         !self.inner.lock().info.frozen_owners.is_empty()
     }
 
-    /// fxdax: the frozen owners, with the number of stores sharing their extents.
+    /// cladefs: the frozen owners, with the number of stores sharing their extents.
     pub fn frozen_owners(&self) -> BTreeMap<u64, u64> {
         self.inner.lock().info.frozen_owners.clone()
     }
 
-    /// fxdax: the current data owners of the stores snapshots gave new ones, by store object id.
+    /// cladefs: the current data owners of the stores snapshots gave new ones, by store object id.
     pub fn data_owners(&self) -> BTreeMap<u64, u64> {
         self.inner.lock().info.data_owners.clone()
     }
 
-    /// fxdax: the sequence numbers of this allocator's branch the mount sought orphans among, for
+    /// cladefs: the sequence numbers of this allocator's branch the mount sought orphans among, for
     /// tests that look for extents no one knows (TASK-149.41).
     pub fn orphans_sought(&self) -> Vec<std::ops::Range<u64>> {
         self.inner.lock().orphans_sought.clone()
     }
 
-    /// fxdax: the extents alive, with their owners and the bytes of them allocated, for fsck.
+    /// cladefs: the extents alive, with their owners and the bytes of them allocated, for fsck.
     pub fn extents(&self) -> HashMap<ExtentId, (u64, u64)> {
         let inner = self.inner.lock();
         inner
@@ -1868,7 +1868,7 @@ impl Allocator {
             .collect()
     }
 
-    /// fxdax: the extents that died and are not yet freed.
+    /// cladefs: the extents that died and are not yet freed.
     pub fn dead_extents(&self) -> Vec<ExtentId> {
         self.inner.lock().extents.dead().collect()
     }
@@ -1889,7 +1889,7 @@ impl Allocator {
     ///
     /// After an allocator.flush() (i.e. a major compaction), we know that there is no data left
     /// in the layer files for this owner_object_id and we are able to clear `marked_for_deletion`.
-    /// fxdax: the first after the owner's extents are freed, which merges all the layers (see
+    /// cladefs: the first after the owner's extents are freed, which merges all the layers (see
     /// "Compactions").
     pub fn mark_for_deletion(&self, transaction: &mut Transaction<'_>, owner_object_id: u64) {
         // Note that because the actual time of deletion (the next major compaction) is undefined,
@@ -1900,7 +1900,7 @@ impl Allocator {
         );
     }
 
-    /// fxdax: whether freeing the extents that died before `log_file_offset` needs a record of
+    /// cladefs: whether freeing the extents that died before `log_file_offset` needs a record of
     /// the device's flush to it (see `extent_table::FreeAfter::RecordedFlush`).
     pub fn needs_recorded_flush(&self, log_file_offset: u64) -> bool {
         self.inner.lock().extents.needs_recorded_flush(log_file_offset)
@@ -1910,7 +1910,7 @@ impl Allocator {
     /// that happened, and whether the journal records that. The extents that died before then are
     /// freed.
     ///
-    /// fxdax: freed in the background, as `freed` waits for: each free is a round trip to the
+    /// cladefs: freed in the background, as `freed` waits for: each free is a round trip to the
     /// device, which a sync need not wait for (`SyncOptions::background_frees`).
     pub async fn did_flush_device(self: &Arc<Self>, flush_log_offset: u64, recorded: bool) {
         self.sealed();
@@ -1928,7 +1928,7 @@ impl Allocator {
         }));
     }
 
-    /// fxdax: waits for the frees of the extents that the device flushes so far let die
+    /// cladefs: waits for the frees of the extents that the device flushes so far let die
     /// (`did_flush_device`).
     pub async fn freed(&self) -> Result<(), Error> {
         let mut freeing = self.freeing.lock().await;
@@ -1942,18 +1942,18 @@ impl Allocator {
         }
     }
 
-    /// fxdax: called as the device begins a flush, which seals the frees issued before it.
+    /// cladefs: called as the device begins a flush, which seals the frees issued before it.
     pub fn will_flush_device(&self) {
         self.inner.lock().extents.seal_begins();
     }
 
-    /// fxdax: called as the device ends a flush, of which `did_flush_device` frees nothing.
+    /// cladefs: called as the device ends a flush, of which `did_flush_device` frees nothing.
     pub fn sealed(&self) {
         self.inner.lock().extents.sealed();
     }
 
     /// Frees the dead extents that a flush of the journal to `log_file_offset`, recorded if
-    /// `recorded`, allows. fxdax: the table keeps them dying while the device frees them, so that
+    /// `recorded`, allows. cladefs: the table keeps them dying while the device frees them, so that
     /// a compaction meanwhile records them for a mount to free again (`Flusher::start`). One call
     /// at a time: the mount's, and then each device flush's, after the last's (`did_flush_device`).
     async fn free_dead(
@@ -1966,7 +1966,7 @@ impl Allocator {
         if extents.is_empty() {
             return Ok(());
         }
-        // fxdax: an extent the device holds open was written, or mapped writably, since the last
+        // cladefs: an extent the device holds open was written, or mapped writably, since the last
         // seal: something uses it, which its free takes from under it (TASK-121).
         for (extent, dead) in self.inner.lock().extents.freeing_described() {
             if device.is_open(extent) {
@@ -2026,7 +2026,7 @@ impl Allocator {
         Reservation::new(self, owner_object_id, amount)
     }
 
-    /// fxdax: whether extents wait to be freed: those a crash orphaned among them, of a size no one
+    /// cladefs: whether extents wait to be freed: those a crash orphaned among them, of a size no one
     /// knows, which `dead_bytes` doesn't count.
     pub fn has_dead_extents(&self) -> bool {
         self.inner.lock().extents.dead().len() > 0
@@ -2052,14 +2052,14 @@ impl Allocator {
         self.branch.load(Ordering::Acquire)
     }
 
-    /// fxdax: the allocator mints extents of `branch` from now on: the device's, as the filesystem
+    /// cladefs: the allocator mints extents of `branch` from now on: the device's, as the filesystem
     /// thaws in a VM restored from a snapshot, whose store is a fork of its own, and nothing is
     /// open. Extents staged before, sealed, are not staged in again.
     pub fn set_branch(&self, branch: u64) {
         self.branch.store(branch, Ordering::Release);
     }
 
-    /// fxdax: the device's capacity is `size` bytes from now on, as the extent store is resized
+    /// cladefs: the device's capacity is `size` bytes from now on, as the extent store is resized
     /// while mounted: more, or fewer, but no fewer than the allocator holds, its extents alive,
     /// allocations not yet committed, and reservations, and its dead extents (`NoSpace`). The
     /// allocator's info records no size, so a mount after takes the device's.
@@ -2089,7 +2089,7 @@ impl Allocator {
         Saturating(self.inner.lock().used_bytes())
     }
 
-    /// fxdax: what the used bytes (`get_used_bytes`) are made of, at one moment: what the free
+    /// cladefs: what the used bytes (`get_used_bytes`) are made of, at one moment: what the free
     /// space a statfs reports changes by, divided, as a check of it needs (TASK-257).
     pub fn usage(&self) -> Usage {
         let inner = self.inner.lock();
@@ -2106,13 +2106,13 @@ impl Allocator {
         self.flush_with_reason(FlushReason::Journal(ForceMajor::False)).await
     }
 
-    /// fxdax: flushes for `reason`, which may ask for a compaction of all the tree's layers (see
+    /// cladefs: flushes for `reason`, which may ask for a compaction of all the tree's layers (see
     /// "Compactions").
     async fn flush_with_reason(&self, reason: FlushReason) -> Result<Version, Error> {
         let filesystem = self.filesystem.upgrade().unwrap();
         let object_manager = filesystem.object_manager();
         let earliest_version = self.tree.get_earliest_version();
-        // fxdax: but for a major compaction, which merges all the layers whatever there is to flush
+        // cladefs: but for a major compaction, which merges all the layers whatever there is to flush
         // (see "Compactions"), as an object store's does.
         if reason != FlushReason::Journal(ForceMajor::True)
             && !object_manager.needs_flush(self.object_id())
@@ -2136,7 +2136,7 @@ impl ReservationOwner for Allocator {
 }
 
 impl Allocator {
-    /// fxdax: merges `records`, which changes of the extents' states imply (`ExtentTable`), into
+    /// cladefs: merges `records`, which changes of the extents' states imply (`ExtentTable`), into
     /// the tree. Called under the inner lock, as the table's changes are made, so that the tree
     /// changes with it.
     fn record(&self, records: Records) {
@@ -2159,12 +2159,12 @@ impl JournalingObject for Allocator {
         context: &ApplyContext<'_, '_>,
         _assoc_obj: AssocObj<'_>,
     ) -> Result<(), Error> {
-        // fxdax: extents that die are freed once the device is flushed past this transaction, or,
+        // cladefs: extents that die are freed once the device is flushed past this transaction, or,
         // for those whose deallocation replay finds, as the mount settles them (`Applied`).
         match mutation {
             Mutation::Allocator(AllocatorMutation::MarkForDeletion(owner_object_id)) => {
                 let mut inner = self.inner.lock();
-                // fxdax: a store's extents are its current data owner's, and those of the frozen
+                // cladefs: a store's extents are its current data owner's, and those of the frozen
                 // owners it shares, which are deleted once no store shares them.
                 let mut owners = vec![inner.data_owner(owner_object_id)];
                 inner.info.data_owners.remove(&owner_object_id);
@@ -2237,7 +2237,7 @@ impl JournalingObject for Allocator {
             }
             Mutation::Allocator(AllocatorMutation::Reference { device_range, delta, .. }) => {
                 let mut inner = self.inner.lock();
-                // fxdax: of a transaction built before a snapshot froze the extent's owner and
+                // cladefs: of a transaction built before a snapshot froze the extent's owner and
                 // committed after it, which `reference` and `deallocate` would have left out: a
                 // frozen owner's extents are shared whole (TASK-241).
                 if inner.is_frozen(&device_range) {
@@ -2253,7 +2253,7 @@ impl JournalingObject for Allocator {
             Mutation::Allocator(AllocatorMutation::Deallocate { device_range, .. }) => {
                 let mut inner = self.inner.lock();
                 // `deallocate` leaves out the extents frozen owners hold, so the extent is the
-                // store's current data owner's. fxdax: but for a transaction built before a
+                // store's current data owner's. cladefs: but for a transaction built before a
                 // snapshot froze its owner and committed after it, held back from the snapshot's
                 // flush: left out here, the extent shared with the snapshot (TASK-241). The parts
                 // referenced more than once lose a reference; the rest are deallocated (see
@@ -2294,7 +2294,7 @@ impl JournalingObject for Allocator {
             let mut inner = self.inner.lock();
             let data_owner = inner.data_owner(owner_object_id);
             inner.owner_bytes.entry(data_owner).or_default().uncommitted_allocated_bytes -= len;
-            // fxdax: the extent's data may have been written: it dies, unless a shared extent's
+            // cladefs: the extent's data may have been written: it dies, unless a shared extent's
             // other allocations keep it, which then takes the range, as one allocated
             // (`ExtentTable::drop_allocation`). What it takes is the reservation's, as a commit
             // takes it; the rest goes back. Given back, it was taken twice: the next allocation in
@@ -2438,7 +2438,7 @@ impl<'a> Flusher<'a> {
             .commit_with_callback(|_| {
                 // We must capture `info` as it is when we start flushing. Subsequent transactions
                 // can end up modifying `info` and we shouldn't capture those here.
-                // fxdax: with the extents dying, of which a mount finds no records in the tree the
+                // cladefs: with the extents dying, of which a mount finds no records in the tree the
                 // compaction leaves, and those not yet committed, which may be lost.
                 let inner = self.allocator.inner.lock();
                 AllocatorInfo { dying: inner.extents.recorded_dying(), ..inner.info.clone() }
@@ -2456,7 +2456,7 @@ impl<'a> Flusher<'a> {
         let object_manager = self.fs.object_manager();
         let txn_options = Self::txn_options(object_manager.metadata_reservation());
 
-        // fxdax: the owners marked for deletion whose extents have all been freed, whose
+        // cladefs: the owners marked for deletion whose extents have all been freed, whose
         // allocations the compaction filters out. The others' stay until their extents are freed,
         // which a mount does if the filesystem doesn't first.
         let freed_owners: HashSet<u64> = {
@@ -2468,7 +2468,7 @@ impl<'a> Flusher<'a> {
                 .collect()
         };
 
-        // fxdax: the compaction merges the newer layers, as an object store's does, unless it is to
+        // cladefs: the compaction merges the newer layers, as an object store's does, unless it is to
         // merge them all (see "Compactions"): a major compaction, which gives back what removals
         // took, or one that filters out the allocations of owners freed, which older layers hold
         // too.
@@ -2485,7 +2485,7 @@ impl<'a> Flusher<'a> {
             let writer = DirectWriter::new(&layer_object_handle, txn_options).await;
             let block_size = layer_object_handle.block_size();
             let yielder = Some(self.fs.journal().get_compaction_yielder());
-            // fxdax: only a compaction of all the layers leaves out removals, and the records of
+            // cladefs: only a compaction of all the layers leaves out removals, and the records of
             // owners freed: the layers kept may hold records they hide.
             let bytes_written = if layers_to_keep.is_empty() {
                 let iter = filter_marked_for_deletion(
@@ -2532,7 +2532,7 @@ impl<'a> Flusher<'a> {
         )
         .await?;
 
-        // Move all the existing layers to the graveyard. fxdax: those merged; those kept stay.
+        // Move all the existing layers to the graveyard. cladefs: those merged; those kept stay.
         for layer in &layer_set.layers {
             if let Some(handle) = layer.handle() {
                 root_store.add_to_graveyard(&mut transaction, handle.object_id());
@@ -2544,11 +2544,11 @@ impl<'a> Flusher<'a> {
         // After successfully flushing, all the stores that were marked for deletion at the time of
         // the BeginFlush transaction, and whose extents have been freed, no longer need to be
         // marked for deletion.  There can be stores that have been deleted since the BeginFlush
-        // transaction, but they will be covered by a MarkForDeletion mutation. fxdax: owners freed
+        // transaction, but they will be covered by a MarkForDeletion mutation. cladefs: owners freed
         // make the compaction one of all the layers.
         info.marked_for_deletion.retain(|owner| !freed_owners.contains(owner));
 
-        // fxdax: the layer written, with those kept, older, which the info names, and whose sizes
+        // cladefs: the layer written, with those kept, older, which the info names, and whose sizes
         // the reservation is for, as an object store's flush does.
         let layer_object_id = layer_object_handle.object_id();
         let mut layers = vec![layer_from_handle(layer_object_handle, None).await?];
@@ -2593,7 +2593,7 @@ impl<'a> Flusher<'a> {
             })
             .await?;
 
-        // Now close the layers and purge them. fxdax: those merged.
+        // Now close the layers and purge them. cladefs: those merged.
         for layer in layer_set.layers {
             let object_id = layer.handle().map(|h| h.object_id());
             layer.close_layer().await;
@@ -2697,7 +2697,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a key is its extent's ID and the range within it, which bincode serializes as it does
+    /// cladefs: a key is its extent's ID and the range within it, which bincode serializes as it does
     /// the pair.
     #[test]
     fn test_allocator_key_serialization_compatibility() {
@@ -2829,7 +2829,7 @@ mod tests {
         assert!(iter.get().is_none());
     }
 
-    /// fxdax: keys sort by extent, and within an extent, by range; records of different extents
+    /// cladefs: keys sort by extent, and within an extent, by range; records of different extents
     /// never coalesce.
     #[fuchsia::test]
     async fn test_merge_and_coalesce_wont_merge_across_extents() {
@@ -2952,7 +2952,7 @@ mod tests {
         ExtentId::new(DEFAULT_BRANCH, sequence)
     }
 
-    /// fxdax: orphans are sought past what the tree holds, and below the device's next, and in one
+    /// cladefs: orphans are sought past what the tree holds, and below the device's next, and in one
     /// window if those meet.
     #[test]
     fn test_orphan_windows() {
@@ -2966,7 +2966,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a mount frees the orphans it found, and seals their frees with a flush, before it
+    /// cladefs: a mount frees the orphans it found, and seals their frees with a flush, before it
     /// writes anything, which it does past its floor once a lease has moved, or in what the
     /// journal holds (TASK-149.41). A mount
     /// cut short after writing there left the orphans of the range before unfreed, and the next
@@ -3043,7 +3043,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a filesystem reopened on a device whose floor is far past what it holds, as when
+    /// cladefs: a filesystem reopened on a device whose floor is far past what it holds, as when
     /// another writer of its branch takes it over (backlog doc-7, The head), mints from the floor,
     /// and looks for extents a crash left below what the device holds only: not across the gap to
     /// the floor, which took a guest's allocator ever.
@@ -3194,7 +3194,7 @@ mod tests {
         assert!(device.read(device_range1.extent, 0, buffer.as_mut()).await.is_err());
     }
 
-    /// fxdax: an extent part of which is deallocated is alive until the rest is, and keeps its
+    /// cladefs: an extent part of which is deallocated is alive until the rest is, and keeps its
     /// size meanwhile, across remounts.
     #[fuchsia::test]
     async fn test_partial_deallocations() {
@@ -3253,7 +3253,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a transaction that is dropped kills the extents it allocated, which are never minted
+    /// cladefs: a transaction that is dropped kills the extents it allocated, which are never minted
     /// again.
     #[fuchsia::test]
     async fn test_mark_allocated() {
@@ -3368,7 +3368,7 @@ mod tests {
         allocator.mark_for_deletion(&mut transaction, STORE_OBJECT_ID);
         transaction.commit().await.expect("commit failed");
 
-        // fxdax: expect that allocated bytes is updated immediately, and the owner's allocations
+        // cladefs: expect that allocated bytes is updated immediately, and the owner's allocations
         // ignored, but its extents are only dead: they are freed once the device is flushed.
         assert_eq!(allocator.get_allocated_bytes(), initial_allocated_bytes);
         check_allocations(&allocator, &initial_allocations).await;
@@ -3624,7 +3624,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: the device's capacity changes while mounted: it grows, and shrinks no lower than
+    /// cladefs: the device's capacity changes while mounted: it grows, and shrinks no lower than
     /// what the allocator holds, which allocations then fit within.
     #[fuchsia::test]
     async fn test_device_size_changes() {
@@ -3684,7 +3684,7 @@ mod tests {
         ranges
     }
 
-    /// fxdax: a filesystem shrunk below what it had allocated when the allocator's tree was last
+    /// cladefs: a filesystem shrunk below what it had allocated when the allocator's tree was last
     /// compacted, though not below what it holds, mounts again on the smaller device: the mount
     /// checks the bytes allocated as replay leaves them, not as that compaction recorded them.
     #[fuchsia::test]
@@ -3724,7 +3724,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a mount refuses a device smaller than the bytes allocated, as replay leaves them,
+    /// cladefs: a mount refuses a device smaller than the bytes allocated, as replay leaves them,
     /// though the allocator's tree, when last compacted, recorded fewer.
     #[fuchsia::test]
     async fn test_mount_refuses_a_device_smaller_than_what_is_allocated() {
@@ -4075,7 +4075,7 @@ mod tests {
         println!("{}", range.end - range.start);
     }
 
-    /// fxdax: extents that die in transactions the journal holds, whose frees a crash may have
+    /// cladefs: extents that die in transactions the journal holds, whose frees a crash may have
     /// lost, are freed after replay, with the next flush.
     #[fuchsia::test]
     async fn test_replay_frees_dead_extents() {
@@ -4138,7 +4138,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a sync that frees in the background returns with the extents its flush let die
+    /// cladefs: a sync that frees in the background returns with the extents its flush let die
     /// still dead; the next flush waits for their frees.
     #[fuchsia::test]
     async fn test_background_frees_finish_before_the_next_flush() {
@@ -4215,7 +4215,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a compaction while frees are in flight, as an extent store's are over their round
+    /// cladefs: a compaction while frees are in flight, as an extent store's are over their round
     /// trips, keeps their extents dying in the info it writes: a crash once the compaction is on
     /// the device, and before the frees are, leaves them to the mount to free again, not leaked
     /// (TASK-79.22).
@@ -4267,7 +4267,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: the allocator's info holds the extents dying, however many: more than a record of the
+    /// cladefs: the allocator's info holds the extents dying, however many: more than a record of the
     /// default size holds, as removing many files at once leaves.
     #[fuchsia::test]
     fn test_info_with_many_extents_dying() {
@@ -4284,7 +4284,7 @@ mod tests {
         assert_eq!(read.dying, info.dying);
     }
 
-    /// fxdax: a crash may leave extents written whose transactions were lost: they are freed after
+    /// cladefs: a crash may leave extents written whose transactions were lost: they are freed after
     /// replay, and their sequence numbers aren't minted again.
     #[fuchsia::test]
     async fn test_orphans_are_freed() {
@@ -4313,7 +4313,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: transactions commit in no particular order, so that one lost may have minted its
+    /// cladefs: transactions commit in no particular order, so that one lost may have minted its
     /// extent before one replay finds did: its extent is an orphan too, below the sequence numbers
     /// the journal holds, and was left on the device for good.
     #[fuchsia::test]
@@ -4376,7 +4376,7 @@ mod tests {
         (transaction, range)
     }
 
-    /// fxdax: an extent minted before a compaction, whose transaction a crash loses after it, is
+    /// cladefs: an extent minted before a compaction, whose transaction a crash loses after it, is
     /// below the sequence numbers the compaction recorded: an orphan a mount frees all the same.
     #[fuchsia::test]
     async fn test_orphans_minted_before_a_compaction_are_freed() {
@@ -4395,7 +4395,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: an extent minted before a compaction, whose transaction commits after it, is alive
+    /// cladefs: an extent minted before a compaction, whose transaction commits after it, is alive
     /// after a replay: that the compaction recorded it as possibly lost mustn't free it.
     #[fuchsia::test]
     async fn test_extents_committed_after_a_compaction_survive_replay() {
@@ -4416,7 +4416,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: sequence numbers are the store's, and far apart: a mount looks for orphans among a
+    /// cladefs: sequence numbers are the store's, and far apart: a mount looks for orphans among a
     /// bounded number of them, however far the device's are from those the tree holds. Every one
     /// between was sought once, at 2 GiB of them, and the guest panicked with no memory for them.
     #[fuchsia::test]
@@ -4436,7 +4436,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: the numbers a mount seeks orphans among may be numbers the device never held: a
+    /// cladefs: the numbers a mount seeks orphans among may be numbers the device never held: a
     /// writer's range begun far past the last's, as a lease moved, the mount that follows one kills
     /// as many as it seeks, whose records, which no journal record pays for as a compaction's
     /// metadata reservation counts on, took more room than it held: the compaction failed with
@@ -4483,7 +4483,7 @@ mod tests {
         (transaction, range)
     }
 
-    /// fxdax: a shared allocation dropped leaves its range of the staging extent taken, as the
+    /// cladefs: a shared allocation dropped leaves its range of the staging extent taken, as the
     /// extent is written once and the next allocation in it starts past it: the extent takes it from
     /// the drop on, and it isn't free for another to take, whether the transaction had a
     /// reservation of its own or not. Given back, a reservation took it, and the next commit in the
@@ -4537,7 +4537,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
     }
 
-    /// fxdax: a shared allocation dropped leaves its range of the staging extent written, which the
+    /// cladefs: a shared allocation dropped leaves its range of the staging extent written, which the
     /// extent takes while it lives (TASK-211): after a remount too, as the device holds it. Taken
     /// only as far as its last allocation that committed, the filesystem held less than its device
     /// did, which a full device's compactions, which its metadata reservation promises room,
@@ -4581,7 +4581,7 @@ mod tests {
             .expect("sync failed");
     }
 
-    /// fxdax: shared allocations take the staging extent's blocks in turn, open on the device, until
+    /// cladefs: shared allocations take the staging extent's blocks in turn, open on the device, until
     /// it is sealed; it outlives its allocations while it is the staging extent, and dies once it
     /// isn't, and is freed.
     #[fuchsia::test]
@@ -4620,7 +4620,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a shared extent emptied while it is the staging extent, the tree compacted then, and
+    /// cladefs: a shared extent emptied while it is the staging extent, the tree compacted then, and
     /// the filesystem closed with it staging still: the layers the compaction wrote hold its
     /// records, all counted 0, and no transaction journals the removal its last pin's going would
     /// have written. The next mount finds nothing of it allocated, kills it, and removes it from
@@ -4645,7 +4645,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a shared extent doesn't die while a transaction not yet committed has allocated in
+    /// cladefs: a shared extent doesn't die while a transaction not yet committed has allocated in
     /// it, nor with a transaction that drops: it dies once neither it nor staging pins it.
     #[fuchsia::test]
     async fn test_shared_allocations_pin() {
@@ -4677,7 +4677,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a shared extent whose allocations all go while a transaction not yet committed has
+    /// cladefs: a shared extent whose allocations all go while a transaction not yet committed has
     /// allocated in it lives on, live and in replay, which kills it with the deallocation, and
     /// revives it with the allocation: replay doesn't free it.
     #[fuchsia::test]
@@ -4712,7 +4712,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a shared extent is alive, after a remount, until all its allocations are
+    /// cladefs: a shared extent is alive, after a remount, until all its allocations are
     /// deallocated, and is checked as any other.
     #[fuchsia::test]
     async fn test_shared_allocations_remount() {
@@ -4739,11 +4739,11 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: how many extents `tiered_fs`'s file has: their records make a layer larger than
+    /// cladefs: how many extents `tiered_fs`'s file has: their records make a layer larger than
     /// `journal::DEFAULT_RECLAIM_SIZE`.
     const TIERED_EXTENTS: u64 = 96;
 
-    /// fxdax: a file `name` of `extents` extents, in `store`'s root directory, each deallocated
+    /// cladefs: a file `name` of `extents` extents, in `store`'s root directory, each deallocated
     /// every other block, which leaves a record per block in the allocator's tree. A transaction
     /// allocates `TIERED_EXTENTS` of them at most.
     async fn tiered_file(
@@ -4784,7 +4784,7 @@ mod tests {
         file
     }
 
-    /// fxdax: a filesystem, opened by `builder`, whose allocator's tree is one layer larger than
+    /// cladefs: a filesystem, opened by `builder`, whose allocator's tree is one layer larger than
     /// `journal::DEFAULT_RECLAIM_SIZE`, which a compaction of newer layers keeps (see
     /// "Compactions"), as tens of thousands of files make it over an extent store: the records of a
     /// `tiered_file` of `TIERED_EXTENTS` extents, in a volume of its own. Its device has room for a
@@ -4817,7 +4817,7 @@ mod tests {
         (fs, store, file)
     }
 
-    /// fxdax: deallocates block `block` of `file`, in a transaction of its own.
+    /// cladefs: deallocates block `block` of `file`, in a transaction of its own.
     async fn zero_block(file: &DataObjectHandle<ObjectStore>, block: u64) {
         let bs = file.block_size();
         let mut transaction = file.new_transaction().await.expect("new_transaction failed");
@@ -4825,7 +4825,7 @@ mod tests {
         transaction.commit().await.expect("commit failed");
     }
 
-    /// fxdax: closes `fs`, and mounts it again.
+    /// cladefs: closes `fs`, and mounts it again.
     async fn remount(fs: OpenFxFilesystem) -> OpenFxFilesystem {
         fs.close().await.expect("close failed");
         let device = fs.take_device().await;
@@ -4833,7 +4833,7 @@ mod tests {
         FxFilesystemBuilder::new().open(device).await.expect("open failed")
     }
 
-    /// fxdax: truncates the last extent of `file`, a `tiered_file`, which dies. Returns it.
+    /// cladefs: truncates the last extent of `file`, a `tiered_file`, which dies. Returns it.
     async fn truncate_last_extent(
         allocator: &Allocator,
         file: &DataObjectHandle<ObjectStore>,
@@ -4849,7 +4849,7 @@ mod tests {
         extent
     }
 
-    /// fxdax: the ranges of `extent` that the allocator's tree holds allocated.
+    /// cladefs: the ranges of `extent` that the allocator's tree holds allocated.
     async fn allocated_in(allocator: &Allocator, extent: ExtentId) -> Vec<ExtentRange> {
         collect_allocations(allocator)
             .await
@@ -4858,7 +4858,7 @@ mod tests {
             .collect()
     }
 
-    /// fxdax: deletes `root_volume`'s volume `name`, whose store is `owner`.
+    /// cladefs: deletes `root_volume`'s volume `name`, whose store is `owner`.
     async fn delete_volume(
         fs: &OpenFxFilesystem,
         root_volume: &RootVolume,
@@ -4880,7 +4880,7 @@ mod tests {
         root_volume.delete_volume(name, transaction, || {}).await.expect("delete failed");
     }
 
-    /// fxdax: a compaction of the allocator's tree merges its newer layers, and keeps a layer much
+    /// cladefs: a compaction of the allocator's tree merges its newer layers, and keeps a layer much
     /// larger than they are, which it doesn't write again (see "Compactions").
     #[fuchsia::test]
     async fn test_compaction_merges_newer_layers() {
@@ -4912,7 +4912,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a compaction of the allocator's newer layers keeps the removals of extents that died:
+    /// cladefs: a compaction of the allocator's newer layers keeps the removals of extents that died:
     /// the older layers it keeps hold their records, which they hide.
     #[fuchsia::test]
     async fn test_compaction_of_newer_layers_keeps_removals() {
@@ -4935,7 +4935,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a compaction that merges the allocator's middle layer with the newer, and keeps the
+    /// cladefs: a compaction that merges the allocator's middle layer with the newer, and keeps the
     /// oldest, keeps the removals the middle layer holds, of records the oldest holds. A layer on
     /// disk is kept while those newer than it are together less than three quarters of it, and the
     /// newest, alone, while it is larger than `journal::DEFAULT_RECLAIM_SIZE` (see "Compactions"):
@@ -4988,7 +4988,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a compaction of the allocator's newer layers reserves the metadata space to compact
+    /// cladefs: a compaction of the allocator's newer layers reserves the metadata space to compact
     /// all the layers it leaves, the one it writes and those it keeps, as a mount does.
     #[fuchsia::test]
     async fn test_compaction_of_newer_layers_reserves_for_all_layers() {
@@ -5012,7 +5012,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a compaction of the allocator's newer layers keeps a deleted volume's owner marked
+    /// cladefs: a compaction of the allocator's newer layers keeps a deleted volume's owner marked
     /// for deletion, as the older layers it keeps hold the owner's records; once the volume's
     /// extents are freed, the next compaction merges all the layers, without the owner's records.
     #[fuchsia::test]
@@ -5055,7 +5055,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a mount, after a compaction of the allocator's newer layers kept a deleted volume's
+    /// cladefs: a mount, after a compaction of the allocator's newer layers kept a deleted volume's
     /// owner marked for deletion, kills the owner's extents, whose records are in the layer the
     /// compaction wrote and in the one it kept; once they are freed, the next compaction merges
     /// all the layers, without their records.
@@ -5123,7 +5123,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a major compaction, which the journal asks for once the metadata reservation runs
+    /// cladefs: a major compaction, which the journal asks for once the metadata reservation runs
     /// low, merges all the allocator's layers, whatever their sizes, which gives back what the
     /// removals took of it.
     #[fuchsia::test]
@@ -5144,7 +5144,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: where a crash in a compaction of the allocator's newer layers comes
+    /// cladefs: where a crash in a compaction of the allocator's newer layers comes
     /// (`crash_in_compaction_of_newer_layers`).
     #[derive(Clone, Copy)]
     enum Crash {
@@ -5156,7 +5156,7 @@ mod tests {
         Purging,
     }
 
-    /// fxdax: the extents of `owner_object_id` alive, with the bytes of them allocated.
+    /// cladefs: the extents of `owner_object_id` alive, with the bytes of them allocated.
     fn extents_of(allocator: &Allocator, owner_object_id: u64) -> HashMap<ExtentId, u64> {
         allocator
             .extents()
@@ -5167,7 +5167,7 @@ mod tests {
             .collect()
     }
 
-    /// fxdax: a crash, at `crash`, in a compaction of the allocator's newer layers, which mounts
+    /// cladefs: a crash, at `crash`, in a compaction of the allocator's newer layers, which mounts
     /// with what the volume had allocated before, and checks. Returns the layers before the
     /// compaction, and the filesystem mounted after the crash.
     async fn crash_in_compaction_of_newer_layers(crash: Crash) -> (Vec<u64>, OpenFxFilesystem) {
@@ -5223,7 +5223,7 @@ mod tests {
         (before, fs)
     }
 
-    /// fxdax: a crash as a compaction of the allocator's newer layers writes the layer it merges
+    /// cladefs: a crash as a compaction of the allocator's newer layers writes the layer it merges
     /// them into leaves the layers as they were.
     #[fuchsia::test]
     async fn test_crash_writing_compaction_of_newer_layers() {
@@ -5233,7 +5233,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a crash as a compaction of the allocator's newer layers ends leaves the layers as
+    /// cladefs: a crash as a compaction of the allocator's newer layers ends leaves the layers as
     /// they were.
     #[fuchsia::test]
     async fn test_crash_ending_compaction_of_newer_layers() {
@@ -5243,7 +5243,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a crash once a compaction of the allocator's newer layers has ended, as it purges
+    /// cladefs: a crash once a compaction of the allocator's newer layers has ended, as it purges
     /// the layers it merged, leaves the layer it wrote and those it kept, and the mount purges
     /// those it merged.
     #[fuchsia::test]

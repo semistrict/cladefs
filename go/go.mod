@@ -1,4 +1,4 @@
-module github.com/semistrict/fxdax/go
+module github.com/semistrict/cladefs/go
 
 go 1.26.0
 

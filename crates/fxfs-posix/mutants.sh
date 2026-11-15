@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -63,7 +63,7 @@ for name in "${names[@]}"; do
     patch -s -F0 -p1 < "$patch"
     log=$(mktemp)
     began=$SECONDS
-    FXDAX_MODEL_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
+    CLADEFS_MODEL_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
         cargo nextest run -p fxfs-posix > "$log" 2>&1
     status=$?
     patch -s -F0 -R -p1 < "$patch" || { echo "$name: its patch doesn't reverse: the tree has it" >&2; exit 1; }

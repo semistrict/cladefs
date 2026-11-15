@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // The shapes the guide's tools write and its pages read.
 
-export type Origin = "fxdax" | "ported" | "fuchsia" | "fuchsia-changed" | "stand-in";
+export type Origin = "cladefs" | "ported" | "fuchsia" | "fuchsia-changed" | "stand-in";
 
 export type Kind = "fn" | "struct" | "enum" | "trait" | "mod" | "const" | "static" | "type";
 

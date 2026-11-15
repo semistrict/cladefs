@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: how long this process's stores' flushes and framings took, phase by phase: where the
+//! cladefs: how long this process's stores' flushes and framings took, phase by phase: where the
 //! time commits wait to be made durable goes ([`crate::Lags`], TASK-165.9).
 
 use crate::durability::FileSyncs;
@@ -16,16 +16,16 @@ use std::time::Instant;
 pub const FLUSH_PHASES: [&str; 6] = ["wait", "data", "dirs", "logs", "gone", "raw"];
 
 /// The phases of a framing ([`crate::Store::framing`]): syncing the extents stored on their own
-/// its footer names; fxdax: reading its raw data, part by part, each checksummed and
+/// its footer names; cladefs: reading its raw data, part by part, each checksummed and
 /// sampled if it may be framed in place (`framing::read`), but for the parts looks ahead saw as it
 /// filled, read only for a copy (TASK-400); compressing them, if it is to be framed
 /// in a copy (`framing::pack`); and writing its framed file, or its tail
 /// (TASK-336: one phase, `write`, said nothing of whether a framing's second went to the host's
-/// CPUs or its disk). fxdax: its framed file is written back and made durable after, with others
+/// CPUs or its disk). cladefs: its framed file is written back and made durable after, with others
 /// framed meanwhile ([`DURABLE_PHASES`], TASK-310, TASK-401).
 pub const FRAMING_PHASES: [&str; 4] = ["own", "read", "compress", "write"];
 
-/// fxdax: the phases of making segments framed durable together (`segments::make_durable`,
+/// cladefs: the phases of making segments framed durable together (`segments::make_durable`,
 /// TASK-310): the time the first of them waited for it, framed; syncing the directories of raw
 /// files and logs, if segments opened since they were; writing their framed files back, a piece at
 /// a time (TASK-401), and syncing them; and renaming them theirs and syncing the directory of
@@ -33,7 +33,7 @@ pub const FRAMING_PHASES: [&str; 4] = ["own", "read", "compress", "write"];
 pub const DURABLE_PHASES: [&str; 4] = ["wait", "entries", "files", "dirs"];
 
 /// Something timed, phase by phase, in microseconds: [`FLUSH_PHASES`], [`FRAMING_PHASES`] or
-/// [`DURABLE_PHASES`]. fxdax: and of that time, how long the threads it ran on waited to run,
+/// [`DURABLE_PHASES`]. cladefs: and of that time, how long the threads it ran on waited to run,
 /// runnable, the host's CPUs busy with others' ([`Waits`], TASK-336): what tells a phase that took
 /// long for want of a CPU from one waiting for the host's disk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,7 +78,7 @@ impl<const N: usize> Phases<N> {
     }
 }
 
-/// fxdax: how long the calling thread has waited to run, runnable, in nanoseconds, since it
+/// cladefs: how long the calling thread has waited to run, runnable, in nanoseconds, since it
 /// started, as the host's scheduler counts it (Linux's `/proc/thread-self/schedstat`, its second
 /// field); 0 where it doesn't (TASK-336). A read of a file of /proc's, a few microseconds: once or
 /// twice per thing timed, of a segment's framing, a flush, or a making durable.
@@ -97,7 +97,7 @@ pub fn runnable_ns() -> u64 {
     0
 }
 
-/// fxdax: the waits to run of a thing timed ([`Phases::runnable_us`]): those of the thread timing
+/// cladefs: the waits to run of a thing timed ([`Phases::runnable_us`]): those of the thread timing
 /// it, since it started, but for the spans it handed to others, whose own waits are added instead
 /// (TASK-336).
 pub(crate) struct Waits {
@@ -136,7 +136,7 @@ impl Waits {
     }
 }
 
-/// fxdax: something being timed on the calling thread, phase by phase, and its waits to run
+/// cladefs: something being timed on the calling thread, phase by phase, and its waits to run
 /// ([`Phases`], [`Waits`]): each phase from the end of the one before (TASK-336).
 pub(crate) struct Timing<const N: usize> {
     phases: Phases<N>,
@@ -201,7 +201,7 @@ impl<const N: usize> Timed<N> {
     }
 }
 
-/// How long this process's stores' flushes and framings took; fxdax: and making their segments
+/// How long this process's stores' flushes and framings took; cladefs: and making their segments
 /// framed durable, so many at a time, `durable_segments` of them in all (TASK-310); and, of the
 /// files flushes synced, how long the longest sync of an extent's own file, and of a segment's raw
 /// file, took.
@@ -233,7 +233,7 @@ pub(crate) struct Flush {
     pub synced: FileSyncs,
 }
 
-/// fxdax: how long this process's stores' flushes and framings took ([`Timings`]).
+/// cladefs: how long this process's stores' flushes and framings took ([`Timings`]).
 pub fn timings() -> Timings {
     *TIMINGS.lock().unwrap()
 }
@@ -263,7 +263,7 @@ pub(crate) fn flushed(branch: u64, flush: &Flush) {
 }
 
 /// `phases`, named by `names`, as a slow flush's or framing's warning says them, in milliseconds:
-/// fxdax: and how long of them its threads waited to run (TASK-336).
+/// cladefs: and how long of them its threads waited to run (TASK-336).
 fn named<const N: usize>(names: &[&str; N], phases: Phases<N>) -> String {
     let ms = |us: u64| us as f64 / 1000.0;
     let named = names.iter().zip(phases.us);
@@ -272,7 +272,7 @@ fn named<const N: usize>(names: &[&str; N], phases: Phases<N>) -> String {
 }
 
 /// A framing of a store of this process's, of `segment`, took `phases`: one past extentd's turn
-/// said as it happens, as a slow flush is ([`flushed`]); fxdax: with `how` it framed it, in place
+/// said as it happens, as a slow flush is ([`flushed`]); cladefs: with `how` it framed it, in place
 /// or not, and what of it it read (TASK-400).
 pub(crate) fn framed(
     segment: impl std::fmt::Debug,
@@ -289,7 +289,7 @@ pub(crate) fn framed(
     TIMINGS.lock().unwrap().framings.record(phases);
 }
 
-/// fxdax: making `segments` segments of branch `branch` framed durable together took `phases`
+/// cladefs: making `segments` segments of branch `branch` framed durable together took `phases`
 /// (`segments::make_durable`, TASK-310): past extentd's turn, said as it happens, as a slow
 /// framing is ([`framed`]).
 pub(crate) fn made_durable(branch: u64, segments: usize, phases: Phases<4>) {
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(timed.sum, Phases { us: [40_000, 31_000, 32_000], runnable_us: 50_012 });
     }
 
-    /// fxdax: a thread spinning beside more spinning threads than there are CPUs it may run on
+    /// cladefs: a thread spinning beside more spinning threads than there are CPUs it may run on
     /// waits to run, as its scheduler counts it: what a framing's warning says of the host's CPUs
     /// (TASK-336). Pinned to one CPU, with three others there, it runs about a quarter of the time.
     #[cfg(target_os = "linux")]
@@ -374,7 +374,7 @@ mod tests {
         });
     }
 
-    /// fxdax: what a thread hands others counts their waits, not its own meanwhile (TASK-336).
+    /// cladefs: what a thread hands others counts their waits, not its own meanwhile (TASK-336).
     #[test]
     fn handed_spans_count_the_others_waits() {
         let mut waits = Waits::start();
@@ -402,7 +402,7 @@ pub(crate) mod framing {
     pub const WRITE: usize = 3;
 }
 
-/// fxdax: the indices of [`DURABLE_PHASES`].
+/// cladefs: the indices of [`DURABLE_PHASES`].
 pub(crate) mod durable {
     pub const WAIT: usize = 0;
     pub const ENTRIES: usize = 1;

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: data lives in extents of an extent store, written
+//! cladefs's own, a child of data_object_handle.rs: data lives in extents of an extent store, written
 //! once (backlog doc-4). `overwrite` writes blocks in place only as `in_place` says, which refuses
 //! those a snapshot or a clone shares; `reallocate_range` moves a range written in place already,
 //! the journal's, to new extents.
@@ -19,7 +19,7 @@ use std::cmp::min;
 use std::ops::Range;
 use storage_device::ExtentRange;
 
-/// fxdax: whether a file's blocks may be written in place, and if not, why: the rule
+/// cladefs: whether a file's blocks may be written in place, and if not, why: the rule
 /// ([`DataObjectHandle::in_place`]) for `overwrite`, which writes them through the device
 /// (TASK-160.22).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +37,7 @@ pub(super) enum InPlace {
 }
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: whether `blocks` of the file, which a record of `mode` holds, may be written in place
+    /// cladefs: whether `blocks` of the file, which a record of `mode` holds, may be written in place
     /// (`InPlace`), as `overwrite` writes them: whether their extent is open isn't asked, as the
     /// device takes or refuses its writes itself.
     pub(super) async fn in_place(
@@ -54,7 +54,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         })
     }
 
-    /// fxdax: replaces the extents in `file_range` with new ones, preallocated, of at most
+    /// cladefs: replaces the extents in `file_range` with new ones, preallocated, of at most
     /// `max_extent_len` bytes each, freeing those it had: for a file written in place, such as
     /// the journal, whose extents there may have been written already, and can't be again (backlog
     /// doc-4). The range must be within the file.
@@ -121,7 +121,7 @@ mod tests {
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
 
-    /// fxdax: random single-block overwrites of a large allocated file, each in a transaction of
+    /// cladefs: random single-block overwrites of a large allocated file, each in a transaction of
     /// its own (as fxfs-platform flushes overwrite ranges), read back, with the journal compacted.
     /// Each overwrite writes new blocks, and the old ones' extents live on while any of their
     /// blocks does.

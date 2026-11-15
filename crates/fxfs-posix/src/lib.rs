@@ -1,15 +1,15 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! Fxfs as a POSIX filesystem: a volume of a mounted Fxfs, served by object ID, which is the
-//! inode number. Its callers are a VFS: the guest kernel's (guest/rust/fxfs-linux), and fxdax's
-//! host filesystem (crates/fxdax), each of which keeps what a VFS keeps (`Platform`).
+//! inode number. Its callers are a VFS: the guest kernel's (guest/rust/fxfs-linux), and cladefs's
+//! host filesystem (crates/cladefs), each of which keeps what a VFS keeps (`Platform`).
 //!
 //! The VFS checks what it can before calling: names exist or not, types match, and permissions
 //! allow. Each change is one of Fxfs's transactions, locking the objects it changes.
 //!
-//! fxdax: mounted read-only, it changes nothing; on a follower's device, it follows the store's
+//! cladefs: mounted read-only, it changes nothing; on a follower's device, it follows the store's
 //! writer (the guest's `follow`, backlog doc-8): its tree reads are made under the follower's fill
 //! barrier, which no batch applies under (`reading`), and it keeps no handles to objects, whose
 //! sizes a batch would leave stale.
@@ -48,7 +48,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// fxdax: what a change fails with once a batch of queued unlinks failed: the I/O error's errno,
+/// cladefs: what a change fails with once a batch of queued unlinks failed: the I/O error's errno,
 /// as what failed, mostly the device, was; nothing on the device is inconsistent (`errno`).
 const UNLINK_FAILED: &str = "a batch of unlinks failed: changes fail until the filesystem remounts";
 
@@ -68,18 +68,18 @@ pub trait Platform: Send + Sync + Sized + 'static {
     /// completes.
     fn spawn_urgent(&self, future: impl Future<Output = ()> + Send + 'static);
 
-    /// fxdax: on a follower, checks that the fill barrier is held, in a debug kernel (lockdep),
+    /// cladefs: on a follower, checks that the fill barrier is held, in a debug kernel (lockdep),
     /// and that the trees can be read: not, once a batch failed (crates/follower).
     fn filling(&self) -> Result<(), Error> {
         Ok(())
     }
 
-    /// fxdax: whether the filesystem follows its device's writer: it then keeps no handles.
+    /// cladefs: whether the filesystem follows its device's writer: it then keeps no handles.
     fn follows(&self) -> bool {
         false
     }
 
-    /// fxdax: where the volume counts its fsyncs: the platform's own, to count those of all a
+    /// cladefs: where the volume counts its fsyncs: the platform's own, to count those of all a
     /// filesystem's volumes together.
     fn sync_counts(&self) -> Arc<SyncCounts> {
         Arc::default()
@@ -109,7 +109,7 @@ pub struct Attr {
     pub atime_ns: u64,
     pub mtime_ns: u64,
     pub ctime_ns: u64,
-    /// fxdax: with the inode's attribute flags (chattr) above the kernel's 16 bits, which the
+    /// cladefs: with the inode's attribute flags (chattr) above the kernel's 16 bits, which the
     /// kernel keeps there (`FXFS_MODE_*`): Fxfs's objects have no record of them of their own.
     pub mode: u32,
     pub nlink: u32,
@@ -126,7 +126,7 @@ pub const SET_SIZE: u32 = 1 << 3;
 pub const SET_ATIME: u32 = 1 << 4;
 pub const SET_MTIME: u32 = 1 << 5;
 pub const SET_CTIME: u32 = 1 << 6;
-/// fxdax: a truncate leaves the last block as it is: a DAX window's file zeroes it through the
+/// cladefs: a truncate leaves the last block as it is: a DAX window's file zeroes it through the
 /// window, which maps that block.
 pub const SET_KEEP_TAIL: u32 = 1 << 7;
 
@@ -203,22 +203,22 @@ impl DaxExtent {
     }
 }
 
-/// fxdax: how many unlinks apply in one transaction at most (doc-6): as many wait before a
+/// cladefs: how many unlinks apply in one transaction at most (doc-6): as many wait before a
 /// background worker is woken to apply them.
 const DELAYED_BATCH: usize = 32;
 
-/// fxdax: the tasks applying queued unlinks in the background, at once.
+/// cladefs: the tasks applying queued unlinks in the background, at once.
 const DELAYED_WORKERS: usize = 2;
 
-/// fxdax: how many may wait at most: an unlink finding the queue this long applies batches of it
+/// cladefs: how many may wait at most: an unlink finding the queue this long applies batches of it
 /// until it is shorter.
 const DELAYED_QUEUE: usize = 4 * DELAYED_BATCH;
 
-/// fxdax: how long what is queued waits at most, once no more comes, for a full batch: the room an
+/// cladefs: how long what is queued waits at most, once no more comes, for a full batch: the room an
 /// `rm` frees, and what a crash finds of it, wait for no sync (TASK-79.21).
 const DELAYED_WAIT: Duration = Duration::from_millis(10);
 
-/// fxdax: unlinks the syscalls queued rather than made (doc-6): the kernel holds the directory's
+/// cladefs: unlinks the syscalls queued rather than made (doc-6): the kernel holds the directory's
 /// lock while it unlinks, which each of Fxfs's commits held up for most of the call; a batch of
 /// them in one transaction costs a fraction of each alone. Each inode's apply in the order
 /// queued, before anything reads what they change (`drain`): a lookup, before it reads the inode a
@@ -522,20 +522,20 @@ pub struct Fxfs<P: Platform> {
     /// evicts them (`evict`): one for each object, as Fxfs has handles.
     directories: Mutex<FxHashMap<u64, Arc<Directory<ObjectStore>>>>,
     files: Mutex<FxHashMap<u64, Arc<DataObjectHandle<ObjectStore>>>>,
-    /// fxdax: the room reserved for the page cache's dirty data, by file, as it dirties it,
+    /// cladefs: the room reserved for the page cache's dirty data, by file, as it dirties it,
     /// which its writeback writes it with (`write_dirty`, TASK-80).
     dirty: DirtyReservation,
     /// Unlinks queued (doc-6).
     delayed: Delayed,
-    /// fxdax: fsyncs, and those another's sync covered (`fsync`).
+    /// cladefs: fsyncs, and those another's sync covered (`fsync`).
     sync_counts: Arc<SyncCounts>,
-    /// fxdax: whether it is mounted read-only, which changes nothing: with `-o ro`, or its
+    /// cladefs: whether it is mounted read-only, which changes nothing: with `-o ro`, or its
     /// filesystem is (`FxFilesystem::options`, on a follower's device too). Derived at `new`, the
     /// one place it is decided, from the filesystem's, which owns it (TASK-160.26).
     read_only: bool,
 }
 
-/// fxdax: fsyncs, and those another's sync covered (`Fxfs::fsync`).
+/// cladefs: fsyncs, and those another's sync covered (`Fxfs::fsync`).
 #[derive(Default)]
 pub struct SyncCounts {
     fsyncs: AtomicU64,
@@ -593,12 +593,12 @@ impl<P: Platform> Fxfs<P> {
         self.attr(self.volume.root_directory_object_id()).await
     }
 
-    /// fxdax: whether it is mounted read-only, and changes nothing.
+    /// cladefs: whether it is mounted read-only, and changes nothing.
     pub fn read_only(&self) -> bool {
         self.read_only
     }
 
-    /// fxdax: whether it follows its device's writer (the guest's `follow`).
+    /// cladefs: whether it follows its device's writer (the guest's `follow`).
     pub fn follows(&self) -> bool {
         self.platform.follows()
     }
@@ -613,7 +613,7 @@ impl<P: Platform> Fxfs<P> {
         self.volume.store_object_id()
     }
 
-    /// fxdax: `read`, a read of its trees: a follower's under its fill barrier, which the kernel's
+    /// cladefs: `read`, a read of its trees: a follower's under its fill barrier, which the kernel's
     /// call in holds (fs/fxfs, vfs.h), so that it sees whole batches; checked, in a debug kernel.
     pub async fn reading<T, R: Future<Output = Result<T, Error>>>(
         &self,
@@ -623,7 +623,7 @@ impl<P: Platform> Fxfs<P> {
         read().await
     }
 
-    /// fxdax: frees the blocks of the file `ino` within `range`, which is block-aligned, which
+    /// cladefs: frees the blocks of the file `ino` within `range`, which is block-aligned, which
     /// then read as zeros: a hole (fallocate's FALLOC_FL_PUNCH_HOLE and FALLOC_FL_ZERO_RANGE), in
     /// as many transactions as its extents take (`DataObjectHandle::zero_in_commits`).
     pub async fn punch(&self, ino: u64, range: Range<u64>) -> Result<(), Error> {
@@ -639,7 +639,7 @@ impl<P: Platform> Fxfs<P> {
     /// the range beyond what the file holds already, but no blocks set aside, which an extent store
     /// can't do, each write taking new ones (copy-on-write); blocks not written read as zeros.
     ///
-    /// fxdax: not Fxfs's preallocation (`DataObjectHandle::allocate`), whose overwrite extents the
+    /// cladefs: not Fxfs's preallocation (`DataObjectHandle::allocate`), whose overwrite extents the
     /// first write to them replaced, copy-on-write, the attribute still saying it had some, which
     /// fsck refuses (MissingOverwriteExtents): the host's fallocate alone made them, the guest's
     /// never (TASK-149.39).
@@ -659,7 +659,7 @@ impl<P: Platform> Fxfs<P> {
         Ok(())
     }
 
-    /// fxdax: the attributes of the object `ino`, for a file handle (open_by_handle_at, NFS):
+    /// cladefs: the attributes of the object `ino`, for a file handle (open_by_handle_at, NFS):
     /// NotFound for one no name links and nothing has open, in the graveyard.
     pub async fn attr_by_handle(&self, ino: u64) -> Result<Attr, Error> {
         self.begin(Op::AttrByHandle, Some(ino)).await?;
@@ -728,7 +728,7 @@ impl<P: Platform> Fxfs<P> {
                 (S_IFREG, refs, size)
             }
             ObjectKind::Symlink { refs, link } | ObjectKind::EncryptedSymlink { refs, link } => {
-                // fxdax: a long target is in chunks of its own, its record's link empty
+                // cladefs: a long target is in chunks of its own, its record's link empty
                 // (`directory::LONG_SYMLINK_XATTR`): its length theirs, as `size` says or reading
                 // them does. A size of 0 said so: lstat's st_size, which readlink(1) and realpath
                 // size their buffers by (TASK-149.37).
@@ -768,7 +768,7 @@ impl<P: Platform> Fxfs<P> {
         Ok(data_size(self.volume.tree().find(&data_key(ino)).await?.map(|item| item.value)))
     }
 
-    /// The attributes of `name` in the directory `dir`. fxdax: unlinks of the directory's other
+    /// The attributes of `name` in the directory `dir`. cladefs: unlinks of the directory's other
     /// names stay queued: with the kernel's dentries cold, as after a boot, each unlinkat's lookup
     /// applied the unlink before it, alone, under the directory's lock (TASK-92.26).
     pub async fn lookup(&self, dir: u64, name: &[u8]) -> Result<Attr, Error> {
@@ -786,7 +786,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Calls `emit` for the entries of the directory `dir` from `start` on, with each one's name,
-    /// inode and type (as `S_IFMT` bits of a mode), until it returns false. fxdax: a follower's
+    /// inode and type (as `S_IFMT` bits of a mode), until it returns false. cladefs: a follower's
     /// under its fill barrier (`reading`), as of one state. Each type is its entry's, which says
     /// which special file a file is (`ObjectDescriptor::Special`), so that no record is looked up:
     /// a FIFO was listed as a regular file (`DT_REG`), which `find -type p` and `ls` take a
@@ -824,7 +824,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Reads up to `buf.len()` bytes of the file `ino` at `offset`, returning how many it read:
-    /// fewer only at the end of the file. fxdax: a follower's under its fill barrier (`reading`),
+    /// fewer only at the end of the file. cladefs: a follower's under its fill barrier (`reading`),
     /// which keeps the extents it reads until it is done.
     pub async fn read(&self, ino: u64, offset: u64, buf: &mut [u8]) -> Result<usize, Error> {
         self.platform.filling()?;
@@ -890,25 +890,25 @@ impl<P: Platform> Fxfs<P> {
         self.write_many(ino, &mut [(offset, data)]).await
     }
 
-    /// fxdax: reserves room for `bytes` more of the file `ino`'s data, whole pages, which the page
+    /// cladefs: reserves room for `bytes` more of the file `ino`'s data, whole pages, which the page
     /// cache dirties: NoSpace if the filesystem hasn't it (TASK-80).
     pub fn reserve_dirty(&self, ino: u64, bytes: u64) -> Result<(), Error> {
         self.dirty.reserve(ino, bytes)
     }
 
-    /// fxdax: reserves what room the filesystem has for `bytes` more of the file `ino`'s data,
+    /// cladefs: reserves what room the filesystem has for `bytes` more of the file `ino`'s data,
     /// which the page cache dirtied whether it has or not.
     pub fn reserve_dirty_what_fits(&self, ino: u64, bytes: u64) {
         self.dirty.reserve_what_fits(ino, bytes)
     }
 
-    /// fxdax: releases the room of `bytes` of the file `ino`'s dirty data, which the page cache
+    /// cladefs: releases the room of `bytes` of the file `ino`'s dirty data, which the page cache
     /// dropped unwritten.
     pub fn release_dirty(&self, ino: u64, bytes: u64) {
         self.dirty.release(ino, bytes)
     }
 
-    /// fxdax: `write_many`, writing back `dirty` bytes of the page cache's dirty data, whose room
+    /// cladefs: `write_many`, writing back `dirty` bytes of the page cache's dirty data, whose room
     /// it was reserved (`reserve_dirty`) pays for the writes (TASK-80): a filesystem filled since
     /// they were dirtied doesn't fail them.
     pub async fn write_dirty(
@@ -955,7 +955,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Creates `name` in the directory `dir`, as `mode` says: a directory, or a file, which may be
-    /// a special file (as Starnix and fxdax make them), owned by `uid` and `gid`. fxdax: with the
+    /// a special file (as Starnix and cladefs make them), owned by `uid` and `gid`. cladefs: with the
     /// extended attributes `xattrs`, names and values, in its transaction, as the ACLs it inherits:
     /// written back after, a crash could keep the new object without them (TASK-79.29); those too
     /// large to keep inline in its record too, in an attribute of the object (TASK-199).
@@ -985,7 +985,7 @@ impl<P: Platform> Fxfs<P> {
             child.handle().update_attributes(&mut transaction, Some(&attributes), None).await?;
             child.object_id()
         } else {
-            // fxdax: its entry says which special file it is, if it is one, as its mode does; the
+            // cladefs: its entry says which special file it is, if it is one, as its mode does; the
             // directory's times are the kernel's, which writes them back with it.
             let descriptor = ObjectDescriptor::of_file(Some(mode));
             let times = !P::KEEPS_DIRECTORY_TIMES;
@@ -1033,7 +1033,7 @@ impl<P: Platform> Fxfs<P> {
         let dir = self.directory(dir).await?;
         let mut transaction = begun.transaction(&[dir.object_id()]).await?;
         let ino = dir.create_symlink(&mut transaction, target, name).await?;
-        // fxdax: its times too, as a file's are made: it has only an mtime of Fxfs's own, and a
+        // cladefs: its times too, as a file's are made: it has only an mtime of Fxfs's own, and a
         // ctime of 0 before it (xfstests generic/423).
         let now = Timestamp::now();
         let owner = fio::MutableNodeAttributes {
@@ -1045,7 +1045,7 @@ impl<P: Platform> Fxfs<P> {
             ..Default::default()
         };
         self.handle(ino).update_attributes(&mut transaction, Some(&owner), Some(now)).await?;
-        // fxdax: its size its target's length, which a long target's chunks, not yet in the tree,
+        // cladefs: its size its target's length, which a long target's chunks, not yet in the tree,
         // can't say (`attr_of`).
         let attrs = [
             self.attr_after_sized(&transaction, ino, Some(target.len() as u64)).await?,
@@ -1236,7 +1236,7 @@ impl<P: Platform> Fxfs<P> {
         }
     }
 
-    /// fxdax: makes the bytes of the file `dst` from `dst_offset` share the extents holding the
+    /// cladefs: makes the bytes of the file `dst` from `dst_offset` share the extents holding the
     /// file `src`'s bytes `range` (a reflink: FICLONE, FICLONERANGE, copy_file_range), copying no
     /// data (`DataObjectHandle::clone_range_in_commits`), and makes `dst` `size` bytes long if it
     /// is shorter: `dst`'s attributes. `range` and `dst_offset` are block aligned; the kernel holds
@@ -1271,7 +1271,7 @@ impl<P: Platform> Fxfs<P> {
     }
 
     /// Sets the extended attribute `name` of the object `ino` to `value`: creating it, replacing
-    /// it, or either, as `mode` says. fxdax: in a transaction of its own, as ext4's setxattr
+    /// it, or either, as `mode` says. cladefs: in a transaction of its own, as ext4's setxattr
     /// journals it, refused (NoSpace) on a filesystem without the room: kept in memory until the
     /// kernel wrote back the inode, a change the filesystem had no room for was lost behind
     /// fsync's 0, and changes took the kernel's memory without bound (TASK-199).
@@ -1304,27 +1304,27 @@ impl<P: Platform> Fxfs<P> {
         handle.remove_extended_attribute_with_options(name.to_vec(), begun.options()).await
     }
 
-    /// fxdax: how many records the volume's tree caches (its objects', names' and data's): what
+    /// cladefs: how many records the volume's tree caches (its objects', names' and data's): what
     /// the kernel's shrinker of the superblock may free (`free_cached`).
     pub fn cached(&self) -> u64 {
         self.volume.tree().cache_len() as u64
     }
 
-    /// fxdax: frees up to `count` of the records the volume's tree caches, those used least
+    /// cladefs: frees up to `count` of the records the volume's tree caches, those used least
     /// recently first, as the guest's memory pressure asks, and returns how many it freed.
     pub fn free_cached(&self, count: u64) -> u64 {
         self.volume.tree().shrink_cache(count.try_into().unwrap_or(usize::MAX)) as u64
     }
 
     /// Closes the inode `ino`, which the kernel evicts, and frees its object if no name links it.
-    /// fxdax: mounted read-only, it frees nothing: a follower's writer frees what it unlinked.
+    /// cladefs: mounted read-only, it frees nothing: a follower's writer frees what it unlinked.
     pub fn evict(&self, ino: u64, unlinked: bool) {
         self.directories.lock().unwrap().remove(&ino);
         self.files.lock().unwrap().remove(&ino);
         if self.read_only {
             return;
         }
-        // fxdax: the page cache dropped its pages, the dirty ones' room with them (TASK-80).
+        // cladefs: the page cache dropped its pages, the dirty ones' room with them (TASK-80).
         let dirty = self.dirty.dirty_bytes(ino);
         if dirty > 0 {
             log::error!(
@@ -1355,7 +1355,7 @@ impl<P: Platform> Fxfs<P> {
         }
     }
 
-    /// fxdax: removes `name`, which links `ino`, no directory, from the directory `dir` later, in
+    /// cladefs: removes `name`, which links `ino`, no directory, from the directory `dir` later, in
     /// a batch, before anything reads what it changes (doc-6). The kernel checked what could fail
     /// but for failures of the filesystem, which make it fail later changes.
     pub async fn unlink_later(&self, dir: u64, name: &[u8], ino: u64) -> Result<(), Error> {
@@ -1656,7 +1656,7 @@ impl<P: Platform> Fxfs<P> {
             let cut = set.size < file.get_size();
             let begun = self.begin(if cut { Op::Cut } else { Op::Grow }, None).await?;
             file.truncate_with_options(begun.options(), set.size).await?;
-            // fxdax: once the cut has freed what it may, which only a sync makes room of, as a
+            // cladefs: once the cut has freed what it may, which only a sync makes room of, as a
             // write that finds the filesystem full makes it (`fxfs_vfs_make_room`). With no room
             // even so what the last block holds past the end stays, as the file must still be cut.
             if cut && set.valid & SET_KEEP_TAIL == 0 {
@@ -1681,11 +1681,11 @@ impl<P: Platform> Fxfs<P> {
             ..Default::default()
         };
         if attributes != fio::MutableNodeAttributes::default() || flag(SET_CTIME) {
-            // fxdax: changing a record, it borrows the metadata space it needs, as Fuchsia's
+            // cladefs: changing a record, it borrows the metadata space it needs, as Fuchsia's
             // `update_attributes` does: an inode's writeback on a full filesystem failed (TASK-82).
             let begun = self.begin(Op::SetAttr, None).await?;
             let mut transaction = begun.transaction(&[ino]).await?;
-            // fxdax: the mode, owner and group not changed keep what they were. Fxfs keeps them
+            // cladefs: the mode, owner and group not changed keep what they were. Fxfs keeps them
             // together, in a node's POSIX attributes, which it makes of the fields given, the rest
             // 0, for a node that has none, as a new volume's root directory hasn't, whose
             // defaults `attr` gives: a chown of it alone left it mode 000 (TASK-222).
@@ -1708,12 +1708,12 @@ impl<P: Platform> Fxfs<P> {
         Ok(())
     }
 
-    /// Makes what the filesystem holds durable: sync, syncfs. fxdax: and frees what was removed,
+    /// Makes what the filesystem holds durable: sync, syncfs. cladefs: and frees what was removed,
     /// the graveyard's tombstones of the objects unlinked done, so that their room is free once
     /// it returns: a write right after `rm` and `sync` found it full, the graveyard waiting
     /// GRAVEYARD_BATCH_DELAY still; and a write that finds it full syncs to make room (TASK-80).
     ///
-    /// fxdax: it ends with a flush of the device, durable as the platform has it, whatever the
+    /// cladefs: it ends with a flush of the device, durable as the platform has it, whatever the
     /// journal's sync asked of it: the journal counts itself durable as far as any flush took it,
     /// an fsync's too, which is ordered alone, and asks the device nothing once it is; so that a
     /// sync after fsyncs, finding nothing more, returned with their commits not yet durable, which
@@ -1728,7 +1728,7 @@ impl<P: Platform> Fxfs<P> {
         self.filesystem.device().flush().await
     }
 
-    /// fxdax: makes what the filesystem holds survive a crash of the guest, in order, before what
+    /// cladefs: makes what the filesystem holds survive a crash of the guest, in order, before what
     /// comes after: fsync, which doc-2 (requirement 2) lets complete without waiting for the
     /// host's disk, which the host makes durable soon after; nor for the frees of the extents
     /// that died before it, which the next flush waits for.
@@ -1865,7 +1865,7 @@ fn check_replaced(replaced: &ReplacedChild, expected: Option<u64>) -> Result<(),
     Ok(())
 }
 
-/// What `replaced` was (`REPLACED_*`). fxdax: a directory waits in the graveyard, where
+/// What `replaced` was (`REPLACED_*`). cladefs: a directory waits in the graveyard, where
 /// `replace_child` put it, until the kernel evicts it, as a file does, rather than being tombstoned
 /// at once (as upstream's fuchsia/directory.rs does): the kernel may still hold its inode, and write
 /// back its times and extended attributes, as overlayfs leaves its work directory's (TASK-50.6.1).
@@ -1897,7 +1897,7 @@ fn file_type(descriptor: &ObjectDescriptor) -> u32 {
 
 /// The `S_IFMT` bits of a node whose kind of object has `kind_bits` and whose POSIX attributes are
 /// `posix`, if it has any. A file's mode may say it is a special file, a FIFO, a socket or a
-/// device, as Starnix and fxdax make them: what its entries say it is (`ObjectDescriptor::of_file`).
+/// device, as Starnix and cladefs make them: what its entries say it is (`ObjectDescriptor::of_file`).
 fn node_type(kind_bits: u32, posix: Option<&PosixAttributes>) -> u32 {
     match kind_bits {
         S_IFREG => file_type(&ObjectDescriptor::of_file(posix.map(|posix| posix.mode))),

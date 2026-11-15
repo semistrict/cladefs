@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,27 +29,27 @@ describe("where code comes from", () => {
 
   test.each([
     ["crates/fxfs/src/object_store/journal.rs", "fuchsia-changed"],
-    ["crates/fxfs/src/object_store/volume/snapshot.rs", "fxdax"],
-    ["crates/storage_device/src/extent.rs", "fxdax"],
+    ["crates/fxfs/src/object_store/volume/snapshot.rs", "cladefs"],
+    ["crates/storage_device/src/extent.rs", "cladefs"],
     ["crates/zx/src/lib.rs", "fuchsia"],
     ["crates/fidl/src/lib.rs", "stand-in"],
-    ["crates/fxdax/src/extents.rs", "fxdax"],
-    ["crates/extent_remote/src/writer.rs", "fxdax"],
-    ["guest/linux/fs/fxfs/dax.c", "fxdax"],
+    ["crates/cladefs/src/extents.rs", "cladefs"],
+    ["crates/extent_remote/src/writer.rs", "cladefs"],
+    ["guest/linux/fs/fxfs/dax.c", "cladefs"],
   ])("%s is %s", (path, origin) => {
     expect(originOf(path, crates)).toBe(origin);
   });
 
-  test("a crate copied from Fuchsia cites its Fuchsia directory; fxdax's don't", () => {
+  test("a crate copied from Fuchsia cites its Fuchsia directory; cladefs's don't", () => {
     expect(crates.get("fxfs")).toBe("fuchsia");
     expect(crates.get("fuchsia-async")).toBe("fuchsia");
-    expect(crates.get("fxdax")).toBe("fxdax");
-    expect(crates.get("physmem")).toBe("fxdax");
+    expect(crates.get("cladefs")).toBe("cladefs");
+    expect(crates.get("physmem")).toBe("cladefs");
   });
 
-  test("in fxdax's own crates, a file citing a Fuchsia source is ported", () => {
-    expect(fileOrigin("fxdax", "// Ported from `zircon/kernel/vm/page_queues.cc`.\nfn x() {}\n")).toBe("ported");
-    expect(fileOrigin("fxdax", "// fxdax's own.\nfn x() {}\n")).toBe("fxdax");
+  test("in cladefs's own crates, a file citing a Fuchsia source is ported", () => {
+    expect(fileOrigin("cladefs", "// Ported from `zircon/kernel/vm/page_queues.cc`.\nfn x() {}\n")).toBe("ported");
+    expect(fileOrigin("cladefs", "// cladefs's own.\nfn x() {}\n")).toBe("cladefs");
   });
 });
 
@@ -60,23 +60,23 @@ describe("the symbol index", () => {
   });
 
   test("test code is left out", () => {
-    expect(isTestPath("crates/fxdax/src/extentd/tests/open.rs")).toBe(true);
-    expect(isTestPath("crates/fxdax/src/cache_tests.rs")).toBe(true);
-    expect(isTestPath("crates/fxdax/src/cache.rs")).toBe(false);
+    expect(isTestPath("crates/cladefs/src/extentd/tests/open.rs")).toBe(true);
+    expect(isTestPath("crates/cladefs/src/cache_tests.rs")).toBe(true);
+    expect(isTestPath("crates/cladefs/src/cache.rs")).toBe(false);
   });
 
-  test("it finds fxdax's and Fuchsia's symbols, with their docs and anchors", async () => {
+  test("it finds cladefs's and Fuchsia's symbols, with their docs and anchors", async () => {
     const symbols = await indexRepo();
-    const store = symbols.find((s) => s.path === "crates/fxdax/src/extents.rs" && s.name === "ExtentStore" && s.kind === "struct");
+    const store = symbols.find((s) => s.path === "crates/cladefs/src/extents.rs" && s.name === "ExtentStore" && s.kind === "struct");
     expect(store).toEqual({
-      path: "crates/fxdax/src/extents.rs",
+      path: "crates/cladefs/src/extents.rs",
       kind: "struct",
       name: "ExtentStore",
       container: "",
       signature: "pub struct ExtentStore",
       unique: true,
       doc: "An extent store a guest's filesystem lives on.",
-      origin: "fxdax",
+      origin: "cladefs",
     });
     const commit = symbols.find((s) => s.path === "crates/fxfs/src/object_store/journal.rs" && s.name === "commit" && s.container === "Journal");
     expect(commit?.signature).toBe("pub async fn commit(&self, transaction: &mut Transaction<'_>) -> Result<u64, Error>");

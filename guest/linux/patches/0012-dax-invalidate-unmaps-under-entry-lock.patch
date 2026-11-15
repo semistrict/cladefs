@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 dax: an invalidated entry's pages are unmapped under its lock
 
 invalidate_inode_pages2_range puts each clean entry's folio, then
@@ -10,8 +10,8 @@ the write's invalidation then puts the folio while the PMD maps it,
 splitting it under the PMD (dax_folio_put's WARN), and the PMD names a
 folio no entry has until the unmap after. Each entry's pages are
 unmapped first, the entry locked so that no fault maps them again, as
-grab_mapping_entry does a PMD it downgrades. Found by fxdax's guest/sim
-(fxdax TASK-150.21).
+grab_mapping_entry does a PMD it downgrades. Found by cladefs's guest/sim
+(cladefs TASK-150.21).
 
 diff --git a/fs/dax.c b/fs/dax.c
 --- a/fs/dax.c

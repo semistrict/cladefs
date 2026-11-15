@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -54,10 +54,10 @@ use seals::*;
 use tracepoints::*;
 use window::*;
 
-const MNT: &str = "/mnt/fxdax";
+const MNT: &str = "/mnt/cladefs";
 /// The device's tag, which the image is mounted by, and its mount's counts are named by
 /// (/proc/fs/fxfs/<tag>).
-const TAG: &str = "fxdax";
+const TAG: &str = "cladefs";
 
 pub(crate) fn path(name: &str) -> String {
     format!("{MNT}/{name}")
@@ -86,11 +86,11 @@ fn mount_with(flags: libc::c_ulong) -> std::io::Result<()> {
     if ret == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
-/// fxdax: `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
+/// cladefs: `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
 const FIFREEZE: libc::c_ulong = 0xc004_5877;
 const FITHAW: libc::c_ulong = 0xc004_5878;
 
-/// fxdax: freezes (`FIFREEZE`) or thaws (`FITHAW`), as `request` says, the volume mounted at
+/// cladefs: freezes (`FIFREEZE`) or thaws (`FITHAW`), as `request` says, the volume mounted at
 /// `target`.
 fn freeze_at(target: &str, request: libc::c_ulong) -> std::io::Result<()> {
     let dir = fs::File::open(target).unwrap();
@@ -98,7 +98,7 @@ fn freeze_at(target: &str, request: libc::c_ulong) -> std::io::Result<()> {
     if ret == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
 }
 
-/// fxdax: how many requests of the type `name` the device has taken, as its driver counts them
+/// cladefs: how many requests of the type `name` the device has taken, as its driver counts them
 /// (its `requests` in sysfs): `freeze` those telling it the filesystem froze or thawed.
 fn device_requests(name: &str) -> u64 {
     let device = crate::extent_driver::device();
@@ -108,7 +108,7 @@ fn device_requests(name: &str) -> u64 {
     count.unwrap_or_else(|| panic!("no {name} in {path}: {requests}")).parse().unwrap()
 }
 
-/// fxdax: a fault injection counting down, `name`, has run out.
+/// cladefs: a fault injection counting down, `name`, has run out.
 fn assert_injected(name: &str) {
     let left = fs::read_to_string(format!("{PARAMS}/{name}")).unwrap();
     assert_eq!(left.trim(), "0", "{name} never failed anything");
@@ -121,7 +121,7 @@ fn unmount() {
     assert_eq!(ret, 0, "umount: {}", std::io::Error::last_os_error());
 }
 
-/// fxdax: what a coverage kernel counted of fs/fxfs so far, copied to the store for the host:
+/// cladefs: what a coverage kernel counted of fs/fxfs so far, copied to the store for the host:
 /// a kernel without gcov has no such directory in debugfs, and leaves nothing (TASK-119.14).
 fn save_coverage() {
     const DEBUGFS: &CStr = c"/sys/kernel/debug";
@@ -171,7 +171,7 @@ fn clone_range(dst: &fs::File, src: &fs::File, src_offset: u64, len: u64, dst_of
     assert_eq!(cloned, 0, "FICLONERANGE: {}", std::io::Error::last_os_error());
 }
 
-/// fxdax: has the kernel log what it traced of `path`'s page `page`, if it traces
+/// cladefs: has the kernel log what it traced of `path`'s page `page`, if it traces
 /// (fxfs.dax_trace, TASK-121): before a check fails on the page.
 fn trace_dump(path: &str, page: u64) {
     use std::os::unix::fs::MetadataExt;
@@ -182,18 +182,18 @@ fn trace_dump(path: &str, page: u64) {
     }
 }
 
-/// fxdax: what scales the checks' budgets, as the host has it ([`SCALE`]), and what else a check
+/// cladefs: what scales the checks' budgets, as the host has it ([`SCALE`]), and what else a check
 /// bounds of the guest's time.
 fn scale() -> f64 {
     std::env::var(SCALE).map_or(1.0, |scale| scale.parse().unwrap())
 }
 
-/// fxdax: what the mount counts ([`crate::guest_fxfs::stats`]), by name.
+/// cladefs: what the mount counts ([`crate::guest_fxfs::stats`]), by name.
 fn stats() -> std::collections::BTreeMap<String, u64> {
     crate::guest_fxfs::stats(TAG)
 }
 
-/// fxdax: what the host was asked and took so far: the device's write requests, the mount's
+/// cladefs: what the host was asked and took so far: the device's write requests, the mount's
 /// durable commits, and the host's time, the device's requests in flight (`busy_ns`). What a part
 /// of a check asked of the host, and waited for it, is the difference of two (TASK-263).
 #[derive(Clone, Copy)]
@@ -284,10 +284,10 @@ fn wait_for_child(child: libc::pid_t, limit: std::time::Duration) -> i32 {
     }
 }
 
-/// fxdax: where fxfs's module parameters are.
+/// cladefs: where fxfs's module parameters are.
 const PARAMS: &str = "/sys/module/fxfs/parameters";
 
-/// fxdax: one of fxfs's module parameters set for the rest of a check, or a part of it, as it was
+/// cladefs: one of fxfs's module parameters set for the rest of a check, or a part of it, as it was
 /// again once the guard goes. What a check leaves set, as it crashes or hangs, the agent sets back
 /// as the guest booted with it, before the next check ([`run`], TASK-160.30).
 struct Param {
@@ -314,7 +314,7 @@ impl Drop for Param {
     }
 }
 
-/// fxdax: pause points (fxfs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
+/// cladefs: pause points (fxfs.dax_pause, TASK-119.9): sets the steps tasks wait at, and waits
 /// for a task to wait at `step`.
 struct Pauses;
 
@@ -364,7 +364,7 @@ impl Pauses {
     }
 }
 
-/// fxdax: [`checks`]'s bodies, in [`CHECKS`]'s order, each given its suite. A body's given
+/// cladefs: [`checks`]'s bodies, in [`CHECKS`]'s order, each given its suite. A body's given
 /// its suite's fields as it takes them, and most take none.
 macro_rules! check_bodies {
     ($($name:ident: $suites:ident, $budget:literal => $body:ident $(($field:ident))?

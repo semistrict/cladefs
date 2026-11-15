@@ -1,5 +1,5 @@
 #!/usr/bin/env bpftrace
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -8,7 +8,7 @@
 // woken, who wakes whom, the vCPUs' exits by reason and how long each took the host, how long a
 // halted vCPU slept and whether the host's halt polling caught its wakeup, and how long an
 // interrupt waited for its vCPU to run again. Run alongside guest tests with
-// FXDAX_HOST_TRACE=scripts/extent-transport.bt (scripts/lib/test-linux-host.sh), which keeps
+// CLADEFS_HOST_TRACE=scripts/extent-transport.bt (scripts/lib/test-linux-host.sh), which keeps
 // what it prints, its maps, in RESULTS/host-trace.txt as it ends. Of every VM the host runs
 // meanwhile: a case of one VM at a time measures that VM, a forked case its base's too.
 

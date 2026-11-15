@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Checks that what the tests leave out says why, and that a why naming a task is still open.
@@ -7,7 +7,7 @@
 What a test or suite leaves out outlives its reason unless something looks (TASK-149.20: a guest
 check covering a data loss bug had been switched off on DAX). So each of these says why:
 
-- An ignored Rust test of fxdax's: `#[ignore = "why"]`, not a bare `#[ignore]`, nor a cfg_attr
+- An ignored Rust test of cladefs's: `#[ignore = "why"]`, not a bare `#[ignore]`, nor a cfg_attr
   ignoring it with none. A file of Fuchsia's (its copyright Fuchsia's) keeps upstream's ways.
 - A line of the open bugs' lists of failures the runs let be (scripts/pjdfstest-fuse-known,
   guest/sim/known-failures, crates/fxfs-posix/known-panics): its task first, which is open.
@@ -39,7 +39,7 @@ KNOWN_LISTS = [
 XFSTESTS = "guest/tests/test_cases/src/test_xfstests.rs"
 PJDFSTEST = "guest/tests/test_cases/src/test_pjdfstest.rs"
 MUTANTS = "guest/mutants"
-# Where fxdax's Rust tests are: not vendor/, Firecracker's and the guest kernel's sources.
+# Where cladefs's Rust tests are: not vendor/, Firecracker's and the guest kernel's sources.
 RUST = ["crates", "guest/tests", "guest/rust"]
 
 TASK = re.compile(r"\bTASK-\d+(?:\.\d+)*\b")

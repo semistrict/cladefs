@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
- * fxdax: the guest Fxfs's tracepoints (TASK-44.16), events/fxfs/ in tracefs, for perf, bpftrace and
+ * cladefs: the guest Fxfs's tracepoints (TASK-44.16), events/fxfs/ in tracefs, for perf, bpftrace and
  * ftrace to see the DAX protocol's steps and measure what each takes: a _start and an _end of each
  * step that waits, or a begin and an end, the device's sharing an id. They are the device's
  * requests, READ, WRITE, COMMIT, FREE and the rest, as submitted and as completed; the window's

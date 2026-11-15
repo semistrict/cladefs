@@ -1,11 +1,11 @@
 ---
 id: TASK-394
-title: 'fxdax-gc --usage: the bucket space each tenant and each cell takes'
+title: 'cladefs-gc --usage: the bucket space each tenant and each cell takes'
 status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-13T08:25:00Z'
-updated_date: '2026-11-13T08:53:00Z'
+updated_date: '2026-11-15 11:36'
 labels:
   - tools
   - extent_remote
@@ -17,16 +17,16 @@ ordinal: 771000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Operators have no way to say how much of the bucket a tenant or a cell takes: for billing, quotas, and for seeing which cell grows. extentd exports each tenant's host disk (`fxdax_extentd_tenant_disk_bytes`), but a host holds only the cells placed on it, and only what it caches of them; the bucket holds every cell whole. Since TASK-364 every object of a cell is under its prefix, `tenants/<tenant>/cells/<cell>/`, and what the collector compacts of it under `moves/` of such a key, so a listing sums it.
+Operators have no way to say how much of the bucket a tenant or a cell takes: for billing, quotas, and for seeing which cell grows. extentd exports each tenant's host disk (`cladefs_extentd_tenant_disk_bytes`), but a host holds only the cells placed on it, and only what it caches of them; the bucket holds every cell whole. Since TASK-364 every object of a cell is under its prefix, `tenants/<tenant>/cells/<cell>/`, and what the collector compacts of it under `moves/` of such a key, so a listing sums it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 fxdax-gc URL --usage prints, for each cell, its objects and bytes, as TENANT/CELL in hexadecimal; for each tenant, the sums of its cells; and the bucket's total, with what no cell owns (the collector's lease and marks, object-ID blocks, unknown keys) apart
+- [x] #1 cladefs-gc URL --usage prints, for each cell, its objects and bytes, as TENANT/CELL in hexadecimal; for each tenant, the sums of its cells; and the bucket's total, with what no cell owns (the collector's lease and marks, object-ID blocks, unknown keys) apart
 - [x] #2 A cell's compacted objects (moves of its keys, and moves of moves) count to the cell
 - [x] #3 It writes nothing to the bucket, not even the probe
 - [x] #4 Unit tests cover the summing, the attribution of moves, and the command line
-- [ ] #5 `--usage --json` prints the same sums as JSON, IDs in hexadecimal strings as `fxdaxctl stats --json` does
+- [ ] #5 `--usage --json` prints the same sums as JSON, IDs in hexadecimal strings as `cladefsctl stats --json` does
 <!-- AC:END -->
 
 ## Definition of Done
@@ -40,7 +40,7 @@ Operators have no way to say how much of the bucket a tenant or a cell takes: fo
 
 <!-- SECTION:PLAN:BEGIN -->
 1. layout::owner(key): the cell an object is of, following moves/ back to the key moved.
-2. fxdax-gc --usage: one listing of the whole bucket, summed by tenant and cell, no probe.
+2. cladefs-gc --usage: one listing of the whole bucket, summed by tenant and cell, no probe.
 3. Unit tests (owner, summing, command line) and an end-to-end run over a file bucket.
 <!-- SECTION:PLAN:END -->
 

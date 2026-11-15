@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * A write over a hole a mapping maps zeros for must take those zeros away, whatever its pieces:
  * one task, no seals, no scheduling but what a single task does.

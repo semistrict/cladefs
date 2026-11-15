@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,7 +20,7 @@ const progress: Progress = {
     { at: 2, kind: "prediction", question: "What does B see?", chose: "The old byte", right: true, answer: "The old byte", place },
     { at: 3, kind: "design", prompt: "Design it before you look.", text: "Write it to a new extent,\nthen remap.", place: { view: "Page Pilot, step 3: fsync", hash: "pilot-3" } },
     { at: 4, kind: "catch", rule: "swapExclusive", guessed: "NoLostStore", actual: "FsyncKeepsStores", place },
-    { at: 5, kind: "find", task: "Where does the host copy a page?", picked: "crates/fxdax/src/dax.rs make_private", right: true, ms: 67_000, place },
+    { at: 5, kind: "find", task: "Where does the host copy a page?", picked: "crates/cladefs/src/dax.rs make_private", right: true, ms: 67_000, place },
     {
       at: 6,
       kind: "question",
@@ -48,7 +48,7 @@ describe("the notebook's blob for Claude", () => {
 
   test("it keeps my designs, finds and marks", () => {
     expect(text).toContain("> Write it to a new extent,\n> then remap.");
-    expect(text).toContain('- "Where does the host copy a page?": found `crates/fxdax/src/dax.rs make_private` after 1:07.');
+    expect(text).toContain('- "Where does the host copy a page?": found `crates/cladefs/src/dax.rs make_private` after 1:07.');
     expect(text).toContain("- I know: the Guest kernel layer.");
     expect(text).toContain("- I don't understand: the Physical memory layer.");
   });

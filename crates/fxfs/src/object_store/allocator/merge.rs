@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/allocator/merge.rs`. fxdax: allocations are ranges
+// Fuchsia's `src/storage/fxfs/src/object_store/allocator/merge.rs`. cladefs: allocations are ranges
 // of extents (backlog doc-4), so records of different extents never overlap.
 
 use crate::lsm_tree::merge::ItemOp::{Discard, Keep, Replace};
@@ -22,7 +22,7 @@ pub fn merge(
     // might not merge records that come after that end point because the merger won't merge records
     // in the same layer
 
-    // fxdax: records of different extents never overlap.
+    // cladefs: records of different extents never overlap.
     let extent = left.key().extent;
     if extent != right.key().extent {
         return MergeResult::EmitLeft;

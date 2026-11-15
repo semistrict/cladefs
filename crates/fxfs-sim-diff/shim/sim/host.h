@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* The store's memory, at offsets the device gives each extent (sim_device_store_offset). */
 #ifndef _SHIM_SIM_HOST_H
 #define _SHIM_SIM_HOST_H

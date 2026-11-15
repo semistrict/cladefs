@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,13 +29,13 @@ fn serve() -> (tempfile::TempDir, PathBuf) {
 fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var("FXDAX_EXTENTD_REMOTE", url);
-        std::env::set_var("FXDAX_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFS_EXTENTD_REMOTE", url);
+        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();
     let socket = sockets.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || fxdax::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::extentd::serve(listener));
     (sockets, socket)
 }
 
@@ -55,7 +55,7 @@ fn a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening() {
     let kms = keys.path().join("kms");
     extent_keys::kms::LocalKms::open(&kms).unwrap().create(0).unwrap();
     // The daemon's KMS, as a host's is named: SAFETY: before this process starts any other thread.
-    unsafe { std::env::set_var("FXDAX_KMS", format!("local://{}", kms.display())) };
+    unsafe { std::env::set_var("CLADEFS_KMS", format!("local://{}", kms.display())) };
     assert_eq!(reads_in_place_and_survives_reopening("sealed"), Vec::<String>::new());
 }
 
@@ -83,7 +83,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
 
     for round in 0..2i64 {
         let volume = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
-        let vfs = format!("fxdax-daemon-{name}-{round}");
+        let vfs = format!("cladefs-daemon-{name}-{round}");
         let registration = register(&vfs, volume.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs.as_str())
@@ -142,7 +142,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
 /// A volume on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
 /// database reading it in place, and the store, to fork.
 struct Mounted {
-    store: Arc<fxdax::RemoteExtentStore>,
+    store: Arc<cladefs::RemoteExtentStore>,
     volume: Arc<Volume>,
     _registration: Registration,
     connection: Connection,
@@ -150,9 +150,9 @@ struct Mounted {
 
 impl Mounted {
     fn new(socket: &Path, store: &Path, vfs: &str) -> Self {
-        let store = Arc::new(fxdax::RemoteExtentStore::connect(socket, store, 1 << 30).unwrap());
+        let store = Arc::new(cladefs::RemoteExtentStore::connect(socket, store, 1 << 30).unwrap());
         let window = daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device = DeviceHolder::new(fxdax::RemoteDevice::new(store.clone()).unwrap());
+        let device = DeviceHolder::new(cladefs::RemoteDevice::new(store.clone()).unwrap());
         let volume = Volume::open_mapped(device, Box::new(window), Options::default()).unwrap();
         let registration = register(vfs, volume.clone()).unwrap();
         let connection =
@@ -187,10 +187,10 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
     let (path, forked) = (dir.path().join("store"), dir.path().join("fork"));
-    let parent = Mounted::new(&socket, &path, "fxdax-daemon-parent");
+    let parent = Mounted::new(&socket, &path, "cladefs-daemon-parent");
     let mut parent_rows = common::fill(&parent.connection);
     parent.store.fork(&forked).unwrap();
-    let fork = Mounted::new(&socket, &forked, "fxdax-daemon-fork");
+    let fork = Mounted::new(&socket, &forked, "cladefs-daemon-fork");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.connection, &fork_rows);
 
@@ -202,7 +202,7 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
     parent.close();
 
     for (round, (path, rows)) in [(&path, parent_rows), (&forked, fork_rows)].iter().enumerate() {
-        let mounted = Mounted::new(&socket, path, &format!("fxdax-daemon-reopened-{round}"));
+        let mounted = Mounted::new(&socket, path, &format!("cladefs-daemon-reopened-{round}"));
         common::check(&mounted.connection, rows);
         mounted.close();
     }
@@ -223,14 +223,14 @@ fn a_database_is_fenced_with_its_cell() {
     let listener = UnixListener::bind(&control_socket).unwrap();
     let tenants = sockets.path().join("tenants");
     std::fs::create_dir(&tenants).unwrap();
-    std::thread::spawn(move || fxdax::extentd::control::serve_control(listener, tenants));
-    let control = fxdax::extentd::control::Client::connect(&control_socket).unwrap();
+    std::thread::spawn(move || cladefs::extentd::control::serve_control(listener, tenants));
+    let control = cladefs::extentd::control::Client::connect(&control_socket).unwrap();
 
     let store = dir.path().join("store");
     let volume = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
-    let _registration = register("fxdax-fenced", volume.clone()).unwrap();
+    let _registration = register("cladefs-fenced", volume.clone()).unwrap();
     let connection =
-        Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), "fxdax-fenced")
+        Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), "cladefs-fenced")
             .unwrap();
     connection.execute_batch("CREATE TABLE t (k INTEGER PRIMARY KEY, v TEXT)").unwrap();
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
@@ -253,7 +253,7 @@ fn a_database_is_fenced_with_its_cell() {
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();
     let fenced = control.sync_store(&store).unwrap_err();
-    assert_eq!(fenced.errno(), Some(fxdax::Errno::EROFS), "{fenced:#}");
+    assert_eq!(fenced.errno(), Some(cladefs::Errno::EROFS), "{fenced:#}");
     let refused = connection.execute("INSERT INTO t VALUES (3, 'refused')", []).unwrap_err();
     assert_eq!(
         refused.sqlite_error_code(),

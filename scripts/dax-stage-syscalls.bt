@@ -1,10 +1,10 @@
 #!/usr/bin/env bpftrace
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
 // What a VM process's changes to its DAX window cost its thread receiving from the extent daemon,
-// `extentd client`, which makes every change in turn (crates/fxdax/src/dax/uffd.rs), and its
+// `extentd client`, which makes every change in turn (crates/cladefs/src/dax/uffd.rs), and its
 // fault thread's, `dax faults` (TASK-276.6): each second, each system call the threads made, by
 // kind (an mmap by the protection it maps with, an ioctl by its command: userfaultfd's
 // UFFDIO_COPY c028aa03, REGISTER c020aa00, WAKE 8010aa02, WRITEPROTECT c018aa06, KVM's

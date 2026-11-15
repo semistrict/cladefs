@@ -1,20 +1,20 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: guests writing all the while against a degraded bucket (TASK-330.3): the case's daemon,
+//! cladefs: guests writing all the while against a degraded bucket (TASK-330.3): the case's daemon,
 //! its own, keeps its stores' branches in an S3 server's bucket (RustFS, scripts/test-e2e-rustfs.sh
 //! starts it), through a proxy that degrades it as the case says ([`crate::faulty_s3`]):
 //! answering, then slow (300 ms a request), then full (its writes failing, 507), then out of
 //! service (every request failing, 503), then answering again, 300 ms a request, each a fraction
-//! of FXDAX_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
+//! of CLADEFS_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
 //! of service longer than its S3 client retries a request, about a minute). Through a proxy, not
-//! the daemon's own faults (`FXDAX_REMOTE_FAULTS`), so that a pin's daemon from before them meets
-//! the same bucket, a qualification's A/B comparing them (TASK-330.4). FXDAX_BUCKET_SOAK_VMS
+//! the daemon's own faults (`CLADEFS_REMOTE_FAULTS`), so that a pin's daemon from before them meets
+//! the same bucket, a qualification's A/B comparing them (TASK-330.4). CLADEFS_BUCKET_SOAK_VMS
 //! VMs (4), each on a store of its own, write files of 16 MiB that don't compress and fsync each,
 //! deleting each once 16 newer are written, at the rate that writes past every store's lag bound
 //! while the bucket fails, until the run's end; then sync, every commit uploaded, and exit. As
-//! `fxdax::extentd::tests::soak` does with VM processes of its own in CI, in seconds a phase, this
+//! `cladefs::extentd::tests::soak` does with VM processes of its own in CI, in seconds a phase, this
 //! does with guests' kernels and their Fxfs, the daemon a process of its own. It fails, saying each
 //! check that failed, unless:
 //!
@@ -50,7 +50,7 @@ const KEPT: u64 = 16;
 mod host {
     use super::*;
 
-    use crate::common::{Measured, ProcessCosts, fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{Measured, ProcessCosts, cladefs_guest_should_run, setup_rootfs};
     use crate::faulty_s3::FaultyS3;
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
@@ -64,7 +64,7 @@ mod host {
     const DAEMON_MEMORY: u64 = 2 << 30;
     /// Its upload memory: as much as its stores upload at once, so that its uploads holding each
     /// object twice, TASK-317's bug, hold more than every other part of its budget may, as
-    /// `fxdax::extentd::tests::soak`'s.
+    /// `cladefs::extentd::tests::soak`'s.
     const UPLOAD_MEMORY: u64 = 1536 << 20;
     /// What the guests write while the bucket fails: past every store's lag bound, 1 GiB, so that
     /// their commits stall there, and past the host's upload memory.
@@ -126,9 +126,9 @@ mod host {
         machine.guest_kernel()?;
         machine.extent_store_served("extents", store, CAPACITY, 0, socket);
         for (var, value) in [
-            ("FXDAX_BUCKET_SOAK_SEED", vm),
-            ("FXDAX_BUCKET_SOAK_RATE", rate),
-            ("FXDAX_BUCKET_SOAK_SECS", secs),
+            ("CLADEFS_BUCKET_SOAK_SEED", vm),
+            ("CLADEFS_BUCKET_SOAK_RATE", rate),
+            ("CLADEFS_BUCKET_SOAK_SECS", secs),
         ] {
             machine.env(&CString::new(format!("{var}={value}"))?);
         }
@@ -160,17 +160,17 @@ mod host {
         /// Runs the soak, saying what it measured in `measured`, the checks that failed among it,
         /// as it fails then.
         fn run(&self, test_setup: &TestSetup, measured: &mut Measured) -> anyhow::Result<()> {
-            let secs = count("FXDAX_BUCKET_SOAK_SECS", 1800)?;
-            let vms = count("FXDAX_BUCKET_SOAK_VMS", 4)?;
+            let secs = count("CLADEFS_BUCKET_SOAK_SECS", 1800)?;
+            let vms = count("CLADEFS_BUCKET_SOAK_VMS", 4)?;
             ensure!(
                 secs >= MIN_SECS,
-                "FXDAX_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
+                "CLADEFS_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
                  longer than its client retries a request"
             );
-            let remote = std::env::var("FXDAX_EXTENTD_REMOTE").unwrap_or_default();
+            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
             ensure!(
                 remote.starts_with("s3://"),
-                "FXDAX_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: \
+                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: \
                  scripts/test-e2e-rustfs.sh starts one"
             );
             let server =
@@ -181,12 +181,12 @@ mod host {
             let dir = &test_setup.tmp_dir;
             let stats = dir.join("extentd-stats.txt");
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("fxdax-bucket-soak")?;
+            let sockets = tempdir::TempDir::new("cladefs-bucket-soak")?;
             let socket = sockets.path().join("extentd.sock");
             let (upload_memory, endpoint) = (UPLOAD_MEMORY.to_string(), bucket.endpoint());
             let env = [
                 ("AWS_ENDPOINT", endpoint.as_ref()),
-                ("FXDAX_EXTENTD_UPLOAD_MEMORY", upload_memory.as_ref()),
+                ("CLADEFS_EXTENTD_UPLOAD_MEMORY", upload_memory.as_ref()),
             ];
             let mut daemon = crate::common::spawn_daemon(
                 test_setup,
@@ -325,14 +325,14 @@ mod host {
 
     impl Test for TestFxfsGuestBucketSoak {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("FXDAX_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("FXDAX_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
+                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
-            count("FXDAX_BUCKET_SOAK_SECS", 1800).unwrap_or(1800) + 600
+            count("CLADEFS_BUCKET_SOAK_SECS", 1800).unwrap_or(1800) + 600
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
@@ -404,9 +404,9 @@ mod guest {
 
     impl Test for TestFxfsGuestBucketSoak {
         fn in_guest(self: Box<Self>) {
-            let seed = count("FXDAX_BUCKET_SOAK_SEED", 0) << 32;
-            let rate = count("FXDAX_BUCKET_SOAK_RATE", 4 * MIB);
-            let secs = count("FXDAX_BUCKET_SOAK_SECS", 1800);
+            let seed = count("CLADEFS_BUCKET_SOAK_SEED", 0) << 32;
+            let rate = count("CLADEFS_BUCKET_SOAK_RATE", 4 * MIB);
+            let secs = count("CLADEFS_BUCKET_SOAK_SECS", 1800);
             fs::create_dir_all(MNT).unwrap();
             let (source, target, fstype) = (
                 CString::new("extents").unwrap(),

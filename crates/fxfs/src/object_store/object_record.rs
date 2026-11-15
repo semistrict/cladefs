@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/object_record.rs`. fxdax: an extent's value locates
+// Fuchsia's `src/storage/fxfs/src/object_store/object_record.rs`. cladefs: an extent's value locates
 // its data in an extent of the extent store (backlog doc-4), so ObjectValue holds ExtentValueV60,
 // which nothing older converts to. ObjectDescriptorV63 says which special file a file is, so that
 // a directory's entries say what each node is (`ObjectDescriptor::Special`), and ChildValueV63,
@@ -10,7 +10,7 @@
 
 mod legacy;
 
-// TODO(https://fxbug.dev/42178223): need validation after deserialization. fxdax: what a layer or
+// TODO(https://fxbug.dev/42178223): need validation after deserialization. cladefs: what a layer or
 // the journal holds is validated as it's read (`ObjectValue::is_valid_for`).
 use crate::checksum::Checksums;
 use crate::log::error;
@@ -48,20 +48,20 @@ pub enum ObjectDescriptorV63 {
     Volume,
     /// A symbolic link.
     Symlink,
-    /// fxdax: a special file: a file object, whose POSIX mode says it is this one
+    /// cladefs: a special file: a file object, whose POSIX mode says it is this one
     /// (`SpecialFile::of_mode`), and fsck checks that it does. Its entries say so, that a listing
     /// of a directory need not look up each file's record to say what it is (TASK-236).
     Special(SpecialFileV63),
 }
 
 impl ObjectDescriptor {
-    /// fxdax: whether the entry is a file's, which is a file object: a regular file's, or a
+    /// cladefs: whether the entry is a file's, which is a file object: a regular file's, or a
     /// special file's.
     pub fn is_file(&self) -> bool {
         matches!(self, ObjectDescriptor::File | ObjectDescriptor::Special(_))
     }
 
-    /// fxdax: the descriptor of a file object whose POSIX mode is `mode`, if it has one: a special
+    /// cladefs: the descriptor of a file object whose POSIX mode is `mode`, if it has one: a special
     /// file's, or a regular file's.
     pub fn of_file(mode: Option<u32>) -> ObjectDescriptor {
         match mode.and_then(SpecialFile::of_mode) {
@@ -71,7 +71,7 @@ impl ObjectDescriptor {
     }
 }
 
-/// fxdax: the kinds of special file, as POSIX has them.
+/// cladefs: the kinds of special file, as POSIX has them.
 pub type SpecialFile = SpecialFileV63;
 
 #[derive(Copy, Clone, Debug, Eq, Serialize, Deserialize, PartialEq, TypeFingerprint)]
@@ -508,7 +508,7 @@ impl LayerKey for ObjectKey {
         }
     }
 
-    /// fxdax: an object store's item is what its value says it may be (`ObjectValue::is_valid_for`).
+    /// cladefs: an object store's item is what its value says it may be (`ObjectValue::is_valid_for`).
     fn is_valid_item<V: 'static>(&self, value: &V, block_size: BlockSize) -> bool {
         let value: &dyn Any = value;
         value.downcast_ref::<ObjectValue>().is_none_or(|value| value.is_valid_for(self, block_size))
@@ -1001,7 +1001,7 @@ impl From<BytesAndNodes> for (i64, i64) {
 }
 
 impl ObjectValue {
-    /// fxdax: whether this is what an object store's item of `key` may hold, in a filesystem of
+    /// cladefs: whether this is what an object store's item of `key` may hold, in a filesystem of
     /// `block_size` blocks: the one check of what's read, of the journal's mutations
     /// (`Journal::validate_mutation`), a super-block's records, and a layer's items
     /// (`LayerKey::is_valid_item`), after which what reads them trusts them. Any extent's key is

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
@@ -237,7 +237,7 @@ impl FrameList {
     }
 }
 
-/// fxdax: an arena's free pages, as blocks of free pages consecutive in physical memory, each of 2
+/// cladefs: an arena's free pages, as blocks of free pages consecutive in physical memory, each of 2
 /// to the power of its order pages, aligned to its size, within a chunk: a buddy allocator's
 /// (TASK-131.1). A block whose buddy, the block of its size it would make one twice its size with,
 /// is free too is made one with it, as long as one of the chunk's size is not reached, so that

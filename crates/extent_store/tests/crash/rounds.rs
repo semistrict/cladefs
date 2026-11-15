@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,7 +20,7 @@ pub const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_br
 pub const ROUNDS: u64 = 300;
 const STEPS: usize = 200;
 
-/// Small segments, large extents and index files, so that workloads make many of each. fxdax:
+/// Small segments, large extents and index files, so that workloads make many of each. cladefs:
 /// and extents small enough that a segment fills between commits, holding a segment and an extent
 /// at most, so that commits span segments, sealing extents in those filled (TASK-92.41): with
 /// extents of 64 MiB, none ever filled, and no round made such a commit.
@@ -32,7 +32,7 @@ pub const OPTIONS: Options = Options {
     open_files: 3,
     view_lag: None,
     view_kept_bytes: None,
-    // fxdax: flushes of either kind, holding their runs or checking them (TASK-301).
+    // cladefs: flushes of either kind, holding their runs or checking them (TASK-301).
     held_most: 8 << 10,
 };
 
@@ -57,7 +57,7 @@ impl std::fmt::Debug for Model {
     }
 }
 
-/// One to `most` blocks of data, which compress, or, half the time, don't: fxdax: segments of
+/// One to `most` blocks of data, which compress, or, half the time, don't: cladefs: segments of
 /// parts stored compressed and of parts stored raw, which the kept rounds' passes compact alike.
 fn random_data(rng: &mut StdRng, most: usize) -> Vec<u8> {
     let blocks = rng.random_range(1..=most);
@@ -73,11 +73,11 @@ fn random_blocks(rng: &mut StdRng, blocks: usize) -> Vec<u8> {
     (0..blocks * BLOCK).map(|i| byte ^ (i / BLOCK) as u8).collect()
 }
 
-/// fxdax: the blocks of each of a burst's extents: under `large_extent`, so that the open segment
+/// cladefs: the blocks of each of a burst's extents: under `large_extent`, so that the open segment
 /// holds it.
 const BURST_BLOCKS: usize = OPTIONS.large_extent as usize / BLOCK - 1;
 
-/// fxdax: how many extents a burst writes between two commits: more than two segments hold at
+/// cladefs: how many extents a burst writes between two commits: more than two segments hold at
 /// most (`Options::segment_limit`), so that one fills, and the commit after spans segments
 /// (TASK-92.41), however full the open segment was, and though an uploader closes it once among
 /// them, as it may between two commits. Without bursts, a commit spanned segments only after a
@@ -167,7 +167,7 @@ impl Run<'_> {
         result
     }
 
-    /// fxdax: a burst, [`BURST`] new extents, then the commit that spans the segments they filled.
+    /// cladefs: a burst, [`BURST`] new extents, then the commit that spans the segments they filled.
     fn burst(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
         for _ in 0..BURST {
             self.write_new(random_blocks(rng, BURST_BLOCKS))?;
@@ -200,10 +200,10 @@ pub fn workload(
             // root or not.
             8..=11 => run.commit(rng),
             12 => run.flush(),
-            // fxdax: the open segment closed between commits, as an uploader has it closed: its
+            // cladefs: the open segment closed between commits, as an uploader has it closed: its
             // footer names commits only ordered, maybe (TASK-92.16).
             13 => store.close_now().map(drop),
-            // fxdax: a burst, a quarter of the time: each writes more than two segments.
+            // cladefs: a burst, a quarter of the time: each writes more than two segments.
             14 if rng.random_ratio(1, 4) => run.burst(rng),
             _ => Ok(()),
         };

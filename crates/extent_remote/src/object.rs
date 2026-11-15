@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -44,7 +44,7 @@ impl Tail {
         Ok(Self { bytes, parts })
     }
 
-    /// fxdax: its parts, as a reader holding `keys` reads them: its table and footer checked
+    /// cladefs: its parts, as a reader holding `keys` reads them: its table and footer checked
     /// against their MACs too, if the object is sealed under a key `keys` holds, and its parts
     /// opened under it (TASK-411.2).
     pub fn open(&self, keys: &dyn Keys) -> Result<Parts, Error> {
@@ -161,7 +161,7 @@ mod tests {
         assert_eq!(asked, [first, format!("get {KEY} {range:?}")]);
     }
 
-    /// fxdax: a sealed object's tail is read and checked by a reader holding no key, as the cache
+    /// cladefs: a sealed object's tail is read and checked by a reader holding no key, as the cache
     /// keeps it; opened under its key, its parts open, and its footer and table are checked
     /// against their MACs; under another key of its name, refused (TASK-411.2). One in the clear
     /// opens alike under any keys.

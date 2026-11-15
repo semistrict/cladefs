@@ -1,4 +1,4 @@
-# Fxfs's third-party dependencies, with the features fxdax's workspace builds them with, as a
+# Fxfs's third-party dependencies, with the features cladefs's workspace builds them with, as a
 # library with no code of its own: scripts/probe-guest-std.sh builds it against guest/rust/std for
 # the kernel's targets, to find what of std they need (TASK-26.1).
 [package]

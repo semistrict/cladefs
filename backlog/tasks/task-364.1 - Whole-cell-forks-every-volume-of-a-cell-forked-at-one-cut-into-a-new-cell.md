@@ -4,6 +4,7 @@ title: 'Whole-cell forks: every volume of a cell forked at one cut into a new ce
 status: To Do
 assignee: []
 created_date: '2026-11-12 02:16'
+updated_date: '2026-11-15 11:36'
 labels:
   - bucket
   - host
@@ -16,7 +17,7 @@ ordinal: 751000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The user chose whole-cell forks for cells (TASK-364, 2026-11-11): a cell of several volumes forked into a new cell, each volume a fork of its parent volume at one consistent point. TASK-364 makes every fork of a one-volume cell a new cell; a cell whose volumes are written by several processes of its host (extentd for VMs, fxdax-mount for FUSE) has no one place that can pause them all and cut them at once yet. Volumes are branches with logs of their own, so the cut is the holder pausing commits on every volume, forking each, and writing the new cell's object naming the children.
+The user chose whole-cell forks for cells (TASK-364, 2026-11-11): a cell of several volumes forked into a new cell, each volume a fork of its parent volume at one consistent point. TASK-364 makes every fork of a one-volume cell a new cell; a cell whose volumes are written by several processes of its host (extentd for VMs, cladefs-mount for FUSE) has no one place that can pause them all and cut them at once yet. Volumes are branches with logs of their own, so the cut is the holder pausing commits on every volume, forking each, and writing the new cell's object naming the children.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

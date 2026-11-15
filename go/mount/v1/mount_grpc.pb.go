@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
-// `fxdax-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
+// `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
 // stores: one OS mount, not one per store. Attach takes a cell of the mount's bucket, as its
 // holder, and every Fxfs volume of it into a store at DIR/TENANT/CELL/VOLUME, its lease with it,
 // each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and CELL in 16 hexadecimal digits as the
@@ -15,8 +15,8 @@
 // every caller may do everything.
 //
 // Errors are gRPC statuses whose code follows the errno the mount failed with, which the
-// `fxdax-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
-// control API has them (fxdax/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
+// `cladefs-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
+// control API has them (cladefs/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
 // ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
@@ -32,7 +32,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: fxdax/mount/v1/mount.proto
+// source: cladefs/mount/v1/mount.proto
 
 package mountv1
 
@@ -49,10 +49,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Mount_Attach_FullMethodName       = "/fxdax.mount.v1.Mount/Attach"
-	Mount_CreateVolume_FullMethodName = "/fxdax.mount.v1.Mount/CreateVolume"
-	Mount_Detach_FullMethodName       = "/fxdax.mount.v1.Mount/Detach"
-	Mount_List_FullMethodName         = "/fxdax.mount.v1.Mount/List"
+	Mount_Attach_FullMethodName       = "/cladefs.mount.v1.Mount/Attach"
+	Mount_CreateVolume_FullMethodName = "/cladefs.mount.v1.Mount/CreateVolume"
+	Mount_Detach_FullMethodName       = "/cladefs.mount.v1.Mount/Detach"
+	Mount_List_FullMethodName         = "/cladefs.mount.v1.Mount/List"
 )
 
 // MountClient is the client API for Mount service.
@@ -276,7 +276,7 @@ func _Mount_List_Handler(srv interface{}, ctx context.Context, dec func(interfac
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Mount_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "fxdax.mount.v1.Mount",
+	ServiceName: "cladefs.mount.v1.Mount",
 	HandlerType: (*MountServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -297,5 +297,5 @@ var Mount_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "fxdax/mount/v1/mount.proto",
+	Metadata: "cladefs/mount/v1/mount.proto",
 }

@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/lib/fuchsia-async/src/runtime/mod.rs`, for the host: the portable runtime, without
-// Fuchsia's; and in fxdax's guest kernel (target_os = "none"), a runtime of its own (`guest`).
+// Fuchsia's; and in cladefs's guest kernel (target_os = "none"), a runtime of its own (`guest`).
 
 #[cfg(not(target_os = "none"))]
 mod portable;

@@ -1,15 +1,15 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: fxfs-guest-soak (TASK-67): hours of mixed load on forks of one base, through crashes of
+//! cladefs: fxfs-guest-soak (TASK-67): hours of mixed load on forks of one base, through crashes of
 //! every kind doc-12 names, each round checked against it. Each of the runner's rounds
-//! (FXDAX_E2E_ROUNDS) is a round of the soak, which goes on from where the last left it: a bucket,
+//! (CLADEFS_E2E_ROUNDS) is a round of the soak, which goes on from where the last left it: a bucket,
 //! a host's stores and cache, and a ledger of what the guests were told, kept outside the results
 //! (`Paths`), which the first round makes.
 //!
 //! A round, as the run's seed and its number say (`crate::soak::Plan`): a daemon of the soak's
-//! own, its bucket answering late or an upload failing; a collector (fxdax-gc) collecting the
+//! own, its bucket answering late or an upload failing; a collector (cladefs-gc) collecting the
 //! bucket throughout; five VMs at once, each on a fork of the base, which holds files and a pgbench
 //! database, a VM's store forked anew now and then; each VM a writer, fsyncing file after file and
 //! syncing the filesystem every so often, saying what returned; or fsx-style scripts against their
@@ -25,13 +25,13 @@
 //! on a line of the log (`soak-round {...}`), and a measure grown past twice the warm rounds' most
 //! fails the round (`crate::soak::Bound`).
 //!
-//! FXDAX_SEED replays a run, round by round: its first round's seed, which the run's outcomes say;
-//! FXDAX_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
-//! FXDAX_SOAK_LOAD_SECS fixes the loads' time; FXDAX_SOAK_STATE is where runs keep their state,
-//! /var/tmp/fxdax-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
-//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is FXDAX_EXTENTD_REMOTE's, under
+//! CLADEFS_SEED replays a run, round by round: its first round's seed, which the run's outcomes say;
+//! CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
+//! CLADEFS_SOAK_LOAD_SECS fixes the loads' time; CLADEFS_SOAK_STATE is where runs keep their state,
+//! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
+//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFS_EXTENTD_REMOTE's, under
 //! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
-//! with failpoints (scripts/test-e2e.sh's FXDAX_EXTENTD_FAILPOINTS).
+//! with failpoints (scripts/test-e2e.sh's CLADEFS_EXTENTD_FAILPOINTS).
 
 use macros::{guest, host};
 
@@ -44,16 +44,16 @@ const TAG: &str = "extents";
 const MNT: &str = "/mnt/fxfs";
 
 /// What a VM does: makes the base (`base`), runs its load (`load`), or checks its store (`check`).
-const ROLE: &str = "FXDAX_SOAK_ROLE";
-const SLOT: &str = "FXDAX_SOAK_SLOT";
-const LOAD: &str = "FXDAX_SOAK_LOAD";
+const ROLE: &str = "CLADEFS_SOAK_ROLE";
+const SLOT: &str = "CLADEFS_SOAK_SLOT";
+const LOAD: &str = "CLADEFS_SOAK_LOAD";
 /// The run directory a writer's VM writes in.
-const RUN: &str = "FXDAX_SOAK_RUN";
-const SECS: &str = "FXDAX_SOAK_SECS";
+const RUN: &str = "CLADEFS_SOAK_RUN";
+const SECS: &str = "CLADEFS_SOAK_SECS";
 /// The seed its load is drawn from.
-const VM_SEED: &str = "FXDAX_SOAK_VM_SEED";
+const VM_SEED: &str = "CLADEFS_SOAK_VM_SEED";
 /// The run's seed, which the base's files are of.
-const BASE_SEED: &str = "FXDAX_SOAK_BASE_SEED";
+const BASE_SEED: &str = "CLADEFS_SOAK_BASE_SEED";
 
 /// pgbench's database's scale, made in the base.
 #[cfg_attr(feature = "host", allow(dead_code))]
@@ -62,7 +62,7 @@ const SCALE: u64 = 4;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, fxdax_guest_should_run, setup_rootfs, spawn_daemon};
+    use crate::common::{control, cladefs_guest_should_run, setup_rootfs, spawn_daemon};
     use crate::script::Failure;
     use crate::soak::{self, Acks, Bound, Fault, Found, KEPT_RUNS, Load, Plan, SLOTS, WRITERS};
     use crate::vm::{self, Firecracker, Vm};
@@ -110,7 +110,7 @@ mod host {
         /// The placement's fencing token, which each lost host's successor's exceeds.
         token: u64,
         /// The base's branch, once made.
-        base: Option<fxdax::Branch>,
+        base: Option<cladefs::Branch>,
         slots: Vec<SlotState>,
         measures: Vec<Measure>,
     }
@@ -120,7 +120,7 @@ mod host {
     struct SlotState {
         /// How many times it was forked again.
         generation: u32,
-        branch: Option<fxdax::Branch>,
+        branch: Option<cladefs::Branch>,
         /// Its writers' runs, by name.
         runs: BTreeMap<String, RunState>,
         /// The fsx script whose files and models it holds, synced, if any.
@@ -169,16 +169,16 @@ mod host {
 
     impl Paths {
         fn new(sockets: &Path) -> anyhow::Result<Self> {
-            let run = std::env::var("FXDAX_E2E_RUN").context(
-                "FXDAX_E2E_RUN names no run (scripts/test-e2e.sh's): the soak keeps its state by it",
+            let run = std::env::var("CLADEFS_E2E_RUN").context(
+                "CLADEFS_E2E_RUN names no run (scripts/test-e2e.sh's): the soak keeps its state by it",
             )?;
-            let root = std::env::var_os("FXDAX_SOAK_STATE")
+            let root = std::env::var_os("CLADEFS_SOAK_STATE")
                 .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/var/tmp/fxdax-soak"));
+                .unwrap_or_else(|| PathBuf::from("/var/tmp/cladefs-soak"));
             let key = format!("{:016x}", soak::fnv(run.as_bytes()));
             let state = root.join(&key);
             let host = state.join("host");
-            let (bucket, bucket_dir) = match std::env::var("FXDAX_EXTENTD_REMOTE") {
+            let (bucket, bucket_dir) = match std::env::var("CLADEFS_EXTENTD_REMOTE") {
                 Ok(remote) if !remote.is_empty() => {
                     (format!("{}/soak-{key}", remote.trim_end_matches('/')), None)
                 }
@@ -187,8 +187,8 @@ mod host {
                     (format!("file://{}/", dir.display()), Some(dir))
                 }
             };
-            let gc = std::env::var_os("FXDAX_GC_BIN")
-                .context("FXDAX_GC_BIN names no fxdax-gc (scripts/test-e2e.sh's)")?;
+            let gc = std::env::var_os("CLADEFS_GC_BIN")
+                .context("CLADEFS_GC_BIN names no cladefs-gc (scripts/test-e2e.sh's)")?;
             Ok(Self {
                 ledger: state.join("ledger.json"),
                 stores: host.join("stores"),
@@ -354,8 +354,8 @@ mod host {
             let ledger = match std::fs::read(&paths.ledger) {
                 Ok(bytes) => serde_json::from_slice(&bytes).context("the soak's ledger")?,
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    let seed = match std::env::var("FXDAX_SEED") {
-                        Ok(seed) => seed.parse().context("FXDAX_SEED is a number")?,
+                    let seed = match std::env::var("CLADEFS_SEED") {
+                        Ok(seed) => seed.parse().context("CLADEFS_SEED is a number")?,
                         Err(_) => rand_seed(),
                     };
                     let slots = vec![SlotState::default(); SLOTS];
@@ -365,15 +365,15 @@ mod host {
             };
             std::fs::write(setup.tmp_dir.join("seed"), ledger.seed.to_string())?;
             let faults =
-                Fault::parse(&std::env::var("FXDAX_SOAK_FAULTS").unwrap_or_else(|_| "all".into()))
+                Fault::parse(&std::env::var("CLADEFS_SOAK_FAULTS").unwrap_or_else(|_| "all".into()))
                     .map_err(anyhow::Error::msg)?;
-            let load_secs = match std::env::var("FXDAX_SOAK_LOAD_SECS") {
-                Ok(secs) => Some(secs.parse().context("FXDAX_SOAK_LOAD_SECS is seconds")?),
+            let load_secs = match std::env::var("CLADEFS_SOAK_LOAD_SECS") {
+                Ok(secs) => Some(secs.parse().context("CLADEFS_SOAK_LOAD_SECS is seconds")?),
                 Err(_) => None,
             };
             let mut plan = Plan::new(ledger.seed, ledger.rounds + 1, &faults, load_secs);
             // A daemon without failpoints would fail no upload, and the round say it did.
-            if std::env::var_os("FXDAX_EXTENTD_FAILPOINTS").is_none() {
+            if std::env::var_os("CLADEFS_EXTENTD_FAILPOINTS").is_none() {
                 plan.upload_fails_after = None;
             }
             // Latency is added to every bucket the plan names: a file bucket's reads take it since
@@ -408,10 +408,10 @@ mod host {
             let latency = if faulty { self.plan.latency_ms } else { 0 }.to_string();
             let failpoints = if faulty { self.plan.failpoints() } else { None }.unwrap_or_default();
             let env = [
-                ("FXDAX_EXTENTD_REMOTE", self.paths.bucket.as_ref()),
-                ("FXDAX_EXTENTD_TOKEN", token.as_ref()),
-                ("FXDAX_EXTENTD_CACHE", self.paths.cache.as_os_str()),
-                ("FXDAX_REMOTE_LATENCY_MS", latency.as_ref()),
+                ("CLADEFS_EXTENTD_REMOTE", self.paths.bucket.as_ref()),
+                ("CLADEFS_EXTENTD_TOKEN", token.as_ref()),
+                ("CLADEFS_EXTENTD_CACHE", self.paths.cache.as_os_str()),
+                ("CLADEFS_REMOTE_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];
             let name = format!("extentd-{}", self.daemons);
@@ -428,19 +428,19 @@ mod host {
                 .args([&self.paths.bucket, "--every", "15", "--grace", "10"])
                 .stderr(log)
                 .spawn()
-                .context("starting fxdax-gc")?;
+                .context("starting cladefs-gc")?;
             self.setup.register_cleanup_pid(child.id());
             Ok(child)
         }
 
         /// The live branches the collector finds in the bucket.
-        fn live_branches(&self) -> anyhow::Result<BTreeSet<fxdax::Branch>> {
+        fn live_branches(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
             let output = std::process::Command::new(&self.paths.gc)
                 .args([&self.paths.bucket, "--branches"])
                 .output()?;
             ensure!(
                 output.status.success(),
-                "fxdax-gc --branches: {}: {}",
+                "cladefs-gc --branches: {}: {}",
                 output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
@@ -866,7 +866,7 @@ mod host {
 
         /// The branches whose uploads the round's daemons failed, as their logs say: those stores'
         /// uploaders stopped, and their commits fail until they are attached again (remote.rs).
-        fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<fxdax::Branch>> {
+        fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
                 let log = self.setup.tmp_dir.join(format!("extentd-{daemon}.log"));
@@ -975,7 +975,7 @@ mod host {
         {
             let seed = lines.iter().rev().find_map(|line| line.strip_prefix("fsx script "));
             problems.push(format!(
-                "{failure} (FXDAX_RANDOM_OPS_SEED={} replays the script alone in \
+                "{failure} (CLADEFS_RANDOM_OPS_SEED={} replays the script alone in \
                  fxfs-guest-script-dax)",
                 seed.unwrap_or("?")
             ));
@@ -1002,7 +1002,7 @@ mod host {
 
     /// The branches a daemon's log, `log`, says it failed an upload of (FAILPOINTS'
     /// `writer::upload`).
-    fn upload_failures(log: &str) -> BTreeSet<fxdax::Branch> {
+    fn upload_failures(log: &str) -> BTreeSet<cladefs::Branch> {
         (log.lines())
             .filter(|line| line.contains("failpoint writer::upload"))
             .filter_map(|line| line.split("uploading branch ").nth(1)?.split(':').next())
@@ -1089,7 +1089,7 @@ mod host {
 
     impl Test for TestFxfsGuestSoak {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -1103,7 +1103,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
         fn timeout_secs(&self) -> u64 {
             // The longest load, and what may run past it: the base made, the daemons stopped, the
             // checks.
-            let load = std::env::var("FXDAX_SOAK_LOAD_SECS")
+            let load = std::env::var("CLADEFS_SOAK_LOAD_SECS")
                 .ok()
                 .and_then(|secs| secs.parse().ok())
                 .unwrap_or(240u64);
@@ -1111,7 +1111,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let sockets = tempdir::TempDir::new("fxdax-soak")?;
+            let sockets = tempdir::TempDir::new("cladefs-soak")?;
             let ran = Soak::new(&test_setup, sockets.path()).and_then(|mut soak| soak.round());
             match ran {
                 Ok(()) => {
@@ -1164,11 +1164,11 @@ RUN apk add --no-cache postgresql postgresql-contrib
         /// Only a store whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
-            let log = "ERROR fxdax::remote: fxdax: uploading branch 0/7a/fb232d4739d569c0: \
-                       reading failpoint writer::upload\nERROR fxdax::extents: fxdax: uploading \
+            let log = "ERROR cladefs::remote: cladefs: uploading branch 0/7a/fb232d4739d569c0: \
+                       reading failpoint writer::upload\nERROR cladefs::extents: cladefs: uploading \
                        the store's commits: reading failpoint writer::upload\n";
-            let cell = fxdax::Cell { tenant: 0, id: 0x7a };
-            let branch = fxdax::Branch { cell, id: 0xfb23_2d47_39d5_69c0 };
+            let cell = cladefs::Cell { tenant: 0, id: 0x7a };
+            let branch = cladefs::Branch { cell, id: 0xfb23_2d47_39d5_69c0 };
             assert_eq!(upload_failures(log), BTreeSet::from([branch]));
             let failed = "base ok\nfsx script 7\nscript failed: operation 989: errno 5: fsync: \
                           I/O error (os error 5)\n";
@@ -1176,7 +1176,7 @@ RUN apk add --no-cache postgresql postgresql-contrib
             assert_eq!(load_problems(died, failed, false, true), Vec::<String>::new());
             let problems = load_problems(died, failed, false, false);
             assert_eq!(problems.len(), 2, "{problems:?}");
-            assert!(problems[0].contains("FXDAX_RANDOM_OPS_SEED=7"), "{problems:?}");
+            assert!(problems[0].contains("CLADEFS_RANDOM_OPS_SEED=7"), "{problems:?}");
             let differs = "fsx script 8\nscript failed: operation 3: differs: a read\n";
             assert_eq!(load_problems(died, differs, false, true).len(), 1);
             let erred = "base ok\nerror syncfs: Input/output error (os error 5)\ndone\n";

@@ -1064,7 +1064,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxdax"
+name = "cladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -3270,7 +3270,7 @@ dependencies = [
  "extent_store",
  "follower_history",
  "futures",
- "fxdax",
+ "cladefs",
  "fxfs-automount",
  "http-body-util",
  "hyper",

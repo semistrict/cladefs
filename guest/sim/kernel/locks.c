@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Locks, whose takings are the scheduling points. Each keeps its waiters in order and hands itself
  * over, as near to the kernel's rules as what they let tasks observe: a mutex is handed to a waiter

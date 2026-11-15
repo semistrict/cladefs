@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Container images as base stores (fxdax's TASK-39.5): the host builds a store from an OCI image
-//! of two layers, as `fxdaxctl import` does, and forks it; a guest boots on the fork, and finds the
+//! Container images as base stores (cladefs's TASK-39.5): the host builds a store from an OCI image
+//! of two layers, as `cladefsctl import` does, and forks it; a guest boots on the fork, and finds the
 //! image's files, with their contents, owners, permissions, times, hard links, symlinks, device
 //! nodes and extended attributes, and the upper layer's whiteouts applied. It writes to the fork,
 //! which the base doesn't see.
@@ -42,12 +42,12 @@ fn holey() -> Vec<u8> {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use futures::executor::block_on;
-    use fxdax::import::testing::{Entry, Kind, gzip, layer, oci_layout, opaque, whiteout};
-    use fxdax::{Errno, Filesystem, Storage};
+    use cladefs::import::testing::{Entry, Kind, gzip, layer, oci_layout, opaque, whiteout};
+    use cladefs::{Errno, Filesystem, Storage};
     use std::path::Path;
 
     const CAPACITY: u64 = 256 << 20;
@@ -107,19 +107,19 @@ mod host {
 
     impl Test for TestFxfsGuestImport {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let layout = dir.join("image");
-            oci_layout(&layout, "fxdax/test:import", &layers()?)?;
+            oci_layout(&layout, "cladefs/test:import", &layers()?)?;
             let base = dir.join("base");
-            block_on(fxdax::import::store(&base, CAPACITY, &layout, Some("fxdax/test:import")))?;
+            block_on(cladefs::import::store(&base, CAPACITY, &layout, Some("cladefs/test:import")))?;
             // A branch of each case's own, as each fork's is, its ID its bucket's to give: the
             // one volume of a new cell of the base's tenant (TASK-364).
-            let base = fxdax::ExtentStore::open(&base)?;
-            base.fork(dir.join("extents"), fxdax::new_cell(base.branch().cell.tenant))?;
+            let base = cladefs::ExtentStore::open(&base)?;
+            base.fork(dir.join("extents"), cladefs::new_cell(base.branch().cell.tenant))?;
             drop(base);
 
             let mut vm = Vm::new(2, 512)?;

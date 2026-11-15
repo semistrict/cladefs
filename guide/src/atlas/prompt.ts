@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -35,7 +35,7 @@ export function learningPrompt(marks: Record<string, Mark>): string | null {
   const name = (item: (typeof known)[number]) => (item.kind === "layer" ? `the ${item.l.name} layer` : `"${item.i.claim}"`);
 
   const parts = [
-    "I own the fxdax repo (this checkout) and I'm learning its code. I'm an experienced systems programmer, new to this codebase.",
+    "I own the cladefs repo (this checkout) and I'm learning its code. I'm an experienced systems programmer, new to this codebase.",
   ];
   if (unknown.length) parts.push(`I don't understand these yet:\n${unknown.map(describe).join("\n")}`);
   if (fuzzy.length) parts.push(`I'm fuzzy on these:\n${fuzzy.map(describe).join("\n")}`);

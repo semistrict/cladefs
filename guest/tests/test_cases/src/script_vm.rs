@@ -1,11 +1,11 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what the host does with a script that failed (TASK-149.2): boots a VM of the test for
+//! cladefs: what the host does with a script that failed (TASK-149.2): boots a VM of the test for
 //! each try of a shrink, the runner's `start-vm`, in a directory of its own, told the seed and the
-//! operations to drop, and says the smallest script that failed the same way, which FXDAX_SEED and
-//! FXDAX_RANDOM_OPS_DROP replay. FXDAX_SHRINK_TRIES bounds the VMs, as a hang takes the test's
+//! operations to drop, and says the smallest script that failed the same way, which CLADEFS_SEED and
+//! CLADEFS_RANDOM_OPS_DROP replay. CLADEFS_SHRINK_TRIES bounds the VMs, as a hang takes the test's
 //! timeout each, and 0 turns it off.
 
 use crate::TestSetup;
@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Sets the guest's script: the run's seed, and what FXDAX_RANDOM_OPS_DROP drops of it.
+/// Sets the guest's script: the run's seed, and what CLADEFS_RANDOM_OPS_DROP drops of it.
 pub fn pass_script(vm: &mut Vm, seed: u64) -> anyhow::Result<()> {
     vm.env(&CString::new(format!("{SEED_VAR}={seed}"))?);
     if let Ok(drops) = std::env::var(DROP_VAR) {
@@ -75,7 +75,7 @@ impl Replays<'_> {
             .arg(&self.test_setup.test_case)
             .arg("--tmp-dir")
             .arg(dir)
-            .env("FXDAX_SEED", self.seed.to_string())
+            .env("CLADEFS_SEED", self.seed.to_string())
             .env(DROP_VAR, drops)
             .envs(self.env.iter().copied())
             .stdin(Stdio::null())
@@ -87,7 +87,7 @@ impl Replays<'_> {
         })
     }
 
-    /// fxdax: replays the script with `drops` dropped once, in the test's directory's `replay`:
+    /// cladefs: replays the script with `drops` dropped once, in the test's directory's `replay`:
     /// how it failed, if it did. A guest's own shrink is confirmed so, from a boot.
     pub fn replay(&self, drops: &str) -> anyhow::Result<Option<Failure>> {
         self.attempt(&self.test_setup.tmp_dir.join("replay"), drops)
@@ -98,12 +98,12 @@ impl Replays<'_> {
     pub fn report(&self, failure: &Failure) -> String {
         // A replay of a script shrunk already is for looking at, and says what it is.
         if !failure.shrinks() || std::env::var_os(DROP_VAR).is_some() {
-            return format!("{failure}\nFXDAX_SEED={} and {DROP_VAR} replay it", self.seed);
+            return format!("{failure}\nCLADEFS_SEED={} and {DROP_VAR} replay it", self.seed);
         }
         let ops = script::generate(self.seed, self.mix);
-        let tries = std::env::var("FXDAX_SHRINK_TRIES")
+        let tries = std::env::var("CLADEFS_SHRINK_TRIES")
             .ok()
-            .map_or(TRIES, |tries| tries.parse().expect("FXDAX_SHRINK_TRIES is a count"));
+            .map_or(TRIES, |tries| tries.parse().expect("CLADEFS_SHRINK_TRIES is a count"));
         let shrunk_dir = self.test_setup.tmp_dir.join("shrunk");
         let mut ran = 0;
         let shrunk = shrink_failure(ops.len(), failure, tries, |drops| {
@@ -129,7 +129,7 @@ impl Replays<'_> {
                 let listed: Vec<String> =
                     kept.iter().map(|&index| format!("  {index}: {:?}", ops[index])).collect();
                 format!(
-                    "{failure}\nFXDAX_SEED={seed} {DROP_VAR}={drops} replays it: {} of {} \
+                    "{failure}\nCLADEFS_SEED={seed} {DROP_VAR}={drops} replays it: {} of {} \
                      operations, in {} tries:\n{}",
                     kept.len(),
                     ops.len(),
@@ -138,7 +138,7 @@ impl Replays<'_> {
                 )
             }
             None => format!(
-                "{failure}\nFXDAX_SEED={seed} replays it, which {} tries of it didn't: it isn't \
+                "{failure}\nCLADEFS_SEED={seed} replays it, which {} tries of it didn't: it isn't \
                  shrunk",
                 shrunk.tries
             ),
@@ -156,7 +156,7 @@ impl Replays<'_> {
 /// left in the store.
 pub fn stored_as_modelled(path: &Path, files: &[(String, String)]) -> Option<Failure> {
     use futures::executor::block_on;
-    use fxdax::{Filesystem, Storage};
+    use cladefs::{Filesystem, Storage};
     let read = |fs: &Filesystem, name: &str| -> anyhow::Result<Vec<u8>> {
         block_on(async {
             let (file, attr) = fs.root().lookup(name.as_bytes()).await?;
@@ -233,7 +233,7 @@ mod tests {
 
     #[test]
     fn a_process_that_cant_start_says_so() {
-        let mut command = Command::new("/nonexistent/fxdax-replay");
+        let mut command = Command::new("/nonexistent/cladefs-replay");
         let err = run_to_deadline(&mut command, Duration::from_secs(1)).unwrap_err();
         assert_eq!(format!("{err}"), "starting a replay");
     }
@@ -243,12 +243,12 @@ mod tests {
     fn fake_runner(dir: &Path, hangs: bool) -> PathBuf {
         let runner = dir.join("runner");
         let hang = if hangs {
-            "case \"$FXDAX_RANDOM_OPS_DROP\" in *-3010) ;; *) exec sleep 600;; esac"
+            "case \"$CLADEFS_RANDOM_OPS_DROP\" in *-3010) ;; *) exec sleep 600;; esac"
         } else {
             ""
         };
         let body = format!(
-            "#!/bin/sh\n{hang}\necho \"$FXDAX_SEED $FXDAX_CHECKS $FXDAX_RANDOM_OPS_DROP\"\n"
+            "#!/bin/sh\n{hang}\necho \"$CLADEFS_SEED $CLADEFS_CHECKS $CLADEFS_RANDOM_OPS_DROP\"\n"
         );
         fs::write(&runner, body).unwrap();
         fs::set_permissions(&runner, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -281,7 +281,7 @@ mod tests {
             test_setup: &test_setup,
             seed,
             mix: script::ONE_FILE,
-            env: &[("FXDAX_CHECKS", "random_ops")],
+            env: &[("CLADEFS_CHECKS", "random_ops")],
             timeout: Duration::from_secs(60),
             verdict: &|dir, stdout| planted(dir, stdout, [40, 2500], seed),
         };
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(
             said,
             format!(
-                "{first}\nFXDAX_SEED=77 FXDAX_RANDOM_OPS_DROP=0-39,41-2499,2501-3010 replays it: 2 \
+                "{first}\nCLADEFS_SEED=77 CLADEFS_RANDOM_OPS_DROP=0-39,41-2499,2501-3010 replays it: 2 \
                  of 3011 operations, in 48 tries:\n  40: {:?}\n  2500: {:?}",
                 ops[40], ops[2500]
             )
@@ -324,7 +324,7 @@ mod tests {
         assert_eq!(
             said.lines().nth(1),
             Some(
-                "FXDAX_SEED=1 FXDAX_RANDOM_OPS_DROP=0-3008,3010 replays it: 1 of 3011 operations, in 26 tries:"
+                "CLADEFS_SEED=1 CLADEFS_RANDOM_OPS_DROP=0-3008,3010 replays it: 1 of 3011 operations, in 26 tries:"
             )
         );
     }

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a cell's collector lease (`<C>gc/lease`, [`layout::gc_lease`]): which pass holds the
+//! cladefs: a cell's collector lease (`<C>gc/lease`, [`layout::gc_lease`]): which pass holds the
 //! cell, for how long, and what the last pass over it to end recorded for the passes after it, and
 //! what the cell takes in the bucket (doc-7, Garbage collection; TASK-395.5, TASK-395.6,
 //! TASK-395.8). One object, so that a pass learns all of it by the read that takes the lease.
@@ -25,7 +25,7 @@
 //! one did: everything it decides by is under the cell's prefix, and an object there written,
 //! rewritten or deleted since changes the listing, or it was recorded with no digest
 //! ([`Passed::listing`]). It deletes what was deferred once due, and nothing else (doc-7 has why
-//! that is as safe as a pass in full). fxdax: one recorded leaving objects sealed uncompacted holds
+//! that is as safe as a pass in full). cladefs: one recorded leaving objects sealed uncompacted holds
 //! only while their cell's tenant's KEK is still not to be had (TASK-411.13). Who recorded it, of what process, is of no matter: the
 //! lease's holders and times are under `<C>gc/`, outside the digest, and a pass of other options
 //! decides anew.
@@ -108,7 +108,7 @@ pub struct Passed {
     /// The cell's objects and bytes, as of its listing, less what it deleted, and with what it
     /// compacted to.
     pub usage: Usage,
-    /// fxdax: the objects sealed it would have compacted, and left, its cell's KEK not to be had
+    /// cladefs: the objects sealed it would have compacted, and left, its cell's KEK not to be had
     /// (TASK-411.13): the KMS refusing it, or the collector having none. A pass listing the same
     /// skips the cell only while its tenant's KEK is still not to be had, as the KMS says once a
     /// sweep ([`crate::collector::Heard`]), and goes over it in full, compacting them, once it is.
@@ -212,7 +212,7 @@ pub(crate) struct Listed {
     /// Every object listed but the cell's collector lease, which recording counts as it writes it
     /// ([`record`]).
     pub usage: Usage,
-    /// fxdax: the references of forks of the cell's branches listed beside their marks
+    /// cladefs: the references of forks of the cell's branches listed beside their marks
     /// ([`layout::retired`]): retired, or taken back, and written again since by a writer whose
     /// read of the child's record came before, garbage the pass deletes (TASK-395.13,
     /// TASK-395.14). Their writes changed the listing, so that no pass skips them.

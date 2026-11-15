@@ -1,38 +1,38 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Measure fxdax-gc's sweeps over a bucket of files of many cells on an x86-64 Linux host of one's
-# own, over ssh (FXDAX_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement, alone there
+# Measure cladefs-gc's sweeps over a bucket of files of many cells on an x86-64 Linux host of one's
+# own, over ssh (CLADEFS_HOST, ubu1 by default; scripts/lib/host.sh), as a measurement, alone there
 # and on CPUs of its own (fxjob --bench) (TASK-395.5): scripts/gc-sweep.sh, through
 # scripts/lib/gc-sweep-linux-host.sh, fills a bucket of about 1M objects in 10k cells and times
 # sweeps of it by passes at once, with their peak memory. The table, the host and the source
 # measured go to docs/measurements/HOST-gc-sweep-<time>-<mark>, the run's mark, unless named, with
 # what the run was for (note.md).
 #
-# Each SIDE=COMMIT, a commit origin has, is a worktree there whose fxdax-gc this tree's scripts
+# Each SIDE=COMMIT, a commit origin has, is a worktree there whose cladefs-gc this tree's scripts
 # build and measure beside the others', in one job, the sides' sweeps in turn (scripts/gc-sweep.sh),
 # for an A/B (TASK-395.17); each's record in RESULTS/SIDE/source.txt. With none, the run's commit's
-# (scripts/lib/host.sh's FXDAX_HOST_COMMIT).
+# (scripts/lib/host.sh's CLADEFS_HOST_COMMIT).
 #
 #   scripts/gc-sweep-host.sh [RESULTS [SIDE=COMMIT...]]
 #   scripts/gc-sweep-host.sh resume RUN RESULTS | cancel RUN
 #
-# FXDAX_GC_TENANTS, FXDAX_GC_CELLS, FXDAX_GC_SEGMENTS, FXDAX_GC_LARGEST, FXDAX_GC_AT_ONCE,
-# FXDAX_GC_SWEEPS and FXDAX_GC_ROUNDS shape the bucket and the sweeps (scripts/gc-sweep.sh), and
-# reach the host, as every other FXDAX_* does. FXDAX_BENCH_NOTE says what the run is for; FXDAX_HOST_LIMIT caps it (default 3h).
+# CLADEFS_GC_TENANTS, CLADEFS_GC_CELLS, CLADEFS_GC_SEGMENTS, CLADEFS_GC_LARGEST, CLADEFS_GC_AT_ONCE,
+# CLADEFS_GC_SWEEPS and CLADEFS_GC_ROUNDS shape the bucket and the sweeps (scripts/gc-sweep.sh), and
+# reach the host, as every other CLADEFS_* does. CLADEFS_BENCH_NOTE says what the run is for; CLADEFS_HOST_LIMIT caps it (default 3h).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"
 limit=3h
 host_bench=1
-note="fxdax-gc's sweeps over a bucket of files of many cells (TASK-395.5)."
+note="cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5)."
 
 # finish STATUS writes what the run was for, shows the table, and returns STATUS.
 finish() {
     {
-        echo "${FXDAX_BENCH_NOTE:-$note}"
+        echo "${CLADEFS_BENCH_NOTE:-$note}"
         echo
         echo "Host: $host."
     } > "$results/note.md"

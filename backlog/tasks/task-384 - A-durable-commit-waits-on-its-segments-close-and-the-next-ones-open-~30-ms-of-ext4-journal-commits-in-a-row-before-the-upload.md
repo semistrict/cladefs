@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-12 13:42'
-updated_date: '2026-11-13 01:40'
+updated_date: '2026-11-15 11:35'
 labels:
   - performance
   - extent_store
@@ -20,7 +20,7 @@ ordinal: 763000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-369's clean daemon comparison (crates/fxdax/src/extentd/tests.rs durable_commits_through_the_daemon, ubu1, 25 ms bucket latency, 5 interleaved runs a side, own target dirs): median sync round main 88.5 ms / fix 85.3 ms with the file bucket on the ext4 scratch disk; 71.9 / 68.8 ms with the bucket on /dev/shm, against 37 ms on ZFS home. With the bucket off the disk, the ~30 ms left per round is the store's own syncs: a durable commit uploads its segment, so every round closes one segment and opens the next, and the commit waits, one after another, on ext4 journal commits for the new segment's directory entries, the new framed file, and the framed files' directory, before the upload goes. TASK-369's fixes (duplicate entry syncs removed: 1,578 -> 863 ms of entry-sync time over 40 rounds) don't touch this chain. Change what an upload must make durable locally first: the bucket object is what makes the commit durable, so the local framed file and directory entries may not need to be durable before it (recovery re-derives them from the WAL/raw file?), or the next segment can be opened ahead of time off the commit's path. Decide it against doc-12's recovery rules and the TLA+ model (specs/bucket), with crash tests. TASK-371's AC #4 (25 durable syncs/s) and doc-12's 50 ms median (TASK-322) depend on it.
+TASK-369's clean daemon comparison (crates/cladefs/src/extentd/tests.rs durable_commits_through_the_daemon, ubu1, 25 ms bucket latency, 5 interleaved runs a side, own target dirs): median sync round main 88.5 ms / fix 85.3 ms with the file bucket on the ext4 scratch disk; 71.9 / 68.8 ms with the bucket on /dev/shm, against 37 ms on ZFS home. With the bucket off the disk, the ~30 ms left per round is the store's own syncs: a durable commit uploads its segment, so every round closes one segment and opens the next, and the commit waits, one after another, on ext4 journal commits for the new segment's directory entries, the new framed file, and the framed files' directory, before the upload goes. TASK-369's fixes (duplicate entry syncs removed: 1,578 -> 863 ms of entry-sync time over 40 rounds) don't touch this chain. Change what an upload must make durable locally first: the bucket object is what makes the commit durable, so the local framed file and directory entries may not need to be durable before it (recovery re-derives them from the WAL/raw file?), or the next segment can be opened ahead of time off the commit's path. Decide it against doc-12's recovery rules and the TLA+ model (specs/bucket), with crash tests. TASK-371's AC #4 (25 durable syncs/s) and doc-12's 50 ms median (TASK-322) depend on it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

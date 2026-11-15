@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"testing"
 
-	extentdv1 "github.com/semistrict/fxdax/go/extentd/v1"
+	extentdv1 "github.com/semistrict/cladefs/go/extentd/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/health"
@@ -126,7 +126,7 @@ func TestNoErrno(t *testing.T) {
 func TestGarbledErrno(t *testing.T) {
 	client := client(t, serve(t))
 	_, err := client.StatStore(t.Context(), &extentdv1.StatStoreRequest{Path: "garbled"})
-	want := `rpc error: code = NotFound desc = ENOENT (its fxdax-errno ["ENOENT"] is no errno)`
+	want := `rpc error: code = NotFound desc = ENOENT (its cladefs-errno ["ENOENT"] is no errno)`
 	if err.Error() != want {
 		t.Errorf("err = %q, want %q", err, want)
 	}

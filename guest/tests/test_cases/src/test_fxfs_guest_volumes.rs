@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Volumes of one filesystem mounted side by side (fxdax's TASK-136.2): the host makes a store with
+//! Volumes of one filesystem mounted side by side (cladefs's TASK-136.2): the host makes a store with
 //! several volumes, as it does a repo's base, and the guest mounts them on directories of the
 //! default volume, each with a superblock of its own, on one device. It checks that they have their
 //! own `st_dev` and `EXDEV`, and that a file of each, made alike, has the same inode number and
@@ -30,11 +30,11 @@ fn contents(volume: &str) -> Vec<u8> {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use futures::executor::block_on;
-    use fxdax::{Image, Storage};
+    use cladefs::{Image, Storage};
     use std::path::Path;
 
     const CAPACITY: u64 = 256 << 20;
@@ -73,7 +73,7 @@ mod host {
 
     impl Test for TestFxfsGuestVolumes {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {

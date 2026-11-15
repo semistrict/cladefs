@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -31,8 +31,8 @@ export const transferTasks: TransferTask[] = [
   {
     id: "host-copy",
     question: "Where does the host copy a page into the VM's private memory when the guest asks for it?",
-    accepts: (s) => (s.path === "crates/fxdax/src/dax.rs" || s.path === "crates/fxdax/src/dax/uffd.rs") && s.name === "make_private",
-    hint: "It is the daemon's window code, in crates/fxdax: what serves PRIVATE.",
+    accepts: (s) => (s.path === "crates/cladefs/src/dax.rs" || s.path === "crates/cladefs/src/dax/uffd.rs") && s.name === "make_private",
+    hint: "It is the daemon's window code, in crates/cladefs: what serves PRIVATE.",
     answer: answer("window_make_private"),
   },
   {

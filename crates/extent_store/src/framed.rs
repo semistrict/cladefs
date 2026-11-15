@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -77,7 +77,7 @@ pub fn read_whole<F: File>(file: &F) -> io::Result<Vec<u8>> {
     Ok(read_aligned(file, 0, file.size()? as usize)?.as_slice().to_vec())
 }
 
-/// fxdax: the whole of the framed file `file`, checked: its frame, and each part's stored bytes
+/// cladefs: the whole of the framed file `file`, checked: its frame, and each part's stored bytes
 /// against its CRC ([`extent_frame::check`]). What a host sends on as it is, as its uploader does
 /// the segments its store closed, goes so, or not at all (TASK-153.11). Read through the host's
 /// page cache ([`File::read_cached`]), which holds what a framing wrote, its writing back left to
@@ -92,7 +92,7 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// fxdax: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
+/// cladefs: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
 /// their checks: refused if it is in the clear and `keys` hold its branch sealed, a downgrade
 /// (TASK-411.3).
 fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
@@ -107,7 +107,7 @@ fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
 }
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
-/// footer pass their checks. Its parts are checked as they are read. fxdax: by a reader holding
+/// footer pass their checks. Its parts are checked as they are read. cladefs: by a reader holding
 /// `keys`, the store's branch's (TASK-411.3).
 pub(crate) fn read_frame<F: File>(
     file: &F,
@@ -130,10 +130,10 @@ pub(crate) fn read_frame<F: File>(
     Ok(Some((parts, footer)))
 }
 
-/// fxdax: the parts of the framed file `file`, if its trailer and table pass their checks: read
+/// cladefs: the parts of the framed file `file`, if its trailer and table pass their checks: read
 /// from the blocks they are in alone, the last, but for a table that begins before them, and not
 /// its footer, which reading its data needs not (TASK-92.2). Its parts are checked as they are
-/// read. fxdax: by a reader holding `keys`, the store's branch's (TASK-411.3).
+/// read. cladefs: by a reader holding `keys`, the store's branch's (TASK-411.3).
 pub(crate) fn read_parts<F: File>(file: &F, keys: &dyn Keys) -> Result<Option<Parts>, Error> {
     let size = file.size()?;
     let Some(trailer) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -166,7 +166,7 @@ impl<F: File> Framed<F> {
     }
 
     /// The framed file `file`, which must be whole, as far as its trailer and table say; `path`
-    /// names it. fxdax: read holding `keys`, the store's branch's (TASK-411.3).
+    /// names it. cladefs: read holding `keys`, the store's branch's (TASK-411.3).
     pub(crate) fn open(file: F, path: &str, keys: &dyn Keys) -> Result<Self, Error> {
         match read_parts(&file, keys).with_context(|| path.to_owned())? {
             Some(parts) => Ok(Self::new(Arc::new(file), parts)),
@@ -185,7 +185,7 @@ impl<F: File> Framed<F> {
     }
 }
 
-/// fxdax: framed files kept open, by their keys: at most `limit` of them, but for those reads use,
+/// cladefs: framed files kept open, by their keys: at most `limit` of them, but for those reads use,
 /// the least lately read of the others closing as more open; not all of them, which reads would
 /// open again, each opening anew a file whose parts unpacked no read finds then (TASK-92.2).
 pub(crate) struct Files<K, F> {
@@ -244,7 +244,7 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 
 /// A file of extents' data, open.
 pub(crate) enum Source<F> {
-    /// Raw, as written: an open segment's, or an open extent's own. fxdax: encrypted, if the store
+    /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the store
     /// is sealed, which reads decrypt (TASK-411.5).
     Raw(Arc<RawFile<F>>),
     /// Framed: a closed segment's, or a sealed extent's own.
@@ -262,7 +262,7 @@ impl<F> Clone for Source<F> {
 
 impl<F: File> Source<F> {
     /// The parts of where `len` bytes at `at` in its data are, to `parts`: unpacked lately, as
-    /// `unpacked` keeps them, or not. fxdax: fails with [`Corrupt`] if they are past its data, as
+    /// `unpacked` keeps them, or not. cladefs: fails with [`Corrupt`] if they are past its data, as
     /// an index would place them that names another file made at its path (TASK-79.38). A framed
     /// file's part stored raw is read whole and checked against its CRC, as one stored compressed
     /// is, not read in place: so no byte of a framed file reaches a reader unchecked (TASK-153.11).
@@ -321,9 +321,9 @@ fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<RawFile<F>>, offset: u64, l
 /// [`crate::Store::unpack`] checks and unpacks from its stored bytes; bytes of a part unpacked
 /// lately; or zeros, where nothing was written.
 pub enum Part<F> {
-    /// fxdax: bytes of a raw file, which the store wrote lately and has not framed: an open
+    /// cladefs: bytes of a raw file, which the store wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
-    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). fxdax: a
+    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: a
     /// sealed store's are encrypted, a sector at a time: a reader of the file's stored bytes reads
     /// [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the [`RawFile`]
     /// itself does (TASK-411.5).
@@ -364,7 +364,7 @@ impl<F> Part<F> {
 /// opened if sealed, and unpacked.
 pub struct Packed<F> {
     pub file: Arc<F>,
-    /// fxdax: the part, as its file's tail says it is stored and opened (TASK-411.2).
+    /// cladefs: the part, as its file's tail says it is stored and opened (TASK-411.2).
     part: extent_frame::Part,
     /// Its name among the parts unpacked.
     key: Key,
@@ -421,7 +421,7 @@ impl<F> Packed<F> {
 /// How many parts stored compressed this process unpacked.
 static UNPACKS: AtomicU64 = AtomicU64::new(0);
 
-/// fxdax: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
+/// cladefs: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
 /// [`Corrupt`] alone, as before parts were sealed; one sealed under a key the store doesn't hold
 /// by `extent_frame::Error::NoKey` (TASK-411.2).
 fn unread(error: extent_frame::Error) -> Error {
@@ -490,7 +490,7 @@ mod tests {
     use super::*;
     use crate::{Dir as _, MemDir};
 
-    /// fxdax: bytes past a framed file's data are located nowhere in it: an index naming them, as
+    /// cladefs: bytes past a framed file's data are located nowhere in it: an index naming them, as
     /// one of a file gone and made anew would, is corrupt, which reads fail on, and the store's
     /// state is not poisoned by a panic (TASK-79.38).
     #[test]
@@ -512,7 +512,7 @@ mod tests {
         assert_eq!(parts.len(), 1);
     }
 
-    /// fxdax: of the files kept open, the least lately read closes as one more opens past the
+    /// cladefs: of the files kept open, the least lately read closes as one more opens past the
     /// limit, but for those reads use; and a file opened again meanwhile is not kept, but the one
     /// kept already (TASK-92.2).
     #[test]

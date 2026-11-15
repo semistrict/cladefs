@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,8 +23,8 @@ pub mod host {
     use crate::vm::{Firecracker, Vm};
     use anyhow::Context;
     use futures::executor::block_on;
-    use fxdax::extentd::control::Client;
-    use fxdax::{Image, Storage};
+    use cladefs::extentd::control::Client;
+    use cladefs::{Image, Storage};
     use fxfs_automount::upcall::{Answer, Newest};
     use std::cell::Cell;
     use std::collections::BTreeMap;
@@ -260,7 +260,7 @@ pub mod host {
             let mut vm = Vm::new(self.cpus, self.memory_mib)?;
             vm.guest_kernel()?;
             devices(&mut vm)?;
-            vm.env(&CString::new(format!("FXDAX_SHARED_VOLUMES={role}"))?);
+            vm.env(&CString::new(format!("CLADEFS_SHARED_VOLUMES={role}"))?);
             // One vsock, its Unix socket's path short, as they must be, and one for each VM's
             // Firecracker: for measuring on its port, and talking on `PORT`.
             let requests = Requests::new(&Self::vsock_name(role))?;
@@ -497,9 +497,9 @@ pub mod guest {
             // A status leaves the index as it is: what one finds, the next finds too.
             .env("GIT_OPTIONAL_LOCKS", "0")
             .env("GIT_AUTHOR_NAME", "publisher")
-            .env("GIT_AUTHOR_EMAIL", "publisher@fxdax")
+            .env("GIT_AUTHOR_EMAIL", "publisher@cladefs")
             .env("GIT_COMMITTER_NAME", "publisher")
-            .env("GIT_COMMITTER_EMAIL", "publisher@fxdax")
+            .env("GIT_COMMITTER_EMAIL", "publisher@cladefs")
             .output()
             .unwrap_or_else(|error| panic!("{program}: {error}"));
         assert!(

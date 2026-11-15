@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -74,9 +74,9 @@ class Ci(unittest.TestCase):
 
     def test_no_build_needs_protoc_or_libclang(self):
         """What lets the job install neither but in the firecracker part: the gRPC API compiled by
-        protox, not protoc, and no bindgen, which loads libclang, in fxdax's workspace or the guest
+        protox, not protoc, and no bindgen, which loads libclang, in cladefs's workspace or the guest
         tests'. One that comes needs them back. The VMM's has it, its part's own libclang's why."""
-        self.assertIn("protox::compile", (ROOT / "crates/fxdax/build.rs").read_text())
+        self.assertIn("protox::compile", (ROOT / "crates/cladefs/build.rs").read_text())
         for lock in [ROOT / "Cargo.lock", ROOT / "guest/tests/Cargo.lock"]:
             self.assertNotIn('name = "bindgen"', lock.read_text(), lock)
         self.assertIn('name = "bindgen"', (ROOT / "vendor/firecracker.lock").read_text())
@@ -91,7 +91,7 @@ class Ci(unittest.TestCase):
 
     def test_the_vmms_own_tests_run_with_a_bucket(self):
         """TASK-220: the firecracker part runs the VMM's extent device's tests and its vCPUs'
-        exits', from vendor/firecracker as fxdax builds it (scripts/firecracker-cargo.sh, TASK-269),
+        exits', from vendor/firecracker as cladefs builds it (scripts/firecracker-cargo.sh, TASK-269),
         each extent test's daemon a host's, its stores' branches in a bucket in memory: with none
         named, every store's opening fails EIO, which 8 of its 21 did, run by nothing but
         scripts/test-e2e.sh on GCE. And the cache keeps its builds, in target/firecracker."""
@@ -99,14 +99,14 @@ class Ci(unittest.TestCase):
         body = re.search(r"^if part firecracker; then\n(.*?)^fi$", script,
                          re.MULTILINE | re.DOTALL).group(1)
         self.assertIn('"$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib', body)
-        self.assertIn("FXDAX_EXTENTD_REMOTE=memory:///", body)
-        self.assertIn("FXDAX_EXTENTD_TOKEN=1", body)
-        self.assertIn("--features fxdax", body)
+        self.assertIn("CLADEFS_EXTENTD_REMOTE=memory:///", body)
+        self.assertIn("CLADEFS_EXTENTD_TOKEN=1", body)
+        self.assertIn("--features cladefs", body)
         self.assertIn("test(/extent::/)", body)
         self.assertIn("            target\n", job())
         self.assertIn("'vendor/firecracker.lock'", job())
         e2e = (ROOT / "scripts" / "test-e2e.sh").read_text()
-        self.assertIn('FXDAX_TEST_PARTS="guest firecracker" "$root/scripts/test.sh"', e2e)
+        self.assertIn('CLADEFS_TEST_PARTS="guest firecracker" "$root/scripts/test.sh"', e2e)
 
     def test_guest_sim_runs_whole_when_what_it_tests_changed_and_nightly(self):
         """The user's decision (2026-11-08): guest/sim's jobs, keeping their names, run whole in CI
@@ -121,7 +121,7 @@ class Ci(unittest.TestCase):
             body = workflow_job(text, name)
             self.assertIn("fetch-depth: 0", body, name)
             self.assertIn(f"          BASE: {base}\n", body, name)
-            self.assertIn("FXDAX_GUEST_SIM: ${{ inputs.guest-sim }}", body, name)
+            self.assertIn("CLADEFS_GUEST_SIM: ${{ inputs.guest-sim }}", body, name)
             self.assertIn('run: echo "scope=$(scripts/guest-sim-scope.py "$BASE")"', body, name)
         seeds = workflow_job(text, "guest-sim")
         self.assertIn("guest/sim/mutants.sh --check", seeds)
@@ -142,19 +142,44 @@ class Ci(unittest.TestCase):
         for name in ["ci.yml", "nightly.yml", "sandboxes.yml"]:
             text = (ROOT / ".github" / "workflows" / name).read_text()
             self.assertNotRegex(text, r"(?i)\bgce\b|gcloud|google", name)
-        self.assertIn("No guest\n# kernels nor VMs, which boot on GitHub's runners too",
+        self.assertIn("Guest\n# kernels and VMs boot on GitHub's runners too, as they have KVM",
                       CI.read_text())
+
+    def test_the_sandboxes_short_mode_runs_on_every_push_to_main(self):
+        """TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology, on every push to main,
+        once main passed it on GitHub's runner (TASK-336, TASK-400, TASK-401): sandboxes.yml,
+        reusable, its job the short mode's, its artifacts' builds and the guest kernel cached, so
+        that it doesn't build them whole each push. Its long mode is ubu1's (TASK-330.5)."""
+        text = CI.read_text()
+        self.assertIn("push:\n    branches: [main]\n", text)
+        self.assertEqual(workflow_job(text, "sandboxes"),
+                         "    if: github.event_name == 'push'\n"
+                         "    uses: ./.github/workflows/sandboxes.yml\n\n")
+        sandboxes = (ROOT / ".github" / "workflows" / "sandboxes.yml").read_text()
+        self.assertIn("on:\n  workflow_call:\n  workflow_dispatch:\n", sandboxes)
+        self.assertIn("scripts/sandboxes.sh short\n", sandboxes)
+        self.assertNotIn("sandboxes.sh long", sandboxes)
+        self.assertIn("uses: ./.github/actions/guest-kernel", sandboxes)
+        key = ("key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock',"
+               " 'vendor/firecracker.lock') }}")
+        restore = sandboxes.index("uses: actions/cache/restore@v6")
+        build = sandboxes.index('CLADEFS_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts"')
+        save = sandboxes.index("uses: actions/cache/save@v6")
+        self.assertLess(restore, build)
+        self.assertLess(build, save)
+        self.assertEqual(sandboxes.count(key), 2)
+        self.assertIn("            target\n            guest/tests/target\n", sandboxes)
 
     def test_macos_runs_what_compiles_for_macos(self):
         """TASK-149.20.2: the macos job runs scripts/test.sh's workspace and Shuttle parts on a
-        macOS runner, a part a job, every failure: what fxdax compiles for macOS alone (physmem's
-        physical map, extent_store's syncs, extent_remote's cache, fxdax's storage I/O) ran on
+        macOS runner, a part a job, every failure: what cladefs compiles for macOS alone (physmem's
+        physical map, extent_store's syncs, extent_remote's cache, cladefs's storage I/O) ran on
         laptops alone."""
         text = CI.read_text()
         macos = re.search(r"^  macos:\n(.*?)^  \S", text, re.MULTILINE | re.DOTALL).group(1)
         self.assertIn("runs-on: macos-15", macos)
         self.assertIn("parts: [workspace, shuttle]", macos)
-        self.assertIn("FXDAX_TEST_PARTS: ${{ matrix.parts }}", macos)
+        self.assertIn("CLADEFS_TEST_PARTS: ${{ matrix.parts }}", macos)
         self.assertIn("run: scripts/test.sh --no-fail-fast", macos)
         self.assertIn("submodules: true", macos)
 
@@ -176,7 +201,7 @@ class Nightly(unittest.TestCase):
         build = workflow_job(self.text, "guest-build")
         self.assertIn("uses: ./.github/actions/guest-host", build)
         self.assertIn("uses: ./.github/actions/guest-kernel", build)
-        self.assertIn('FXDAX_E2E_BUILD_ONLY="$HOME/guest/artifacts" scripts/test-e2e.sh', build)
+        self.assertIn('CLADEFS_E2E_BUILD_ONLY="$HOME/guest/artifacts" scripts/test-e2e.sh', build)
         self.assertIn("submodules: true", build)
         self.assertIn("name: guest-artifacts", build)
 
@@ -196,9 +221,9 @@ class Nightly(unittest.TestCase):
         self.assertNotIn("$HOME/nightly", suites)
         run = re.search(r"- name: The guest suites, part .*?\n(.*?)\n      # ", suites,
                         re.DOTALL).group(1)
-        for want in ["FXDAX_FIRECRACKER_JAIL=1", "FXDAX_FIRECRACKER_SECCOMP=real",
-                     '"FXDAX_E2E_PREBUILT=$WORK/artifacts"', '"FXDAX_GUEST_KERNEL=$WORK/vmlinux"',
-                     '"FXDAX_E2E_RESULTS=$WORK/results"', "sudo --preserve-env",
+        for want in ["CLADEFS_FIRECRACKER_JAIL=1", "CLADEFS_FIRECRACKER_SECCOMP=real",
+                     '"CLADEFS_E2E_PREBUILT=$WORK/artifacts"', '"CLADEFS_GUEST_KERNEL=$WORK/vmlinux"',
+                     '"CLADEFS_E2E_RESULTS=$WORK/results"', "sudo --preserve-env",
                      'scripts/test-e2e-rustfs.sh --tag nightly --shard "$SHARD"']:
             self.assertIn(want, run)
         # Its results uploaded however it ends, the run's step stopped in time for that.
@@ -211,7 +236,7 @@ class Nightly(unittest.TestCase):
 
     def test_the_bucket_is_rustfs_on_the_runner(self):
         script = (ROOT / "scripts" / "test-e2e-rustfs.sh").read_text()
-        self.assertIn('FXDAX_EXTENTD_REMOTE=s3://fxdax/e2e "$root/scripts/test-e2e.sh" "$@"',
+        self.assertIn('CLADEFS_EXTENTD_REMOTE=s3://cladefs/e2e "$root/scripts/test-e2e.sh" "$@"',
                       script)
         self.assertIn("rustfs_start", script)
 
@@ -257,7 +282,7 @@ class AptInstall(unittest.TestCase):
         done = subprocess.run(
             ["/bin/bash", APT_INSTALL.parent / "apt-install.sh", "clang", "lld"],
             env={"PATH": f"{bin_}:/usr/bin:/bin", "FAKE": str(directory), "UPDATE": str(update_status),
-                 "FXDAX_APT_MIRRORS": str(mirrors), "FXDAX_APT_SOURCES": str(ubuntu_sources)},
+                 "CLADEFS_APT_MIRRORS": str(mirrors), "CLADEFS_APT_SOURCES": str(ubuntu_sources)},
             capture_output=True, text=True)
         asked = directory / "apt-get"
         return (done.returncode, done.stdout, mirrors.read_text(),

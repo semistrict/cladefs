@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of volume.rs: a volume of one another filesystem wrote, a base (backlog
+//! cladefs's own, a child of volume.rs: a volume of one another filesystem wrote, a base (backlog
 //! doc-10). `RootVolume::publish_volume` gives its manifest, and `new_volume_over_base` makes a
 //! volume over it, whose layers and data stay where they are, in extents it doesn't hold.
 
@@ -21,7 +21,7 @@ use anyhow::{Context, Error, anyhow, bail, ensure};
 use std::sync::Arc;
 
 impl RootVolume {
-    /// fxdax: flushes the volume `name`, which must be unencrypted and open, whole, to one layer,
+    /// cladefs: flushes the volume `name`, which must be unencrypted and open, whole, to one layer,
     /// and returns its manifest: what lets a filesystem on a device reading its extents make a
     /// volume over it (`new_volume_over_base`, backlog doc-10), with no replay of this journal.
     /// The device must keep what the manifest names, as of now: a compaction here frees the
@@ -44,7 +44,7 @@ impl RootVolume {
         store.manifest().await
     }
 
-    /// fxdax: creates the volume `name`, private to this filesystem, over the volume `manifest`
+    /// cladefs: creates the volume `name`, private to this filesystem, over the volume `manifest`
     /// describes (`publish_volume`), and opens it. It holds what that volume held when published,
     /// which the device must read: its layers and data stay where they are, in extents it doesn't
     /// hold, and what it writes goes in layers above. Takes one transaction, whatever the base's
@@ -57,7 +57,7 @@ impl RootVolume {
         let filesystem = &self.filesystem;
         ensure!(manifest.len() <= MAX_MANIFEST_SIZE, FxfsError::TooBig);
         let mut reader = manifest;
-        // fxdax: a manifest that doesn't parse is an argument wrong, as one that names no base.
+        // cladefs: a manifest that doesn't parse is an argument wrong, as one that names no base.
         let version = Version::deserialize_from(&mut reader).context(FxfsError::InvalidArgs)?;
         // Of the latest version alone, as no other is read (`EARLIEST_SUPPORTED_VERSION`): nor,
         // then, are its layers of another, a store of the latest version writing its own in it and
@@ -135,7 +135,7 @@ mod tests {
     use storage_device::fake_device::FakeDevice;
     use test_case::test_case;
 
-    // fxdax: volumes over a base (backlog doc-10). The branches of the devices these tests use:
+    // cladefs: volumes over a base (backlog doc-10). The branches of the devices these tests use:
     // those of the base, the fork of it that keeps a generation, and of what reads through to it.
     const BASE: u64 = 10;
     const GENERATION: u64 = 11;

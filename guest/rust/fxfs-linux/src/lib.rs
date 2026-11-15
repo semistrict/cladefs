@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -40,7 +40,7 @@ fn xattr_errno(error: &Error) -> c_int {
     stale(error).unwrap_or_else(|| fxfs_posix::xattr_errno(error)).raw()
 }
 
-/// fxdax: ESTALE for a follower that follows no more, or was cut off, until it remounts: doc-4,
+/// cladefs: ESTALE for a follower that follows no more, or was cut off, until it remounts: doc-4,
 /// doc-8.
 fn stale(error: &Error) -> Option<Errno> {
     let stale =
@@ -316,7 +316,7 @@ pub unsafe extern "C" fn fxfs_unmount(fs: *mut Fxfs) {
     block_on(fs.unmount());
 }
 
-/// fxdax: fault injection (TASK-164.2): the next `count` of `fxfs_write_many`'s transactions fail
+/// cladefs: fault injection (TASK-164.2): the next `count` of `fxfs_write_many`'s transactions fail
 /// once their blocks are written, before they commit
 /// (`fxfs::object_store::data_object_handle::FAIL_COMMITS`).
 #[unsafe(no_mangle)]
@@ -325,7 +325,7 @@ pub extern "C" fn fxfs_set_fail_commits(count: u64) {
         .store(count, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// fxdax: whether a volume mounted on `filesystem` follows its device's writer.
+/// cladefs: whether a volume mounted on `filesystem` follows its device's writer.
 ///
 /// # Safety
 ///
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn fxfs_filesystem_follows(filesystem: *const Filesystem) 
     unsafe { (*filesystem).follows() }
 }
 
-/// fxdax: whether `fs` is mounted read-only, and whether it follows its device's writer.
+/// cladefs: whether `fs` is mounted read-only, and whether it follows its device's writer.
 ///
 /// # Safety
 ///
@@ -356,7 +356,7 @@ pub unsafe extern "C" fn fxfs_follows(fs: *const Fxfs) -> bool {
     unsafe { (*fs).follows() }
 }
 
-/// fxdax: a follower's batch (`Fxfs::follow`): 0, or a -errno.
+/// cladefs: a follower's batch (`Fxfs::follow`): 0, or a -errno.
 ///
 /// # Safety
 ///
@@ -370,7 +370,7 @@ pub unsafe extern "C" fn fxfs_follow(fs: *const Fxfs) -> c_int {
     }
 }
 
-/// fxdax: holds the file `ino`, which the kernel opens, on a follower (`Fxfs::hold`): 0, or a
+/// cladefs: holds the file `ino`, which the kernel opens, on a follower (`Fxfs::hold`): 0, or a
 /// -errno (-ENOENT if a batch deleted it).
 ///
 /// # Safety
@@ -385,7 +385,7 @@ pub unsafe extern "C" fn fxfs_hold(fs: *const Fxfs, ino: u64) -> c_int {
     }
 }
 
-/// fxdax: lets go of the file `ino`, which the kernel closes.
+/// cladefs: lets go of the file `ino`, which the kernel closes.
 ///
 /// # Safety
 ///
@@ -503,7 +503,7 @@ pub unsafe extern "C" fn fxfs_sync(fs: *const Fxfs) -> c_int {
     }
 }
 
-/// fxdax: freezes the filesystem (`Filesystem::freeze`).
+/// cladefs: freezes the filesystem (`Filesystem::freeze`).
 ///
 /// # Safety
 ///
@@ -518,7 +518,7 @@ pub unsafe extern "C" fn fxfs_freeze(filesystem: *const Filesystem) -> c_int {
     }
 }
 
-/// fxdax: thaws the filesystem (`Filesystem::thaw`): failing, it stays frozen, and the next thaw
+/// cladefs: thaws the filesystem (`Filesystem::thaw`): failing, it stays frozen, and the next thaw
 /// goes on from where this stopped.
 ///
 /// # Safety
@@ -534,20 +534,20 @@ pub unsafe extern "C" fn fxfs_thaw(filesystem: *const Filesystem) -> c_int {
     }
 }
 
-/// fxdax: fault injection (TASK-200): the next thaw fails before its step `step`, 1 telling the
+/// cladefs: fault injection (TASK-200): the next thaw fails before its step `step`, 1 telling the
 /// device, 2 renewing the journal's tail, 3 recording it; 0, none (`fs::FAIL_THAW_AT`).
 #[unsafe(no_mangle)]
 pub extern "C" fn fxfs_set_fail_thaw_at(step: u32) {
     fs::FAIL_THAW_AT.store(step, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// fxdax: the step the next thaw fails before (`fxfs_set_fail_thaw_at`): 0 once one has.
+/// cladefs: the step the next thaw fails before (`fxfs_set_fail_thaw_at`): 0 once one has.
 #[unsafe(no_mangle)]
 pub extern "C" fn fxfs_fail_thaw_at() -> u32 {
     fs::FAIL_THAW_AT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// fxdax: flushes the volume whole (`GuestFxfs::flush_volume`).
+/// cladefs: flushes the volume whole (`GuestFxfs::flush_volume`).
 ///
 /// # Safety
 ///
@@ -561,7 +561,7 @@ pub unsafe extern "C" fn fxfs_flush_volume(fs: *const Fxfs) -> c_int {
     }
 }
 
-/// fxdax: the volume's manifest (`GuestFxfs::manifest`), in `buf`: its size, or a -errno.
+/// cladefs: the volume's manifest (`GuestFxfs::manifest`), in `buf`: its size, or a -errno.
 ///
 /// # Safety
 ///
@@ -580,7 +580,7 @@ pub unsafe extern "C" fn fxfs_manifest(fs: *const Fxfs, buf: *mut u8, size: usiz
     }
 }
 
-/// fxdax: makes a volume over a base (`Filesystem::import`), named with the `len` bytes of `name`.
+/// cladefs: makes a volume over a base (`Filesystem::import`), named with the `len` bytes of `name`.
 ///
 /// # Safety
 ///
@@ -606,7 +606,7 @@ pub unsafe extern "C" fn fxfs_import(
     }
 }
 
-/// fxdax: seals what is open, as the host asks (`Filesystem::seal`).
+/// cladefs: seals what is open, as the host asks (`Filesystem::seal`).
 ///
 /// # Safety
 ///
@@ -621,7 +621,7 @@ pub unsafe extern "C" fn fxfs_seal(filesystem: *const Filesystem) -> c_int {
     }
 }
 
-/// fxdax: takes the size the host resized the store to (`Filesystem::resize`).
+/// cladefs: takes the size the host resized the store to (`Filesystem::resize`).
 ///
 /// # Safety
 ///
@@ -672,7 +672,7 @@ pub unsafe extern "C" fn fxfs_getattr(fs: *const Fxfs, ino: u64, attr: *mut Attr
     unsafe { write_attr(block_on(fs.reading(|| fs.attr_by_handle(ino))), attr) }
 }
 
-/// fxdax: the attributes of the object `ino`, as `fxfs_getattr`'s, but of one no name links too.
+/// cladefs: the attributes of the object `ino`, as `fxfs_getattr`'s, but of one no name links too.
 ///
 /// # Safety
 ///
@@ -685,7 +685,7 @@ pub unsafe extern "C" fn fxfs_attr_of_open(fs: *const Fxfs, ino: u64, attr: *mut
     unsafe { write_attr(block_on(fs.reading(|| fs.attr(ino))), attr) }
 }
 
-/// fxdax: how far the journal is written (`Journal::file_offset`).
+/// cladefs: how far the journal is written (`Journal::file_offset`).
 ///
 /// # Safety
 ///
@@ -755,7 +755,7 @@ pub unsafe extern "C" fn fxfs_create(
     }
 }
 
-/// fxdax: an extended attribute a new object is made with (`fxfs_create`), as C has it
+/// cladefs: an extended attribute a new object is made with (`fxfs_create`), as C has it
 /// (`struct fxfs_xattr`).
 #[repr(C)]
 pub struct Xattr {
@@ -949,7 +949,7 @@ pub unsafe extern "C" fn fxfs_cached_objects(fs: *const Fxfs) -> u64 {
     unsafe { (*fs).cached() }
 }
 
-/// fxdax: writes what the filesystem waited on, and its device's requests took
+/// cladefs: writes what the filesystem waited on, and its device's requests took
 /// (`Filesystem::stats`), as text, into the `len` bytes at `buf`, as much of it as fits; returns
 /// how long it is.
 ///
@@ -1072,7 +1072,7 @@ pub unsafe extern "C" fn fxfs_write_many(
     }
 }
 
-/// fxdax: reserves room for `bytes` more of the file `ino`'s data, which the page cache dirties:
+/// cladefs: reserves room for `bytes` more of the file `ino`'s data, which the page cache dirties:
 /// 0, or -ENOSPC if the filesystem hasn't it (TASK-80).
 ///
 /// # Safety
@@ -1087,7 +1087,7 @@ pub unsafe extern "C" fn fxfs_reserve_dirty(fs: *const Fxfs, ino: u64, bytes: u6
     }
 }
 
-/// fxdax: reserves what room the filesystem has for `bytes` more of the file `ino`'s data, which
+/// cladefs: reserves what room the filesystem has for `bytes` more of the file `ino`'s data, which
 /// the page cache dirtied whether it has or not.
 ///
 /// # Safety
@@ -1099,7 +1099,7 @@ pub unsafe extern "C" fn fxfs_reserve_dirty_what_fits(fs: *const Fxfs, ino: u64,
     unsafe { &*fs }.reserve_dirty_what_fits(ino, bytes)
 }
 
-/// fxdax: releases the room of `bytes` of the file `ino`'s dirty data, which the page cache
+/// cladefs: releases the room of `bytes` of the file `ino`'s dirty data, which the page cache
 /// dropped unwritten.
 ///
 /// # Safety

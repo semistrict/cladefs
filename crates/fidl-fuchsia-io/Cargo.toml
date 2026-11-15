@@ -15,7 +15,7 @@ fidl.workspace = true
 futures.workspace = true
 zx.workspace = true
 
-# Synchronous proxies, which block on tokio, which the guest kernel (fxdax's TASK-26.6) has none of.
+# Synchronous proxies, which block on tokio, which the guest kernel (cladefs's TASK-26.6) has none of.
 [target.'cfg(not(target_os = "none"))'.dependencies]
 tokio.workspace = true
 

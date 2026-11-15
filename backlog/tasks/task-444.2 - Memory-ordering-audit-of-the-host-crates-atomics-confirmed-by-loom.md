@@ -4,6 +4,7 @@ title: 'Memory-ordering audit of the host crates atomics, confirmed by loom'
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:33'
+updated_date: '2026-11-15 13:31'
 labels: []
 dependencies: []
 references:
@@ -18,7 +19,7 @@ ordinal: 851000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Shuttle models every atomic as SeqCst (its docs; it warns at runtime), so no fxdax test can see an Acquire/Release/Relaxed bug. The host crates (fxdax, physmem, extent_store, extent_remote, follower, virtio_extent) hold ~450 non-SeqCst orderings (2026-11-15). LLMs reason poorly about weak memory (arXiv 2501.14326), so an audit alone is no evidence: loom (MIT) is the disposer. AtomVChecker classes: ordering too weak to publish related state; AtomicPtr data unsynchronised; stronger than needed.
+Shuttle models every atomic as SeqCst (its docs; it warns at runtime), so no cladefs test can see an Acquire/Release/Relaxed bug. The host crates (cladefs, physmem, extent_store, extent_remote, follower, virtio_extent) hold ~450 non-SeqCst orderings (2026-11-15). LLMs reason poorly about weak memory (arXiv 2501.14326), so an audit alone is no evidence: loom (MIT) is the disposer. AtomVChecker classes: ordering too weak to publish related state; AtomicPtr data unsynchronised; stronger than needed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

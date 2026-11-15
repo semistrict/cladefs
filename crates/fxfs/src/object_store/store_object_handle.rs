@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/store_object_handle.rs`. fxdax deviates from upstream
+// Fuchsia's `src/storage/fxfs/src/object_store/store_object_handle.rs`. cladefs deviates from upstream
 // here: data lives in extents of an extent store (backlog doc-4), which are written once, so
 // `multi_overwrite` writes to new blocks (`overwrite_with_new_blocks`) rather than in place, which
-// also keeps fxdax snapshots' shared blocks as they were. Reads of extents that may never have been
+// also keeps cladefs snapshots' shared blocks as they were. Reads of extents that may never have been
 // written (raw and preallocated, or overwrite extents none of whose blocks read is written) read
 // zeros if the store doesn't hold them. `multi_write_packed` packs small writes into the staging
 // extent, which other small writes share (`Allocator::allocate_shared`): a guest's writeback.
@@ -70,7 +70,7 @@ pub const MAX_INLINE_XATTR_SIZE: usize = 256;
 /// enforced.
 pub const MAX_XATTR_VALUE_SIZE: usize = 64000;
 
-/// fxdax: the most `read_attr` reads: merkle trees and extended attributes are far shorter.
+/// cladefs: the most `read_attr` reads: merkle trees and extended attributes are far shorter.
 const MAX_ATTRIBUTE_READ: u64 = 32 << 20;
 
 /// Zeroes blocks in 'buffer' based on `bitmap`, one bit per block from start of buffer.
@@ -382,7 +382,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     // Writes aligned data (that should already be encrypted) to the given offset in `extent` and
     // computes checksums if requested. The aligned data must be from a single logical file range.
     //
-    // fxdax: `options` are forwarded to the underlying device (e.g. `WriteFlags::PRE_BARRIER`), but
+    // cladefs: `options` are forwarded to the underlying device (e.g. `WriteFlags::PRE_BARRIER`), but
     // for their inline crypto, which `crypt_ctx` says.
     async fn write_aligned(
         &self,
@@ -563,7 +563,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok((aligned, aligned_buf))
     }
 
-    /// fxdax: reads into `aligned_buf`, for `range` aligned outwards, the blocks `range` covers in
+    /// cladefs: reads into `aligned_buf`, for `range` aligned outwards, the blocks `range` covers in
     /// part, its head and tail, as `align_buffer` does: what of them the attribute holds, and zeros
     /// past its end. Writing `range` there next makes the buffer what to write to the blocks.
     pub async fn read_unaligned_ends(
@@ -984,7 +984,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         self.read_aligned_locked(attribute_id, offset, buf).await
     }
 
-    /// fxdax: `read_aligned_unchecked`, by a caller whose transaction locks the object, which
+    /// cladefs: `read_aligned_unchecked`, by a caller whose transaction locks the object, which
     /// keeps its extents as they are: read as every read is, holes and blocks allocated and never
     /// written, which the device doesn't hold (backlog doc-4), as zeros. What a file's last block
     /// holds past its end is read so (`txn_zero_tail`): read from its extent alone, a block an
@@ -1048,7 +1048,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 ..
             }) if *object_id == self.object_id => {
                 // TODO(https://fxbug.dev/42073113): size > max buffer size
-                // fxdax: the size is what an image says, which may be more than a device's
+                // cladefs: the size is what an image says, which may be more than a device's
                 // transfer buffer could ever hold, however long this waited for it.
                 ensure!(*size <= MAX_ATTRIBUTE_READ, FxfsError::Inconsistent);
                 (
@@ -1160,7 +1160,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                 }
                 _ => None,
             };
-            // fxdax: an extent may never have been written, when it is raw, as preallocated ones
+            // cladefs: an extent may never have been written, when it is raw, as preallocated ones
             // are, or none of what is read of it is written yet. The store then doesn't hold it
             // (backlog doc-4), and it reads as zeros.
             let may_be_unwritten = match (mode, &maybe_bitmap) {
@@ -1241,7 +1241,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     }
 
     /// Same as `write_at`, but allows passing `WriteOptions` (such as `WriteFlags::PRE_BARRIER`) to
-    /// the underlying device write. fxdax: upstream's `write_at_with_flags`, which passes flags
+    /// the underlying device write. cladefs: upstream's `write_at_with_flags`, which passes flags
     /// alone.
     pub async fn write_at_with_options(
         &self,
@@ -1302,7 +1302,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
 
     /// This is a low-level write function that writes to multiple ranges. Users should generally
     /// use `multi_write` instead of this function as this does not update the object's allocated
-    /// size, mtime, atime, etc. fxdax: if `packed`, a write of at most STAGED_MAX bytes takes its
+    /// size, mtime, atime, etc. cladefs: if `packed`, a write of at most STAGED_MAX bytes takes its
     /// blocks of the staging extent (`multi_write_packed`).
     ///
     /// Returns (allocated, deallocated) bytes on success.
@@ -1515,7 +1515,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         self.multi_write_allocating(transaction, attribute_id, key_id, ranges, buf, false).await
     }
 
-    /// fxdax: as `multi_write`, but a write of at most STAGED_MAX bytes takes its blocks of the
+    /// cladefs: as `multi_write`, but a write of at most STAGED_MAX bytes takes its blocks of the
     /// staging extent, which other small writes share (`Allocator::allocate_shared`, the
     /// allocator's "Shared extents"), so that a directory of small files doesn't take an extent
     /// each, nor a DAX window a MAP each to read them. The staging extent may be sealed between the
@@ -1554,7 +1554,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
     /// Write data to overwrite extents with the provided set of ranges. This makes a strong
     /// assumption that the ranges are actually going to be already allocated overwrite extents and
     /// will error out or do something wrong if they aren't. It also assumes the ranges passed to
-    /// it are sorted. fxdax: nothing is written in place, as extents are written once (backlog
+    /// it are sorted. cladefs: nothing is written in place, as extents are written once (backlog
     /// doc-4): what is written goes to new blocks, which replace the ranges' in the extent records,
     /// as overwrite extents, and the old blocks are deallocated, unless a snapshot shares them.
     pub async fn multi_overwrite<'a>(
@@ -1724,7 +1724,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok(())
     }
 
-    /// fxdax: writes `buf` to the attribute at `offset`, where its overwrite extent holds the range
+    /// cladefs: writes `buf` to the attribute at `offset`, where its overwrite extent holds the range
     /// `old_device_range` (see `multi_overwrite`): to new blocks, which replace that range in the
     /// extent, fully written, and deallocates it, unless a snapshot shares it. Returns the
     /// checksums of what it wrote, which are first writes.
@@ -1922,7 +1922,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
                     ObjectKey { object_id, data: ObjectKeyData::ExtendedAttribute { name } }
                         if *object_id == self.object_id() =>
                     {
-                        // fxdax: a long symlink target's chunks are no attributes of the user's.
+                        // cladefs: a long symlink target's chunks are no attributes of the user's.
                         if !name.starts_with(super::directory::LONG_SYMLINK_XATTR) {
                             out.push(name.clone());
                         }
@@ -2004,7 +2004,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         Ok(())
     }
 
-    /// fxdax: public, to set an extended attribute in a transaction of the caller's: a new
+    /// cladefs: public, to set an extended attribute in a transaction of the caller's: a new
     /// object's, which its ACLs are made in with it (fxfs-posix's `create`), or one whose room
     /// the caller chooses.
     pub async fn set_extended_attribute_impl(
@@ -2128,7 +2128,7 @@ impl<S: HandleOwner> StoreObjectHandle<S> {
         self.remove_extended_attribute_with_options(name, Options::default()).await
     }
 
-    /// fxdax: `remove_extended_attribute`, its transaction's room as `options` say: borrowed, as
+    /// cladefs: `remove_extended_attribute`, its transaction's room as `options` say: borrowed, as
     /// what frees space works on a full filesystem (fxfs-posix's `remove_xattr`).
     pub async fn remove_extended_attribute_with_options(
         &self,
@@ -2256,7 +2256,7 @@ mod tests {
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
     const TEST_OBJECT_NAME: &str = "foo";
 
-    /// fxdax: an attribute's size is what an image says: a size past what a transfer buffer could
+    /// cladefs: an attribute's size is what an image says: a size past what a transfer buffer could
     /// ever hold fails a read.
     #[fuchsia::test]
     async fn test_reads_of_what_an_image_says() {
@@ -2994,7 +2994,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a trim of an object looks for its next attribute, and past the last it finds the
+    /// cladefs: a trim of an object looks for its next attribute, and past the last it finds the
     /// object's extended attributes, which end the walk: stepping over them, from one attribute ID
     /// to the next, the graveyard's task never ended.
     #[fuchsia::test]

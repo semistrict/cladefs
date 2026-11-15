@@ -90,7 +90,7 @@ struct Inner {
     // the same as the start offset for the next transaction because of padding.
     last_end_offset: u64,
 
-    // fxdax: what the last transaction applied took of the journal, as it was charged: from the
+    // cladefs: what the last transaction applied took of the journal, as it was charged: from the
     // last's end, past the padding before it that the journal's own transaction accounted for.
     last_journal_usage: u64,
 
@@ -98,7 +98,7 @@ struct Inner {
     // eventually it will be recovered (potentially after a full compaction).
     borrowed_metadata_space: u64,
 
-    // fxdax: `borrowed_metadata_space` as replay found it, before the mount's own transactions: what
+    // cladefs: `borrowed_metadata_space` as replay found it, before the mount's own transactions: what
     // the filesystem had borrowed when it stopped, if nothing was lost (TASK-218).
     borrowed_as_replayed: u64,
 
@@ -121,7 +121,7 @@ impl Inner {
         self.reservations.values().max().unwrap_or(&0)
 
         // Account for data that has been written to the journal that will need to be written
-        // to layer files when flushed. fxdax: there is none if the earliest is ahead of what's been
+        // to layer files when flushed. cladefs: there is none if the earliest is ahead of what's been
         // accounted for, as a mount's renewal of the journal's tail, its first transaction, is of
         // a journal compacted clean, with what a replay discarded behind it.
             + self.earliest_journal_offset()
@@ -256,7 +256,7 @@ impl ObjectManager {
             }
         }
 
-        // fxdax: replay opened those with something in the journal, which lazily are all that open.
+        // cladefs: replay opened those with something in the journal, which lazily are all that open.
         if !root_store.filesystem().options().lazy_volumes {
             let object_ids = list_volumes(self.volume_directory.get().unwrap())
                 .await
@@ -408,7 +408,7 @@ impl ObjectManager {
 
         for (object_id, mutation) in mutations {
             if let Mutation::UpdateBorrowed { borrowed, from, paid } = mutation {
-                // fxdax: as the transaction borrowed live (`did_commit_transaction`): what its
+                // cladefs: as the transaction borrowed live (`did_commit_transaction`): what its
                 // reservation didn't pay of its usage from `from`, which replay can't tell from
                 // where the last it replayed ended, as a transaction paying for padding writes
                 // nothing to the journal (TASK-218).
@@ -439,7 +439,7 @@ impl ObjectManager {
         Ok(())
     }
 
-    /// fxdax: opens the volume `object_id`, if it stayed closed (`Options::lazy_volumes`), while
+    /// cladefs: opens the volume `object_id`, if it stayed closed (`Options::lazy_volumes`), while
     /// transactions commit: no commit finds what it requires changed. A closed volume wasn't
     /// counted in the metadata reservation, which pays for compacting the largest, so what it
     /// adds is reserved now, or it stays closed. Its graveyard is reaped as mounting does.
@@ -470,7 +470,7 @@ impl ObjectManager {
         Ok(())
     }
 
-    /// fxdax: closes the volume `object_id` again (`Options::lazy_volumes`), once nothing has it
+    /// cladefs: closes the volume `object_id` again (`Options::lazy_volumes`), once nothing has it
     /// open: what it holds in memory goes, its layers stay, and `open_volume` opens it again
     /// (backlog doc-10, an idle repo's mount expiring, TASK-136.6). What the journal holds of it
     /// is flushed into its layers first, which then hold all it has; on a read-only filesystem,
@@ -509,7 +509,7 @@ impl ObjectManager {
         Ok(())
     }
 
-    /// fxdax: how many volumes are open: not the root store's (`close_volume`).
+    /// cladefs: how many volumes are open: not the root store's (`close_volume`).
     pub fn open_volumes(&self) -> usize {
         let inner = self.inner.read();
         let system = [inner.root_store_object_id, inner.root_parent_store_object_id];
@@ -573,7 +573,7 @@ impl ObjectManager {
                 inner.borrowed_metadata_space =
                     inner.borrowed_metadata_space.saturating_sub(sub - add);
             }
-            // fxdax: with what replay needs to find what the transaction borrows of its own usage,
+            // cladefs: with what replay needs to find what the transaction borrows of its own usage,
             // which `did_commit_transaction` adds: where it counts it from, and what of it the
             // transaction's reservation pays, which is untouched until then.
             let paid = match &transaction.metadata_reservation {
@@ -617,7 +617,7 @@ impl ObjectManager {
             MetadataReservation::None => unreachable!(),
             MetadataReservation::Borrowed | MetadataReservation::Borrowing(_) => {
                 // Account for the amount we need to borrow for the transaction itself now that we
-                // know the transaction size: fxdax, what its reservation doesn't pay for, if it has
+                // know the transaction size: cladefs, what its reservation doesn't pay for, if it has
                 // one.
                 let paid = match &transaction.metadata_reservation {
                     MetadataReservation::Borrowing(txn_reservation) => {
@@ -638,7 +638,7 @@ impl ObjectManager {
                 }
             }
             MetadataReservation::Hold(hold_amount) => {
-                // Transfer reserved space into the metadata reservation. fxdax: as for
+                // Transfer reserved space into the metadata reservation. cladefs: as for
                 // `MetadataReservation::Reservation` below, a release build borrows what the hold
                 // doesn't cover rather than panic; it commits only what the hold has, which its
                 // reservation counts as reserved (TASK-60).
@@ -672,7 +672,7 @@ impl ObjectManager {
                 }
             }
             MetadataReservation::Reservation(txn_reservation) => {
-                // Transfer reserved space into the metadata reservation. fxdax: a transaction larger
+                // Transfer reserved space into the metadata reservation. cladefs: a transaction larger
                 // than it reserved for is a bug, which debug builds panic on, to find it; a release
                 // build borrows what it doesn't hold, which compacting the journal repays, rather
                 // than take the guest's kernel down with it (TASK-58, TASK-60).
@@ -786,7 +786,7 @@ impl ObjectManager {
         self.inner.read().journaling_object(object_id)
     }
 
-    /// fxdax: whether the object `object_id` writes its mutations as they are
+    /// cladefs: whether the object `object_id` writes its mutations as they are
     /// (`JournalingObject::writes_mutations_as_they_are`).
     pub fn writes_mutations_as_they_are(&self, object_id: u64) -> bool {
         self.journaling_object(object_id)
@@ -852,7 +852,7 @@ impl ObjectManager {
         self.inner.read().last_end_offset
     }
 
-    /// fxdax: what the last transaction applied took of the journal, as its reservation was
+    /// cladefs: what the last transaction applied took of the journal, as its reservation was
     /// charged (`did_commit_transaction`).
     pub fn last_journal_usage(&self) -> u64 {
         self.inner.read().last_journal_usage
@@ -866,7 +866,7 @@ impl ObjectManager {
         self.inner.read().borrowed_metadata_space
     }
 
-    /// fxdax: the metadata space borrowed as replay found it, before the mount's own transactions:
+    /// cladefs: the metadata space borrowed as replay found it, before the mount's own transactions:
     /// what the filesystem had borrowed when it stopped, unless a crash lost some of what it did.
     pub fn borrowed_as_replayed(&self) -> u64 {
         self.inner.read().borrowed_as_replayed
@@ -943,7 +943,7 @@ impl ObjectManager {
         self.unaccounted_journal(checkpoint) > 256
     }
 
-    /// fxdax: how much of the journal, up to `checkpoint`, no transaction has paid for yet: what
+    /// cladefs: how much of the journal, up to `checkpoint`, no transaction has paid for yet: what
     /// the next must.
     pub fn unaccounted_journal(&self, checkpoint: u64) -> u64 {
         checkpoint.checked_sub(self.inner.read().last_end_offset).unwrap()

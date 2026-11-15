@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: '2026-10-31 22:17'
-updated_date: '2026-11-13 00:03'
+updated_date: '2026-11-15 11:34'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -67,8 +67,8 @@ it stays within the bound.
 | extentd killed | what was ordered within the crash bound (1 s) may go, its records unwritten; a prefix stays, a file whose fsync returned in that time found short or empty at worst. The VM exits 158 | kept | fxfs-guest-crash-dax-daemon-killed (1 of 296 files told of went, GCE r342), fxfs-guest-daemon-lost |
 | Host reboot or kernel crash, disk kept | what was ordered within the crash bound may go; a prefix stays | kept | **nothing: no test loses a host's page cache (TASK-67)** |
 | Host lost, disk with it, with a remote | the unuploaded lag goes; a prefix stays | kept | the simulation (doc-7, `crashes_anywhere`); **no guest test (TASK-67)** |
-| Host lost, without a remote | everything goes | everything goes | not a recovery case: a store with no remote, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; extentd refuses to start without a remote (`FXDAX_EXTENTD_REMOTE`, TASK-45) |
-| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_remote's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); fxdax's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: fxdax's `extentd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
+| Host lost, without a remote | everything goes | everything goes | not a recovery case: a store with no remote, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; extentd refuses to start without a remote (`CLADEFS_EXTENTD_REMOTE`, TASK-45) |
+| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_remote's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `extentd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
 
 Every row keeps ordering: what survives is a prefix of the commits, never a later commit without an
 earlier one. Filesystems recover by replaying their journal to that prefix. Open-but-unnamed files
@@ -102,12 +102,12 @@ are freed as the store is next mounted.
   starts, a warning naming the bucket's own error (a file bucket's `No space left on device`,
   S3's `AccessDenied`), then every 30 s with how many failed, and as it answers again
   (`extent_remote::store`, `FAILING_EVERY`); counts them by kind (the stats line's `failed-NAME`,
-  GetStats' `ObjectStorageStats.failures`, the metric `fxdax_extentd_object_storage_failures_total`),
+  GetStats' `ObjectStorageStats.failures`, the metric `cladefs_extentd_object_storage_failures_total`),
   beside how long each store's oldest commit has waited for its upload
-  (`fxdax_extentd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
+  (`cladefs_extentd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
   commit first waits at the bound. *Added 2026-11-10 (TASK-317):* meanwhile extentd's memory does
   not grow with what waits, which is on the host's disk: what it holds of it is what it uploads at
-  once, its upload memory (`FXDAX_EXTENTD_UPLOAD_MEMORY`, 512 MiB), and it gives back what it
+  once, its upload memory (`CLADEFS_EXTENTD_UPLOAD_MEMORY`, 512 MiB), and it gives back what it
   frees (doc-7, Uploads, Memory). Before, a backlog held its uploads twice and the allocator kept
   what it freed, 4-6 GB of anonymous memory, and the host's OOM killer took the daemon, every VM
   it served with it.

@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the errnos a VFS gives for Fxfs's errors, the guest kernel's (guest/rust/fxfs-linux)
-//! and the host's (crates/fxdax) alike: one table of [`FxfsError`]'s, and one rule for which of
+//! cladefs: the errnos a VFS gives for Fxfs's errors, the guest kernel's (guest/rust/fxfs-linux)
+//! and the host's (crates/cladefs) alike: one table of [`FxfsError`]'s, and one rule for which of
 //! an error's it is classified by ([`errno`]).
 
 use anyhow::Error;
@@ -202,7 +202,7 @@ fn errno_of_call(error: &Error, call: Call) -> Errno {
     errno
 }
 
-/// fxdax: `error`, of a storage device that failed a request with `errno`, as [`errno`] is to
+/// cladefs: `error`, of a storage device that failed a request with `errno`, as [`errno`] is to
 /// classify it: ENOMEM, the request's memory not found, as itself, no I/O having failed (a
 /// guest's allocation, as its kernel's fault injection fails them, came to EIO: GCE r694,
 /// TASK-44.15); any other as `error` holds it, which is EIO unless it holds an errno or an

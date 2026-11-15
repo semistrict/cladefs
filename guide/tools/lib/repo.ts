@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,9 +10,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Origin } from "../../src/data/types.ts";
 
-/** The repo's root: the guide lives in its `guide/`, unless FXDAX_REPO names another. */
+/** The repo's root: the guide lives in its `guide/`, unless CLADEFS_REPO names another. */
 export const REPO = resolve(
-  process.env.FXDAX_REPO ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
+  process.env.CLADEFS_REPO ?? join(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."),
 );
 
 /** The guide's own directory. */
@@ -20,16 +20,16 @@ export const GUIDE = resolve(dirname(fileURLToPath(import.meta.url)), "..", ".."
 
 /**
  * Where code comes from, as README's "Where the code comes from" sorts it:
- * - `fxdax`: fxdax's own;
- * - `ported`: fxdax's own code citing a Fuchsia source it ports or excerpts;
+ * - `cladefs`: cladefs's own;
+ * - `ported`: cladefs's own code citing a Fuchsia source it ports or excerpts;
  * - `fuchsia`: copied from Fuchsia, as upstream wrote it;
  * - `fuchsia-changed`: copied from Fuchsia, deviating from upstream as its leading comment says;
- * - `stand-in`: fxdax's stand-in for a crate only Fuchsia's build has.
+ * - `stand-in`: cladefs's stand-in for a crate only Fuchsia's build has.
  */
 export type { Origin };
 
 export const ORIGINS: readonly Origin[] = [
-  "fxdax",
+  "cladefs",
   "ported",
   "fuchsia-changed",
   "fuchsia",
@@ -59,7 +59,7 @@ export function standIns(repo = REPO): Set<string> {
       }
     }
   }
-  // zx-sys has no row: it is the syscalls fxdax defines none of, a stand-in all the same.
+  // zx-sys has no row: it is the syscalls cladefs defines none of, a stand-in all the same.
   if (existsSync(join(repo, "crates", "zx-sys"))) names.add("zx-sys");
   return names;
 }
@@ -84,30 +84,30 @@ export function crateOrigins(repo = REPO): Map<string, Origin> {
     const manifest = join(repo, "crates", name, "Cargo.toml");
     if (!existsSync(manifest)) continue;
     if (stand.has(name)) origins.set(name, "stand-in");
-    else origins.set(name, CITATION.test(readFileSync(manifest, "utf8")) ? "fuchsia" : "fxdax");
+    else origins.set(name, CITATION.test(readFileSync(manifest, "utf8")) ? "fuchsia" : "cladefs");
   }
   return origins;
 }
 
 /**
  * A file's origin: its crate's, refined by its leading comment. In a crate copied from Fuchsia,
- * a file under fxdax's copyright is fxdax's own, and one under Fuchsia's whose leading comment
- * names fxdax deviates from upstream; in fxdax's crates, a file citing a Fuchsia source ports it.
+ * a file under cladefs's copyright is cladefs's own, and one under Fuchsia's whose leading comment
+ * names cladefs deviates from upstream; in cladefs's crates, a file citing a Fuchsia source ports it.
  */
 export function fileOrigin(crate: Origin, text: string): Origin {
   const head = leadingComment(text);
   if (crate === "fuchsia") {
-    if (head.includes("The fxdax Authors")) return "fxdax";
-    return head.includes("fxdax") ? "fuchsia-changed" : "fuchsia";
+    if (head.includes("The cladefs Authors")) return "cladefs";
+    return head.includes("cladefs") ? "fuchsia-changed" : "fuchsia";
   }
-  if (crate === "fxdax" && CITATION.test(head)) return "ported";
+  if (crate === "cladefs" && CITATION.test(head)) return "ported";
   return crate;
 }
 
 /** The origin of the file at `path`, relative to the repo. */
 export function originOf(path: string, crates: Map<string, Origin>, repo = REPO): Origin {
   const match = /^crates\/([^/]+)\//.exec(path);
-  const crate = match ? (crates.get(match[1]) ?? "fxdax") : "fxdax";
+  const crate = match ? (crates.get(match[1]) ?? "cladefs") : "cladefs";
   return fileOrigin(crate, readFileSync(join(repo, path), "utf8"));
 }
 

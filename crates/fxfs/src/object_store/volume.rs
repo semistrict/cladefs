@@ -2,13 +2,13 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/volume.rs`. fxdax's additions are in child modules,
+// Fuchsia's `src/storage/fxfs/src/object_store/volume.rs`. cladefs's additions are in child modules,
 // impl blocks of their own, so that this file keeps upstream's shape (TASK-160.24): `snapshot`
 // (`RootVolume::snapshot_volume`, volume snapshots that share their source's layers and
 // extents) and `base` (`RootVolume::publish_volume` and `new_volume_over_base`, a volume of one
 // another filesystem wrote, backlog doc-10). Deleting a volume releases its layers by reference
 // count, and locks them. There is no `install_volume` (nor `replace_volume`, which it used): an
-// image within a file is a block device's, which fxdax's extent store has none of (backlog
+// image within a file is a block device's, which cladefs's extent store has none of (backlog
 // doc-4). `RootVolume::volume` opens a volume left closed (`Options::lazy_volumes`).
 
 use crate::errors::FxfsError;
@@ -31,7 +31,7 @@ use std::sync::Arc;
 // volume stores references to all other volumes on the system (as volumes/foo, volumes/bar, ...).
 // For now, this hierarchy is only one deep.
 
-// fxdax: its additions (TASK-160.24).
+// cladefs: its additions (TASK-160.24).
 mod base;
 #[cfg(test)]
 mod lazy;
@@ -126,7 +126,7 @@ impl RootVolume {
             ObjectDescriptor::Volume => (),
             _ => bail!(anyhow!(FxfsError::Inconsistent).context("Expected volume")),
         }
-        // Lookup the object store corresponding to the volume. fxdax: which may be closed.
+        // Lookup the object store corresponding to the volume. cladefs: which may be closed.
         if self.filesystem.options().lazy_volumes {
             self.filesystem.object_manager().open_volume(store_object_id).await?;
         }
@@ -209,7 +209,7 @@ impl RootVolume {
         let root_store = self.filesystem.root_store();
 
         // Delete all the layers and encrypted mutations stored in root_store for this volume.
-        // This includes the StoreInfo itself. fxdax: layers are deleted only once no other volume
+        // This includes the StoreInfo itself. cladefs: layers are deleted only once no other volume
         // shares them (see `snapshot_volume`).
         let mut parent_objects = load_store_info(&root_store, object_id).await?.parent_objects();
         parent_objects.push(object_id);
@@ -254,7 +254,7 @@ impl RootVolume {
                     // deleting the store will remove references to it from ObjectManager which are
                     // then updated by flushing.
                     lock_keys.push(LockKey::flush(object_id));
-                    // fxdax: and its layers are locked, as other volumes (snapshots) may share
+                    // cladefs: and its layers are locked, as other volumes (snapshots) may share
                     // them, and release them too.
                     let root_store = self.filesystem.root_store();
                     for layer in load_store_info(&root_store, object_id).await?.parent_objects() {

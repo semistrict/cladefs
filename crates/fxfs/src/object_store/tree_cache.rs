@@ -17,7 +17,7 @@ fn filter(key: &ObjectKey) -> bool {
         ObjectKeyData::Object => true,
         ObjectKeyData::ExtendedAttribute { .. } => true,
         ObjectKeyData::Keys => true,
-        // fxdax: names in directories neither encrypted nor case-insensitive, which lookups find
+        // cladefs: names in directories neither encrypted nor case-insensitive, which lookups find
         // exactly (`Directory::lookup_ext`), and the record of an object's data, which says its
         // size: a file's attributes are its object's and its data's. That record goes with its
         // object's (`invalidate`).
@@ -28,11 +28,11 @@ fn filter(key: &ObjectKey) -> bool {
 }
 
 // Limiting to ~100KiB of space usage. 56 bytes of linear overhead per item plus the overhead of
-// the structure. fxdax: the default, which a filesystem's options can change
+// the structure. cladefs: the default, which a filesystem's options can change
 // (`Options::object_cache_items`).
 pub(crate) const ITEM_LIMIT: usize = 1535;
 
-/// fxdax: how many shards, each with a lock and least-recently-used order of its own, a cache
+/// cladefs: how many shards, each with a lock and least-recently-used order of its own, a cache
 /// larger than `SHARD_ABOVE` items is split into, by its keys' hashes: threads changing a store at
 /// once otherwise all take one lock, around every lookup and change of its tree. A cache no larger
 /// is one, as upstream's.
@@ -41,7 +41,7 @@ const SHARD_ABOVE: usize = 16 * ITEM_LIMIT;
 
 type Shard = LinkedHashMap<ObjectKey, CacheValue, BuildHasherDefault<rustc_hash::FxHasher>>;
 
-/// fxdax: a cache's shards, and how many items they hold, all told, counted as they change, so
+/// cladefs: a cache's shards, and how many items they hold, all told, counted as they change, so
 /// that the count takes no lock: the kernel's superblock shrinker counts the cache under memory
 /// pressure (`TreeCache::len`), from an allocation that may be made under one of these locks,
 /// as `invalidate`'s insert is (TASK-292).
@@ -58,7 +58,7 @@ impl std::ops::Deref for Shards {
     }
 }
 
-/// fxdax: what the caches of a filesystem's stores share: they hold at most `limit` items, all
+/// cladefs: what the caches of a filesystem's stores share: they hold at most `limit` items, all
 /// told, whatever their number. Over it, a cache adding an item takes one from each of them in
 /// turn, its shards among them, each's least recently used: one little used empties as those used
 /// fill it up, which a store mounted and idle does (backlog doc-10).
@@ -158,7 +158,7 @@ impl<'a> ObjectCachePlaceholder<ObjectValue> for Placeholder<'a> {
             value @ Some(ObjectValue::Child(_)) => value.cloned(),
             value @ Some(ObjectValue::Attribute { .. }) => value.cloned(),
             value @ Some(ObjectValue::VerifiedAttribute { .. }) => value.cloned(),
-            // fxdax: there is none.
+            // cladefs: there is none.
             value @ Some(ObjectValue::None) => value.cloned(),
             _ => None,
         }
@@ -174,21 +174,21 @@ enum CacheValue {
 
 /// Supports caching for Objects directly for now. Speeds up stat calls.
 pub struct TreeCache {
-    /// fxdax: the cache's shards (`SHARDS`).
+    /// cladefs: the cache's shards (`SHARDS`).
     shards: Arc<Shards>,
     placeholder_counter: AtomicU64,
-    /// fxdax: how many items it may hold, with the others sharing it.
+    /// cladefs: how many items it may hold, with the others sharing it.
     budget: Arc<TreeCacheBudget>,
 }
 
 impl TreeCache {
-    /// fxdax: a cache of at most `limit` items (`ITEM_LIMIT` by default), which grows to that as
+    /// cladefs: a cache of at most `limit` items (`ITEM_LIMIT` by default), which grows to that as
     /// it fills.
     pub fn with_limit(limit: usize) -> Self {
         Self::sharing(&TreeCacheBudget::new(limit))
     }
 
-    /// fxdax: a cache sharing `budget` with the others on it, which grows as it fills.
+    /// cladefs: a cache sharing `budget` with the others on it, which grows as it fills.
     pub fn sharing(budget: &Arc<TreeCacheBudget>) -> Self {
         let shards = if budget.limit > SHARD_ABOVE { SHARDS } else { 1 };
         let shards = Arc::new(Shards {
@@ -237,7 +237,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
         match MutexGuard::try_map_or_err(inner, |inner| match inner.get_refresh(key) {
             Some(CacheValue::Value(v)) => Ok(v),
             Some(CacheValue::Placeholder(_)) => Err(false),
-            // fxdax: a name not cached isn't reserved: the kernel caches what its lookups of
+            // cladefs: a name not cached isn't reserved: the kernel caches what its lookups of
             // names find, and what they don't (dentries), and names are cached as they are
             // written (`invalidate`). A lookup of a missing name would make and drop a placeholder.
             None => Err(!matches!(key.data, ObjectKeyData::Child { .. })),
@@ -267,7 +267,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
         if !filter(key) {
             return;
         }
-        // fxdax: an object's record removed, or deleted, takes its other records with it, by
+        // cladefs: an object's record removed, or deleted, takes its other records with it, by
         // merging (a tombstone): its data's record goes from the cache too.
         if key.data == ObjectKeyData::Object
             && value.as_ref().is_none_or(|value| *value == ObjectValue::None)
@@ -284,7 +284,7 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
             if let Some(entry) = inner.get_mut(key) {
                 *entry = CacheValue::Value(replacement);
             } else {
-                // fxdax: a record written is cached too, as the kernel's caches keep what it
+                // cladefs: a record written is cached too, as the kernel's caches keep what it
                 // creates: the object a file just created is, say, which its unlink finds.
                 inner.insert(key.clone(), CacheValue::Value(replacement));
                 self.added(false);
@@ -304,12 +304,12 @@ impl ObjectCache<ObjectKey, ObjectValue> for TreeCache {
         }
     }
 
-    /// fxdax: counted, taking no shard's lock (`Shards`, TASK-292).
+    /// cladefs: counted, taking no shard's lock (`Shards`, TASK-292).
     fn len(&self) -> usize {
         self.shards.len.load(Ordering::Relaxed)
     }
 
-    /// fxdax: a shard at a time, round about, each's least recently used first, so that each
+    /// cladefs: a shard at a time, round about, each's least recently used first, so that each
     /// shrinks alike. A placeholder removed is completed to nothing (`Placeholder::replace_entry`).
     /// A shard whose lock is held is passed over: the kernel's shrinker asks this of an
     /// allocation that may be made under it, which would wait for itself (TASK-292).
@@ -376,13 +376,13 @@ mod tests {
         enforce_limit(ITEM_LIMIT);
     }
 
-    /// fxdax: a cache larger than the default keeps as many items as it was made for.
+    /// cladefs: a cache larger than the default keeps as many items as it was made for.
     #[fuchsia::test]
     async fn test_enforce_larger_limit() {
         enforce_limit(4 * ITEM_LIMIT);
     }
 
-    /// fxdax: a large cache, in shards, keeps at most as many items as it was made for, and what
+    /// cladefs: a large cache, in shards, keeps at most as many items as it was made for, and what
     /// was used last.
     #[fuchsia::test]
     async fn test_sharded_cache_limit() {
@@ -400,7 +400,7 @@ mod tests {
         assert_matches!(cache.lookup_or_reserve(&last), ObjectCacheResult::Value(_));
     }
 
-    /// fxdax: the cache is counted, and shrunk, with a shard's lock held, as the kernel's shrinker
+    /// cladefs: the cache is counted, and shrunk, with a shard's lock held, as the kernel's shrinker
     /// does both under memory pressure from an allocation made under it (`invalidate`'s insert):
     /// a count that took the lock waited for itself, and the guest hung (TASK-292). The count is
     /// the shards' items, all told, through what changes them.
@@ -431,7 +431,7 @@ mod tests {
         assert_eq!((cache.len(), held(&cache)), (in_shard, in_shard));
     }
 
-    /// fxdax: shrinking removes what was used least recently, and stops when the cache is empty;
+    /// cladefs: shrinking removes what was used least recently, and stops when the cache is empty;
     /// a cache in shards shrinks by as many.
     #[fuchsia::test]
     async fn test_shrink() {
@@ -530,7 +530,7 @@ mod tests {
     async fn test_is_cacheable() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
 
-        // Cacheable keys: Object, ExtendedAttribute, Keys, and fxdax: attributes' records
+        // Cacheable keys: Object, ExtendedAttribute, Keys, and cladefs: attributes' records
         assert!(cache.is_cacheable(&ObjectKey::object(1)));
         assert!(cache.is_cacheable(&ObjectKey::keys(1)));
         assert!(cache.is_cacheable(&ObjectKey::extended_attribute(1, vec![1, 2, 3])));
@@ -615,7 +615,7 @@ mod tests {
         };
     }
 
-    /// fxdax: a name in a directory neither encrypted nor case-insensitive is cached as it is
+    /// cladefs: a name in a directory neither encrypted nor case-insensitive is cached as it is
     /// written, not as a lookup misses it, and forgotten once removed; others aren't, which
     /// lookups don't find exactly.
     #[fuchsia::test]
@@ -642,7 +642,7 @@ mod tests {
         assert!(!cache.is_cacheable(&ObjectKey::encrypted_child(1, vec![1, 2, 3], None)));
     }
 
-    /// fxdax: that there is no item is cached too, until one is inserted.
+    /// cladefs: that there is no item is cached too, until one is inserted.
     #[fuchsia::test]
     async fn test_absence_is_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);
@@ -666,7 +666,7 @@ mod tests {
         };
     }
 
-    /// fxdax: an object's tombstone, which deletes its other records by merging, takes its
+    /// cladefs: an object's tombstone, which deletes its other records by merging, takes its
     /// data's record from the cache too.
     #[fuchsia::test]
     async fn test_object_tombstone_takes_its_data_record() {
@@ -690,7 +690,7 @@ mod tests {
         };
     }
 
-    /// fxdax: caches sharing a budget hold no more than it, all told, and one used takes the
+    /// cladefs: caches sharing a budget hold no more than it, all told, and one used takes the
     /// room of one that isn't, which empties; one dropped gives its room back.
     #[fuchsia::test]
     async fn test_shared_budget() {
@@ -718,7 +718,7 @@ mod tests {
         assert_eq!(idle.len(), ITEM_LIMIT);
     }
 
-    /// fxdax: a record written is cached, though not looked up before.
+    /// cladefs: a record written is cached, though not looked up before.
     #[fuchsia::test]
     async fn test_written_records_are_cached() {
         let cache = TreeCache::with_limit(ITEM_LIMIT);

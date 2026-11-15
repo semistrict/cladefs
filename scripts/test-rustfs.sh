@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -13,8 +13,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 source "$root/scripts/lib/rustfs.sh"
 rustfs_start
 trap rustfs_stop EXIT
-FXDAX_S3_URL=s3://fxdax/test cargo nextest run --manifest-path "$root/Cargo.toml" \
-    -p extent_remote -p fxdax --run-ignored only -E 'test(/rustfs/)' "$@"
+CLADEFS_S3_URL=s3://cladefs/test cargo nextest run --manifest-path "$root/Cargo.toml" \
+    -p extent_remote -p cladefs --run-ignored only -E 'test(/rustfs/)' "$@"
 # The collector, over what the tests left.
-cargo run --quiet --manifest-path "$root/Cargo.toml" -p extent_remote --bin fxdax-gc -- \
-    s3://fxdax/test --grace 0
+cargo run --quiet --manifest-path "$root/Cargo.toml" -p extent_remote --bin cladefs-gc -- \
+    s3://cladefs/test --grace 0

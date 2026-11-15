@@ -1,18 +1,18 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a bucket as a degraded one is, between a store and its objects ([`Faulty`]): each
+//! cladefs: a bucket as a degraded one is, between a store and its objects ([`Faulty`]): each
 //! request waits so long first, and fails as it is told, its writes as a full disk's do or every
 //! request as an object store out of service answers, until it is told otherwise (TASK-330.3).
 //! What a host's daemon does meanwhile, its memory, its stalled commits and what it says of the
 //! failures, is what a soak against it measures; how far a bucket is, its latency, what LangSmith's
-//! RustFS beside the daemon on a shared disk was (TASK-310), and what `FXDAX_REMOTE_LATENCY_MS`
+//! RustFS beside the daemon on a shared disk was (TASK-310), and what `CLADEFS_REMOTE_LATENCY_MS`
 //! set alone before.
 //!
 //! A bucket made from a URL ([`crate::store::object_store_at`]) is one, if its process's
-//! environment says so: `FXDAX_REMOTE_LATENCY_MS`, milliseconds each request waits, as long as the
-//! process lives (TASK-62); `FXDAX_REMOTE_FAULTS`, a file of what it does now, read again within
+//! environment says so: `CLADEFS_REMOTE_LATENCY_MS`, milliseconds each request waits, as long as the
+//! process lives (TASK-62); `CLADEFS_REMOTE_FAULTS`, a file of what it does now, read again within
 //! [`READ_EVERY`] of each change, for a test to change as it runs: [`Fault::parse`]'s words, such
 //! as `latency-ms=300 failing=no-space`, none for a bucket that answers. Neither set, a bucket is
 //! the object store itself: nothing of this is in its requests' way.
@@ -106,9 +106,9 @@ impl Fault {
 /// What a bucket's faults are now: a fault set, and what a file says, as of when it was last read.
 #[derive(Debug)]
 pub struct Faults {
-    /// What every request waits besides, as long as these live (`FXDAX_REMOTE_LATENCY_MS`).
+    /// What every request waits besides, as long as these live (`CLADEFS_REMOTE_LATENCY_MS`).
     latency: Duration,
-    /// The file it reads its fault from, if any (`FXDAX_REMOTE_FAULTS`).
+    /// The file it reads its fault from, if any (`CLADEFS_REMOTE_FAULTS`).
     file: Option<std::path::PathBuf>,
     now: Mutex<Now>,
 }
@@ -130,13 +130,13 @@ impl Faults {
 
     /// The faults the process's environment says ([`self`]), if it says any.
     pub(crate) fn from_env() -> Result<Option<Arc<Self>>, String> {
-        let latency = match std::env::var("FXDAX_REMOTE_LATENCY_MS") {
+        let latency = match std::env::var("CLADEFS_REMOTE_LATENCY_MS") {
             Ok(ms) if !ms.is_empty() => Duration::from_millis(
-                ms.parse().map_err(|_| format!("FXDAX_REMOTE_LATENCY_MS={ms} is no count"))?,
+                ms.parse().map_err(|_| format!("CLADEFS_REMOTE_LATENCY_MS={ms} is no count"))?,
             ),
             _ => Duration::ZERO,
         };
-        let file = std::env::var_os("FXDAX_REMOTE_FAULTS").filter(|file| !file.is_empty());
+        let file = std::env::var_os("CLADEFS_REMOTE_FAULTS").filter(|file| !file.is_empty());
         if latency.is_zero() && file.is_none() {
             return Ok(None);
         }
@@ -347,7 +347,7 @@ mod tests {
         let listed: Vec<_> = store.list(None).collect().await;
         assert_eq!(listed.len(), 1);
         assert!(listed[0].is_err());
-        // fxdax: listings by delimiter and batches of deletes fail as every request (TASK-395.5).
+        // cladefs: listings by delimiter and batches of deletes fail as every request (TASK-395.5).
         let unavailable =
             "Generic Faulty error: HTTP status server error (503 Service Unavailable)";
         let level = store.list_with_delimiter(None).await.unwrap_err();

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,14 +7,14 @@
 
 use super::*;
 
-use crate::common::{fxdax_guest_should_run, guest_kernel_slowness, setup_rootfs};
+use crate::common::{cladefs_guest_should_run, guest_kernel_slowness, setup_rootfs};
 use crate::script::{self, Failure};
 use crate::script_vm::{self, Replays};
 use crate::vm::{Vm, without_kernel_lines};
 use crate::{ShouldRun, Test, TestOutcome, TestSetup};
 use anyhow::Context;
 use futures::executor::block_on;
-use fxdax::{Attr, Filesystem, Node, Owner, Storage};
+use cladefs::{Attr, Filesystem, Node, Owner, Storage};
 use std::path::Path;
 use std::time::Duration;
 
@@ -53,42 +53,42 @@ fn read_path(fs: &Filesystem, path: &str) -> Vec<u8> {
     buf
 }
 
-/// fxdax: the seed of a run's random choices (random_ops's operations, fxfs.dax_delay_us's
-/// delays): FXDAX_SEED's, to replay a run, or else a new one each run, which the run says
+/// cladefs: the seed of a run's random choices (random_ops's operations, fxfs.dax_delay_us's
+/// delays): CLADEFS_SEED's, to replay a run, or else a new one each run, which the run says
 /// (TASK-119.2).
 pub(crate) fn seed() -> u64 {
-    std::env::var("FXDAX_SEED").ok().and_then(|seed| seed.parse().ok()).unwrap_or_else(|| {
+    std::env::var("CLADEFS_SEED").ok().and_then(|seed| seed.parse().ok()).unwrap_or_else(|| {
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
         now.as_nanos() as u64 ^ u64::from(std::process::id()) << 32
     })
 }
 
-/// fxdax: what a run of the checks takes besides its checks: creating the image, booting, and
+/// cladefs: what a run of the checks takes besides its checks: creating the image, booting, and
 /// syncing as the guest ends.
 const SETUP: Duration = Duration::from_secs(30);
 
-/// fxdax: what the checks' budgets are scaled by where the daemon keeps their stores in a real
-/// bucket (`FXDAX_EXTENTD_REMOTE`): the most a check took of its budget on GCS, 3.3 times (GCE
+/// cladefs: what the checks' budgets are scaled by where the daemon keeps their stores in a real
+/// bucket (`CLADEFS_EXTENTD_REMOTE`): the most a check took of its budget on GCS, 3.3 times (GCE
 /// r980), and half that again (TASK-165.11).
 const REMOTE_SCALE: f64 = 5.0;
 
 impl TestFxfsGuestChecks {
-    /// fxdax: the checks a run is of, FXDAX_CHECKS's, as [`TestFxfsGuestChecks::checks`] has
+    /// cladefs: the checks a run is of, CLADEFS_CHECKS's, as [`TestFxfsGuestChecks::checks`] has
     /// them.
     fn only(&self) -> String {
-        std::env::var("FXDAX_CHECKS").unwrap_or_default()
+        std::env::var("CLADEFS_CHECKS").unwrap_or_default()
     }
 
-    /// fxdax: the run's checks, and what their budgets are scaled by: the guest kernel's
-    /// slowness, its storage's, and FXDAX_CHECKS_SCALE's, for a slower host (TASK-168). A real
+    /// cladefs: the run's checks, and what their budgets are scaled by: the guest kernel's
+    /// slowness, its storage's, and CLADEFS_CHECKS_SCALE's, for a slower host (TASK-168). A real
     /// bucket's, [`REMOTE_SCALE`], is measured: on GCS a check took at most 3.3 times its budget
     /// on a file bucket (GCE r980, TASK-165.11: append_writeback's 64 fdatasyncs, each a durable
     /// commit's create and lease read, 10.0 s of 3.0 s; torture 79 s of 38 s), against r353's
     /// twice, which four of them overran on GCS (r740).
     fn run(&self) -> anyhow::Result<(Vec<(usize, &'static Check)>, f64)> {
         let checks = self.checks(&self.only()).map_err(anyhow::Error::msg)?;
-        anyhow::ensure!(!checks.is_empty(), "FXDAX_CHECKS names none of this suite's checks");
-        let remote = std::env::var_os("FXDAX_EXTENTD_REMOTE").is_some_and(|r| !r.is_empty());
+        anyhow::ensure!(!checks.is_empty(), "CLADEFS_CHECKS names none of this suite's checks");
+        let remote = std::env::var_os("CLADEFS_EXTENTD_REMOTE").is_some_and(|r| !r.is_empty());
         let storage = if remote { REMOTE_SCALE } else { 1.0 };
         let given = match std::env::var(SCALE) {
             Ok(given) => given.parse().with_context(|| format!("{SCALE} is {given:?}"))?,
@@ -97,7 +97,7 @@ impl TestFxfsGuestChecks {
         Ok((checks, guest_kernel_slowness()? * storage * given))
     }
 
-    /// fxdax: what the guest says as the run ends: OK, or the checks that failed, those made to
+    /// cladefs: what the guest says as the run ends: OK, or the checks that failed, those made to
     /// fail alone ([`Suites::Failing`]).
     fn expected(&self, checks: &[(usize, &'static Check)]) -> String {
         let failing: Vec<&str> = (checks.iter())
@@ -111,7 +111,7 @@ impl TestFxfsGuestChecks {
         }
     }
 
-    /// fxdax: whether the guest's log, `log`, says that those of `checks` made to fail failed as
+    /// cladefs: whether the guest's log, `log`, says that those of `checks` made to fail failed as
     /// they were made to, by name, and that it put back what they left: the fault injection
     /// `crashes` set, the filesystem `hangs` froze (TASK-160.30). Each check's own line, after its
     /// time.
@@ -148,7 +148,7 @@ impl TestFxfsGuestChecks {
         Ok(())
     }
 
-    /// fxdax: what a replay of random_ops alone may take (`script_vm`).
+    /// cladefs: what a replay of random_ops alone may take (`script_vm`).
     fn random_ops_limit(&self) -> Duration {
         let scale = self.run().map_or(1.0, |(_, scale)| scale);
         let random_ops = CHECKS.iter().find(|check| check.name == "random_ops").unwrap();
@@ -158,10 +158,10 @@ impl TestFxfsGuestChecks {
 
 impl Test for TestFxfsGuestChecks {
     fn should_run(&self) -> ShouldRun {
-        fxdax_guest_should_run()
+        cladefs_guest_should_run()
     }
 
-    /// fxdax: a run's limit: [`SETUP`]; its checks' budgets, scaled, twice over, the second for
+    /// cladefs: a run's limit: [`SETUP`]; its checks' budgets, scaled, twice over, the second for
     /// what they wait for the host, which their budgets leave out but for a [`HOST_SCALE`]th of it
     /// (`guest::run`'s `Clock`, TASK-263); and the most one check may wait for the host,
     /// [`HOST_SCALE`] times the largest budget, so that the guest ends a check whose device never
@@ -178,7 +178,7 @@ impl Test for TestFxfsGuestChecks {
         (SETUP + sum * 2 + most.mul_f64(HOST_SCALE)).as_secs()
     }
 
-    /// fxdax: names the check the guest was in, after the last its log has the time of.
+    /// cladefs: names the check the guest was in, after the last its log has the time of.
     fn timed_out(self: Box<Self>, test_setup: TestSetup) -> Option<String> {
         let (checks, scale) = self.run().ok()?;
         let log = std::fs::read_to_string(test_setup.tmp_dir.join("log.txt")).ok()?;
@@ -196,10 +196,10 @@ impl Test for TestFxfsGuestChecks {
     }
 
     fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-        let image = test_setup.tmp_dir.join("fxdax.img");
+        let image = test_setup.tmp_dir.join("cladefs.img");
         create_image(&image)?;
-        // fxdax: a window as large as the data, or a small one's, that fills (-small); either
-        // FXDAX_DAX_WINDOW_MIB's if set (TASK-227).
+        // cladefs: a window as large as the data, or a small one's, that fills (-small); either
+        // CLADEFS_DAX_WINDOW_MIB's if set (TASK-227).
         let window = match (self.dax, self.small_window) {
             (false, _) => 0,
             (true, false) => crate::common::dax_window(crate::common::Window::Large)?,
@@ -207,15 +207,15 @@ impl Test for TestFxfsGuestChecks {
         };
         let mut vm = Vm::new(2, 512)?;
         vm.guest_kernel()?;
-        vm.extent_store("fxdax", &image, IMAGE_SIZE, window)?;
-        // FXDAX_CHECKS names the checks to run, separated by commas (such as
-        // `seal_race,sparse`), for a quick run: all of them otherwise. fxdax: and the guest
+        vm.extent_store("cladefs", &image, IMAGE_SIZE, window)?;
+        // CLADEFS_CHECKS names the checks to run, separated by commas (such as
+        // `seal_race,sparse`), for a quick run: all of them otherwise. cladefs: and the guest
         // their budgets' scale (TASK-168).
         let (_, scale) = self.run()?;
-        vm.env(&std::ffi::CString::new(format!("FXDAX_CHECKS={}", self.only()))?);
+        vm.env(&std::ffi::CString::new(format!("CLADEFS_CHECKS={}", self.only()))?);
         vm.env(&std::ffi::CString::new(format!("{SCALE}={scale}"))?);
         let seed = seed();
-        eprintln!("{}: seed {seed} (FXDAX_SEED={seed} replays it)", test_setup.test_case);
+        eprintln!("{}: seed {seed} (CLADEFS_SEED={seed} replays it)", test_setup.test_case);
         std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
         script_vm::pass_script(&mut vm, seed)?;
         if self.delay {
@@ -231,7 +231,7 @@ impl Test for TestFxfsGuestChecks {
         let (checks, scale) = self.run().unwrap();
         let expected = self.expected(&checks);
         if output != expected {
-            // fxdax: random_ops, run alone, as a run of its script told what to drop can be
+            // cladefs: random_ops, run alone, as a run of its script told what to drop can be
             // (TASK-149.2).
             let shrunk = Failure::parse(&output).map(|failure| {
                 let replays = Replays {
@@ -239,7 +239,7 @@ impl Test for TestFxfsGuestChecks {
                     test_setup: &test_setup,
                     seed: seed.parse().unwrap(),
                     mix: script::ONE_FILE,
-                    env: &[("FXDAX_CHECKS", "random_ops")],
+                    env: &[("CLADEFS_CHECKS", "random_ops")],
                     timeout: self.random_ops_limit(),
                     verdict: &|_, stdout| Failure::parse(&String::from_utf8_lossy(stdout)),
                 };
@@ -250,16 +250,16 @@ impl Test for TestFxfsGuestChecks {
                 "seed {seed}: expected exactly {expected:?}, got {output:?}\n{shrunk}"
             ));
         }
-        // fxdax: the checks made to fail failed alone, as made to, and the rest passed after
+        // cladefs: the checks made to fail failed alone, as made to, and the rest passed after
         // them (TASK-160.30).
         let log = std::fs::read_to_string(test_setup.tmp_dir.join("log.txt")).unwrap();
         if let Err(failed) = Self::failed_as_made_to(&checks, &without_kernel_lines(&log), scale) {
             return TestOutcome::Fail(format!("seed {seed}: {failed}"));
         }
-        // fxdax: fsck, whichever checks ran.
-        let fs = open_image(&test_setup.tmp_dir.join("fxdax.img"));
-        // fxdax: what a coverage kernel counted, under the directory the run says (TASK-119.14).
-        if let Some(coverage) = std::env::var_os("FXDAX_COVERAGE") {
+        // cladefs: fsck, whichever checks ran.
+        let fs = open_image(&test_setup.tmp_dir.join("cladefs.img"));
+        // cladefs: what a coverage kernel counted, under the directory the run says (TASK-119.14).
+        if let Some(coverage) = std::env::var_os("CLADEFS_COVERAGE") {
             let vm = format!("{}-{}", test_setup.test_case, std::process::id());
             let counts = Path::new(&coverage).join(vm);
             std::fs::create_dir(&counts).unwrap();
@@ -280,7 +280,7 @@ impl Test for TestFxfsGuestChecks {
     }
 }
 
-/// fxdax: the image as the host's Fxfs reads it once the VM is gone, which a check's verify
+/// cladefs: the image as the host's Fxfs reads it once the VM is gone, which a check's verify
 /// looks at what the check left in: of the run of seed `seed`, of suite `suite`.
 pub(crate) struct Image<'a> {
     fs: &'a Filesystem,
@@ -288,7 +288,7 @@ pub(crate) struct Image<'a> {
     suite: &'a TestFxfsGuestChecks,
 }
 
-/// fxdax: [`checks`]'s verifies, in [`CHECKS`]'s order: each check's, if it has one.
+/// cladefs: [`checks`]'s verifies, in [`CHECKS`]'s order: each check's, if it has one.
 macro_rules! check_verifies {
     ($($name:ident: $suites:ident, $budget:literal => $body:ident $(($field:ident))?
         $(, $verify:ident)?;)*) => {
@@ -361,7 +361,7 @@ fn verify_delayed_unlinks(image: &Image) {
     assert!(block_on(lookup_path(fs, "delayed-kept").0.lookup(b"gone")).is_err());
 }
 
-/// fxdax: random_ops's file, as the store holds it, is as its model (TASK-119.2), and its
+/// cladefs: random_ops's file, as the store holds it, is as its model (TASK-119.2), and its
 /// operations, which replay it, are there (TASK-119.15).
 fn verify_random_ops(image: &Image) {
     let (fs, seed) = (image.fs, image.seed);
@@ -376,12 +376,12 @@ fn verify_random_ops(image: &Image) {
     );
 }
 
-/// fxdax: the blocks appends reserved past a file's end left it as written (TASK-133).
+/// cladefs: the blocks appends reserved past a file's end left it as written (TASK-133).
 fn verify_append_reserved_tail(image: &Image) {
     assert_eq!(read_path(image.fs, APPEND_RESERVED), append_reserved());
 }
 
-/// fxdax: torture's files are as their models (TASK-119.5).
+/// cladefs: torture's files are as their models (TASK-119.5).
 fn verify_torture(image: &Image) {
     for name in (0..TORTURE_FILES).map(torture) {
         assert!(

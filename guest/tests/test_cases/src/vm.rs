@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The VM an fxdax test boots: fxdax's Firecracker (vendor/firecracker, with its fxdax feature),
-//! as FXDAX_FIRECRACKER names it, booting fxdax's guest kernel, which this process runs until it
+//! The VM an cladefs test boots: cladefs's Firecracker (vendor/firecracker, with its cladefs feature),
+//! as CLADEFS_FIRECRACKER names it, booting cladefs's guest kernel, which this process runs until it
 //! exits.
 //!
 //! The root filesystem is an ext4 image of the root directory, on the first virtio-blk disk, and
@@ -19,12 +19,12 @@ use std::ffi::{CStr, CString, OsStr};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Whether the VMM, fxdax's Firecracker, which FXDAX_FIRECRACKER names, is there to boot.
+/// Whether the VMM, cladefs's Firecracker, which CLADEFS_FIRECRACKER names, is there to boot.
 pub fn has_vmm() -> bool {
-    std::env::var_os("FXDAX_FIRECRACKER").is_some()
+    std::env::var_os("CLADEFS_FIRECRACKER").is_some()
 }
 
-/// fxdax: what a virtio-blk disk does with the guest's flushes, Firecracker's `cache_type`
+/// cladefs: what a virtio-blk disk does with the guest's flushes, Firecracker's `cache_type`
 /// (TASK-91.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DiskCache {
@@ -59,28 +59,28 @@ pub struct Vm {
     root_image: String,
     /// The host's CPUs its Firecracker runs on, if not any.
     cpus: Vec<usize>,
-    /// fxdax: the extent store whose Fxfs is the root filesystem, by its tag, if not an image.
+    /// cladefs: the extent store whose Fxfs is the root filesystem, by its tag, if not an image.
     fxfs_root: Option<String>,
-    /// fxdax: a line of the guest agent's output at which the VM process is killed ([`Vm::kill_on`]).
+    /// cladefs: a line of the guest agent's output at which the VM process is killed ([`Vm::kill_on`]).
     kill_on: Option<String>,
-    /// fxdax: how the VM process is to exit ([`Vm::stops_with`]).
+    /// cladefs: how the VM process is to exit ([`Vm::stops_with`]).
     stops_with: Option<i32>,
-    /// fxdax: a process killed at that line in place of the VM process.
+    /// cladefs: a process killed at that line in place of the VM process.
     kill_instead: Option<u32>,
-    /// fxdax: the loop devices its disks are on, held until the VM is done ([`Vm::loop_disk`]).
+    /// cladefs: the loop devices its disks are on, held until the VM is done ([`Vm::loop_disk`]).
     loops: Vec<LoopDevice>,
 }
 
 /// The guest kernel's command line, before the guest's environment and the test's name: the
 /// console on the serial port, saying what is a warning or worse (to the test's standard error:
-/// `split_console`); a reset on a panic, which ends the VM; and the guest agent as init. fxdax: a
+/// `split_console`); a reset on a panic, which ends the VM; and the guest agent as init. cladefs: a
 /// task blocked for 10 s says so, with its stack, on the console, before the runner's timeout
 /// kills a hung test (TASK-44.13); a soft lockup panics, printing every task's state first
 /// (panic_print's bit 0), runnable ones too: two vCPUs looping in the kernel starve the task they
 /// wait on, which no guest watchdog then runs to name, and the test waited for its timeout
 /// (TASK-113). It says what every CPU is doing before that, as the task holding what the stuck
 /// CPU waits for is on another, whose state the tasks' dump doesn't show (TASK-133). An oops
-/// panics too, as fxdax's kernel is configured to (fxdax.config), rather than leave the locks its
+/// panics too, as cladefs's kernel is configured to (cladefs.config), rather than leave the locks its
 /// task held held, and every CPU locked up on them (TASK-311).
 const CMDLINE: &str = "console=ttyS0 loglevel=5 reboot=k panic=-1 8250.nr_uarts=1 i8042.noaux i8042.nomux \
      i8042.dumbkbd sysctl.kernel.hung_task_timeout_secs=10 softlockup_panic=1 panic_print=0x1 \
@@ -89,11 +89,11 @@ const CMDLINE: &str = "console=ttyS0 loglevel=5 reboot=k panic=-1 8250.nr_uarts=
 impl Vm {
     /// A VM of `cpus` vCPUs and `ram_mib` MiB of memory.
     pub fn new(cpus: u8, ram_mib: u32) -> anyhow::Result<Self> {
-        // fxdax: FXDAX_GUEST_HUGE_PAGES=2M backs its memory with the host's huge pages
+        // cladefs: CLADEFS_GUEST_HUGE_PAGES=2M backs its memory with the host's huge pages
         // (scripts/test-e2e.sh, TASK-91.16).
-        let huge_pages = match std::env::var("FXDAX_GUEST_HUGE_PAGES").as_deref() {
+        let huge_pages = match std::env::var("CLADEFS_GUEST_HUGE_PAGES").as_deref() {
             Ok("2M") => "2M",
-            Ok(other) => anyhow::bail!("FXDAX_GUEST_HUGE_PAGES is 2M or unset, not {other:?}"),
+            Ok(other) => anyhow::bail!("CLADEFS_GUEST_HUGE_PAGES is 2M or unset, not {other:?}"),
             Err(_) => "None",
         };
         let config = serde_json::json!({
@@ -122,17 +122,17 @@ impl Vm {
         })
     }
 
-    /// Boots the kernel fxdax's scripts/build-guest-kernel.sh builds, which FXDAX_GUEST_KERNEL
+    /// Boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which CLADEFS_GUEST_KERNEL
     /// names.
     pub fn guest_kernel(&mut self) -> anyhow::Result<()> {
-        let kernel = std::env::var("FXDAX_GUEST_KERNEL").context("FXDAX_GUEST_KERNEL not set")?;
+        let kernel = std::env::var("CLADEFS_GUEST_KERNEL").context("CLADEFS_GUEST_KERNEL not set")?;
         self.config["boot-source"]["kernel_image_path"] = kernel.into();
         Ok(())
     }
 
     /// Adds an extent-store device tagged `tag`, on the store at `path`, which it makes, holding
     /// at most `capacity` bytes, if it doesn't exist; with a DAX window of `window` bytes if not
-    /// 0. The extent daemon at FXDAX_EXTENTD serves the store.
+    /// 0. The extent daemon at CLADEFS_EXTENTD serves the store.
     pub fn extent_store(
         &mut self,
         tag: &str,
@@ -140,21 +140,21 @@ impl Vm {
         capacity: u64,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?;
+        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
         self.extent_store_served(tag, path, capacity, window, Path::new(&extentd));
         Ok(())
     }
 
-    /// fxdax: adds an extent-store device tagged `tag` that follows the store at `path`, which
+    /// cladefs: adds an extent-store device tagged `tag` that follows the store at `path`, which
     /// another VM writes, read-only (backlog doc-8), with a DAX window of `window` bytes if not 0.
-    /// The extent daemon at FXDAX_EXTENTD serves the store.
+    /// The extent daemon at CLADEFS_EXTENTD serves the store.
     pub fn extent_store_following(
         &mut self,
         tag: &str,
         path: &Path,
         window: u64,
     ) -> anyhow::Result<()> {
-        let extentd = std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?;
+        let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
         self.extent_store_following_served(tag, path, window, Path::new(&extentd));
         Ok(())
     }
@@ -173,7 +173,7 @@ impl Vm {
         devices.last_mut().expect("the device added")["read_only"] = true.into();
     }
 
-    /// fxdax: has the extent-store device added last answer the guest's asks for durability once
+    /// cladefs: has the extent-store device added last answer the guest's asks for durability once
     /// ordered (`cache_type` Unsafe, TASK-363), as a drive whose flushes the host drops does.
     pub fn extent_store_unsafe(&mut self) {
         let devices = self.config["extent"].as_array_mut().expect("an array");
@@ -199,12 +199,12 @@ impl Vm {
         });
         if window != 0 {
             device["dax_window_size"] = window.into();
-            // fxdax: the window's private pages at most, FXDAX_DAX_PRIVATE_MAX if set; the
+            // cladefs: the window's private pages at most, CLADEFS_DAX_PRIVATE_MAX if set; the
             // device's default otherwise, half its pages (TASK-164.11).
             if let Some(most) =
-                std::env::var("FXDAX_DAX_PRIVATE_MAX").ok().filter(|m| !m.is_empty())
+                std::env::var("CLADEFS_DAX_PRIVATE_MAX").ok().filter(|m| !m.is_empty())
             {
-                let most: u64 = most.parse().expect("FXDAX_DAX_PRIVATE_MAX is a count of pages");
+                let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX is a count of pages");
                 device["dax_private_max"] = most.into();
             }
         }
@@ -225,7 +225,7 @@ impl Vm {
         self.disk_cached(id, image, DiskCache::Writeback)
     }
 
-    /// fxdax: as [`Vm::disk`], its flushes as `cache` has them (TASK-91.8).
+    /// cladefs: as [`Vm::disk`], its flushes as `cache` has them (TASK-91.8).
     pub fn disk_cached(
         &mut self,
         id: &str,
@@ -248,7 +248,7 @@ impl Vm {
         Ok(device)
     }
 
-    /// fxdax: as [`Vm::disk_cached`], on a loop device over the raw `image`, attached as `io`
+    /// cladefs: as [`Vm::disk_cached`], on a loop device over the raw `image`, attached as `io`
     /// says, as a VM host's local disk images are (TASK-350.1). Says on standard error how: the
     /// device, whether it bypasses the page cache, the image's filesystem, and the cache mode.
     /// The device, which the VM holds, clears itself once the VM and this process are done.
@@ -260,12 +260,12 @@ impl Vm {
         io: LoopIo,
     ) -> anyhow::Result<String> {
         ensure!(
-            std::env::var_os("FXDAX_FIRECRACKER_JAILER").is_none(),
+            std::env::var_os("CLADEFS_FIRECRACKER_JAILER").is_none(),
             "a jailed Firecracker sees no loop device"
         );
         let device = LoopDevice::attach(image, io)?;
         eprintln!(
-            "fxdax: disk {id} on {} over {} on {}, direct I/O {}, cache_type {}",
+            "cladefs: disk {id} on {} over {} on {}, direct I/O {}, cache_type {}",
             device.path().display(),
             image.display(),
             crate::loop_device::filesystem_type(image)?,
@@ -295,7 +295,7 @@ impl Vm {
         self.root_image = name.into();
     }
 
-    /// fxdax: boots on the Fxfs of the extent store tagged `tag` as the root filesystem, mounted
+    /// cladefs: boots on the Fxfs of the extent store tagged `tag` as the root filesystem, mounted
     /// read-write, rather than on an ext4 image of the root directory: it holds the guest agent,
     /// at /guest-agent, which runs as init.
     pub fn fxfs_root(&mut self, tag: &str) {
@@ -307,20 +307,20 @@ impl Vm {
         self.cpus = cpus.to_owned();
     }
 
-    /// fxdax: kills the VM process (SIGKILL) at once as `line` comes on its console, a line of the
+    /// cladefs: kills the VM process (SIGKILL) at once as `line` comes on its console, a line of the
     /// guest agent's output, as a host's crash would end it, wherever its guest's writes and its
     /// own requests were (TASK-119.6): [`Vm::enter`] returns as if it had exited of itself.
     pub fn kill_on(&mut self, line: &str) {
         self.kill_on = Some(line.to_owned());
     }
 
-    /// fxdax: the VM stops itself, its VM process exiting with `code`, which [`Vm::enter`] takes as
+    /// cladefs: the VM stops itself, its VM process exiting with `code`, which [`Vm::enter`] takes as
     /// an exit of its own, and any other as a failure.
     pub fn stops_with(&mut self, code: i32) {
         self.stops_with = Some(code);
     }
 
-    /// fxdax: kills the process `daemon`, the VM's extent daemon, at `line`, rather than the VM
+    /// cladefs: kills the process `daemon`, the VM's extent daemon, at `line`, rather than the VM
     /// process, which exits as it finds its daemon gone: status 158, or [`Vm::enter`] fails.
     pub fn kill_daemon_on(&mut self, line: &str, daemon: u32) {
         self.kill_on = Some(line.to_owned());
@@ -371,7 +371,7 @@ impl Vm {
     /// A path for the API socket of the VM `name` of this process: in the temporary directory, as
     /// a socket's path is short (SUN_LEN), and a test's directory, named after its case, may not be.
     pub fn api_socket(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fxdax-{}-{name}.api", std::process::id()))
+        std::env::temp_dir().join(format!("cladefs-{}-{name}.api", std::process::id()))
     }
 
     /// Boots the guest as [`Vm::enter`] does, but in a Firecracker the test drives through its
@@ -399,7 +399,7 @@ impl Vm {
     fn prepare(mut self, root: &Path, test_case: &str) -> anyhow::Result<serde_json::Value> {
         ensure!(
             self.config["boot-source"]["kernel_image_path"].is_string(),
-            "Firecracker boots fxdax's guest kernel only"
+            "Firecracker boots cladefs's guest kernel only"
         );
         let mut boot_args = match &self.fxfs_root {
             // Not a block device's: the kernel mounts it by its source, the device's tag.
@@ -418,9 +418,9 @@ impl Vm {
             boot_args.push(' ');
             boot_args.push_str(var);
         }
-        // fxdax: FXDAX_GUEST_CMDLINE, the kernel's arguments to measure, such as
+        // cladefs: CLADEFS_GUEST_CMDLINE, the kernel's arguments to measure, such as
         // `cpuidle_haltpoll.force=1` (TASK-41).
-        if let Ok(extra) = std::env::var("FXDAX_GUEST_CMDLINE")
+        if let Ok(extra) = std::env::var("CLADEFS_GUEST_CMDLINE")
             && !extra.trim().is_empty()
         {
             boot_args.push(' ');
@@ -473,7 +473,7 @@ pub struct Firecracker {
     child: std::process::Child,
     api: PathBuf,
     console: PathBuf,
-    /// fxdax: the loop devices its disks are on, held as long as it is ([`Vm::loop_disk`]).
+    /// cladefs: the loop devices its disks are on, held as long as it is ([`Vm::loop_disk`]).
     loops: Vec<LoopDevice>,
 }
 
@@ -622,22 +622,22 @@ impl Firecracker {
 
 /// Firecracker's arguments that have it log to `log`.
 fn log_args(log: &Path) -> Vec<std::ffi::OsString> {
-    let level = std::env::var("FXDAX_FIRECRACKER_LOG_LEVEL")
+    let level = std::env::var("CLADEFS_FIRECRACKER_LOG_LEVEL")
         .ok()
         .filter(|l| !l.is_empty())
         .unwrap_or_else(|| "Warning".into());
     vec!["--log-path".into(), log.into(), "--level".into(), level.into()]
 }
 
-/// Starts fxdax's Firecracker with `args`, its console, its serial port, going to `console`, on
+/// Starts cladefs's Firecracker with `args`, its console, its serial port, going to `console`, on
 /// the host's CPUs `cpus`, or any if none; in a jail, as production runs it, with
-/// FXDAX_FIRECRACKER_JAILER set ([`Jail`]).
+/// CLADEFS_FIRECRACKER_JAILER set ([`Jail`]).
 /// The exit code a VM process's exit `status` is said with.
 fn exit_code(status: std::process::ExitStatus) -> i32 {
     status.code().unwrap_or(1)
 }
 
-/// fxdax: waits for the VM process `child` to exit, killing it (SIGKILL) at once if `line`, a line
+/// cladefs: waits for the VM process `child` to exit, killing it (SIGKILL) at once if `line`, a line
 /// of the guest agent's output, comes on its console at `console` first ([`Vm::kill_on`]): or, with
 /// `daemon`, killing that, and waiting for the VM process to exit, as it does once its daemon goes
 /// ([`Vm::kill_daemon_on`]). Returns its exit status, if it exited of itself.
@@ -683,14 +683,14 @@ fn spawn(
 ) -> anyhow::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
 
-    let firecracker = std::env::var_os("FXDAX_FIRECRACKER").context("FXDAX_FIRECRACKER not set")?;
+    let firecracker = std::env::var_os("CLADEFS_FIRECRACKER").context("CLADEFS_FIRECRACKER not set")?;
     let mut jail = Jail::from_env()?;
     let mut command = match &mut jail {
         Some(jail) => jail.command(&firecracker, console)?,
         None => std::process::Command::new(&firecracker),
     };
-    // A seccomp filter of its own, compiled (scripts/test-e2e.sh's FXDAX_FIRECRACKER_SECCOMP=log).
-    if let Some(filter) = std::env::var_os("FXDAX_FIRECRACKER_SECCOMP_FILTER") {
+    // A seccomp filter of its own, compiled (scripts/test-e2e.sh's CLADEFS_FIRECRACKER_SECCOMP=log).
+    if let Some(filter) = std::env::var_os("CLADEFS_FIRECRACKER_SECCOMP_FILTER") {
         command.arg("--seccomp-filter").arg(filter);
     }
     // Every device on virtio-PCI, on every architecture: the extent device attaches over PCI
@@ -734,9 +734,9 @@ fn spawn(
     command.spawn().with_context(|| format!("executing {}", PathBuf::from(&firecracker).display()))
 }
 
-/// fxdax: a jail for Firecracker, as production runs it (TASK-50.1, TASK-50.4): Firecracker's
-/// jailer, which FXDAX_FIRECRACKER_JAILER names, chroots it, makes its /dev/kvm and
-/// /dev/userfaultfd, owned by the user it runs it as, FXDAX_JAIL_UID and FXDAX_JAIL_GID, and
+/// cladefs: a jail for Firecracker, as production runs it (TASK-50.1, TASK-50.4): Firecracker's
+/// jailer, which CLADEFS_FIRECRACKER_JAILER names, chroots it, makes its /dev/kvm and
+/// /dev/userfaultfd, owned by the user it runs it as, CLADEFS_JAIL_UID and CLADEFS_JAIL_GID, and
 /// drops every privilege. The directories Firecracker's paths are in, the test's, the guest
 /// kernel's, the extent daemon's socket's and the temporary one, are bound into the jail at their
 /// own paths, in a mount namespace of its own, so that its configuration's paths, and those its API
@@ -751,12 +751,12 @@ struct Jail {
 
 impl Jail {
     fn from_env() -> anyhow::Result<Option<Self>> {
-        let Some(jailer) = std::env::var_os("FXDAX_FIRECRACKER_JAILER") else { return Ok(None) };
+        let Some(jailer) = std::env::var_os("CLADEFS_FIRECRACKER_JAILER") else { return Ok(None) };
         let id = |name: &str| -> anyhow::Result<u32> {
             let value = std::env::var(name).with_context(|| format!("{name} not set"))?;
             value.parse().with_context(|| format!("{name} is not a number"))
         };
-        let (uid, gid) = (id("FXDAX_JAIL_UID")?, id("FXDAX_JAIL_GID")?);
+        let (uid, gid) = (id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?);
         Ok(Some(Self { jailer, uid, gid, binds: Vec::new() }))
     }
 
@@ -776,7 +776,7 @@ impl Jail {
         let name = Path::new(firecracker).file_name().context("Firecracker has no file name")?;
         let root = base.join(name).join(&id).join("root");
         let mut dirs = vec![dir.to_owned(), std::env::temp_dir()];
-        for var in ["FXDAX_GUEST_KERNEL", "FXDAX_EXTENTD", "FXDAX_FIRECRACKER_SECCOMP_FILTER"] {
+        for var in ["CLADEFS_GUEST_KERNEL", "CLADEFS_EXTENTD", "CLADEFS_FIRECRACKER_SECCOMP_FILTER"] {
             if let Some(path) = std::env::var_os(var) {
                 dirs.extend(Path::new(&path).parent().map(Path::to_owned));
             }
@@ -860,7 +860,7 @@ fn disk_letter(index: usize) -> char {
 /// them to cross the console.
 const WATCHDOG_MARGIN: Duration = Duration::from_secs(15);
 
-/// fxdax: the seconds a guest booting at `now` has before it dumps its stacks, if the runner set a
+/// cladefs: the seconds a guest booting at `now` has before it dumps its stacks, if the runner set a
 /// deadline, `deadline` ([`crate::TEST_DEADLINE`]): a guest hung in the kernel can't say where
 /// otherwise. None too close to the deadline.
 fn watchdog_secs(deadline: Option<&OsStr>, now: SystemTime) -> anyhow::Result<Option<u64>> {
@@ -904,7 +904,7 @@ pub fn split_console(mut console: impl std::io::Read) -> anyhow::Result<()> {
     }
 }
 
-/// fxdax: the guest agent's standard output, of what its console holds, `console`, as
+/// cladefs: the guest agent's standard output, of what its console holds, `console`, as
 /// [`split_console`] passes it on: for a test that reads what each of several VMs said
 /// (fxfs-guest-soak, TASK-67).
 pub fn guest_stdout(console: &[u8]) -> String {
@@ -949,7 +949,7 @@ impl Framing {
     }
 }
 
-/// fxdax: `output`, the guest agent's standard output, without the kernel's lines that came out in
+/// cladefs: `output`, the guest agent's standard output, without the kernel's lines that came out in
 /// the midst of it: the console carries the kernel's lines as it says them, between the bytes of
 /// output it is still passing on, so that one, a stop's, went into the middle of an output line
 /// (GCE r215, r221, r248). The kernel's begin with its timestamp, `[` seconds `.` microseconds `]`,
@@ -1014,11 +1014,11 @@ mod tests {
         assert_eq!(watchdog_secs(None, now).unwrap(), None);
         assert_eq!(
             at("soon").unwrap_err().to_string(),
-            "FXDAX_TEST_DEADLINE is \"soon\", not seconds"
+            "CLADEFS_TEST_DEADLINE is \"soon\", not seconds"
         );
     }
 
-    /// fxdax: the agent's output, framed on the console among the kernel's lines and the agent's
+    /// cladefs: the agent's output, framed on the console among the kernel's lines and the agent's
     /// standard error, read back alone, across frames (TASK-67).
     #[test]
     fn guest_stdout_is_what_its_frames_hold() {
@@ -1072,7 +1072,7 @@ mod tests {
         assert_eq!(&said, b"ready\n");
         running.kill().unwrap();
     }
-    /// fxdax: the kernel's lines that came out in the midst of the agent's output go, the output
+    /// cladefs: the kernel's lines that came out in the midst of the agent's output go, the output
     /// whole again around them; brackets of the output's own stay.
     #[test]
     fn output_loses_the_kernels_lines_in_its_midst() {
@@ -1134,7 +1134,7 @@ mod tests {
     }
 
     /// TASK-44.8: a console's complaints fail its test: a WARN_ON's, lockdep's, a KCSAN report of
-    /// a race in fxdax's code; not KCSAN's of a race of the rest of the kernel's, nor of the race
+    /// a race in cladefs's code; not KCSAN's of a race of the rest of the kernel's, nor of the race
     /// looked into (KCSAN_REVIEWED_CHANGE, KCSAN_REVIEWED_PEERS).
     #[test]
     fn consoles_fail_on_their_kernels_complaints() {
@@ -1197,7 +1197,7 @@ mod tests {
         assert_eq!(checked("theirs.console.txt", &theirs), Ok(()));
         let reviewed = kcsan("fxfs_dax_seal+0x10/0x20 / kthread_is_per_cpu", "0x40000 -> 0x0");
         assert_eq!(checked("reviewed.console.txt", &reviewed), Ok(()));
-        // A folio's flags, which a reviewed peer reads plainly as fxdax's code changes them,
+        // A folio's flags, which a reviewed peer reads plainly as cladefs's code changes them,
         // marked: its reads finishing (r565, r611), or a page_mkwrite's lock as writeback holds it
         // (r611), each changing the bits its peer's review allows.
         let peer = kcsan_of(
@@ -1248,7 +1248,7 @@ mod tests {
         let waits = writeback("0x000fffe00000412d -> 0x000fffe0000041ad");
         assert_eq!(checked("writeback-peer.console.txt", &waits), Ok(()));
         // A page_mkwrite dirtying a folio that writeback holds locked, cleaning it: a race of
-        // fxdax's, whatever its side's marking.
+        // cladefs's, whatever its side's marking.
         let dirties = writeback("0x000fffe00000412d -> 0x000fffe00000413d");
         assert_eq!(
             checked("writeback-dirtied.console.txt", &dirties),
@@ -1259,7 +1259,7 @@ mod tests {
                 ]
             ))
         );
-        // fxdax's side plain, or not in the report: a race of its own, whatever its peer.
+        // cladefs's side plain, or not in the report: a race of its own, whatever its peer.
         let plain = kcsan_of(
             "fxfs_vfs_read_folios / lru_gen_add_folio",
             &[("write", "fxfs_vfs_read_folios"), ("read", "lru_gen_add_folio")],
@@ -1291,9 +1291,9 @@ mod tests {
     }
 }
 
-// fxdax: what a guest's kernel says of itself on its console (TASK-44.8).
+// cladefs: what a guest's kernel says of itself on its console (TASK-44.8).
 
-/// The change of a word in a race of fxdax's code that KCSAN reports, looked into: a task's
+/// The change of a word in a race of cladefs's code that KCSAN reports, looked into: a task's
 /// flags, its PF_MEMALLOC_NOFS set or cleared, as fs/fxfs's NOFS scopes around its calls into its
 /// Rust do (memalloc_nofs_save and restore, inlined), which other tasks read for other bits of the
 /// word, read whole (the scheduler's kthread_is_per_cpu, for PF_KTHREAD; mem_cgroup_from_task).
@@ -1306,10 +1306,10 @@ const PG_LOCKED: u64 = 1 << 0;
 const PG_UPTODATE: u64 = 1 << 3;
 const PG_WAITERS: u64 = 1 << 7;
 
-/// The functions of the kernel's whose races with fxdax's code KCSAN reports, looked into, each
+/// The functions of the kernel's whose races with cladefs's code KCSAN reports, looked into, each
 /// with the bits of the word that the race may change: each reads a folio's flags plainly, for a
 /// field of the word that doesn't change while the folio is in the page cache (its zone, its
-/// node), as fxdax's code changes the folio's flag bits through the folio API, atomically, as any
+/// node), as cladefs's code changes the folio's flag bits through the folio API, atomically, as any
 /// filesystem's does.
 ///
 /// folio_batch_move_lru reads a folio new to the LRU as the worker that read it
@@ -1326,10 +1326,10 @@ const PG_WAITERS: u64 = 1 << 7;
 /// as filemap_page_mkwrite does, to dirty the folio under it (the exclusion
 /// folio_clear_dirty_for_io's comment asks of a fault handler): its folio_trylock fails, marked,
 /// and it waits, setting PG_waiters. Only the lock's bits change: a dirtying, or any change of the
-/// folio's bits but its lock's, while writeback holds the lock, would be a race of fxdax's.
+/// folio's bits but its lock's, while writeback holds the lock, would be a race of cladefs's.
 ///
-/// Reviewed only while fxdax's side of the race is marked: a plain access of its own to a folio's
-/// flags would be a race of fxdax's, whichever of the kernel's functions met it (TASK-44.8.1).
+/// Reviewed only while cladefs's side of the race is marked: a plain access of its own to a folio's
+/// flags would be a race of cladefs's, whichever of the kernel's functions met it (TASK-44.8.1).
 const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
     ("folio_batch_move_lru", PG_LOCKED | PG_UPTODATE | PG_WAITERS),
     ("lru_add", PG_LOCKED | PG_UPTODATE | PG_WAITERS),
@@ -1339,10 +1339,10 @@ const KCSAN_REVIEWED_PEERS: [(&str, u64); 6] = [
     ("folio_clear_dirty_for_io", PG_LOCKED | PG_WAITERS),
 ];
 
-/// Whether the kernel's function `function` is fxdax's code's: fs/fxfs's, its Rust's
+/// Whether the kernel's function `function` is cladefs's code's: fs/fxfs's, its Rust's
 /// (whose mangled names name its crates, fxfs and fxfs_linux), or virtio_extent's.
 ///
-/// A debug kernel's KCSAN reports races in all of the kernel; a test fails on those of fxdax's
+/// A debug kernel's KCSAN reports races in all of the kernel; a test fails on those of cladefs's
 /// code: a report naming a function of fs/fxfs's, virtio_extent's or their Rust's,
 /// whether both of its accesses are, or one is at unknown origin (one KCSAN doesn't
 /// see: uninstrumented, as the Rust and the scheduler are, or the host's, writing shared memory).
@@ -1403,20 +1403,20 @@ const COMPLAINTS: [&str; 7] = [
     "sleeping function called from invalid context",
 ];
 
-/// fxdax: what a WARN_ON's report ("WARNING: CPU: N PID: N at FILE:LINE") and lockdep's begin
+/// cladefs: what a WARN_ON's report ("WARNING: CPU: N PID: N at FILE:LINE") and lockdep's begin
 /// their message with: a complaint there alone. x86's CPU-vulnerability advisories say it behind
 /// their subsystem's prefix, of the host's CPU, not of the guest's code ("Speculative Return
 /// Stack Overflow: WARNING: See ...", on GitHub's AMD runners), and failed every case there
 /// (TASK-335).
 const WARNING: &str = "WARNING:";
 
-/// fxdax: whether a console's `line` complains ([`COMPLAINTS`], [`WARNING`]).
+/// cladefs: whether a console's `line` complains ([`COMPLAINTS`], [`WARNING`]).
 fn complains(line: &str) -> bool {
     message(line).starts_with(WARNING)
         || COMPLAINTS.iter().any(|complaint| line.contains(complaint))
 }
 
-/// fxdax: the kernel's message on a console's `line`: past its time, "[    1.234] ", and its
+/// cladefs: the kernel's message on a console's `line`: past its time, "[    1.234] ", and its
 /// caller's, "[    T1] ", if printed.
 fn message(line: &str) -> &str {
     let mut text = line.trim_start();
@@ -1427,7 +1427,7 @@ fn message(line: &str) -> &str {
 }
 
 /// Fails with the lines of the console at `console` in which its kernel complains, but for
-/// KCSAN's reports of races that aren't fxdax's code's, or were reviewed (see [`ours`]). The
+/// KCSAN's reports of races that aren't cladefs's code's, or were reviewed (see [`ours`]). The
 /// runner checks every test's consoles so (TASK-44.8): a release kernel's WARN_ON in fs/fxfs, which
 /// once hid a bug a stress test alone found (TASK-44.2), fails its test as a debug kernel's
 /// lockdep, KCSAN and atomic-sleep reports do.
@@ -1448,7 +1448,7 @@ const REPORT_BEFORE: usize = 8;
 /// report: an oops' registers, its stack and the modules linked, with room to spare.
 const REPORT_BYTES: usize = 16 << 10;
 
-/// fxdax: the first report of a console's kernel, of its first complaint (as [`complaints`] finds
+/// cladefs: the first report of a console's kernel, of its first complaint (as [`complaints`] finds
 /// them): from REPORT_BEFORE lines before it to the end of its trace ("---[ end trace ...]---"),
 /// REPORT_BYTES at most. A guest whose task died holding a lock prints its oops once, then soft
 /// lockups for minutes, every CPU's, till a console's tail holds them alone: what went wrong
@@ -1474,7 +1474,7 @@ pub fn first_report(console: &str) -> Option<String> {
 }
 
 /// The indices of the lines of a console, `lines`, in which its kernel complains, but for KCSAN's
-/// reports of races that aren't fxdax's code's, or were reviewed (see [`ours`]).
+/// reports of races that aren't cladefs's code's, or were reviewed (see [`ours`]).
 fn complained<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = usize> + 'a {
     lines.iter().enumerate().filter_map(|(at, line)| {
         if !complains(line) {

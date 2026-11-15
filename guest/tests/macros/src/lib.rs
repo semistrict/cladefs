@@ -1,5 +1,5 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
 extern crate proc_macro;

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Shared volumes attached on a path's lookup (fxdax's TASK-136.6, backlog doc-10, Automount). A
+//! Shared volumes attached on a path's lookup (cladefs's TASK-136.6, backlog doc-10, Automount). A
 //! publisher VM publishes a volume, as fxfs-guest-shared-volumes's does. A consumer VM, on a
 //! store of its own, runs the automounter (`fxfs-automount`) on `/repos`, whose asks the host
 //! answers as the sandbox manager would: `repo` and `other` are the generation, imported as
@@ -29,7 +29,7 @@ pub struct TestFxfsGuestAutomount {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{control, cladefs_guest_should_run, setup_rootfs};
     use crate::shared_volumes::host::{Manager, Vms, format, next_generation};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -43,7 +43,7 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let extentd: PathBuf =
-                std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?.into();
+                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
             let control = control(&extentd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;
@@ -73,7 +73,7 @@ mod host {
 
     impl Test for TestFxfsGuestAutomount {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -240,7 +240,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             fs::create_dir_all(MNT).unwrap();
             mount(None, MNT);
-            let role = std::env::var("FXDAX_SHARED_VOLUMES").unwrap();
+            let role = std::env::var("CLADEFS_SHARED_VOLUMES").unwrap();
             match role.as_str() {
                 "publisher" => publisher(),
                 "consumer" => consumer(),

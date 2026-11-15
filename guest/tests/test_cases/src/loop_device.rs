@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a loop device over an image file, the host's block device a VM's virtio-blk disk is
+//! cladefs: a loop device over an image file, the host's block device a VM's virtio-blk disk is
 //! on, as a VM host's local disk images are (TASK-350.1).
 //!
 //! The device clears itself (LO_FLAGS_AUTOCLEAR): the kernel detaches it once its last opener

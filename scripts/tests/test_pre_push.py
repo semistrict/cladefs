@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -30,7 +30,7 @@ class PrePushTest(unittest.TestCase):
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "config", "user.name", "Test")
         git(self.repo, "config", "user.email", "test@example.com")
-        self.main = self.commit("README", "fxdax\n")
+        self.main = self.commit("README", "cladefs\n")
         git(self.repo, "update-ref", "refs/remotes/origin/main", self.main)
 
     def commit(self, path, text):
@@ -65,11 +65,11 @@ class PrePushTest(unittest.TestCase):
 
     def test_dax_change_under_a_later_commit_is_refused(self):
         self.commit("guest/linux/fs/fxfs/dax.c", "changed\n")
-        sha = self.commit("README", "fxdax, again\n")
+        sha = self.commit("README", "cladefs, again\n")
         self.assertEqual(self.push(sha, self.main)[0], 1)
 
     def test_other_changes_are_pushed(self):
-        sha = self.commit("crates/fxdax/src/lib.rs", "changed\n")
+        sha = self.commit("crates/cladefs/src/lib.rs", "changed\n")
         self.assertEqual(self.push(sha, self.main), (0, ""))
 
     def test_new_branch_is_compared_with_origin_main(self):

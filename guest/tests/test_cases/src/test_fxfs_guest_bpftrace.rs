@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the guest Fxfs's tracepoints under bpftrace (TASK-44.16, docs/guest-tracepoints.md):
+//! cladefs: the guest Fxfs's tracepoints under bpftrace (TASK-44.16, docs/guest-tracepoints.md):
 //! scripts/bpftrace/fxfs-latency.bt, run in a guest with a DAX window, attaches to fs/fxfs's events,
 //! and while files are written, fsynced, read in sealed, loaded and stored to through a mapping and
 //! fsynced again, measures the seals and the window's MAPs: it ends with a histogram of each, and
@@ -21,7 +21,7 @@ const SCRIPT: &str = include_str!("../../../../scripts/bpftrace/fxfs-latency.bt"
 #[host]
 mod host {
     use super::*;
-    use crate::common::{Window, dax_window, fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{Window, dax_window, cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestSetup};
 
@@ -33,7 +33,7 @@ mod host {
 
     impl Test for TestFxfsGuestBpftrace {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {

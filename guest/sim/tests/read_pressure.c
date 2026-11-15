@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Tasks reading through mappings of more than the window holds, as a build's typecheck does: many
  * small files of one staging extent and a few large ones, written and sealed first, then mapped by

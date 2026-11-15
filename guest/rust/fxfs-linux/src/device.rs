@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,11 +18,11 @@
 //! the device applies a request in flight while a barrier is on either side of it, a write's
 //! several requests on both.
 //!
-//! fxdax: frozen with its filesystem (`Freezer`), the device takes no writes, frees or commits
+//! cladefs: frozen with its filesystem (`Freezer`), the device takes no writes, frees or commits
 //! until it thaws: those wait at its `Gate`, as a snapshot of the VM is taken, which a VM restored
 //! from, with a store of its own, thaws in (TASK-39.1).
 //!
-//! fxdax: a follower's device (doc-4's F_READ_ONLY, backlog doc-8) reads a store another VM
+//! cladefs: a follower's device (doc-4's F_READ_ONLY, backlog doc-8) reads a store another VM
 //! writes, as of one of its commits, which it advances to the writer's latest (`Device::advance`),
 //! letting go of the commits before once the follower is done with them, and keeps single extents
 //! (`Device::pin`). It writes nothing.
@@ -129,7 +129,7 @@ const DEVICE_FREEZE: u32 = 1 << 1;
 const DEVICE_READ_ONLY: u32 = 1 << 2;
 const DEVICE_FREE_MANY: u32 = 1 << 3;
 
-/// fxdax: the most extents a `FREE` names with `FREE_MANY`: its arguments' one, and its data's,
+/// cladefs: the most extents a `FREE` names with `FREE_MANY`: its arguments' one, and its data's,
 /// a page of `virtio_extent_id`s.
 const FREE_MANY_MAX: usize = 1 + 4096 / 16;
 
@@ -219,27 +219,27 @@ impl Drop for Request<'_> {
 pub struct ExtentDevice {
     device: NonNull<ffi::Device>,
     info: ffi::Info,
-    /// fxdax: how many bytes the store holds at most, as resizing changes it (`Resizer`).
+    /// cladefs: how many bytes the store holds at most, as resizing changes it (`Resizer`).
     capacity: Arc<AtomicU64>,
     allocator: BufferAllocator,
     /// What Fxfs may take for open, which `sealer` seals.
     open: Arc<OpenExtents>,
     /// What seals the extents open.
     sealer: Sealer,
-    /// fxdax: the syncs wanting durability in progress (`Durability`).
+    /// cladefs: the syncs wanting durability in progress (`Durability`).
     durable: Arc<AtomicUsize>,
-    /// fxdax: what writes, frees and commits pass, unless the device is frozen.
+    /// cladefs: what writes, frees and commits pass, unless the device is frozen.
     gate: Arc<Gate>,
-    /// fxdax: the guest's branch, which thawing may change (`Freezer`).
+    /// cladefs: the guest's branch, which thawing may change (`Freezer`).
     branch: Arc<AtomicU64>,
-    /// fxdax: the epoch of the commit a follower's device last advanced to (`Device::advance`).
+    /// cladefs: the epoch of the commit a follower's device last advanced to (`Device::advance`).
     advanced: Arc<AtomicU64>,
-    /// fxdax: whether its filesystem writes nothing, mounted read-only (-o ro, or a follower's):
+    /// cladefs: whether its filesystem writes nothing, mounted read-only (-o ro, or a follower's):
     /// then it commits nothing either, as it flushes or closes (`writing_nothing`).
     writes_nothing: bool,
 }
 
-/// fxdax: what requests pass through, each holding a `Passage` while it is in progress, unless
+/// cladefs: what requests pass through, each holding a `Passage` while it is in progress, unless
 /// the gate is closed: then they wait for it to open. The device's writes, frees and commits pass
 /// one while the device isn't frozen with its filesystem (`Freezer`), and the writes that seal
 /// nothing another while no seal is in progress (`Seal`).
@@ -311,7 +311,7 @@ impl Drop for Passage {
     }
 }
 
-/// fxdax: what makes the device's commits durable (`COMMIT_DURABLE`). doc-2 asks durability of
+/// cladefs: what makes the device's commits durable (`COMMIT_DURABLE`). doc-2 asks durability of
 /// sync, syncfs and unmount only: fsync keeps its ordering, but need not wait for the host's
 /// disk, and the device's other commits are barriers only, which the host makes durable soon
 /// after. Commits setting the root and closing are always durable.
@@ -335,7 +335,7 @@ impl Drop for DurableGuard {
     }
 }
 
-/// fxdax: how many of something there were, and their nanoseconds, all told; and how many took
+/// cladefs: how many of something there were, and their nanoseconds, all told; and how many took
 /// each power of two of time (TASK-111.6), as the C side's histograms (fs/fxfs/hist.h) count them:
 /// bucket k those under 1.024 us times 2 to the k, the last the rest.
 #[derive(Default)]
@@ -365,7 +365,7 @@ impl Timed {
     }
 }
 
-/// fxdax: what the device's requests took, and what waited on its seals: Fxfs waits on the device
+/// cladefs: what the device's requests took, and what waited on its seals: Fxfs waits on the device
 /// in `block_on`, which the guest counts as idle, not iowait, so that nothing else tells them
 /// apart (TASK-91.7).
 #[derive(Default)]
@@ -427,7 +427,7 @@ struct Sealer {
     /// What the writes that seal nothing pass, from their submission to their end, while no seal is
     /// in progress.
     writes: Arc<Gate>,
-    /// fxdax: the device's (`DeviceStats`).
+    /// cladefs: the device's (`DeviceStats`).
     stats: Arc<DeviceStats>,
 }
 
@@ -529,7 +529,7 @@ impl ExtentDevice {
         Ok(this)
     }
 
-    /// fxdax: the device, for a filesystem mounted on it read-only, which writes nothing: it
+    /// cladefs: the device, for a filesystem mounted on it read-only, which writes nothing: it
     /// commits nothing either, as it flushes or closes. `Filesystem::open` decides it, a
     /// follower's device among them (TASK-160.26).
     pub fn writing_nothing(mut self) -> Self {
@@ -542,7 +542,7 @@ impl ExtentDevice {
         self.capacity.load(Ordering::Acquire)
     }
 
-    /// fxdax: what freezes the device with its filesystem, and thaws it.
+    /// cladefs: what freezes the device with its filesystem, and thaws it.
     pub fn freezer(&self) -> Freezer {
         Freezer {
             sealer: self.sealer.clone(),
@@ -553,7 +553,7 @@ impl ExtentDevice {
         }
     }
 
-    /// fxdax: what resizes the device while the filesystem is mounted.
+    /// cladefs: what resizes the device while the filesystem is mounted.
     pub fn resizer(&self) -> Resizer {
         Resizer { device: self.device, capacity: self.capacity.clone() }
     }
@@ -563,7 +563,7 @@ impl ExtentDevice {
         Dax { device: self.device }
     }
 
-    /// fxdax: what the device's requests took, and what waited on its seals.
+    /// cladefs: what the device's requests took, and what waited on its seals.
     pub fn stats(&self) -> Arc<DeviceStats> {
         self.sealer.stats.clone()
     }
@@ -573,18 +573,18 @@ impl ExtentDevice {
         Durability(self.durable.clone())
     }
 
-    /// fxdax: whether it is a follower's device, which reads a store another VM writes
+    /// cladefs: whether it is a follower's device, which reads a store another VM writes
     /// (DEVICE_READ_ONLY): its filesystem is read-only.
     pub fn follows(&self) -> bool {
         self.info.flags & DEVICE_READ_ONLY != 0
     }
 
-    /// fxdax: what tells a follower of its writer's commits.
+    /// cladefs: what tells a follower of its writer's commits.
     pub fn commits(&self) -> Commits {
         Commits { device: self.device }
     }
 
-    /// fxdax: the epoch of the commit a follower's device last advanced to, as it advances.
+    /// cladefs: the epoch of the commit a follower's device last advanced to, as it advances.
     pub fn advanced(&self) -> Arc<AtomicU64> {
         self.advanced.clone()
     }
@@ -655,7 +655,7 @@ impl ExtentDevice {
         }
     }
 
-    /// fxdax: counts a commit, which began at `began`, durable if `durable` (`DeviceStats`).
+    /// cladefs: counts a commit, which began at `began`, durable if `durable` (`DeviceStats`).
     fn count_commit(&self, began: Instant, durable: bool) {
         self.sealer.stats.commits.add(began);
         if durable {
@@ -750,7 +750,7 @@ fn call<'a>(
     }
 }
 
-/// fxdax: resizes the device while the filesystem is mounted, as the host resizes its store: what
+/// cladefs: resizes the device while the filesystem is mounted, as the host resizes its store: what
 /// the device's configuration says the store's capacity is, and the shrink the guest is asked to
 /// take; the device's capacity, which its block count follows; and the guest's answer to a shrink.
 pub struct Resizer {
@@ -790,7 +790,7 @@ impl Resizer {
     }
 }
 
-/// fxdax: a follower's device's writer's commits, as its configuration says.
+/// cladefs: a follower's device's writer's commits, as its configuration says.
 pub struct Commits {
     device: NonNull<ffi::Device>,
 }
@@ -808,7 +808,7 @@ impl Commits {
     }
 }
 
-/// fxdax: lets go of what a follower's device's view held of the commits before the one it
+/// cladefs: lets go of what a follower's device's view held of the commits before the one it
 /// advanced to, `epoch`, when dropped: a request not waited for, which names its epoch, as the
 /// device may serve it after the next advance (doc-4's LET_GO).
 struct LetGo {
@@ -864,7 +864,7 @@ fn info_reply(reply: &InfoReply) -> InfoReply {
     }
 }
 
-/// fxdax: what freezes the device with its filesystem (`Fxfs::freeze`), as a snapshot of the VM
+/// cladefs: what freezes the device with its filesystem (`Fxfs::freeze`), as a snapshot of the VM
 /// needs it, and thaws it (TASK-39.1).
 pub struct Freezer {
     sealer: Sealer,
@@ -984,7 +984,7 @@ fn errno_error(status: c_int, extent: Option<ExtentId>) -> Error {
         (ENOENT, Some(extent)) => NoExtent(extent).into(),
         (ENOSPC, _) => anyhow!(FxfsError::NoSpace),
         (EROFS, _) => anyhow!(FxfsError::ReadOnlyFilesystem),
-        // fxdax: ENOMEM as ENOMEM, not an I/O error (fxfs_posix::device_error, TASK-44.15).
+        // cladefs: ENOMEM as ENOMEM, not an I/O error (fxfs_posix::device_error, TASK-44.15).
         (errno, extent) => {
             fxfs_posix::device_error(Errno::from_raw(errno), DeviceError { errno, extent }.into())
         }
@@ -1031,7 +1031,7 @@ impl Device for ExtentDevice {
         let _passage = self.gate.pass().await;
         let barrier = write_opts.flags.contains(WriteFlags::PRE_BARRIER);
         let commit = write_opts.flags.contains(WriteFlags::POST_BARRIER);
-        // fxdax: the root the commit sets, if any (TASK-153.13).
+        // cladefs: the root the commit sets, if any (TASK-153.13).
         let root = write_opts.root.map(|root| self.root_to_send(root)).transpose()?;
         // A write with a barrier is a seal, and seals what came before it; one a commit follows
         // seals its own extent too. Another holds seals off until it ends (`Seal`).
@@ -1052,7 +1052,7 @@ impl Device for ExtentDevice {
         }
         let began = Instant::now();
         let requests = match root.as_ref().filter(|_| in_one) {
-            // fxdax: the write's one request, whose commit sets the root (`WRITE_ROOT`).
+            // cladefs: the write's one request, whose commit sets the root (`WRITE_ROOT`).
             Some(root) => {
                 let data = addr as *mut c_void;
                 let mut write =
@@ -1105,7 +1105,7 @@ impl Device for ExtentDevice {
         self.call(op(T_FREE, 0, Some(extent), 0, std::ptr::null_mut(), 0), Some(extent)).await
     }
 
-    /// fxdax: a flush's dead extents in as few requests as the device takes (`FREE_MANY`, TASK-41),
+    /// cladefs: a flush's dead extents in as few requests as the device takes (`FREE_MANY`, TASK-41),
     /// one at a time: each request a round trip, which nested virtualization makes dear, and which
     /// the device's servers, shared with the syncs, serve one of at a time. A request that fails
     /// fails its extents, which the allocator tries again: freeing one freed does nothing.
@@ -1167,7 +1167,7 @@ impl Device for ExtentDevice {
         Ok(buf)
     }
 
-    /// fxdax: ordered, as the device's other commits, durable only while a sync wants it: each
+    /// cladefs: ordered, as the device's other commits, durable only while a sync wants it: each
     /// journal compaction ends in one, and durable, its seal held the guest's fsyncs and stores
     /// for as long as the object store's uploads took (TASK-91.2). A crash keeps a prefix of the
     /// epochs (doc-4), the root with what came before it, or neither.

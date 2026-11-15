@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # What check.sh, mutants.sh and zloop.sh share, sourced with guest/sim as the directory: builds of
 # the tests against a copy of the real sources, and the model of Fxfs, with patches in, each in

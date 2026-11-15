@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 //! and each file created or removed since the directory's last sync, in order. Directories
 //! themselves are durable once created. [`MemDir::fail_after`] makes the file system fail every
 //! operation that would change it after a number of them, as a crash would interrupt them.
-//! fxdax: which of them fails, and so what a crash keeps, is a function of the store's calls, and
+//! cladefs: which of them fails, and so what a crash keeps, is a function of the store's calls, and
 //! of the crash's seed, only if the store does no I/O on threads of its own, in a directory made
 //! [`MemDir::serial`], or if a seeded schedule orders that I/O, as Shuttle's do; it says whether
 //! the first that failed was a thread's of the store's ([`MemDir::failed_elsewhere`], TASK-79.79).
@@ -31,7 +31,7 @@ const BLOCK: usize = 512;
 #[derive(Clone, Default)]
 pub struct MemDir {
     fs: Arc<Mutex<Fs>>,
-    /// fxdax: whether the store does all of its I/O in it on its callers' threads
+    /// cladefs: whether the store does all of its I/O in it on its callers' threads
     /// ([`MemDir::serial`]): as it never changes, asking takes no lock ([`Dir::concurrent`]), which
     /// under Shuttle would be a scheduling point of its own.
     serial: bool,
@@ -55,29 +55,29 @@ struct Fs {
     dir_changes: BTreeMap<String, Vec<DirChange>>,
     /// How many more operations that change the file system succeed, if limited.
     budget: Option<u64>,
-    /// fxdax: the thread that last set the budget ([`MemDir::fail_after`]), if any.
+    /// cladefs: the thread that last set the budget ([`MemDir::fail_after`]), if any.
     limited_on: Option<thread::ThreadId>,
-    /// fxdax: the thread whose operation the file system failed first since the budget was last
+    /// cladefs: the thread whose operation the file system failed first since the budget was last
     /// set, if any.
     failed_on: Option<thread::ThreadId>,
     /// The bytes read and written since it was made, or crashed, and the files opened.
     io: Io,
 }
 
-/// The bytes a [`MemDir`]'s files were read and written; fxdax: and how many times its files were
+/// The bytes a [`MemDir`]'s files were read and written; cladefs: and how many times its files were
 /// opened (TASK-92.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Io {
     pub read: u64,
     pub written: u64,
     pub opened: u64,
-    /// fxdax: the most bytes a file held written, but neither written back ([`File::write_back`])
+    /// cladefs: the most bytes a file held written, but neither written back ([`File::write_back`])
     /// nor synced since, at any time: what a sync of it would have had to write (TASK-165.9).
     pub most_unwritten: u64,
-    /// fxdax: the most bytes a sync of a file found written, but neither written back nor synced
+    /// cladefs: the most bytes a sync of a file found written, but neither written back nor synced
     /// since: what it wrote at once (TASK-401).
     pub most_synced_unwritten: u64,
-    /// fxdax: the syncs of directories, and of files (TASK-369, TASK-333).
+    /// cladefs: the syncs of directories, and of files (TASK-369, TASK-333).
     pub synced_dirs: u64,
     pub synced_files: u64,
 }
@@ -89,7 +89,7 @@ struct Inode {
     durable: Vec<u8>,
     /// The writes since the last sync, in order: their offsets and data.
     writes: Vec<(usize, Vec<u8>)>,
-    /// fxdax: the bytes written since the last write-back of any of its range, or sync.
+    /// cladefs: the bytes written since the last write-back of any of its range, or sync.
     unwritten: u64,
 }
 
@@ -97,7 +97,7 @@ struct Inode {
 enum DirChange {
     Add(String, u64),
     Remove(String),
-    /// fxdax: a file renamed, at once ([`Dir::rename`]).
+    /// cladefs: a file renamed, at once ([`Dir::rename`]).
     Rename(String, String, u64),
 }
 
@@ -174,7 +174,7 @@ impl MemDir {
         dir
     }
 
-    /// fxdax: an empty directory in which the store does all of its I/O on its callers' threads,
+    /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads,
     /// none on threads of its own ([`Dir::concurrent`]): so that its operations come in an order
     /// the store's calls alone decide, and so where it fails ([`MemDir::fail_after`]), and what a
     /// crash of a seed keeps; as do the directories its crashes leave (TASK-79.79).
@@ -201,7 +201,7 @@ impl MemDir {
         self.fs.lock().unwrap().budget == Some(0)
     }
 
-    /// fxdax: whether the first operation the file system failed, since its budget was last set
+    /// cladefs: whether the first operation the file system failed, since its budget was last set
     /// ([`MemDir::fail_after`]), was another thread's than the one that set it: in a test whose
     /// thread runs the store, and sets the budget, one of the store's own, framing a segment or
     /// syncing a flush's files, which a crash then interrupted (TASK-79.79).
@@ -210,7 +210,7 @@ impl MemDir {
         fs.failed_on.is_some() && fs.failed_on != fs.limited_on
     }
 
-    /// fxdax: every file in it, by its path, with what it holds now, durable or not: what tests
+    /// cladefs: every file in it, by its path, with what it holds now, durable or not: what tests
     /// search for bytes that must be in no file of a host's (TASK-411.9).
     pub fn files(&self) -> Vec<(String, Vec<u8>)> {
         let fs = self.fs.lock().unwrap();
@@ -317,7 +317,7 @@ impl Dir for MemDir {
         fs.change_dir(path, DirChange::Remove(name.to_owned()))
     }
 
-    /// fxdax: within a directory, at once; from one to another, its removal from the one and its
+    /// cladefs: within a directory, at once; from one to another, its removal from the one and its
     /// entry in the other each durable as its directory is synced (TASK-310).
     fn rename(&self, from: &str, to: &str) -> io::Result<()> {
         let ((dir, from_name), (to_dir, to_name)) = (split(from), split(to));
@@ -336,7 +336,7 @@ impl Dir for MemDir {
         fs.change_dir(from, DirChange::Remove(from_name.to_owned()))
     }
 
-    /// fxdax: `to`'s entry, of `from`'s file, durable as its directory is synced (TASK-310).
+    /// cladefs: `to`'s entry, of `from`'s file, durable as its directory is synced (TASK-310).
     fn link(&self, from: &str, to: &str) -> io::Result<()> {
         let (_, to_name) = split(to);
         let mut fs = self.fs.lock().unwrap();
@@ -516,7 +516,7 @@ mod tests {
         assert_eq!(read(&file), b"a");
     }
 
-    /// fxdax: it says whether the first operation it failed, since its budget was set, was another
+    /// cladefs: it says whether the first operation it failed, since its budget was set, was another
     /// thread's than the one that set it (TASK-79.79).
     #[test]
     fn says_whose_operation_failed_first() {

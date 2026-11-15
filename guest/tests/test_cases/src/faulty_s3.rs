@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: an S3 bucket degraded as a test says (TASK-330.4): an HTTP proxy in front of an S3
+//! cladefs: an S3 bucket degraded as a test says (TASK-330.4): an HTTP proxy in front of an S3
 //! server, which waits so long before each request it passes on, and fails requests as a degraded
 //! S3 server does: its writes as a full one, `507 Insufficient Storage`, or every request as one
 //! out of service, `503 Service Unavailable`; each after reading the request whole, as a server
@@ -10,7 +10,7 @@
 //! makes of those, retries and all.
 //!
 //! Between the daemon and its bucket, not in the daemon (`extent_remote::faults`,
-//! `FXDAX_REMOTE_FAULTS`, which fxdax's in-process soak still uses): so that a pin's daemon from
+//! `CLADEFS_REMOTE_FAULTS`, which cladefs's in-process soak still uses): so that a pin's daemon from
 //! before that, LangSmith's, meets the same faults as the candidate's, and a qualification's A/B
 //! compares what each did with them. The requests keep their `Host`, which their signatures sign:
 //! the server checks them against what they were sent to, this proxy.
@@ -229,7 +229,7 @@ mod tests {
         let mut stream =
             std::net::TcpStream::connect(endpoint.trim_start_matches("http://")).unwrap();
         let head = format!(
-            "{method} /fxdax/object HTTP/1.1\r\nHost: signed.example:9000\r\ncontent-length: \
+            "{method} /cladefs/object HTTP/1.1\r\nHost: signed.example:9000\r\ncontent-length: \
              {body}\r\nconnection: close\r\n\r\n"
         );
         stream.write_all(head.as_bytes()).unwrap();

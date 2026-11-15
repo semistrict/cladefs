@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a follower's mount (backlog doc-8): Fxfs, read-only, on a device that follows a store
+//! cladefs: a follower's mount (backlog doc-8): Fxfs, read-only, on a device that follows a store
 //! another VM writes, applying the writer's commits as they come, while readers read.
 //!
 //! The concurrency protocol (crates/follower, TASK-42.5, TASK-42.10) keeps readers and the

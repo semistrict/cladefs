@@ -1,11 +1,11 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! Fxfs devices on an extent store (crates/extent_store, backlog doc-4): the writer's, on the
 //! store's branch, and a follower's, on a view of it ([`extent_store::View`]), read-only, as of the
 //! view's commit. Extents' I/O, commits and frees go to the store directly, as its locks are
-//! Shuttle's in the simulation (fxdax's own image device moves them off Fxfs's threads instead).
+//! Shuttle's in the simulation (cladefs's own image device moves them off Fxfs's threads instead).
 
 use anyhow::{Error, bail};
 use async_trait::async_trait;

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:33'
+updated_date: '2026-11-15 13:32'
 labels: []
 dependencies: []
 references:
@@ -19,7 +20,7 @@ ordinal: 855000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Big Sleep first real bug came from variant analysis of recent fixes; KNighter (SOSP 2025) turned kernel fix commits into static checkers that found 92 new bugs. fxdax puts past bugs back as mutants (guest/mutants, guest/sim/mutants.sh) but has one Coccinelle rule (scripts/cocci/region-lock.cocci). A static rule applies a lesson at every call site for good, where a seed covers one path.
+Big Sleep first real bug came from variant analysis of recent fixes; KNighter (SOSP 2025) turned kernel fix commits into static checkers that found 92 new bugs. cladefs puts past bugs back as mutants (guest/mutants, guest/sim/mutants.sh) but has one Coccinelle rule (scripts/cocci/region-lock.cocci). A static rule applies a lesson at every call site for good, where a seed covers one path.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -47,7 +47,7 @@ fn open_host(path: &Path) -> anyhow::Result<Store<HostDir>> {
     Store::open(HostDir::new(path, false)?, OPTIONS)
 }
 
-/// fxdax: a host's store names its branch, and the bucket it is kept in (TASK-165.6), which its
+/// cladefs: a host's store names its branch, and the bucket it is kept in (TASK-165.6), which its
 /// description says, opened or not.
 #[test]
 fn stores_name_their_branch_and_bucket() {
@@ -81,7 +81,7 @@ fn stores_open_once() {
     drop(open_host(&path).unwrap());
 }
 
-/// fxdax: a store is no store until its maker says it is whole: one whose maker stopped part way,
+/// cladefs: a store is no store until its maker says it is whole: one whose maker stopped part way,
 /// as an import a crash cut off, refuses to open, opened again or by another process (TASK-196);
 /// once made, it opens.
 #[test]
@@ -114,7 +114,7 @@ fn stores_unmade_refuse_to_open() {
     assert_eq!(store.extent(ExtentId::new(BRANCH.id, 1)).unwrap(), Some((BLOCK as u64, false)));
 }
 
-/// fxdax: a store's placement's token is its description's, placed durably, which opening it
+/// cladefs: a store's placement's token is its description's, placed durably, which opening it
 /// takes its branch's lease with (TASK-39.7, TASK-165.9); none, never placed.
 #[test]
 fn placements_name_their_token_in_the_description() {

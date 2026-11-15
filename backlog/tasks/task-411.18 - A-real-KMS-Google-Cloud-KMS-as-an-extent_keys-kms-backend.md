@@ -4,6 +4,7 @@ title: 'A real KMS: Google Cloud KMS as an extent_keys::kms backend'
 status: To Do
 assignee: []
 created_date: '2026-11-15 03:35'
+updated_date: '2026-11-15 11:36'
 labels: []
 dependencies: []
 documentation:
@@ -19,12 +20,12 @@ ordinal: 816000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: tenants on GCP grant fxdax cloudkms.cryptoKeyEncrypterDecrypter on their key; the user allowed GCP for testing this backend (2026-11-14), project echophase-connectome-test. URL: gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
+doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: tenants on GCP grant cladefs cloudkms.cryptoKeyEncrypterDecrypter on their key; the user allowed GCP for testing this backend (2026-11-14), project echophase-connectome-test. URL: gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
+- [ ] #1 CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
 - [ ] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
 - [ ] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [ ] #4 Integration tests: tests against real Cloud KMS in echophase-connectome-test, one test key ring reused (keys cannot be deleted, only versions destroyed), skipped with a message unless credentials are present; CI stays without GCP secrets unless the user says otherwise; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend

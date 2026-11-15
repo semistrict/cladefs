@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Mutation testing (scripts/mutants.sh) on an x86-64 Linux host, as
-# root, into RESULTS/mutants (scripts/mutants-host.sh). FXDAX_MUTANTS_SHARD and
-# FXDAX_MUTANTS_JOBS are scripts/mutants.sh's, as is FXDAX_MUTANTS_LIST, a path in SOURCE; the latter's default here is a
+# root, into RESULTS/mutants (scripts/mutants-host.sh). CLADEFS_MUTANTS_SHARD and
+# CLADEFS_MUTANTS_JOBS are scripts/mutants.sh's, as is CLADEFS_MUTANTS_LIST, a path in SOURCE; the latter's default here is a
 # third of the host's CPUs.
 #
 # Usage: mutants-linux-host.sh SOURCE RESULTS [CRATE...]
@@ -23,10 +23,10 @@ export TMPDIR="$work/tmp"
 mkdir -p "$TMPDIR"
 {
     host_record
-    echo "shard ${FXDAX_MUTANTS_SHARD:-all}"
+    echo "shard ${CLADEFS_MUTANTS_SHARD:-all}"
 } > "$results/host.txt"
-export FXDAX_MUTANTS_JOBS=${FXDAX_MUTANTS_JOBS:-$(( $(nproc) / 3 > 0 ? $(nproc) / 3 : 1 ))}
-if [[ -n ${FXDAX_MUTANTS_LIST:-} ]]; then
-    export FXDAX_MUTANTS_LIST="$repo/$FXDAX_MUTANTS_LIST"
+export CLADEFS_MUTANTS_JOBS=${CLADEFS_MUTANTS_JOBS:-$(( $(nproc) / 3 > 0 ? $(nproc) / 3 : 1 ))}
+if [[ -n ${CLADEFS_MUTANTS_LIST:-} ]]; then
+    export CLADEFS_MUTANTS_LIST="$repo/$CLADEFS_MUTANTS_LIST"
 fi
-FXDAX_MUTANTS="$results/mutants" bash "$repo/scripts/mutants.sh" "$@"
+CLADEFS_MUTANTS="$results/mutants" bash "$repo/scripts/mutants.sh" "$@"
