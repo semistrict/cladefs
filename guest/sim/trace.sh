@@ -8,18 +8,21 @@
 # ../mutants put back, OUT/mutant-NAME-seed-N/, each run of it whether or not it failed, with
 # what it said in OUT/mutant-NAME-seed-N/run.log. Takes KERNEL and BUILD as the Makefile does.
 #
-#   trace.sh [-s SEEDS] [-f FIRST] [-o OPERATIONS] [-d OUT] [-m MUTANT]...
+#   trace.sh [-s SEEDS] [-f FIRST] [-o OPERATIONS] [-d OUT] [-x TEST_FLAG]... [-m MUTANT]...
+#
+# -x passes tests/traced a flag, as many as asked (-x -p: punches).
 
 set -u -o pipefail
 cd "$(dirname "$0")"
 
-first=1 seeds=12 operations=60 out="" mutants=()
-while getopts s:f:o:d:m: opt; do
+first=1 seeds=12 operations=60 out="" mutants=() flags=()
+while getopts s:f:o:d:x:m: opt; do
     case $opt in
         s) seeds=$OPTARG ;;
         f) first=$OPTARG ;;
         o) operations=$OPTARG ;;
         d) out=$OPTARG ;;
+        x) flags+=("$OPTARG") ;;
         m) mutants+=("$OPTARG") ;;
         *) exit 2 ;;
     esac
@@ -36,7 +39,7 @@ trace() { # bin, prefix, sources, must-pass
         dir=$out/${prefix}seed-$seed
         mkdir -p "$dir"
         if ! SIM_TRACE_SOURCES=$sources timeout 120 "$bin" "$seed" "$operations" \
-            -o "$dir/TraceDaxCowData.tla" > "$dir/run.log" 2>&1; then
+            -o "$dir/TraceDaxCowData.tla" ${flags[@]+"${flags[@]}"} > "$dir/run.log" 2>&1; then
             echo "${prefix}seed $seed: $(sim_failure "$dir/run.log")"
             if [[ $must == 1 ]]; then
                 status=1

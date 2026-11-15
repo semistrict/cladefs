@@ -7,7 +7,10 @@
  * pages keep busy writing back and rebinding (TASK-444.1). With -o, its steps are traced as the
  * spec's actions (kernel/spec_trace.c), for specs/dax-cow/trace/TraceDaxCow.tla to follow.
  *
- *   traced SEED [OPERATIONS] [-o TRACE] [-v]
+ *   traced SEED [OPERATIONS] [-o TRACE] [-v] [-p]
+ *
+ * -p has the fsyncing task punch pages too, whole, as dax.c punches them (the range dropped and
+ * mapped again), which DaxCow's punch, a page's MAP_ZEROS, isn't: its trace diverges there.
  *
  * As DaxCow's Init has it, the traced part begins with each page a sealed extent's, mapped in the
  * window, none private nor dirty, no PTE: written a page at a time from the last (so that the
@@ -29,7 +32,7 @@ static struct file *file;
 static unsigned long addr, pages, operations = 60;
 static int storers_left;
 static unsigned long stores;
-static bool verbose;
+static bool verbose, punching;
 
 static u64 between(u64 low, u64 high)
 {
@@ -115,8 +118,14 @@ static void storer_task(void *arg)
 /* Fsyncs, and asks the budget's worker to rebind, as the storers store. */
 static void fsyncer_task(void *arg)
 {
+	unsigned long page;
+
 	while (READ_ONCE(storers_left)) {
-		if (between(0, 3)) {
+		if (punching && !between(0, 3)) {
+			page = between(0, pages - 1);
+			check(!sim_punch(file, page << PAGE_SHIFT, (page + 1) << PAGE_SHIFT),
+			      "a punch of page %lu", page);
+		} else if (between(0, 3)) {
 			check(!sim_fsync(file), "an fsync");
 		} else {
 			check(!sim_param_set("dax_rebind_now", "1"), "rebinding now");
@@ -134,7 +143,7 @@ int main(int argc, char **argv)
 	int i;
 
 	if (argc < 2 || sscanf(argv[1], "%llu", &seed) != 1)
-		sim_panic("usage: traced SEED [OPERATIONS] [-o TRACE] [-v]");
+		sim_panic("usage: traced SEED [OPERATIONS] [-o TRACE] [-v] [-p]");
 	if (argc > 2 && argv[2][0] != '-')
 		sscanf(argv[2], "%lu", &operations);
 	for (i = 2; i < argc; i++) {
@@ -142,6 +151,8 @@ int main(int argc, char **argv)
 			path = argv[++i];
 		else if (!strcmp(argv[i], "-v"))
 			verbose = true;
+		else if (!strcmp(argv[i], "-p"))
+			punching = true;
 	}
 	sim_init(seed);
 	sim_device_init(WINDOW_LEN);

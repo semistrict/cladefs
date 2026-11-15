@@ -24,6 +24,8 @@ KERNEL=<tree> BUILD=<dir> ./mutants.sh --check                # that each still 
 <dir>/tests/scenarios [NAME]             # paths no seed takes, each played out; none lists them
 KERNEL=<tree> BUILD=<dir> ./sweep.sh [RUN...] # each run of one, each of its failable calls failing in turn
 SIM_SWEEP=N <dir>/tests/scenarios NAME    # one of the sweep's runs, its Nth call failing
+<dir>/tests/traced SEED [OPERATIONS] -o T # one file, two storers, an fsyncer: its steps as DaxCow's
+KERNEL=<tree> BUILD=<dir> ./trace.sh [-m MUTANT]... # traced's seeds' traces, mutants' too
 ```
 
 `interleave`'s flags say what to log of a run, and `failures`' (`-v`, `-W`, `-a`, `-w`); replaying
@@ -40,6 +42,19 @@ changed since its base (dax.c and the kernel's fxfs, the kernel's patches and bu
 `scripts/guest-sim-scope.py`), else 1 to 200; the nightly workflow runs 3,000 every day; the nightly hunt
 (`.github/workflows/hunt.yml`) 20,000 more each night, from a first seed that moves, and keeps what
 failed, with `replay`, how to run each again.
+
+## Traced runs: dax.c against specs/dax-cow (TASK-444.1)
+
+`tests/traced` plays out specs/dax-cow's world, with dax.c in it: one file of a few pages, two
+storers storing through one mapping and by write(2), a task fsyncing it and asking for rebinds,
+and the budget's worker. With `-o`, `kernel/spec_trace.c` writes its steps as DaxCow's actions,
+and `specs/dax-cow/trace` has TLC follow them through the spec: each run must be a behavior of
+it (specs/dax-cow/trace/README.md). The steps come from the fake kernel (locks by name, PTEs,
+the device's COMMIT and WRITE, fsync), from tracepoints (`shim/linux/tracepoint.h` calls a weak
+`sim_tp_NAME` if one is defined), and from pages.c's transitions and the model of Fxfs's
+writeback and lookups, wrapped as they are linked (the Makefile's `WRAPPED`). dax.c is left
+unchanged. `trace.sh` makes the traces of a set of seeds, and of past bugs put back, which
+`scripts/check-tla.sh` checks.
 
 ## What is real, and what is simulated
 
