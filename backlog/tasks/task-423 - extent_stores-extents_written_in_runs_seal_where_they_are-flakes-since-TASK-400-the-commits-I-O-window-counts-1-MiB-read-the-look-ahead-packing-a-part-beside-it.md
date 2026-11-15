@@ -4,11 +4,11 @@ title: >-
   extent_store's extents_written_in_runs_seal_where_they_are flakes since
   TASK-400: the commit's I/O window counts 1 MiB read, the look-ahead packing a
   part beside it
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 05:06'
-updated_date: '2026-11-15 05:36'
+updated_date: '2026-11-15 05:51'
 labels:
   - testing
   - flaky
@@ -26,14 +26,14 @@ Main's CI test (workspace) on 7998d1f86 (run 43675449547): crates/extent_store/t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The test passes deterministically: 0 failures over many runs under load, and a run that forces the look-ahead into the window fails without the fix
+- [x] #1 The test passes deterministically: 0 failures over many runs under load, and a run that forces the look-ahead into the window fails without the fix
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -54,4 +54,12 @@ Fix (test side, the look ahead promises no ordering against a commit and must no
 Proof (Mac, M-series, 15 CPUs): temporary failpoints (look waits for the commit to begin; commit waits for one look's read; applied, run, reversed, not committed): unfixed test fails deterministically with left (1048576, 0), CI's; fixed test passes with the hooks compiled in, unconfigured. Under 15 'yes' spinners: unfixed copy 10/1000 failed (all (1048576, 0)); fixed 0/2000.
 Sweep: no other test races. store.rs opened_reading/eight_segments write blocks only (no part written whole, no look ahead); synced_dirs/synced_files/most_unwritten tests count syncs/writes (a look ahead does neither); segments_framed_in_copies_take_their_parts_held and encrypted.rs sealed_stores_hold_no_parts_packed_ahead assert reads on MemDir::serial (looks inline), the concurrent variant asserts only bytes; segments.rs unit tests look ahead inline; fxdax: no dir.io(); extentd's governor test writes noise (nothing held). store-bench's opening read count can include a closed store's in-flight look: filed TASK-426 (close returns with a look ahead still reading).
 Verified on the Mac: clippy part (workspace + shuttle builds), shuttle part green (follower_sim LEAK flag, noted on TASK-420), cargo nextest -p extent_store -p fxdax (but sim) 592/592 (5 LEAK flags, noted on TASK-420), upstream-changes.py --check.
+
+2026-11-15 (claude): pushed to main as 7edc54ef3 (rebased on c8344a37a). Rebased tree on the Mac: clippy + shuttle parts green (LEAK flags only: fxdax dax stores_race_frees_*, follower busy_by_pct, follower_sim failure::*, TASK-420's), extent_store + fxdax 591/591, upstream-changes.py --check. No upstream code touched (DoD #3). DoD #1's Linux half: Mac was enough (the race isn't Linux-only); main's CI run 43682804204 on 7edc54ef3 was pending when last looked at.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The test measured the framer's look-ahead reads (TASK-400: parts written whole, read on the framer thread with no lock, whenever it ran) as the commit's. The look ahead promises no order against a commit, so the test changed: Store::wait_looked_ahead waits while a look ahead is queued or reading (Framing::looking), and the test waits before measuring. Forced with temporary failpoints the old test failed every run with CI's (1048576, 0); under 15 spinners old 10/1000, new 0/2000. No other I/O-measuring test races; TASK-426 filed for close returning mid-look.
+<!-- SECTION:FINAL_SUMMARY:END -->
