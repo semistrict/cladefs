@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-18 04:06'
-updated_date: '2026-11-06 00:55'
+updated_date: '2026-11-15 12:34'
 labels: []
 dependencies: []
 parent_task_id: TASK-44
@@ -40,4 +40,6 @@ At dde8d58d3 the spec exists: specs/bucket (TASK-165.2, 25c2b6314, with TASK-175
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-05 triage: AC #1 met by specs/bucket (TASK-165.2, 25c2b6314; TASK-175 to 180 and 183's rules since). check-tla.sh is a script, not a make target. Verified on main dde8d58d3, macOS: scripts/check-tla.sh over specs/bucket's 11 models and 32 mutations, 43 of 43 (the models hold, each mutation violates what its configuration names), 17 min. Left: AC #2 (trace validation), AC #3 (cargo-mutants on extent_remote).
+
+doc-17 (2026-11-15): the bucket part of TASK-444.1 (trace validation of every spec). Specula (TASK-444.5) can import specs/bucket and may do much of this.
 <!-- SECTION:NOTES:END -->

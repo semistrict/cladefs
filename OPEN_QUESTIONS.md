@@ -1,6 +1,21 @@
 # Open questions
 
+## Is herdtools7 (CeCILL-B) acceptable? (TASK-444.2, 2026-11-15)
+
+Needed: your call on herdtools7's licence, CeCILL-B (BSD-like, French law; GitHub reports
+NOASSERTION; not on OSI's list as far as I could find). Why: herd7 runs the Linux kernel memory
+model's litmus tests (tools/memory-model), the natural disposer for an audit of dax.c's barriers.
+Recommend: allow it as a dev-only checker (nothing linked or shipped). Until answered: TASK-444.2
+audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
+
 # Decisions
+
+## Kani excluded: its backend CBMC is BSD-4-Clause (doc-17, 2026-11-15)
+
+Kani (Apache-2.0) runs on CBMC, whose LICENSE has the 4-clause BSD advertising clause, not
+OSI-approved. Decided: no Kani; bounded proofs of pure code, if wanted, go to Verus (MIT). *Instead:*
+Kani with bolero harnesses doubling as fuzz tests, as s2n-quic does. *Undo:* allow CBMC and add Kani
+harnesses.
 
 ## The extent device as a crate, crates/virtio_extent, which libmachine shares (TASK-417, 2026-11-14)
 
