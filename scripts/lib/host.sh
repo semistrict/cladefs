@@ -9,7 +9,9 @@
 # through test-host.sh, perf-gate-host.sh, soak-host.sh, soak-workloads-host.sh,
 # guest-mutants-host.py and dax-gate.sh.
 #
-# The host, CLADEFS_HOST as ssh names it (default ubu1), is an x86-64 Linux host with KVM, set up
+# The host, CLADEFS_HOST as ssh names it (default ubu1), or `local`, this machine itself, reached
+# without ssh (as the nightly on ubu1 runs, from cron: scripts/nightly-host.sh), is an x86-64
+# Linux host with KVM, set up
 # once by its own setup, not by a run (ubu1's ~/docs/system-setup.d: 140-fxdax_dev.sh's packages,
 # those scripts/lib/linux-host-setup.sh lists, and the user's Rust, in ~/.cargo, with
 # cargo-nextest; 141's sudo without a password; 143's ext4 scratch disk, /mnt/fxdax-scratch; 146's
@@ -80,27 +82,37 @@ host_name() {
 # so that two drivers started in the same second keep apart (TASK-79.86).
 host_name "run-${CLADEFS_HOST_RUN:+$CLADEFS_HOST_RUN-}$(date -u +%Y%m%dT%H%M%SZ)-$host_mark"
 
-# host_label prints the host's name for the names of results: ssh's, without its user.
+# host_label prints the host's name for the names of results: ssh's, without its user; a local
+# host's own, as its name for itself.
 host_label() {
-    echo "${host##*@}"
+    if [[ $host == local ]]; then hostname -s; else echo "${host##*@}"; fi
 }
 
-# host_ssh COMMAND... runs COMMAND on the host. Keepalives, as a command may run for hours
-# without output.
+# host_shell COMMAND runs the shell command COMMAND on the host, with this function's standard
+# input: over ssh, with keepalives, as a command may run for hours without output; or, on a local
+# host, in a login's place, the home, as ssh runs it.
+host_shell() {
+    if [[ $host == local ]]; then
+        (cd && bash -c "$1")
+    else
+        # shellcheck disable=SC2029 # COMMAND is built here, its words quoted for the host.
+        ssh "${host_ssh_options[@]}" "$host" "$1"
+    fi
+}
+
+# host_ssh COMMAND... runs COMMAND on the host.
 host_ssh() {
-    ssh "${host_ssh_options[@]}" "$host" "$*" < /dev/null
+    host_shell "$*" < /dev/null
 }
 
 # host_side ACTION ARG... does ACTION of scripts/lib/host-remote.sh on the host.
 host_side() {
-    ssh "${host_ssh_options[@]}" "$host" "bash -s -- $(printf '%q ' "$@")" \
-        < "$host_library/host-remote.sh"
+    host_shell "bash -s -- $(printf '%q ' "$@")" < "$host_library/host-remote.sh"
 }
 
 # host_put FILE PATH copies FILE here to PATH on the host.
 host_put() {
-    ssh "${host_ssh_options[@]}" "$host" \
-        "mkdir -p $(printf %q "$(dirname "$2")") && cat > $(printf %q "$2")" < "$1"
+    host_shell "mkdir -p $(printf %q "$(dirname "$2")") && cat > $(printf %q "$2")" < "$1"
 }
 
 # host_commit [REV] prints the commit REV names in repo, in full; with no REV, CLADEFS_HOST_COMMIT's,

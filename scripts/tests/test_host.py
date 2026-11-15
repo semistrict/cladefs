@@ -24,6 +24,7 @@ import unittest
 import weakref
 from pathlib import Path
 
+import fake_ssh
 from script import SCRIPTS
 
 HOST = SCRIPTS / "lib" / "host.sh"
@@ -483,6 +484,26 @@ class Runs(unittest.TestCase):
              "ubu1 bash -s -- wait", "ubu1 bash -s -- log", "ubu1 bash -s -- fetch",
              "ubu1 bash -s -- clean"],
         )
+
+    def test_a_local_host_runs_here_without_ssh(self):
+        """CLADEFS_HOST=local: the run's host half runs on this machine, in its home, as the
+        nightly's on ubu1 does from cron (scripts/nightly-host.sh, TASK-441)."""
+        fleet = Fleet()
+        tools = fleet.directory / "local-bin"
+        fake_ssh.tools(tools)
+        status, out, errors = fleet.drive(
+            RAN + 'host_label\n',
+            environment={"CLADEFS_HOST": "local", "CLADEFS_HOST_REPO": str(fleet.clone),
+                         "PATH": f"{tools}:{fleet.environment['PATH']}"})
+        hostname = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout
+        self.assertEqual((status, out, errors), (0, f"status 0\n{hostname}", ""))
+        results = fleet.directory / "results"
+        run = (results / "run.txt").read_text().splitlines()[0].removeprefix("run ")
+        self.assertEqual((results / "ran.txt").read_text().splitlines()[:2],
+                         ["test-linux-host.sh a b", f"source {fleet.scratch}/{run}/tree"])
+        self.assertEqual((fleet.directory / "fxjob-calls").read_text(), f"--name {run} --mem 12G -- "
+                         f"bash {fleet.scratch}/{run}/job/command\n")
+        self.assertEqual((fleet.calls(), fleet.runs(), fleet.worktrees()), ([], [], []))
 
     def test_a_run_whose_job_fails_leaves_nothing(self):
         fleet = Fleet()

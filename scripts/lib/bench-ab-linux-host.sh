@@ -37,6 +37,17 @@
 # CLADEFS_GUEST_CMDLINE=virtio_extent.affine=0. CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS,
 # CLADEFS_BENCH_ITERATIONS (each round's, default 2) and the like are the same for both sides.
 # CLADEFS_GUEST_KERNEL_BUILD is the guest kernels' build (default release).
+#
+# For the nightly (scripts/nightly-host.sh, TASK-441.1), whose baseline is the commit the night
+# before measured: CLADEFS_AB_KEEP names a directory where each side's artifacts are kept, by its
+# source revision and guest kernel build (ab_key), so that a side built by a run before builds
+# nothing, its kept artifacts what its rounds run; the CLADEFS_AB_KEEP_COUNT (default 4) used last
+# are kept, the others removed. CLADEFS_AB_COUNTS=1 runs scripts/counts.sh (this tree's) on each
+# side as it is built, the exact counts kept with its artifacts, and copied to RESULTS/NAME-counts.
+# CLADEFS_AB_RERUN=1 runs each round scripts/ab-rounds.py leaves out (others wrote beside it, or
+# its control moved) once more, of both sides in the same order, as round ROUNDS+K, which
+# RESULTS/reruns.txt records (`RERUN ROUND`). A side that fails to build says so in
+# RESULTS/build-failed, its name, and the run ends there.
 set -euo pipefail
 
 # Prints the sides' order of each of ROUNDS rounds, a line each: `a b`, then `b a`, and so on, so
@@ -46,6 +57,97 @@ ab_order() {
     for (( r = 1; r <= $1; r++ )); do
         if (( r % 2 )); then echo "a b"; else echo "b a"; fi
     done
+}
+
+# ab_key TREE prints what a side's artifacts are kept by in CLADEFS_AB_KEEP: TREE's source
+# revision (its source-revision.txt, scripts/lib/host-remote.sh's) and the guest kernel's build;
+# nothing for a tree whose revision doesn't name its source alone (changed from its commit, or
+# unknown), whose artifacts are not kept.
+ab_key() {
+    local revision
+    revision=$(sed -n 1p "$1/source-revision.txt" 2> /dev/null) || true
+    [[ $revision =~ ^[0-9a-f]{40}$ ]] || return 0
+    echo "$revision-$kernel_build"
+}
+
+# Each side's tree and artifacts, tree_a and artifacts_a, tree_b and artifacts_b, which build makes
+# or finds kept; `of tree SIDE` and `of artifacts SIDE` print them.
+tree_a='' tree_b='' artifacts_a='' artifacts_b=''
+of() {
+    local name="$1_$2"
+    printf '%s' "${!name}"
+}
+
+# build SIDE SOURCE builds side SIDE from SOURCE once: its tree, tree_SIDE, its guest kernel and
+# its artifacts, artifacts_SIDE (host_artifacts), and, with CLADEFS_AB_COUNTS=1, its exact counts
+# in the artifacts' counts (scripts/counts.sh). With CLADEFS_AB_KEEP, artifacts kept of the same
+# key (ab_key) are the side's, built by a run before, and nothing builds; what this builds is kept
+# there. A side that fails to build is named in RESULTS/build-failed, and fails this.
+build() {
+    local side=$1 source=$2 key='' kept='' made
+    repo=$source
+    host_tree "bench-ab-$side"
+    printf -v "tree_$side" '%s' "$repo"
+    if [[ -n ${CLADEFS_AB_KEEP:-} ]]; then key=$(ab_key "$repo"); fi
+    if [[ -n $key ]]; then kept=$CLADEFS_AB_KEEP/$key; fi
+    if [[ -n $kept && -f $kept/artifacts.txt ]]; then
+        echo "Side $side's artifacts kept from a run before: $kept; building nothing" >&2
+        touch "$kept"
+    else
+        echo "Building side $side from $source" >&2
+        made=$work/ab-artifacts-$side
+        if ! host_kernel_log=$results/guest-kernel-$side.log \
+            host_kernel "$kernel_build" "$work/guest-kernel-ab-$side-$kernel_build" ||
+            ! host_artifacts "$made" "$side" "$host_kernel_image"; then
+            echo "$side" > "$results/build-failed"
+            echo "Side $side failed to build: see $results/build-$side.log and" \
+                "$results/guest-kernel-$side.log" >&2
+            return 1
+        fi
+        if [[ -n $kept ]]; then
+            mkdir -p "$CLADEFS_AB_KEEP"
+            if [[ -e $kept.new ]]; then rm -r -- "$kept.new"; fi
+            cp -a "$made" "$kept.new"
+            mv "$kept.new" "$kept"
+            touch "$kept"
+            rm -r -- "$made"
+            echo "Side $side's artifacts kept in $kept" >&2
+        else
+            kept=$made
+        fi
+    fi
+    printf -v "artifacts_$side" '%s' "$kept"
+    cp "$kept/artifacts.txt" "$results/artifacts-$side.txt"
+    if [[ ${CLADEFS_AB_COUNTS:-} == 1 ]]; then
+        if [[ ! -f $kept/counts/status.txt ]]; then
+            echo "Counting side $side's exact counts (scripts/counts.sh)" >&2
+            "$host_tools/scripts/counts.sh" "$repo" "$kept/counts.new" "$work/counts-$side" \
+                > "$results/counts-$side.log" 2>&1 ||
+                { echo "side $side's counts could not start: see $results/counts-$side.log" >&2
+                  return 1; }
+            mv "$kept/counts.new" "$kept/counts"
+        fi
+    fi
+    ab_prune
+}
+
+# ab_prune removes from CLADEFS_AB_KEEP all but the CLADEFS_AB_KEEP_COUNT (default 4) artifacts
+# used last, but never one a side of this run uses.
+ab_prune() {
+    local keep=${CLADEFS_AB_KEEP_COUNT:-4} old side used
+    [[ -n ${CLADEFS_AB_KEEP:-} && -d $CLADEFS_AB_KEEP ]] || return 0
+    [[ $keep =~ ^[1-9][0-9]*$ ]] || { echo "CLADEFS_AB_KEEP_COUNT is a count" >&2; return 2; }
+    # shellcheck disable=SC2012 # Its names are ab_key's, hexadecimal and a word: by time, newest first.
+    while read -r old; do
+        used=0
+        for side in a b; do
+            if [[ $(of artifacts "$side") == "$CLADEFS_AB_KEEP/$old" ]]; then used=1; fi
+        done
+        if (( ! used )); then
+            echo "Removing kept artifacts $CLADEFS_AB_KEEP/$old" >&2
+            rm -r -- "${CLADEFS_AB_KEEP:?}/$old"
+        fi
+    done < <(ls -1t "$CLADEFS_AB_KEEP" | sed -n "$((keep + 1)),\$p")
 }
 
 # Sourced, as by the scripts' tests, it defines its functions and does nothing else.
@@ -69,21 +171,6 @@ suite=${CLADEFS_AB_SUITE:-fs}
 read -ra a_env <<< "${CLADEFS_AB_A_ENV:-}"
 read -ra b_env <<< "${CLADEFS_AB_B_ENV:-}"
 
-# Each side's tree, by side, which build makes.
-declare -A trees
-
-# Builds side SIDE from SOURCE once: its tree, trees[SIDE], its guest kernel and its artifacts, in
-# $work/ab-artifacts-SIDE (host_artifacts).
-build() {
-    local side=$1 source=$2
-    repo=$source
-    host_tree "bench-ab-$side"
-    echo "Building side $side from $source" >&2
-    host_kernel_log=$results/guest-kernel-$side.log \
-        host_kernel "$kernel_build" "$work/guest-kernel-ab-$side-$kernel_build"
-    host_artifacts "$work/ab-artifacts-$side" "$side" "$host_kernel_image"
-    trees[$side]=$repo
-}
 
 # What a build made, which the rounds run: each side's tree, and the harness.
 built=$work/ab-built
@@ -93,21 +180,26 @@ harness=
 # sides, which a side of this tree's own revision built already; and records what it made, in
 # $built and the results' host.txt.
 build_sides() {
-    local side
+    local side name
     build a "$a_source"
     if [[ $b_source == same ]]; then
-        trees[b]=${trees[a]}
-        mkdir -p "$work/ab-artifacts-b"
-        cp -a "$work/ab-artifacts-a/." "$work/ab-artifacts-b/"
+        tree_b=$tree_a artifacts_b=$artifacts_a
         cp "$results/artifacts-a.txt" "$results/artifacts-b.txt"
     else
         build b "$b_source"
     fi
+    for side in a b; do
+        if [[ -d $(of artifacts "$side")/counts ]]; then
+            name=$a_name
+            if [[ $side == b ]]; then name=$b_name; fi
+            cp -a "$(of artifacts "$side")/counts" "$results/$name-counts"
+        fi
+    done
 
     if [[ $suite == qualify ]]; then
         for side in a b; do
-            if cmp -s "$tools/source-revision.txt" "${trees[$side]}/source-revision.txt"; then
-                harness=$work/ab-artifacts-$side
+            if cmp -s "$tools/source-revision.txt" "$(of tree "$side")/source-revision.txt"; then
+                harness=$(of artifacts "$side")
                 break
             fi
         done
@@ -125,16 +217,17 @@ build_sides() {
         echo "A $a_name: $a_source ${a_env[*]:-}"
         echo "B $b_name: $b_source ${b_env[*]:-}"
     } > "$results/host.txt"
-    printf 'a %s\nb %s\nharness %s\n' "${trees[a]}" "${trees[b]}" "$harness" > "$built"
+    printf 'a %s %s\nb %s %s\nharness %s\n' "$tree_a" "$artifacts_a" "$tree_b" "$artifacts_b" \
+        "$harness" > "$built"
 }
 
 # Reads what a build made from $built.
 load_build() {
-    local key value
+    local key value made
     [[ -f $built ]] || { echo "$work holds no build: CLADEFS_HOST_PHASE=build first" >&2; exit 2; }
-    while read -r key value; do
+    while read -r key value made; do
         case $key in
-            a | b) trees[$key]=$value ;;
+            a | b) printf -v "tree_$key" '%s' "$value"; printf -v "artifacts_$key" '%s' "$made" ;;
             harness) harness=$value ;;
         esac
     done < "$built"
@@ -159,13 +252,13 @@ round() {
     if [[ $side == a ]]; then name=$a_name env=(${a_env[@]+"${a_env[@]}"}); else
         name=$b_name env=(${b_env[@]+"${b_env[@]}"}); fi
     out=$results/$name-r$round
-    env+=("CLADEFS_E2E_PREBUILT=$work/ab-artifacts-$side"
-        "CLADEFS_GUEST_KERNEL=$work/ab-artifacts-$side/vmlinux")
+    env+=("CLADEFS_E2E_PREBUILT=$(of artifacts "$side")"
+        "CLADEFS_GUEST_KERNEL=$(of artifacts "$side")/vmlinux")
     if [[ $suite == qualify ]]; then
         env+=("CLADEFS_E2E_HARNESS=$harness")
         command=("$tools/scripts/qualify.sh" "$out")
     else
-        env+=("CLADEFS_E2E_ROOT=${trees[$side]}" "CLADEFS_BENCH_RESULTS=$out")
+        env+=("CLADEFS_E2E_ROOT=$(of tree "$side")" "CLADEFS_BENCH_RESULTS=$out")
         command=("$tools/scripts/bench.sh" "$iterations")
     fi
     echo "Round $round: $name" >&2
@@ -192,10 +285,28 @@ done < <(ab_order "$rounds")
 
 control=${CLADEFS_AB_CONTROL-ext4-guest-kernel}
 if [[ $suite == qualify ]]; then control=${CLADEFS_AB_CONTROL-}; fi
+
+# Each round left out, rerun once, as the next round's number, of both sides in the round's own
+# order (TASK-441.1).
+ran=$rounds
+if [[ ${CLADEFS_AB_RERUN:-} == 1 && $suite == fs ]]; then
+    mapfile -t again < <("$tools/scripts/ab-rounds.py" discarded --control "$control" \
+        "$results" "$a_name" "$b_name" 2>> "$results/reruns.log")
+    for r in ${again[@]+"${again[@]}"}; do
+        ran=$((ran + 1))
+        echo "Round $ran: round $r again, which was left out (see $results/reruns.log)" >&2
+        echo "$ran $r" >> "$results/reruns.txt"
+        read -r first second < <(ab_order "$r" | sed -n "${r}p")
+        for side in "$first" "$second"; do
+            round "$side" "$ran" || status=1
+        done
+    done
+fi
+
 sides=()
-for (( r = 1; r <= rounds; r++ )); do sides+=("$results/$a_name-r$r"); done
+for (( r = 1; r <= ran; r++ )); do sides+=("$results/$a_name-r$r"); done
 sides+=(-- "$b_name")
-for (( r = 1; r <= rounds; r++ )); do sides+=("$results/$b_name-r$r"); done
+for (( r = 1; r <= ran; r++ )); do sides+=("$results/$b_name-r$r"); done
 "$tools/scripts/bench-ab.py" ${control:+--control "$control"} "$a_name" "${sides[@]}" \
     > "$results/ab.md" || status=1
 # The guests' root filesystems and the stores, which a failed case leaves, are not results.

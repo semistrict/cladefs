@@ -51,13 +51,14 @@ TOOLS = {
 }
 
 
-def tools():
-    """The host's tools' directory, made: each tool written whole under a name of this call's, then
+def tools(directory=None):
+    """The host's tools' directory, made (default $FAKE_SSH/host-bin; a local host's, as the
+    nightly's tests run one, another): each tool written whole under a name of this call's, then
     renamed into place, as a job an earlier call launched may run one meanwhile. Written over in
     place, as each call did, a tool the job ran was empty, which sh ran as nothing, ending 0, or,
     on Linux, open for writing (ETXTBSY): the source's host script of a migration never ran, its
     snapshot not left for the target (TASK-385)."""
-    directory = STATE / "host-bin"
+    directory = Path(directory) if directory else STATE / "host-bin"
     directory.mkdir(exist_ok=True)
     for name, text in TOOLS.items():
         written = directory / f".{name}.{os.getpid()}"

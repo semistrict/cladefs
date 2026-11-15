@@ -27,7 +27,9 @@
 # (CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS, CLADEFS_BENCH_VCPUS), the same for both sides. The scripts that run are those of
 # the commit this tree's scripts run (scripts/lib/host.sh's CLADEFS_HOST_COMMIT), the sides' commits'
 # code what they build and boot. The results go to docs/measurements/HOST-fs-bench-ab-<time>-<mark>
-# unless named; each side's record in RESULTS/NAME/source.txt.
+# unless named; each side's record in RESULTS/NAME/source.txt. The nightly's knobs, artifacts kept
+# between runs (CLADEFS_AB_KEEP), each side's exact counts (CLADEFS_AB_COUNTS) and rounds left out
+# rerun once (CLADEFS_AB_RERUN), scripts/lib/bench-ab-linux-host.sh's header says (TASK-441.1).
 #
 # CLADEFS_AB_SUITE=qualify runs the qualification in place of the fs bench (scripts/qualify.sh,
 # TASK-330.4): LangSmith's pin as side A, the candidate as B, before the candidate is handed to
