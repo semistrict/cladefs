@@ -2,101 +2,26 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what fxdax needs of a KMS, where each tenant's KEK is kept and never leaves
-//! (backlog doc-16, Goals): to wrap a key under a tenant's KEK, and to unwrap what it wrapped.
-//! Nothing else: creating, rotating, revoking and destroying a KEK are the tenant's, done out of
-//! band in its KMS, so they are not in [`Kms`]. [`LocalKms`] is a fake with those too, for tests
-//! and development, its KEKs files in a directory. Real KMSes come later (doc-16, the user's
-//! decision).
+//! fxdax's own: [`LocalKms`], a KMS on the host's filesystem, a fake for tests and development
+//! (TASK-411.1), with what a real KMS does out of band too: creating, rotating, revoking and
+//! destroying tenants' KEKs.
 
+use super::{Error, Kms};
 use crate::{KEY_LEN, SALT_LEN, Salt, Secret, Unauthentic, WRAPPED_LEN, Wrapped};
 use std::fs;
-use std::future::Future;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use zeroize::Zeroize as _;
 
-/// A KMS, holding tenants' KEKs, each named by its tenant's ID.
-pub trait Kms: Send + Sync + 'static {
-    /// `key`, wrapped under `tenant`'s KEK: its newest version, if the KMS keeps several.
-    fn wrap(
-        &self,
-        tenant: u64,
-        key: &Secret,
-    ) -> impl Future<Output = Result<Wrapped, Error>> + Send;
-
-    /// The key `wrapped` holds, if `tenant`'s KEK wrapped it, under any version of it still kept.
-    fn unwrap(
-        &self,
-        tenant: u64,
-        wrapped: &Wrapped,
-    ) -> impl Future<Output = Result<Secret, Error>> + Send;
-}
-
-/// fxdax: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
-/// [`Kms`] is one.
-pub trait Dyn: Send + Sync + 'static {
-    /// [`Kms::wrap`].
-    fn wrap_dyn<'a>(&'a self, tenant: u64, key: &'a Secret) -> Boxed<'a, Wrapped>;
-
-    /// [`Kms::unwrap`].
-    fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret>;
-}
-
-/// What a [`Dyn`] KMS's calls return.
-pub type Boxed<'a, T> = std::pin::Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'a>>;
-
-impl<K: Kms> Dyn for K {
-    fn wrap_dyn<'a>(&'a self, tenant: u64, key: &'a Secret) -> Boxed<'a, Wrapped> {
-        Box::pin(self.wrap(tenant, key))
-    }
-
-    fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret> {
-        Box::pin(self.unwrap(tenant, wrapped))
-    }
-}
-
-/// fxdax: the KMS a host's processes are configured with, shared (TASK-411.3).
-pub type Shared = std::sync::Arc<dyn Dyn>;
-
-/// fxdax: the KMS `url` names (TASK-411.3): `local:///DIR`, a [`LocalKms`] keeping its tenants'
-/// KEKs under the directory `DIR`, the only kind there is until real KMSes come (doc-16, the
-/// user's decision); any other is refused, naming it.
-pub fn from_url(url: &str) -> Result<Shared, String> {
-    let Some(dir) = url.strip_prefix("local://") else {
-        return Err(format!("{url:?} names no KMS: local:///DIR, a directory of tenants' KEKs"));
-    };
+/// The [`LocalKms`] `url`, `local:///DIR`, names ([`super::from_url`]).
+pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
+    let dir = url.strip_prefix("local://").expect("a local:// URL");
     if !dir.starts_with('/') {
         return Err(format!("{url:?} names no KMS: local:///DIR names an absolute directory"));
     }
     let kms = LocalKms::open(dir).map_err(|err| format!("the KMS at {url}: {err}"))?;
     Ok(std::sync::Arc::new(kms))
-}
-
-/// Why a KMS refused, each naming the tenant whose KEK was asked for, so that a store that cannot
-/// open says whose key it lacks.
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("tenant {tenant}: no KEK in the KMS")]
-    NoSuchTenant { tenant: u64 },
-    /// [`LocalKms::create`] of a tenant that has a KEK, or had one.
-    #[error("tenant {tenant}: a KEK exists already")]
-    Exists { tenant: u64 },
-    /// The tenant took fxdax's rights to its KEK away, for now: it may give them back.
-    #[error("tenant {tenant}: its KEK is revoked")]
-    Revoked { tenant: u64 },
-    /// The tenant's KEK is gone for good, and with it everything wrapped under it: the tenant is
-    /// shredded (doc-16, Shredding).
-    #[error("tenant {tenant}: its KEK is destroyed")]
-    Destroyed { tenant: u64 },
-    /// A wrapped key not wrapped by this tenant's KEK: another tenant's, a version it never had,
-    /// tampered with or corrupt.
-    #[error("tenant {tenant}: {source}")]
-    Unauthentic { tenant: u64, source: Unauthentic },
-    /// The KMS failed. What was asked may or may not have taken effect.
-    #[error("tenant {tenant}: the KMS failed: {source}")]
-    Io { tenant: u64, source: io::Error },
 }
 
 /// Which KEK wrapped a key [`LocalKms`] wrapped, as its header says: a tenant's, of a version.
@@ -727,7 +652,7 @@ mod tests {
     fn kmses_are_named_by_their_urls() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("kms");
-        let shared = from_url(&format!("local://{}", path.display())).unwrap();
+        let shared = crate::kms::from_url(&format!("local://{}", path.display())).unwrap();
         LocalKms::open(&path).unwrap().create(7).unwrap();
         let key = Secret::random();
         let wrapped = block_on(shared.wrap_dyn(7, &key)).unwrap();
@@ -736,10 +661,11 @@ mod tests {
             block_on(shared.unwrap_dyn(8, &wrapped)).map(|_| ()).unwrap_err().to_string(),
             "tenant 8: no KEK in the KMS"
         );
-        let refused = |url: &str| from_url(url).map(|_| ()).unwrap_err();
+        let refused = |url: &str| crate::kms::from_url(url).map(|_| ()).unwrap_err();
         assert_eq!(
-            refused("aws-kms://key"),
-            "\"aws-kms://key\" names no KMS: local:///DIR, a directory of tenants' KEKs"
+            refused("vault://key"),
+            "\"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or gcp-kms:// \
+             (doc-16)"
         );
         assert_eq!(
             refused("local://relative"),
