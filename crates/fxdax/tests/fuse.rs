@@ -876,3 +876,63 @@ fn concurrent_requests() {
         }
     })
 }
+
+/// Data that compresses not, which a file holding it in the clear holds as it is.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+/// TASK-411.7 (TASK-411's AC #3, FUSE mounts): the server a FUSE mount runs, serving a store of a
+/// sealed cell, its tenant's KEK in the host's KMS (the common tenant's, whose cells `Storage`
+/// makes): a file written through it reads back, before and after the store is closed and served
+/// again; no file of the store's directory, nor of its bucket's, holds the file's data in the
+/// clear. Its kernel mount is `fuse_mount.rs`'s, Linux's.
+#[test]
+fn a_sealed_store_served_reads_back_and_holds_nothing_in_the_clear() {
+    let keys = tempfile::tempdir().unwrap();
+    let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+    kms.create(0).unwrap();
+    fxdax::remote::set_kms(std::sync::Arc::new(kms)).unwrap();
+    // Under the build's temporary directory, where direct I/O works.
+    let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let path = dir.path().join("store");
+    let data = noise(3 * pages::page_size() as usize + 5);
+    let served =
+        |fs: Filesystem| Client { server: Server::new(fs), unique: 0, uid: 1000, gid: 100 };
+    block_on(async {
+        let fs = Filesystem::format(Storage::create(&path, 256 << 20).unwrap()).await.unwrap();
+        let mut client = served(fs);
+        client.init().await;
+        let (file, _) = client.create(ROOT, b"file", 0o644).await;
+        let written = client.write(file, 0, &data, 0).await.ok();
+        assert_eq!(u32_at(&written, 0) as usize, data.len());
+        assert!(client.read(file, 0, data.len() as u32).await == data, "read back otherwise");
+        drop(client.server.into_filesystem().close().await.unwrap());
+
+        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.unwrap();
+        let mut client = served(fs);
+        client.init().await;
+        let (file, attr) = entry(&client.lookup(ROOT, b"file").await.ok());
+        assert_eq!(attr.size, data.len() as u64);
+        assert!(client.read(file, 0, data.len() as u32).await == data, "reopened, read otherwise");
+        drop(client.server.into_filesystem().close().await.unwrap());
+    });
+    let mut held = Vec::new();
+    let mut paths = vec![dir.path().to_path_buf()];
+    while let Some(at) = paths.pop() {
+        if at.is_dir() {
+            paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+        } else if std::fs::read(&at).unwrap().windows(64).any(|window| window == &data[..64]) {
+            held.push(at.display().to_string());
+        }
+    }
+    assert_eq!(held, Vec::<String>::new());
+}

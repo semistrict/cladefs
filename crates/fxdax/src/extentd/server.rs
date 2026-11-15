@@ -1210,9 +1210,10 @@ impl Connection {
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
         };
         // fxdax: a store a panic went through serves nothing more, of whatever the panic left half
-        // done (`crate::fence`, TASK-153.16).
-        if self.store().is_some_and(|store| store.is_fenced()) {
-            return refuse(answer, Errno::EIO);
+        // done (`crate::fence`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
+        // daemon forgot, `EACCES` (TASK-411.7).
+        if let Some(errno) = self.store().and_then(|store| store.fenced()) {
+            return refuse(answer, errno);
         }
         let request = Request::decode(&message).and_then(|request| {
             request.paths().try_for_each(|path| self.authorize(path))?;

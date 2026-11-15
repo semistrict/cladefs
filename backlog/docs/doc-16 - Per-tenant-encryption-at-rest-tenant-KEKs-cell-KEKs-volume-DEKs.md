@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 01:04'
+updated_date: '2026-11-15 01:23'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
 
 ## Goals
 
@@ -136,12 +136,14 @@ dropped with its pool, never written out unwrapped.
 
 ## Shredding
 
-- **A tenant:** destroy its KEK in the KMS. Absolute: every cell KEK of it, in every version of
-  every cell object, unwraps no more.
-- **A cell:** remove its wrapped KEK from its object (a control API call, conditional as every cell
-  update). Only as strong as the bucket keeps no older version of `<C>cell`: with versioning on, a
-  lifecycle rule must expire non-current versions, or the old wrapped KEK stays unwrappable while
-  the tenant's KEK lives.
+- **A tenant:** destroy its KEK in the KMS, then tell every host (`ForgetTenantKeys`, TASK-411.7).
+  Absolute: every cell KEK of it, in every version of every cell object, unwraps no more.
+- **A cell:** remove its wrapped KEK from its object (`ShredCell`, conditional as every cell
+  update, TASK-411.7). Only as strong as the bucket keeps no older version of `<C>cell`: with
+  versioning on, a lifecycle rule must expire non-current versions (S3
+  `NoncurrentVersionExpiration`; GCS versioning off or a lifecycle delete of non-current
+  versions), or the old wrapped KEK stays unwrappable while the tenant's KEK lives. With
+  versioning off, nothing more is needed. The README says it for operators, doc-7 for the bucket.
 - **A volume:** deleting it, as now; its record stays (records stay, doc-7) and could have its
   wrapped DEKs cleared once the collector has removed the branch's objects.
 
@@ -394,3 +396,48 @@ dropped with its pool, never written out unwrapped.
   2.3-2.7 GB/s; 4 KiB extents 195 against 209 MiB/s. Framing 32 MiB segments, four stores at once:
   text 66-76 ms each in the clear, 70-72 ms sealed; noise 39-41 ms in the clear (in place), 83-85 ms
   sealed (in a copy). Linux to be measured.
+
+## What TASK-411.7 made
+
+- **A cell shredded** (`extent_remote::cell::shred`): one conditional update of `<C>cell`, by
+  whoever calls it, not its holder, takes every KEK generation out and sets `shredded`
+  (`cell::Object::shredded`, layout FORMAT 10 extended, unreleased). Takings and holdings of it are
+  refused (`cell::shredded`: `Error::Kms`, "tenant T: cell T/C is shredded, its KEK gone", so
+  `EACCES` to callers and the collector's locked path, marking and deleting on, its sealed objects
+  left uncompacted, not a corrupt pass), and so is `add_kek`. `CellKeys` of a shredded cell are
+  sealed and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
+  given. Its holder, if any, goes on changing its volumes until told: every change keeps the mark.
+- **A host told** (`fxdax::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
+  control API (`ShredCell`, which shreds then forgets, idempotent, to be called on every host;
+  `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
+  fxdaxctl (`shred-cell`, `forget-tenant-keys`):
+  - fences every store of the scope open in the process (`fence::fence_stores`, fences listed by
+    branch): each request fails with `EACCES` from then on, as its reopening does; extentd refuses
+    its VM process's requests so;
+  - takes the scope's stores out of the extent cache's holders (`cache::forget`): an extent no
+    other open store holds goes, its pages evicted, unmapped from every window, and no page-in
+    reads it again;
+  - drops what its fetchers kept of the scope's objects (`fetch::Memory::forget_kept`: tails opened
+    under keys, parts unpacked in the clear) and the rings of the scope's stores
+    (`HostRing::forget`, by `Ring`'s owner, the branch whose store opened it);
+  - has its KMS forget the scope (`keys::Kms::forget`): a tenant's unwrapped cell KEKs, pool and
+    forks inheriting its keys (`Kms::revoked`, now wired), until the KMS answers for it again; a
+    cell's unwrapped KEKs, refused from then on on this host even under a cell object read before.
+- **What stays.** In memory: a fenced store's own ring and its open segment's XTS key, until
+  whoever holds it closes it (a VM process whose guest met `EACCES`, a point kept for forks); the
+  DEKs other stores hold, which they inherited (a fork of the shredded tenant into another's keeps
+  its keys: shredding a parent leaves its children what they inherited, and their pages); pages of
+  extents other open stores hold too (a shared point's clone, a public base, by design one copy for
+  all). A host not told keeps reading its open stores under what it unwrapped, but opens none afresh:
+  a fresh opening reads the cell object (shredded) or asks the KMS (destroyed). On disk: everything
+  of the scope's is as its keys sealed it, open segments (XTS), logs (MACed, metadata), the part
+  cache (GCM), and a shredded cell's objects stay in the bucket, ciphertext, until its branches are
+  deleted. A race: a store opening on a host as it is told may finish opening; telling it again
+  fences it.
+- **Tests.** `extent_store` `upload::encrypted::shredded_tenants_leave_none_of_their_volumes_readable_on_any_host`
+  (two hosts, open segment, part cache on disk, a cross-tenant fork reading on) and
+  `shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable` (the collector
+  locked, the old cell object put back reading again: why versions must expire); `extent_remote`
+  `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `fxdax`
+  `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
+  `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
