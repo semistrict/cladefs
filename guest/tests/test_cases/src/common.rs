@@ -444,7 +444,7 @@ pub fn control(socket: &Path) -> Result<cladefs::extentd::control::Client, clade
 /// marker's `.new` file was renamed away between listing it and copying it (TASK-129).
 pub fn copy_store(from: &Path, to: &Path) -> anyhow::Result<()> {
     use extent_store::Dir;
-    let dir = extent_store::HostDir::new(from, false)
+    let dir = extent_store::HostDir::new(from)
         .with_context(|| format!("opening {}", from.display()))?;
     dir.take().with_context(|| format!("taking {}", from.display()))?;
     let copied = copy_dir(from, to);
