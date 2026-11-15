@@ -8,7 +8,7 @@
 use extent_files::{Options, Volume};
 use rand::{RngExt as _, SeedableRng as _};
 use storage_device::fake_device::{Crashes, FakeDevice};
-use storage_device::{Device, DeviceHolder};
+use storage_device::DeviceHolder;
 
 const PAGE: usize = 4096;
 const PAGES: usize = 300;
