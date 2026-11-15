@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 09:42'
-updated_date: '2026-11-15 10:06'
+updated_date: '2026-11-15 14:26'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -18,7 +18,7 @@ ordinal: 819000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found in TASK-411.19. A tenant whose first sealed cell was made writes `tenants/<tenant>/sealed`, and a host whose KMS says the tenant has no KEK refuses its new cells as destroyed (extent_remote `keys::new_cell_kek`). But a host with no KMS at all (`FXDAX_KMS` unset, `keys::Host::kms` None) returns no KEK before reading anything: a store opening of a new volume or a new cell of a sealed tenant on such a host makes the cell in the clear, as before TASK-411.19. Its existing sealed cells refuse to open there ("this host has no KMS"), so only new cells are affected; an operator leaving `FXDAX_KMS` off one host of a fleet would get them. Reading the marker on hosts with no KMS costs a HEAD per opening of a store whose record keeps no DEK unless cached per host (there is no `keys::Kms` to cache in), which plaintext-only deployments would pay.
+Found in TASK-411.19. A tenant whose first sealed cell was made writes `tenants/<tenant>/sealed`, and a host whose KMS says the tenant has no KEK refuses its new cells as destroyed (extent_remote `keys::new_cell_kek`). But a host with no KMS at all (`CLADEFS_KMS` unset, `keys::Host::kms` None) returns no KEK before reading anything: a store opening of a new volume or a new cell of a sealed tenant on such a host makes the cell in the clear, as before TASK-411.19. Its existing sealed cells refuse to open there ("this host has no KMS"), so only new cells are affected; an operator leaving `CLADEFS_KMS` off one host of a fleet would get them. Reading the marker on hosts with no KMS costs a HEAD per opening of a store whose record keeps no DEK unless cached per host (there is no `keys::Kms` to cache in), which plaintext-only deployments would pay.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-23 19:35'
+updated_date: '2026-11-15 14:29'
 labels:
   - review-2026-10-21
 dependencies: []
@@ -18,7 +19,7 @@ ordinal: 361000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found fixing TASK-79.90 (r5/regress). extentd's warning that commits wait for object storage (crates/fxdax/src/remote.rs) says neither the bytes unreleased against the lag bound nor the commits waiting, so its logs cannot tell a lag-bound stall from a slow upload.
+Found fixing TASK-79.90 (r5/regress). extentd's warning that commits wait for object storage (crates/cladefs/src/remote.rs) says neither the bytes unreleased against the lag bound nor the commits waiting, so its logs cannot tell a lag-bound stall from a slow upload.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

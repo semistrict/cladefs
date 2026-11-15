@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 04:10'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies: []
 documentation:
@@ -21,12 +21,12 @@ ordinal: 815000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: the usual BYOK target: tenants grant fxdax kms:Encrypt/Decrypt on their CMK (key ARN, alias, or a key in another account by ARN). URL: aws-kms://REGION?key=TEMPLATE, credentials from the standard AWS chain (env, profile, instance role). Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
+doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: the usual BYOK target: tenants grant cladefs kms:Encrypt/Decrypt on their CMK (key ARN, alias, or a key in another account by ARN). URL: aws-kms://REGION?key=TEMPLATE, credentials from the standard AWS chain (env, profile, instance role). Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 FXDAX_KMS=aws-kms://REGION?key=TEMPLATE, credentials from the standard AWS chain (env, profile, instance role) gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
+- [ ] #1 CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE, credentials from the standard AWS chain (env, profile, instance role) gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
 - [x] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
 - [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [ ] #4 Integration tests: tests against an OSI-licensed AWS KMS emulator (e.g. nsmithuk/local-kms, MIT) on the Mac and in CI, as CI holds no cloud credentials; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
@@ -44,12 +44,12 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Client: aws-sdk-kms + aws-config (Apache-2.0, AWS's own): the full credential chain (env, shared profile/SSO/credential_process, web identity, ECS, IMDSv2), retries with backoff and error codes maintained upstream; a hand-made SigV4 REST client would still need aws-config for credentials, so it saves little and adds a protocol to maintain. Calls run on a runtime of the backend's own (one worker thread), so the futures poll on any executor and the HTTP client's connections never outlive a caller's runtime; the client is made lazily on it.
-2. kms/aws.rs: AwsKms; from_url parses aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL] (KeyNames::of_query). Wrap = Encrypt(KeyId = the tenant's key name, plaintext 32 bytes, EncryptionContext {fxdax-tenant: tenant hex}); Wrapped = header (magic 'fxka', format 1, key name length u16 BE, key name) + CiphertextBlob. Unwrap: header checked (magic, format, key name == KeyNames::of(tenant)) before any call, else Unauthentic; Decrypt(KeyId = key name, same context); plaintext must be 32 bytes.
+2. kms/aws.rs: AwsKms; from_url parses aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL] (KeyNames::of_query). Wrap = Encrypt(KeyId = the tenant's key name, plaintext 32 bytes, EncryptionContext {cladefs-tenant: tenant hex}); Wrapped = header (magic 'fxka', format 1, key name length u16 BE, key name) + CiphertextBlob. Unwrap: header checked (magic, format, key name == KeyNames::of(tenant)) before any call, else Unauthentic; Decrypt(KeyId = key name, same context); plaintext must be 32 bytes.
 3. Error mapping by the service's error code: NotFoundException -> NoSuchTenant; AccessDeniedException, DisabledException -> Revoked; KMSInvalidStateException 'pending deletion' -> Destroyed, other states -> Revoked; InvalidCiphertextException, IncorrectKeyException -> Unauthentic; everything else (throttling, KeyUnavailable, KMSInternal, dispatch/timeout, credentials) -> Io naming operation and key, no secrets. Unit tests of the mapping on synthetic SDK errors (AccessDenied, throttling: the emulator has no IAM nor throttling).
 4. Emulator: nsmithuk/local-kms (MIT), pinned pseudo-version, installed by scripts/test-local-kms.sh into target/local-kms with go install; extent_keys::testing::LocalAwsKms (testing feature) starts it on PORT=0 in a temp dir, reads the bound port from its log, seeds keys, admin calls (create key/alias, disable, schedule deletion). Tests #[ignore = needs local-kms: scripts/test-local-kms.sh] as the RustFS/Azurite ones (the repo's pattern), named local_kms_*: wrap/unwrap, rotation (two instances seeded with one then two backing keys of the same key ID: old wraps unwrap), disabled -> Revoked, pending deletion -> Destroyed, not found -> NoSuchTenant, wrong tenant/context/backend/tamper -> Unauthentic, alias name/alias ARN/key ID/key ARN naming, overrides; extent_store: a sealed store opened end to end through kms::from_url(aws-kms://...&endpoint=...).
 5. CI: object-stores job gains setup-go and scripts/test-local-kms.sh (dummy env credentials, no AWS account).
 6. Lock files: Cargo.lock, vendor/firecracker.lock (scripts/firecracker-cargo.sh --lock), guest/tests check. Licenses of every new crate checked from cargo metadata.
-7. Docs: doc-16 'Real KMSes: AWS KMS', README encryption paragraph (configuration, IAM policy with kms:EncryptionContext:fxdax-tenant condition, cross-account BYOK through overrides).
+7. Docs: doc-16 'Real KMSes: AWS KMS', README encryption paragraph (configuration, IAM policy with kms:EncryptionContext:cladefs-tenant condition, cross-account BYOK through overrides).
 8. Verify: narrow nextest, then the four-package run; clippy, fmt.
 <!-- SECTION:PLAN:END -->
 

@@ -4,7 +4,7 @@ title: 'aarch64 guests over virtio-PCI: verify once an arm64 KVM host exists'
 status: To Do
 assignee: []
 created_date: '2026-11-08 22:31'
-updated_date: '2026-11-09 03:10'
+updated_date: '2026-11-15 14:29'
 labels:
   - firecracker
 dependencies: []
@@ -15,7 +15,7 @@ ordinal: 698000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-273 put every fxdax VM on virtio-PCI, aarch64 too, and removed fxdax's MMIO paths, without an aarch64 guest having run over PCI: fxdax has no arm64 KVM host (GCE nests KVM on Intel only; CI is x86-64). What TASK-273 could check without one: aarch64 compiles, and the aarch64 guest kernel config has what Firecracker's aarch64 PCI path needs. This task runs the aarch64 guest suites on PCI once an arm64 KVM host exists, and fixes what they find. The specific runtime unknowns are in TASK-273's notes.
+TASK-273 put every cladefs VM on virtio-PCI, aarch64 too, and removed cladefs's MMIO paths, without an aarch64 guest having run over PCI: cladefs has no arm64 KVM host (GCE nests KVM on Intel only; CI is x86-64). What TASK-273 could check without one: aarch64 compiles, and the aarch64 guest kernel config has what Firecracker's aarch64 PCI path needs. This task runs the aarch64 guest suites on PCI once an arm64 KVM host exists, and fixes what they find. The specific runtime unknowns are in TASK-273's notes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

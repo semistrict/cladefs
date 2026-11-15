@@ -4,7 +4,7 @@ title: 'Bench: guest RAM left idle under DAX'
 status: To Do
 assignee: []
 created_date: '2026-11-11 10:56'
-updated_date: '2026-11-11 11:01'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies:
   - TASK-350.1
@@ -16,7 +16,7 @@ ordinal: 712000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-A guest on a local disk caches its files in its own RAM, paid for with the VM. Under DAX it caches nothing of its files; they compete for the daemon's per-tenant memory. A VM with a large RAM and a working set inside it can do worse on fxdax, and its idle RAM is cost with no use.
+A guest on a local disk caches its files in its own RAM, paid for with the VM. Under DAX it caches nothing of its files; they compete for the daemon's per-tenant memory. A VM with a large RAM and a working set inside it can do worse on cladefs, and its idle RAM is cost with no use.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

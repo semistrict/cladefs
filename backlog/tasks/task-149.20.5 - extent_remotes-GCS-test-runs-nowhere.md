@@ -4,6 +4,7 @@ title: extent_remote's GCS test runs nowhere
 status: To Do
 assignee: []
 created_date: '2026-11-07 13:37'
+updated_date: '2026-11-15 14:29'
 labels:
   - testing
 dependencies: []
@@ -16,7 +17,7 @@ ordinal: 670000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found by TASK-149.20. extent_remote store::tests::gcs (ignored: needs FXDAX_GCS_URL and credentials, TASK-205) is run by no script or job; RustFS's and Azurite's now run in CI's object-stores job. GCE hosts have credentials for the run's bucket.
+Found by TASK-149.20. extent_remote store::tests::gcs (ignored: needs CLADEFS_GCS_URL and credentials, TASK-205) is run by no script or job; RustFS's and Azurite's now run in CI's object-stores job. GCE hosts have credentials for the run's bucket.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

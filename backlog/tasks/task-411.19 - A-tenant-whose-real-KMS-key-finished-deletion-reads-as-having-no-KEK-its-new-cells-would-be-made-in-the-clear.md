@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:58'
-updated_date: '2026-11-15 09:50'
+updated_date: '2026-11-15 14:26'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -41,7 +41,7 @@ Found in TASK-411.17 (AWS KMS backend). A real KMS forgets a deleted key: AWS KM
 1. layout: tenants/<tenant>/sealed (layout::sealed, Kind::Sealed { tenant }, no cell's, owner none); the collector's fate Stays; FORMAT 10 extended in place.
 2. keys: new_cell_kek(bucket, kms, tenant) is where every cell maker gets a KEK (store opening in extent_store::upload, keys::inheriting for forks into new cells, FUSE control attach). A KEK handed out: the marker is created first (create-only, an existing one fine), cached per host for good (Kms), so it lands before the cell object holding the wrapped KEK is created: no sealed cell without its marker. None (the KMS's NoSuchTenant, heard now or believed for KEKLESS_FOR): read the marker (head), present cached for good, absent cached for KEKLESS_FOR; present: Kms::revoked(tenant) (pool, takings dropped, forks refused) and refuse as Destroyed naming the tenant and the marker. NoSuchTenant heard by new_kek or a pool refill also drops the tenant's pool (era bumped).
 3. extent_keys::testing::Forgetting<K>: a KMS answering NoSuchTenant where its inner one answers Destroyed (AWS after deletion, OpenBao deleted key).
-4. Tests: keys unit tests (SimBucket::served request counts, paused clock: plaintext tenant one wrap + one head per KEKLESS_FOR; marked tenant refused, pool dropped, no clear cell); extent_store encrypted: store opening, fork into a new cell refused naming the tenant after Forgetting; never-sealed tenant clear as before; collector sweep keeps the marker; fxdax FUSE attach if testable.
+4. Tests: keys unit tests (SimBucket::served request counts, paused clock: plaintext tenant one wrap + one head per KEKLESS_FOR; marked tenant refused, pool dropped, no clear cell); extent_store encrypted: store opening, fork into a new cell refused naming the tenant after Forgetting; never-sealed tenant clear as before; collector sweep keeps the marker; cladefs FUSE attach if testable.
 5. Docs: doc-16 (marker section, replace operator workarounds in AWS/OpenBao sections), doc-7 layout row.
 6. fmt, clippy, nextest on touched crates + sim sample.
 <!-- SECTION:PLAN:END -->

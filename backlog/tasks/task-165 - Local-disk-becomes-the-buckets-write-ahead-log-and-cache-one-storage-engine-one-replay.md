@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-04 07:34'
-updated_date: '2026-11-07 19:15'
+updated_date: '2026-11-15 14:25'
 labels: []
 dependencies:
   - TASK-164
@@ -19,7 +19,7 @@ ordinal: 610000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Decided by the user on 2026-11-04 (docs/reviews/2026-11-04-first-principles.md, section 2), to start after the read-only DAX work. extent_store's local lineage (records, layers, ledger, index, cleaning, rebuild) and extent_remote each hold every branch, crates/fxdax/src/remote.rs keeping them agreeing; 13+ bugs at the seam, three footer replays (160.15), two cleaners, fork bugs fixed three times. New design: local disk holds only unacknowledged closed segments and a part cache; forks, points, records, checkpoints and cleaning exist only in the bucket protocol; one replay; a local-filesystem Bucket for development. Then a serial commit log over parallel data (a SlateDB-style manifest) and a TLA+ spec of doc-7.
+Decided by the user on 2026-11-04 (docs/reviews/2026-11-04-first-principles.md, section 2), to start after the read-only DAX work. extent_store's local lineage (records, layers, ledger, index, cleaning, rebuild) and extent_remote each hold every branch, crates/cladefs/src/remote.rs keeping them agreeing; 13+ bugs at the seam, three footer replays (160.15), two cleaners, fork bugs fixed three times. New design: local disk holds only unacknowledged closed segments and a part cache; forks, points, records, checkpoints and cleaning exist only in the bucket protocol; one replay; a local-filesystem Bucket for development. Then a serial commit log over parallel data (a SlateDB-style manifest) and a TLA+ spec of doc-7.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

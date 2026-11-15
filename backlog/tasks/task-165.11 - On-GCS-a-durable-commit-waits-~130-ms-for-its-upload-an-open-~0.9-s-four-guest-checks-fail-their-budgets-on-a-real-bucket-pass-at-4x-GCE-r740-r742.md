@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-06 09:22'
-updated_date: '2026-11-08 01:08'
+updated_date: '2026-11-15 14:25'
 labels:
   - real-bucket
   - perf
@@ -23,9 +23,9 @@ ordinal: 645000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Every guest suite so far ran on `file://` or `memory://` buckets. Against a real one (GCS, `gs://echophase-fxdax-bench`, us-east4; hosts in us-east1-c, n2-standard-4, jailed, production seccomp filter; main f81174090), four `fxfs-guest-checks*` cases fail on time alone (GCE r740), where the same tree on a file bucket passes them all (r741). Given 4x their budgets (`FXDAX_CHECKS_SCALE=4`, r742), every check passes: nothing hangs, it is slow. `fxfs-guest-docker-dax` passed at 242 s of its 300 s limit (45 s on a file bucket).
+Every guest suite so far ran on `file://` or `memory://` buckets. Against a real one (GCS, `gs://echophase-cladefs-bench`, us-east4; hosts in us-east1-c, n2-standard-4, jailed, production seccomp filter; main f81174090), four `fxfs-guest-checks*` cases fail on time alone (GCE r740), where the same tree on a file bucket passes them all (r741). Given 4x their budgets (`CLADEFS_CHECKS_SCALE=4`, r742), every check passes: nothing hangs, it is slow. `fxfs-guest-docker-dax` passed at 242 s of its 300 s limit (45 s on a file bucket).
 
-**Failed checks, r740 (killed at their budgets, which `host.rs:83-84` doubles for any `FXDAX_EXTENTD_REMOTE`), and as long as they took in r742 / on a file bucket (r741):**
+**Failed checks, r740 (killed at their budgets, which `host.rs:83-84` doubles for any `CLADEFS_EXTENTD_REMOTE`), and as long as they took in r742 / on a file bucket (r741):**
 
 | check | r742 GCS | r741 file | x |
 |---|---|---|---|
@@ -50,9 +50,9 @@ Whole cases: checks 175 s against 60 s, checks-dax 209 s against 75 s. Every oth
 | write | 1.35 ms | 0.35 ms | 3.9 |
 | commits' wait for the bucket (`commit-wait-ns` / `commits`) | 3.6 ms | 0.56 ms | 6.4 |
 
-- Durable commits: `ExtentStore::commit_and_wait` (crates/fxdax/src/extents.rs:1255) waits in `make_durable` (extents.rs:1172-1177) for `Remote::wait_uploaded`, the segment's PUT and its acknowledgement after a lease read (doc-7, Uploads; doc-14, Commits, closing, uploads). The guest's fsync and syncfs park in `fxfs_rt_park` meanwhile (r740's stacks: `fxfs_fsync`, `fxfs_sync`, `__do_sys_msync` and `syncfs` in state D at every timed-out check). On GCS a guest fdatasync costs about 130 ms (append_writeback: 8.6 s over 64 rounds), against 16 ms on a file bucket.
+- Durable commits: `ExtentStore::commit_and_wait` (crates/cladefs/src/extents.rs:1255) waits in `make_durable` (extents.rs:1172-1177) for `Remote::wait_uploaded`, the segment's PUT and its acknowledgement after a lease read (doc-7, Uploads; doc-14, Commits, closing, uploads). The guest's fsync and syncfs park in `fxfs_rt_park` meanwhile (r740's stacks: `fxfs_fsync`, `fxfs_sync`, `__do_sys_msync` and `syncfs` in state D at every timed-out check). On GCS a guest fdatasync costs about 130 ms (append_writeback: 8.6 s over 64 rounds), against 16 ms on a file bucket.
 - Opens and forks: 0.7-0.9 s each on GCS, which every VM boot, snapshot, migration and fork pays.
-- Reads and faults of extents only in the bucket (the image a case's store forks): each page-in is a ranged GET (crates/fxdax/src/cache.rs:399-410), with no part cache in the test daemons (the other task filed with this one).
+- Reads and faults of extents only in the bucket (the image a case's store forks): each page-in is a ranged GET (crates/cladefs/src/cache.rs:399-410), with no part cache in the test daemons (the other task filed with this one).
 
 **Bucket requests**, the main daemon, r740, 20 cases: get 3,709, get-range 11,306, list 208, create 7,606, update 15, delete 1; 412 MB of segments, 1.8 MB of own extents and 1.1 MB of checkpoints up, 826 MB down. r742 (4 cases): get 1,545, get-range 6,774, list 48, create 3,510, update 5; 230 MB up, 1.7 GB down. The file run's counts aren't comparable: on a file bucket the cases' stores keep branches the daemon's `Stats` doesn't count (their own, TASK-165.6).
 
@@ -79,7 +79,7 @@ This is what TASK-165.9's recovery and uploader and TASK-165.10's measurements n
 <!-- SECTION:PLAN:BEGIN -->
 1. Count and time each bucket round trip on the commit, open and fork paths (Stats::request_ns; a test pinning a durable commit's requests; bucket_round_trips_by_phase, a measurement against a real bucket).
 2. Cut the round trips the protocol doesn't need in series: the writer's reads once it holds the lease (record, recovery, segments listing) at once; the lease read alongside the record before recovery, the taking conditional on it; a checkpoint's moves listing alongside its children's record reads.
-3. Measure on GCE against gs://echophase-fxdax-bench (one host in us-east4, the bucket's region): the phases before and after the cuts; fxfs-guest-checks, -checks-dax and -docker-dax on GCS at 4x budgets, each check's time.
+3. Measure on GCE against gs://echophase-cladefs-bench (one host in us-east4, the bucket's region): the phases before and after the cuts; fxfs-guest-checks, -checks-dax and -docker-dax on GCS at 4x budgets, each check's time.
 4. Set the checks' remote scale in host.rs and docker's limit from that measurement; verify on GCS; record in docs/measurements.
 <!-- SECTION:PLAN:END -->
 

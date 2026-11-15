@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-10-24 03:39'
-updated_date: '2026-11-08 05:44'
+updated_date: '2026-11-15 14:27'
 labels:
   - review-2026-10-21
 dependencies: []
@@ -20,7 +20,7 @@ ordinal: 370000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found in round 2b (TASK-92.17's test counting_followers_walks_no_extents). 100 forks of a base of 32,768 extents opened through the daemon on a GCE host (debug build) took ~55 s, about 0.5 s a fork (2 s before unpacked parts were zeroed at once). perf puts it on the 'fxdax remote' thread in ZSTD_compress2 / ZSTD_decompressSequences as each fork opens, so a fork's opening compresses or reads data that grows with its base, against TASK-34's rule that a connection's cost does not grow with its base.
+Found in round 2b (TASK-92.17's test counting_followers_walks_no_extents). 100 forks of a base of 32,768 extents opened through the daemon on a GCE host (debug build) took ~55 s, about 0.5 s a fork (2 s before unpacked parts were zeroed at once). perf puts it on the 'cladefs remote' thread in ZSTD_compress2 / ZSTD_decompressSequences as each fork opens, so a fork's opening compresses or reads data that grows with its base, against TASK-34's rule that a connection's cost does not grow with its base.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

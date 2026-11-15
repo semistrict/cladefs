@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 04:17'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies: []
 documentation:
@@ -21,12 +21,12 @@ ordinal: 814000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: OpenBao (MPL-2.0) is self-hostable and OSI-licensed (Vault is BSL, excluded): a real KMS testable anywhere with `bao server -dev`, in CI too. URL: openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from FXDAX_KMS_OPENBAO_TOKEN or a token file. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
+doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: OpenBao (MPL-2.0) is self-hostable and OSI-licensed (Vault is BSL, excluded): a real KMS testable anywhere with `bao server -dev`, in CI too. URL: openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from CLADEFS_KMS_OPENBAO_TOKEN or a token file. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 FXDAX_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from FXDAX_KMS_OPENBAO_TOKEN or a token file gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
+- [x] #1 CLADEFS_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from CLADEFS_KMS_OPENBAO_TOKEN or a token file gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
 - [ ] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
 - [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [ ] #4 Integration tests: tests against a real `bao server -dev` (Mac and Linux; CI job or test script starting it); they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
@@ -43,13 +43,13 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. kms/openbao.rs: OpenBao, a Kms over Transit's encrypt/decrypt (reqwest+rustls, on a tokio runtime of its own so its futures run on any executor). URL openbao://HOST[:PORT]/MOUNT?key=T[&keys=F][&namespace=NS][&ca=PEM] (openbaos:// = HTTPS, ca= trusts only that CA); token from FXDAX_KMS_OPENBAO_TOKEN or the file FXDAX_KMS_OPENBAO_TOKEN_FILE names (re-read on a 403, the request retried once with a changed token: OpenBao Agent's file sink).
+1. kms/openbao.rs: OpenBao, a Kms over Transit's encrypt/decrypt (reqwest+rustls, on a tokio runtime of its own so its futures run on any executor). URL openbao://HOST[:PORT]/MOUNT?key=T[&keys=F][&namespace=NS][&ca=PEM] (openbaos:// = HTTPS, ca= trusts only that CA); token from CLADEFS_KMS_OPENBAO_TOKEN or the file CLADEFS_KMS_OPENBAO_TOKEN_FILE names (re-read on a 403, the request retried once with a changed token: OpenBao Agent's file sink).
 2. Wrapped = header (magic fxkm, format, backend 'openbao', tenant, key name) + Transit's ciphertext; the header sent as associated_data (and context, for derived keys), so the server authenticates it; unwrap refuses locally a header of another magic/backend/tenant/key name.
-3. Error mapping verified against bao 2.7.2: 400 'encryption key not found' on decrypt -> Destroyed (the header says the key existed); soft-deleted -> Revoked; 'too old' -> Destroyed if trimmed below min_available_version, else Revoked; AEAD failure / invalid ciphertext -> Unauthentic; 403 -> GET keys/NAME probe: 404 NoSuchTenant (wrap) / Destroyed (unwrap), 200 Revoked, 403 -> lookup-self: valid token Revoked, else Io (fxdax's token refused); 404 route (no mount), 5xx, 429, network -> Io after retries (3 tries, 100 ms then 400 ms; 5 s connect, 15 s request timeouts).
-4. Test helper extent_keys::testing::openbao::DevServer: starts bao server -dev on a free port (TLS optionally), CLI wrappers for admin; skips with a reason when bao is absent unless FXDAX_REQUIRE_OPENBAO=1.
+3. Error mapping verified against bao 2.7.2: 400 'encryption key not found' on decrypt -> Destroyed (the header says the key existed); soft-deleted -> Revoked; 'too old' -> Destroyed if trimmed below min_available_version, else Revoked; AEAD failure / invalid ciphertext -> Unauthentic; 403 -> GET keys/NAME probe: 404 NoSuchTenant (wrap) / Destroyed (unwrap), 200 Revoked, 403 -> lookup-self: valid token Revoked, else Io (cladefs's token refused); 404 route (no mount), 5xx, 429, network -> Io after retries (3 tries, 100 ms then 400 ms; 5 s connect, 15 s request timeouts).
+4. Test helper extent_keys::testing::openbao::DevServer: starts bao server -dev on a free port (TLS optionally), CLI wrappers for admin; skips with a reason when bao is absent unless CLADEFS_REQUIRE_OPENBAO=1.
 5. Tests in openbao.rs: URL/token parsing; wrap/unwrap; rotation; revocation (policy, soft delete, min_decryption_version); destruction (trim, delete); unknown tenant; bad/rotated token file; local refusals made without a server; shared key across tenants refused by AD; tampering; down/sealed server -> Io; namespace; openbaos:// with ca=; kms::from_url via env.
 6. End to end: extent_store encrypted.rs World made generic over its KMS; a sealed cell made and taken by a second host through OpenBao, then refused when revoked.
-7. scripts/lib/openbao.sh + scripts/test-openbao.sh (release binary by digest, FXDAX_REQUIRE_OPENBAO=1) for CI; CI step proposed in notes, not added.
+7. scripts/lib/openbao.sh + scripts/test-openbao.sh (release binary by digest, CLADEFS_REQUIRE_OPENBAO=1) for CI; CI step proposed in notes, not added.
 8. Docs: doc-16 'Real KMSes: OpenBao', README encryption paragraph.
 <!-- SECTION:PLAN:END -->
 

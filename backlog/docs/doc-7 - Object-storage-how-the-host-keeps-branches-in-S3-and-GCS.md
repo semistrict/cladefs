@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 11:49'
+updated_date: '2026-11-15 14:25'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -33,12 +33,12 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
 ## Where it stands (2026-11-07)
 
 - **The protocol** is `crates/extent_remote`: writers, readers, branch records and forks, points,
-  the collector (`fxdax-gc`), checkpoints as block-indexed tables, the WAL's rebase (`Wal::rebase`),
+  the collector (`cladefs-gc`), checkpoints as block-indexed tables, the WAL's rebase (`Wal::rebase`),
   and `object_store` behind it (S3, GCS, Azure Blob Storage; RustFS in `scripts/test-rustfs.sh`),
   or a directory of the host's (`file:///DIR`, `extent_remote::local`). Its simulation and a TLA+
   spec check it (Testing).
-- **Every store has a bucket**, which its description names (TASK-165.6): on a host of fxdax's
-  system, the host's (`FXDAX_EXTENTD_REMOTE`); an image of the fxdax CLI's, or a test's, a file
+- **Every store has a bucket**, which its description names (TASK-165.6): on a host of cladefs's
+  system, the host's (`CLADEFS_EXTENTD_REMOTE`); an image of the cladefs CLI's, or a test's, a file
   bucket of its own beside its directory (`<image>.bucket`), which its clones share. A store's
   directory holds one branch.
 - **On the host** (doc-14, `crates/extent_store`): the guest's writes go to the store's open
@@ -57,12 +57,12 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   file into the host's **part cache** (`Cache::adopt`), or removes it. Commits stall at a lag bound
   in commits (4,096) and in bytes of WAL (1 GiB). What waits is on the host's disk; of it, the
   host holds in memory only what it uploads at once, its **upload memory** (512 MiB,
-  `FXDAX_EXTENTD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
+  `CLADEFS_EXTENTD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
 - **Opening a store**, here or anywhere, the first time or after a crash, is one recovery (doc-14,
   Opening a store): its writer takes the branch's head with the placement's token and recovers the
   branch from what the head names; a segment left open is closed again from its log; the
   WAL is put after the branch's end by its commits (Recovery on the same host). An empty store of
-  a branch (`fxdaxctl take`) takes it so, holding its extents without their data, which is
+  a branch (`cladefsctl take`) takes it so, holding its extents without their data, which is
   fetched as it is read.
 - **Forks, points and deletion** are the bucket's alone (TASK-165.7): a fork is a commit of the
   parent's naming the child, whose acknowledgement gives the child its record; the child's
@@ -70,7 +70,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
 - **Reading** (TASK-28.9): by 1 MiB parts of objects, each checked against the CRC its object
   carries; one GET per part however many reads want it; a host's GETs bounded (64 requests,
   64 MiB), demand before read-ahead; parts kept in the host's part cache
-  (`FXDAX_EXTENTD_CACHE`, within `FXDAX_EXTENTD_CACHE_BYTES`), across restarts, read least
+  (`CLADEFS_EXTENTD_CACHE`, within `CLADEFS_EXTENTD_CACHE_BYTES`), across restarts, read least
   recently evicted first by punching holes, with a floor of free space; read-ahead doubling along
   sequential reads, to 16 parts; a part another host owns asked of it before the bucket
   (Reading).
@@ -89,7 +89,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   forked DAX 58% faster and a VM 557 MiB cheaper; forks 12 ms; a cold host's page-ins of a fork's
   data slower than reading it from local files was (TASK-225).
 
-- **Versioning and shredding** (doc-16, Shredding; TASK-411.7). Nothing of fxdax needs object
+- **Versioning and shredding** (doc-16, Shredding; TASK-411.7). Nothing of cladefs needs object
   versions: every object is create-only or updated by a conditional write. A cell is shredded by
   taking its wrapped KEKs out of its object (`<C>cell`, `extent_remote::cell::shred`), which holds
   only while no older version of that object is kept: a bucket with versioning on needs a
@@ -121,8 +121,8 @@ Settled with the user on 2026-10-16:
    *Added 2026-10-18 (TASK-39.7):* a head carries the **fencing token** of the placement that took
    it, its boot ID, which a later placement's exceeds; a writer takes the head only with a token
    as high, so a host cut off takes no branch back from the placement after it (`ESTALE`). A
-   store's copy on a host carries its placement's token (`fxdaxctl place`, `take … TOKEN`). Before
-   a clean stop, the system waits for a store's uploads (`fxdaxctl sync`, the extent daemon's control API's `SyncStore`).
+   store's copy on a host carries its placement's token (`cladefsctl place`, `take … TOKEN`). Before
+   a clean stop, the system waits for a store's uploads (`cladefsctl sync`, the extent daemon's control API's `SyncStore`).
 5. **A fork is made once the parent's fork point is uploaded.** The child's `branches/` record is
    created only after the parent's uploads reach the fork point. *Revised 2026-11-05 (TASK-165.7):*
    it was local at once, a record in the parent's local lineage; there is no local fork now, and the
@@ -141,8 +141,8 @@ Settled with the user on 2026-10-16:
    than 5.0 and runs 14% more transactions per second (1,442 against 1,262); the fs bench's other
    workloads uploaded 705 MiB rather than 1.2 GiB, alike within noise but sequential writes, 6%
    slower (65.8 MiB/s against 70.3). Level 3 compressed them no further (705.5 MiB) and wrote 6%
-   slower again (61.8 MiB/s). `FXDAX_ZSTD_LEVEL` sets another, 0 storing parts raw, to measure.
-8. **Garbage collection is its own process,** `fxdax-gc`, one per bucket prefix, holding a lease of
+   slower again (61.8 MiB/s). `CLADEFS_ZSTD_LEVEL` sets another, 0 storing parts raw, to measure.
+8. **Garbage collection is its own process,** `cladefs-gc`, one per bucket prefix, holding a lease of
    its own. Any host can run it.
 9. **Tests use RustFS** (Apache-2.0) as a local S3 server, Azurite (MIT) as a local Blob Storage
    (`scripts/test-azurite.sh`), and GCS on GCE. Real S3 once credentials
@@ -179,8 +179,8 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a clone's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
-| `tenants/<tenant>/sealed` | fxdax: the tenant's sealed marker, its bytes the format, its being there all it says: a cell of the tenant's was made sealed, so a KMS answering that the tenant has no KEK has forgotten it, and its new cells are refused as destroyed, never made in the clear (doc-16, A forgotten KEK told from none; TASK-411.19) | create-only, one there already as good, by a host handing out the tenant's first new cell KEK, before the cell's object; kept for good: no cell's, so no pass lists it, and the collector keeps it (`Kind::Sealed`) if one did |
-| `tenants/<tenant>/kek` | fxdax: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`fxdax-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
+| `tenants/<tenant>/sealed` | cladefs: the tenant's sealed marker, its bytes the format, its being there all it says: a cell of the tenant's was made sealed, so a KMS answering that the tenant has no KEK has forgotten it, and its new cells are refused as destroyed, never made in the clear (doc-16, A forgotten KEK told from none; TASK-411.19) | create-only, one there already as good, by a host handing out the tenant's first new cell KEK, before the cell's object; kept for good: no cell's, so no pass lists it, and the collector keeps it (`Kind::Sealed`) if one did |
+| `tenants/<tenant>/kek` | cladefs: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`cladefs-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
 *Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease,
@@ -275,7 +275,7 @@ any format reads it before the rest: one of another format, newer or older, is r
 the branch is read or written. Every reader of a branch reads its record first: a
 writer taking it, a host attaching it, the collector, whose pass stops, deleting nothing in a
 bucket it can't read. Every framed object (segments, extents on their own, checkpoints, moves)
-ends with its frame's format, the last byte of its trailer's magic (`fxdaxob2` since TASK-411.2), which a reader of
+ends with its frame's format, the last byte of its trailer's magic (`cladefs2` since TASK-411.2), which a reader of
 an older frame names rather than calls corrupt. A head goes with its branch's record.
 
 **Kinds of record** *(added 2026-11-03, TASK-160.14).* A record's flags say together one of six
@@ -284,7 +284,7 @@ fork made nowhere in the bucket, or one a deletion found no record of; a fork's 
 origin; a point, of an origin; a fork of a point being made, of the point's origin; and a failed
 fork's claim, of an origin. Only a root has no `forked`; only a root and a branch of its own have no
 origin; `point`, `forking` and `claimed` each go with an origin, one at most; `shared` goes with
-`point` alone (fxdax, TASK-395.7: Shared points, under Points). Any other combination
+`point` alone (cladefs, TASK-395.7: Shared points, under Points). Any other combination
 is refused as corrupt as the record is read (`record::Kind`), and what a record allows (whether a
 writer takes it, whether it is a given fork's child, whether the collector may drop it, whether
 its recovery failing lost nothing) is asked of its kind. Every create or update of a record is one
@@ -494,7 +494,7 @@ Each branch's commits go through:
 4. **Uploaded:** segments and extents of their own upload in parallel, each a single create-only
    PUT (an extent is 64 MiB at most; no multipart upload), extents before the segments that name
    them, up to 16 segments of a store at once within the host's upload budget (64 requests, its
-   upload memory: 512 MiB unless `FXDAX_EXTENTD_UPLOAD_MEMORY` says otherwise; Memory, below).
+   upload memory: 512 MiB unless `CLADEFS_EXTENTD_UPLOAD_MEMORY` says otherwise; Memory, below).
 5. **Acknowledged:** once every segment before it is uploaded too, by the head's swap naming it
    (The head, TASK-407); a segment going on with a commit, with the segment ending it (Segments,
    TASK-92.41). Then `COMMIT_DURABLE` waiters up to it complete, the WAL's
@@ -521,7 +521,7 @@ took the branch again until TASK-407: no segment lands where another's goes now.
 host disk, not memory: what waits is the stores' write-ahead logs, durable on its disk (decision 3),
 within the lag bound, and the uploader takes at most `IN_FLIGHT` segments of a store's at a time,
 reading none until its upload goes. What a host's extent daemon holds in memory for it is bounded
-by its **upload memory**, `FXDAX_EXTENTD_UPLOAD_MEMORY` (512 MiB by default, 64 MiB at least, an
+by its **upload memory**, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (512 MiB by default, 64 MiB at least, an
 extent's most, which goes alone), every store's uploads together: each object read only once that
 budget has room for it (`extent_remote::fetch::Budget`), held once while its PUT goes, however
 often it is retried (`Bucket::put` takes `bytes::Bytes`, which each try shares), and let go as it
@@ -529,8 +529,8 @@ lands. Besides, the daemon holds, whatever the backlog, each store's framing of 
 data and its framed bytes (~2-4 segments' size, TASK-325), the host's fetches (64 MiB in flight,
 64 MiB of tails, 64 MiB of parts recent), its connections' rooms (doc-4) and its extent cache
 (`MEMORY_BYTES`, shared memory). The stats line's `uploads:` says what the uploads hold, the most
-they held and the budget, and so do the metrics `fxdax_extentd_upload_held_bytes`,
-`fxdax_extentd_upload_held_max_bytes` and `fxdax_extentd_upload_memory_bytes`.
+they held and the budget, and so do the metrics `cladefs_extentd_upload_held_bytes`,
+`cladefs_extentd_upload_held_max_bytes` and `cladefs_extentd_upload_memory_bytes`.
 
 What the daemon frees, it gives back: glibc's allocator maps each allocation of 1 MiB or more on
 its own and unmaps it as it is freed (`extentd::memory::return_large_allocations`, mallopt's
@@ -538,7 +538,7 @@ its own and unmaps it as it is freed (`extentd::memory::return_large_allocations
 32 MiB, and keeps buffers below it in its arenas, one a thread, up to eight times the CPUs.
 *Measured on ubu1* (fxfs-guest-docker-build-dax, 8 vCPUs, three builds of 512 MiB; `MEMORY_BYTES`
 2 GiB; a file bucket on disk behind 300 ms a request; commits stalled at the lag bound 8 times,
-extentd in a systemd scope of its own, scripts/test-e2e.sh's `FXDAX_EXTENTD_MEMORY_MAX`): before,
+extentd in a systemd scope of its own, scripts/test-e2e.sh's `CLADEFS_EXTENTD_MEMORY_MAX`): before,
 its anonymous memory reached 5.9 GB (4.4 GB under heaptrack, and 4.8 GB idle after that run),
 its heap 1.3 GB at most: its 512 MiB of uploads held twice, a copy for each PUT's try, and 2.6 GB
 in 134 of glibc's per-thread arenas of 64 MiB, buffers freed; the host's OOM killer took it at
@@ -547,13 +547,13 @@ in 134 of glibc's per-thread arenas of 64 MiB, buffers freed; the host's OOM kil
 cache included, with no kill.
 
 *Added 2026-11-10 (TASK-330.2):* the daemon holds itself to that sum, its **anonymous memory's
-budget** (`fxdax::extentd::process`): its upload memory, a store's framing and sealing for each
+budget** (`cladefs::extentd::process`): its upload memory, a store's framing and sealing for each
 store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
 tenants' rooms, as much as they held at most, and its own (64 MiB). It samples its anonymous
 memory (`RssAnon`) as it keeps its stats, every 200 ms, against that budget as of then, and counts
 the samples past it: the stats line's `process:` (`max-anon`, `anon-budget`, `over-budget`), and
-the metrics `fxdax_extentd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
+the metrics `cladefs_extentd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
 `_anon_over_budget_total`, what an operator alerts on. A sample past it is memory no part holds, a
 copy no budget counts or what the allocator kept: both of TASK-317's bugs. The guest tests fail a
 run whose daemon passed it (`scripts/budgets.py`), and the daemon's soak against a degraded bucket
@@ -567,7 +567,7 @@ the WAL's segments to it landed: acknowledged now, into the cache. If it is the 
 last the WAL's segments landed to, the rest are restamped on the new chain after the head's end and
 upload as any closed segment: the guest keeps every commit made durable here. Otherwise another
 writer's commits moved the branch on, and the store refuses to open (`Diverged`, `ESTALE`) until
-`fxdaxctl take` drops its WAL, losing what its guest was never promised. Extents committed again
+`cladefsctl take` drops its WAL, losing what its guest was never promised. Extents committed again
 are uploaded under the new writer's epoch, at its keys.
 
 **Opening on another host** is the same with an empty WAL, which never diverges: it takes the
@@ -621,7 +621,7 @@ the host's part cache, fetching what it lacks.
   its directory goes; its host crashing part way leaves a directory with no store, which deleting
   finishes, and a fork that stands or never was, as the bucket has it. This replaced `copy_store`,
   which forked by copying every file, and then local lineage, a record in the parent's store.
-- **Keys** *(fxdax, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of a sealed branch into
+- **Keys** *(cladefs, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of a sealed branch into
   another cell, as every fork a host makes is, asks before anything is made for what its child
   inherits (`Remote::inheriting`): the keys its parent's store holds and a KEK for the child's
   cell from the host's pool, no KMS call; refused (`EACCES`, `ENOTSUP`) it makes nothing. Once
@@ -653,14 +653,14 @@ immutable instead.
 
 The steps of a fork of point P to child C:
 
-1. C's record, created saying the fork is being made (`forking: P`). fxdax: then its reference
+1. C's record, created saying the fork is being made (`forking: P`). cladefs: then its reference
    under the cell of the branch P names (Garbage collection, References; after the record since
    TASK-395.10).
-2. A read of P's record: deleted, the fork fails. fxdax: so does it if C is of another tenant's cell
+2. A read of P's record: deleted, the fork fails. cladefs: so does it if C is of another tenant's cell
    than P, and the record doesn't say P is shared (`Error::NotShared`, `EACCES`; TASK-395.7). The
    read is made then whatever the rule that checks for deletion says.
 3. C's record, updated with a condition: no longer being made. Only then does the fork succeed.
-4. fxdax (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
+4. cladefs (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
    makes is: C's cell, made with a KEK of the host's pool, and C's record given its keys by a
    conditional update: its DEK and those it inherits, from the host's copy of P, rewrapped under
    that KEK (doc-16). A point keeps no key; its copies read under its origin's cell's. Asked for
@@ -686,7 +686,7 @@ that finds C. The danger is a pass that finds neither, or takes P for deleted wi
 
 **A host dying** at any step leaves C's record being made, or made, and a directory with no store,
 which deleting removes (Forks): a record made stands as a fork's orphan, for
-`fxdax-gc --delete-branch` (TASK-165.7); one being made holds what P holds until the collector gives
+`cladefs-gc --delete-branch` (TASK-165.7); one being made holds what P holds until the collector gives
 it up, once P goes, or an operator deletes it. A dead host's create landing late finds a deleted
 record, and its update, being conditional, fails.
 
@@ -704,10 +704,10 @@ state, and its forks fork the point itself (TASK-158).
 **Deleting a point** is deleting a branch: its forks keep what they inherited, by their records, and
 its moves stay for as long as it lives, as it has no writer to record them in a checkpoint.
 
-**Shared points** *(fxdax, TASK-395.7, format 8).* A point forks only into cells of its own tenant's,
+**Shared points** *(cladefs, TASK-395.7, format 8).* A point forks only into cells of its own tenant's,
 unless its record says `shared`: a base image or a snapshot many tenants clone. Only a point's record
 says it (another's is corrupt), and only the trusted control API sets it, at the point's making
-(ForkStore's `shared`, after the point is made) or later (SharePoint, `fxdaxctl share`), and clears
+(ForkStore's `shared`, after the point is made) or later (SharePoint, `cladefsctl share`), and clears
 it (`unshare`). The check is step 2's read, which every fork of a point makes, on any host, so that
 unsharing stops the forks whose reads come after, and those made stand. A fork refused leaves C's
 record being made, which its host deletes, as for a point deleted. *(TASK-411.4)* A clone keeps the keys it inherits
@@ -730,18 +730,18 @@ points are shared or not as any other's. Forks of branches with writers into ano
   read where it went. Every part is checked against its CRC; one that fails is corrupt, `EIO`
   (TASK-407.4: a key names one object for good, so a part failing its tail's CRC is no other
   object's; until then, it was read again, once, by its object's tail fetched anew).
-- **The part cache** (`extent_remote::cache`, `FXDAX_EXTENTD_CACHE`), one per host, shared by its
-  stores: sparse copies of objects at their keys (`fxdax-parts/<key>`), their tails and the parts
+- **The part cache** (`extent_remote::cache`, `CLADEFS_EXTENTD_CACHE`), one per host, shared by its
+  stores: sparse copies of objects at their keys (`cladefs-parts/<key>`), their tails and the parts
   kept, as stored (compressed), at their real offsets, filled by fetches and by acknowledged WAL
   files moved in whole (`Cache::adopt`), and emptied by punching holes. It keeps no index file:
   opening it rebuilds what it keeps from its files' tails, each checked, so a host's restart
   refetches nothing it had (TASK-165.4). The parts read least recently go first (a clock of uses,
   `by_use`), an object's tail with its last part, to keep within its capacity (extentd:
-  `FXDAX_EXTENTD_CACHE_BYTES`, unbounded if unset, TASK-406.1) and a floor of the filesystem's
+  `CLADEFS_EXTENTD_CACHE_BYTES`, unbounded if unset, TASK-406.1) and a floor of the filesystem's
   space free (extentd: 4 GiB, `CACHE_FLOOR`). It holds copies of
-  what the bucket has, never data the bucket lacks. Without a cache (`FXDAX_EXTENTD_CACHE` empty),
+  what the bucket has, never data the bucket lacks. Without a cache (`CLADEFS_EXTENTD_CACHE` empty),
   every page-in of an extent in the bucket is a GET.
-- **Peers** (TASK-406.2, `extent_remote::peer`, `fxdax::remote::peers`, `fxdax::extentd::peers`):
+- **Peers** (TASK-406.2, `extent_remote::peer`, `cladefs::remote::peers`, `cladefs::extentd::peers`):
   hosts sharing a bucket serve each other parts, so that a part many hosts read, as a popular base
   booting on many cold hosts is, comes from the bucket about once for them all, not once each.
   Each part has one owner, by rendezvous hashing (SipHash-1-3 of fixed keys) of each host's
@@ -756,15 +756,15 @@ points are shared or not as any other's. Forks of branches with writers into ano
   peer past its deadline (1 s to connect, 5 s a request) falls back to the bucket and puts the
   peer down for 30 s, its parts going to the bucket meanwhile, never to another peer. Tails are
   always the bucket's own: a tail is what checks a part. gRPC over TCP, unauthenticated, on the hosts' own network
-  (`proto/fxdax/peer/v1/peer.proto`): every host reads the whole bucket anyway. extentd:
-  `FXDAX_EXTENTD_PEER_ADDRESS` (this host's address, listened at), `FXDAX_EXTENTD_PEERS` (the
+  (`proto/cladefs/peer/v1/peer.proto`): every host reads the whole bucket anyway. extentd:
+  `CLADEFS_EXTENTD_PEER_ADDRESS` (this host's address, listened at), `CLADEFS_EXTENTD_PEERS` (the
   list at start, comma-separated), `SetPeers` (the list at any time); it needs a part cache. The
   stats file's `peers:` line counts what was asked, given, missing, failed and served.
 - **Read-ahead** follows each object's reads (1,024 objects at most): along sequential reads its
   window doubles, from 1 part to 16 (`fetch::AHEAD`), and a read out of sequence starts it again at
   1; the parts read ahead go into the cache, and are read only where a cache is. Profiles of what
   a branch reads at boot are recorded and replayed into the extent cache as a fork boots
-  (`fxdax::profile`).
+  (`cladefs::profile`).
 - **Not yet** (TASK-225): a host whose cache holds none of a fork's data, one forking another
   host's base or a fresh host after a host's loss, pages it in as a host without a cache did
   (r812, docs/measurements/real-bucket-guest-suites-2026-11-06.md): a ranged GET a page-in, one
@@ -775,7 +775,7 @@ points are shared or not as any other's. Forks of branches with writers into ano
 *Rewritten 2026-11-13 (TASK-395.1): per cell, conservative.* The protocol below is model-checked
 in `specs/bucket` (Bucket.tla, the `BucketCells*` models and every other model extended to cells)
 and is the design of record for TASK-395.2-.8. The code runs it since TASK-395.2-.4 (format 9,
-`extent_remote::collector`): the whole-bucket pass is gone. `fxdax-gc` sweeps every cell, the
+`extent_remote::collector`): the whole-bucket pass is gone. `cladefs-gc` sweeps every cell, the
 cells found by delimiter listings of `tenants/` and each tenant's `cells/`, a page of 1,000 at a
 time, listing none of their objects (`cell::listed`), `--at-once` passes at once (16 by default;
 `extent_remote::sweep`, TASK-395.5), or passes over the one `--cell TENANT/CELL` names;
@@ -784,11 +784,11 @@ sweep one bucket at once, each cell's lease keeping two passes off one cell (Swe
 cell unchanged since its last pass, whichever process made it, costs a pass its lease and one
 listing (Passes that skip, below).
 
-`fxdax-gc` is the only thing that deletes; writers only add. A live branch is one whose record says
-so, whether or not a host holds it, which only hosts know: `fxdax-gc URL --branches --held FILE`
-lists those no host holds, FILE naming what they do, and `fxdax-gc URL --delete-branch ID` deletes
+`cladefs-gc` is the only thing that deletes; writers only add. A live branch is one whose record says
+so, whether or not a host holds it, which only hosts know: `cladefs-gc URL --branches --held FILE`
+lists those no host holds, FILE naming what they do, and `cladefs-gc URL --delete-branch ID` deletes
 one for the next pass to reclaim (a sealed one whose fork into another cell it records, the child
-unrecorded, under `FXDAX_KMS`'s KMS, failing partway without one: doc-16, TASK-411.14).
+unrecorded, under `CLADEFS_KMS`'s KMS, failing partway without one: doc-16, TASK-411.14).
 
 **Decided with the user (2026-11-13, TASK-395):** the collector may be **conservative**, reclaiming
 late and wasting space for a time; **the unit of collection is the cell**, not the tenant, so that a
@@ -1085,7 +1085,7 @@ exact, but a protocol across cells every pass.
 
 ### Sweeps (TASK-395.5)
 
-A sweep is a pass over each cell, so many at once (`fxdax-gc --at-once`, 16 by default), the cells
+A sweep is a pass over each cell, so many at once (`cladefs-gc --at-once`, 16 by default), the cells
 taken from their listing only as a pass ends: it holds a page of tenants, a page of cells and the
 passes in flight, each holding what it read of its cell alone (a `Collector` keeps nothing across
 passes), so its memory is bounded by its passes at once times what a pass over the largest cell
@@ -1093,7 +1093,7 @@ takes, whatever the bucket holds. Every listing by delimiter is a page a request
 Azure through `object_store`'s paged listings, with continuation tokens; files and memory, which
 can only list a directory whole, cut their pages out of the whole level.
 
-**Passes at once run at once** (TASK-395.15): `fxdax-gc` runs on a runtime of a thread a core, each
+**Passes at once run at once** (TASK-395.15): `cladefs-gc` runs on a runtime of a thread a core, each
 pass a task of its own (`Sweep::spawned`), so that their work between requests (digests, decoding
 checkpoints, compacting) runs on several threads; before, every pass shared the sweep's one task.
 A file bucket locks the objects of a directory, not itself, for what replaces or removes one
@@ -1143,7 +1143,7 @@ The rest of a pass, unchanged within the cell:
   A reader that finds an object gone reads its moves. *(TASK-411.6)* An object of a sealed cell
   (doc-16) is read under its branch's DEK and its moves sealed under the same key, the generation
   its trailer names, with a salt of their own: a pass with something sealed to compact unwraps the
-  cell's KEK through `fxdax-gc`'s KMS (`FXDAX_KMS`), once for the pass; marking, and passes
+  cell's KEK through `cladefs-gc`'s KMS (`CLADEFS_KMS`), once for the pass; marking, and passes
   compacting nothing sealed, ask it nothing. The KEK not to be had (the tenant's KEK revoked or
   destroyed, no KMS), the pass compacts what is in the clear and leaves the rest, counted in its
   report (`locked`, `uncompacted`), deleting as ever.
@@ -1201,7 +1201,7 @@ which the default run skips: its 72 parts, each in minutes, take hours in all (`
 **Watching before deleting** *(added 2026-11-08, TASK-264).* Two passes delete nothing, for an
 operator to see what the collector would do before trusting it with a bucket:
 
-- `fxdax-gc URL --dry-run [--grace S] [--compact-below F]` writes nothing at all. It does not take
+- `cladefs-gc URL --dry-run [--grace S] [--compact-below F]` writes nothing at all. It does not take
   its cell's `<C>gc/lease`, which would bump the epoch and fence a pass running meanwhile out of its
   deletes; it reads the lease's epoch as it starts instead, and says it was fenced if a pass took
   the lease before it ended, what it read being possibly older than that pass's deletes. Nor does it
@@ -1210,7 +1210,7 @@ operator to see what the collector would do before trusting it with a bucket:
   delete, then each it would compact by its listed size, `KEY KIND SIZE delete|compact`, and their
   counts and bytes. It **undercounts**: what a pass compacts it deletes a grace period after, which
   a dry run never finds doomed. With `--compact-below 0`, a pass deletes exactly what it lists.
-- `fxdax-gc URL --mark-only [--every S] [--grace S] [--compact-below F]` is a pass in every respect
+- `cladefs-gc URL --mark-only [--every S] [--grace S] [--compact-below F]` is a pass in every respect
   but deleting: it compacts as one does, sealed cells under their keys through the KMS
   (TASK-411.6) (the compacted originals are the keys most worth watching,
   TASK-175), and instead of deleting writes `<C>gc/marks/<epoch>`, the doomed objects of its cell as
@@ -1223,7 +1223,7 @@ operator to see what the collector would do before trusting it with a bucket:
   moves both, and every marks object, until an operator collects for real or removes them. The
   collector never takes `<C>gc/` for a candidate, nor for a branch's.
   - **Readers warn.** Every reader of a bucket reads it through `store::Store` (extentd's remote
-    stores, writers recovering, fxdaxctl, the collector). A mark-only pass writes `gc/marking`
+    stores, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
     first, which a reader reads every 60 s, a HEAD, alongside one of its reads; only while it is
     there does the reader hold the newest marks' keys of each cell it reads, read again every 60 s
     by a listing of the cell's `gc/marks/` (and a read once it changed) alongside one of its reads
@@ -1318,7 +1318,7 @@ read changed. What a pass reads outside the prefix, case by case:
   and refuses as it refuses an unwrap when that KEK is revoked or destroyed, or the KMS fails);
   without a KMS it is not, nothing asked. So a revoked tenant's idle cells cost a sweep three
   requests each, as any idle cell, and one KMS call for all of them; a skipping pass reports what
-  is left (`locked`, `uncompacted`), and fxdax-gc counts it in the sweep's line and metrics, not on
+  is left (`locked`, `uncompacted`), and cladefs-gc counts it in the sweep's line and metrics, not on
   a line of its own. Deciding by the KMS this way is as safe as by the cell: only compaction goes
   by the KEK, and a skip compacts nothing; what the recorded pass would delete went by the cell
   alone. A KMS that wraps for the tenant but unwraps not the cell's KEK (another than the one that
@@ -1352,7 +1352,7 @@ would keep the older checkpoint it cached and delete the newer, which the child'
 its key: the child lost. Idle cells, where most fork points are (bases, snapshots), are skipped
 whole; a written cell with many fork points is TASK-395.12's.
 
-**What each cell and tenant takes** (TASK-395.8): `fxdax-gc URL --usage [--tenant TENANT]` reads
+**What each cell and tenant takes** (TASK-395.8): `cladefs-gc URL --usage [--tenant TENANT]` reads
 each cell's lease (one GET a cell, 32 at once, the tenants and each one's cells found by delimiter
 listings a page at a time, as a sweep finds them) and writes a JSON object a line, a cell's then its
 tenant's sum, IDs in hexadecimal, each with when it was measured: a cell as of its last pass in

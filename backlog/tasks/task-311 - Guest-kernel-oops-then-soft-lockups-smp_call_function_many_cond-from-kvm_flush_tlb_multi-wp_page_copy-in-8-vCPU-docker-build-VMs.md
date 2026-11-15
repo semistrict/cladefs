@@ -7,7 +7,7 @@ status: To Do
 assignee:
   - '@claude'
 created_date: '2026-11-09 23:57'
-updated_date: '2026-11-10 09:19'
+updated_date: '2026-11-15 14:25'
 labels:
   - guest-kernel
 dependencies: []
@@ -37,7 +37,7 @@ LangSmith's host now logs 16 KiB from the first fault report, and they will send
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 fxdax's own VM console capture keeps the first oops (the first report, not only the tail)
+- [x] #1 cladefs's own VM console capture keeps the first oops (the first report, not only the tail)
 - [x] #2 Attempted reproduction on ubu1: 8-vCPU guest, docker build plus image export under host CPU contention, debug kernel (lockdep, KASAN), N rounds recorded
 - [ ] #3 Root cause identified from the first oops (ours or LangSmith's) and fixed, with a test or mutant that catches it
 <!-- AC:END -->
@@ -53,7 +53,7 @@ LangSmith's host now logs 16 KiB from the first fault report, and they will send
 
 <!-- SECTION:PLAN:BEGIN -->
 1. Keep the first oops: vm::first_report (first complaint, its context and trace, 16 KiB at most); the runner prints each console's first report for failed/timed-out tests and records it in the outcome JSON and GitHub summary; 'Oops:' becomes a complaint; log tail cut at a char boundary.
-2. Fail fast: CONFIG_PANIC_ON_OOPS=y and CONFIG_PANIC_TIMEOUT=-1 in fxdax.config (a panic is a crash doc-12 covers; the oops is then the console's last report); build script checks them; fxfs-guest-checks oops_panics checks the booted kernel. No pstore/ramoops: a Firecracker VM's RAM goes with it.
+2. Fail fast: CONFIG_PANIC_ON_OOPS=y and CONFIG_PANIC_TIMEOUT=-1 in cladefs.config (a panic is a crash doc-12 covers; the oops is then the console's last report); build script checks them; fxfs-guest-checks oops_panics checks the booted kernel. No pstore/ramoops: a Firecracker VM's RAM goes with it.
 3. Reproduce on ubu1: 8-vCPU guest, docker build + image export, host CPU contention, release and debug (lockdep/KASAN/DEBUG_LIST) kernels, N rounds.
 4. Root-cause and fix with a test/mutant if reproduced; else leave open with notes on what LangSmith should send.
 <!-- SECTION:PLAN:END -->

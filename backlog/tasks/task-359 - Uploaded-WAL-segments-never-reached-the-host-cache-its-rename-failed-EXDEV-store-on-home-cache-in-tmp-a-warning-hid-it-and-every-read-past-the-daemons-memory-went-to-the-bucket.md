@@ -8,6 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-11 14:59'
+updated_date: '2026-11-15 14:26'
 labels: []
 dependencies: []
 priority: high
@@ -24,7 +25,7 @@ ubu1 2026-11-11 (docs/measurements/ubu1-loop-baseline-2026-11-11): extentd.log f
 <!-- AC:BEGIN -->
 - [ ] #1 Store::open refuses a store whose directory is on another filesystem than the host's cache, with an error naming both; a test shows it
 - [ ] #2 test-e2e's cache is on its stores' filesystem; the working-set benchmark's daemon stats show reads served from the cache, not the bucket
-- [ ] #3 extent_store, extent_remote and fxdax suites pass on ubu1
+- [ ] #3 extent_store, extent_remote and cladefs suites pass on ubu1
 <!-- AC:END -->
 
 ## Definition of Done

@@ -4,7 +4,7 @@ title: 'Bench: fsync-heavy small transactions'
 status: To Do
 assignee: []
 created_date: '2026-11-11 10:56'
-updated_date: '2026-11-11 13:47'
+updated_date: '2026-11-15 14:27'
 labels: []
 dependencies:
   - TASK-350.1
@@ -16,7 +16,7 @@ ordinal: 708000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Every fxdax fsync is a guest Fxfs commit and an ordered COMMIT; pgbench measured 2,000 tps on Fxfs against 3,600-3,800 on ext4 with flushes dropped and 1,535 with each flush a host fsync (docs/measurements/gce-pgbench-baselines-2026-11-08), guest CPU-bound.
+Every cladefs fsync is a guest Fxfs commit and an ordered COMMIT; pgbench measured 2,000 tps on Fxfs against 3,600-3,800 on ext4 with flushes dropped and 1,535 with each flush a host fsync (docs/measurements/gce-pgbench-baselines-2026-11-08), guest CPU-bound.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

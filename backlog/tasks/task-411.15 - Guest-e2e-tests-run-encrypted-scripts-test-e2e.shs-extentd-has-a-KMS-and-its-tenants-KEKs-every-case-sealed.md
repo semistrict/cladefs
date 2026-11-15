@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 05:58'
+updated_date: '2026-11-15 14:26'
 labels: []
 dependencies: []
 documentation:
@@ -23,12 +23,12 @@ ordinal: 813000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-411's AC #3: the VMM and guest end-to-end paths (scripts/test-e2e.sh, guest/tests) have no encrypted variant. The user chose (2026-11-14) that e2e runs encrypted only: no clear e2e runs; plaintext stays covered by the host-side suites. Today test-e2e.sh starts extentd with no FXDAX_KMS, so every guest's store is a plaintext cell.
+TASK-411's AC #3: the VMM and guest end-to-end paths (scripts/test-e2e.sh, guest/tests) have no encrypted variant. The user chose (2026-11-14) that e2e runs encrypted only: no clear e2e runs; plaintext stays covered by the host-side suites. Today test-e2e.sh starts extentd with no CLADEFS_KMS, so every guest's store is a plaintext cell.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 scripts/test-e2e.sh starts extentd (and every process of the cases that opens stores: fxdaxctl, fxdax-gc, FUSE mounts) with FXDAX_KMS naming a LocalKms holding a KEK for every tenant the cases use, tenant 0 included or the cases moved to granted tenants
+- [x] #1 scripts/test-e2e.sh starts extentd (and every process of the cases that opens stores: cladefsctl, cladefs-gc, FUSE mounts) with CLADEFS_KMS naming a LocalKms holding a KEK for every tenant the cases use, tenant 0 included or the cases moved to granted tenants
 - [x] #2 A check in the harness fails a run whose stores are not sealed: every cell the run made has a wrapped KEK and every branch record a DEK, and no object of the bucket nor file of the stores' directories holds a known plaintext a case wrote
 - [x] #3 The e2e suite passes encrypted on ubu1 (test-e2e.sh, --tag e2e), and the nightly/qualification scripts that run it (scripts/qualify.sh, bench scripts) run encrypted too
 - [x] #4 Guest checks' time budgets hold encrypted, or the cases that overrun are named with their measured times
@@ -44,9 +44,9 @@ TASK-411's AC #3: the VMM and guest end-to-end paths (scripts/test-e2e.sh, guest
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. scripts/test-e2e.sh: a LocalKms beside the run's sockets (/tmp/fxdax-e2e-sockets.*/kms, gone with them, not in the results), KEKs for tenants 0-15 made by `runner kms`; FXDAX_KMS and FXDAX_E2E_SEALED exported, so the daemon, the cases' own daemons, the runner's in-process stores, fxdaxctl, fxdax-gc and FUSE inherit them; a caller's FXDAX_KMS kept. A daemon (no FXDAX_KMS string in it) or runner (no `kms`) built before encryption runs in the clear, unchecked, saying so; results/encryption.txt says which.
-2. Tenant 0 gets a KEK (doc-16 lets it; the default tenant's socket, fxdaxctl create and the cases' in-process stores are tenant 0's; fxdax's tests seal it already); granted IDs to 15 cover fxfs-guest-migrate-tenant-dax's 1-4.
-3. The check, keyless (test_cases::sealed, extent_store::on_disk): cells have KEKs (or shredded), records of branches that wrote objects have DEKs (not points/deleted), framed objects not Seal::Clear, store dirs' framed files and logs not clear, and no run of test_cases::canary in any object or file read. The runner checks each passed case's directory (FXDAX_E2E_SEALED); `runner sealed` checks the run's bucket whole and part cache at its end.
+1. scripts/test-e2e.sh: a LocalKms beside the run's sockets (/tmp/cladefs-e2e-sockets.*/kms, gone with them, not in the results), KEKs for tenants 0-15 made by `runner kms`; CLADEFS_KMS and CLADEFS_E2E_SEALED exported, so the daemon, the cases' own daemons, the runner's in-process stores, cladefsctl, cladefs-gc and FUSE inherit them; a caller's CLADEFS_KMS kept. A daemon (no CLADEFS_KMS string in it) or runner (no `kms`) built before encryption runs in the clear, unchecked, saying so; results/encryption.txt says which.
+2. Tenant 0 gets a KEK (doc-16 lets it; the default tenant's socket, cladefsctl create and the cases' in-process stores are tenant 0's; cladefs's tests seal it already); granted IDs to 15 cover fxfs-guest-migrate-tenant-dax's 1-4.
+3. The check, keyless (test_cases::sealed, extent_store::on_disk): cells have KEKs (or shredded), records of branches that wrote objects have DEKs (not points/deleted), framed objects not Seal::Clear, store dirs' framed files and logs not clear, and no run of test_cases::canary in any object or file read. The runner checks each passed case's directory (CLADEFS_E2E_SEALED); `runner sealed` checks the run's bucket whole and part cache at its end.
 4. Known plaintext: fxfs-guest's written() and fxfs-guest-checks' pattern() are the canary.
 5. Tests: extent_store on_disk in sealed_stores_raw_files_and_logs_hold_no_plaintext (sealed and clear twin); test_cases canary and sealed unit tests.
 6. ubu1: single cases, negative control (KMS with no KEK fails the check), S3 (RustFS), sandboxes short, full --tag e2e once; times against limits.

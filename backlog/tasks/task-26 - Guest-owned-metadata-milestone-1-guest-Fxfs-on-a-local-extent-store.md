@@ -4,7 +4,7 @@ title: 'Guest-owned metadata, milestone 1: guest Fxfs on a local extent store'
 status: To Do
 assignee: []
 created_date: '2026-10-13 19:53'
-updated_date: '2026-11-06 06:54'
+updated_date: '2026-11-15 14:26'
 labels: []
 milestone: m-3
 dependencies: []
@@ -25,7 +25,7 @@ Metadata operations over virtio-fs are 8-55x slower than ext4 in the guest under
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Fxfs runs in a Firecracker guest's kernel over the extent-store device, served by the host's extent daemon, and passes the fxdax guest tests' filesystem checks
+- [x] #1 Fxfs runs in a Firecracker guest's kernel over the extent-store device, served by the host's extent daemon, and passes the cladefs guest tests' filesystem checks
 - [ ] #2 Metadata workloads and git status measured on GCE against ext4 in the guest, within 2x
 - [x] #3 The write path (DAX with commit barriers, or WRITE requests) is decided from measurements and recorded in doc-2
 <!-- AC:END -->

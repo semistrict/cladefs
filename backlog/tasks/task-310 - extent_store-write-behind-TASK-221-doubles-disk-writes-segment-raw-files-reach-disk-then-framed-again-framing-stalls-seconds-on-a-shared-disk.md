@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09 23:57'
-updated_date: '2026-11-12 07:45'
+updated_date: '2026-11-15 14:25'
 labels:
   - perf
   - extentd
@@ -20,7 +20,7 @@ ordinal: 718000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Reported by LangSmith (sandbox CI, 8-vCPU runner, two sandbox hosts each with its own extentd, one local RustFS bucket on the same disk), after the bump 6a513509a -> 96c7808b8. Their fxdax E2E job became flaky; the non-fxdax job did not.
+Reported by LangSmith (sandbox CI, 8-vCPU runner, two sandbox hosts each with its own extentd, one local RustFS bucket on the same disk), after the bump 6a513509a -> 96c7808b8. Their cladefs E2E job became flaky; the non-cladefs job did not.
 
 Per CI run, from extentd's 'extent store: framing ... took' warnings (logged above 50 ms):
 - Old pin: 33-51 slow framings, slowest 0.2 s, 3-4 s total, about a third in the write phase.

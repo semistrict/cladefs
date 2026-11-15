@@ -3,17 +3,17 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 11:49'
+updated_date: '2026-11-15 14:25'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**), TASK-411.16, .17 and .18 (OpenBao, AWS KMS and Google Cloud KMS, below: **Real KMSes**), TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**), TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**) and TASK-411.27 (the bucket KMS, tenants' KEKs kept in the bucket under a master key, below: **The bucket KMS**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`cladefs-gc --delete-branch` under `CLADEFS_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**), TASK-411.16, .17 and .18 (OpenBao, AWS KMS and Google Cloud KMS, below: **Real KMSes**), TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**), TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**) and TASK-411.27 (the bucket KMS, tenants' KEKs kept in the bucket under a master key, below: **The bucket KMS**) are implemented.
 
 ## Goals
 
 *(decided)* Three, and no more:
 
-1. **BYOK.** A tenant's root key (its KEK) lives in a KMS, possibly the tenant's own; fxdax gets
+1. **BYOK.** A tenant's root key (its KEK) lives in a KMS, possibly the tenant's own; cladefs gets
    wrap and unwrap rights only, which the tenant can revoke.
 2. **Crypto-shredding.** Destroying a tenant's KEK leaves its data unreadable everywhere it is:
    the bucket, its object versions and copies, hosts' disks.
@@ -22,7 +22,7 @@ Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TAS
 **Not a goal:** keeping plaintext from a compromised host. The extent cache holds plaintext pages,
 as DAX needs: one copy, mapped into every VM's window (README, doc-13). Keeping the host blind needs
 encryption in the guest (Fxfs's fscrypt), and Linux turns DAX off for encrypted inodes, which
-loses fxdax's reason to be. Guest-side encryption stays possible as a tenant's opt-in without DAX;
+loses cladefs's reason to be. Guest-side encryption stays possible as a tenant's opt-in without DAX;
 it is not this design.
 
 ## Keys
@@ -63,7 +63,7 @@ GCM's authentication key. A salt per object makes every subkey new.
 
 - **Data parts:** each part of a framed object (`extent_frame::PART`, 1 MiB) is compressed
   first, as now, then sealed with AES-256-GCM under the object's subkey
-  (`dek.derive(salt, ["fxdax frame parts"])`); the nonce is the part's index, the associated data
+  (`dek.derive(salt, ["cladefs frame parts"])`); the nonce is the part's index, the associated data
   its index, encoding, stored and unpacked lengths. The table's entry holds the tag (every FORMAT 2
   entry has one, zeros in the clear: 33 bytes a part). Compression keeps working; ciphertext is the
   same length. *(TASK-411.2)* Nothing is bound to the object's key: a rebase renumbers and restamps
@@ -77,7 +77,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   GMAC under the object's parts subkey, its footer and table MACed, so that the collector reads it
   holding no key and a key-holding reader checks every byte), which key-holding readers check (a
   frame's footer and its table, which covers the trailer's seal and the footer's MAC, each have an
-  HMAC-SHA256 under `dek.derive(salt, ["fxdax frame mac"])` in the trailer; restamping a footer
+  HMAC-SHA256 under `dek.derive(salt, ["cladefs frame mac"])` in the trailer; restamping a footer
   needs the key and keeps the salt). The
   collector reads them without keys, checking CRCs, as now. They show extent IDs, sizes, the fork
   tree and live bytes; Fxfs's own metadata (names, inodes, directories) is data inside extents, so
@@ -95,7 +95,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   derived from the DEK and a salt of the file's own, kept in its log's header (TASK-411.5, below). *(found
   2026-11-14)* Every write reaching it is whole sectors, so XTS needs no read-modify-write: with an
   assert that each length given `Segments::reserve` and `Segments::append` is a multiple of 4096,
-  every test of `extent_store`, `sqlite_extents` and `fxdax` on macOS passed (574) but the 62 of
+  every test of `extent_store`, `sqlite_extents` and `cladefs` on macOS passed (574) but the 62 of
   `extent_store`'s simulation, whose writes are of 512 bytes (`sim/world.rs`, `BLOCK`); the guest's
   writes are aligned to the device's `block_size`, 4096 (doc-4). So the store refuses a write that
   is not whole sectors, and the simulation writes 4 KiB blocks (TASK-411.8). Large extents' own raw
@@ -111,9 +111,9 @@ GCM's authentication key. A salt per object makes every subkey new.
 |---|---|---|
 | extentd, a cell's holder | the cell's KEK; its volumes' DEKs; inherited DEKs | reads and writes the volumes |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
-| `fxdax-gc`, marking | none | reads metadata only |
-| `fxdax-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
-| `fxdax-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
+| `cladefs-gc`, marking | none | reads metadata only |
+| `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
+| `cladefs-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
 | the control API | whatever a fork across cells needs | rewraps (below) |
 
 ## Forks and shared points
@@ -167,18 +167,18 @@ dropped with its pool, never written out unwrapped.
   `keks: Vec<Kek { generation, wrapped }>`, its KEK's generations wrapped by the tenant's KEK in
   the KMS, oldest first; none: a cell in the clear. A record gains `deks: Vec<Dek { generation,
   kek, wrapped }>`, each generation of the branch's DEK wrapped by the cell's KEK of generation
-  `kek`, with AES-KW under `HKDF(cell KEK, info = "fxdax dek wrap" || tenant || cell || branch ||
+  `kek`, with AES-KW under `HKDF(cell KEK, info = "cladefs dek wrap" || tenant || cell || branch ||
   generation)`: a wrapped DEK copied to another record, or relabelled, fails AES-KW. `Record` is no
   longer `Copy`. An own extent's footer is its `ExtentId`, a moves' footer names the key it is the
   moves of (`Moves::of`): a whole object copied to another key of its branch is refused there, its
   footer under the MAC.
-- **The KMS and how a cell chooses.** `FXDAX_KMS=local:///DIR` (a `LocalKms` directory, the only
+- **The KMS and how a cell chooses.** `CLADEFS_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
-  `fxdax::remote::runtime()`: extentd, the fxdax CLI's FUSE mounts, fxdaxctl; and `fxdax-gc`, to
+  `cladefs::remote::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
   compact sealed cells (TASK-411.6; marking keyless). A cell is made sealed iff
   the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear (unless
   the tenant's sealed marker says it had one: TASK-411.19, below), any
-  other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
+  other refusal (revoked, destroyed, unreachable, a bad `CLADEFS_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
   *(TASK-411.10)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
@@ -258,10 +258,10 @@ dropped with its pool, never written out unwrapped.
   tenant for all its cells (`collector::Heard`, a wrap of a key of no use; none without a KMS), and
   goes over it in full, compacting, once it is, or once the cell changes. (TASK-411.6 recorded no
   digest: every pass over a revoked tenant's idle cells went in full.)
-  `fxdax-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
-  their cell's KEK`) and in `--metrics` (`fxdax_gc_sweep_objects{action="uncompacted"}`,
-  `fxdax_gc_sweep_locked_cells`).
-- **`fxdax-gc` reads `FXDAX_KMS`** as every fxdax process does (`extent_keys::kms::from_url`); one it
+  `cladefs-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
+  their cell's KEK`) and in `--metrics` (`cladefs_gc_sweep_objects{action="uncompacted"}`,
+  `cladefs_gc_sweep_locked_cells`).
+- **`cladefs-gc` reads `CLADEFS_KMS`** as every cladefs process does (`extent_keys::kms::from_url`); one it
   names that can't be had stops it before it collects (a CLI fails at once rather than leave every
   sealed cell uncompacted); `--dry-run` reads none.
 
@@ -271,7 +271,7 @@ dropped with its pool, never written out unwrapped.
 - **Format.** A record gains `inherited: Vec<Inherited { branch, dek: Dek { generation, kek,
   wrapped } }>`: the DEK of every ancestor of another cell whose objects the branch reads, each
   generation, wrapped by the record's own cell's KEK of generation `kek`, with AES-KW under
-  `HKDF(cell KEK, info = "fxdax inherited dek wrap" || holder (tenant, cell, id) || ancestor
+  `HKDF(cell KEK, info = "cladefs inherited dek wrap" || holder (tenant, cell, id) || ancestor
   (tenant, cell, id) || generation)`: copied to another record, or of another ancestor, or
   relabelled, it fails AES-KW. `layout::FORMAT` 10 is extended, not bumped: it is unreleased (main
   is at 7), as FORMAT 2 of `extent_frame` was for TASK-411.2. They are given with the branch's
@@ -286,7 +286,7 @@ dropped with its pool, never written out unwrapped.
   placement takes it; the host's `keys::Kms` keeps the KEK for the cell's first taking here, so
   that the child's store opening here unwraps nothing), and gives the child's record its first DEK
   and the parent's keys rewrapped under the new KEK (`keys::give_inherited`). A failure there fails
-  the fork, which fxdax deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
+  the fork, which cladefs deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
   child's writer gives its own DEK as before, and with it what the parent's record inherits), for
   a point, nor for a fork of branches in the clear: plaintext forks make no request more, no KMS
   call. A child its fork's host did not give keys to (its host died between the record and the
@@ -308,7 +308,7 @@ dropped with its pool, never written out unwrapped.
 - **KMS calls on the fork's path: none**, its cell KEK from the pool, the parent's keys in memory.
   The child's first opening on the forking host: none. On another host: one unwrap of the child's
   cell KEK, as for any cell taken.
-- **Pools** (`keys::Pooling`; fxdax: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
+- **Pools** (`keys::Pooling`; cladefs: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
   a take leaving a pool low, or a sealed store of the tenant opening, refills it in a batch of
   wraps at once, off the fork's path (`Kms::refill`, `Kms::filled`); an empty pool wraps one on the
   path. `Kms::revoked(tenant)`, called on every revoked or destroyed answer of the KMS (a refill's,
@@ -324,11 +324,11 @@ dropped with its pool, never written out unwrapped.
   branch's forks, the host's KMS (`branch::delete_under`, `extent_store::upload::delete_branch`):
   with none, it fails rather than write one the child refuses; a failed fork's claim, the host's
   KMS (`branch::delete_fork_under`). Asked for only when one is to be written. *(TASK-411.14)*
-  `fxdax-gc --delete-branch` deletes under `FXDAX_KMS`'s KMS, as its passes compact: a sealed
+  `cladefs-gc --delete-branch` deletes under `CLADEFS_KMS`'s KMS, as its passes compact: a sealed
   branch with an unrecorded fork into another cell (its writer died between the fork's
   acknowledgement and recording it) is deleted given one, the checkpoint at the fork point
   authenticated under the branch's DEK. Without one the deletion fails naming the tenant and
-  `FXDAX_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
+  `CLADEFS_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
   running it again with the KMS finishes (`extent_remote` `tests/gc.rs`
   `deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms`).
 - **Rotation** rewraps a record's inherited DEKs with its own; `add_generation` keeps them.
@@ -350,11 +350,11 @@ dropped with its pool, never written out unwrapped.
   cell object is no object a pass keeps or deletes, the checkpoint at the fork point is written
   where and when it was, and a deletion refused for want of a KMS is a deletion stopping partway,
   which the model has.
-- **Fork latency** (`cargo run --release -p fxdax-examples --example fork-bench`, on a Mac, a
+- **Fork latency** (`cargo run --release -p cladefs-examples --example fork-bench`, on a Mac, a
   memory bucket, 2026-11-14): a fork of a store of 64 extents into a new cell, median, sealed 32-34
   ms, in the clear 31-35 ms, with a KMS or none: the same within noise; 3 bucket requests more a
   sealed fork (the cell's create, the record's read beside it, its update), 47.5 against 44.5. With
-  10 ms a request (`FXDAX_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
+  10 ms a request (`CLADEFS_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
   more. No KMS call. Linux numbers: the user's, later.
 
 ## What TASK-411.5 made
@@ -367,7 +367,7 @@ dropped with its pool, never written out unwrapped.
 - **Raw files.** `extent_store::RawFile`: a sealed store's (its ring seals, `Ring::sealing`) open
   segments' and large extents' raw files are encrypted a sector at a time (`SECTOR`, 4096), the
   sector's place in the file its tweak (the data unit number), under
-  `Xts::derive(dek, salt, "fxdax raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
+  `Xts::derive(dek, salt, "cladefs raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
   of the branch's newest DEK and a salt drawn for the file. Writes are whole sectors (TASK-411.8;
   a sealed store refuses writes to large extents that are not, `Unsectored`, as it always refused
   them to segments), encrypted through a buffer; reads decrypt the sectors they are in. A large
@@ -376,7 +376,7 @@ dropped with its pool, never written out unwrapped.
 - **Logs.** A sealed store's segment's log is headed `FXLOG\0\0\x03` (`wal::SEALED_LOG_MAGIC`):
   after the clear header's fields (record salt, branch, number), the DEK's branch (u64) and
   generation (u32) and the raw file's 32-byte salt, then an HMAC-SHA256 of the header so far under
-  `dek.derive(salt, ["fxdax raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
+  `dek.derive(salt, ["cladefs raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
   followed by an HMAC of its offset in the log (u64) and the payload, inside the salted hash's
   frame. The runs a record holds or checksums (`Runs::Held`, `Runs::Checked`) are the raw file's
   stored bytes, encrypted: recovery, holding no key, works on stored bytes as before (salted
@@ -419,7 +419,7 @@ dropped with its pool, never written out unwrapped.
   back, and leaves no plaintext in any file; its clear twin holds its parts and reads its last
   alone).
 - **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
-  `Write::stored` gives a caller doing its own I/O (fxdax's image device) the file, the offset and
+  `Write::stored` gives a caller doing its own I/O (cladefs's image device) the file, the offset and
   the bytes encrypted, which it writes again from the last whole sector written after a short
   write. `Part::Data` carries the `RawFile`: such a reader reads `RawFile::read_range` and
   decrypts it (`RawFile::decrypt`).
@@ -439,10 +439,10 @@ dropped with its pool, never written out unwrapped.
   left uncompacted, not a corrupt pass), and so is `add_kek`. `CellKeys` of a shredded cell are
   sealed and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
   given. Its holder, if any, goes on changing its volumes until told: every change keeps the mark.
-- **A host told** (`fxdax::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
+- **A host told** (`cladefs::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
   control API (`ShredCell`, which shreds then forgets, idempotent, to be called on every host;
   `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
-  fxdaxctl (`shred-cell`, `forget-tenant-keys`):
+  cladefsctl (`shred-cell`, `forget-tenant-keys`):
   - fences every store of the scope open in the process (`fence::fence_stores`, fences listed by
     branch): each request fails with `EACCES` from then on, as its reopening does; extentd refuses
     its VM process's requests so;
@@ -470,7 +470,7 @@ dropped with its pool, never written out unwrapped.
   (two hosts, open segment, part cache on disk, a cross-tenant fork reading on) and
   `shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable` (the collector
   locked, the old cell object put back reading again: why versions must expire); `extent_remote`
-  `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `fxdax`
+  `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `cladefs`
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
 
@@ -490,7 +490,7 @@ configuration.
   it.
 - **Written** by `keys::new_cell_kek`, which every maker of a cell asks for its KEK: a store's
   opening (`extent_store::upload`), a fork into a new cell (`keys::inheriting`), the control API's
-  attaching of a new cell (`fxdax::fuse::control`). A KEK handed out, from the pool or wrapped
+  attaching of a new cell (`cladefs::fuse::control`). A KEK handed out, from the pool or wrapped
   then, the marker is created first, create-only (`bucket::put_if_absent`: one there already is as
   good, a retry finding its own write there too), before the function returns. *Why that order:*
   the maker writes the cell's object, keeping the wrapped KEK, only after it returns; so no sealed
@@ -501,7 +501,7 @@ configuration.
 - **Read** when the KMS says the tenant has no KEK (`Kms::new_kek` heard `NoSuchTenant`, now or
   within `KEKLESS_FOR`): a HEAD of the marker. There: the tenant is refused as destroyed, naming it
   and the marker (`tenant T: its KEK is destroyed: the KMS has none, and tenants/<T>/sealed says it
-  had one`, `Error::Kms`, `EACCES` at fxdax), and noted as a KMS's `Destroyed` is (`Kms::revoked`:
+  had one`, `Error::Kms`, `EACCES` at cladefs), and noted as a KMS's `Destroyed` is (`Kms::revoked`:
   its pool and cells' KEKs dropped, forks inheriting its keys refused, until the KMS answers a call
   for it again). Seen once, the host believes it for good, as nothing deletes it. Not there: the
   cell is made in the clear, as before, and the absence believed for `KEKLESS_FOR`, as the KMS's
@@ -536,7 +536,7 @@ configuration.
   `upload::encrypted::tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear` (openings of a new
   cell and of a new volume of its sealed cell refused, a fork into a new cell refused, nothing
   made; a tenant never sealed in the clear, no marker; a collector sweep of every cell leaves the
-  marker); `fxdax` `remote::tests::tenants_whose_kek_the_kms_forgot_open_no_store_in_the_clear`
+  marker); `cladefs` `remote::tests::tenants_whose_kek_the_kms_forgot_open_no_store_in_the_clear`
   (`EACCES`, no cell made; a tenant without a marker in the clear). The KMS:
   `extent_keys::testing::Forgetting`, answering `NoSuchTenant` where its inner KMS says
   `Destroyed`, as AWS and OpenBao do once a key is deleted. A hand mutant reading no marker failed
@@ -545,7 +545,7 @@ configuration.
 
 ## The bucket KMS (TASK-411.27)
 
-*(decided 2026-11-15)* When no `FXDAX_KMS` names a KMS, a host given a **master key** keeps every
+*(decided 2026-11-15)* When no `CLADEFS_KMS` names a KMS, a host given a **master key** keeps every
 tenant's KEK in the bucket itself, wrapped by the master key, made on the tenant's first use: no
 setup per tenant, every tenant sealed. TASK-411.28 makes it the default (a host with neither
 refuses to start) and removes plaintext; until then a host with neither makes cells in the clear,
@@ -555,35 +555,35 @@ as before.
   real KMS. Goal 3 holds while the master key stays out of the bucket: a reader of the bucket finds
   every tenant's KEK there, wrapped by a key it lacks. Goal 2, shredding, holds as below.
 - **Choosing it** (`extent_remote::bucket_kms::from_env`, the one function every process that
-  opens stores asks: extentd, fxdaxctl and the fxdax CLI's FUSE mounts through
-  `fxdax::remote::kms`, and `fxdax-gc`). `FXDAX_KMS`, if it names one, is the host's KMS (a master
+  opens stores asks: extentd, cladefsctl and the cladefs CLI's FUSE mounts through
+  `cladefs::remote::kms`, and `cladefs-gc`). `CLADEFS_KMS`, if it names one, is the host's KMS (a master
   key also given is unused, and warned of); else, given master keys, the bucket KMS over the
-  host's bucket: `FXDAX_EXTENTD_REMOTE`'s for fxdax's processes, the bucket collected for
-  `fxdax-gc`; else none. Master keys given that can't be had (malformed, both variables set, an
-  unreadable file, no `FXDAX_EXTENTD_REMOTE`) make the host's KMS refuse every call, naming why, as
-  a bad `FXDAX_KMS` does (fxdax-gc stops): no cell is made in the clear for want of it. A process
-  keeping stores in other buckets (the fxdax CLI's own file buckets) keeps their tenants' KEKs in
+  host's bucket: `CLADEFS_EXTENTD_REMOTE`'s for cladefs's processes, the bucket collected for
+  `cladefs-gc`; else none. Master keys given that can't be had (malformed, both variables set, an
+  unreadable file, no `CLADEFS_EXTENTD_REMOTE`) make the host's KMS refuse every call, naming why, as
+  a bad `CLADEFS_KMS` does (cladefs-gc stops): no cell is made in the clear for want of it. A process
+  keeping stores in other buckets (the cladefs CLI's own file buckets) keeps their tenants' KEKs in
   the host's bucket all the same: a cell's KEK, wrapped, is in its cell's object wherever that is.
-- **Master keys** (`extent_keys::kms::master`). `FXDAX_MASTER_KEY`: one or more keys, each 64
+- **Master keys** (`extent_keys::kms::master`). `CLADEFS_MASTER_KEY`: one or more keys, each 64
   hexadecimal digits (32 bytes), separated by commas or white space (one a line), the **newest
-  first**: it wraps new KEK objects, any unwraps. Or `FXDAX_MASTER_KEY_FILE`, naming a file of
+  first**: it wraps new KEK objects, any unwraps. Or `CLADEFS_MASTER_KEY_FILE`, naming a file of
   exactly 32 raw bytes (one key), or of text as the variable holds; both set is refused. A key
   given twice, none, or one not of 64 hex digits is refused, saying which by its place, never what
-  it holds. Each key is known by its **ID**, the first 8 bytes of SHA-256 over `fxdax master key
+  it holds. Each key is known by its **ID**, the first 8 bytes of SHA-256 over `cladefs master key
   id\0` and the key, in hex (`2bb56b8197c604e4` for the bytes 0 to 31): all that is ever written,
   logged or said of it. What was read of the variable or the file is zeroed once parsed (the
   process's environment keeps its own copy); keys in memory are zeroed when dropped. Make one with
   `openssl rand -hex 32`.
 - **The KEK object**, `tenants/<tenant>/kek` (`layout::kek`, doc-7 Layout): `fxkt`, format 1, kind
   1, the tenant (u64, big-endian), the KEK's ID (8 random bytes), the master key's ID, then the KEK
-  (32 random bytes) wrapped with AES-KW under `HKDF-SHA256(master key, info = "fxdax bucket kms
+  (32 random bytes) wrapped with AES-KW under `HKDF-SHA256(master key, info = "cladefs bucket kms
   kek" || all of that header)`, 70 bytes: an object copied to another tenant's key, or relabelled
   another master key or KEK, fails AES-KW. A **tombstone**, a shredded tenant's: `fxkt`, format
   1, kind 2, the tenant, 14 bytes. Under the tenant's prefix, no cell's: no pass lists it, and the
   collector keeps it (`Kind::Kek`) if one did (`extent_remote` `testing::uncollected`, the fork and
   restore fault tests' tables).
 - **Keys it wraps** (cell KEKs, in cells' objects): `fxkb`, format 1, the tenant, the KEK's ID,
-  then the key wrapped with AES-KW under `HKDF-SHA256(tenant KEK, info = "fxdax bucket kms wrap"
+  then the key wrapped with AES-KW under `HKDF-SHA256(tenant KEK, info = "cladefs bucket kms wrap"
   || that header)`, 61 bytes, as `LocalKms`'s (`fxkw`) are: the header names whose KEK and which,
   and is bound to the key.
 - **First use.** A wrap for a tenant whose KEK the host holds not reads its object: there, it
@@ -607,29 +607,29 @@ as before.
   |---|---|
   | a tombstone | `Destroyed` |
   | no object, unwrapping; or no object and the sealed marker, wrapping | `Destroyed` |
-  | an object under a master key not given | `UnknownMasterKey`: `tenant T: its KEK is wrapped by master key ID, which this host has not (it has IDS): FXDAX_MASTER_KEY` |
+  | an object under a master key not given | `UnknownMasterKey`: `tenant T: its KEK is wrapped by master key ID, which this host has not (it has IDS): CLADEFS_MASTER_KEY` |
   | an object or a wrapped key not authentic (another tenant's, tampered, another KEK of the tenant's) | `Unauthentic` |
 
   Never `NoSuchTenant`: every tenant asked for gets a KEK, so every cell made is sealed. Cells made
   in the clear before a host had a master key stay in the clear (a cell's sealing is chosen as it
   is made; TASK-411.28 removes them). A wrong master key is never read as a tenant without a KEK.
-- **Rotating the master key.** (1) Give every host `FXDAX_MASTER_KEY=NEW,OLD` and restart its
+- **Rotating the master key.** (1) Give every host `CLADEFS_MASTER_KEY=NEW,OLD` and restart its
   processes: from then on they unwrap under either and make new KEK objects under NEW (a host
   still given OLD alone refuses those tenants, naming NEW's ID: update every host first). (2) Run
-  `fxdax-gc URL --rotate-master-key` with the same variable: every tenant's KEK object under OLD is
+  `cladefs-gc URL --rotate-master-key` with the same variable: every tenant's KEK object under OLD is
   rewrapped under NEW by a conditional update (read again and done again if another changed it),
   the KEK and its ID unchanged, so every cell KEK it wrapped stays valid; it says how many it
   rewrapped, how many were under NEW already, how many tenants are shredded, and leaves, saying so
   and failing, any under none of the keys given. Run again, it rewraps nothing. (3) Give hosts NEW
   alone. With versioning on, OLD still opens the objects' non-current versions until they expire.
-- **Shredding a tenant** (`ShredTenant`, `fxdaxctl shred-tenant TENANT`, through each host's
-  daemon; `fxdax::remote::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
+- **Shredding a tenant** (`ShredTenant`, `cladefsctl shred-tenant TENANT`, through each host's
+  daemon; `cladefs::remote::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
   tenant's KEK object is replaced by a tombstone, by a conditional update (or created one, a tenant
   never given a KEK: it is never made one), then the host forgets the tenant's keys as
   `ForgetTenantKeys` does (What TASK-411.7 made). Call it on every host: the first shreds, the
   others find it shredded (`shredded_now: false`) and forget; a host not told refuses the tenant
   once its KEK is a minute old. Every cell KEK of the tenant, in every version of every cell
-  object, unwraps no more, and no KEK is made for it again. A daemon whose KMS is `FXDAX_KMS`'s
+  object, unwraps no more, and no KEK is made for it again. A daemon whose KMS is `CLADEFS_KMS`'s
   refuses it (`FAILED_PRECONDITION`, `ENOTSUP`): destroy the KEK in that KMS, then
   `ForgetTenantKeys`. **Only as strong as the bucket keeps no older version of
   `tenants/<tenant>/kek`**: an older version holds the KEK, wrapped by a master key the hosts have.
@@ -652,8 +652,8 @@ as before.
   `upload::encrypted::sealed_stores_open_through_the_bucket_kms_on_two_hosts` (a sealed store made
   on one host, taken and read on another, no object holding the master key, the cell's KEK or the
   data, a collector sweep leaving the KEK object and its tombstone, no host opening it shredded);
-  `fxdax` `remote::tests::hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms`
-  (`FXDAX_MASTER_KEY` and `FXDAX_EXTENTD_REMOTE` alone: every store sealed; `shred_tenant` fences
+  `cladefs` `remote::tests::hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms`
+  (`CLADEFS_MASTER_KEY` and `CLADEFS_EXTENTD_REMOTE` alone: every store sealed; `shred_tenant` fences
   and refuses, another tenant reading on) and `hosts_of_another_kms_shred_no_tenant`; Linux:
   `tests/control.rs` `tenants_sealed_under_the_bucket_kms_and_shredded_through_the_control_api`.
   Hand mutants (no marker read, a racing create keeping its own KEK, no tombstone written) each
@@ -661,13 +661,13 @@ as before.
 
 ## Real KMSes: AWS KMS
 
-*(TASK-411.17)* `FXDAX_KMS=aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`
+*(TASK-411.17)* `CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`
 (`AwsKms`, `extent_keys/src/kms/aws.rs`), the query percent-encoded as any URL's; any other query name is
 refused, so that a misspelt `endpoint` does not send calls to AWS itself.
 
 - **Naming.** Each tenant's KEK is a symmetric KMS key (`SYMMETRIC_DEFAULT`, `ENCRYPT_DECRYPT`)
   named as `kms::KeyNames` says: the template `key` with `{tenant}` in hexadecimal, say
-  `alias/fxdax-tenant-{tenant}`, an alias per tenant the operator makes (`aws kms create-key`,
+  `alias/cladefs-tenant-{tenant}`, an alias per tenant the operator makes (`aws kms create-key`,
   `aws kms create-alias`); and the overrides file `keys`, lines `TENANT_HEX NAME`, for tenants that
   bring their own key (BYOK). A name is any form `Encrypt` and `Decrypt` take: a key ID, a key
   ARN, an alias name or an alias ARN; a key in another account needs its key ARN (or alias ARN).
@@ -681,8 +681,8 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   Nothing of them, nor any key, is logged: an I/O error says the call, the key's name and AWS's
   error code and message, or the SDK's error and its causes' Display, never its Debug.
 - **Wrap.** KMS `Encrypt` of the key's 32 bytes under the tenant's key, with the encryption context
-  `{"fxdax-tenant": TENANT_HEX}`: the ciphertext decrypts for that tenant alone even where two
-  tenants share a key, and a key policy can let fxdax use a key for one tenant only. The wrapped
+  `{"cladefs-tenant": TENANT_HEX}`: the ciphertext decrypts for that tenant alone even where two
+  tenants share a key, and a key policy can let cladefs use a key for one tenant only. The wrapped
   key is a header, `fxka`, format 1, the key name's length (2 bytes, big-endian) and the name, then
   KMS's ciphertext blob. `LocalKms`'s begin `fxkw`.
 - **Unwrap.** The header is checked first, asking the KMS nothing: another backend's (`fxkw`, or
@@ -692,7 +692,7 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   (whose key's owner could make one), is refused, and with the same context; a plaintext not of
   32 bytes is `Unauthentic`. The blob names the key version that encrypted it, so a rotated key
   (automatic rotation, or `RotateKeyOnDemand`) unwraps what every version of it wrapped, and
-  fxdax does nothing on a rotation.
+  cladefs does nothing on a rotation.
 - **Refusals**, each naming the tenant (`kms::Error`):
 
   | AWS KMS's error | `kms::Error` |
@@ -713,7 +713,7 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   tenant
   with imported key material that deletes it reads as `Revoked` (it may import the same material
   again), never `Destroyed`.
-- **IAM.** fxdax's role needs `kms:Encrypt` and `kms:Decrypt` on each tenant's key, no more (no
+- **IAM.** cladefs's role needs `kms:Encrypt` and `kms:Decrypt` on each tenant's key, no more (no
   `kms:DescribeKey`, no `kms:GenerateDataKey`); a condition on the encryption context ties each key
   to its tenant:
 
@@ -722,22 +722,22 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
     "Effect": "Allow",
     "Action": ["kms:Encrypt", "kms:Decrypt"],
     "Resource": "arn:aws:kms:REGION:ACCOUNT:key/KEY-ID",
-    "Condition": {"StringEquals": {"kms:EncryptionContext:fxdax-tenant": "2a"}}
+    "Condition": {"StringEquals": {"kms:EncryptionContext:cladefs-tenant": "2a"}}
   }
   ```
 
-  Cross-account BYOK: the tenant's key policy allows fxdax's role (its ARN as principal) the same
-  two actions with the same condition, fxdax's role's own IAM policy allows them on the key's ARN
+  Cross-account BYOK: the tenant's key policy allows cladefs's role (its ARN as principal) the same
+  two actions with the same condition, cladefs's role's own IAM policy allows them on the key's ARN
   (cross-account use needs both), and the overrides file names the key by its ARN. The tenant
   revokes by disabling the key or removing that statement (`Revoked`), and shreds by scheduling the
   key's deletion (`Destroyed`).
-- **Calls.** On a runtime of the backend's own (one thread, `fxdax-aws-kms`), its HTTPS client
+- **Calls.** On a runtime of the backend's own (one thread, `cladefs-aws-kms`), its HTTPS client
   (hyper 1 over rustls 0.23, the build's, not the SDK's legacy default) made there when first
   needed: its futures run on any executor, and its connections never outlive a caller's runtime.
   The SDK retries what AWS says is retryable (throttling, 5xx, a lost connection), three attempts
   backing off; an attempt times out after 10 s, a call after 30 s, so a KMS that answers not fails a
   store's opening as `Io` rather than holding it.
-- **Memory.** The key fxdax hands `Encrypt`, and `Decrypt`'s answer, are zeroed where fxdax holds
+- **Memory.** The key cladefs hands `Encrypt`, and `Decrypt`'s answer, are zeroed where cladefs holds
   them; the SDK's own copies (the request's JSON body, the response's buffer, its `Blob`) are not,
   which it offers no way to do. Its models mark both fields sensitive, so its `Debug` redacts
   them.
@@ -774,13 +774,13 @@ TASK-411.16: OpenBao's Transit engine (openbao.org, MPL-2.0; Vault is BSL, exclu
 `extent_keys::kms::openbao::OpenBao`. Self-hosted, so the one real KMS tested anywhere: its tests
 start `bao server -dev` themselves.
 
-- **Configuring.** `FXDAX_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE][&namespace=NS]`
+- **Configuring.** `CLADEFS_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE][&namespace=NS]`
   (port 8200 by default; `MOUNT` the Transit engine's path, which may hold `/`; `NS` its namespace,
   sent as `X-Vault-Namespace`), or `openbaos://` over HTTPS, which may add `&ca=FILE`, a PEM file of
   the only CAs trusted (else the system's). `openbao://` sends the token in the clear: loopback or a
   trusted network only. Each tenant's key is named by `kms::KeyNames`: `TEMPLATE` with `{tenant}` in
   hexadecimal, `FILE`'s overrides for tenants bringing their own; names of letters, digits, `-`, `_`
-  and `.`. The token is `FXDAX_KMS_OPENBAO_TOKEN`'s, or that of the file `FXDAX_KMS_OPENBAO_TOKEN_FILE`
+  and `.`. The token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or that of the file `CLADEFS_KMS_OPENBAO_TOKEN_FILE`
   names (exactly one set), read at start and again whenever OpenBao answers 403, the call made once
   more if it changed: OpenBao Agent's file sink renewing it works. Credentials in the URL are refused.
 - **The token's policy** needs, for each tenant key `NAME`: `update` on `MOUNT/encrypt/NAME` and
@@ -812,12 +812,12 @@ start `bao server -dev` themselves.
   | the same, version < `min_available_version` (trimmed, gone) | | `Destroyed` |
   | 400 `message authentication failed`, `invalid ciphertext` | | `Unauthentic` |
   | 400 `version is too new` | | `Unauthentic` |
-  | 403 and `lookup-self` 403 (fxdax's token invalid, expired, revoked) | `Io` | `Io` |
+  | 403 and `lookup-self` 403 (cladefs's token invalid, expired, revoked) | `Io` | `Io` |
   | 404 route not found (no such mount, a token with rights to it), other 4xx, 412/429/5xx (sealed: 503) after 3 tries, network | `Io` | `Io` |
 
   Why the probing: OpenBao answers 403 both for a token without rights to a key and for an encrypt
   of a missing key with a token that may not create one; the key's metadata says which, and
-  `lookup-self` tells a tenant's revocation from fxdax's own token failing, so that an expired host
+  `lookup-self` tells a tenant's revocation from cladefs's own token failing, so that an expired host
   token is not read as every tenant revoked (which would drop their keys from every host's memory).
   Nothing is `NoSuchTenant` but a key OpenBao says it has not, as that one makes cells in the clear
   for a tenant never sealed.
@@ -843,7 +843,7 @@ start `bao server -dev` themselves.
   (a sealed cell made, taken with one unwrap, refused when the policy drops its key, opened again,
   a tenant without a key in the clear). Each starts `bao server -dev` on a free port
   (`extent_keys::testing::openbao::DevServer`, `-dev-no-store-token`), and is skipped, saying so,
-  without `bao` (`FXDAX_BAO`, else `PATH`), unless `FXDAX_REQUIRE_OPENBAO` is set: then it fails.
+  without `bao` (`CLADEFS_BAO`, else `PATH`), unless `CLADEFS_REQUIRE_OPENBAO` is set: then it fails.
   `scripts/test-openbao.sh` fetches OpenBao's release (2.7.2, by digest, `scripts/lib/openbao.sh`)
   and runs them so required; CI's `object-stores` job could run it (proposed, not added).
 
@@ -852,30 +852,30 @@ start `bao server -dev` themselves.
 TASK-411.18, `extent_keys::kms::gcp` (2026-11-15). A real backend beside `LocalKms`, over Cloud
 KMS's REST API (`cloudkms.googleapis.com/v1`).
 
-- **Configuration.** `FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`.
+- **Configuration.** `CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`.
   A tenant's KEK is a `cryptoKey` named as `kms::KeyNames` says: the template, `{tenant}` the tenant
-  in hexadecimal, an id in ring `R` (`fxdax-tenant-{tenant}`); or a line of the overrides file,
+  in hexadecimal, an id in ring `R` (`cladefs-tenant-{tenant}`); or a line of the overrides file,
   `TENANT NAME`, where `NAME` is an id in `R` or a key's whole resource name,
   `projects/P2/locations/L2/keyRings/R2/cryptoKeys/K`, in a project of the tenant's own (BYOK,
   cross-project). Each name is checked as the URL is read (project, location, ids of 1 to 63
   letters, digits, `_` and `-`; unknown parameters refused), so a bad one fails the host's KMS, not
   a call.
-- **Credentials.** Application Default Credentials as `object_store` finds them for fxdax's `gs://`
+- **Credentials.** Application Default Credentials as `object_store` finds them for cladefs's `gs://`
   buckets (`GoogleCloudStorageBuilder::from_env`, its credential provider, which caches and renews
   tokens): `GOOGLE_APPLICATION_CREDENTIALS` (a service account's key file, or a user's), gcloud's
   well-known `application_default_credentials.json`, else the metadata server (GCE, GKE workload
   identity). Not covered by `object_store`: `external_account` files (workload identity federation
-  from outside GCP) and impersonation. For development only, `FXDAX_KMS_GCP_TOKEN` holds an access
+  from outside GCP) and impersonation. For development only, `CLADEFS_KMS_GCP_TOKEN` holds an access
   token used as is (`gcloud auth print-access-token`, an hour's). `GOOGLE_CLOUD_QUOTA_PROJECT`, if
   set, is sent as `x-goog-user-project`. Tokens go to the KMS alone; neither they nor keys are
   logged or in any error.
 - **What a tenant does.** Makes a symmetric key (purpose `ENCRYPT_DECRYPT`,
-  `GOOGLE_SYMMETRIC_ENCRYPTION`, software or HSM) and grants fxdax's service account
+  `GOOGLE_SYMMETRIC_ENCRYPTION`, software or HSM) and grants cladefs's service account
   `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key alone; for a key in its own project,
   gives the operator the key's resource name for the overrides file. Revoking is taking the role
   away or disabling the key's versions; shredding is destroying them.
 - **A wrap** is `:encrypt` of the key's 32 bytes under the tenant's key (its primary version), with
-  `additionalAuthenticatedData` `fxdax-tenant:<tenant hex>`, so that what was wrapped for one
+  `additionalAuthenticatedData` `cladefs-tenant:<tenant hex>`, so that what was wrapped for one
   tenant is refused to another even under one key (overrides may share one); and
   `plaintextCrc32c` and `additionalAuthenticatedDataCrc32c`, the answer checked for
   `verifiedPlaintextCrc32c`, `verifiedAdditionalAuthenticatedDataCrc32c`, its `ciphertextCrc32c`,
@@ -896,7 +896,7 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
     'projects/X' not found.", a location Cloud KMS has not) → `Io`, so that a wrong project in an
     override fails closed. A misnamed key ring in the URL reads as every template tenant keyless,
     their new cells in the clear (TASK-411.22): check the URL.
-  - `PERMISSION_DENIED` (the role taken away, or a project fxdax may not see: Cloud KMS says "or it
+  - `PERMISSION_DENIED` (the role taken away, or a project cladefs may not see: Cloud KMS says "or it
     may not exist") → `Revoked`.
   - `FAILED_PRECONDITION` "NAME/cryptoKeyVersions/N is not enabled, current state is: S.", its
     `PreconditionFailure` violation `KEY_S` (seen: `KEY_DISABLED`, `KEY_DESTROY_SCHEDULED`; the
@@ -907,7 +907,7 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   - `INVALID_ARGUMENT` of a decrypt ("Decryption failed.", wrong associated data; "the ciphertext
     is invalid"; `INDECIPHERABLE_CIPHERTEXT_FOR_CRYPTOKEY`) → `Unauthentic`; but `INVALID_CHECKSUM`
     (a CRC32C failed in transit) → `Io`, retried.
-  - `UNAUTHENTICATED` (fxdax's own credentials), `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`,
+  - `UNAUTHENTICATED` (cladefs's own credentials), `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`,
     other 5xx and 429, network failures and timeouts (30 s a call, 10 s to connect) → `Io`, naming
     the call and the key; `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, untyped 5xx and 429,
     checksums and network failures retried twice (after 200 ms and 1 s), as Google's client
@@ -924,38 +924,38 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   and `google-cloud-auth` (Apache-2.0) would add their gax stack for two calls, and a second
   credential story beside the buckets'.
 - **Tests.** Against real Cloud KMS, project `echophase-connectome-test`, key ring
-  `projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test` (or
-  `FXDAX_KMS_GCP_TEST_RING`), keys `fxdax-test-1` to `-5` and `fxdax-probe`, made if missing, a
+  `projects/echophase-connectome-test/locations/us-central1/keyRings/cladefs-test` (or
+  `CLADEFS_KMS_GCP_TEST_RING`), keys `cladefs-test-1` to `-5` and `cladefs-probe`, made if missing, a
   day's scheduled destruction (`extent_keys::testing::gcp::Admin`); skipped, saying why, unless
-  `FXDAX_KMS_GCP_TOKEN` holds a token, so CI, which holds no GCP secret, skips them:
-  `FXDAX_KMS_GCP_TOKEN=$(gcloud auth print-access-token) cargo nextest run -p extent_keys -p fxdax -E 'test(/gcp::service|google_cloud_kms/)'`.
+  `CLADEFS_KMS_GCP_TOKEN` holds a token, so CI, which holds no GCP secret, skips them:
+  `CLADEFS_KMS_GCP_TOKEN=$(gcloud auth print-access-token) cargo nextest run -p extent_keys -p cladefs -E 'test(/gcp::service|google_cloud_kms/)'`.
   `extent_keys` `kms::gcp::service`: `keys_wrap_unwrap_and_bind_their_tenant` (header, other
   tenants, a tenant sharing the key refused by associated data, changed and truncated ciphertexts,
   `LocalKms`'s bytes, no key, a foreign project), `rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed`,
-  `disabled_versions_revoke_until_enabled`, `destroyed_primaries_destroy`; `fxdax`
-  `extents::tests::sealed_stores_open_through_google_cloud_kms` (`FXDAX_KMS=gcp-kms://...`: a
+  `disabled_versions_revoke_until_enabled`, `destroyed_primaries_destroy`; `cladefs`
+  `extents::tests::sealed_stores_open_through_google_cloud_kms` (`CLADEFS_KMS=gcp-kms://...`: a
   sealed store made, its cell KEK unwrapped by the KMS to the KEK its DEK is under, reopened,
-  forked). Billing: one enabled software version per key kept (`fxdax-test-1`, `-2`, `-3`, `-5`),
-  each run destroying the versions it rotates out; `fxdax-test-4` and `fxdax-probe` keep none.
+  forked). Billing: one enabled software version per key kept (`cladefs-test-1`, `-2`, `-3`, `-5`),
+  each run destroying the versions it rotates out; `cladefs-test-4` and `cladefs-probe` keep none.
 
 ## What TASK-411.15 made
 
 - **The guest tests run sealed, only** *(decided, 2026-11-14: no clear e2e runs; plaintext stays
   covered by the host's suites)*. `scripts/test-e2e.sh` makes a `LocalKms` beside the run's
-  sockets (`/tmp/fxdax-e2e-sockets.*/kms`, gone with them, never in the results, which runs keep
+  sockets (`/tmp/cladefs-e2e-sockets.*/kms`, gone with them, never in the results, which runs keep
   and fetch), holding a KEK for tenants 0-15 (`runner kms`, `test_cases::sealed::TENANTS`), and
-  exports `FXDAX_KMS` to every process of the run: its daemon, the cases' own daemons, the runner's
-  processes that make and open stores themselves (fxdax's `Storage`, `Image`, `import`), fxdaxctl,
-  fxdax-gc and FUSE mounts. A caller's own `FXDAX_KMS` is kept, its KEKs the caller's to make. A
-  daemon or harness built before encryption (an A/B's old pin, through `FXDAX_E2E_PREBUILT` or
-  `FXDAX_E2E_ROOT`) runs in the clear, unchecked, saying so; `encryption.txt` in the results says
+  exports `CLADEFS_KMS` to every process of the run: its daemon, the cases' own daemons, the runner's
+  processes that make and open stores themselves (cladefs's `Storage`, `Image`, `import`), cladefsctl,
+  cladefs-gc and FUSE mounts. A caller's own `CLADEFS_KMS` is kept, its KEKs the caller's to make. A
+  daemon or harness built before encryption (an A/B's old pin, through `CLADEFS_E2E_PREBUILT` or
+  `CLADEFS_E2E_ROOT`) runs in the clear, unchecked, saying so; `encryption.txt` in the results says
   which each run was. qualify.sh, sandboxes.sh, the bench and soak scripts and the nightly all
   run through test-e2e.sh, so sealed.
 - **Tenant 0 has a KEK**, not the cases moved to granted tenants: the default tenant's socket,
-  `fxdaxctl create`, and every store a case makes in its own process are of tenant 0
+  `cladefsctl create`, and every store a case makes in its own process are of tenant 0
   (`host_store::NO_TENANT`); moving them would change most cases and leave the common tenant's
   path, the daemon's own stores and public bases, untested sealed. doc-16 lets tenant 0 be sealed
-  like any other (a cell is sealed iff the host has a KMS and its tenant a KEK in it), and fxdax's
+  like any other (a cell is sealed iff the host has a KMS and its tenant a KEK in it), and cladefs's
   own tests seal it already (`kms.create(NO_TENANT)`). Granted IDs up to 15 cover
   fxfs-guest-migrate-tenant-dax's 1-4.
 - **The check, holding no key** (`test_cases::sealed`; `extent_store::on_disk` for a store's
@@ -966,7 +966,7 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   read holds a run of the guest tests' known plaintext (`test_cases::canary`, 1 MiB of
   xorshift64*, incompressible, so that a clear store keeps it as written in the bucket too),
   which fxfs-guest's file and fxfs-guest-checks' mapped file are made of: any run of 528 bytes or
-  more is found, at any offset. With `FXDAX_E2E_SEALED`, the runner checks each case's directory
+  more is found, at any offset. With `CLADEFS_E2E_SEALED`, the runner checks each case's directory
   once it passed, every file under it, its stores, the file buckets in it whole, and the cells its
   stores are of in other buckets (the run's own); a case not sealed fails, naming what. At the
   run's end, `runner sealed` checks the run's bucket whole and its part cache. A store's bucket in
@@ -991,15 +991,15 @@ and a sealed store frames in place exactly when a clear one does.
   (`Keyed::Sectors`), not a new FORMAT: FORMAT 2 is unreleased and no bucket needs keeping (the
   user's decision of 2026-11-14, as for TASK-411.3's extensions). An object of kind 3 is a sealed
   raw file framed in place: every part stored raw where the raw file holds it, its AES-256-XTS
-  sectors as they are, under the raw file's own key, `Xts::derive(dek, salt, "fxdax raw file")`,
+  sectors as they are, under the raw file's own key, `Xts::derive(dek, salt, "cladefs raw file")`,
   the sector's place in the object its tweak, which is its place in the raw file (parts begin at
   multiples of `PART`, a multiple of `SECTOR`). Its trailer names the DEK (branch, generation) and
   the raw file's salt, so a reader derives the same key; there is no other salt. Each part's tag,
   in its table entry's 16 bytes (the entry's layout unchanged), is HMAC-SHA256 truncated to 128 bits
-  (`Secret::tag`) under `dek.derive(salt, ["fxdax raw part tag"])`, of the part's associated data as
+  (`Secret::tag`) under `dek.derive(salt, ["cladefs raw part tag"])`, of the part's associated data as
   a GCM part's (index, encoding, stored and unpacked lengths) and then its stored bytes, the
   ciphertext. Its footer and table are MACed as any keyed object's, under
-  `dek.derive(salt, ["fxdax frame mac"])`; `restamp` works under its key as for a sealed object.
+  `dek.derive(salt, ["cladefs frame mac"])`; `restamp` works under its key as for a sealed object.
   The key is one object, `ObjectKey::sectors`, which the store's `raw::Sealer` holds for the raw
   file's encryption too: one derivation for both. A table naming a part of kind 3 that is not raw,
   or not whole sectors, is corrupt (`part N, not whole sectors of a raw file`), to readers holding
@@ -1025,8 +1025,8 @@ and a sealed store frames in place exactly when a clear one does.
   paid once a part by the look ahead. Truncated to 128 bits (RFC 2104, 5; NIST SP 800-107, 5.3.3):
   a forgery succeeds with probability 2^-128 a try.
 - **The composition.** Encrypt-then-MAC under independent subkeys of one DEK and salt (HKDF infos
-  `fxdax raw file` + `data`/`tweak`, `fxdax raw part tag`, `fxdax frame mac`,
-  `fxdax raw file log mac`), the tag checked before anything is decrypted. The tag binds a part's
+  `cladefs raw file` + `data`/`tweak`, `cladefs raw part tag`, `cladefs frame mac`,
+  `cladefs raw file log mac`), the tag checked before anything is decrypted. The tag binds a part's
   bytes, index, encoding and lengths; the salt binds it to its raw file (a part of another raw file
   of the same data and DEK fails, tested); the table's MAC binds each part's place, which is its
   sectors' tweaks, and its CRC: a part read at another place decrypts to other bytes, and a table

@@ -4,7 +4,7 @@ title: 'Bench: sync, syncfs and fsfreeze waiting for the bucket'
 status: To Do
 assignee: []
 created_date: '2026-11-11 10:56'
-updated_date: '2026-11-11 13:47'
+updated_date: '2026-11-15 14:27'
 labels: []
 dependencies:
   - TASK-350.1
@@ -21,7 +21,7 @@ sync, syncfs, unmount and freeze ask for COMMIT_DURABLE, which waits for the upl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A loop of small writes each followed by sync, syncfs, and an fsfreeze/thaw cycle, fxdax at bucket latencies of 0, 25 and 80 ms, against the loop-device baseline (TASK-350.1)
+- [ ] #1 A loop of small writes each followed by sync, syncfs, and an fsfreeze/thaw cycle, cladefs at bucket latencies of 0, 25 and 80 ms, against the loop-device baseline (TASK-350.1)
 - [ ] #2 A real workload that syncs (e.g. a docker build or a build script calling sync) timed end to end on both
 <!-- AC:END -->
 

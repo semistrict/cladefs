@@ -3,9 +3,9 @@ id: doc-1
 title: libkrun virtio-fs server interface
 type: specification
 created_date: '2026-09-28 02:44'
-updated_date: '2026-11-06 06:43'
+updated_date: '2026-11-15 14:25'
 ---
-**Status: historical.** fxdax's virtio-fs (FUSE) server over host Fxfs was removed in 610923b34 (2026-10-15), and libkrun, with `vendor/libkrun`, in 5ba394977 (TASK-40, 2026-10-17). Fxfs runs in the guest's kernel over the virtio extent-store device (doc-4) in Firecracker (`vendor/firecracker`), DAX copying on write (doc-13). The survey below is kept as written.
+**Status: historical.** cladefs's virtio-fs (FUSE) server over host Fxfs was removed in 610923b34 (2026-10-15), and libkrun, with `vendor/libkrun`, in 5ba394977 (TASK-40, 2026-10-17). Fxfs runs in the guest's kernel over the virtio extent-store device (doc-4) in Firecracker (`vendor/firecracker`), DAX copying on write (doc-13). The survey below is kept as written.
 
 Survey for TASK-1. Paths are in `vendor/libkrun` (semistrict/libkrun) unless noted.
 
@@ -38,7 +38,7 @@ A DAX backend that passes a guest e2e test (mount with `dax=always`, DAX checks,
 - **Directories:** opendir, readdir, readdirplus, fsyncdir, releasedir.
 - **DAX:** setupmapping, removemapping.
 
-Everything else takes the trait's default, ENOSYS: xattrs, access, lseek, fallocate, copy_file_range, ioctl, locks. The Linux client copes with that. fxdax should implement the same set, plus fallocate (Fxfs supports it and TASK-5 asks for it).
+Everything else takes the trait's default, ENOSYS: xattrs, access, lseek, fallocate, copy_file_range, ioctl, locks. The Linux client copes with that. cladefs should implement the same set, plus fallocate (Fxfs supports it and TASK-5 asks for it).
 
 ## Linux guest DAX behaviour (`~/src/linux/fs/fuse/dax.c`)
 
@@ -57,9 +57,9 @@ Everything else takes the trait's default, ENOSYS: xattrs, access, lseek, falloc
 - **HVF faults:** `EC_DATAABORT` handling (`src/hvf/src/lib.rs:927`) checks write faults against libkrun's snapshot dirty tracker (`dirty_tracking_handle_write_fault`, which uses `hv_vm_protect`). All other aborts become MMIO exits. There is no hook yet for "unmapped IPA in a DAX window → ask the pager". That's TASK-8.
 - **IPA granule:** libkrun does not call `hv_vm_config_set_ipa_granule`, so HVF maps in 16 KiB units.
 
-## How fxdax fits
+## How cladefs fits
 
-- **Backend:** add an `FsBackend::Fxdax(..)` variant and a `devices/src/virtio/fs/fxdax.rs` adapter behind an `fxdax` feature. The adapter stays thin; the filesystem semantics live in an fxdax crate with a synchronous, errno-returning API over FxVolume/FxDirectory/FxFile. TASK-5's tests can then drive that crate directly, without libkrun.
+- **Backend:** add an `FsBackend::Cladefs(..)` variant and a `devices/src/virtio/fs/cladefs.rs` adapter behind an `cladefs` feature. The adapter stays thin; the filesystem semantics live in an cladefs crate with a synchronous, errno-returning API over FxVolume/FxDirectory/FxFile. TASK-5's tests can then drive that crate directly, without libkrun.
 - **Inode numbers:** Fxfs object ids are not FUSE node ids. The root directory is not object 1, and encrypted volumes use 64-bit ids from `LastObjectId::Encrypted`, so the adapter needs a nodeid ↔ object id map with lookup counts. That also leaves room for `AugmentFs` virtual inodes.
 - **DAX mappings:** the kernel's `GuestPhysicalAspace` (`~/src/fxdax/crates/zircon/src/hypervisor/aspace.rs`) is a host-address window mapped lazily on `page_fault(gpaddr, write)`, with dirty-correct write faults. SETUPMAPPING maps a range of the file's pager-backed VMO into that aspace without populating it. Guest accesses then fault into the pager:
   - on HVF, via data-abort exits (TASK-8);
@@ -69,4 +69,4 @@ Everything else takes the trait's default, ENOSYS: xattrs, access, lseek, falloc
 
 ## Open questions
 
-- Whether fxdax's libkrun changes go on a branch of semistrict/libkrun, vendored as a submodule of fxdax.
+- Whether cladefs's libkrun changes go on a branch of semistrict/libkrun, vendored as a submodule of cladefs.

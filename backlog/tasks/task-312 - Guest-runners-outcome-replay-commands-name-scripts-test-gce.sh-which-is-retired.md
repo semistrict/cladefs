@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 00:23'
+updated_date: '2026-11-15 14:29'
 labels: []
 dependencies: []
 priority: low
@@ -16,7 +17,7 @@ ordinal: 720000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-guest/tests/runner/src/main.rs's replay() writes each round's replay command as 'FXDAX_WORKSPACE_TESTS=0 FXDAX_E2E_TEST=<case> ... scripts/test-gce.sh all' into round-K.json (outcome_json's "replay"), and the tests an_outcome_says_how_to_replay_it and an_outcome_of_no_run pin it. GCE test hosts are retired (Linux testing runs on ubu1 with scripts/test-e2e.sh), so the command replays nothing. Found while working TASK-311.
+guest/tests/runner/src/main.rs's replay() writes each round's replay command as 'CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=<case> ... scripts/test-gce.sh all' into round-K.json (outcome_json's "replay"), and the tests an_outcome_says_how_to_replay_it and an_outcome_of_no_run pin it. GCE test hosts are retired (Linux testing runs on ubu1 with scripts/test-e2e.sh), so the command replays nothing. Found while working TASK-311.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

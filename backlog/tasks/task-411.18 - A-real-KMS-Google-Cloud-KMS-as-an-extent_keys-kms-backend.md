@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 05:09'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies: []
 documentation:
@@ -21,12 +21,12 @@ ordinal: 816000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: tenants on GCP grant fxdax cloudkms.cryptoKeyEncrypterDecrypter on their key; the user allowed GCP for testing this backend (2026-11-14), project echophase-connectome-test. URL: gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
+doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS and Google Cloud KMS (2026-11-14). Why this one: tenants on GCP grant cladefs cloudkms.cryptoKeyEncrypterDecrypter on their key; the user allowed GCP for testing this backend (2026-11-14), project echophase-connectome-test. URL: gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials. Each tenant's KEK is named by kms::KeyNames (a template with {tenant}, the tenant in hexadecimal, plus a per-tenant overrides file for tenants who bring their own key).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
+- [ ] #1 CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
 - [x] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
 - [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [x] #4 Integration tests: tests against real Cloud KMS in echophase-connectome-test, one test key ring reused (keys cannot be deleted, only versions destroyed), skipped with a message unless credentials are present; CI stays without GCP secrets unless the user says otherwise; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
@@ -44,9 +44,9 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 <!-- SECTION:PLAN:BEGIN -->
 1. kms/real.rs (shared, small): the header of what a real KMS wraps: magic fxkr, format 1, the backend's scheme and the key's full name (each length-prefixed), then the KMS's ciphertext; open() refuses another backend's or another key's as Unauthentic before any call.
-2. kms/gcp.rs: from_url parses gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE] (KeyNames::of_query; a name not starting projects/ is a cryptoKey id in the URL's ring, else a full key resource name, each checked at from_url, overrides via a new KeyNames::overrides()); credentials: FXDAX_KMS_GCP_TOKEN (development: a static bearer token) or else object_store's GCP credential provider (ADC: GOOGLE_APPLICATION_CREDENTIALS, the gcloud well-known file, the metadata server), no new crate; a REST client over reqwest: :encrypt / :decrypt with additionalAuthenticatedData fxdax-tenant:<hex>, CRC32C (crc-fast Crc32Iscsi) of plaintext, AAD, ciphertext checked both ways; errors mapped from google.rpc status (NOT_FOUND NoSuchTenant; PERMISSION_DENIED and DISABLED Revoked; DESTROYED/DESTROY_SCHEDULED Destroyed; decrypt INVALID_ARGUMENT Unauthentic; else Io), verified against the service first with curl.
-3. GCP: enable cloudkms API on echophase-connectome-test; key ring fxdax-test in us-central1; fixed keys fxdax-test-<tenant hex> created if missing by the tests (destroyScheduledDuration 24h); rotations destroy the version they replace.
-4. Tests: unit tests (URL parsing, header, error mapping from recorded service bodies); integration tests in crates/extent_keys/tests/gcp_kms.rs against the real service, skipped with a message unless FXDAX_KMS_GCP_TEST_RING names a ring: wrap/unwrap, rotation, disabled version Revoked, destroyed version Destroyed, missing key NoSuchTenant, foreign project PERMISSION_DENIED Revoked, other tenant/backend/tampered Unauthentic; and an fxdax store opened sealed end to end with FXDAX_KMS=gcp-kms://...
+2. kms/gcp.rs: from_url parses gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE] (KeyNames::of_query; a name not starting projects/ is a cryptoKey id in the URL's ring, else a full key resource name, each checked at from_url, overrides via a new KeyNames::overrides()); credentials: CLADEFS_KMS_GCP_TOKEN (development: a static bearer token) or else object_store's GCP credential provider (ADC: GOOGLE_APPLICATION_CREDENTIALS, the gcloud well-known file, the metadata server), no new crate; a REST client over reqwest: :encrypt / :decrypt with additionalAuthenticatedData cladefs-tenant:<hex>, CRC32C (crc-fast Crc32Iscsi) of plaintext, AAD, ciphertext checked both ways; errors mapped from google.rpc status (NOT_FOUND NoSuchTenant; PERMISSION_DENIED and DISABLED Revoked; DESTROYED/DESTROY_SCHEDULED Destroyed; decrypt INVALID_ARGUMENT Unauthentic; else Io), verified against the service first with curl.
+3. GCP: enable cloudkms API on echophase-connectome-test; key ring cladefs-test in us-central1; fixed keys cladefs-test-<tenant hex> created if missing by the tests (destroyScheduledDuration 24h); rotations destroy the version they replace.
+4. Tests: unit tests (URL parsing, header, error mapping from recorded service bodies); integration tests in crates/extent_keys/tests/gcp_kms.rs against the real service, skipped with a message unless CLADEFS_KMS_GCP_TEST_RING names a ring: wrap/unwrap, rotation, disabled version Revoked, destroyed version Destroyed, missing key NoSuchTenant, foreign project PERMISSION_DENIED Revoked, other tenant/backend/tampered Unauthentic; and an cladefs store opened sealed end to end with CLADEFS_KMS=gcp-kms://...
 5. Docs: doc-16 section Real KMSes: Google Cloud KMS; README encryption paragraph. Locks: firecracker lock, guest/tests lock.
 <!-- SECTION:PLAN:END -->
 

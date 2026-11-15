@@ -1,11 +1,12 @@
 ---
 id: TASK-411.22
 title: >-
-  A misnamed key ring in FXDAX_KMS=gcp-kms:// reads as every template tenant
+  A misnamed key ring in CLADEFS_KMS=gcp-kms:// reads as every template tenant
   having no KEK: their new cells made in the clear
 status: To Do
 assignee: []
 created_date: '2026-11-15 04:04'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -24,7 +25,7 @@ Found building the Google Cloud KMS backend (TASK-411.18). Cloud KMS answers a m
 <!-- AC:BEGIN -->
 - [ ] #1 A host whose gcp-kms:// URL names a key ring that does not exist refuses to make cells (Io or a startup error naming the ring), rather than making them in the clear
 - [ ] #2 Tested against real Cloud KMS: a URL with a missing ring fails closed, the right ring still gives NoSuchTenant for a missing key
-- [ ] #3 Whatever IAM the check needs on fxdax's own key ring is documented in doc-16
+- [ ] #3 Whatever IAM the check needs on cladefs's own key ring is documented in doc-16
 <!-- AC:END -->
 
 ## Definition of Done

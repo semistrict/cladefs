@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-22 14:46'
-updated_date: '2026-11-06 06:51'
+updated_date: '2026-11-15 14:26'
 labels:
   - review-2026-10-21
 dependencies:
@@ -26,7 +26,7 @@ TASK-28.6 built checkpoint::Table so that a host resuming a large branch from ob
 <!-- AC:BEGIN -->
 - [ ] #1 A host's lookups of extents in a remote checkpoint go through Table, through the host's Fetcher, and the second part reader (object::range) goes
 - [ ] #2 A test counts the requests and bytes one lookup takes: the tail, the index and one block
-- [ ] #3 The extent_remote suites, its simulation included, and fxdax's pass
+- [ ] #3 The extent_remote suites, its simulation included, and cladefs's pass
 <!-- AC:END -->
 
 ## Definition of Done

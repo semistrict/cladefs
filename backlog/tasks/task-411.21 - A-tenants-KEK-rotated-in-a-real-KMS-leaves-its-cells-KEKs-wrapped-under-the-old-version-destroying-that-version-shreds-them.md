@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 04:04'
+updated_date: '2026-11-15 14:28'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -17,7 +18,7 @@ ordinal: 817000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found building the Google Cloud KMS backend (TASK-411.18). Real KMSes rotate a key by adding a primary version; the old versions still decrypt only while kept, and Cloud KMS, AWS KMS and OpenBao users routinely destroy old versions after rotating. fxdax wraps each cell KEK once, under the tenant KEK's primary version of the day, and never rewraps it: keys::rotate adds a cell KEK generation, but older generations stay in the cell object wrapped as they were (TASK-411.11). So a tenant that rotates and then destroys the old version shreds every cell made before, unknowingly. doc-16 'Real KMSes: Google Cloud KMS', Rotation, warns of it.
+Found building the Google Cloud KMS backend (TASK-411.18). Real KMSes rotate a key by adding a primary version; the old versions still decrypt only while kept, and Cloud KMS, AWS KMS and OpenBao users routinely destroy old versions after rotating. cladefs wraps each cell KEK once, under the tenant KEK's primary version of the day, and never rewraps it: keys::rotate adds a cell KEK generation, but older generations stay in the cell object wrapped as they were (TASK-411.11). So a tenant that rotates and then destroys the old version shreds every cell made before, unknowingly. doc-16 'Real KMSes: Google Cloud KMS', Rotation, warns of it.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

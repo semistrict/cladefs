@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09 08:26'
+updated_date: '2026-11-15 14:29'
 labels:
   - perf
   - bench
@@ -18,7 +19,7 @@ ordinal: 705000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-TASK-275, one c3-standard-8 (fxdax-keep-c3-standard-8-us-east4-a-1), 557b49a70 (MMIO) against main 0f011561a (PCI): stat-warm is bimodal on both, ~0.7-0.85M or ~1.1-1.4M stats/s a run, but main lands in the slow mode in 20 of 47 runs against 10 of 47 (all seven bench-fs cases, two rounds and a rerun), ext4-guest-kernel 6 of 11 against 0 of 11 (gce-fs-bench-pci-ab-*-2026-11-08, *-lookup-2026-11-09). stat-warm (test_fs_bench.rs) times one pass of fs::metadata over the metadata group's files right after stat-cold, ~1.7 ms in all, so one interrupt or preemption halves it: a late device completion or MSI-X interrupt landing in it over PCI may be what differs, or a real per-stat cost. Unknown which.
+TASK-275, one c3-standard-8 (cladefs-keep-c3-standard-8-us-east4-a-1), 557b49a70 (MMIO) against main 0f011561a (PCI): stat-warm is bimodal on both, ~0.7-0.85M or ~1.1-1.4M stats/s a run, but main lands in the slow mode in 20 of 47 runs against 10 of 47 (all seven bench-fs cases, two rounds and a rerun), ext4-guest-kernel 6 of 11 against 0 of 11 (gce-fs-bench-pci-ab-*-2026-11-08, *-lookup-2026-11-09). stat-warm (test_fs_bench.rs) times one pass of fs::metadata over the metadata group's files right after stat-cold, ~1.7 ms in all, so one interrupt or preemption halves it: a late device completion or MSI-X interrupt landing in it over PCI may be what differs, or a real per-stat cost. Unknown which.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

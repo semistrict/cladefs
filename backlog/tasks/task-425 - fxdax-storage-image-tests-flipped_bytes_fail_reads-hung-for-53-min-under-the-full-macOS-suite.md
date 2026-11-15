@@ -1,12 +1,12 @@
 ---
 id: TASK-425
 title: >-
-  fxdax storage::image::tests::flipped_bytes_fail_reads hung for 53 min under
+  cladefs storage::image::tests::flipped_bytes_fail_reads hung for 53 min under
   the full macOS suite
 status: To Do
 assignee: []
 created_date: '2026-11-15 05:08'
-updated_date: '2026-11-15 05:09'
+updated_date: '2026-11-15 14:30'
 labels: []
 dependencies: []
 priority: low
@@ -17,7 +17,7 @@ ordinal: 819000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Seen 2026-11-15 on branch t3/gcp-kms-backend (TASK-411.18, whose changes don't touch this path: the test uses no KMS, extent_frame::NoKeys): cargo nextest run -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))' on the Mac (Apple M5 Pro) ran 961 of 962 tests to pass; this one went SLOW past 3180 s and was killed with SIGTERM at 3202 s, its only output 'has been running for over 60 seconds'. Run alone it passes in 0.35 s, 30 of 30 times. A hang only under load: something in the device's read of a part with a flipped byte, or the flush before, waits for what never comes when the machine is busy.
+Seen 2026-11-15 on branch t3/gcp-kms-backend (TASK-411.18, whose changes don't touch this path: the test uses no KMS, extent_frame::NoKeys): cargo nextest run -p extent_keys -p extent_remote -p extent_store -p cladefs -E 'not (package(extent_store) & test(/^sim::/))' on the Mac (Apple M5 Pro) ran 961 of 962 tests to pass; this one went SLOW past 3180 s and was killed with SIGTERM at 3202 s, its only output 'has been running for over 60 seconds'. Run alone it passes in 0.35 s, 30 of 30 times. A hang only under load: something in the device's read of a part with a flipped byte, or the flush before, waits for what never comes when the machine is busy.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
