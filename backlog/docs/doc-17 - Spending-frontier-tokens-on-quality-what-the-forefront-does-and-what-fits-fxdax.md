@@ -157,7 +157,7 @@ item 10 is TASK-149.4, filed before.
     descriptions cheap; a KCSAN guest beside it, races labelled by agents but "benign" never
     accepted without an argument in the code.
 
-Not ranked, for later: Verus proofs of small pure cores (extent arithmetic, segment framing; MIT,
+Not ranked, for later (TASK-444.10, TASK-444.11): Verus proofs of small pure cores (extent arithmetic, segment framing; MIT,
 agents now prove >80% of real systems tasks, VeruSAGE), with `--no-cheating` and a check against
 `assume`/`external_body`; a whole-daemon deterministic simulation (turmoil/madsim) with
 linearizability checks of follower reads.
