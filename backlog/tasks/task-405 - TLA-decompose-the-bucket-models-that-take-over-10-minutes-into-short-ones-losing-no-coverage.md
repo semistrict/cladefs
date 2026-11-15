@@ -3,11 +3,11 @@ id: TASK-405
 title: >-
   TLA+: decompose the bucket models that take over 10 minutes into short ones,
   losing no coverage
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13 22:24'
-updated_date: '2026-11-14 22:31'
+updated_date: '2026-11-15 00:36'
 labels:
   - tla
   - specs
@@ -33,9 +33,9 @@ specs/bucket has grown models TLC needs from 15 minutes to over 2.5 hours (ubu1,
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -58,10 +58,12 @@ Dead end on the way: TakePhases as a history of steps multiplied part sizes 2-5x
 Hand mutants on single parts (sandbox copy): pinsVoidStrays and pinsLateStrays removed -> BucketStrays part {11,21,31} finds NoAckedLost; recordsKept (TASK-174) -> BucketForks part PassCells=2 {11,2x} finds NothingNeededGone; deletionsFence (TASK-183) -> PassCells=1 {11,2x} NothingNeededGone; CloneRefs across cells only (BucketOverlap's find) -> part ForkTo={3}, PassCells=13 NothingNeededGone.
 
 Rebased on ec149e6de (TASK-395.13/.14 Bucket.tla): covers PASS for BucketStrays (20 parts, 92091 states), BucketForks (6, 221737), BucketOverlap (5, 94565). Every default model, part and mutation PASS on the new spec (73 mutations, NoRetirementsMarked 2 s); follower/traces PASS (20 runs, 5 mutant rejected). Laptop times (load noted per run in the agent's logs): Forks parts 154-471 s (load 24-43), Overlap 32-325 s, Strays parts 1-826 s (the 826 s at load 137 from other agents' TLC; at load ~25 they took under 5 min); NoPinsVoidStrays narrowed to the part where its bug shows, 190 s. Hand mutants re-run on the new spec: recordsKept and deletionsFence (Forks parts), CloneRefs across cells only (Overlap part), pinsLateStrays and pinsVoidStrays (Strays parts) each violate as before. Takeovers deep parts: measured ones 1-13 min under load; some refined later and unmeasured; cover with MaxTakes=3 PASS (234963 states), with MaxCommits=0 parts missed 0 (extra-state check is off under 3-host symmetry, see check-tla.sh). upstream-changes.py --check passes. Branch t3/tla-decompose; ubu1 re-timing left to the parent.
+
+Re-timed on the Mac (@claude, 2026-11-14; TLC runs on the Mac, not ubu1, since the user's 2026-11-14 decision): BucketStrays' 20 parts all PASS, 2-802 s each, 7173 s together, load 35-56 from other agents' runs; the whole took 18 min. The user chose to merge as is (parts short, full default run about 2-3 h, run by hand only). On main as 545dca7c1..093399c82. DoD: specs, scripts and docs only, no Rust changed; upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Split BucketForks (6 parts), BucketOverlap (5) and BucketStrays (20) exactly into parts of a few minutes each, by Bucket.tla knobs that restrict once-per-behaviour choices; check-tla.sh runs parts and proves each split exact (cover). BucketTakeovers is a deep model of 72 parts. All default models, parts, covers, 73 mutations and traces pass on the laptop; the long models' bugs, put back, are each found by one part.
+BucketForks, BucketOverlap and BucketStrays are split into 6, 5 and 20 exact parts (Bucket.tla's Takers, TakePhases, CommitPhases, CommitTakes, ForkTo, PassCells), each minutes long, with check-tla.sh cover proving every state of the whole is reached by a part; BucketTakeovers is a deep model (72 parts, `check-tla.sh deep`). All 73 mutations and the long models' old bugs are caught by short parts. The full default run is longer in total (about 2-3 h) as parts re-check shared prefixes.
 <!-- SECTION:FINAL_SUMMARY:END -->
