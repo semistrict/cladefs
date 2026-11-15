@@ -58,4 +58,6 @@ Tests (macOS, cargo nextest run -p extent_store -p cladefs: 655 passed, 11 skipp
 Linux only, NOT run (no ubu1 in this task; cross-compiling fails on aws-lc-sys/zstd-sys build scripts): cladefs::control extents_are_counted_through_the_control_api (new; StatStore open and closed, ListStores, a fork), stores_through_the_control_api and open_stores_are_listed_with_their_leases_and_uploads (extended with exact counts), cladefs::cladefsctl stat_counts_extents_through_the_daemon. They compiled on no machine yet.
 
 AC #1 checked on the local path's evidence (stat_counts_extents_locally); its daemon path's test is Linux-only and unrun. AC #2 (a real base's count on ubu1, into TASK-443.2) and DoD #1 (workspace on macOS and Linux) left open: only extent_store and cladefs ran, on macOS.
+
+Correction: the code's commit is 48a40af6b (9b4dfaad7 above was its first form, amended to drop a proptest-regressions file the hand mutants left; never pushed).
 <!-- SECTION:NOTES:END -->
