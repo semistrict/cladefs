@@ -2318,7 +2318,7 @@ mod tests {
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
         let volume =
             extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs };
-        extent_store::create_host(path, description, &url_of(bucket), volume, true).unwrap();
+        extent_store::create_host(path, description, &url_of(bucket), volume).unwrap();
         extent_store::made_host(path).unwrap();
     }
 

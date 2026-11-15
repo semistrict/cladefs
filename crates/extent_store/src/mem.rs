@@ -15,7 +15,9 @@
 //! [`MemDir::serial`], or if a seeded schedule orders that I/O, as Shuttle's do; it says whether
 //! the first that failed was a thread's of the store's ([`MemDir::failed_elsewhere`], TASK-79.79).
 
+use crate::cached::{CachedDir, CachedFile};
 use crate::dir::{Dir, File};
+use crate::pages::{Options, PageCache};
 use crate::sync::{Mutex, thread};
 use rand::rngs::StdRng;
 use rand::{RngExt as _, SeedableRng as _};
@@ -27,9 +29,9 @@ use std::sync::Arc;
 /// all.
 const BLOCK: usize = 512;
 
-/// A store's directory in memory. See the module docs.
+/// A store's directory in memory, under its page cache ([`MemDir`]). See the module docs.
 #[derive(Clone, Default)]
-pub struct MemDir {
+pub struct MemDisk {
     fs: Arc<Mutex<Fs>>,
     /// cladefs: whether the store does all of its I/O in it on its callers' threads
     /// ([`MemDir::serial`]): as it never changes, asking takes no lock ([`Dir::concurrent`]), which
@@ -37,8 +39,8 @@ pub struct MemDir {
     serial: bool,
 }
 
-/// A file of a [`MemDir`].
-pub struct MemFile {
+/// A file of a [`MemDisk`].
+pub struct MemDiskFile {
     fs: Arc<Mutex<Fs>>,
     inode: u64,
 }
@@ -162,7 +164,7 @@ impl Fs {
     }
 }
 
-impl MemDir {
+impl MemDisk {
     /// An empty directory.
     pub fn new() -> Self {
         let dir = Self::default();
@@ -226,7 +228,7 @@ impl MemDir {
 
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
     /// chosen at random by an RNG seeded with `seed`. See the module docs.
-    pub fn crash(&self, seed: u64) -> MemDir {
+    pub fn crash(&self, seed: u64) -> MemDisk {
         let mut rng = StdRng::seed_from_u64(seed);
         let fs = self.fs.lock().unwrap();
         let mut dirs = BTreeMap::new();
@@ -285,14 +287,89 @@ impl MemDir {
             failed_on: None,
             io: Io::default(),
         };
-        MemDir { fs: Arc::new(Mutex::new(crashed)), serial: self.serial }
+        MemDisk { fs: Arc::new(Mutex::new(crashed)), serial: self.serial }
     }
 }
 
-impl Dir for MemDir {
-    type File = MemFile;
+/// A store's directory in memory, which simulates crashes ([`MemDisk`]), its extents' files through
+/// a page cache of its own, as a host's are through the process's ([`crate::HostDir`], TASK-433):
+/// small, so that the store's tests write back often, and with no flusher, so that what is written
+/// when is a function of the store's calls alone ([`PageCache::without_flusher`]). What its pages
+/// hold dirty a crash loses, as a host's crash loses a process's memory.
+pub type MemDir = CachedDir<MemDisk>;
 
-    fn create(&self, path: &str, _data: bool) -> io::Result<MemFile> {
+/// A file of a [`MemDir`].
+pub type MemFile = CachedFile<MemDiskFile>;
+
+/// The page cache of a [`MemDir`].
+fn page_cache() -> std::sync::Arc<PageCache> {
+    PageCache::without_flusher(Options {
+        background: 256 << 10,
+        hard: 1 << 20,
+        most: 4 << 20,
+        ..Options::default()
+    })
+}
+
+impl MemDir {
+    /// An empty directory ([`MemDisk::new`]).
+    pub fn new() -> Self {
+        Self::over(MemDisk::new(), page_cache())
+    }
+
+    /// An empty directory whose page cache goes by `options`, with no flusher: what a test of how
+    /// the store paces its own write-back holds dirty under a cache as large as a host's.
+    pub fn with_cache(options: Options) -> Self {
+        Self::over(MemDisk::new(), PageCache::without_flusher(options))
+    }
+
+    /// cladefs: an empty directory in which the store does all of its I/O on its callers' threads
+    /// ([`MemDisk::serial`]).
+    pub fn serial() -> Self {
+        Self::over(MemDisk::serial(), page_cache())
+    }
+
+    /// As [`MemDisk::fail_after`].
+    pub fn fail_after(&self, operations: Option<u64>) {
+        self.under().fail_after(operations)
+    }
+
+    /// As [`MemDisk::io`]: what reached the directory under the page cache.
+    pub fn io(&self) -> Io {
+        self.under().io()
+    }
+
+    /// As [`MemDisk::has_failed`].
+    pub fn has_failed(&self) -> bool {
+        self.under().has_failed()
+    }
+
+    /// As [`MemDisk::failed_elsewhere`].
+    pub fn failed_elsewhere(&self) -> bool {
+        self.under().failed_elsewhere()
+    }
+
+    /// cladefs: every file in it, by its path, with what it holds now ([`MemDisk::files`]), what
+    /// its page cache holds dirty written back first, as it would be: what tests search for bytes
+    /// that must be in no file of a host's (TASK-411.9).
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        if let Err(err) = self.cache().write_back_all() {
+            log::warn!("extent store: writing back a directory in memory: {err}");
+        }
+        self.under().files()
+    }
+
+    /// The directory as a crash would leave it ([`MemDisk::crash`]): what its page cache held
+    /// dirty lost, as a process's memory is.
+    pub fn crash(&self, seed: u64) -> MemDir {
+        Self::over(self.under().crash(seed), page_cache())
+    }
+}
+
+impl Dir for MemDisk {
+    type File = MemDiskFile;
+
+    fn create(&self, path: &str, _data: bool) -> io::Result<MemDiskFile> {
         let mut fs = self.fs.lock().unwrap();
         fs.spend()?;
         let inode = fs.next_inode;
@@ -300,14 +377,14 @@ impl Dir for MemDir {
         fs.change_dir(path, DirChange::Add(name.to_owned(), inode))?;
         fs.next_inode += 1;
         fs.inodes.insert(inode, Inode::default());
-        Ok(MemFile { fs: self.fs.clone(), inode })
+        Ok(MemDiskFile { fs: self.fs.clone(), inode })
     }
 
-    fn open(&self, path: &str, _data: bool) -> io::Result<MemFile> {
+    fn open(&self, path: &str, _data: bool) -> io::Result<MemDiskFile> {
         let mut fs = self.fs.lock().unwrap();
         let inode = fs.lookup(path)?;
         fs.io.opened += 1;
-        Ok(MemFile { fs: self.fs.clone(), inode })
+        Ok(MemDiskFile { fs: self.fs.clone(), inode })
     }
 
     fn remove(&self, path: &str) -> io::Result<()> {
@@ -390,13 +467,13 @@ impl Dir for MemDir {
     }
 }
 
-impl File for MemFile {
+impl File for MemDiskFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
         let mut fs = self.fs.lock().unwrap();
         fs.io.read += buf.len() as u64;
         let data = &fs.inodes[&self.inode].data;
-        let offset = offset as usize;
-        let held = data.len().saturating_sub(offset).min(buf.len());
+        let offset = (offset as usize).min(data.len());
+        let held = (data.len() - offset).min(buf.len());
         buf[..held].copy_from_slice(&data[offset..offset + held]);
         buf[held..].fill(0);
         Ok(())
@@ -441,7 +518,7 @@ impl File for MemFile {
         Ok(())
     }
 
-    /// As [`MemFile::sync`]: it caches nothing of its own.
+    /// As [`MemDiskFile::sync`]: it caches nothing of its own.
     fn sync_cached(&self) -> io::Result<()> {
         self.sync()
     }
@@ -451,7 +528,7 @@ impl File for MemFile {
 mod tests {
     use super::*;
 
-    fn read(file: &MemFile) -> Vec<u8> {
+    fn read(file: &MemDiskFile) -> Vec<u8> {
         let mut data = vec![0; file.size().unwrap() as usize];
         file.read_at(&mut data, 0).unwrap();
         data
@@ -459,7 +536,7 @@ mod tests {
 
     #[test]
     fn crashes_keep_what_was_synced() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         dir.create_dir("d").unwrap();
         let synced = dir.create("d/synced", true).unwrap();
         synced.write_at(&[1; BLOCK], 0).unwrap();
@@ -493,7 +570,7 @@ mod tests {
     /// it was, and those made after it their own.
     #[test]
     fn creating_where_a_file_is_leaves_it() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         dir.create("f", false).unwrap().write_at(b"a", 0).unwrap();
         let error = dir.create("f", false).err().expect("created over a file");
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
@@ -504,7 +581,7 @@ mod tests {
 
     #[test]
     fn fails_after_its_budget() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let file = dir.create("f", false).unwrap();
         dir.fail_after(Some(2));
         file.write_at(b"a", 0).unwrap();
@@ -520,7 +597,7 @@ mod tests {
     /// thread's than the one that set it (TASK-79.79).
     #[test]
     fn says_whose_operation_failed_first() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         // Files there, so that removing one fails only as the file system crashed.
         for name in ["f", "g"] {
             dir.create(name, false).unwrap();

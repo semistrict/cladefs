@@ -153,9 +153,7 @@ fn reads_what_was_written_in_memory() {
 fn reads_what_was_written_on_the_host() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().to_owned();
-    reads_what_was_written(HostDir::new(&path, true).unwrap(), |dir| {
-        HostDir::new(dir.path(), true).unwrap()
-    });
+    reads_what_was_written(HostDir::new(&path).unwrap(), |dir| HostDir::new(dir.path()).unwrap());
 }
 
 /// Extents are written once: commits seal them. A store writes only its branch's extents.
@@ -658,7 +656,7 @@ fn closed_segments_hold_the_branchs_history() {
 #[test]
 fn closed_segments_reopen_on_the_host() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let open = || HostDir::new(temp.path(), true).unwrap();
+    let open = || HostDir::new(temp.path()).unwrap();
     let store = create(open(), 64 << 20);
     store.write(extent(1), 0, &pattern(1, 0, 3 * BLOCK)).unwrap();
     let state = closed_state(&store);
@@ -1198,10 +1196,18 @@ fn framings_write_back_as_they_go() {
 /// 300 MB a second under pgbench, waited in the host's page cache for the flush of extentd's next
 /// turn, which synced 100 MB at once in 250-420 ms (GCE r954); its writing back begun but not
 /// waited for filled the disk's queue as well, syncs waiting behind it up to 0.6 s (r956,
-/// TASK-221). Red with nothing written back until the flush.
+/// TASK-221). Red with nothing written back until the flush. cladefs: what the sync has left is
+/// what the store's page cache holds dirty (TASK-433), here one that would hold all 32 MiB.
 #[test]
 fn writes_are_written_back_as_they_go() {
-    let dir = MemDir::new();
+    let big = 64 << 20;
+    let pages = extent_store::pages::Options {
+        background: big,
+        hard: big,
+        most: big,
+        ..Default::default()
+    };
+    let dir = MemDir::with_cache(pages);
     let options = Options { segment_size: 64 << 20, ..OPTIONS };
     let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
     let store = Store::create(dir.clone(), description, options).unwrap();
@@ -1209,7 +1215,7 @@ fn writes_are_written_back_as_they_go() {
     for sequence in 1..=2048 {
         store.write(extent(sequence), 0, &noise(sequence, len)).unwrap();
     }
-    assert_eq!(dir.io().most_unwritten, 9 << 20);
+    assert_eq!(dir.cache().usage().peak_dirty, 9 << 20);
     store.commit(None).unwrap();
     for sequence in 1..=2048 {
         assert_eq!(read(&store, extent(sequence), 0, len), noise(sequence, len));
@@ -2070,7 +2076,7 @@ fn open_fds() -> usize {
 #[test]
 fn closed_segments_keep_no_more_files_open_than_allowed() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let store = create(HostDir::new(temp.path(), true).unwrap(), 64 << 20);
+    let store = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
     let mut open = Vec::new();
     for sequence in 1..=40 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
@@ -2382,7 +2388,7 @@ fn cached_pages(path: &std::path::Path) -> usize {
 #[test]
 fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let store = create(HostDir::new(temp.path(), true).unwrap(), 64 << 20);
+    let store = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
     assert!(store.dir().is_direct(), "the host's file system bypasses no page cache");
     for sequence in 1..=8 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
@@ -3589,10 +3595,11 @@ fn reads_past_an_extents_end_are_zeros() {
 
 /// A commit that fails part way, which leaves the store's state ahead of its files, fails the store:
 /// it does nothing more, though its file system works again. Here the file system fails the
-/// commit's first change to it: a seal's copy of an extent written in two writes, its second
-/// block first, which are not one run, or the creation of the next open segment's file as the
-/// commit closes the last. cladefs: not that of the index file a checkpoint begins, which the
-/// commit's flush makes (`checkpoints_failing_in_their_flushes_fail_the_store`, TASK-92.56).
+/// commit's first change to it: the creation of the next open segment's file as the commit closes
+/// the last. cladefs: not that of the index file a checkpoint begins, which the commit's flush
+/// makes (`checkpoints_failing_in_their_flushes_fail_the_store`, TASK-92.56). Nor a seal's copy of
+/// an extent written in two writes, its second block first, which are not one run: the copy lands
+/// in the store's page cache, the file system untouched, and the flush after fails (TASK-433).
 #[test]
 fn commits_failing_part_way_fail_the_store() {
     let created = || {
@@ -3613,13 +3620,24 @@ fn commits_failing_part_way_fail_the_store() {
         store.close_segment().unwrap();
         (dir, store)
     };
-    for (dir, store) in [sealing(), closing()] {
+    let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
+    let (dir, store) = sealing();
+    dir.fail_after(Some(0));
+    store.commit_ordered(None).unwrap();
+    assert_eq!(failure(store.flush()), "committing the extent store");
+    for budget in [Some(0), None] {
+        dir.fail_after(budget);
+        let failed = "the extent store failed: committing the extent store: appending commits' \
+                      records: the file system crashed";
+        assert_eq!(failure(store.commit(None)), failed);
+        assert_eq!(failure(store.read(extent(1), 0, &mut [0; BLOCK])), failed);
+    }
+    for (dir, store) in [closing()] {
         dir.fail_after(Some(0));
         let failed = store.commit_ordered(None).unwrap_err();
         assert_eq!(failed.to_string(), "committing the extent store");
         for budget in [Some(0), None] {
             dir.fail_after(budget);
-            let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
             // cladefs: saying why (TASK-165.9).
             let failed = "the extent store failed: the file system crashed";
             assert_eq!(failure(store.commit(None)), failed);
@@ -3749,7 +3767,7 @@ fn stores_elsewhere_than_the_hosts_cache_are_refused() {
     assert_ne!(device(cached.path()), device(temp.path()), "two filesystems");
     let cache = Arc::new(extent_remote::cache::Cache::open(cached.path(), 1 << 20, 0).unwrap());
     let cache_dir = cache.dir().to_owned();
-    let dir = HostDir::new(temp.path(), true).unwrap();
+    let dir = HostDir::new(temp.path()).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
     Store::make(&dir, description, None, None).unwrap();
     let opening = Opening { cache: Some(cache), ..Opening::new(BRANCH) };

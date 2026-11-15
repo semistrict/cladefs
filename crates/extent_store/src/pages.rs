@@ -14,11 +14,16 @@
 //!   what the cache holds not goes to the file, and leaves nothing cached: what is read again, the
 //!   readers' own caches hold (the extent cache), so that nothing is held twice here either.
 //! - **Write-back** goes in the file's order, contiguous dirty pages one write of up to
-//!   [`CHUNK`], from memory aligned to blocks, as iomap's ioends coalesce. A page written while
-//!   its write-back is in flight is dirty again, and written again after: writers never wait on
-//!   write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back what has been
+//!   [`CHUNK`], from memory aligned to blocks, as iomap's ioends coalesce. One write-back of a
+//!   file at a time (`I_SYNC`): a sync, the flusher and a writer writing back take turns, each
+//!   waiting for the last to end, which carries what it covers ([`Shared::writeback`]). A page
+//!   written while its write-back is in flight is dirty again, and written again after: writers
+//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back what has been
 //!   dirty longer than [`Options::expire`], and the oldest first while more than
-//!   [`Options::background`] is dirty.
+//!   [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
+//!   as a directory whose I/O is all its callers' has ([`crate::Dir::concurrent`]), has the writer
+//!   that takes it past [`Options::background`] write back itself, as Linux's writers did before
+//!   per-device flushers: what it writes, and when, is then a function of the writes alone.
 //! - **Writers are throttled**, not refused, past [`Options::hard`] dirty: they wait for
 //!   write-back, as `balance_dirty_pages` has them.
 //! - **A sync** ([`Cached::sync`]) writes back what was dirty as it began, waits for every write of
@@ -27,15 +32,23 @@
 //!   failed fails the sync after it, once ([`Pages::failed`], errseq's semantics for one opener).
 //! - **Eviction** takes clean pages alone, of the files used least recently first
 //!   ([`PageCache::evict_to`]), never writing any: what is dirty is the flusher's to write.
-//! - **A file removed** drops its pages, the dirty ones unwritten (`folio_cancel_dirty`): a
-//!   segment's raw file, framed and gone, never reaches the disk but what its syncs needed.
+//! - **A file removed** keeps its pages while it is open, as an unlinked inode does, and drops
+//!   them with its last opening, the dirty ones unwritten (`truncate_inode_pages` at the last
+//!   `iput`): a segment's raw file, framed and gone, never reaches the disk but what its syncs
+//!   and the flusher took.
+//!
+//! Every directory a store opens holds its data files in one ([`crate::CachedDir`]): the host's
+//! ([`crate::HostDir`]) in the process's ([`shared`]), and one in memory ([`crate::MemDir`]) in a
+//! small one of its own with no flusher, so that the store's tests, its crash rounds and its
+//! Shuttle schedules among them, run through it as the store does on a host.
 
 use crate::dir::File;
+use crate::sync::{Condvar, Mutex, MutexGuard};
 use std::collections::BTreeMap;
 use std::io;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 /// The cache's page: what it holds, writes back and evicts. A store's data files are written in
@@ -83,15 +96,21 @@ pub struct Usage {
     pub writing: u64,
     /// The most bytes held at once so far.
     pub peak: u64,
+    /// The most bytes dirty at once so far.
+    pub peak_dirty: u64,
 }
 
 /// A process's page cache: its files' pages, accounted together, written back by one flusher
-/// thread, evicted together. One for the process ([`shared`]), which the extent daemon governs.
+/// thread, or by its writers if it has none, evicted together. One for the process ([`shared`]),
+/// which the extent daemon governs.
 pub struct PageCache {
     options: Options,
+    /// Whether a flusher thread writes back for it; if not, its writers do.
+    flusher: bool,
     held: AtomicU64,
     peak: AtomicU64,
     dirty: AtomicU64,
+    peak_dirty: AtomicU64,
     writing: AtomicU64,
     /// Each write's number, in order: what a sync covers, the writes before it.
     writes: AtomicU64,
@@ -114,13 +133,33 @@ pub fn shared() -> &'static Arc<PageCache> {
 }
 
 impl PageCache {
-    /// A cache going by `options`, its flusher started.
+    /// A cache going by `options`, its flusher started. Not under Shuttle, whose schedules start
+    /// no thread of their own: [`PageCache::without_flusher`].
     pub fn new(options: Options) -> Arc<Self> {
-        let cache = Arc::new(Self {
+        let cache = Self::made(options, true);
+        let flusher = Arc::downgrade(&cache);
+        std::thread::Builder::new()
+            .name("store flusher".into())
+            .spawn(move || flush_while(flusher))
+            .expect("starting the page cache's flusher");
+        cache
+    }
+
+    /// A cache going by `options` with no flusher: the writer that takes it past
+    /// [`Options::background`] dirty writes back, on its own thread, until it is under, and
+    /// nothing expires.
+    pub fn without_flusher(options: Options) -> Arc<Self> {
+        Self::made(options, false)
+    }
+
+    fn made(options: Options, flusher: bool) -> Arc<Self> {
+        Arc::new(Self {
             options,
+            flusher,
             held: AtomicU64::new(0),
             peak: AtomicU64::new(0),
             dirty: AtomicU64::new(0),
+            peak_dirty: AtomicU64::new(0),
             writing: AtomicU64::new(0),
             writes: AtomicU64::new(0),
             uses: AtomicU64::new(0),
@@ -129,13 +168,7 @@ impl PageCache {
             flushing: Mutex::new(false),
             drained: Condvar::new(),
             holding: Mutex::new(()),
-        });
-        let flusher = Arc::downgrade(&cache);
-        std::thread::Builder::new()
-            .name("store flusher".into())
-            .spawn(move || flush_while(flusher))
-            .expect("starting the page cache's flusher");
-        cache
+        })
     }
 
     /// What it holds.
@@ -145,6 +178,7 @@ impl PageCache {
             dirty: self.dirty.load(Ordering::Relaxed),
             writing: self.writing.load(Ordering::Relaxed),
             peak: self.peak.load(Ordering::Relaxed),
+            peak_dirty: self.peak_dirty.load(Ordering::Relaxed),
         }
     }
 
@@ -205,16 +239,40 @@ impl PageCache {
         self.uses.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Wakes the flusher.
+    /// Wakes the flusher, if it has one.
     fn wake(&self) {
+        if !self.flusher {
+            return;
+        }
         *self.flushing.lock().unwrap() = true;
         self.flush.notify_one();
     }
 
+    /// Writes back, on the caller's thread, the files dirty the longest, a few chunks of each in
+    /// turn, until no more than `dirty` bytes are dirty, or a write-back fails, which the file's
+    /// next sync reports.
+    fn write_back_to(&self, dirty: u64) {
+        let mut files = self.files();
+        files.sort_by_key(|file| file.dirtied());
+        for file in files {
+            if self.dirty.load(Ordering::Relaxed) <= dirty {
+                return;
+            }
+            if file.dirtied().is_none() {
+                continue;
+            }
+            if let Err(err) = file.write_back(16 * CHUNK) {
+                return log::warn!("extent store: writing back a file's pages: {err}");
+            }
+        }
+    }
+
     /// Holds a writer about to dirty pages back while more than [`Options::hard`] is dirty, until
-    /// write-back brings it under, the flusher woken.
+    /// write-back brings it under, the flusher woken. With no flusher, its writers keep it under
+    /// [`Options::background`] as they go ([`PageCache::dirtied`]); what failed to be written
+    /// stays dirty, which none waits for.
     fn throttle(&self) {
-        if self.dirty.load(Ordering::Relaxed) <= self.options.hard {
+        if !self.flusher || self.dirty.load(Ordering::Relaxed) <= self.options.hard {
             return;
         }
         self.wake();
@@ -232,10 +290,15 @@ impl PageCache {
     }
 
     /// Pages were dirtied: the flusher writes back once more than [`Options::background`] is
-    /// dirty; and clean ones are evicted once more than [`Options::most`] is held.
+    /// dirty, or the writer, with none; and clean ones are evicted once more than
+    /// [`Options::most`] is held.
     fn dirtied(&self) {
         if self.dirty.load(Ordering::Relaxed) > self.options.background {
-            self.wake();
+            if self.flusher {
+                self.wake();
+            } else {
+                self.write_back_to(self.options.background);
+            }
         }
         if self.bytes() > self.options.most {
             self.evict_to(self.options.most);
@@ -306,8 +369,6 @@ struct Pages {
     size: u64,
     /// When the oldest of its dirty pages was dirtied.
     dirtied: Option<Instant>,
-    /// Write-backs in flight.
-    in_flight: usize,
     /// A write-back that failed, which the next sync reports, once.
     failed: Option<io::Error>,
 }
@@ -323,9 +384,15 @@ pub(crate) struct Shared<F: File> {
     file: F,
     cache: Arc<PageCache>,
     pages: Mutex<Pages>,
-    /// Signalled as its write-backs end.
-    written: Condvar,
+    /// Held by its write-back, one at a time (`I_SYNC`): what a sync, or a dropping of pages,
+    /// waits on for the write-back in flight to end. A lock, not a condition variable, so that
+    /// whatever wakes a thread waiting on it, it waits on (Shuttle's scoped threads wake the scope's
+    /// thread as the last ends, whatever it waits on). Taken before its pages' lock.
+    writeback: Mutex<()>,
     used: AtomicU64,
+    /// Whether the file is at no name any more ([`Cached::unlink`]): its last opening drops its
+    /// pages unwritten.
+    unlinked: AtomicBool,
 }
 
 /// A file through the page cache that keeps it open no more ([`Cached::downgrade`]): what a
@@ -360,15 +427,10 @@ impl<F: File> Cached<F> {
         let shared = Arc::new(Shared {
             file,
             cache: cache.clone(),
-            pages: Mutex::new(Pages {
-                pages: BTreeMap::new(),
-                size,
-                dirtied: None,
-                in_flight: 0,
-                failed: None,
-            }),
-            written: Condvar::new(),
+            pages: Mutex::new(Pages { pages: BTreeMap::new(), size, dirtied: None, failed: None }),
+            writeback: Mutex::new(()),
             used: AtomicU64::new(cache.used()),
+            unlinked: AtomicBool::new(false),
         });
         let paged: Arc<dyn Paged> = shared.clone();
         cache.files.lock().unwrap().push(Arc::downgrade(&paged));
@@ -398,10 +460,16 @@ impl<F: File> Cached<F> {
         Ok(())
     }
 
-    /// Drops every page, the dirty ones unwritten: the file is gone ([`crate::HostDir`]'s
-    /// `remove`).
+    /// Drops every page, the dirty ones unwritten: the file is the host's now
+    /// ([`crate::CachedDir`]'s `host_path`), or a test's to damage.
     pub(crate) fn cancel(&self) {
         self.shared.drop_pages(0..u64::MAX);
+    }
+
+    /// The file is at no name any more: its openings read and write it on, and the last of them
+    /// drops its pages, the dirty ones unwritten ([`crate::CachedDir`]'s `remove`).
+    pub(crate) fn unlink(&self) {
+        self.shared.unlinked.store(true, Ordering::Relaxed);
     }
 
     /// This, held no more: what a directory names it by.
@@ -413,31 +481,26 @@ impl<F: File> Cached<F> {
     pub(crate) fn same(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
     }
-
-    /// Whether this is the file's only opening.
-    pub(crate) fn alone(&self) -> bool {
-        Arc::strong_count(&self.shared) == 1
-    }
 }
 
 impl<F: File> Shared<F> {
-    fn lock(&self) -> MutexGuard<'_, Pages> {
-        self.used.store(self.cache.used(), Ordering::Relaxed);
-        self.pages.lock().unwrap()
+    /// Its write-back, taken: none other of it in flight.
+    fn writeback(&self) -> MutexGuard<'_, ()> {
+        self.writeback.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Drops the pages in `range`, dirty or not, waiting for write-backs in flight there.
+    /// Its pages, locked; as a panic left them, if one did ([`InFlight`]).
+    fn lock(&self) -> MutexGuard<'_, Pages> {
+        self.used.store(self.cache.used(), Ordering::Relaxed);
+        self.pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Drops the pages in `range`, dirty or not, waiting for a write-back in flight to end.
     fn drop_pages(&self, range: Range<u64>) {
+        let _writeback = self.writeback();
         let mut pages = self.lock();
         let first = range.start / PAGE;
         let last = range.end.div_ceil(PAGE);
-        loop {
-            let writing = pages.pages.range(first..last).any(|(_, page)| page.writing);
-            if !writing {
-                break;
-            }
-            pages = self.written.wait(pages).unwrap();
-        }
         let doomed: Vec<u64> = pages.pages.range(first..last).map(|(&index, _)| index).collect();
         for index in doomed {
             let page = pages.pages.remove(&index).unwrap();
@@ -454,9 +517,9 @@ impl<F: File> Shared<F> {
     }
 
     /// Writes back the dirty pages in `range`, those dirtied by writes numbered `through` or
-    /// before if given, and waits for every write-back of them in flight; or, if `most` is given,
-    /// writes back up to `most` bytes and waits for none but its own. Pages are written in the
-    /// file's order, contiguous dirty ones at once, up to [`CHUNK`] a write.
+    /// before if given; or, if `most` is given, up to `most` bytes of them. It waits for the
+    /// write-back in flight first, if any. Pages are written in the file's order, contiguous dirty
+    /// ones at once, up to [`CHUNK`] a write.
     fn flush(&self, range: Range<u64>, through: Option<u64>) -> io::Result<()> {
         self.write_runs(range, through, None)
     }
@@ -468,9 +531,9 @@ impl<F: File> Shared<F> {
         mut most: Option<u64>,
     ) -> io::Result<()> {
         let (first, last) = (range.start / PAGE, range.end.div_ceil(PAGE));
-        let covers = |page: &Page| {
-            !page.writing && page.dirty.is_some_and(|dirty| through.is_none_or(|t| dirty <= t))
-        };
+        let covers =
+            |page: &Page| page.dirty.is_some_and(|dirty| through.is_none_or(|t| dirty <= t));
+        let _writeback = self.writeback();
         let mut pages = self.lock();
         loop {
             if most.is_some_and(|most| most == 0) {
@@ -489,14 +552,7 @@ impl<F: File> Shared<F> {
                 }
             }
             if run.is_empty() {
-                // None left to write: a sync waits for every write-back in flight in the range,
-                // the flusher's too, which may carry what it covers.
-                let in_flight = pages.pages.range(first..last).any(|(_, page)| page.writing);
-                if most.is_some() || !in_flight {
-                    break;
-                }
-                pages = self.written.wait(pages).unwrap();
-                continue;
+                break;
             }
             let start = run[0] * PAGE;
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
@@ -509,17 +565,14 @@ impl<F: File> Shared<F> {
                 bytes.extend_from_slice(&page.bytes);
             }
             bytes.truncate((end - start) as usize);
-            pages.in_flight += 1;
             let len = run.len() as u64 * PAGE;
             self.cache.writing.fetch_add(len, Ordering::Relaxed);
             drop(pages);
+            let in_flight = InFlight { shared: self, run: &written, len, ended: false };
             let wrote = self.file.write_at(&bytes, start);
-            pages = self.lock();
-            self.cache.writing.fetch_sub(len, Ordering::Relaxed);
-            pages.in_flight -= 1;
-            for (index, last) in written {
+            pages = in_flight.end();
+            for &(index, last) in &written {
                 let Some(page) = pages.pages.get_mut(&index) else { continue };
-                page.writing = false;
                 if wrote.is_err() {
                     continue;
                 }
@@ -535,7 +588,6 @@ impl<F: File> Shared<F> {
             if !pages.pages.values().any(|page| page.dirty.is_some()) {
                 pages.dirtied = None;
             }
-            self.written.notify_all();
             self.cache.drained();
             if let Err(err) = wrote {
                 let kept = io::Error::new(err.kind(), err.to_string());
@@ -550,14 +602,59 @@ impl<F: File> Shared<F> {
     }
 }
 
+/// A write-back in flight, of a run of a file's pages, by their indexes with the numbers of their
+/// last writes: ended ([`InFlight::end`]) as its write returns, or, if a panic unwinds it, by its
+/// drop, its pages left dirty, and in flight no more, and the failure kept for the next sync.
+struct InFlight<'a, 'r, F: File> {
+    shared: &'a Shared<F>,
+    run: &'r [(u64, u64)],
+    len: u64,
+    ended: bool,
+}
+
+impl<'a, F: File> InFlight<'a, '_, F> {
+    /// Its pages in flight no more, the file's lock held, for the caller to say what its write
+    /// did.
+    fn end(mut self) -> MutexGuard<'a, Pages> {
+        self.ended = true;
+        self.unmark()
+    }
+
+    fn unmark(&self) -> MutexGuard<'a, Pages> {
+        let mut pages = self.shared.lock();
+        self.shared.cache.writing.fetch_sub(self.len, Ordering::Relaxed);
+        for (index, _) in self.run {
+            if let Some(page) = pages.pages.get_mut(index) {
+                page.writing = false;
+            }
+        }
+        pages
+    }
+}
+
+impl<F: File> Drop for InFlight<'_, '_, F> {
+    fn drop(&mut self) {
+        if self.ended {
+            return;
+        }
+        let mut pages = self.unmark();
+        let interrupted = io::Error::new(io::ErrorKind::Interrupted, "a write-back panicked");
+        pages.failed.get_or_insert(interrupted);
+    }
+}
+
 /// A file whose every opening went: what of it is dirty is written back, as a file closed keeps
-/// what was written to it; then its pages go, counted out.
+/// what was written to it, unless it is at no name; then its pages go, counted out.
 impl<F: File> Drop for Shared<F> {
     fn drop(&mut self) {
-        if let Err(err) = self.flush(0..u64::MAX, None) {
+        // Not as a panic unwinds: its pages' lock may be poisoned, and a second panic aborts.
+        if !self.unlinked.load(Ordering::Relaxed)
+            && !std::thread::panicking()
+            && let Err(err) = self.flush(0..u64::MAX, None)
+        {
             log::warn!("extent store: writing back a file closed: {err}");
         }
-        let pages = self.pages.get_mut().unwrap();
+        let pages = self.pages.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner);
         let dirty = pages.pages.values().filter(|page| page.dirty.is_some()).count() as u64;
         self.cache.held.fetch_sub(pages.pages.len() as u64 * PAGE, Ordering::Relaxed);
         self.cache.dirty.fetch_sub(dirty * PAGE, Ordering::Relaxed);
@@ -670,14 +767,19 @@ impl<F: File> File for Cached<F> {
         pages.dirtied.get_or_insert_with(Instant::now);
         let held = shared.cache.held.fetch_add(added * PAGE, Ordering::Relaxed) + added * PAGE;
         shared.cache.peak.fetch_max(held, Ordering::Relaxed);
-        shared.cache.dirty.fetch_add(dirtied * PAGE, Ordering::Relaxed);
+        let dirty =
+            shared.cache.dirty.fetch_add(dirtied * PAGE, Ordering::Relaxed) + dirtied * PAGE;
+        shared.cache.peak_dirty.fetch_max(dirty, Ordering::Relaxed);
         drop(pages);
         shared.cache.dirtied();
         Ok(())
     }
 
+    /// The pages in the range written back, and the file told to write them back too, as one
+    /// with a cache of its own does.
     fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
-        self.shared.flush(offset..offset + len, None)
+        self.shared.flush(offset..offset + len, None)?;
+        self.shared.file.write_back(offset, len)
     }
 
     fn write_behind(&self, _offset: u64, _len: u64) -> io::Result<()> {
@@ -710,7 +812,7 @@ impl<F: File> File for Cached<F> {
 mod tests {
     use super::*;
     use crate::dir::Dir as _;
-    use crate::mem::MemDir;
+    use crate::mem::MemDisk;
 
     fn cache(options: Options) -> Arc<PageCache> {
         PageCache::new(options)
@@ -725,7 +827,7 @@ mod tests {
     /// read from memory, until evicted; then reads go to the file.
     #[test]
     fn writes_are_held_until_synced_and_read_from_memory() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
         let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
         let data = pattern(1, 3 * PAGE as usize + 100);
@@ -738,13 +840,22 @@ mod tests {
         assert_eq!(under, vec![0; data.len()], "the file holds none of it before a sync");
         assert_eq!(
             cache.usage(),
-            Usage { held: 4 * PAGE, dirty: 4 * PAGE, writing: 0, peak: 4 * PAGE }
+            Usage {
+                held: 4 * PAGE,
+                dirty: 4 * PAGE,
+                writing: 0,
+                peak: 4 * PAGE,
+                peak_dirty: 4 * PAGE
+            }
         );
         file.sync().unwrap();
         file.file().read_at(&mut under, 0).unwrap();
         assert_eq!(under, data);
         assert_eq!(file.size().unwrap(), data.len() as u64);
-        assert_eq!(cache.usage(), Usage { held: 4 * PAGE, dirty: 0, writing: 0, peak: 4 * PAGE });
+        assert_eq!(
+            cache.usage(),
+            Usage { held: 4 * PAGE, dirty: 0, writing: 0, peak: 4 * PAGE, peak_dirty: 4 * PAGE }
+        );
         assert_eq!(cache.evict_to(0), 0);
         file.read_at(&mut read, 0).unwrap();
         assert_eq!(read, data, "read from the file, evicted");
@@ -754,7 +865,7 @@ mod tests {
     /// between.
     #[test]
     fn partial_pages_keep_what_the_file_holds() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options::default());
         let raw = dir.create("f", true).unwrap();
         raw.write_at(&pattern(2, 2 * PAGE as usize), 0).unwrap();
@@ -778,7 +889,7 @@ mod tests {
     /// crash after the sync keeps them.
     #[test]
     fn writes_unsynced_are_lost_in_a_crash() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
         let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
         dir.sync_dir("").unwrap();
@@ -795,7 +906,7 @@ mod tests {
     /// The flusher writes back what has been dirty past the expiry, with no sync.
     #[test]
     fn the_flusher_writes_back_what_expires() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options { expire: Duration::from_millis(20), ..Options::default() });
         let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
         file.write_at(&pattern(7, 2 * PAGE as usize), 0).unwrap();
@@ -812,7 +923,7 @@ mod tests {
     /// A file's pages dropped, the dirty ones unwritten, as a removed file's are.
     #[test]
     fn cancelled_pages_are_never_written() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
         let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
         file.write_at(&pattern(8, PAGE as usize), 0).unwrap();
@@ -829,7 +940,7 @@ mod tests {
     /// all of it once synced: writers going on while write-backs are in flight.
     #[test]
     fn concurrent_writes_and_syncs_keep_every_write() {
-        let dir = MemDir::new();
+        let dir = MemDisk::new();
         let cache = cache(Options { background: 4 * PAGE, hard: 16 * PAGE, ..Options::default() });
         let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
         std::thread::scope(|scope| {
