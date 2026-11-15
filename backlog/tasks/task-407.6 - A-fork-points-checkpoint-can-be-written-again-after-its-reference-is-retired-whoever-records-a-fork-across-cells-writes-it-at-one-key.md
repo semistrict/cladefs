@@ -6,10 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 02:25'
+updated_date: '2026-11-15 10:18'
 labels: []
 dependencies: []
 parent_task_id: TASK-407
-priority: medium
+priority: low
 type: bug
 ordinal: 803000
 ---
@@ -32,3 +33,9 @@ recovery::checkpoint_at (TASK-395.4) writes the parent's state at a cross-cell f
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15, decided with the user: left filed. The re-created checkpoint is never read (a deleted child's ID is never reused), so no cache serves anything stale from it, and a later pass deletes it. Keying it by its recorder would have the parent's cell's passes read each child's record across cells to know which to keep (TASK-395.4 avoids that); identical bytes from any recorder would need extents named where sealed, recovery following moves from there. Neither is worth it for garbage.
+<!-- SECTION:NOTES:END -->

@@ -232,8 +232,15 @@ impl HostDir {
     }
 
     fn file(&self, file: std::fs::File, data: bool) -> io::Result<HostFile> {
-        if !(data && self.direct) {
-            return Ok(HostFile { file, written: None });
+        if !self.direct {
+            return Ok(HostFile { file, written: None, small: None });
+        }
+        // fxdax: a file of no extents' data, a log or the store's description, written a little at
+        // a time, bypasses the page cache whole, its writes merged into the blocks they touch, the
+        // last it wrote held in memory ([`HostFile::small`], TASK-433.2).
+        if !data {
+            let small = extent_remote::direct::bypass(&file).then(Mutex::default);
+            return Ok(HostFile { file, written: None, small });
         }
         // The same file again, through the page cache, for writes.
         let written = file.try_clone()?;
@@ -248,7 +255,7 @@ impl HostDir {
         };
         let bypassing = bypass_page_cache(file.as_raw_fd());
         self.bypassing.store(bypassing, Ordering::Relaxed);
-        Ok(HostFile { file, written: bypassing.then_some(written) })
+        Ok(HostFile { file, written: bypassing.then_some(written), small: None })
     }
 }
 
@@ -430,10 +437,14 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
 }
 
 /// A file of a [`HostDir`]: read through `file`, which bypasses the page cache if `written` is
-/// given, through which it is written; fxdax: and read, by [`File::read_cached`].
+/// given, through which it is written; fxdax: and read, by [`File::read_cached`]. Or, a file of no
+/// extents' data, bypassing the page cache for its reads and writes alike if `small` is given: its
+/// writes, of any length at any offset, merged into the blocks they touch, the block ending the
+/// last held, which a log's next append goes on in without reading it back (TASK-433.2).
 pub struct HostFile {
     file: std::fs::File,
     written: Option<std::fs::File>,
+    small: Option<Mutex<extent_remote::direct::Tail>>,
 }
 
 impl HostFile {
@@ -450,14 +461,24 @@ impl AsRawFd for HostFile {
 
 impl File for HostFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        if self.small.is_some() {
+            return extent_remote::direct::read_at(&self.file, true, buf, offset);
+        }
         read_fully(&self.file, buf, offset)
     }
 
     fn read_cached(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        if self.small.is_some() {
+            return self.read_at(buf, offset);
+        }
         read_fully(self.written(), buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        if let Some(small) = &self.small {
+            let mut tail = small.lock().unwrap();
+            return extent_remote::direct::write_at(&self.file, true, &mut tail, buf, offset);
+        }
         self.written().write_all_at(buf, offset)
     }
 

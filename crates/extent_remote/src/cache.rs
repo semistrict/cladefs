@@ -620,19 +620,20 @@ impl Found {
 /// The object at `key` the file at `path` holds, if its tail, at its end, passes its checks: its
 /// parts checked against their CRCs unless `holes`, the filesystem finding holes punched.
 fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
-    let file = File::open(path)?;
+    let (file, direct) = opened(path, false)?;
+    let read_exact_at = |bytes: &mut [u8], at: u64| read_exact(&file, direct, bytes, at);
     let metadata = file.metadata()?;
     let size = metadata.len();
     let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
     let mut trailer = vec![0; TRAILER as usize];
-    file.read_exact_at(&mut trailer, at)?;
+    read_exact_at(&mut trailer, at)?;
     let Ok(frame) = Frame::of_trailer(&trailer) else { return Ok(None) };
     if frame.size() != size {
         return Ok(None);
     }
     let tail = frame.tail();
     let mut bytes = vec![0; (tail.end - tail.start) as usize];
-    file.read_exact_at(&mut bytes, tail.start)?;
+    read_exact_at(&mut bytes, tail.start)?;
     let Ok(tail) = object::Tail::of(key, bytes) else { return Ok(None) };
     let data = data(&file, size)?;
     let mut kept = Vec::new();
@@ -644,7 +645,7 @@ fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
         // it is told by its CRC.
         if stored.len < BLOCK || !holes {
             let mut bytes = vec![0; stored.len as usize];
-            file.read_exact_at(&mut bytes, stored.offset)?;
+            read_exact_at(&mut bytes, stored.offset)?;
             if stored.check(&bytes).is_err() {
                 continue;
             }
@@ -652,6 +653,29 @@ fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
         kept.push(part);
     }
     Ok(Some(Found { parts: tail.parts, kept, modified: metadata.modified()? }))
+}
+
+/// fxdax: the file at `path`, opened to read, and to write if `write`, bypassing the host's page
+/// cache if its file system allows ([`crate::direct::bypass`], TASK-433.4): and whether it does.
+fn opened(path: &Path, write: bool) -> io::Result<(File, bool)> {
+    let file = File::options().read(true).write(write).open(path)?;
+    // A directory where an object's file was is none, as a read of it would say, rather than
+    // what bypassing the cache on it says (EPERM on macOS).
+    if file.metadata()?.is_dir() {
+        return Err(io::Error::from_raw_os_error(libc::EISDIR));
+    }
+    let direct = crate::direct::bypass(&file);
+    Ok((file, direct))
+}
+
+/// fxdax: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing as
+/// `read_exact_at` does if the file ends before them (`UnexpectedEof`): one that shrank behind
+/// the cache's back.
+fn read_exact(file: &File, direct: bool, bytes: &mut [u8], at: u64) -> io::Result<()> {
+    if at + bytes.len() as u64 > file.metadata()?.len() {
+        return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+    }
+    crate::direct::read_at(file, direct, bytes, at)
 }
 
 /// The ranges of `file`, of `size` bytes, that hold data, not holes, as `SEEK_DATA` and
@@ -808,12 +832,15 @@ impl Files {
         Ok(())
     }
 
-    /// Writes `bytes` at `offset` in the file of the object at `key`.
+    /// Writes `bytes` at `offset` in the file of the object at `key`, bypassing the host's page
+    /// cache ([`crate::direct`], TASK-433.4): the cache's copies are on its disk alone, what is
+    /// held in memory the fetchers' to hold, within their budget.
     fn write(&self, key: &str, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        let file = File::options().write(true).open(self.path(key))?;
+        let (file, direct) = opened(&self.path(key), true)?;
         for piece in self.pieces(Change::Write, offset..offset + bytes.len() as u64) {
             let from = (piece.start - offset) as usize..(piece.end - offset) as usize;
-            file.write_all_at(&bytes[from], piece.start)?;
+            let mut tail = crate::direct::Tail::default();
+            crate::direct::write_at(&file, direct, &mut tail, &bytes[from], piece.start)?;
         }
         Ok(())
     }
@@ -847,10 +874,12 @@ impl Files {
         }
     }
 
-    /// The bytes at `place` in the file of the object at `key`.
+    /// The bytes at `place` in the file of the object at `key`, read bypassing the host's page
+    /// cache ([`Files::write`]).
     fn read(&self, key: &str, place: Range<u64>) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0; (place.end - place.start) as usize];
-        File::open(self.path(key))?.read_exact_at(&mut bytes, place.start)?;
+        let (file, direct) = opened(&self.path(key), false)?;
+        read_exact(&file, direct, &mut bytes, place.start)?;
         Ok(bytes)
     }
 
@@ -1255,6 +1284,41 @@ mod tests {
         std::fs::create_dir(cache.path(KEY)).unwrap();
         let err = cache.part(KEY, 1).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EISDIR), "{err}");
+    }
+
+    /// TASK-433.4: what the cache keeps is on its disk alone: none of an object's file, its tail
+    /// and parts kept, read and kept again, is in the host's page cache, the cache's file system
+    /// bypassing it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kept_objects_hold_no_pages_in_the_page_cache() {
+        use std::os::fd::AsRawFd as _;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
+        let object = Object::noise(KEY, 2 * PART + 100, 1);
+        object.keep(&cache);
+        assert_eq!(object.read(&cache, 1).as_deref(), Some(object.part(1)));
+        let file = File::open(cache.path(KEY)).unwrap();
+        let len = file.metadata().unwrap().len() as usize;
+        let page = 4096;
+        // SAFETY: Maps the file, unread, to ask the kernel which of its pages it caches, and
+        // unmaps it.
+        let cached = unsafe {
+            let addr = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                file.as_raw_fd(),
+                0,
+            );
+            assert_ne!(addr, libc::MAP_FAILED, "{}", io::Error::last_os_error());
+            let mut pages = vec![0u8; len.div_ceil(page)];
+            assert_eq!(libc::mincore(addr, len, pages.as_mut_ptr()), 0);
+            libc::munmap(addr, len);
+            pages.iter().filter(|page| **page & 1 == 1).count()
+        };
+        assert_eq!(cached, 0, "of {} pages", len.div_ceil(page));
     }
 
     /// A part larger than the cache isn't kept, and evicts nothing; one that fits beside its tail
