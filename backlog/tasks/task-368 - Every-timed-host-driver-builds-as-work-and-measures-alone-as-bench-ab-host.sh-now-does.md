@@ -3,10 +3,11 @@ id: TASK-368
 title: >-
   Every timed host driver builds as work and measures alone, as bench-ab-host.sh
   now does
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-11 22:22'
-updated_date: '2026-11-15 11:36'
+updated_date: '2026-11-15 21:27'
 labels:
   - scripts
   - ubu1
@@ -33,3 +34,21 @@ TASK-330.4 split bench-ab-host.sh into a build job (fxjob, the work slice) and a
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. scripts/lib/measurement.sh: measuring (this process's cgroup, /proc/self/cgroup, in fxjob --bench's fxdax-bench.slice; survives sudo) and measurement_refuses WHAT (exit 2, saying why). The guard, called where a build would start: test-e2e.sh without CLADEFS_E2E_PREBUILT (and, with it, its artifacts complete), scripts/test.sh, host_kernel_build, linux-host-setup.sh's host_cargo, gc-sweep.sh's cargo.
+2. host.sh: host_job runs a measurement (host_bench=1) as two jobs of its run: CLADEFS_HOST_PHASE=build as work (no --bench, CLADEFS_HOST_NICE, 12G, RESULTS/remote-build.log), then CLADEFS_HOST_PHASE=measure under fxjob --bench; other runs one job, no phase.
+3. linux-host-setup.sh: host_phase (all, build, measure) checked by host_setup; host_artifacts DIR NAME [KERNEL] (test-e2e.sh's CLADEFS_E2E_BUILD_ONLY, the kernel as DIR/vmlinux) and host_prebuilt DIR; host_build_nice gone (the build job's niceness is host_command's).
+4. Host scripts by phase: bench-linux-host.sh, test-linux-host.sh (perf-gate-host.sh, soak-host.sh with CLADEFS_HOST_BENCH=1; workspace tests in the build phase), fork-time-linux-host.sh (builds and its image in the build phase), gets-linux-host.sh, gc-sweep-linux-host.sh via gc-sweep.sh --prepare/--prepared, bench-ab-linux-host.sh (CLADEFS_AB_PHASE and CLADEFS_AB_BUILD_NICE replaced by the shared phase; bench-ab-host.sh one host_job).
+5. bench-rounds.sh: TASK-446, CARGO_BUILD_JOBS (default 4) and CARGO_TARGET_DIR through sudo; made runnable under fakes (CLADEFS_HOST_PROC, a cgroup root) so its jobs are tested.
+6. Tests (scripts/tests): fake fxjob places its job in a work or bench cgroup (CLADEFS_HOST_PROC); fake host scripts build unless measuring, through the real guard; each driver's jobs are build-as-work then measure-in-bench; the guard refusing (test-e2e.sh, incomplete prebuilt, test.sh, host_kernel, host_cargo, gc-sweep.sh); bench-rounds' build jobs and environment.
+7. Verify: scripts suite in full on macOS, shellcheck, test.sh's scripts part; on ubu1 bench-rounds.sh one round of bench-fs-fxfs-guest-dax (sync, 1 iteration) under the split, fxjob history lines.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15 (claude): built, commit 3127f204d on branch t368. Each driver's fxjob --bench job, checked: bench-host.sh (bench-linux-host.sh's test-e2e.sh built inside it, and host_kernel), perf-gate-host.sh and soak-host.sh (CLADEFS_HOST_BENCH=1) through test-linux-host.sh (test-e2e.sh's build, host_kernel), fork-time-linux-host.sh (cargo per tree, and its 10 GiB image), gets-linux-host.sh (cargo), gc-sweep.sh (cargo, and its buckets' fill) built inside the bench; bench-ab-host.sh and bench-rounds.sh built as work already; qualify.sh runs only under bench-ab's rounds, prebuilt (RustFS's binary fetched, not built); migrate-host.sh and soak-host.sh by default are no measurement. Now host_job splits every measurement (CLADEFS_HOST_PHASE build as work, measure under --bench); preparation (fork-time's image, gc-sweep's fill) is in the build job too. Guard: scripts/lib/measurement.sh by the process's cgroup (fxdax-bench.slice), so it holds for drivers that call fxjob --bench directly (bench-rounds.sh, ab-guest-cases.sh) and through sudo. Test-only knobs: CLADEFS_SELF_CGROUP (the guard), CLADEFS_HOST_PROC/CLADEFS_HOST_SYS (bench-rounds.sh). Behaviour changes: a measurement run of test-linux-host.sh no longer runs the harness's own tests (test.sh guest/firecracker), and its workspace tests, if any, run in the build job (a failure there measures nothing); bench-linux-host.sh needs no nextest. TASK-446 fixed here (bench-rounds.sh passes CARGO_BUILD_JOBS, default 4, and CARGO_TARGET_DIR through sudo). macOS: scripts suite 442 OK; scripts/test.sh's scripts part exits 1 only on crates/cladefs/mutants/written-back-twice.patch not applying (TASK-461, someone else's, open); shellcheck -x clean on what changed (only pre-existing info notes). Hand mutants each red: host_job as one job (10 failures), guard never refusing (6), bench-rounds without cargo_env (2), test-e2e.sh without the completeness check (2).
+<!-- SECTION:NOTES:END -->
