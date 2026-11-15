@@ -1479,7 +1479,7 @@ mod tests {
         assert!(ring.of(7).sealed() && ring.of(8).sealed() && !ring.of(9).sealed());
         assert_eq!(ring.sealing().map(|(_, id)| id), Some(one));
         assert!(of_key(&ring, &layout::segment(test_branch(8), 3, 1)).sealed());
-        let moves = layout::moves(&layout::segment(test_branch(7), 3, 1)).unwrap();
+        let moves = layout::moves(&layout::segment(test_branch(7), 3, 1), 1).unwrap();
         assert_eq!(branch_of(&moves), Some(7));
         assert!(!of_key(&ring, &layout::cell(TEST_CELL)).sealed());
 

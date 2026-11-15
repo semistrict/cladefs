@@ -1371,7 +1371,7 @@ pub(crate) mod tests {
                 layout::extent(layout::TEST_CELL, 1, 0, storage_device::ExtentId::new(1, 5));
             store.put(&extent, vec![6; 11].into(), PutMode::Create).await.unwrap();
             store
-                .put(&layout::moves(&segment).unwrap(), vec![7; 13].into(), PutMode::Create)
+                .put(&layout::moves(&segment, 1).unwrap(), vec![7; 13].into(), PutMode::Create)
                 .await
                 .unwrap();
             assert_eq!(store.get(&segment).await.unwrap().bytes.len(), 50);
@@ -1382,7 +1382,7 @@ pub(crate) mod tests {
             store.list("segments/").await.unwrap();
             store.list_delimited("segments/", crate::bucket::Page::FIRST).await.unwrap();
             store.delete(&segment).await.unwrap();
-            store.delete_batch(&[&extent, &layout::moves(&segment).unwrap()]).await.unwrap();
+            store.delete_batch(&[&extent, &layout::moves(&segment, 1).unwrap()]).await.unwrap();
         });
         let stats = store.stats();
         let requests: Vec<_> =

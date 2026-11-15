@@ -779,12 +779,19 @@ impl<B: Bucket> Fetcher<B> {
         Ok(())
     }
 
-    /// The key of the moves of the object at `key`, if the collector moved `extent` there when it
-    /// compacted the object: their footer names it.
+    /// The key of the moves of the object at `key` the collector moved `extent` to when it
+    /// compacted the object, if it did: of its moves listed, each a pass's, the latest whose footer
+    /// names it, as the collector and writers follow them ([`crate::moves::MovesMaps`],
+    /// TASK-407.1).
     async fn moved(&self, extent: ExtentId, key: &str) -> Result<Option<String>, Error> {
-        let moves = layout::moves(key)?;
-        let tail = self.shared.tail(&moves).await?;
-        Ok(tail.is_some_and(|tail| tail.extents.contains_key(&extent)).then_some(moves))
+        let listed = bucket::list(&*self.shared.bucket, &layout::moves_of(key)?).await;
+        for meta in listed.iter().rev() {
+            let tail = self.shared.tail(&meta.key).await?;
+            if tail.is_some_and(|tail| tail.extents.contains_key(&extent)) {
+                return Ok(Some(meta.key.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Reads ahead of a read of parts `first..=last` of the object at `key`: the part after them,
@@ -1688,12 +1695,12 @@ mod tests {
     /// it, then deletes it.
     fn compacted(bucket: &Arc<SimBucket>, data: &[u8]) {
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 10, len: MOVED.1 };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 10, len: MOVED.1 };
         let mut moved = vec![0; 10];
         moved.extend_from_slice(&data[MOVED.0 as usize..][..MOVED.1 as usize]);
         let moves =
             layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
     }
 
@@ -1770,7 +1777,7 @@ mod tests {
         let mut reads = Reads::new();
         let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
         let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
-        let moves = layout::moves(KEY).unwrap();
+        let moves = layout::moves(KEY, 1).unwrap();
         let moved = block_on(Direct(bucket.clone()).get(&moves)).unwrap().bytes;
         let moved = extent_frame::Parts::of(&moved, &extent_frame::NoKeys);
         assert_eq!(
@@ -1778,6 +1785,7 @@ mod tests {
             [
                 format!("get {KEY} 0..3000"),
                 format!("get {KEY} last {TAIL}"),
+                format!("list {}", layout::moves_of(KEY).unwrap()),
                 format!("get {moves} last {TAIL}"),
                 format!("get {moves} {:?}", moved.unwrap().stored[0].range()),
             ]
@@ -1805,24 +1813,25 @@ mod tests {
         assert_eq!(read().0, Some(Ok(want.clone())));
         // Compacted, then a segment far shorter recreated at its key.
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len: at.1 };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len: at.1 };
         let moved = data[at.0 as usize..][..at.1 as usize].to_vec();
         let moves =
             layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let stale = segment(&noise(100), vec![(ExtentId::new(1, 9), 0, 100)]);
         block_on(direct.put(KEY, stale.into(), PutMode::Create)).unwrap();
 
         let (read, asked) = read();
         assert_eq!(read, Some(Ok(want)));
-        let moves = layout::moves(KEY).unwrap();
+        let moves = layout::moves(KEY, 1).unwrap();
         assert_eq!(
             asked,
             [
                 format!("get {KEY} {}..{}", PART, PART + 3000),
                 format!("head {KEY}"),
                 format!("get {KEY} last {TAIL}"),
+                format!("list {}", layout::moves_of(KEY).unwrap()),
                 format!("get {moves} last {TAIL}"),
                 format!("get {moves} 0..{}", at.1),
             ]
@@ -1830,7 +1839,8 @@ mod tests {
     }
 
     /// A read of an extent by a fetcher of its own ([`read`]) asks for its object's tail, then for
-    /// the parts the extent is in; with the object gone, moved nowhere, the extent is lost.
+    /// the parts the extent is in; with the object gone, moved nowhere, its moves listed, none
+    /// (TASK-407.1), the extent is lost.
     #[test]
     fn reads_on_their_own_fetch_the_tail_then_the_parts() {
         let data = noise(PART + 300);
@@ -1844,7 +1854,7 @@ mod tests {
         block_on(Direct(bucket.clone()).delete(KEY)).unwrap();
         let (lost, asked) = bucket.served(read(&bucket, EXTENT, &location));
         assert_eq!(lost, Err(Error::Lost(format!("{EXTENT:?} in {KEY}"))));
-        let moves = format!("get {} last {TAIL}", layout::moves(KEY).unwrap());
+        let moves = format!("list {}", layout::moves_of(KEY).unwrap());
         assert_eq!(asked, [format!("get {KEY} last {TAIL}"), moves]);
     }
 
@@ -2313,11 +2323,11 @@ mod tests {
         bucket.complete(0, Fault::None);
 
         let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY).unwrap(), offset: 0, len };
+        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len };
         let moved = &data[at as usize..][..len as usize];
         let moves =
             layout::with_footer(moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY).unwrap(), moves.into(), PutMode::Create)).unwrap();
+        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
         block_on(direct.delete(KEY)).unwrap();
         let other: Vec<u8> = data.iter().map(|byte| byte ^ 0x5a).collect();
         let other_extent = ExtentId::new(1, 9);

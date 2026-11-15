@@ -578,8 +578,13 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         records.iter().filter(|(branch, _)| branch.cell == cell).all(|(_, record)| record.deleted)
             && !references.iter().any(|(_, parent, _, _)| parent.cell == cell)
     };
-    // The moves of a location's object: none of no cell's, which nothing compacts.
-    let moves_of = |key: &str| layout::moves(key).unwrap_or_default();
+    // The moves of a location's object listed, every pass's (TASK-407.1): none of no cell's, which
+    // nothing compacts.
+    let moves_of = |key: &str| -> Vec<String> {
+        let Ok(prefix) = layout::moves_of(key) else { return Vec::new() };
+        let listed = keys.range(prefix.clone()..).take_while(|moves| moves.starts_with(&prefix));
+        listed.cloned().collect()
+    };
     let mut maps = MovesMaps::default();
     let mut needed = BTreeSet::new();
     let mut touched = BTreeSet::new();
@@ -649,9 +654,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             // where they went: as a point's do for as long as it lives, as it has no writer to
             // record them, and a branch's whose writer has not checkpointed since.
             let mut at: Location = location.clone();
-            while keys.contains(&moves_of(&at.key)) {
+            while !moves_of(&at.key).is_empty() {
                 let Ok(Moved::To(to)) = maps.moved(bucket, extent, &at.key).await else { break };
-                needed.insert(moves_of(&at.key));
+                needed.extend(moves_of(&at.key));
                 needed.insert(to.key.clone());
                 if point {
                     named.entry(to.key.clone()).or_default().insert(extent, to.len);
@@ -699,9 +704,9 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 key = from;
             }
             let mut at: Location = location.clone();
-            while keys.contains(&moves_of(&at.key)) {
+            while !moves_of(&at.key).is_empty() {
                 let Ok(Moved::To(to)) = maps.moved(bucket, extent, &at.key).await else { break };
-                needed.insert(moves_of(&at.key));
+                needed.extend(moves_of(&at.key));
                 needed.insert(to.key.clone());
                 named.entry(to.key.clone()).or_default().insert(extent, to.len);
                 at = to;
@@ -729,7 +734,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     for (key, extents) in named {
         let compactable = matches!(layout::kind(&key), Kind::Segment { .. } | Kind::Moves { .. });
-        if !compactable || touched.contains(&key) || keys.contains(&moves_of(&key)) {
+        if !compactable || touched.contains(&key) || !moves_of(&key).is_empty() {
             continue;
         }
         let Some(object) = crate::bucket::get(bucket, &key).await else { continue };

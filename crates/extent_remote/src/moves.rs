@@ -49,32 +49,37 @@ impl MovesMaps {
             keys.into_iter().filter(|key| !self.maps.contains_key(key)).collect();
         let prefixes: BTreeSet<&str> =
             unread.iter().map(|key| &key[..key.rfind('/').map_or(0, |slash| slash + 1)]).collect();
-        let mut moved = BTreeSet::new();
+        let mut moved: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for prefix in prefixes {
-            let listed = bucket::list(bucket, &layout::moves(prefix)?).await;
-            moved.extend(listed.into_iter().filter_map(|meta| layout::moved_from(&meta.key)));
+            for meta in bucket::list(bucket, &layout::moves_under(prefix)?).await {
+                if let Some(from) = layout::moved_from(&meta.key) {
+                    moved.entry(from).or_default().push(meta.key);
+                }
+            }
         }
         let (unread, unmoved): (Vec<String>, Vec<String>) =
-            unread.into_iter().partition(|key| moved.contains(key));
+            unread.into_iter().partition(|key| moved.contains_key(key));
         self.maps.extend(unmoved.into_iter().map(|key| (key, None)));
+        let unread = unread.into_iter().map(|key| {
+            let moves = moved.remove(&key).unwrap_or_default();
+            (key, moves)
+        });
         self.read_listed(bucket, unread).await
     }
 
-    /// fxdax: reads the moves of the objects at `keys` not read yet, which a listing found moves
-    /// of, [`READ_AT_ONCE`] at once (TASK-395.5): the collector's, which listed every object
-    /// before. Moves gone since read as none, as they would one at a time.
+    /// fxdax: reads the moves of the objects at the keys `listed` gives, each with the keys of its
+    /// moves a listing found, in the order of their keys, which is their passes' (TASK-407.1), the
+    /// objects not read yet, [`READ_AT_ONCE`] at once (TASK-395.5): the collector's, which listed
+    /// every object before. Moves gone since read as none, as they would one at a time.
     pub(crate) async fn read_listed(
         &mut self,
         bucket: &impl Bucket,
-        keys: impl IntoIterator<Item = String>,
+        listed: impl IntoIterator<Item = (String, Vec<String>)>,
     ) -> Result<(), Error> {
-        let unread: BTreeSet<String> =
-            keys.into_iter().filter(|key| !self.maps.contains_key(key)).collect();
+        let unread: BTreeMap<String, Vec<String>> =
+            listed.into_iter().filter(|(key, _)| !self.maps.contains_key(key)).collect();
         let read: Vec<_> = futures::stream::iter(unread)
-            .map(|key| async move {
-                let moves: Option<Moves> = object::footer(bucket, &layout::moves(&key)?).await?;
-                Ok::<_, Error>((key, moves.map(|moves| moves.extents.into_iter().collect())))
-            })
+            .map(|(key, moves)| async move { Ok::<_, Error>((key, merged(bucket, &moves).await?)) })
             .buffer_unordered(READ_AT_ONCE)
             .try_collect()
             .await?;
@@ -99,8 +104,9 @@ impl MovesMaps {
         key: &str,
     ) -> Result<Moved, Error> {
         if !self.maps.contains_key(key) {
-            let moves: Option<Moves> = object::footer(bucket, &layout::moves(key)?).await?;
-            let map = moves.map(|moves| moves.extents.into_iter().collect());
+            let listed = bucket::list(bucket, &layout::moves_of(key)?).await;
+            let moves: Vec<String> = listed.into_iter().map(|meta| meta.key).collect();
+            let map = merged(bucket, &moves).await?;
             self.maps.insert(key.to_owned(), map);
         }
         Ok(self.moved_read(extent, key))
@@ -120,4 +126,22 @@ impl MovesMaps {
         }
         Ok(location)
     }
+}
+
+/// fxdax: where the moves at `keys`, of one object, each a pass's, in the order of their passes,
+/// moved its extents (TASK-407.1): each extent where the latest that has it put it, which every
+/// reader and the collector follow alike; none if none of them is there. One pass's alone, but for
+/// a pass slow to create them, whose moves of the extents it found live are a copy of them as
+/// well, or of extents later passes found dead.
+async fn merged(
+    bucket: &impl Bucket,
+    keys: &[String],
+) -> Result<Option<BTreeMap<ExtentId, Location>>, Error> {
+    let mut map: Option<BTreeMap<ExtentId, Location>> = None;
+    for key in keys {
+        if let Some(moves) = object::footer::<Moves>(bucket, key).await? {
+            map.get_or_insert_default().extend(moves.extents);
+        }
+    }
+    Ok(map)
 }

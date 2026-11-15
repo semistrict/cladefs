@@ -158,16 +158,33 @@ pub fn cell_of_prefix(prefix: &str) -> Option<Cell> {
     in_cell(prefix).filter(|(_, rest)| rest.is_empty()).map(|(cell, _)| cell)
 }
 
-/// What the collector made of the object at `key` when it compacted it: the extents of it that were
-/// live, and where in it each is. Being one object, written whole, it is never there without them.
-/// fxdax: under the cell of the object, `<C>moves/<rest>` for the object `<C><rest>`, and so
-/// `<C>moves/moves/<rest>` for its moves' moves, so that the cell's pass of the collector lists
-/// them with the cell (TASK-395.2). Only a cell's objects are compacted: a key of no cell's, which
-/// a location read from a checkpoint or a footer may name if they are corrupt, has none
+/// What the pass of the collector of epoch `pass` made of the object at `key` when it compacted
+/// it: the extents of it that were live, and where in it each is. Being one object, written whole,
+/// it is never there without them. fxdax: under the cell of the object, `<C>moves/<rest>/<pass>`
+/// for the object `<C><rest>`, and so `<C>moves/moves/<rest>/<pass>/<pass>` for its moves' moves,
+/// so that the cell's pass of the collector lists them with the cell (TASK-395.2). The pass's epoch
+/// in the key, the cell's collector lease's, two passes' moves of one object never share a key:
+/// one slow to create them, after later passes made them and deleted them, makes its own, never
+/// again those at a key once read (rule `moves_by_pass`, TASK-407.1); readers find an object's
+/// moves by listing [`moves_of`]. Only a cell's objects are compacted: a key of no cell's, which a
+/// location read from a checkpoint or a footer may name if they are corrupt, has none
 /// ([`crate::Error::Corrupt`]).
-pub fn moves(key: &str) -> Result<String, crate::Error> {
-    let Some((cell, rest)) = in_cell(key) else {
-        return Err(crate::Error::Corrupt(format!("{key}: no cell's object, which has no moves")));
+pub fn moves(key: &str, pass: u64) -> Result<String, crate::Error> {
+    let pass = if crate::rules().moves_by_pass { pass } else { 0 };
+    Ok(format!("{}{pass:016x}", moves_of(key)?))
+}
+
+/// fxdax: the prefix of the keys of the moves of the object at `key`, whichever passes made them
+/// ([`moves`]).
+pub fn moves_of(key: &str) -> Result<String, crate::Error> {
+    Ok(format!("{}/", moves_under(key)?))
+}
+
+/// fxdax: the prefix of the keys of the moves of the objects whose keys start with `prefix`, a
+/// cell's: `<C>moves/<rest>` for `<C><rest>`.
+pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
+    let Some((cell, rest)) = in_cell(prefix) else {
+        return Err(crate::Error::Corrupt(format!("{prefix}: no cell's object, which has no moves")));
     };
     Ok(format!("{}{MOVES}{rest}", cell.prefix()))
 }
@@ -176,7 +193,7 @@ pub fn moves(key: &str) -> Result<String, crate::Error> {
 /// [`moves`].
 pub fn moved_from(key: &str) -> Option<String> {
     match kind(key) {
-        Kind::Moves { cell, of } => Some(format!("{}{of}", cell.prefix())),
+        Kind::Moves { cell, of, .. } => Some(format!("{}{of}", cell.prefix())),
         _ => None,
     }
 }
@@ -276,14 +293,9 @@ pub fn referenced_at(parent: Branch, prefix: &str) -> Option<u64> {
 /// Whether the object at `later` is further along the way of an extent from the object at `key`:
 /// the moves of it, or of moves of it.
 pub fn further(key: &str, later: &str) -> bool {
-    let (Some((cell, of)), Some((at_cell, mut at))) = (in_cell(key), in_cell(later)) else {
-        return false;
-    };
-    if cell != at_cell {
-        return false;
-    }
-    while let Some(from) = at.strip_prefix(MOVES) {
-        if from == of {
+    let mut at = later.to_owned();
+    while let Some(from) = moved_from(&at) {
+        if from == key {
             return true;
         }
         at = from;
@@ -338,11 +350,12 @@ pub enum Kind<'a> {
         cell: Cell,
         epoch: u64,
     },
-    /// The moves of the object `of`, the rest of its key under the cell's prefix ([`moves`],
-    /// [`moved_from`]).
+    /// The moves of the object `of`, the rest of its key under the cell's prefix, by the pass of
+    /// the collector of epoch `pass` ([`moves`], [`moved_from`]).
     Moves {
         cell: Cell,
         of: &'a str,
+        pass: u64,
     },
     /// fxdax: the reference of the fork of `parent`, of the cell it is under, at the end of its
     /// segment `at`, to `child` ([`reference`]): never a candidate.
@@ -417,8 +430,9 @@ pub fn kind(key: &str) -> Kind<'_> {
         if rest == "cell" {
             return Some(Kind::Cell { cell });
         }
-        if let Some(of) = rest.strip_prefix(MOVES) {
-            return (!of.is_empty()).then_some(Kind::Moves { cell, of });
+        if let Some(moves) = rest.strip_prefix(MOVES) {
+            let (of, pass) = moves.rsplit_once('/')?;
+            return (!of.is_empty()).then_some(Kind::Moves { cell, of, pass: hex(pass)? });
         }
         if let Some(rest) = rest.strip_prefix(GC) {
             if rest == GC_LEASE.strip_prefix(GC)? {
@@ -768,9 +782,9 @@ impl Segment {
 mod tests {
     use super::*;
 
-    /// The moves of `key`, a cell's object's.
+    /// The moves of `key`, a cell's object's, by the pass of epoch 1.
     fn moves(key: &str) -> String {
-        super::moves(key).unwrap()
+        super::moves(key, 1).unwrap()
     }
 
     /// A branch's extents stored on their own, whichever writer uploaded them, are under its
@@ -819,11 +833,17 @@ mod tests {
         assert!(record(branch).starts_with(&records(cell)));
         assert_eq!(
             moves(&segment(branch, 7, 2)),
-            format!("{prefix}moves/segments/0000000000000003/0000000000000002.0000000000000007")
+            format!(
+                "{prefix}moves/segments/0000000000000003/0000000000000002.0000000000000007/\
+                 0000000000000001"
+            )
         );
         assert_eq!(
             moves(&moves(&segment(branch, 7, 2))),
-            format!("{prefix}moves/moves/segments/0000000000000003/0000000000000002.0000000000000007")
+            format!(
+                "{prefix}moves/moves/segments/0000000000000003/0000000000000002.0000000000000007/\
+                 0000000000000001/0000000000000001"
+            )
         );
         assert_eq!(gc_lease(cell), format!("{prefix}gc/lease"));
         assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000000002a"));
@@ -871,13 +891,31 @@ mod tests {
         assert_eq!(moved_from(&sealed), None);
     }
 
+    /// TASK-407.1: two passes' moves of one object are at keys of their own, under the object's
+    /// moves' prefix, which no other object's moves are under, nor its moves' moves.
+    #[test]
+    fn passes_moves_of_one_object_are_at_keys_of_their_own() {
+        let cell = Cell { tenant: 0xa, id: 0xc };
+        let sealed = segment(Branch { cell, id: 3 }, 7, 2);
+        let (first, second) = (super::moves(&sealed, 1).unwrap(), super::moves(&sealed, 2).unwrap());
+        assert_ne!(first, second);
+        let prefix = moves_of(&sealed).unwrap();
+        assert!(first.starts_with(&prefix) && second.starts_with(&prefix));
+        assert_eq!((moved_from(&first), moved_from(&second)), (Some(sealed.clone()), Some(sealed.clone())));
+        let next = segment(Branch { cell, id: 3 }, 8, 2);
+        assert!(!super::moves(&next, 1).unwrap().starts_with(&prefix));
+        assert!(!moves(&first).starts_with(&prefix));
+        let of = "segments/0000000000000003/0000000000000002.0000000000000007";
+        assert_eq!(kind(&second), Kind::Moves { cell, of, pass: 2 });
+    }
+
     /// The moves of an object of no cell's, which nothing writes, and a location read from a
     /// corrupt checkpoint may name: refused as corrupt, not put at the bucket's root as before
     /// format 9, nor a panic of the reader's.
     #[test]
     fn objects_of_no_cell_have_no_moves() {
         let refused = "probe/0000000000000001: no cell's object, which has no moves".to_owned();
-        assert_eq!(super::moves("probe/0000000000000001"), Err(crate::Error::Corrupt(refused)));
+        assert_eq!(super::moves("probe/0000000000000001", 1), Err(crate::Error::Corrupt(refused)));
     }
 
     #[test]
@@ -905,10 +943,11 @@ mod tests {
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
         let from = segment(branch, 7, 2);
         let of = "segments/0000000000000003/0000000000000002.0000000000000007";
-        assert_eq!(kind(&moves(&from)), Kind::Moves { cell, of });
-        let moved = format!("moves/{of}");
-        assert_eq!(kind(&moves(&moves(&from))), Kind::Moves { cell, of: &moved });
+        assert_eq!(kind(&moves(&from)), Kind::Moves { cell, of, pass: 1 });
+        let moved = format!("moves/{of}/0000000000000001");
+        assert_eq!(kind(&moves(&moves(&from))), Kind::Moves { cell, of: &moved, pass: 1 });
         assert_eq!(kind(&format!("{}moves/", cell.prefix())), Kind::Unknown);
+        assert_eq!(kind(&format!("{}moves/{of}", cell.prefix())), Kind::Unknown);
         let child = Branch { cell: Cell { tenant: 1, id: 2 }, id: 5 };
         assert_eq!(
             kind(&reference(branch, 7, child)),

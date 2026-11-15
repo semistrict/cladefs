@@ -2204,8 +2204,10 @@ impl World {
                 }
             }
             for (extent, location) in &state.extents {
-                let moves = layout::moves(&location.key).unwrap();
-                if !keys.contains(&location.key) && !keys.contains(&moves) {
+                // Its moves, any pass's (TASK-407.1).
+                let moves = layout::moves_of(&location.key).unwrap();
+                let moved = keys.iter().any(|key| key.starts_with(&moves));
+                if !keys.contains(&location.key) && !moved {
                     violations.push(format!("{extent:?} of {id:x}: {} is gone", location.key));
                 }
             }
