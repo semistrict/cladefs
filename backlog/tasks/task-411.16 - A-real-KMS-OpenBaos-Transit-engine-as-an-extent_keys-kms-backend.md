@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 04:06'
+updated_date: '2026-11-15 04:17'
 labels: []
 dependencies: []
 documentation:
@@ -26,11 +26,11 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 FXDAX_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from FXDAX_KMS_OPENBAO_TOKEN or a token file gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
+- [x] #1 FXDAX_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE (openbaos:// over TLS); token from FXDAX_KMS_OPENBAO_TOKEN or a token file gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
 - [ ] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
-- [ ] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
+- [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [ ] #4 Integration tests: tests against a real `bao server -dev` (Mac and Linux; CI job or test script starting it); they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
-- [ ] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
+- [x] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
 <!-- AC:END -->
 
 ## Definition of Done
@@ -65,4 +65,14 @@ Decisions: header (fxkm, 1, 'openbao', tenant, key name) sent as associated_data
 Dependencies (all already in Cargo.lock via object_store/extent_remote, no new crate): reqwest 0.13.5 MIT OR Apache-2.0 (features rustls: rustls Apache-2.0 OR ISC OR MIT, aws-lc-rs, rustls-platform-verifier MIT OR Apache-2.0), tokio 1.53.1 MIT, serde_json 1.0.154 MIT OR Apache-2.0, base64 0.22.1 MIT OR Apache-2.0, bytes 1.12.1 MIT, url 2.5.8 MIT OR Apache-2.0, zeroize feature serde; tempfile (MIT OR Apache-2.0) optional for the testing feature. OpenBao itself MPL-2.0 (test tool only). Cargo.lock, guest/tests/Cargo.lock (cargo metadata --offline; --locked passes after) and vendor/firecracker.lock (firecracker-cargo.sh --lock; --check passes) updated: extent_keys' dependency lists and zeroize's serde only.
 
 CI proposal (not added): in ci.yml's object-stores job, a step 'The OpenBao KMS tests' running scripts/test-openbao.sh --no-fail-fast (fetches OpenBao 2.7.2's release by digest, FXDAX_REQUIRE_OPENBAO=1 so nothing skips). No secrets needed. Verified on the Mac with the release binary and no brew bao on PATH: 18/18.
+
+Validation (macOS, bao 2.7.2 present): cargo nextest run -p extent_keys 49/49; final -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))' 966/966 passed (81 skipped); scripts/test-openbao.sh with the release binary 18/18 (before derived_keys_wrap_and_unwrap was added; that test passes in the 49); skip without bao and failure under FXDAX_REQUIRE_OPENBAO checked; clippy --all-targets on extent_keys and extent_store: no warnings in touched files; fmt clean; upstream-changes.py --check and license-headers.py pass; firecracker-cargo.sh --check passes; guest/tests cargo metadata --locked passes. Commit 5ef520491.
+AC #2 left unchecked: every refusal maps as the AC says except a key deleted, which OpenBao forgets: an unwrap says Destroyed (the header says the key existed), but a wrap can only say NoSuchTenant, as for a key never made; OpenBao has no 'scheduled for deletion' (soft-delete is restorable, mapped Revoked). Doc-16 says how to keep a shredded tenant refused. Needs the parent's/user's call whether that is acceptable.
+AC #4 left unchecked: Linux not run (ubu1 out of this task's scope); CI step proposed, not added. DoD #1 (Linux) likewise.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+OpenBao's Transit engine is a kms backend (kms::openbao::OpenBao): openbao(s)://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE][&namespace=NS][&ca=FILE], token from FXDAX_KMS_OPENBAO_TOKEN or a file re-read on 403; wrapped keys headed fxkm/1/openbao/tenant/key name, the header Transit's associated_data and context; refusals mapped per doc-16's table, 403s probed so NoSuchTenant is said only of keys OpenBao lacks and fxdax's own token failing is Io. Verified against a real bao server -dev on macOS: 18 extent_keys tests (wrap/unwrap, rotation, revocation by policy/soft delete/min_decryption_version, destruction by trim/delete, shared keys, tokens, sealed server, mount, namespace, TLS, from_url) and extent_store's sealed_stores_open_through_openbao; the four crates' suite 966/966. Open: AC #2's deleted key on wrap (NoSuchTenant), Linux and CI (AC #4, DoD #1).
+<!-- SECTION:FINAL_SUMMARY:END -->
