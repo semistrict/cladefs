@@ -381,9 +381,16 @@ SStore(t) ==
             /\ UNCHANGED <<win, inst, refused, latest, next, stores, sPage, sWay>>
     /\ UNCHANGED <<fxfsVars, errors, guestVars, wVars>>
 
+\* A fault that finds its PTE writable, another storer's fault having made it so meanwhile: it
+\* does nothing (mm's do_wp_page isn't reached), and the store is retried.
+SResolved(t) ==
+    /\ spc[t] = "throttle" /\ sWay[t] = "fault" /\ pte[sPage[t]] = "rw"
+    /\ spc' = [spc EXCEPT ![t] = "store"]
+    /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, guestVars, sPage, sWay, stores, wVars>>
+
 StorerNext(t) ==
     SStart(t) \/ SThrottle(t) \/ SLock(t) \/ SBegin(t) \/ SMap(t) \/ SAhead(t) \/ SCopy(t)
-    \/ SUnlock(t) \/ SReturn(t) \/ SStore(t)
+    \/ SUnlock(t) \/ SReturn(t) \/ SStore(t) \/ SResolved(t)
 
 -----------------------------------------------------------------------------
 (* A task doing the rest, t: writeback, fsync, rebinding, punching. *)

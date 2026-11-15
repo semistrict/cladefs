@@ -48,6 +48,7 @@ Step(e) ==
             /\ e.t \in Storers /\ sPage[e.t] = e.p
             /\ \/ spc[e.t] = "store" /\ pte[e.p] # "rw" /\ SStore(e.t)
                \/ spc[e.t] = "throttle" /\ UNCHANGED vars
+      [] e.a = "Resolved" -> e.t \in Storers /\ sPage[e.t] = e.p /\ SResolved(e.t)
       [] e.a = "FsyncStart" -> e.t \in Others /\ WStartOp(e.t, "fsync")
       [] e.a = "WStart" -> e.t \in Others /\ WStartOp(e.t, e.op)
       [] e.a = "WbLock" -> e.t \in Others /\ WWbLock(e.t)

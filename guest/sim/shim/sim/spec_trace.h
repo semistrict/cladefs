@@ -28,6 +28,8 @@ void sim_spec_trace_begin(struct file *file, const char *path, u64 seed, unsigne
 			  unsigned long private_max);
 void sim_spec_actor(struct task_struct *task, const char *name);
 void sim_spec_trace_end(unsigned long stores);
+/* The trace so far, written as the run panics, unless one is being written. */
+void sim_spec_trace_panicked(void);
 /* Whether a run traces. */
 bool sim_spec_tracing(void);
 

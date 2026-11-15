@@ -4,6 +4,7 @@
 
 #include <sim/sim.h>
 #include <sim/host.h>
+#include <sim/spec_trace.h>
 
 /* How many allocations are to fail after how many more, or one in how many, if any. */
 static u64 alloc_skip, alloc_failing, allocs_failed;
@@ -239,6 +240,8 @@ void sim_panic(const char *format, ...)
 	sim_log("sim: PANIC in %s: %s\n", current ? current->comm : "?", line);
 	host_stack_trace();
 	sim_log("sim: at %llu points, trace %llx\n", sim_points(), sim_trace_hash());
+	/* The run's steps traced so far, for its trace to be checked as far as it got. */
+	sim_spec_trace_panicked();
 	host_exit(2);
 }
 

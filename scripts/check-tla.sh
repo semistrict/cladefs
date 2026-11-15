@@ -44,7 +44,12 @@
 #
 # Trace validation (TASK-42.1): runs of crates/follower's Shuttle tests, traced, are behaviors of
 # specs/follower (specs/follower/trace): each trace must be matched to its end. It runs with every
-# model, or alone as follower/traces.
+# model, or alone as follower/traces. And runs of dax.c, guest/sim's tests/traced, are behaviors of
+# specs/dax-cow (TASK-444.1, specs/dax-cow/trace): the traces in specs/dax-cow/trace/runs, which
+# guest/sim/trace.sh makes on Linux, each of the sources as the tree has them (guest/sim/
+# trace-sources.sh: a trace of other sources fails, to be made again), each matched to its end;
+# and those of a past bug put back (mutant-NAME-seed-N, guest/mutants/NAME.patch), none. With
+# every model, or alone as dax-cow/traces.
 #
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
 # below, is fetched once into ~/.cache/fxdax/tla and checked against its SHA-256. v1.8.0 is a
@@ -132,6 +137,7 @@ with_part() {
     printf '%s\n' "$2" | tr ';' '\n' | sed 's/^ */    /' | sed "/^CONSTANTS\$/r /dev/stdin" "$1"
 }
 traces=0
+dax_traces=0
 if [[ ${1:-} == cover ]]; then
     (( $# >= 2 )) || { echo "cover names a model" >&2; exit 2; }
     cover=$(find_cfg "$2")
@@ -142,10 +148,15 @@ elif (( $# == 0 )); then
         deep "$cfg" || choose "$cfg"
     done
     traces=1
+    dax_traces=1
 else
     for model in "$@"; do
         if [[ $model == follower/traces ]]; then
             traces=1
+            continue
+        fi
+        if [[ $model == dax-cow/traces ]]; then
+            dax_traces=1
             continue
         fi
         if [[ $model == deep ]]; then
@@ -179,7 +190,7 @@ reached() {
         hosts=$(sed -n 's/^    Hosts = {\(.*\)}$/\1/p' "$cfg" | tr -d ' ')
         [[ -n $hosts ]] || { echo "$cfg's symmetry is of no Hosts" >&2; exit 2; }
     fi
-    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -noGenerateSpecTE \
+    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers 4 -noGenerateSpecTE \
         -metadir "$work/$name.states" -dump "$work/$name" -config "$cfg" "$3" \
         > "$work/$name.log" 2>&1 ||
         { echo "TLC failed on $name:"; sed -n '/^Error:/,$p' "$work/$name.log"; return 1; }
@@ -294,7 +305,7 @@ for (( r = 0; r < ${#run_cfg[@]}; r++ )); do
     start=$SECONDS
     # TLC exits nonzero when it finds a violation, whose trace it prints rather than writing it
     # beside the spec (-noGenerateSpecTE).
-    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers auto -noGenerateSpecTE \
+    "$java" -XX:+UseParallelGC -cp "$jar" tlc2.TLC -workers 4 -noGenerateSpecTE \
         -metadir "$work/${key//\//-}.states" -config "$cfg" "${tla[0]}" > "$log" 2>&1 &&
         found=0 || found=$?
     took=$((SECONDS - start))
@@ -373,6 +384,58 @@ if (( traces )); then
     if (( unmatched == 0 && matched > 0 && rejected > 0 )); then
         echo "PASS follower/traces: $matched traced runs, each a behavior of the spec, and" \
             "$rejected of a mutant's, none, $((SECONDS - start))s"
+    else
+        status=1
+    fi
+fi
+# Each of guest/sim's traced runs, matched to its end by specs/dax-cow/trace/TraceDaxCow, or, a
+# mutant's, not: each of the sources it says, the tree's.
+if (( dax_traces )); then
+    matched=0 unmatched=0 rejected=0
+    start=$SECONDS
+    for run in "$specs"/dax-cow/trace/runs/*/; do
+        run=${run%/}
+        name=$(basename "$run")
+        data=$run/TraceDaxCowData.tla
+        patches=()
+        if [[ $name == mutant-* ]]; then
+            mutant=${name#mutant-}
+            patches=("$root/guest/mutants/${mutant%-seed-*}.patch")
+        fi
+        made=$(sed -n 's/^\\\* sources: //p' "$data")
+        sources=$("$root/guest/sim/trace-sources.sh" ${patches[@]+"${patches[@]}"})
+        if [[ $made != "$sources" ]]; then
+            unmatched=$((unmatched + 1))
+            echo "FAIL dax-cow/traces: $name is a trace of other sources than the tree's: make" \
+                "them again on Linux (guest/sim/trace.sh, specs/dax-cow/trace/README.md)"
+            continue
+        fi
+        log="$work/dax-$name.log"
+        "$java" -XX:+UseParallelGC -DTLA-Library="$run:$specs/dax-cow" -cp "$jar" tlc2.TLC \
+            -workers 1 -noGenerateSpecTE -metadir "$work/dax-$name.states" \
+            -config "$specs/dax-cow/trace/TraceDaxCow.cfg" \
+            "$specs/dax-cow/trace/TraceDaxCow.tla" > "$log" 2>&1 < /dev/null || true
+        records=$(grep -c '^[ ,] \[a |-> ' "$data")
+        depth=$(sed -n 's/.*depth of the complete state graph search is \([0-9]*\).*/\1/p' "$log")
+        if grep -q '^Error: Invariant TraceMatched is violated' "$log"; then
+            if [[ -z ${patches[*]-} ]]; then
+                matched=$((matched + 1))
+            else
+                unmatched=$((unmatched + 1))
+                echo "FAIL dax-cow/traces: $name, a past bug's, was matched"
+            fi
+        elif [[ -n ${patches[*]-} ]]; then
+            rejected=$((rejected + 1))
+        else
+            unmatched=$((unmatched + 1))
+            echo "FAIL dax-cow/traces: $name is no behavior of the spec: of its $records records," \
+                "matched to record $((${depth:-1} - 1)):"
+            grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
+        fi
+    done
+    if (( unmatched == 0 && matched > 0 )); then
+        echo "PASS dax-cow/traces: $matched traced runs of dax.c, each a behavior of the spec," \
+            "and $rejected of past bugs', none, $((SECONDS - start))s"
     else
         status=1
     fi

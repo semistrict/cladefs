@@ -46,6 +46,11 @@ struct actor {
 	 */
 	unsigned long page;
 	bool fault, begun, fault_write;
+	/*
+	 * A storer's store faulted, its iomap not yet come: a store landing then is one whose fault
+	 * found the PTE writable, another's fault having made it so.
+	 */
+	bool faulted;
 	/* A task doing the rest: in an fsync, or in a rebind, whose look it has made this hold. */
 	bool fsync, rebind, looked;
 	/* What its last look at Fxfs's extents, a rebind's, found it would rebind. */
@@ -234,6 +239,19 @@ void sim_spec_trace_end(unsigned long stores)
 	trace.text = NULL;
 }
 
+void sim_spec_trace_panicked(void)
+{
+	static bool writing;
+
+	if (!trace.on || writing)
+		return;
+	writing = true;
+	trace.on = false;
+	append("\\* the run panicked here\n");
+	/* As many stores as a run of its operations may start: the trace's own are fewer. */
+	write_module(trace.records);
+}
+
 void sim_spec_store_begins(unsigned long page, bool fault)
 {
 	struct actor *a = actor();
@@ -340,8 +358,16 @@ void sim_spec_cleaned(struct vm_area_struct *vma, unsigned long index)
 
 void sim_spec_user_store(struct vm_area_struct *vma, unsigned long addr, bool landed)
 {
-	if (traced(vma) && storer(actor()))
-		record(landed ? "Store" : "Fault", "p |-> %lu", linear_page_index(vma, addr) + 1);
+	struct actor *a = actor();
+	unsigned long page;
+
+	if (!traced(vma) || !storer(a))
+		return;
+	page = linear_page_index(vma, addr) + 1;
+	if (landed && a->faulted)
+		record("Resolved", "p |-> %lu", page);
+	a->faulted = !landed;
+	record(landed ? "Store" : "Fault", "p |-> %lu", page);
 }
 
 void sim_spec_fsync(struct file *file, bool end)
@@ -519,8 +545,10 @@ struct fxfs_dax_change __wrap_fxfs_dax_pages_dirty(struct fxfs_dax_pages *pages,
 			record("Lock", NULL);
 			record("Begin", "p |-> %lu", page + 1);
 		}
-		if (storer(a))
+		if (storer(a)) {
 			a->begun = true;
+			a->faulted = false;
+		}
 	}
 	return __real_fxfs_dax_pages_dirty(pages, first, n);
 }

@@ -49,7 +49,7 @@ trace() { # bin, prefix, sources, must-pass
 status=0
 trace "$BUILD/tests/traced" "" "$(./trace-sources.sh)" 1 || status=1
 for name in "${mutants[@]}"; do
-    patch=../mutants/$name.patch
+    patch=$(realpath ../mutants/$name.patch)
     sim_build "$name" "$patch" > "$out/$name-build.log" 2>&1 ||
         { echo "$name: it doesn't apply or build: $out/$name-build.log"; status=1; continue; }
     trace "$BUILD/mutants/$name/traced" "mutant-$name-" "$(./trace-sources.sh "$patch")" 0
