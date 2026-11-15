@@ -7,7 +7,8 @@
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Batch, Durability, FileSyncs, Syncs};
 use crate::framed::{Aligned, Framed, Packed, Part, Source, Unpacked, read_aligned};
-use crate::framing::{self, Seen};
+use crate::framing::{self, Look, Seen};
+use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, Extents, FileKey, KINDS, LOGS,
@@ -244,6 +245,9 @@ pub struct Store<D: Dir> {
     /// fxdax: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
     /// of the store's goes into it (TASK-165.8).
     cache: Option<Arc<Cache>>,
+    /// fxdax: what holds the parts of its segments packed as they fill, until their framings: the
+    /// process's stores', or its own ([`Opening::held`], TASK-400).
+    held: Arc<HeldParts>,
     /// Notified when the open segment has no write in progress, and when it closed: what
     /// [`Store::close_now`] and the writes it holds up wait for; fxdax: and as each framing of a
     /// segment ends, which flushes, the uploader, forks and the branch's closing wait for.
@@ -442,12 +446,13 @@ struct Framer<D: Dir> {
     branch: u64,
     state: Arc<SharedLock<Mutex<State<D::File>>>>,
     idle: Arc<Condvar>,
+    held: Arc<HeldParts>,
 }
 
 impl<D: Dir> Clone for Framer<D> {
     fn clone(&self) -> Self {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Self { dir, branch: self.branch, state, idle }
+        Self { dir, branch: self.branch, state, idle, held: self.held.clone() }
     }
 }
 
@@ -472,9 +477,9 @@ impl<D: Dir> Framer<D> {
             // (TASK-165.9).
             let whole = state.standing.whole();
             let number = unframed.number();
-            let seen = state.segments.take_seen(number);
+            let ahead = state.segments.take_seen(number);
             drop(state);
-            let framed = whole.and_then(|()| unframed.frame(&*self.dir, &seen));
+            let framed = whole.and_then(|()| unframed.frame(&*self.dir, ahead));
             state = self.lock();
             if self.wrote(&mut state, number, framed) {
                 // The host refused a thread to make it durable: on this one, as it would.
@@ -494,36 +499,69 @@ impl<D: Dir> Framer<D> {
         number: SegmentId,
         part: u64,
     ) -> Locked<'a, D::File> {
-        let Some(raw) = Self::to_see(&state, number) else { return state };
+        let Some((raw, look)) = Self::to_see(&state, number) else { return state };
         drop(state);
-        let seen = framing::see(&*raw, part);
+        let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
         state
     }
 
     /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
-    /// its framing, which reads it no more if it frames the segment in place; unless its framing
-    /// took its parts' looks already, or the store failed, or closed (TASK-400).
-    fn see_here(state: &mut State<D::File>, number: SegmentId, part: u64) {
-        if let Some(raw) = Self::to_see(state, number) {
-            let seen = framing::see(&*raw, part);
+    /// its framing, which reads it no more if it frames the segment in place, nor if it holds it
+    /// packed, which this has it do if the segment looks as if it will be framed in a copy; unless
+    /// its framing took its parts' looks already, or the store failed, or closed (TASK-400).
+    fn see_here(&self, state: &mut State<D::File>, number: SegmentId, part: u64) {
+        if let Some((raw, look)) = Self::to_see(state, number) {
+            let seen = self.look(&*raw, part, look);
             Self::saw(state, (number, part), seen);
         }
     }
 
     /// fxdax: segment `number`'s raw file, if a look ahead at a part of it is for anything
-    /// ([`Framer::see_here`]).
-    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<Arc<RawFile<D::File>>> {
+    /// ([`Framer::see_here`]), and the look at its parts seen so far.
+    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<(Arc<RawFile<D::File>>, Look)> {
         let open = state.standing.whole().is_ok() && !state.standing.is_closed();
         open.then(|| state.segments.see(number)).flatten()
     }
 
-    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, or failed: its framing
-    /// reads the part itself then, which fails as it may.
-    fn saw(state: &mut State<D::File>, (number, part): (SegmentId, u64), seen: io::Result<Seen>) {
+    /// fxdax: a look ahead at part `part` of a segment, in its raw file `raw`, whose parts seen
+    /// before it look as `look` says ([`framing::look_ahead`]): what it saw, and the part held, if
+    /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
+    /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
+    /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
+    /// thread of the store's runs outside of. fxdax: of a clear raw file alone: a sealed segment's
+    /// parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
+    fn look(
+        &self,
+        raw: &RawFile<D::File>,
+        part: u64,
+        look: Look,
+    ) -> io::Result<(Seen, Option<Hold>)> {
+        assert!(raw.clear().is_some(), "a sealed raw file's part looked at ahead");
+        if !self.dir.concurrent() || cfg!(feature = "shuttle") {
+            let (seen, packed) = framing::see(raw, part, look)?;
+            return Ok((seen, packed.map(|packed| self.held.hold(packed))));
+        }
+        let (seen, data) = framing::look_ahead(raw, part, look)?;
+        let held = data.map(|data| {
+            let (held, pending) = self.held.pend();
+            framing::pack_ahead(part, data, pending);
+            held
+        });
+        Ok((seen, held))
+    }
+
+    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or to,
+    /// if it is to be packed, or failed: its framing reads the part itself then, which fails as it
+    /// may.
+    fn saw(
+        state: &mut State<D::File>,
+        (number, part): (SegmentId, u64),
+        seen: io::Result<(Seen, Option<Hold>)>,
+    ) {
         match seen {
-            Ok(seen) => state.segments.saw(number, part, seen),
+            Ok((seen, held)) => state.segments.saw(number, part, seen, held),
             Err(err) => log::warn!("extent store: looking at part {part} of {number:?}: {err}"),
         }
     }
@@ -584,14 +622,14 @@ impl<D: Dir> Framer<D> {
         while let Some(job) = state.framing.queue.pop_front() {
             let unframed = match job {
                 Job::See(number, part) => {
-                    Self::see_here(state, number, part);
+                    self.see_here(state, number, part);
                     continue;
                 }
                 Job::Frame(unframed) => unframed,
             };
             let number = unframed.number();
-            let seen = state.segments.take_seen(number);
-            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir, &seen)) {
+            let ahead = state.segments.take_seen(number);
+            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir, ahead)) {
                 Ok(framed) => {
                     state.segments.written(number, framed.clone());
                     state.framing.wrote(number, framed);
@@ -686,12 +724,16 @@ pub struct Unmade;
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
 /// one, which what the bucket acknowledged of the store's goes into. fxdax: and the store's keys,
 /// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
-/// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear.
+/// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear. And what holds
+/// the parts of its segments packed as they fill, which the process's stores share, so that what
+/// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
+/// one of the store's own, which nothing makes let go. A sealed store holds none (TASK-411.5).
 pub struct Opening {
     pub state: extent_remote::State,
     pub fenced: Option<Fenced>,
     pub cache: Option<Arc<Cache>>,
     pub keys: Arc<Ring>,
+    pub held: Option<Arc<HeldParts>>,
 }
 
 impl Opening {
@@ -703,7 +745,7 @@ impl Opening {
         let chain = Chain::new(branch, 0, 0, None, 0);
         let fenced = Fenced { recovered: None, last_commit: None, chain };
         let state = extent_remote::State::new(branch);
-        Self { state, fenced: Some(fenced), cache: None, keys: Ring::clear() }
+        Self { state, fenced: Some(fenced), cache: None, keys: Ring::clear(), held: None }
     }
 }
 
@@ -817,7 +859,7 @@ impl<D: Dir> Recovering<D> {
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
-        let Opening { state, fenced, cache, keys } = opening;
+        let Opening { state, fenced, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
         // before them is (TASK-411.9).
@@ -1016,6 +1058,7 @@ impl<D: Dir> Recovering<D> {
             ),
             base: SharedLock::new("store log base", Mutex::new(base_file)),
             cache,
+            held: held.unwrap_or_default(),
             idle: Arc::new(Condvar::new()),
             views,
             keys,
@@ -1260,6 +1303,12 @@ impl<D: Dir> Store<D> {
     /// The store's directory.
     pub fn dir(&self) -> &D {
         &self.dir
+    }
+
+    /// fxdax: what holds the parts of its segments packed as they fill ([`Opening::held`],
+    /// TASK-400).
+    pub fn held_parts(&self) -> &Arc<HeldParts> {
+        &self.held
     }
 
     /// The store, as its user sees it.
@@ -1548,7 +1597,7 @@ impl<D: Dir> Store<D> {
     /// commits ([`Framer`]).
     fn framer(&self) -> Framer<D> {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Framer { dir, branch: self.branch.id, state, idle }
+        Framer { dir, branch: self.branch.id, state, idle, held: self.held.clone() }
     }
 
     /// fxdax: prepares the log of the segment after the open one, off the state lock, on a thread

@@ -162,6 +162,8 @@ mod durability;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
 mod framed;
 mod framing;
+mod held;
+pub use held::{HeldCounts, HeldParts};
 mod host;
 mod kept;
 mod layout;

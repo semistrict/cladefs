@@ -11,17 +11,17 @@
 # Killer: scripts/sandboxes.sh short
 --- a/crates/extent_store/src/segments.rs
 +++ b/crates/extent_store/src/segments.rs
-@@ -1538,6 +1538,7 @@ fn frame_segment<D: Dir>(
+@@ -1558,6 +1558,7 @@ fn frame_segment<D: Dir>(
      let mut packer = extent_frame::Packer::new(sealing);
      let clear = raw.clear().filter(|_| packer.key().is_none());
      let in_place_maybe = quiet && len > 0 && clear.is_some();
 +    let in_place_maybe = false && in_place_maybe;
-     let mut parts = framing::read(&**raw, len, in_place_maybe, seen)?;
+     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
      // fxdax: in place at once if a look at its parts says compressing them saves too little,
      // compressing no more of them: compressing every part to tell was most of what framings took
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -2196,10 +2196,6 @@ impl<D: Dir> Store<D> {
+@@ -2245,10 +2245,6 @@ impl<D: Dir> Store<D> {
              raw.read_cached(buf, at)?;
              let end = packer.end();
              let packed = packer.push(buf);

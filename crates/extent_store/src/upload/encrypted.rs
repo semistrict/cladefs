@@ -1032,6 +1032,66 @@ fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
     }
 }
 
+/// TASK-400 in a sealed store (TASK-411.5): a sealed store's segment that compresses has none of
+/// its parts packed or held as it fills, its parts' bytes in its raw file ciphertext, and its
+/// framing, in a copy, reads every part back through the raw file, decrypting, then packs and
+/// seals it: nothing of its data in any file of its directory, nor held, and read back as written.
+/// Its clear twin holds its whole parts packed as they are written, and its framing reads only its
+/// last, never whole. Both on a directory whose I/O is its callers' alone, which packs ahead then
+/// and there, so that what is held is known at the commit.
+#[test]
+fn sealed_stores_hold_no_parts_packed_ahead() {
+    const MIB: usize = 1 << 20;
+    // Letters at random, sixteen of them: compresses by about half, framed in a copy.
+    let text = |seed: u64, len: usize| -> Vec<u8> {
+        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
+    };
+    let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { 4096 });
+    for sealed in [true, false] {
+        let world = World::new();
+        let host = world.host(5);
+        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let dir = MemDir::serial();
+        let description = Description { block_size: 4096, capacity: 1 << 30, branch };
+        let volume = crate::Volume { name: "a".into(), kind: cell::Kind::Fxfs };
+        Store::make(&dir, description, Some("memory:///encrypted"), Some(volume)).unwrap();
+        let held = crate::HeldParts::new();
+        let interval = Duration::from_secs(3600);
+        let options = Options { interval, held: Some(held.clone()), ..Options::default() };
+        let (store, remote) = open_with(&world, &host, &dir, options).unwrap();
+        assert_eq!(store.keys().sealing().is_some(), sealed);
+        for sequence in 1..=7 {
+            store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
+        }
+        store.commit(None).unwrap();
+        let holding = held.counts();
+        match sealed {
+            true => assert_eq!(holding, crate::HeldCounts::default(), "sealed: none held"),
+            false => assert!(holding.bytes > 2 * MIB as u64, "clear: held {holding:?}"),
+        }
+        let before = crate::framing_reads().0;
+        store.close_segment().unwrap();
+        store.commit(None).unwrap();
+        store.closed(usize::MAX).unwrap();
+        let read_back = crate::framing_reads().0 - before;
+        let all = 6 * MIB as u64 + 4096;
+        assert_eq!(read_back, if sealed { all } else { 4096 }, "sealed {sealed}: read back");
+        for sequence in 1..=7 {
+            let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
+            let mut buf = vec![0; data.len()];
+            store.read(extent, 0, &mut buf).unwrap();
+            assert!(buf == data, "sealed {sealed}: {extent:?} read back");
+            if sealed {
+                assert_eq!(clear_files(&dir, &data), Vec::<String>::new(), "{extent:?}");
+            }
+        }
+        if sealed {
+            assert_eq!(held.counts(), crate::HeldCounts::default(), "sealed: none held framing");
+        }
+        remote.cut_short()();
+    }
+}
+
 /// TASK-411.5, AC #5: a write's bytes, as a caller writing them by an I/O of its own takes them
 /// ([`crate::Write::stored`]), are encrypted for the file it names, at the offset it names, and
 /// read back as written; a write of a sealed store's large extent that is not whole sectors is

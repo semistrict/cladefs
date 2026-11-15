@@ -600,6 +600,26 @@ impl PackedPart {
     fn stored<'a>(&'a self, part: &'a [u8]) -> &'a [u8] {
         self.stored.as_deref().unwrap_or(part)
     }
+
+    /// fxdax: its bytes as stored, unless they are the part's own, raw in the clear: compressed,
+    /// or sealed. What a store holds of a part packed as its segment fills, with the part's bytes
+    /// if these are none (TASK-400).
+    pub fn stored_bytes(&self) -> Option<&[u8]> {
+        self.stored.as_deref()
+    }
+
+    /// fxdax: the bytes of memory [`PackedPart::stored_bytes`] take.
+    pub fn stored_capacity(&self) -> usize {
+        self.stored.as_ref().map_or(0, Vec::capacity)
+    }
+
+    /// fxdax: lets go of what the buffer of [`PackedPart::stored_bytes`] holds past them: a part's
+    /// room, which compressing took (TASK-400).
+    pub fn shrink_to_fit(&mut self) {
+        if let Some(stored) = &mut self.stored {
+            stored.shrink_to_fit();
+        }
+    }
 }
 
 /// fxdax: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that a
@@ -778,19 +798,37 @@ impl Packer {
     /// says, appending the object's next bytes to `bytes` (TASK-336). A whole part, but for the
     /// object's last; packed as the object's next, sealed under its key if it is sealed.
     pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
+        self.push_stored(bytes, part.len() as u64, packed.stored(part), packed);
+    }
+
+    /// fxdax: [`Packer::push_part`], of a part of `len` bytes of data given by its bytes as
+    /// stored, `stored`: compressed or sealed if `packed` is, else the part's own. So that a store packs a
+    /// part as its segment fills, and holds it compressed, its data gone, until the segment's
+    /// framing (TASK-400).
+    pub fn push_stored(
+        &mut self,
+        bytes: &mut Vec<u8>,
+        len: u64,
+        stored: &[u8],
+        packed: &PackedPart,
+    ) {
         assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
         assert_eq!(packed.index, self.next_part(), "a part packed as the object's next");
         let keyed = self.key.as_ref().map(|key| key.keyed);
         assert_eq!(packed.keyed, keyed, "a part sealed as its object is");
+        match &packed.stored {
+            Some(packed) => debug_assert!(packed[..] == *stored, "a part packed, stored so"),
+            None => assert_eq!(stored.len() as u64, len, "a raw part, stored as it is"),
+        }
         let offset = self.end.next_multiple_of(ALIGN);
         bytes.resize(bytes.len() + (offset - self.end) as usize, 0);
-        let stored = packed.stored(part);
         bytes.extend_from_slice(stored);
-        let len = stored.len() as u64;
-        self.stored.push(Stored { offset, len, crc: packed.crc, encoding: packed.encoding });
+        let stored_len = stored.len() as u64;
+        let encoding = packed.encoding;
+        self.stored.push(Stored { offset, len: stored_len, crc: packed.crc, encoding });
         self.tags.push(packed.tag);
-        self.data_len += part.len() as u64;
-        self.end = offset + len;
+        self.data_len += len;
+        self.end = offset + stored_len;
     }
 
     /// The object's last bytes, which follow those [`Packer::push`] returned: `footer`, the table,

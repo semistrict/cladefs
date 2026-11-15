@@ -480,7 +480,7 @@ impl Bucket {
         let last = state.last_commit;
         let fenced = Fenced { recovered: last, last_commit: last, chain };
         let keys = extent_remote::keys::Ring::clear();
-        let opening = Opening { state, fenced: Some(fenced), cache: None, keys };
+        let opening = Opening { state, fenced: Some(fenced), cache: None, keys, held: None };
         Store::recover(dir).unwrap().open(OPTIONS, opening).unwrap()
     }
 

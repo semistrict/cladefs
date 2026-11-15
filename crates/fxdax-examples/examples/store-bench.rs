@@ -44,7 +44,12 @@
 //!   on average, the slowest's and the longest of each, and how long their threads waited to run
 //!   (TASK-336). The data is `FXDAX_BENCH_DATA`'s: `text`, of sixteen letters at random, which
 //!   compresses about by half, as a build's files do, slower than a filesystem's structures (the
-//!   default); `noise`, which doesn't compress, framed in place; or `half`, one of each.
+//!   default); `noise`, which doesn't compress, framed in place; or `half`, one of each. fxdax: the
+//!   stores share what holds the parts they pack as their segments fill, as a daemon's do
+//!   (TASK-400), which `FXDAX_BENCH_EVICT` (0) has let go of every part before each closing, as a
+//!   governor short of memory would: what it held, took and let go of, the process's CPU time, and
+//!   how long the writes and commits took, which the looks ahead run behind. Sealed stores hold
+//!   none (TASK-411.5).
 //! - `writes`: N MiB (256) written to a store's open segments as extents of `FXDAX_BENCH_EXTENT`
 //!   KiB (1024), in a directory of the host's (`FXDAX_BENCH_DIR`, or a temporary one), read back
 //!   while open, then committed: MiB/s of the writes, of the reads, and how long the commit took
@@ -59,7 +64,7 @@
 //! The stores of all but `close-now`, `burst` and `durable` are in memory ([`MemDir`]), so that
 //! what is timed is the store's own work.
 
-use extent_store::{Description, Dir, HostDir, MemDir, Options, Store};
+use extent_store::{Description, Dir, HeldParts, HostDir, MemDir, Opening, Options, Store};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -403,12 +408,14 @@ impl Host {
     }
 
     /// The store in `dir`, made, of branch `id` of the host's cell, sealed or not, opened through
-    /// its uploader, which closes no segment between commits.
+    /// its uploader, which closes no segment between commits, holding the parts it packs ahead in
+    /// `held` (TASK-400), none if sealed.
     fn open(
         &self,
         dir: HostDir,
         id: u64,
         options: Options,
+        held: Arc<HeldParts>,
     ) -> (Arc<Store<HostDir>>, extent_store::upload::Remote<HostDir>) {
         let tenant = if self.sealed { Self::SEALED } else { Self::CLEAR };
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
@@ -418,7 +425,8 @@ impl Host {
         Store::make(&dir, description, Some("memory:///bench"), Some(volume)).unwrap();
         let recovering = Store::recover_unmade(dir).unwrap();
         let interval = Duration::from_secs(3600);
-        let uploading = extent_store::upload::Options { interval, ..Default::default() };
+        let uploading =
+            extent_store::upload::Options { interval, held: Some(held), ..Default::default() };
         let holding = (id, uploading);
         let bucket = self.bucket.clone();
         let _entered = self.runtime.enter();
@@ -451,7 +459,7 @@ fn writes(mib: u64) {
     let options = Options { segment_size: 1 << 30, ..Options::default() };
     let (store, _remote) = match &host {
         Some(host) => {
-            let (store, remote) = host.open(dir, 1, options);
+            let (store, remote) = host.open(dir, 1, options, HeldParts::new());
             (store, Some(remote))
         }
         None => (Arc::new(create(dir, options)), None),
@@ -494,6 +502,10 @@ fn framing(segments: u64) {
     const SEGMENT: u64 = 32;
     let (stores, hogs, cpus) = (env("STORES", 4u64), env("HOGS", 0usize), env("CPUS", 0usize));
     let (hog_nice, kind) = (env("HOG_NICE", 0i32), env("DATA", "text".to_owned()));
+    let evict = env("EVICT", 0u8) != 0;
+    let held = HeldParts::new();
+    let cpu_before = cpu_seconds();
+    let writing = std::sync::Mutex::new(Duration::ZERO);
     run_on(cpus);
     let temp = temp_dir();
     let host = Host::from_env();
@@ -521,6 +533,7 @@ fn framing(segments: u64) {
     std::thread::scope(|scope| {
         for store in 0..stores {
             let (temp, bytes, host) = (temp.path().join(format!("{store}")), &bytes, &host);
+            let (held, writing) = (&held, &writing);
             scope.spawn(move || {
                 std::fs::create_dir(&temp).unwrap();
                 // Segments close between commits alone, a commit after each 32 MiB.
@@ -528,17 +541,34 @@ fn framing(segments: u64) {
                 let dir = HostDir::new(&temp, true).unwrap();
                 let (store, _remote) = match host {
                     Some(host) => {
-                        let (store, remote) = host.open(dir, store + 1, options);
+                        let (store, remote) = host.open(dir, store + 1, options, held.clone());
                         (store, Some(remote))
                     }
-                    None => (Arc::new(create(dir, options)), None),
+                    None => {
+                        let description = Description {
+                            block_size: BLOCK as u32,
+                            capacity: 64 << 30,
+                            branch: BRANCH,
+                        };
+                        Store::make(&dir, description, None, None).unwrap();
+                        let opening = Opening { held: Some(held.clone()), ..Opening::new(BRANCH) };
+                        let store =
+                            Store::recover_unmade(dir).unwrap().open(options, opening).unwrap();
+                        store.made().unwrap();
+                        (Arc::new(store), None)
+                    }
                 };
                 let (branch, mut sequence) = (store.description().branch.id, 0);
                 for _ in 0..segments / stores {
+                    let started = Instant::now();
                     for _ in 0..SEGMENT {
                         let extent = ExtentId::new(branch, sequence);
                         store.write(extent, 0, &bytes(sequence)).unwrap();
                         sequence += 1;
+                    }
+                    *writing.lock().unwrap() += started.elapsed();
+                    if evict {
+                        held.evict_to(0);
                     }
                     store.close_segment().unwrap();
                     store.commit(None).unwrap();
@@ -586,6 +616,35 @@ fn framing(segments: u64) {
     println!("  the slowest: {}", named(after.slowest, 1));
     println!("  each phase's longest: {}", named(after.max, 1));
     println!("  past 50 ms: {}", after.slow - before.framings.slow);
+    let held = held.counts();
+    let mib = |bytes: u64| bytes as f64 / MIB as f64;
+    println!(
+        "  parts held: {:.1} MiB in all, at most {:.1} MiB at once, {:.1} MiB taken, {:.1} MiB \
+         let go of ({} parts)",
+        mib(held.held),
+        mib(held.peak),
+        mib(held.taken),
+        mib(held.evicted),
+        held.evicted_parts
+    );
+    let writing = writing.into_inner().unwrap();
+    println!(
+        "  CPU {:.2} s; writing each segment {:.1} ms on average",
+        cpu_seconds() - cpu_before,
+        writing.as_secs_f64() * 1e3 / count.max(1) as f64
+    );
+}
+
+/// The process's CPU time so far, user and system, in seconds.
+fn cpu_seconds() -> f64 {
+    // SAFETY: getrusage fills `usage`, which it is given.
+    let usage = unsafe {
+        let mut usage = std::mem::zeroed::<libc::rusage>();
+        assert_eq!(libc::getrusage(libc::RUSAGE_SELF, &mut usage), 0);
+        usage
+    };
+    let seconds = |time: libc::timeval| time.tv_sec as f64 + time.tv_usec as f64 / 1e6;
+    seconds(usage.ru_utime) + seconds(usage.ru_stime)
 }
 
 fn main() {

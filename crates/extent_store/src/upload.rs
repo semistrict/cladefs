@@ -44,7 +44,7 @@
 //! then on: its writer fenced, by a later writer, its branch deleted, or the log diverged, another
 //! writer's commits past it. Only opening the store anew takes the branch again then.
 
-use crate::{Dir, DirHold, File, Opening, Recovering, Store, read_object};
+use crate::{Dir, DirHold, File, HeldParts, Opening, Recovering, Store, read_object};
 use event_listener::{Event, Listener as _};
 use extent_remote::cache::Cache;
 use extent_remote::fetch::Budget;
@@ -221,6 +221,9 @@ pub struct Options {
     /// The host's cache of the bucket's objects, which its stores share: what the bucket
     /// acknowledged of a store's goes into it (TASK-165.8).
     pub cache: Option<Arc<Cache>>,
+    /// fxdax: what holds the parts of segments packed as they fill, which its stores share, if
+    /// the host has it ([`crate::Opening::held`], TASK-400): else each its own.
+    pub held: Option<Arc<HeldParts>>,
     /// The fencing token of a store never placed: its host's placement's.
     pub token: u64,
     /// fxdax: how many segments go between checkpoints, which recoveries start from: the segments
@@ -242,6 +245,7 @@ impl Default for Options {
             max_lag: 4096,
             max_lag_bytes: 1 << 30,
             cache: None,
+            held: None,
             token: 0,
             checkpoint_every: CHECKPOINT_EVERY,
             filling_wait: Duration::from_secs(30),
@@ -1031,7 +1035,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         holder: u64,
     ) -> Result<Option<Arc<Writer<B>>>, Failure> {
         let branch = recovering.branch();
-        let cache = self.options.cache.clone();
+        let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
         // The record, and the lease the writer takes after recovering the branch, at once: the
         // taking goes on from this read of it, a round trip less (TASK-165.11).
@@ -1048,7 +1052,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None => None,
             Some(record) if record.is_point() => {
                 let (state, keys) = self.point(bucket, branch, record).await?;
-                let opening = Opening { state, fenced: None, cache, keys: keys.clone() };
+                let opening =
+                    Opening { state, fenced: None, cache, keys: keys.clone(), held: parts };
                 let store = blocking(|| recovering.open(options, opening))?;
                 let _ = self.store.set(Arc::new(store));
                 self.hold_ring(&keys);
@@ -1156,12 +1161,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         };
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
-        let opening = Opening {
-            state: writer.state(),
-            fenced: Some(writer.fenced()),
-            cache,
-            keys: keys.clone(),
-        };
+        let (state, fenced) = (writer.state(), Some(writer.fenced()));
+        let opening = Opening { state, fenced, cache, keys: keys.clone(), held: parts };
         let store = blocking(|| recovering.open(options, opening))?;
         let _ = self.store.set(Arc::new(store));
         self.hold_ring(&keys);
