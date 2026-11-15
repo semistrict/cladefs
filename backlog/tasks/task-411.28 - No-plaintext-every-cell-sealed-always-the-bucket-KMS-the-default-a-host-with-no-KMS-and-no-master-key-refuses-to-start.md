@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 11:09'
-updated_date: '2026-11-15 19:09'
+updated_date: '2026-11-15 22:17'
 labels: []
 dependencies:
   - TASK-411.27
@@ -72,4 +72,12 @@ Progress 2026-11-15 (Mac):
 - Mutant patches: crates/fxdax/mutants/framed-in-copies.patch and large-extents-framed-in-copies.patch re-anchored (their hunks' context had the removed sectors.is_some()==packer.key().is_some() check and the sealing.is_some() arm); same mutation, same meaning (framing forced into copies). extent_remote's and the guest's applied unchanged.
 - Filed TASK-460: a sealed take reads its cell's object twice (6 GETs where a clear take asked 5); remote::tests::takes_recover... expectation raised to 6 with a pointer to it.
 - sim: SimBucket's journal described puts by a hash of their bytes; sealed bytes differ run to run (random keys and salts), so seeds_replay compared nothing deterministic. Puts are journaled by length now.
+
+2026-11-15, after the delegate (rate-limited before committing; its work committed as b1ce5f5c6, renamed by scripts/rename-to-cladefs.sh and merged three-way onto the branch as c43a45345):
+- Review (verifying-reviewer) found and a6e1d62e3 fixed: a ring holding keys read an object authenticated under a key it lacked as stored when its branch's record kept no DEKs, and records are unauthenticated: a bucket writer could strip an ancestor's DEKs and plant a checkpoint under a made-up key. keys::View::sealed is now true for every ring but the keyless one (test objects_authenticated_under_keys_unheld_are_refused_by_every_ring_holding_keys, failing before). Also sqlite_extents/tests/daemon.rs (Linux-only) took its writer under the tests' KMS, not the daemon's.
+- Review found, filed as TASK-411.29: a bucket-KMS KEK object deleted outright leaves pooled cell KEKs under the deleted KEK.
+- Linux-only, found on ubu1: cladefs-mount chose its KMS before blocking SIGTERM, so a KMS thread took SIGTERM and died (fuse_mount x3); fixed in 9fc2eaa46. A sealed raw file encrypted a write through a copy of its whole size, holding a 64 MiB write's size again outside extentd's room (hostile what_requests_hold_is_within_the_room); now a MiB at a time (9fc2eaa46).
+- After merging main's TASK-433.5 page cache: Shuttle crash rounds ceased to be functions of their seed (a crash's hole in an open segment's uncommitted tail decrypts to noise of the raw file's random salt); under shuttle the salt is Shuttle's seeded generator's (82ba34832).
+- Seen once each under load on ubu1, unexplained yet: disk.rs tenants_past_their_disk_limits_are_refused_while_others_write refused at 14 MiB of 16 (1 of 17 runs); extentd::tests::stores_fork_live_once_nothing_is_open passed then aborted (SIGABRT) at exit.
+- macOS: test.sh (clippy, workspace 2575-2584, Shuttle 37/37, scripts 353, go) green on a6e1d62e3 and on the merge 94b98e83f but for the Shuttle round fixed since; real Cloud KMS 12/12; OpenBao 19/19; local-kms 9/9.
 <!-- SECTION:NOTES:END -->

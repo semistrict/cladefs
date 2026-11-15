@@ -1060,12 +1060,26 @@ async fn keep_points(
     for (origin, recovered) in recoveries {
         match recovered {
             Ok((state, touched)) => live.keep_point(&state, touched),
-            Err(Error::Lost(lost)) if by == Points::Referred => {
-                if let Some(child) = needing(bucket, origin).await? {
-                    return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+            Err(Error::Lost(_)) if by == Points::Referred => {
+                let Some(child) = needing(bucket, origin).await? else {
+                    // Decided by its children's records, in other cells.
+                    live.unsettled = true;
+                    continue;
+                };
+                // Recovered again, after the child's record was read: its fork checkpointed the
+                // state at its point before it wrote its reference and the record
+                // (`branch::record_fork`), so this finds it, listing anew. What the first found
+                // lost may be another fork at the same segment number, a writer's that a
+                // takeover's dropped, the takeover's writer forking the child there since, after
+                // the first read the head (TASK-462): references name a fork point by its segment
+                // number alone.
+                match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
+                    Ok((state, touched)) => live.keep_point(&state, touched),
+                    Err(Error::Lost(lost)) => {
+                        return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+                    }
+                    Err(error) => return Err(error),
                 }
-                // Decided by its children's records, in other cells.
-                live.unsettled = true;
             }
             Err(error) => return Err(error),
         }
@@ -4570,6 +4584,51 @@ mod tests {
         let read = block_on(read_forked_from_a_deleted_parent());
         crate::set_rules(crate::Rules::ALL);
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
+    /// TASK-462: a pass finds a fork point's state lost, the head it read naming no segment there:
+    /// a fork's reference at that segment number, the fork dropped, its writer taken over. Then,
+    /// before it lists the point's references, the branch's writer forks a child there, in another
+    /// cell: the pass finds the child living on the point, and recovering the state again, after
+    /// the child's record was read, finds it, the fork having checkpointed it before it referred;
+    /// so the pass keeps it, rather than stopping as though the child's state were lost.
+    #[test]
+    fn passes_finding_a_fork_point_lost_then_a_child_forked_there_recover_it_again() {
+        let sim = SimBucket::new();
+        let direct = Arc::new(Direct(sim.clone()));
+        let (parent, dropped, child) = (celled(1, 1), celled(3, 3), celled(2, 2));
+        let writer = block_on(async {
+            branch::create(&*direct, parent, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
+            let extent = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let extents = vec![(extent, b"held".to_vec())];
+            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+            let key = layout::reference(parent, 1, dropped);
+            let bytes = layout::encode(&layout::Reference::of(forked(dropped).owner));
+            direct.put(&key, bytes.into(), PutMode::Create).await.unwrap();
+            writer
+        });
+        let now = Options { compact_below: 0.0, grace: 0 };
+        let mut pass = std::pin::pin!(collect_cell(&*sim, parent.cell, 7, &now));
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let listing = format!("list {}", layout::fork_point(parent, 1));
+        loop {
+            assert!(pass.as_mut().poll(&mut context).is_pending(), "the pass ended first");
+            if sim.describe(0) == listing {
+                break;
+            }
+            sim.complete(0, crate::testing::Fault::None);
+        }
+        block_on(async {
+            let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
+            let objects = forking.fork(forked(child), &mut writer.chain());
+            let at = writer.add_segment(objects.frame(writer.keys().sealing())).unwrap();
+            assert_eq!(at, 1, "the fork's segment");
+            writer.upload(at).await.unwrap();
+            writer.acknowledge().await.unwrap();
+        });
+        let (passed, _) = sim.served(pass);
+        assert!(passed.is_ok(), "{passed:?}");
     }
 
     /// What a fork to another cell reads of what it inherited, its parent having freed it,
