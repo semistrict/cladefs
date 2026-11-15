@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:55'
+updated_date: '2026-11-15 13:35'
 labels:
   - ci
 dependencies: []
@@ -25,7 +26,7 @@ Found in TASK-330.1 (2026-11-15). The sandboxes runs on main saved guest-kernel-
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The repo's caches fit in 10 GB at steady state (gh api repos/semistrict/fxdax/actions/cache/usage, after a day of main pushes)
+- [ ] #1 The repo's caches fit in 10 GB at steady state (gh api repos/semistrict/cladefs/actions/cache/usage, after a day of main pushes)
 - [ ] #2 The guest kernel is still cached, or can be had without a rebuild, a day after the last push that built it
 <!-- AC:END -->
 
