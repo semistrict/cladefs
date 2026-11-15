@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-13 10:20'
-updated_date: '2026-11-15 14:49'
+updated_date: '2026-11-15 20:13'
 labels:
   - bench
   - ubu1
@@ -25,7 +25,7 @@ TASK-371's AC #4 on ubu1, main 10f613290, CLADEFS_REMOTE_LATENCY_MS=25: bench-fs
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 bench-rounds.sh with no overrides puts the store on /mnt/fxdax-scratch and the file bucket on tmpfs (or a documented equivalent), and the sync-loop on ubu1 at 25 ms reads within 10% of 30/s
+- [x] #1 bench-rounds.sh with no overrides puts the store on /mnt/fxdax-scratch and the file bucket on tmpfs (or a documented equivalent), and the sync-loop on ubu1 at 25 ms reads within 10% of 17.5/s: since TASK-407 a durable commit is two bucket requests by design (the segment's create, then the head's swap; measured in TASK-407.5), so about 17.5/s, not the 30/s of one round trip before it
 - [x] #2 Earlier ubu1 measurements that ran with the store on ZFS home are noted where they're cited (doc-12's lag figures, TASK-322)
 <!-- AC:END -->
 
@@ -66,4 +66,13 @@ DoD #1 not run: the change is scripts and notes alone (scripts' suite 326 green 
 ubu1 left as found: worktree, results, scratch directory removed; fxjob ps showed none of mine. /dev/shm holds 7 empty fxdax-e2e-bucket.* of 2026-11-10 to 11-13, others' (TASK-331, noted there).
 
 Correction: the tree measured as main, da0b78edd, is main 836047da0, this change, and six commits another agent made on this branch meanwhile (15b90ab05..cdd40860e: test-only benchmarks in fxdax and extent_store behind cfg(test) and the testing feature, fxdax-gc-fill, gc-sweep.sh; no kernel source, nothing a sync runs).
+
+2026-11-15, the user's decision: AC #1's 30/s is stale. Since TASK-407 a durable commit is two bucket requests by design (the segment's create, then the head's swap; measured in TASK-407.5), so the sync-loop on ubu1 at 25 ms reads about 17.5/s on main, not 30/s. AC #1 reworded to within 10% of 17.5/s, naming TASK-407, and checked on the run above: 17.5/s on main da0b78edd, the store on /mnt/fxdax-scratch through fxjob's TMPDIR, the bucket on /dev/shm. OPEN_QUESTIONS.md's entry says it was decided.
+DoD #1 left unchecked: cargo nextest run --workspace on Linux (ubu1, under fxjob) has not run for this change (macOS: the scripts' suite green, 2026-11-15, on the branch rebased onto main 76fabab76). So the task stays In Progress until a ubu1 workspace run passes; then check DoD #1 and set it Done.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+bench-rounds.sh runs each run through the new scripts/test-e2e-job.sh, in the job's TMPDIR on ubu1's ext4 scratch disk (refusing another filesystem than ext4), its bucket test-e2e.sh's default on tmpfs, results copied back without stores, caches and images; before, each run's store and file bucket were on ubu1's ZFS home, whose syncs a durable sync measured (91 ms against 32.5). Earlier citations of ZFS-home runs noted (doc-12, TASK-322, TASK-371, three measurement READMEs). Verified: scripts/tests/test_e2e_job.py and the scripts' suite on macOS; on ubu1, bench-rounds.sh with no overrides wrote its store on /mnt/fxdax-scratch and its bucket on /dev/shm, the sync-loop 17.5/s at 25 ms on main (two bucket requests a durable commit since TASK-407; 33/s warm on the tree before it). Open: DoD #1, the workspace's tests on Linux.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:24'
-updated_date: '2026-11-15 14:48'
+updated_date: '2026-11-15 20:13'
 labels:
   - perf
   - review-2026-11-15
@@ -75,4 +75,6 @@ Verdict: real, and worse than the review's 150-200 B: 221-238 B an extent a fork
 The extent count of a real sandbox base is NOT known and not guessed: nothing reports it (fxdaxctl stat prints bytes only; extent_store::Store::extents() has it, unexposed). Filed TASK-454 to print it; until then the parent can read it on ubu1 only with code (e.g. a test or tool calling Store::extents().len() on the base's store).
 
 AC #1 is NOT met and left unchecked: the Linux daemon-level run (serves_hundreds_of_forks_of_a_base at 32,768 and 300,000; RssAnon, glibc overhead) and the real base's count were not done here (no ubu1 in this task). AC #2 checked: cost, the size it bites at, fix filed. DoD unchecked: only extent_store + fxdax ran on macOS (641 passed), not the workspace, not Linux.
+
+2026-11-15, rebased onto main as of TASK-433: bench_fork_extent_memory's check that opening and closing the forks again leaves the heap to the byte failed by 64 bytes, now and then. Traced with a counting allocator recording each live allocation's backtrace over one round (instrumentation removed again). None is a leak, and none is the stores'; three holders, each bounded: (1) the page cache's list of files (extent_store::pages, TASK-433) names closed files by Weak, whose ArcInner (176 B each) stays until the list is next pruned, by the flusher every quarter of Options::expire or by write_back_all; (2) on macOS, each of the 32 shards of the remotes' runtime's tokio list of tasks (8 workers x 4) boxes its pthread mutex, 64 B, the first time it is locked, the shard being the task id, numbered across the process, & 31; a round's uploaders reached shards none had; (3) extent_store::shared's thread-local list of the shared locks a thread holds allocates 64 B at a thread's first lock, and the runtime's blocking threads (block_in_place hands a worker to one) took their first lock in a later round, timing-dependent. Fixed in the benchmark's commit: settled() prunes (1); every_task_shard_locked() takes each shard once before the count (2); the remotes' runtime's threads make their list as they start, shared::prepare_thread through on_thread_start (3). Each taken out alone: (2) red 3 of 3 runs, (3) red 1 of 3. Passes at 64, 1,024 and 32,768 extents, forks 1 and 10 (six runs at 64,1024). The structure: no class to remove in the stores' code; the check counts the whole process, so what a process's shared runtime and threads first make shows in it, and the benchmark has them made before it counts.
 <!-- SECTION:NOTES:END -->
