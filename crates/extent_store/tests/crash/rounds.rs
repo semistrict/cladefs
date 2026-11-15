@@ -61,11 +61,119 @@ impl std::fmt::Debug for Model {
 /// parts stored compressed and of parts stored raw, which the kept rounds' passes compact alike.
 fn random_data(rng: &mut StdRng, most: usize) -> Vec<u8> {
     let blocks = rng.random_range(1..=most);
+    random_blocks(rng, blocks)
+}
+
+/// `blocks` blocks of data, which compress, or, half the time, don't.
+fn random_blocks(rng: &mut StdRng, blocks: usize) -> Vec<u8> {
     if rng.random_bool(0.5) {
         return (0..blocks * BLOCK).map(|_| rng.random()).collect();
     }
     let byte: u8 = rng.random();
     (0..blocks * BLOCK).map(|i| byte ^ (i / BLOCK) as u8).collect()
+}
+
+/// fxdax: the blocks of each of a burst's extents: under `large_extent`, so that the open segment
+/// holds it.
+const BURST_BLOCKS: usize = OPTIONS.large_extent as usize / BLOCK - 1;
+
+/// fxdax: how many extents a burst writes between two commits: more than two segments hold at
+/// most (`Options::segment_limit`), so that one fills, and the commit after spans segments
+/// (TASK-92.41), however full the open segment was, and though an uploader closes it once among
+/// them, as it may between two commits. Without bursts, a commit spanned segments only after a
+/// long run of writes, which an uploader's closing, when it came, cut short: the kept rounds made
+/// 26 to 33 such commits in 100 on the Mac, and 20 once in CI, at their bound (TASK-431).
+const BURST: usize =
+    2 * (OPTIONS.segment_size + OPTIONS.max_extent) as usize / (BURST_BLOCKS * BLOCK) + 1;
+
+/// A workload under way: the store, what it holds, and what its commits began with.
+struct Run<'a> {
+    store: &'a Store<MemDir>,
+    epochs: &'a mut Vec<Model>,
+    model: Model,
+    /// The last commit made durable.
+    durable: usize,
+    /// The extents written since the last commit.
+    open: Vec<ExtentId>,
+    next_sequence: u64,
+}
+
+impl Run<'_> {
+    /// A new extent of `data`.
+    fn write_new(&mut self, data: Vec<u8>) -> anyhow::Result<()> {
+        let extent = ExtentId::new(self.store.description().branch.id, self.next_sequence);
+        self.next_sequence += 1;
+        let result = self.store.write(extent, 0, &data);
+        if result.is_ok() {
+            self.model.extents.insert(extent, data);
+            self.open.push(extent);
+        }
+        result
+    }
+
+    /// More of an open extent, over what it holds or past it.
+    fn write_more(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+        let extent = self.open[rng.random_range(0..self.open.len())];
+        let held = self.model.extents[&extent].len() / BLOCK;
+        let offset = rng.random_range(0..=held);
+        let data = random_data(rng, 2);
+        let result = self.store.write(extent, (offset * BLOCK) as u64, &data);
+        if result.is_ok() {
+            let contents = self.model.extents.get_mut(&extent).unwrap();
+            if contents.len() < offset * BLOCK + data.len() {
+                contents.resize(offset * BLOCK + data.len(), 0);
+            }
+            contents[offset * BLOCK..offset * BLOCK + data.len()].copy_from_slice(&data);
+        }
+        result
+    }
+
+    /// Frees an extent the store holds.
+    fn free(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+        let extents: Vec<_> = self.model.extents.keys().copied().collect();
+        let extent = extents[rng.random_range(0..extents.len())];
+        let result = self.store.free(extent);
+        if result.is_ok() {
+            self.model.extents.remove(&extent);
+            self.open.retain(|open| *open != extent);
+        }
+        result
+    }
+
+    /// A commit, durable or only ordered, setting the root or not.
+    fn commit(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+        let ordered = rng.random_bool(0.5);
+        let root = rng.random_bool(0.5).then(|| format!("root {}", self.epochs.len()));
+        if let Some(root) = &root {
+            self.model.root = root.clone().into_bytes();
+        }
+        self.epochs.push(self.model.clone());
+        self.open.clear();
+        let root = root.as_deref().map(str::as_bytes);
+        let store = self.store;
+        let result = if ordered { store.commit_ordered(root) } else { store.commit(root) };
+        if result.is_ok() && !ordered {
+            self.durable = self.epochs.len() - 1;
+        }
+        result
+    }
+
+    /// The commits only ordered so far made durable.
+    fn flush(&mut self) -> anyhow::Result<()> {
+        let result = self.store.flush();
+        if result.is_ok() {
+            self.durable = self.epochs.len() - 1;
+        }
+        result
+    }
+
+    /// fxdax: a burst, [`BURST`] new extents, then the commit that spans the segments they filled.
+    fn burst(&mut self, rng: &mut StdRng) -> anyhow::Result<()> {
+        for _ in 0..BURST {
+            self.write_new(random_blocks(rng, BURST_BLOCKS))?;
+        }
+        self.commit(rng)
+    }
 }
 
 /// Runs a random workload on `store`, which holds `model`, committed or not, and whose commits up
@@ -77,87 +185,33 @@ pub fn workload(
     rng: &mut StdRng,
     store: &Store<MemDir>,
     epochs: &mut Vec<Model>,
-    mut model: Model,
-    mut durable: usize,
+    model: Model,
+    durable: usize,
 ) -> (usize, Model) {
-    let branch = store.description().branch;
-    let mut open: Vec<ExtentId> = Vec::new();
-    let mut next_sequence = store.info().unwrap().next_sequence;
+    let next_sequence = store.info().unwrap().next_sequence;
+    let mut run = Run { store, epochs, model, durable, open: Vec::new(), next_sequence };
     for _ in 0..STEPS {
-        let result = match rng.random_range(0..14) {
+        let result = match rng.random_range(0..15) {
             // A new extent, small or large.
-            0..=3 => {
-                let extent = ExtentId::new(branch.id, next_sequence);
-                next_sequence += 1;
-                let data = random_data(rng, 8);
-                let result = store.write(extent, 0, &data);
-                if result.is_ok() {
-                    model.extents.insert(extent, data);
-                    open.push(extent);
-                }
-                result
-            }
-            // More of an open extent, over what it holds or past it.
-            4..=5 if !open.is_empty() => {
-                let extent = open[rng.random_range(0..open.len())];
-                let held = model.extents[&extent].len() / BLOCK;
-                let offset = rng.random_range(0..=held);
-                let data = random_data(rng, 2);
-                let result = store.write(extent, (offset * BLOCK) as u64, &data);
-                if result.is_ok() {
-                    let contents = model.extents.get_mut(&extent).unwrap();
-                    if contents.len() < offset * BLOCK + data.len() {
-                        contents.resize(offset * BLOCK + data.len(), 0);
-                    }
-                    contents[offset * BLOCK..offset * BLOCK + data.len()].copy_from_slice(&data);
-                }
-                result
-            }
-            6..=7 if !model.extents.is_empty() => {
-                let extents: Vec<_> = model.extents.keys().copied().collect();
-                let extent = extents[rng.random_range(0..extents.len())];
-                let result = store.free(extent);
-                if result.is_ok() {
-                    model.extents.remove(&extent);
-                    open.retain(|open| *open != extent);
-                }
-                result
-            }
+            0..=3 => run.write_new(random_data(rng, 8)),
+            4..=5 if !run.open.is_empty() => run.write_more(rng),
+            6..=7 if !run.model.extents.is_empty() => run.free(rng),
             // Cleaning, which commits durably, or a commit, durable or only ordered, setting the
             // root or not.
-            8..=11 => {
-                let ordered = rng.random_bool(0.5);
-                let root = rng.random_bool(0.5).then(|| format!("root {}", epochs.len()));
-                if let Some(root) = &root {
-                    model.root = root.clone().into_bytes();
-                }
-                epochs.push(model.clone());
-                open.clear();
-                let root = root.as_deref().map(str::as_bytes);
-                let result = if ordered { store.commit_ordered(root) } else { store.commit(root) };
-                if result.is_ok() && !ordered {
-                    durable = epochs.len() - 1;
-                }
-                result
-            }
-            // The commits only ordered so far made durable.
-            12 => {
-                let result = store.flush();
-                if result.is_ok() {
-                    durable = epochs.len() - 1;
-                }
-                result
-            }
+            8..=11 => run.commit(rng),
+            12 => run.flush(),
             // fxdax: the open segment closed between commits, as an uploader has it closed: its
             // footer names commits only ordered, maybe (TASK-92.16).
             13 => store.close_now().map(drop),
+            // fxdax: a burst, a quarter of the time: each writes more than two segments.
+            14 if rng.random_ratio(1, 4) => run.burst(rng),
             _ => Ok(()),
         };
         if result.is_err() {
             break;
         }
     }
-    (durable, model)
+    (run.durable, run.model)
 }
 
 /// What `store` holds.
