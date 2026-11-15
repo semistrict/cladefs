@@ -1,0 +1,267 @@
+// Copyright 2026 The fxdax Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! fxdax: reads and writes of the host's files bypassing its page cache (TASK-433): `O_DIRECT` on
+//! Linux, `F_NOCACHE` on macOS, where the file system allows. fxdax keeps what it caches in memory
+//! of its own, budgeted (its extent cache, the fetchers' parts, held parts); the host's page cache
+//! is a second memory, unbudgeted, holding the same bytes again, which the files it writes and
+//! reads keep out of.
+//!
+//! Direct I/O on Linux moves whole blocks, from memory aligned to them: what is read here is read
+//! by the blocks around it, into a buffer aligned so, and what is written that doesn't start or
+//! end at a block's edge is merged into the blocks it touches, read first, unless the caller holds
+//! the block that ends what it wrote before ([`Tail`]), as a log appended to does. A file that
+//! can't bypass the cache (a file system without `O_DIRECT`) is read and written as it is.
+
+use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::fs::File;
+use std::io;
+use std::ops::Range;
+use std::os::fd::AsRawFd as _;
+use std::os::unix::fs::FileExt as _;
+
+/// The block that direct I/O moves, and aligns memory to: the largest a host's disks have.
+pub const BLOCK: u64 = 4096;
+
+/// Makes I/O on `file` bypass the host's page cache, if its file system allows, and returns whether
+/// it does.
+pub fn bypass(file: &File) -> bool {
+    let fd = file.as_raw_fd();
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: Reads and sets the status flags of an open file descriptor.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT) == 0
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: Sets an option of an open file descriptor.
+        unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) == 0 }
+    }
+}
+
+/// Memory aligned to [`BLOCK`], zeroed, a whole number of blocks long.
+struct Aligned {
+    ptr: *mut u8,
+    len: usize,
+}
+
+// SAFETY: It owns its memory, which nothing else points to.
+unsafe impl Send for Aligned {}
+
+impl Aligned {
+    /// `blocks` blocks, zeroed.
+    fn zeroed(blocks: u64) -> Self {
+        let len = (blocks.max(1) * BLOCK) as usize;
+        let layout = Layout::from_size_align(len, BLOCK as usize).expect("a block-aligned layout");
+        // SAFETY: The layout is of a non-zero size.
+        let ptr = unsafe { alloc_zeroed(layout) };
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Self { ptr, len }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: It owns `len` bytes at `ptr`, initialized.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
+
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: It owns `len` bytes at `ptr`, initialized, and is borrowed mutably.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
+    }
+}
+
+impl Drop for Aligned {
+    fn drop(&mut self) {
+        let layout = Layout::from_size_align(self.len, BLOCK as usize).expect("its layout");
+        // SAFETY: Allocated with this layout by `zeroed`.
+        unsafe { dealloc(self.ptr, layout) };
+    }
+}
+
+/// The blocks around `range`: from the block it starts in to the end of the block it ends in.
+fn blocks(range: &Range<u64>) -> Range<u64> {
+    let start = range.start / BLOCK * BLOCK;
+    start..range.end.div_ceil(BLOCK) * BLOCK
+}
+
+/// Reads all of `buf` at `offset` in `file`, zeros past its end.
+fn read_fully(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()> {
+    while !buf.is_empty() {
+        match file.read_at(buf, offset) {
+            Ok(0) => {
+                buf.fill(0);
+                return Ok(());
+            }
+            Ok(read) => {
+                buf = &mut buf[read..];
+                offset += read as u64;
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => {}
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// Reads `buf.len()` bytes at `offset` in `file`, which bypasses the page cache if `direct`: by
+/// the blocks around them, into memory aligned to them. Bytes past the file's end read as zeros.
+pub fn read_at(file: &File, direct: bool, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    let range = offset..offset + buf.len() as u64;
+    let aligned_already = offset % BLOCK == 0
+        && buf.len() as u64 % BLOCK == 0
+        && (buf.as_ptr() as usize) % BLOCK as usize == 0;
+    if !direct || buf.is_empty() || aligned_already {
+        return read_fully(file, buf, offset);
+    }
+    let around = blocks(&range);
+    let mut bounce = Aligned::zeroed((around.end - around.start) / BLOCK);
+    read_fully(file, bounce.bytes_mut(), around.start)?;
+    let from = (offset - around.start) as usize;
+    buf.copy_from_slice(&bounce.bytes()[from..from + buf.len()]);
+    Ok(())
+}
+
+/// The block a writer holds that ends what it wrote to a file before, which its next write merges
+/// into rather than read from the file: a log's last block, partly filled, appended to again and
+/// again, which would be read back from the disk for each append otherwise.
+#[derive(Default)]
+pub struct Tail {
+    held: Option<(u64, Box<[u8]>)>,
+}
+
+impl Tail {
+    /// The block at `at`, if held.
+    fn block(&self, at: u64) -> Option<&[u8]> {
+        self.held.as_ref().filter(|(held, _)| *held == at).map(|(_, block)| &**block)
+    }
+}
+
+/// Writes `bytes` at `offset` in `file`, which bypasses the page cache if `direct`: whole blocks,
+/// from memory aligned to them, what `bytes` doesn't cover of the first and last block merged in,
+/// read from the file unless `tail` holds the last it wrote. The file's size is as a plain write's
+/// would leave it: the blocks written past the end of what was written are cut off. `tail` holds,
+/// after, the block that ends what this wrote, if it ends partway through one.
+pub fn write_at(
+    file: &File,
+    direct: bool,
+    tail: &mut Tail,
+    bytes: &[u8],
+    offset: u64,
+) -> io::Result<()> {
+    if !direct || bytes.is_empty() {
+        return file.write_all_at(bytes, offset);
+    }
+    let range = offset..offset + bytes.len() as u64;
+    let around = blocks(&range);
+    let len = file.metadata()?.len();
+    let mut buf = Aligned::zeroed((around.end - around.start) / BLOCK);
+    // The edges' blocks, what this doesn't write of them: as held, or as on the disk; none past
+    // the file's end, zeros there. One block alone is read once.
+    let (first, last) = (around.start, around.end - BLOCK);
+    if range.start > first {
+        merge_from(file, tail, len, &mut buf, around.start, first)?;
+    }
+    if range.end < last + BLOCK && !(last == first && range.start > first) {
+        merge_from(file, tail, len, &mut buf, around.start, last)?;
+    }
+    let from = (offset - around.start) as usize;
+    buf.bytes_mut()[from..from + bytes.len()].copy_from_slice(bytes);
+    file.write_all_at(buf.bytes(), around.start)?;
+    // What a plain write would leave: the file as long as what it held, or what this wrote.
+    let end = len.max(range.end);
+    if around.end > end {
+        file.set_len(end)?;
+    }
+    let last = around.end - BLOCK;
+    tail.held = (range.end % BLOCK != 0).then(|| {
+        let at = (last - around.start) as usize;
+        (last, buf.bytes()[at..at + BLOCK as usize].into())
+    });
+    Ok(())
+}
+
+/// Fills the block at `at` of `buf`, which holds the blocks from `start` on, with what the file of
+/// `len` bytes holds there: as `tail` holds it, or read; zeros past the file's end.
+fn merge_from(
+    file: &File,
+    tail: &Tail,
+    len: u64,
+    buf: &mut Aligned,
+    start: u64,
+    at: u64,
+) -> io::Result<()> {
+    if at >= len {
+        return Ok(());
+    }
+    let place = (at - start) as usize..(at - start + BLOCK) as usize;
+    match tail.block(at) {
+        Some(held) => buf.bytes_mut()[place].copy_from_slice(held),
+        None => read_fully(file, &mut buf.bytes_mut()[place], at)?,
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A file in `dir`, bypassing the page cache if the file system allows: whether it does.
+    fn opened(dir: &std::path::Path) -> (File, bool) {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dir.join("file"))
+            .unwrap();
+        let direct = bypass(&file);
+        (file, direct)
+    }
+
+    /// Writes at any offset and of any length, appended or over what was written, read back at
+    /// any offset and length, are as plain I/O's would be, the file as long as what was written;
+    /// appends merged into the block held read nothing back.
+    #[test]
+    fn unaligned_writes_and_reads_are_as_plain_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, direct) = opened(dir.path());
+        let mut tail = Tail::default();
+        let mut model = Vec::new();
+        let mut write = |bytes: &[u8], offset: u64, model: &mut Vec<u8>| {
+            write_at(&file, direct, &mut tail, bytes, offset).unwrap();
+            let end = offset as usize + bytes.len();
+            if model.len() < end {
+                model.resize(end, 0);
+            }
+            model[offset as usize..end].copy_from_slice(bytes);
+        };
+        let pattern = |seed: u8, len: usize| -> Vec<u8> {
+            (0..len).map(|at| seed.wrapping_add((at % 251) as u8)).collect()
+        };
+        // Appends, a record at a time, across blocks.
+        let mut at = 0;
+        for (seed, len) in [(1, 100), (2, 3000), (3, 5000), (4, 1), (5, 8192), (6, 77)] {
+            write(&pattern(seed, len), at, &mut model);
+            at += len as u64;
+        }
+        // Over what was written, unaligned, within a block and across them.
+        write(&pattern(7, 10), 50, &mut model);
+        write(&pattern(8, 6000), 2000, &mut model);
+        // Past the end, leaving a gap.
+        write(&pattern(9, 300), 20_000, &mut model);
+        assert_eq!(file.metadata().unwrap().len(), model.len() as u64);
+        for (offset, len) in [(0, model.len()), (1, 4095), (4000, 200), (8191, 2), (19_999, 302)] {
+            let mut read = vec![0; len];
+            read_at(&file, direct, &mut read, offset as u64).unwrap();
+            let mut want = vec![0; len];
+            let end = (offset + len).min(model.len());
+            want[..end - offset].copy_from_slice(&model[offset..end]);
+            assert_eq!(read, want, "{len} bytes at {offset}");
+        }
+    }
+}

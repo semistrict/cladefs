@@ -2397,6 +2397,9 @@ fn durable_commits_keep_the_open_segments_pages_cached_on_the_host() {
     let (written, cached) =
         ((8 * BLOCK).div_ceil(page_size()), cached_pages(&path("open-segments")));
     assert!(cached > written / 2, "{cached} of the open segment's {written} pages cached");
+    // TASK-433.2: its log, appended to at each commit, bypasses the page cache, holding its last
+    // block in memory of the store's own.
+    assert_eq!(cached_pages(&path("logs")), 0, "the open segment's log's pages cached");
     store.close_segment().unwrap();
     store.commit(None).unwrap();
     // Framed, on a thread of its own, which no commit waits for, nothing written since the commit
