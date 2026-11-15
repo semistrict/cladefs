@@ -129,13 +129,14 @@ def judge_command(role, command, root):
     targets = [name for target in REDIRECT.findall(command)
                if (name := relative(root / target if not os.path.isabs(target) else target, root))
                and forbidden(name)]
-    side = "what checks the code" if role == "implement" else "code"
+    side, agent = ("what checks the code", "an implementing agent") if role == "implement" else \
+        ("code", "a test-writing agent")
     if targets:
-        return refuse(f"this command writes {targets[0]}, {side}, which a {role} agent leaves "
-                      "to the other side")
+        return refuse(f"this command writes {targets[0]}, {side}, which {agent} leaves to the "
+                      "other side")
     if named and WRITES.search(command):
-        return refuse(f"this command may write {named[0]}, {side}, which a {role} agent leaves "
-                      "to the other side")
+        return refuse(f"this command may write {named[0]}, {side}, which {agent} leaves to the "
+                      "other side")
     return 0
 
 
