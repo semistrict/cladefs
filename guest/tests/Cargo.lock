@@ -1120,6 +1120,8 @@ dependencies = [
  "aws-sdk-kms",
  "base64 0.22.1",
  "bytes",
+ "crc-fast",
+ "object_store",
  "reqwest",
  "serde",
  "serde_json",

@@ -386,8 +386,8 @@ branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 **Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
 host's KMS, the cells of a tenant whose KEK it holds are sealed: the bucket,
 the stores' directories and the part cache hold their data encrypted. The KMS
-is `local:///DIR`, a fake for tests and development, AWS KMS (below), or
-OpenBao's Transit engine: `openbao://HOST[:PORT]/MOUNT?key=fxdax-tenant-{tenant}`
+is `local:///DIR`, a fake for tests and development, AWS KMS or Google Cloud KMS
+(below), or OpenBao's Transit engine: `openbao://HOST[:PORT]/MOUNT?key=fxdax-tenant-{tenant}`
 (`openbaos://` over TLS, `&ca=FILE` for a private CA; `&namespace=NS`;
 `&keys=FILE` naming tenants' own keys), each tenant's KEK the Transit key the
 template names, `{tenant}` its ID in hex. Its token is
@@ -433,6 +433,21 @@ forget its keys on every host and stop serving it before the waiting period
 ends, as AWS then forgets the key (TASK-411.19). Rotating a key needs nothing
 of fxdax: what its older versions wrapped still unwraps. The tests run against
 local-kms, an emulator (`scripts/test-local-kms.sh`, Go to install it).
+
+**Google Cloud KMS** (backlog doc-16, Real KMSes). With
+`FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=fxdax-tenant-{tenant}`,
+each tenant's KEK is the key `fxdax-tenant-<tenant in hex>` in that key ring
+(symmetric, purpose `ENCRYPT_DECRYPT`), a wrap its `:encrypt`, bound to the
+tenant as associated data. A tenant bringing its own key, in a project of its
+own, is named in a file given as `&keys=FILE`, a line `TENANT
+projects/P2/locations/L2/keyRings/R2/cryptoKeys/K` each. Each tenant grants
+the hosts' service account `roles/cloudkms.cryptoKeyEncrypterDecrypter` on its
+key alone; taking the role away, or disabling the key's versions, revokes it;
+destroying them shreds the tenant. Hosts authenticate with Application Default
+Credentials, as for `gs://` buckets (`GOOGLE_APPLICATION_CREDENTIALS`, or the
+metadata server); `FXDAX_KMS_GCP_TOKEN`, an access token, is for development.
+A tenant that rotates its key keeps its old versions enabled: cells made
+before stay wrapped under them (TASK-411.21).
 
 ### `vendor/firecracker`: the VMM
 

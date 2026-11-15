@@ -23,6 +23,14 @@ aws-sdk-kms.workspace = true
 # the build already, through object_store and extent_remote.
 base64.workspace = true
 bytes = "1.12.1"
+# fxdax: Google Cloud KMS's REST API (TASK-411.18), each in the build already through object_store
+# and extent_remote: reqwest (MIT OR Apache-2.0) over rustls, serde_json (MIT OR Apache-2.0),
+# base64 (MIT OR Apache-2.0), crc-fast's CRC32C (MIT OR Apache-2.0) for its integrity fields,
+# tokio's timer (MIT) between retries, url's query parsing (MIT OR Apache-2.0); and object_store's
+# (MIT OR Apache-2.0) GCP credentials, Application Default Credentials as fxdax's gs:// buckets
+# have them.
+crc-fast.workspace = true
+object_store.workspace = true
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 serde.workspace = true
 serde_json = "1.0.154"

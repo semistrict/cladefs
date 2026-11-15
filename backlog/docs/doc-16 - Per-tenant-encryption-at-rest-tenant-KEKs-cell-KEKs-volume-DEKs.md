@@ -7,7 +7,7 @@ updated_date: '2026-11-15 04:05'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.18 (Google Cloud KMS, below: **Real KMSes: Google Cloud KMS**) are implemented.
 
 ## Goals
 
@@ -156,7 +156,8 @@ dropped with its pool, never written out unwrapped.
   as `layout::FORMAT` 5 refused 4 (doc-11 rule 1).
 - **aws-lc-rs** *(decided)* for AES-256-GCM, AES-256-XTS (if it has XTS; `storage_xts` otherwise)
   and HKDF: already in the lock file, Apache-2.0 and ISC, AES-NI and ARMv8 AES.
-- **Real KMS backends later** *(decided)*: a trait and a local fake first.
+- **Real KMS backends later** *(decided)*: a trait and a local fake first. Then (the user's choice,
+  2026-11-14) OpenBao Transit, AWS KMS and Google Cloud KMS (below: **Real KMSes: Google Cloud KMS**).
 
 ## What TASK-411.3 made
 
@@ -654,3 +655,94 @@ start `bao server -dev` themselves.
   without `bao` (`FXDAX_BAO`, else `PATH`), unless `FXDAX_REQUIRE_OPENBAO` is set: then it fails.
   `scripts/test-openbao.sh` fetches OpenBao's release (2.7.2, by digest, `scripts/lib/openbao.sh`)
   and runs them so required; CI's `object-stores` job could run it (proposed, not added).
+
+## Real KMSes: Google Cloud KMS
+
+TASK-411.18, `extent_keys::kms::gcp` (2026-11-15). A real backend beside `LocalKms`, over Cloud
+KMS's REST API (`cloudkms.googleapis.com/v1`).
+
+- **Configuration.** `FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE]`.
+  A tenant's KEK is a `cryptoKey` named as `kms::KeyNames` says: the template, `{tenant}` the tenant
+  in hexadecimal, an id in ring `R` (`fxdax-tenant-{tenant}`); or a line of the overrides file,
+  `TENANT NAME`, where `NAME` is an id in `R` or a key's whole resource name,
+  `projects/P2/locations/L2/keyRings/R2/cryptoKeys/K`, in a project of the tenant's own (BYOK,
+  cross-project). Each name is checked as the URL is read (project, location, ids of 1 to 63
+  letters, digits, `_` and `-`; unknown parameters refused), so a bad one fails the host's KMS, not
+  a call.
+- **Credentials.** Application Default Credentials as `object_store` finds them for fxdax's `gs://`
+  buckets (`GoogleCloudStorageBuilder::from_env`, its credential provider, which caches and renews
+  tokens): `GOOGLE_APPLICATION_CREDENTIALS` (a service account's key file, or a user's), gcloud's
+  well-known `application_default_credentials.json`, else the metadata server (GCE, GKE workload
+  identity). Not covered by `object_store`: `external_account` files (workload identity federation
+  from outside GCP) and impersonation. For development only, `FXDAX_KMS_GCP_TOKEN` holds an access
+  token used as is (`gcloud auth print-access-token`, an hour's). `GOOGLE_CLOUD_QUOTA_PROJECT`, if
+  set, is sent as `x-goog-user-project`. Tokens go to the KMS alone; neither they nor keys are
+  logged or in any error.
+- **What a tenant does.** Makes a symmetric key (purpose `ENCRYPT_DECRYPT`,
+  `GOOGLE_SYMMETRIC_ENCRYPTION`, software or HSM) and grants fxdax's service account
+  `roles/cloudkms.cryptoKeyEncrypterDecrypter` on that key alone; for a key in its own project,
+  gives the operator the key's resource name for the overrides file. Revoking is taking the role
+  away or disabling the key's versions; shredding is destroying them.
+- **A wrap** is `:encrypt` of the key's 32 bytes under the tenant's key (its primary version), with
+  `additionalAuthenticatedData` `fxdax-tenant:<tenant hex>`, so that what was wrapped for one
+  tenant is refused to another even under one key (overrides may share one); and
+  `plaintextCrc32c` and `additionalAuthenticatedDataCrc32c`, the answer checked for
+  `verifiedPlaintextCrc32c`, `verifiedAdditionalAuthenticatedDataCrc32c`, its `ciphertextCrc32c`,
+  and a version `NAME/cryptoKeyVersions/N` of the key asked (CRC32C by `crc-fast`). **An unwrap**
+  is `:decrypt` of the ciphertext with the same associated data and `ciphertextCrc32c`, its
+  `plaintextCrc32c` checked, under the key's name: the ciphertext names its version, so any
+  version the KMS keeps enabled unwraps what it wrapped. A plaintext not 32 bytes is not authentic.
+- **Wrapped bytes** (`kms::real`, shared by the real backends, TASK-411.16, .17): `fxkr`, format 1,
+  the backend's scheme (a length byte, `gcp-kms`), the key's resource name (two bytes big-endian of
+  length, then the name), then the KMS's ciphertext (113 bytes for a 32-byte key, software
+  protection). An unwrap refuses bytes of another backend (`LocalKms`'s `fxkw` among them), or
+  naming another key than the tenant's, as `Unauthentic`, asking the KMS nothing. A tenant whose
+  key's name changes (a moved override) has its old wraps refused so: rewrapping is not built.
+- **Refusals, as Cloud KMS answered them** (2026-11-15, the unit test
+  `kms::gcp::tests::refusals_are_mapped_as_cloud_kms_answers_them` holds the bodies):
+  - `NOT_FOUND` "CryptoKey NAME not found." (the key missing; a missing key ring answers the same)
+    → `NoSuchTenant`: the tenant's cells are made in the clear. Any other `NOT_FOUND` ("Project
+    'projects/X' not found.", a location Cloud KMS has not) → `Io`, so that a wrong project in an
+    override fails closed. A misnamed key ring in the URL reads as every template tenant keyless,
+    their new cells in the clear (TASK-411.22): check the URL.
+  - `PERMISSION_DENIED` (the role taken away, or a project fxdax may not see: Cloud KMS says "or it
+    may not exist") → `Revoked`.
+  - `FAILED_PRECONDITION` "NAME/cryptoKeyVersions/N is not enabled, current state is: S.", its
+    `PreconditionFailure` violation `KEY_S` (seen: `KEY_DISABLED`, `KEY_DESTROY_SCHEDULED`; the
+    message read if no violation says): `DISABLED` → `Revoked`; `DESTROY_SCHEDULED`, `DESTROYED`
+    → `Destroyed`. (A version reaches `DESTROYED` a day after scheduling at the soonest: not seen
+    yet, mapped by the same rule.) Both for a wrap (its primary) and an unwrap (the version that
+    wrapped it).
+  - `INVALID_ARGUMENT` of a decrypt ("Decryption failed.", wrong associated data; "the ciphertext
+    is invalid"; `INDECIPHERABLE_CIPHERTEXT_FOR_CRYPTOKEY`) → `Unauthentic`; but `INVALID_CHECKSUM`
+    (a CRC32C failed in transit) → `Io`, retried.
+  - `UNAUTHENTICATED` (fxdax's own credentials), `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`,
+    other 5xx and 429, network failures and timeouts (30 s a call, 10 s to connect) → `Io`, naming
+    the call and the key; `UNAVAILABLE`, `INTERNAL`, `DEADLINE_EXCEEDED`, untyped 5xx and 429,
+    checksums and network failures retried twice (after 200 ms and 1 s), as Google's client
+    libraries retry `Encrypt` and `Decrypt`.
+- **Changes of state take effect eventually**: a version disabled, enabled, destroyed or made
+  primary took from a few seconds to about two minutes to show in `:encrypt` and `:decrypt`
+  (2026-11-15). A tenant revoking is not instant either.
+- **Rotation.** A tenant's new primary version wraps new cell KEKs; old cells' KEKs stay wrapped
+  under the version that wrapped them, which must stay enabled: destroying an old version shreds
+  every cell whose KEK it wrapped (TASK-411.21).
+- **Client.** reqwest over rustls (aws-lc-rs, the platform's roots), serde_json, base64,
+  crc-fast, tokio's timer, url's query parsing, and `object_store`'s GCP credentials: each in the
+  build already (MIT OR Apache-2.0, tokio MIT), no new crate. Google's own `google-cloud-kms-v1`
+  and `google-cloud-auth` (Apache-2.0) would add their gax stack for two calls, and a second
+  credential story beside the buckets'.
+- **Tests.** Against real Cloud KMS, project `echophase-connectome-test`, key ring
+  `projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test` (or
+  `FXDAX_KMS_GCP_TEST_RING`), keys `fxdax-test-1` to `-5` and `fxdax-probe`, made if missing, a
+  day's scheduled destruction (`extent_keys::testing::gcp::Admin`); skipped, saying why, unless
+  `FXDAX_KMS_GCP_TOKEN` holds a token, so CI, which holds no GCP secret, skips them:
+  `FXDAX_KMS_GCP_TOKEN=$(gcloud auth print-access-token) cargo nextest run -p extent_keys -p fxdax -E 'test(/gcp::service|google_cloud_kms/)'`.
+  `extent_keys` `kms::gcp::service`: `keys_wrap_unwrap_and_bind_their_tenant` (header, other
+  tenants, a tenant sharing the key refused by associated data, changed and truncated ciphertexts,
+  `LocalKms`'s bytes, no key, a foreign project), `rotated_keys_unwrap_old_wraps_until_their_version_is_destroyed`,
+  `disabled_versions_revoke_until_enabled`, `destroyed_primaries_destroy`; `fxdax`
+  `extents::tests::sealed_stores_open_through_google_cloud_kms` (`FXDAX_KMS=gcp-kms://...`: a
+  sealed store made, its cell KEK unwrapped by the KMS to the KEK its DEK is under, reopened,
+  forked). Billing: one enabled software version per key kept (`fxdax-test-1`, `-2`, `-3`, `-5`),
+  each run destroying the versions it rotates out; `fxdax-test-4` and `fxdax-probe` keep none.
