@@ -71,6 +71,11 @@ class Job(unittest.TestCase):
         )
         return done.returncode, done.stderr
 
+    def moved(self):
+        """What a run says as it ends: where its results are, and the directory it ran in."""
+        where = self.given()[0]
+        return f"Results: {self.tree / 'results'} (the run's {where})\n"
+
     def given(self):
         """What test-e2e.sh was given: its results directory, its bucket and its arguments."""
         return (self.tree / "results" / "given.txt").read_text().splitlines()
@@ -82,7 +87,8 @@ class Job(unittest.TestCase):
         return sorted(path.name for path in self.tree.iterdir())
 
     def test_the_run_writes_in_the_jobs_temporary_directory_and_its_results_come_back(self):
-        self.assertEqual(self.job("bench-fs-fxfs-guest-dax"), (0, ""))
+        status, errors = self.job("bench-fs-fxfs-guest-dax")
+        self.assertEqual((status, errors), (0, self.moved()))
         where, bucket, *arguments = self.given()
         # In a directory of its own there, which is gone, as nothing else of the run's is left.
         self.assertEqual(Path(where).parent, self.tree / "tmp")
@@ -93,16 +99,19 @@ class Job(unittest.TestCase):
         self.assertEqual((self.tree / "asked").read_text(), f"-no FSTYPE -T {self.tree / 'tmp'}\n")
 
     def test_the_stores_caches_and_root_filesystems_are_no_results(self):
-        self.assertEqual(self.job("--tag", "bench"), (0, ""))
+        status, errors = self.job("--tag", "bench")
+        self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(files(self.tree / "results"), ["case/log.txt", "given.txt"])
         self.assertEqual(self.given()[2:], ["--tag", "bench"])
 
     def test_a_bucket_named_is_the_runs(self):
-        self.assertEqual(self.job("case", env={"CLADEFS_EXTENTD_REMOTE": "s3://bucket/p"}), (0, ""))
+        status, errors = self.job("case", env={"CLADEFS_EXTENTD_REMOTE": "s3://bucket/p"})
+        self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(self.given()[1], "s3://bucket/p")
 
     def test_a_failed_runs_results_come_back_with_its_status(self):
-        self.assertEqual(self.job("case", status=1), (1, ""))
+        status, errors = self.job("case", status=1)
+        self.assertEqual((status, errors), (1, self.moved()))
         self.assertEqual(files(self.tree / "results"), ["case/log.txt", "given.txt"])
         self.assertEqual(list((self.tree / "tmp").iterdir()), [])
 

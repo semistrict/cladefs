@@ -10,7 +10,7 @@
 # daemon's part cache, which test-e2e.sh keeps with its results, are on a local disk's ext4, as a
 # host's are; and once the run ends, however it does, RESULTS gets what it left, but for the
 # stores, the buckets, the part caches and the guests' root filesystems and images, which are no
-# results, and the directory goes.
+# results, and the directory goes: the run's logs name it, and this says where the results are.
 #
 #   scripts/test-e2e-job.sh RESULTS [ARG...]
 #
@@ -55,4 +55,6 @@ find "$work" -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' -o -n
     -o -name rootfs -o -name extents -o -name jail \) -prune -exec rm -r {} +
 find "$work" -type f \( -name '*.ext4' -o -name '*.img' \) -delete
 cp -R "$work/." "$results/" || status=$(( status ? status : 1 ))
+# What the run said of its own directory, as its logs do, is of here now.
+echo "Results: $results (the run's $work)" >&2
 exit "$status"
