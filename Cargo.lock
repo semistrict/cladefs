@@ -949,6 +949,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "extent_files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "rand 0.10.3",
+ "storage_device",
+ "thiserror",
+]
+
+[[package]]
 name = "extent_frame"
 version = "0.1.0"
 dependencies = [
@@ -3766,6 +3778,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cladefs",
+ "extent_files",
  "extent_keys",
  "extent_remote",
  "extent_store",

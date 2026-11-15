@@ -1,9 +1,11 @@
 ---
 id: TASK-456.1
 title: 'A page tree shared by SQLite files and memory volumes, read lazily'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:33'
+updated_date: '2026-11-15 20:09'
 labels:
   - memory
   - sqlite
@@ -32,3 +34,13 @@ sqlite_extents/src/pages.rs keeps a file's bytes as 4 KiB chunks over write-once
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Decided with the user 2026-11-15: a shared volume crate.
+1. New crate extent_files: format.rs, pages.rs, window.rs and a Volume of named files (open, open_mapped, files, open_file/close_file, read/write/truncate/size, sync, delete, exists, fetch/unfetch, extents, close, check), moved from sqlite_extents with their tests; no SQLite lock levels, no in-memory journals.
+2. sqlite_extents keeps its VFS, locks and journals: its Volume wraps an extent_files::Volume (the same name and calls for its users), lock_file/unlock_file/reserved/memory_file its own; unlock commits through the inner volume's sync, as before, skipped once the volume failed.
+3. Root format unchanged (TASK-440's version 3); magic stays.
+4. Validation: extent_files and sqlite_extents suites on macOS, clippy; ubu1 sqlite daemon tests; then the workspace parts once.
+<!-- SECTION:PLAN:END -->

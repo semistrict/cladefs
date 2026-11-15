@@ -15,8 +15,9 @@
 //! shared memory WAL mode needs otherwise. Randomness, sleeping and the time are the default VFS's.
 
 use crate::locks::Level;
-use crate::volume::{Failed, MemoryFile, NotFound, Volume};
+use crate::volume::{MemoryFile, Volume};
 use anyhow::{Error, bail};
+use extent_files::{Failed, NotFound};
 use rusqlite::ffi;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::{Arc, Mutex};
