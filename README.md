@@ -412,6 +412,25 @@ versioning off needs nothing. A host told either fences the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
 a fenced store's own keys stay in memory until its VM process closes it.
 
+**The bucket KMS** (doc-16, The bucket KMS). With no `FXDAX_KMS`, a host given
+a master key, `FXDAX_MASTER_KEY` (64 hex digits: `openssl rand -hex 32`) or
+`FXDAX_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text), keeps
+each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
+master key and made on the tenant's first use: every tenant's cells are
+sealed, with no setup per tenant. Every process that opens stores (extentd,
+fxdaxctl, mounts, fxdax-gc) is given the same key, and the bucket never holds
+it; logs and errors name it only by its ID, a short hash. To rotate it, give
+every host `FXDAX_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest
+first: it wraps, any unwraps), run `fxdax-gc URL --rotate-master-key`, which
+rewraps every tenant's KEK under NEW, then give the hosts NEW alone. To shred a
+tenant, run `fxdaxctl shred-tenant TENANT` (`ShredTenant`) against every host's
+daemon: it replaces the tenant's KEK object by a tombstone, so that nothing of
+the tenant's unwraps anywhere and no KEK is made for it again, and has each
+host forget its keys (a host not told refuses it within a minute). As for a
+cell, a bucket with versioning on needs non-current versions of
+`tenants/<tenant>/kek` expired, by the rule above. It is not BYOK: a tenant holding its
+own key uses a real KMS.
+
 **AWS KMS** (doc-16, Real KMSes: AWS KMS). `FXDAX_KMS=aws-kms://REGION?key=TEMPLATE`,
 say `aws-kms://us-east-1?key=alias/fxdax-tenant-{tenant}`: each tenant's KEK is a
 symmetric KMS key, named by the template with `{tenant}` in hexadecimal (a key

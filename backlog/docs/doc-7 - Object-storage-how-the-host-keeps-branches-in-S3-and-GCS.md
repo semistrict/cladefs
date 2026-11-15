@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 10:07'
+updated_date: '2026-11-15 11:49'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -180,10 +180,11 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
 | `tenants/<tenant>/sealed` | fxdax: the tenant's sealed marker, its bytes the format, its being there all it says: a cell of the tenant's was made sealed, so a KMS answering that the tenant has no KEK has forgotten it, and its new cells are refused as destroyed, never made in the clear (doc-16, A forgotten KEK told from none; TASK-411.19) | create-only, one there already as good, by a host handing out the tenant's first new cell KEK, before the cell's object; kept for good: no cell's, so no pass lists it, and the collector keeps it (`Kind::Sealed`) if one did |
+| `tenants/<tenant>/kek` | fxdax: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`fxdax-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
-*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease
-and `gc/marking` is **written once**: created once, never written again, nor created again once
+*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease,
+`gc/marking` and a tenant's KEK object (TASK-411.27) is **written once**: created once, never written again, nor created again once
 deleted, so that a key names one object for as long as anyone reads it, and readers and caches go by
 the key alone (specs/bucket's `KeysWrittenOnce`; Reading). Keys of a writer's objects name its
 epoch, first, so that a checkpoint's table front-codes them; moves', their pass's.
@@ -195,8 +196,9 @@ the ID alone, as forks share their parents' extents by it and a host's extent ca
 it, so a branch's ID is unique in its bucket, whatever its cell (Object IDs). The collector lists
 a cell's `branches/` for the records it reads again, a cell at a time (Garbage collection). A checkpoint's table stores its keys front-coded (`extent_frame::table`), as
 a branch's keys share their cell's prefix and their kind's. A tenant's sealed marker is under its
-prefix beside `cells/`: the delimiter listings of `tenants/` and of a tenant's `cells/` that find
-the cells for a sweep (Sweeps) list it not, nor does any pass, which lists a cell's prefix.
+prefix beside `cells/`, and so is its KEK object under the bucket KMS (TASK-411.27): the delimiter
+listings of `tenants/` and of a tenant's `cells/` that find the cells for a sweep (Sweeps) list
+neither, nor does any pass, which lists a cell's prefix.
 
 ### Cells
 

@@ -3,19 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 11:10'
+updated_date: '2026-11-15 11:49'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.18 (Google Cloud KMS, below: **Real KMSes: Google Cloud KMS**) are implemented.
-
-updated_date: '2026-11-15 05:44'
----
-# Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
-
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**) and TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**, which settles TASK-421) are implemented.
-
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**), TASK-411.16, .17 and .18 (OpenBao, AWS KMS and Google Cloud KMS, below: **Real KMSes**), TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**), TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**) and TASK-411.27 (the bucket KMS, tenants' KEKs kept in the bucket under a master key, below: **The bucket KMS**) are implemented.
 
 ## Goals
 
@@ -144,7 +136,9 @@ dropped with its pool, never written out unwrapped.
 
 ## Shredding
 
-- **A tenant:** destroy its KEK in the KMS, then tell every host (`ForgetTenantKeys`, TASK-411.7).
+- **A tenant:** destroy its KEK in the KMS, then tell every host (`ForgetTenantKeys`, TASK-411.7);
+  under the bucket KMS, `ShredTenant` on every host, which leaves a tombstone in its KEK object's
+  place (The bucket KMS).
   Absolute: every cell KEK of it, in every version of every cell object, unwraps no more.
 - **A cell:** remove its wrapped KEK from its object (`ShredCell`, conditional as every cell
   update, TASK-411.7). Only as strong as the bucket keeps no older version of `<C>cell`: with
@@ -531,7 +525,8 @@ configuration.
   (`ForgetTenantKeys` on every host before the key is gone) is needed no more for this; telling
   hosts still drops at once what they hold of the tenant (What TASK-411.7 made).
 - **Not covered:** a host with no KMS makes cells in the clear, reading no marker, as before
-  (TASK-411.24).
+  (TASK-411.24). The bucket KMS reads the marker too, where a tenant's KEK object is gone
+  (The bucket KMS).
 - **Tests.** `extent_remote` `keys::tests::tenants_whose_kek_the_kms_forgot_are_refused_by_their_sealed_marker`
   (the bucket's requests counted, `SimBucket::served`: a PUT with a host's first KEK, none after;
   the KMS forgetting, a HEAD once on a host that never saw the marker, none on one that wrote it;
@@ -547,6 +542,122 @@ configuration.
   `Destroyed`, as AWS and OpenBao do once a key is deleted. A hand mutant reading no marker failed
   the first three. The control API's attaching calls the same `new_cell_kek`, untested here (its
   tests need Linux's FUSE).
+
+## The bucket KMS (TASK-411.27)
+
+*(decided 2026-11-15)* When no `FXDAX_KMS` names a KMS, a host given a **master key** keeps every
+tenant's KEK in the bucket itself, wrapped by the master key, made on the tenant's first use: no
+setup per tenant, every tenant sealed. TASK-411.28 makes it the default (a host with neither
+refuses to start) and removes plaintext; until then a host with neither makes cells in the clear,
+as before.
+
+- **What it is not.** BYOK (Goal 1): the tenant holds no key of its own; one wanting that brings a
+  real KMS. Goal 3 holds while the master key stays out of the bucket: a reader of the bucket finds
+  every tenant's KEK there, wrapped by a key it lacks. Goal 2, shredding, holds as below.
+- **Choosing it** (`extent_remote::bucket_kms::from_env`, the one function every process that
+  opens stores asks: extentd, fxdaxctl and the fxdax CLI's FUSE mounts through
+  `fxdax::remote::kms`, and `fxdax-gc`). `FXDAX_KMS`, if it names one, is the host's KMS (a master
+  key also given is unused, and warned of); else, given master keys, the bucket KMS over the
+  host's bucket: `FXDAX_EXTENTD_REMOTE`'s for fxdax's processes, the bucket collected for
+  `fxdax-gc`; else none. Master keys given that can't be had (malformed, both variables set, an
+  unreadable file, no `FXDAX_EXTENTD_REMOTE`) make the host's KMS refuse every call, naming why, as
+  a bad `FXDAX_KMS` does (fxdax-gc stops): no cell is made in the clear for want of it. A process
+  keeping stores in other buckets (the fxdax CLI's own file buckets) keeps their tenants' KEKs in
+  the host's bucket all the same: a cell's KEK, wrapped, is in its cell's object wherever that is.
+- **Master keys** (`extent_keys::kms::master`). `FXDAX_MASTER_KEY`: one or more keys, each 64
+  hexadecimal digits (32 bytes), separated by commas or white space (one a line), the **newest
+  first**: it wraps new KEK objects, any unwraps. Or `FXDAX_MASTER_KEY_FILE`, naming a file of
+  exactly 32 raw bytes (one key), or of text as the variable holds; both set is refused. A key
+  given twice, none, or one not of 64 hex digits is refused, saying which by its place, never what
+  it holds. Each key is known by its **ID**, the first 8 bytes of SHA-256 over `fxdax master key
+  id\0` and the key, in hex (`2bb56b8197c604e4` for the bytes 0 to 31): all that is ever written,
+  logged or said of it. What was read of the variable or the file is zeroed once parsed (the
+  process's environment keeps its own copy); keys in memory are zeroed when dropped. Make one with
+  `openssl rand -hex 32`.
+- **The KEK object**, `tenants/<tenant>/kek` (`layout::kek`, doc-7 Layout): `fxkt`, format 1, kind
+  1, the tenant (u64, big-endian), the KEK's ID (8 random bytes), the master key's ID, then the KEK
+  (32 random bytes) wrapped with AES-KW under `HKDF-SHA256(master key, info = "fxdax bucket kms
+  kek" || all of that header)`, 70 bytes: an object copied to another tenant's key, or relabelled
+  another master key or KEK, fails AES-KW. A **tombstone**, a shredded tenant's: `fxkt`, format
+  1, kind 2, the tenant, 14 bytes. Under the tenant's prefix, no cell's: no pass lists it, and the
+  collector keeps it (`Kind::Kek`) if one did (`extent_remote` `testing::uncollected`, the fork and
+  restore fault tests' tables).
+- **Keys it wraps** (cell KEKs, in cells' objects): `fxkb`, format 1, the tenant, the KEK's ID,
+  then the key wrapped with AES-KW under `HKDF-SHA256(tenant KEK, info = "fxdax bucket kms wrap"
+  || that header)`, 61 bytes, as `LocalKms`'s (`fxkw`) are: the header names whose KEK and which,
+  and is bound to the key.
+- **First use.** A wrap for a tenant whose KEK the host holds not reads its object: there, it
+  unwraps it under whichever master key its ID names. None there: it reads the tenant's sealed
+  marker (TASK-411.19), and if it is there refuses the tenant as destroyed (its KEK object was
+  deleted outright: no KEK made anew under which its cells would be unreadable); else it makes a
+  KEK and creates its object, **create-only**: hosts racing each find none and create, and the
+  creates but one find an object there, which they read and take, dropping their own KEK unused
+  (`bucket::create`). One KEK object, every host's wraps under it. A line is logged naming the
+  object and the master key's ID. An unwrap never makes one: a key naming a tenant's KEK whose
+  object is not there is of a KEK gone (`Destroyed`).
+- **What a host keeps** (`BucketKms`): each tenant's KEK unwrapped, zeroed on drop, read again from
+  its object once `FRESH_FOR` (60 s) old, so that the bucket is asked once a tenant a minute at
+  most, however many cells' KEKs the host wraps and unwraps, and a tenant shredded elsewhere is
+  refused within a minute by a host told nothing. `Kms::forget` (a method every KMS has now, doing
+  nothing but here) drops it at once, which `keys::Kms::revoked` calls: every `ForgetTenantKeys`,
+  `ShredTenant`, and refusal heard.
+- **Refusals**, each naming the tenant, so `Error::Kms`, `EACCES`:
+
+  | Found | `kms::Error` |
+  |---|---|
+  | a tombstone | `Destroyed` |
+  | no object, unwrapping; or no object and the sealed marker, wrapping | `Destroyed` |
+  | an object under a master key not given | `UnknownMasterKey`: `tenant T: its KEK is wrapped by master key ID, which this host has not (it has IDS): FXDAX_MASTER_KEY` |
+  | an object or a wrapped key not authentic (another tenant's, tampered, another KEK of the tenant's) | `Unauthentic` |
+
+  Never `NoSuchTenant`: every tenant asked for gets a KEK, so every cell made is sealed. Cells made
+  in the clear before a host had a master key stay in the clear (a cell's sealing is chosen as it
+  is made; TASK-411.28 removes them). A wrong master key is never read as a tenant without a KEK.
+- **Rotating the master key.** (1) Give every host `FXDAX_MASTER_KEY=NEW,OLD` and restart its
+  processes: from then on they unwrap under either and make new KEK objects under NEW (a host
+  still given OLD alone refuses those tenants, naming NEW's ID: update every host first). (2) Run
+  `fxdax-gc URL --rotate-master-key` with the same variable: every tenant's KEK object under OLD is
+  rewrapped under NEW by a conditional update (read again and done again if another changed it),
+  the KEK and its ID unchanged, so every cell KEK it wrapped stays valid; it says how many it
+  rewrapped, how many were under NEW already, how many tenants are shredded, and leaves, saying so
+  and failing, any under none of the keys given. Run again, it rewraps nothing. (3) Give hosts NEW
+  alone. With versioning on, OLD still opens the objects' non-current versions until they expire.
+- **Shredding a tenant** (`ShredTenant`, `fxdaxctl shred-tenant TENANT`, through each host's
+  daemon; `fxdax::remote::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
+  tenant's KEK object is replaced by a tombstone, by a conditional update (or created one, a tenant
+  never given a KEK: it is never made one), then the host forgets the tenant's keys as
+  `ForgetTenantKeys` does (What TASK-411.7 made). Call it on every host: the first shreds, the
+  others find it shredded (`shredded_now: false`) and forget; a host not told refuses the tenant
+  once its KEK is a minute old. Every cell KEK of the tenant, in every version of every cell
+  object, unwraps no more, and no KEK is made for it again. A daemon whose KMS is `FXDAX_KMS`'s
+  refuses it (`FAILED_PRECONDITION`, `ENOTSUP`): destroy the KEK in that KMS, then
+  `ForgetTenantKeys`. **Only as strong as the bucket keeps no older version of
+  `tenants/<tenant>/kek`**: an older version holds the KEK, wrapped by a master key the hosts have.
+  With versioning on, a lifecycle rule must expire non-current versions, as for a cell shredded
+  (Shredding: S3 `NoncurrentVersionExpiration`; GCS versioning off or a lifecycle delete of
+  non-current versions). Rotating the master key afterwards, and destroying the old one, also ends
+  what such versions hold.
+- **Tests.** `extent_keys` `kms::master::tests` (IDs pinned against Python's hashlib, syntax,
+  refusals by place, files raw and text, the environment) and `kms::bucket::tests` (objects sealed
+  and opened, other master keys named, tampering and moving refused, tombstones, resealing, wrapped
+  keys); `extent_remote` `bucket_kms::tests`: made on first use (the requests counted, none more
+  while fresh), two hosts racing in rounds of `SimBucket` (a GET, a HEAD and a create each; the
+  second create reads the first's) and eight on threads (one object, each unwrapping all),
+  rotation (old key until rotated, the new alone after, idempotent, unopenable objects left
+  named), shredding (refused at once on the shredder and a host reading afresh, on a host told,
+  never made again; a tenant shredded never given one), objects deleted outright with and without
+  the marker, wrong master keys named, no master key in any object, refusal or log line (a logger
+  of the test's), and the choice of KMS from the environment; `extent_remote` `tests/gc.rs`
+  `rotates_master_keys_rewrapping_every_tenants_kek` (the binary); `extent_store`
+  `upload::encrypted::sealed_stores_open_through_the_bucket_kms_on_two_hosts` (a sealed store made
+  on one host, taken and read on another, no object holding the master key, the cell's KEK or the
+  data, a collector sweep leaving the KEK object and its tombstone, no host opening it shredded);
+  `fxdax` `remote::tests::hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms`
+  (`FXDAX_MASTER_KEY` and `FXDAX_EXTENTD_REMOTE` alone: every store sealed; `shred_tenant` fences
+  and refuses, another tenant reading on) and `hosts_of_another_kms_shred_no_tenant`; Linux:
+  `tests/control.rs` `tenants_sealed_under_the_bucket_kms_and_shredded_through_the_control_api`.
+  Hand mutants (no marker read, a racing create keeping its own KEK, no tombstone written) each
+  failed two or three of them.
 
 ## Real KMSes: AWS KMS
 

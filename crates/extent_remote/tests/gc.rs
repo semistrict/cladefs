@@ -551,6 +551,98 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     assert_eq!(key, KeyId { branch: 1, generation: keys::FIRST });
 }
 
+/// TASK-411.27: `--rotate-master-key` rewraps every tenant's KEK object under the newest master
+/// key `FXDAX_MASTER_KEY` gives, the first, saying what it did; a host given the newest alone then
+/// unwraps what was wrapped before. Done again, it rewraps nothing. Given keys none of which opens
+/// an object, it leaves it, says so, and fails; given none, it fails naming the variables.
+#[test]
+fn rotates_master_keys_rewrapping_every_tenants_kek() {
+    use extent_keys::Secret;
+    use extent_keys::kms::Kms as _;
+    use extent_keys::kms::master::MasterKeys;
+    use extent_remote::bucket_kms::{self, BucketKms};
+    use extent_remote::store::Store;
+    use futures::executor::block_on;
+    use std::sync::Arc;
+
+    let dir = tempfile::tempdir().unwrap();
+    let files = dir.path().join("bucket");
+    std::fs::create_dir(&files).unwrap();
+    let url = url::Url::from_directory_path(&files).unwrap().to_string();
+    let hex =
+        |key: &Secret| key.expose().iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+    let (old, new) = (Secret::random(), Secret::random());
+    let keys = |given: &[&Secret]| {
+        MasterKeys::new(given.iter().map(|key| Secret::from_bytes(key.expose())).collect()).unwrap()
+    };
+    let bucket = Arc::new(Store::from_url(&url).unwrap());
+    let before = BucketKms::new(bucket.clone(), keys(&[&old]));
+    let key = Secret::random();
+    let wrapped: Vec<_> =
+        (1..=3).map(|tenant| block_on(before.wrap(tenant, &key)).unwrap()).collect();
+    block_on(bucket_kms::destroy(&*bucket, 3));
+    let rotate = |given: Option<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fxdax-gc"));
+        command.args([url.as_str(), "--rotate-master-key"]);
+        command.env_remove("FXDAX_MASTER_KEY_FILE").env_remove("FXDAX_KMS");
+        match given {
+            Some(given) => command.env("FXDAX_MASTER_KEY", given),
+            None => command.env_remove("FXDAX_MASTER_KEY"),
+        };
+        command.output().unwrap()
+    };
+    let new_id = keys(&[&new]).newest().id();
+
+    let out = rotate(Some(format!("{},{}", hex(&new), hex(&old))));
+    let expected = format!(
+        "fxdax-gc: master key {new_id}: rewrapped 2 tenants' KEKs, 0 under it already, 1 tenants \
+         shredded, 0 refused\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
+    assert!(out.status.success());
+    let after = BucketKms::new(bucket.clone(), keys(&[&new]));
+    for (tenant, wrapped) in (1..=2).zip(&wrapped) {
+        assert_eq!(block_on(after.unwrap(tenant, wrapped)).unwrap().expose(), key.expose());
+    }
+    let out = rotate(Some(format!("{}\n{}\n", hex(&new), hex(&old))));
+    let expected = format!(
+        "fxdax-gc: master key {new_id}: rewrapped 0 tenants' KEKs, 2 under it already, 1 tenants \
+         shredded, 0 refused\n"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
+
+    let other = Secret::random();
+    let other_id = keys(&[&other]).newest().id();
+    let out = rotate(Some(hex(&other)));
+    let left = |tenant| {
+        format!(
+            "fxdax-gc: left as it is: tenant {tenant}: its KEK is wrapped by master key {new_id}, \
+             which this host has not (it has {other_id}): FXDAX_MASTER_KEY\n"
+        )
+    };
+    let expected = format!(
+        "fxdax-gc: master key {other_id}: rewrapped 0 tenants' KEKs, 0 under it already, 1 \
+         tenants shredded, 2 refused\n{}{}Error: \"2 tenants' KEK objects left under no master key \
+         given: run again with theirs among FXDAX_MASTER_KEY's\"\n",
+        left(1),
+        left(2)
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stderr), expected);
+    assert_eq!(out.status.code(), Some(1));
+    for out in [rotate(Some(format!("{},{}", hex(&new), hex(&old)))), rotate(Some(hex(&other)))] {
+        let said = String::from_utf8_lossy(&out.stderr).into_owned();
+        for key in [&old, &new, &other] {
+            assert!(!said.contains(&hex(key)), "{said}");
+        }
+    }
+
+    let out = rotate(None);
+    let refused = "--rotate-master-key: neither FXDAX_MASTER_KEY nor FXDAX_MASTER_KEY_FILE gives \
+                   a master key: the newest first, then those to rotate from";
+    assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
+    assert_eq!(out.status.code(), Some(1));
+}
+
 #[test]
 fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
@@ -559,8 +651,8 @@ fn without_a_bucket_prints_its_usage() {
                  [--metrics FILE] | fxdax-gc URL [--cell TENANT/CELL] \
                  --dry-run [--grace SECONDS] [--compact-below FRACTION] | fxdax-gc URL --branches \
                  [--cell TENANT/CELL] [--held FILE] | fxdax-gc URL --delete-branch \
-                 TENANT/CELL/ID | fxdax-gc URL --usage [--tenant TENANT] (every cell, or the one \
-                 --cell names; \
+                 TENANT/CELL/ID | fxdax-gc URL --usage [--tenant TENANT] | fxdax-gc URL \
+                 --rotate-master-key (every cell, or the one --cell names; \
                  --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the bucket \
                  grows; --dry-run writes nothing, and finds less than a pass deletes)";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {usage:?}\n"));

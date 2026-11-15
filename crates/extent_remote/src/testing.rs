@@ -717,12 +717,13 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for key in &keys {
         // fxdax: cells' objects stay, as their branches' records do, their epochs fencing their
         // volumes' leases; blocks of object IDs taken, for good (TASK-364); and the collector's
-        // leases and marks, and references not yet retirable (TASK-395); tenants' sealed markers,
-        // for good (TASK-411.19).
+        // leases and marks, and references not yet retirable (TASK-395); tenants' sealed markers
+        // and KEK objects, for good (TASK-411.19, TASK-411.27).
         let kept = match layout::kind(key) {
             Kind::Cell { .. }
             | Kind::ObjectIds { .. }
             | Kind::Sealed { .. }
+            | Kind::Kek { .. }
             | Kind::GcLease { .. }
             | Kind::Marks { .. }
             | Kind::Marking

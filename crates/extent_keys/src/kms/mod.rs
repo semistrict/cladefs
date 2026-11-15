@@ -9,15 +9,20 @@
 //! [`from_url`]'s scheme: [`LocalKms`] (`local`), a fake for tests and development, its KEKs files
 //! in a directory; OpenBao's Transit engine (`openbao`, TASK-411.16), AWS KMS (`aws-kms`,
 //! TASK-411.17) and Google Cloud KMS (`gcp-kms`, TASK-411.18), the real ones (the user's choice of
-//! 2026-11-14), each naming a tenant's KEK as [`KeyNames`] says.
+//! 2026-11-14), each naming a tenant's KEK as [`KeyNames`] says. The bucket KMS (TASK-411.27), its
+//! tenants' KEKs kept in the bucket wrapped by a master key, has its keys and formats here
+//! ([`bucket`], [`master`]) and its objects in `extent_remote::bucket_kms`, where buckets are
+//! known: it is named by no URL, but chosen where `FXDAX_KMS` names none and a master key is given.
 
 use crate::{Secret, Unauthentic, Wrapped};
 use std::future::Future;
 use std::io;
 
 mod aws;
+pub mod bucket;
 mod gcp;
 mod local;
+pub mod master;
 mod names;
 pub mod openbao;
 mod real;
@@ -41,6 +46,13 @@ pub trait Kms: Send + Sync + 'static {
         tenant: u64,
         wrapped: &Wrapped,
     ) -> impl Future<Output = Result<Secret, Error>> + Send;
+
+    /// fxdax: drops what it keeps of `tenant`'s KEK, if it keeps any: the bucket KMS's unwrapped
+    /// KEKs (TASK-411.27), as a host told the tenant's keys are revoked or destroyed forgets them.
+    /// A KMS keeping none does nothing, as here.
+    fn forget(&self, tenant: u64) {
+        let _ = tenant;
+    }
 }
 
 /// fxdax: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
@@ -51,6 +63,9 @@ pub trait Dyn: Send + Sync + 'static {
 
     /// [`Kms::unwrap`].
     fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret>;
+
+    /// [`Kms::forget`].
+    fn forget_dyn(&self, tenant: u64);
 }
 
 /// What a [`Dyn`] KMS's calls return.
@@ -63,6 +78,10 @@ impl<K: Kms> Dyn for K {
 
     fn unwrap_dyn<'a>(&'a self, tenant: u64, wrapped: &'a Wrapped) -> Boxed<'a, Secret> {
         Box::pin(self.unwrap(tenant, wrapped))
+    }
+
+    fn forget_dyn(&self, tenant: u64) {
+        self.forget(tenant)
     }
 }
 
@@ -113,6 +132,14 @@ pub enum Error {
     /// tampered with or corrupt.
     #[error("tenant {tenant}: {source}")]
     Unauthentic { tenant: u64, source: Unauthentic },
+    /// fxdax: the bucket KMS's (TASK-411.27): the tenant's KEK object is wrapped by a master key,
+    /// of ID `id`, that is none of this host's (`held`, their IDs): a host given the wrong keys, or
+    /// a rotation's newest before this host has it. Never taken for a tenant with no KEK.
+    #[error(
+        "tenant {tenant}: its KEK is wrapped by master key {id}, which this host has not (it has \
+         {held}): FXDAX_MASTER_KEY"
+    )]
+    UnknownMasterKey { tenant: u64, id: String, held: String },
     /// The KMS failed. What was asked may or may not have taken effect.
     #[error("tenant {tenant}: the KMS failed: {source}")]
     Io { tenant: u64, source: io::Error },

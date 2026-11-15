@@ -1706,8 +1706,12 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
 /// A host of placement `token` as [`World::host`] makes one, but its KMS the one `url` names, as
 /// `FXDAX_KMS` names a host's: made anew, as another process's would be.
 fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
+    host_over(world, extent_keys::kms::from_url(url).unwrap(), token)
+}
+
+/// A host of placement `token` as [`World::host`] makes one, but its KMS `kms`, its own.
+fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
     let memory = Memory::new();
-    let kms = extent_keys::kms::from_url(url).unwrap();
     let keys = keys::Host { kms: Some(keys::Kms::new(kms)), ring: memory.keys().clone() };
     let uploads = Budget::new(Limits::UNBOUNDED);
     Host {
@@ -1715,6 +1719,91 @@ fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
         memory,
         token,
     }
+}
+
+/// TASK-411.27 AC #5: a sealed store end to end through the bucket KMS on two hosts, each with a
+/// bucket KMS of its own over the world's bucket, given the one master key, as two processes
+/// with `FXDAX_MASTER_KEY` and no `FXDAX_KMS` have. The first host's opening makes the tenant's KEK
+/// (`tenants/<tenant>/kek`, the tenant given nothing before) and the cell sealed under it, its
+/// segments sealed; the second takes the cell, its KEK unwrapped by its own bucket KMS from the
+/// object, and reads what the first wrote. No object holds the master key, the cell's KEK or the
+/// data. A collector's sweep of every cell leaves the KEK object as it was. The tenant shredded (a
+/// tombstone), no host opens its store, the second told (`Kms::forget`), a third reading the
+/// tombstone; a sweep leaves the tombstone too.
+#[test]
+fn sealed_stores_open_through_the_bucket_kms_on_two_hosts() {
+    use extent_keys::kms::master::MasterKeys;
+    use extent_remote::bucket_kms::{BucketKms, Destroyed};
+    let world = World::new();
+    let master = Secret::random();
+    let bucket_kms = || {
+        let keys = MasterKeys::new(vec![Secret::from_bytes(master.expose())]).unwrap();
+        Arc::new(BucketKms::new(world.bucket.clone(), keys))
+    };
+    let (first_kms, second_kms) = (bucket_kms(), bucket_kms());
+    let (first, second) =
+        (host_over(&world, first_kms.clone(), 5), host_over(&world, second_kms, 6));
+    let branch = test_branch(7);
+    let extent = ExtentId::new(branch.id, 1);
+    let dir = made(branch, "a");
+    let kek_key = layout::kek(TENANT);
+    assert!(world.objects().is_empty());
+    let (store, remote) = open_on(&world, &first, &dir).unwrap();
+    let data = noise(1, 4 * 4096);
+    written(&store, &remote, extent, &data);
+    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: branch.id, generation: 1 });
+    drop((store, remote));
+    let kek_object = world.object(&kek_key);
+    assert_eq!(kek_object.len(), extent_keys::kms::bucket::KEK_OBJECT_LEN);
+    let object = world.cell();
+    let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
+    assert_eq!(&kek.wrapped.0[..13], b"fxkb\x01\0\0\0\0\0\0\0\x01");
+    let cell_kek = futures::executor::block_on(first_kms.unwrap(TENANT, &kek.wrapped)).unwrap();
+    let objects = world.objects();
+    let segments: Vec<_> =
+        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
+    assert!(!segments.is_empty(), "no segment of {branch}");
+    for (key, segment) in segments {
+        let seal = extent_frame::Frame::of(segment).unwrap().seal;
+        assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+    }
+    for (key, bytes) in &objects {
+        assert!(!holds(bytes, master.expose()), "{key} holds the master key");
+        assert!(!holds(bytes, cell_kek.expose()), "{key} holds the cell's KEK");
+        assert!(!holds(bytes, &data[..64]), "{key} holds the data");
+    }
+
+    let (store, remote) = open_on(&world, &second, &dir.crash(0)).unwrap();
+    assert_eq!(world.cell().epoch, 2);
+    assert_eq!(read(&world, &second, &store, extent, 4 * 4096), Ok(data.clone()));
+    drop((store, remote));
+    let sweep = extent_remote::sweep::Sweep {
+        options: extent_remote::collector::Options { compact_below: 1.0, grace: 0 },
+        mode: extent_remote::sweep::Mode::Delete,
+        at_once: 1,
+        lease: 60_000,
+        slowest: 0,
+        spawned: false,
+        kms: Some(bucket_kms()),
+    };
+    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
+    assert_eq!(swept.visited, 1);
+    assert_eq!(world.object(&kek_key), kek_object);
+
+    assert_eq!(world.runtime.block_on(first_kms.destroy(TENANT)), Destroyed::Now);
+    let tombstone = extent_keys::kms::bucket::KekObject::tombstone(TENANT);
+    assert_eq!(world.object(&kek_key), tombstone);
+    let destroyed =
+        Failure::Remote(extent_remote::Error::Kms("tenant 1: its KEK is destroyed".into()));
+    second.runtime.keys.forget(keys::Scope::Tenant(TENANT), "tenant 1: its KEK is destroyed");
+    let third = host_over(&world, bucket_kms(), 7);
+    for host in [&first, &second, &third] {
+        let refused = open_on(&world, host, &dir.crash(0)).map(drop);
+        assert_eq!(refused, Err(destroyed.clone()), "host {}", host.token);
+    }
+    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
+    assert_eq!(swept.visited, 1);
+    assert_eq!(world.object(&kek_key), tombstone);
 }
 
 /// TASK-411.17 AC #4: a store of a sealed cell opened end to end through AWS KMS, as

@@ -682,10 +682,12 @@ impl Kms {
     /// `tenant`'s KEK is revoked or destroyed, as `why` says: the KMS said so, or the control API
     /// (doc-16, Forks and shared points). Its pool is dropped, a refill of it going adding nothing,
     /// so that it makes no cell more; its cells' KEKs unwrapped are forgotten, so that no taking
-    /// of them goes on unasked; and no fork inherits its keys ([`inheriting`]), until the KMS
-    /// answers a call for it again.
+    /// of them goes on unasked, and what the KMS keeps of its KEK (`kms::Kms::forget`); and no fork
+    /// inherits its keys ([`inheriting`]), until the KMS answers a call for it again.
     pub fn revoked(&self, tenant: u64, why: impl Into<String>) {
         self.drop_pool(tenant);
+        // What the KMS itself keeps of the tenant's KEK: the bucket KMS's (TASK-411.27).
+        self.kms.forget_dyn(tenant);
         self.takings.lock().unwrap().retain(|(cell, _), _| cell.tenant != tenant);
         self.refused.lock().unwrap().insert(tenant, why.into());
     }

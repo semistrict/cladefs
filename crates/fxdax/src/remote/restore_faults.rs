@@ -442,12 +442,13 @@ impl Hosts {
                 }
                 // fxdax: a block of object IDs taken stays for good (TASK-364), a reference's
                 // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a
-                // tenant's sealed marker (TASK-411.19).
+                // tenant's sealed marker and KEK object (TASK-411.19, TASK-411.27).
                 Kind::Head { .. }
                 | Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Sealed { .. }
+                | Kind::Kek { .. }
                 | Kind::Retired { .. } => false,
                 _ => true,
             })

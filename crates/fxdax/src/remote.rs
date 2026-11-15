@@ -7,13 +7,18 @@
 //! fetches run on and their budgets ([`runtime`], [`Fetcher`]), and the errno of each failure
 //! ([`errno`]). The uploader is extent_store's (`extent_store::upload`, TASK-165.9).
 //!
-//! fxdax: and its KMS ([`kms`], TASK-411.3), `FXDAX_KMS`, which every process of the host's
-//! opening stores reads, the extent daemon, the fxdax CLI's mounts and `fxdaxctl` alike: a
-//! `local:///DIR` alone, a directory of tenants' KEKs (`extent_keys::kms::LocalKms`), until real
-//! KMSes come (doc-16). A cell is made encrypted iff the host has a KMS and the cell's tenant has a
-//! KEK there; a host without one makes its cells in the clear, and opens no sealed one.
+//! fxdax: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
+//! chooses alike, the extent daemon, the fxdax CLI's mounts and `fxdaxctl`
+//! (`extent_remote::bucket_kms::from_env`): the one `FXDAX_KMS` names (doc-16: `local:///DIR`,
+//! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`FXDAX_MASTER_KEY` or
+//! `FXDAX_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
+//! (`FXDAX_EXTENTD_REMOTE`), made on each tenant's first use (TASK-411.27); else none. A cell is
+//! made encrypted iff the host has a KMS and the cell's tenant has a KEK there, which under the
+//! bucket KMS every tenant has; a host without one makes its cells in the clear, and opens no
+//! sealed one.
 
 use crate::Errno;
+use extent_remote::bucket_kms::BucketKms;
 use extent_remote::cache::Cache;
 use extent_remote::fetch::{self, Budget, Limits, Priority};
 use extent_remote::keys;
@@ -128,22 +133,48 @@ pub fn runtime() -> Runtime {
     Runtime { handle: RUNTIME.handle().clone(), uploads: UPLOADS.clone(), keys }
 }
 
-/// fxdax: the host's KMS, as `FXDAX_KMS` names it the first time it is asked for, or [`set_kms`]
-/// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
-/// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
-/// or in the clear, rather than make in the clear what its tenants have it seal.
+/// fxdax: the host's KMS, as its environment chooses it the first time it is asked for
+/// (`extent_remote::bucket_kms::from_env`: `FXDAX_KMS`'s, else the bucket KMS over the host's
+/// bucket given a master key, TASK-411.27), or [`set_kms`] set it before (TASK-411.3): none if
+/// it chooses none. One that can't be had (a bad `FXDAX_KMS`, a master key unreadable, or given
+/// with no host's bucket to keep tenants' KEKs in) is a KMS refusing every call, naming why: the
+/// host then opens no sealed store and makes no cell, sealed or in the clear, rather than make in
+/// the clear what its tenants have it seal.
 pub fn kms() -> Option<Arc<keys::Kms>> {
-    KMS.get_or_init(|| match std::env::var("FXDAX_KMS") {
-        Ok(url) if !url.is_empty() => {
-            let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
-                log::error!("fxdax: FXDAX_KMS: {why}");
-                Arc::new(Unreached(why))
-            });
-            Some(host_kms(kms))
+    host_keys().as_ref().map(|keys| keys.kms.clone())
+}
+
+/// fxdax: the host's bucket KMS, if [`kms`] is that (TASK-411.27): what shreds a tenant here
+/// ([`shred_tenant`]).
+pub fn bucket_kms() -> Option<Arc<BucketKms<Bucket>>> {
+    host_keys().as_ref().and_then(|keys| keys.bucket.clone())
+}
+
+/// fxdax: the host's KMS ([`kms`]), chosen once.
+fn host_keys() -> &'static Option<HostKeys> {
+    KMS.get_or_init(|| {
+        let host_bucket = || {
+            let url = std::env::var("FXDAX_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
+            let url = url.ok_or("FXDAX_EXTENTD_REMOTE names none")?;
+            crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
+        };
+        match extent_remote::bucket_kms::from_env(host_bucket) {
+            Ok(None) => None,
+            Ok(Some(chosen)) => {
+                Some(HostKeys { kms: host_kms(chosen.shared()), bucket: chosen.bucket().cloned() })
+            }
+            Err(why) => {
+                log::error!("fxdax: the host's KMS: {why}");
+                Some(HostKeys { kms: host_kms(Arc::new(Unreached(why))), bucket: None })
+            }
         }
-        _ => None,
     })
-    .clone()
+}
+
+/// fxdax: the host's KMS, as its stores hold it, and the bucket KMS it is over, if it is that.
+struct HostKeys {
+    kms: Arc<keys::Kms>,
+    bucket: Option<Arc<BucketKms<Bucket>>>,
 }
 
 /// fxdax: the host's over `kms`: its pools of new cell KEKs refilled in batches on the uploaders'
@@ -154,11 +185,12 @@ fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::Kms> {
 
 /// fxdax: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Some(host_kms(kms))).map_err(|_| "the host's KMS is set already".to_owned())
+    let keys = HostKeys { kms: host_kms(kms), bucket: None };
+    KMS.set(Some(keys)).map_err(|_| "the host's KMS is set already".to_owned())
 }
 
-/// fxdax: the host's KMS ([`kms`]).
-static KMS: std::sync::OnceLock<Option<Arc<keys::Kms>>> = std::sync::OnceLock::new();
+/// fxdax: the host's KMS ([`host_keys`]).
+static KMS: std::sync::OnceLock<Option<HostKeys>> = std::sync::OnceLock::new();
 
 /// fxdax: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -215,7 +247,29 @@ pub async fn shred_cell(
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
-/// fxdax: a KMS `FXDAX_KMS` names that can't be had: every call refused, saying why.
+/// fxdax: shreds `tenant` under the host's bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
+/// KEK object in the host's bucket replaced by a tombstone, so that no key its KEK wrapped unwraps
+/// anywhere and none is made it again ([`extent_remote::bucket_kms::destroy`]); then has this host
+/// forget its keys ([`forget`]). Shredded already, it finds it so, and the host forgets them all
+/// the same: what each host told does. Refused, changing nothing, if the host's KMS is not the
+/// bucket KMS: another KMS's tenant is shredded by destroying its KEK there, then
+/// `ForgetTenantKeys`. Only as strong as the bucket keeps no older version of the KEK object.
+pub async fn shred_tenant(
+    tenant: u64,
+) -> Result<(extent_remote::bucket_kms::Destroyed, Forgotten), String> {
+    let Some(kms) = bucket_kms() else {
+        return Err(format!(
+            "tenant {tenant}: this host's KMS is not the bucket KMS (FXDAX_MASTER_KEY, no \
+             FXDAX_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
+        ));
+    };
+    let destroyed = kms.destroy(tenant).await;
+    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
+    Ok((destroyed, forget(keys::Scope::Tenant(tenant), &why)))
+}
+
+/// fxdax: a KMS the environment chose that can't be had (a bad `FXDAX_KMS`, master keys
+/// unreadable or with no host's bucket, TASK-411.27): every call refused, saying why.
 struct Unreached(String);
 
 impl extent_keys::kms::Kms for Unreached {
@@ -240,7 +294,7 @@ impl extent_keys::kms::Kms for Unreached {
 
 impl Unreached {
     fn refusal(&self, tenant: u64) -> extent_keys::kms::Error {
-        let source = std::io::Error::other(format!("FXDAX_KMS: {}", self.0));
+        let source = std::io::Error::other(self.0.clone());
         extent_keys::kms::Error::Io { tenant, source }
     }
 }
@@ -2720,6 +2774,102 @@ mod tests {
                 assert!(!held, "{} holds a store's data", at.display());
             }
         }
+    }
+
+    /// TASK-411.27: a host given a master key (`FXDAX_MASTER_KEY`) and no `FXDAX_KMS` keeps its
+    /// tenants' KEKs in its bucket: every tenant's store is sealed, its KEK made on its first use
+    /// at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, fences its store
+    /// (`EACCES`), which opens no more, nor any new store of the tenant's, nothing made; another
+    /// tenant's reads on. Shredding it again finds it so.
+    #[test]
+    fn hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms() {
+        use extent_remote::bucket_kms::Destroyed;
+        use extent_remote::layout;
+        let url = "memory:///bucket-kms";
+        let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+        // SAFETY: this test's process is its own (nextest), no store open yet.
+        unsafe {
+            std::env::remove_var("FXDAX_KMS");
+            std::env::set_var("FXDAX_EXTENTD_REMOTE", url);
+            std::env::set_var("FXDAX_MASTER_KEY", &master);
+        }
+        let bucket = crate::host_store::bucket(url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        let names = ["ours", "theirs"];
+        let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
+            .enumerate()
+            .map(|(at, (name, tenant))| {
+                let store =
+                    kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
+                let store = store.unwrap();
+                let data = noise(at as u64 + 1, 4 * BLOCK);
+                let extent = write(&store, 1, &data);
+                store.commit(None).unwrap();
+                store.wait_uploaded().unwrap();
+                (store, extent, data)
+            })
+            .collect();
+        assert!(crate::remote::bucket_kms().is_some());
+        for (store, _, _) in &stores {
+            let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
+            assert_eq!(record.unwrap().unwrap().deks.len(), 1);
+            let cell = futures::executor::block_on(extent_remote::cell::read(
+                &*bucket,
+                store.branch().cell,
+            ));
+            assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
+        }
+        let kek = |tenant| {
+            let key = layout::kek(tenant);
+            let got = futures::executor::block_on(extent_remote::bucket::get(&*bucket, &key));
+            got.map(|object| object.bytes)
+        };
+        assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
+        let read = |at: usize| {
+            let (store, extent, data) = &stores[at];
+            let mut read = vec![0; data.len()];
+            let done = store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]);
+            done.map(|()| read == *data)
+        };
+
+        let shredded = futures::executor::block_on(crate::remote::shred_tenant(1));
+        let (destroyed, forgotten) = shredded.unwrap();
+        assert_eq!((destroyed, forgotten.stores, forgotten.rings), (Destroyed::Now, 1, 1));
+        assert_eq!(kek(1), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x01".to_vec()));
+        assert_eq!((read(0), read(1)), (Err(crate::Errno::EACCES), Ok(true)));
+        let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
+        let reopened_errno = |name: &str| {
+            reopened(dir.path().join(name), idle()).map(drop).map_err(|err| err.errno())
+        };
+        assert_eq!(reopened_errno("ours"), Err(Some(crate::Errno::EACCES)));
+        assert_eq!(reopened_errno("theirs"), Ok(()));
+        let new = of(1);
+        let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
+        assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
+        let cell = futures::executor::block_on(extent_remote::cell::read(&*bucket, new.cell));
+        assert_eq!(cell, Ok(None));
+        let again = futures::executor::block_on(crate::remote::shred_tenant(1)).unwrap();
+        assert_eq!(again.0, Destroyed::Already);
+        assert_eq!(written.len(), 2);
+    }
+
+    /// TASK-411.27: a host whose KMS is not the bucket KMS shreds no tenant: its KEK is its KMS's
+    /// to destroy. Nothing is written.
+    #[test]
+    fn hosts_of_another_kms_shred_no_tenant() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        crate::remote::set_kms(kms).unwrap();
+        let refused = futures::executor::block_on(crate::remote::shred_tenant(1)).unwrap_err();
+        assert_eq!(
+            refused,
+            "tenant 1: this host's KMS is not the bucket KMS (FXDAX_MASTER_KEY, no FXDAX_KMS): \
+             destroy the tenant's KEK in its KMS, then have every host forget its keys"
+        );
     }
 
     /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the
