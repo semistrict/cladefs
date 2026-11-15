@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 02:38'
+updated_date: '2026-11-15 05:44'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**) are implemented.
 
 ## Goals
 
@@ -468,3 +468,42 @@ dropped with its pool, never written out unwrapped.
   `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `fxdax`
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
+
+## What TASK-411.15 made
+
+- **The guest tests run sealed, only** *(decided, 2026-11-14: no clear e2e runs; plaintext stays
+  covered by the host's suites)*. `scripts/test-e2e.sh` makes a `LocalKms` beside the run's
+  sockets (`/tmp/fxdax-e2e-sockets.*/kms`, gone with them, never in the results, which runs keep
+  and fetch), holding a KEK for tenants 0-15 (`runner kms`, `test_cases::sealed::TENANTS`), and
+  exports `FXDAX_KMS` to every process of the run: its daemon, the cases' own daemons, the runner's
+  processes that make and open stores themselves (fxdax's `Storage`, `Image`, `import`), fxdaxctl,
+  fxdax-gc and FUSE mounts. A caller's own `FXDAX_KMS` is kept, its KEKs the caller's to make. A
+  daemon or harness built before encryption (an A/B's old pin, through `FXDAX_E2E_PREBUILT` or
+  `FXDAX_E2E_ROOT`) runs in the clear, unchecked, saying so; `encryption.txt` in the results says
+  which each run was. qualify.sh, sandboxes.sh, the bench and soak scripts and the nightly all
+  run through test-e2e.sh, so sealed.
+- **Tenant 0 has a KEK**, not the cases moved to granted tenants: the default tenant's socket,
+  `fxdaxctl create`, and every store a case makes in its own process are of tenant 0
+  (`host_store::NO_TENANT`); moving them would change most cases and leave the common tenant's
+  path, the daemon's own stores and public bases, untested sealed. doc-16 lets tenant 0 be sealed
+  like any other (a cell is sealed iff the host has a KMS and its tenant a KEK in it), and fxdax's
+  own tests seal it already (`kms.create(NO_TENANT)`). Granted IDs up to 15 cover
+  fxfs-guest-migrate-tenant-dax's 1-4.
+- **The check, holding no key** (`test_cases::sealed`; `extent_store::on_disk` for a store's
+  directory): every cell of the buckets read has a wrapped KEK or was shredded; every record of a
+  branch that wrote objects, but points' and deleted ones', has a DEK; every framed object
+  (segments, own extents, checkpoints, moves) is sealed or authenticated by its trailer; no
+  store's framed file is in the clear, nor log headed `FXLOG\0\0\x02`; and no object nor file
+  read holds a run of the guest tests' known plaintext (`test_cases::canary`, 1 MiB of
+  xorshift64*, incompressible, so that a clear store keeps it as written in the bucket too),
+  which fxfs-guest's file and fxfs-guest-checks' mapped file are made of: any run of 528 bytes or
+  more is found, at any offset. With `FXDAX_E2E_SEALED`, the runner checks each case's directory
+  once it passed, every file under it, its stores, the file buckets in it whole, and the cells its
+  stores are of in other buckets (the run's own); a case not sealed fails, naming what. At the
+  run's end, `runner sealed` checks the run's bucket whole and its part cache. A store's bucket in
+  a daemon's memory (`memory:///`) can't be read and is named as unread.
+- **Proved both ways** (ubu1, 2026-11-15): `--tag e2e`'s 16 cases pass sealed, each check
+  `0 in the clear`, the run's bucket (8 cells) and part cache too; a run whose KMS holds no KEK
+  (tenant 0's stores in the clear) fails fxfs-guest's check with 21 findings (a cell with no KEK,
+  segments, checkpoints and moves framed in the clear, clear logs, the canary in a segment) and
+  the run's part cache's copy of that segment.

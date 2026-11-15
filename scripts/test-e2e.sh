@@ -38,7 +38,9 @@
 # The guests' extent stores are served by fxdax's extent daemon, which this
 # starts, as FXDAX_EXTENTD tells the tests; its control API is beside it, at
 # extentd.control, in a directory of their own under /tmp. FXDAX_EXTENTD_MEMORY
-# caps its memory, in bytes. LIBCLANG_PATH names libclang's directory where
+# caps its memory, in bytes. fxdax: every store of the run is sealed, under a local KMS of the
+# run's (FXDAX_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
+# below). LIBCLANG_PATH names libclang's directory where
 # llvm-config cannot, and DAX needs access to /dev/userfaultfd (see the README).
 set -euo pipefail
 root=$(cd "${FXDAX_E2E_ROOT:-$(dirname "$0")/..}" && pwd)
@@ -341,6 +343,31 @@ sockets=$(mktemp -d /tmp/fxdax-e2e-sockets.XXXXXX)
 chmod 755 "$sockets"
 socket="$sockets/extentd.sock"
 control="$sockets/extentd.control"
+# fxdax: the run's stores sealed, as production's tenants' are (TASK-411.15, doc-16): the guest
+# tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the
+# sockets, gone with them, not in the results, which runs keep, holding a KEK for every tenant the
+# cases use, the default tenant (0) among them (the runner's `kms`); FXDAX_KMS names it to every
+# process of the run, the daemon, the cases' own daemons, fxdaxctl, fxdax-gc and FUSE mounts, unless
+# it names one already, whose tenants' KEKs are the caller's to make. FXDAX_E2E_SEALED has the
+# runner check each case's stores, once it passed, holding no key (test_cases::sealed): its cells'
+# KEKs, its records' DEKs, its objects' and files' seals, and no known plaintext anywhere; and the
+# run's own bucket and part cache at its end. A daemon or harness built before encryption (an A/B's
+# old side, FXDAX_E2E_PREBUILT, FXDAX_E2E_ROOT) runs in the clear, unchecked, saying so: what each
+# run was is in encryption.txt.
+kms_dir="$sockets/kms"
+if ! grep -qa FXDAX_KMS "$extentd_bin"; then
+    echo "clear: $extentd_bin predates encryption (it reads no FXDAX_KMS)" > "$results/encryption.txt"
+elif ! "$runner" kms --help > /dev/null 2>&1; then
+    echo "clear: $runner predates encryption (no \`runner kms\`)" > "$results/encryption.txt"
+else
+    if [[ -z ${FXDAX_KMS:-} ]]; then
+        "$runner" kms "$kms_dir"
+        export FXDAX_KMS="local://$kms_dir"
+    fi
+    export FXDAX_E2E_SEALED=1
+    echo "sealed: $FXDAX_KMS" > "$results/encryption.txt"
+fi
+echo "encryption: $(cat "$results/encryption.txt")" >&2
 # A host keeps stores in a bucket, FXDAX_EXTENTD_REMOTE's or a file bucket in memory, on tmpfs,
 # as of placement 1 unless one is named; what it did with it scripts/bench-report.py reports. Not
 # one in the daemon's memory: the cases open the stores it made in processes of their own (fxdax's
@@ -433,6 +460,15 @@ for test in "${tests[@]}"; do
         echo "$test: $rounds rounds passed" >&2
     fi
 done
+# fxdax: the run's own bucket, whole, and its part cache, sealed and holding no known plaintext,
+# as each case's stores were (TASK-411.15).
+if [[ -n ${FXDAX_E2E_SEALED:-} ]] &&
+    ! "$runner" sealed --bucket "${FXDAX_EXTENTD_REMOTE:-file://$bucket_dir}" \
+        ${cache_dir:+"$cache_dir"} 2> "$results/sealed.txt"; then
+    echo "the run's bucket or part cache isn't sealed: see $results/sealed.txt; the first:" >&2
+    sed -n 1,3p "$results/sealed.txt" >&2
+    status=1
+fi
 if [[ $seccomp == log ]]; then
     # The audit records of the system calls the filter would refuse: thread, call, count.
     dmesg | python3 -c '

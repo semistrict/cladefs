@@ -6,6 +6,8 @@ edition = "2024"
 host = [
     "bytes",
     "fxdax",
+    "extent_frame",
+    "extent_keys",
     "extent_remote",
     "extent_store",
     "follower_history",
@@ -37,6 +39,10 @@ fxdax = { path = "../../../crates/fxdax", optional = true, features = ["testing"
 futures = { version = "0.3.34", optional = true }
 # fxdax's extent store, whose directory the crash test takes before it copies it (TASK-129).
 extent_store = { path = "../../../crates/extent_store", optional = true }
+# fxdax's frames, whose trailers say whether a run's objects are sealed (TASK-411.15).
+extent_frame = { path = "../../../crates/extent_frame", optional = true }
+# fxdax's KMS, the local one a run's stores are sealed under (TASK-411.15).
+extent_keys = { path = "../../../crates/extent_keys", optional = true }
 # fxdax's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
 extent_remote = { path = "../../../crates/extent_remote", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "time", "net", "sync", "macros"] }
