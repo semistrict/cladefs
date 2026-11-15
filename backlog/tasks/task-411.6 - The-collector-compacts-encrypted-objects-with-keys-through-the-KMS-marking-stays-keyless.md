@@ -3,11 +3,11 @@ id: TASK-411.6
 title: >-
   The collector compacts encrypted objects with keys through the KMS; marking
   stays keyless
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 23:51'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.3
@@ -36,9 +36,9 @@ collector::compact_object copies extent ranges out of decompressed data, so it m
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -65,6 +65,8 @@ Hand mutant: dropping fetch::Tail::of's Moves::of check fails sealed_moves_copie
 
 Validation (macOS): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E "not (package(extent_store) & test(/^sim::/))": 935/935 passed (extent_remote alone 317/317). sim::one SIM_SEEDS=10 over everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, collectors, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax, sqlite_extents): no warning in new code (one pre-existing type_complexity in collector tests). scripts/upstream-changes.py --check passes. No dependency change (lock untouched). Linux not run (no ubu1 per brief): DoD #1 open.
 AC evidence (extent_remote collector::tests): #1 sealed_cells_are_compacted_under_their_keys_unwrapped_once_a_pass (3 sealed segments compacted, moves Sealed under KeyId{1,1} with a new salt, no plaintext in any object; reader holding the ring reads moved extents from the segment location after deletion and from the moves location after the writer checkpoints; keyless reader NoKey), moves_are_sealed_under_the_generation_their_objects_were, twin cells_in_the_clear_are_compacted_asking_the_kms_nothing; #2 same test: KEEP pass, dry run (0,0) calls, compacting pass (0,1), next pass compacting nothing still (0,1); #3 cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted (no KMS: locked 1, uncompacted 3, deleted 1, no call; revoked: locked each pass, no skip, 1 refused unwrap a pass; unrevoked: compacted 3) and fxdax-gc passes_say_what_they_did_if_anything / sweeps_say_what_their_passes_did / metrics_say_what_the_last_sweep_did; #4 sealed_moves_copied_to_another_key_of_their_branch_are_refused (copied: Corrupt naming both keys, with or without keys; renamed in the clear: Downgrade); hand mutant removing the check fails it.
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

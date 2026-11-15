@@ -4,11 +4,11 @@ title: >-
   Recovery frames a segment it closes again in the clear before the store's keys
   are known, resealing it once the store opens: plaintext on the host's disk
   meanwhile
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:22'
-updated_date: '2026-11-15 00:34'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.3
@@ -32,7 +32,7 @@ TASK-411.3: WAL recovery runs before the store's ring of keys is built, so a seg
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -56,6 +56,8 @@ Tests: wal::tests::segments_closed_again_are_framed_under_the_keys_alone (no fra
 Runs (macOS): extent_store all but sim 215/215 (crash tests included); shuttle 37/37; sim::one SIM_SEEDS=10 everything, crashes, wals, forked_wals pass; fxdax sealed/reopen/crash/recover filter 11/11. clippy: no warnings in changed lines.
 
 AC #2 completed with TASK-411.5: segments_closed_again_are_never_in_the_clear now searches every file of the store's directory, open segments' raw files and logs included (the exclusion went once they are encrypted); verified it fails with raw files left unsealed. Final runs with TASK-411.5: 963/963 crate tests, 37/37 shuttle, 10-seed sim sample over 10 profiles, all pass on macOS.
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

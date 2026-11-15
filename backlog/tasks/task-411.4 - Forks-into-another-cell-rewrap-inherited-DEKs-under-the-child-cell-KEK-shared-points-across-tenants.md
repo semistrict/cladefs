@@ -3,11 +3,11 @@ id: TASK-411.4
 title: >-
   Forks into another cell rewrap inherited DEKs under the child cell KEK; shared
   points across tenants
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-15 00:33'
+updated_date: '2026-11-15 03:23'
 labels: []
 dependencies:
   - TASK-411.3
@@ -38,9 +38,9 @@ A child reads its parents' objects under their DEKs. Rewrapping them under the c
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -76,6 +76,8 @@ Validation (macOS): cargo nextest -p extent_keys -p extent_frame -p extent_remot
 AC evidence: #1 extent_store encrypted::points_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused (host whose KMS refuses the point's tenant opens no copy; a host holding a copy, told the tenant is revoked, refuses the clone: Kms error, no record, no cell, pool untouched); keys::tests::pools_refill_in_batches_and_go_with_their_tenants_keks. #2 forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_parents_tenant (cross-tenant fork and a grandchild in a third cell; record inherited = parent (and child), unwraps under the child's cell KEK only), the points test's shared-point clone into tenant 2, fxdax remote::tests::sealed_points_fork_into_other_tenants_cells_while_shared, extents::tests::sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone, restore_faults::sealed_* (3 variants), keys::tests::rings_cross_cells_until_records_hold_what_they_inherit. #3 same tests after LocalKms::destroy of the parent's tenant: child and grandchild reopened on a fresh host read every extent, KMS calls (0, 3) (0 for the parent's tenant past its refused opening). #4 Counted: fork (0,0), child opening on the forking host (0,0), take leaving the pool low refills a batch (4,0). #5 revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused (control-API revocation drops the pool, next fork refused (1 wrap, refused), no record/cell; destroyed unheard: pooled KEKs still make cells until a refill's wraps fail, pool dropped, next fork refused).
 Plaintext twin: forks_in_the_clear_ask_for_nothing_more_and_sealed_ones_go_into_no_clear_cell (inheriting None, no KMS call, takes no bucket; record keyless; sealed into a clear tenant's cell refused Inherited, nothing made).
 Filed: TASK-411.14 (fxdax-gc --delete-branch of a sealed branch with an unrecorded fork into another cell needs a KMS).
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

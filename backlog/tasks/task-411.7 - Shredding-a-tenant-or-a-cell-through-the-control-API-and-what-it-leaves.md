@@ -1,11 +1,11 @@
 ---
 id: TASK-411.7
 title: 'Shredding a tenant or a cell through the control API, and what it leaves'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-15 01:28'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.3
@@ -35,7 +35,7 @@ Crypto-shredding is one of the three goals (doc-16). A tenant shreds by its KEK 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -67,6 +67,8 @@ Built (branch t3/tenant-cell-shredding from 979ecd28f):
 
 Validation (macOS, commit 484727774): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 985/985 passed (extent_keys 27, extent_frame 33, extent_remote 321, extent_store 225, sqlite_extents 23, fxdax 356). cargo clippy --all-targets on extent_remote/extent_store/fxdax/sqlite_extents (macOS, and --target x86_64-unknown-linux-gnu with zig cc): no warning in changed lines. cargo fmt --check clean. go/generate.sh --check, scripts/firecracker-cargo.sh --check, scripts/upstream-changes.py --check pass. Linux-only tests compiled, not run: tests/control.rs sealed_stores_served_and_shredded_through_the_control_api, tests/fuse_mount.rs a_sealed_store_mounted_holds_nothing_in_the_clear, sqlite_extents tests/daemon.rs a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening. Mutation evidence: without Memory::forget_kept the cell e2e test failed (host served a cached part after being told).
 AC evidence: #1 extent_store upload::encrypted::shredded_tenants_leave_none_of_their_volumes_readable_on_any_host (two hosts; open segment + log + part cache on disk hold no plaintext; host 6's fetcher NoKey on a cached part; fresh opens on 3 hosts 'tenant 1: its KEK is destroyed'; KMS refuses, pool 0; other tenant and a cross-tenant fork read on) and fxdax remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache (open stores EACCES, cache emptied of them, reopen EACCES, no plaintext in their dirs). #2 shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable (untold host refused naming the cell; told hosts NoKey; sibling cell reads, fresh too; collector locked 1 uncompacted 1; old cell object put back reads again) and keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them. #3 doc-16 Shredding + What TASK-411.7 made, doc-7, README.
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

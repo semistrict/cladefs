@@ -3,11 +3,11 @@ id: TASK-411.3
 title: >-
   Cell KEKs in cell objects, volume DEKs in branch records; opening a store
   unwraps them
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 23:18'
+updated_date: '2026-11-15 03:23'
 labels: []
 dependencies:
   - TASK-411.1
@@ -41,9 +41,9 @@ doc-16, Keys: the tenant KEK wraps a cell KEK kept in <C>cell, which wraps each 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -73,6 +73,8 @@ Linux: cargo check --target x86_64-unknown-linux-gnu (zig cc) of fxdax, sqlite_e
 Validation (macOS): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 952/952 passed. sim::one SIM_SEEDS=10 over everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, collectors, failed: all pass. clippy --all-targets: no new warnings in new code. Linux cross-check (cargo check --target x86_64-unknown-linux-gnu, zig cc) passes; Linux tests not run here (user runs them). scripts/upstream-changes.py --check passes.
 AC evidence: #1, #2 extent_store upload::encrypted::cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell (no KEK/DEK/data bytes in any object; (wraps, unwraps) = (2, 0) making, (0, 1) for three volumes on another placement) and extent_remote keys::tests::cell_keys_unwrap_once_a_taking_and_rings_follow_origins; #3 stores_of_revoked_tenants_open_not ('tenant 1: its KEK is revoked'); #4 generations_seal_new_objects_and_rotations_rewrap; #5 objects_of_sealed_branches_in_the_clear_are_refused (segment and checkpoint re-framed clear) and extent_frame readers_holding_objects_sealed_refuse_them_in_the_clear (seal, MACs, tags zeroed); #6 own_extents_copied_to_another_key_are_refused (moves' Moves::of check implemented, its refusal untested: no sealed moves exist until TASK-411.6); #7 hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve; #8 wal::tests::sealed_segments_framed_whole_are_whole_holding_no_key.
 Encrypted variants: forks and points within a cell, cross-cell refusal (forks_and_points_within_a_sealed_cell_read_what_they_inherit), fxdax store served/followed/reopened/fork refused (extents::tests::sealed_stores_serve_follow_reopen_and_fork_into_no_other_cell). Not written: sqlite volumes, FUSE mounts, extentd, restores on sealed cells (Linux-only daemon paths; restores fork across cells, refused until TASK-411.4).
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

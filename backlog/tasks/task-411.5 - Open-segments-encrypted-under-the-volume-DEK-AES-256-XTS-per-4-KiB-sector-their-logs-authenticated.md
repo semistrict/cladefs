@@ -3,11 +3,11 @@ id: TASK-411.5
 title: >-
   Open segments encrypted under the volume DEK (AES-256-XTS per 4 KiB sector);
   their logs authenticated
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-15 00:34'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.8
@@ -37,7 +37,7 @@ The open segment holds raw guest writes on local disk until it is framed, read b
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -66,6 +66,8 @@ Measurements (macOS, Apple M5 Pro, 15 CPUs, release store-bench, HostDir in /var
 
 Tests: extent_keys xts::tests (IEEE 1619 vectors 10, 11; aws-lc cross-check; unaligned; derivation); extent_store raw::tests::sealed_raw_files_store_ciphertext_and_read_plaintext; upload::encrypted::sealed_stores_raw_files_and_logs_hold_no_plaintext (AC #1, #2, #4: small extent in the open segment, 4 MiB extent in open-extents/, written/committed/framed: no plaintext in any file, reads back; clear twin holds the data verbatim, logs FXLOG v2), writes_stored_by_callers_are_sealed_and_large_extents_take_whole_sectors (AC #5: Write::stored encrypts; sealed 512-byte large-extent write refused Unsectored, clear accepted), sealed_logs_changed_are_refused (record payload changed with its hash redone: 'its record at 4096 is not authentic'; header salt changed: 'its header is not authentic'; generation changed: no such DEK; nothing framed), segments_closed_again_are_never_in_the_clear (AC #3: crash with a durable commit in the open segment, reopened under fail_after(n) for every n; now with no exclusions; reads back); fxdax storage::image::tests::sealed_images_hold_no_plaintext (image device on a sealed cell: write_file via Write::stored, Part::Data reads decrypted, after flush and reopening, no plaintext in the image dir). Mutation checks: raw files unsealed -> segments_closed_again fails on open-segments/ and logs/.
 Validation (macOS): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 963/963 passed (extent_keys 27, extent_frame 33, extent_remote 312, extent_store 219, sqlite_extents 22, fxdax 350). Shuttle (extent_store --features shuttle, binary(shuttle)): 37/37. sim::one SIM_SEEDS=10 for everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, collectors, failed: all pass. clippy --all-targets (and --features shuttle): no warnings on changed lines. cargo fmt --check clean. scripts/firecracker-cargo.sh --lock updated vendor/firecracker.lock (--check passes); scripts/upstream-changes.py --check passes. Linux not run (DoD #1's ubu1 half is the user's).
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

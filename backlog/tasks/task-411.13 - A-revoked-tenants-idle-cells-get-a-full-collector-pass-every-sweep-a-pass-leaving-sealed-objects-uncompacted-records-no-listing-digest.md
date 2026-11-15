@@ -3,11 +3,11 @@ id: TASK-411.13
 title: >-
   A revoked tenant's idle cells get a full collector pass every sweep: a pass
   leaving sealed objects uncompacted records no listing digest
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:52'
-updated_date: '2026-11-15 01:14'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.6
@@ -31,9 +31,9 @@ TASK-411.6: a pass over a cell whose KEK the KMS refuses (revoked, destroyed, fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -57,6 +57,8 @@ Report: a skip over a locked digest reports skipped 1, locked 1, uncompacted N, 
 Tests (extent_remote, all 322 pass): collector::tests::cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted: no-KMS pass locked (deleted 1); next full (listing changed); next skipped: report {skipped 1, locked 1, uncompacted 3}, requests exactly [Get 1, List 1, Update 1], KMS (0,0). Revoked with KMS: two skips, same requests, 1 refused wrap each (2,0). Checkpoint written: full (locked, deleted 1), full, then skip (3,2). Unrevoked: full, compacted 3, read back under the ring (4,3). Then delete pass, full pass, skip with no KMS call (4,3). collector::tests::tenants_keks_are_asked_for_once_a_sweep (tenant 1 twice, 2 revoked twice, 3 unknown: 3 wraps; no KMS: none). fxdax-gc tests::passes_say_what_they_did_if_anything gains the locked skip (None).
 
 Validation (macOS, branch t3/cache-tenant-keys-gc at fb253eb4a): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 960/960 passed (extent_keys 27, extent_frame 33, extent_remote 323, extent_store 223, fxdax 354; 1 leaky: faults::tests::faults_say_their_words, untouched). sim::one SIM_SEEDS=10 over collectors, everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax): no warning in touched files. fmt clean on touched crates. scripts/upstream-changes.py --check passes. No dependency change. Linux not run (no ubu1 per brief): DoD #1 open.
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

@@ -3,11 +3,11 @@ id: TASK-411.10
 title: >-
   Plaintext tenants on a host with a KMS cost one KMS wrap call per store
   opening: the KMS's no-such-tenant answer is not cached
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:22'
-updated_date: '2026-11-15 01:14'
+updated_date: '2026-11-15 03:24'
 labels: []
 dependencies:
   - TASK-411.3
@@ -31,9 +31,9 @@ TASK-411.3: a cell chooses encryption iff a KMS is configured and the tenant has
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -54,6 +54,8 @@ Bound 60 s: the cost of a plaintext tenant drops from a round trip per store ope
 Tests: extent_remote keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while (paused current-thread runtime: 3 asks -> 1 wrap; KEK created, advance 59 s -> None, no call; +1 s -> Some, generation 1, 2 wraps; next take wraps as before); extent_store upload::encrypted::cells_of_tenants_with_no_kek_are_in_the_clear extended (host opens a second volume of the cell, a volume of a new cell, the first again: calls stay (1, 0); another host asks once: (2, 0)). Both pass.
 
 Validation (macOS, branch t3/cache-tenant-keys-gc at fb253eb4a): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 960/960 passed (extent_keys 27, extent_frame 33, extent_remote 323, extent_store 223, fxdax 354; 1 leaky: faults::tests::faults_say_their_words, untouched). sim::one SIM_SEEDS=10 over collectors, everything, forks, takeovers, crashes, wals, forked_wals, restores, fresh_cells, failed: all pass. clippy --all-targets (extent_remote, extent_store, fxdax): no warning in touched files. fmt clean on touched crates. scripts/upstream-changes.py --check passes. No dependency change. Linux not run (no ubu1 per brief): DoD #1 open.
+
+Verified 2026-11-15 at 594ff82e9 (origin/main merged): macOS scripts/test.sh workspace 2466/2466, shuttle, scripts (mutants 0 broken), go; Linux ubu1 under fxjob (target on /mnt/fxdax-scratch), every part: clippy, workspace 2752/2752, sim 63/63, shuttle, scripts, go, guest, firecracker. Only fxdax's own crates changed (extent_keys, extent_frame, extent_remote, extent_store, sqlite_extents, fxdax, fxdax-examples): no upstream deviation; scripts/upstream-changes.py --check passes.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
