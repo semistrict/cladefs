@@ -11,6 +11,11 @@
 # host's are; and once the run ends, however it does, RESULTS gets what it left, but for the
 # stores, the buckets, the part caches and the guests' root filesystems and images, which are no
 # results, and the directory goes: the run's logs name it, and this says where the results are.
+# The run is a round under scripts/contamination.py (TASK-375), which records what others wrote
+# meanwhile to the disk that directory is on, the stores' and no other (RESULTS's own, ZFS on
+# ubu1, it could not check): its record, contamination.json, is in CLADEFS_BENCH_RESULTS, beside
+# the bench's report, where scripts/bench-ab.py reads both, or in RESULTS if the run has none.
+# Copying the results back is after the round, and none of it.
 #
 #   scripts/test-e2e-job.sh RESULTS [ARG...]
 #
@@ -47,7 +52,8 @@ trap 'rm -r "$work"' EXIT
 chmod 755 "$work"
 
 status=0
-CLADEFS_E2E_RESULTS="$work" "$root/scripts/test-e2e.sh" "$@" || status=$?
+CLADEFS_E2E_RESULTS="$work" "$root/scripts/contamination.py" run \
+    "${CLADEFS_BENCH_RESULTS:-$results}" "$work" -- "$root/scripts/test-e2e.sh" "$@" || status=$?
 # What a case leaves of its stores, buckets, caches, images and roots: not results
 # (scripts/qualify.sh's, and a jailed VM's jail).
 find "$work" -type d \( -name '*.root' -o -name '*.data' -o -name '*.base' -o -name '*-cache' \

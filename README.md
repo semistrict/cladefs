@@ -646,6 +646,28 @@ its kernel's count (disk written, peak memory, CPU), whatever the daemon says of
 ranges apart), and each side's failed checks. A candidate goes to LangSmith when its side passes
 every check and nothing moved the wrong way that the change didn't mean to move.
 
+`fxjob --bench` gives a measurement cores, cache, memory bandwidth and memory of its own; not the
+disk, ubu1's one NVMe, which others write to all the while. So every round of a measurement runs
+under `scripts/contamination.py` (the A/B's rounds, `scripts/bench-host.sh`'s run,
+`scripts/bench-rounds.sh`'s), which records in the round's results (`contamination.json`) what
+others read from and wrote to the round's disk as it ran, the disk's own count less the round's
+cgroup's, and under ubu1's scratch zvol the pool's other datasets' writes; and how long the
+round's tasks stalled on CPU, memory and I/O. A round others wrote more than 10 MB/s beside,
+or 50 MB/s in any one minute, is contaminated (`CLADEFS_CONTAMINATION_WRITE_MB_S`,
+`CLADEFS_CONTAMINATION_MINUTE_WRITE_MB_S`): `scripts/bench-ab.py` leaves its timings and rates out
+of the comparison, saying so above the table and in each cell, and keeps its counts and sizes
+(bytes written for each guest byte, peak memory), which a load doesn't move. A metric with no
+clean round on a side is NO RESULT, and fails the comparison. Where others' I/O can't be told
+from the round's own (no cgroup v2 cgroup of its own, as in a CI runner's container or on macOS;
+a ZFS dataset as the round's disk), the round is not checked, said as such, never clean
+(TASK-375). A round run by hand is recorded the same way, and `scripts/contamination-check.sh`
+checks the record on a host with fxjob, a round alone and one beside a loader of its own:
+
+```sh
+scripts/contamination.py run RESULTS -- scripts/qualify.sh RESULTS
+scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # ubu1, four minutes
+```
+
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, in Lima on macOS.
 

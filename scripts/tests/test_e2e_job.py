@@ -5,8 +5,9 @@
 """Tests of scripts/test-e2e-job.sh, which runs scripts/test-e2e.sh with what it writes, the
 cases' stores among it, in the job's temporary directory, on ext4, and copies the results back
 (TASK-397): here in a tree of its own, test-e2e-job.sh as it is, and in place of test-e2e.sh one
-that says where it ran and leaves what a case leaves, and of findmnt one that says the filesystem
-given; and of scripts/bench-rounds.sh's runs, which go through it."""
+that says where it ran and leaves what a case leaves, of findmnt one that says the filesystem
+given, and of scripts/contamination.py, under which the cases run (TASK-375), one that says how it
+was run; and of scripts/bench-rounds.sh's runs, which go through it."""
 
 import subprocess
 import tempfile
@@ -27,6 +28,13 @@ for left in case/extents/segment case/rootfs/bin/sh case/rootfs.ext4 case/disk.i
     echo left > "$left"
 done
 exit "$FAKE_STATUS"
+"""
+# contamination.py, which says how it was run and runs the round it was given.
+CONTAMINATION = """#!/bin/bash
+printf '%s\\n' "$@" > "$FAKE_RECORDED"
+[[ $1 == run && $4 == -- ]] || exit 64
+shift 4
+exec "$@"
 """
 # findmnt, which says every directory is on $FAKE_FSTYPE, or fails if that is empty.
 FINDMNT = """#!/bin/bash
@@ -52,6 +60,7 @@ class Job(unittest.TestCase):
         (tree / "scripts" / "test-e2e-job.sh").symlink_to(SCRIPTS / "test-e2e-job.sh")
         (tree / "bin").mkdir()
         for path, text in [(tree / "scripts" / "test-e2e.sh", CASES),
+                           (tree / "scripts" / "contamination.py", CONTAMINATION),
                            (tree / "bin" / "findmnt", FINDMNT)]:
             path.write_text(text)
             path.chmod(0o755)
@@ -63,6 +72,7 @@ class Job(unittest.TestCase):
                 "FAKE_STATUS": str(status),
                 "FAKE_FSTYPE": fstype,
                 "FAKE_ASKED": str(tree / "asked"),
+                "FAKE_RECORDED": str(tree / "recorded"),
                 **({"TMPDIR": str(tree / "tmp")} if tmpdir else {}),
                 **(env or {}),
             },
@@ -80,9 +90,13 @@ class Job(unittest.TestCase):
         """What test-e2e.sh was given: its results directory, its bucket and its arguments."""
         return (self.tree / "results" / "given.txt").read_text().splitlines()
 
+    def recorded(self):
+        """How contamination.py was run: its arguments."""
+        return (self.tree / "recorded").read_text().splitlines()
+
     def left(self):
-        """What the tree holds once a job was refused: no results, nothing in the temporary
-        directory, and `asked` if findmnt was."""
+        """What the tree holds once a job was refused: no results, no round run or recorded,
+        nothing in the temporary directory, and `asked` if findmnt was."""
         self.assertEqual(list((self.tree / "tmp").iterdir()), [])
         return sorted(path.name for path in self.tree.iterdir())
 
@@ -97,6 +111,23 @@ class Job(unittest.TestCase):
         # The bucket is test-e2e.sh's own, on tmpfs: none is named.
         self.assertEqual((bucket, arguments), ("no bucket named", ["bench-fs-fxfs-guest-dax"]))
         self.assertEqual((self.tree / "asked").read_text(), f"-no FSTYPE -T {self.tree / 'tmp'}\n")
+
+    def test_the_run_is_a_round_recorded_of_the_disk_its_stores_are_on(self):
+        # The directory the run wrote in, in the job's temporary one, is the round's disk, and no
+        # other: not the results', which is ubu1's ZFS home under bench-rounds.sh, not checked.
+        status, errors = self.job("bench-fs-fxfs-guest-dax")
+        self.assertEqual((status, errors), (0, self.moved()))
+        self.assertEqual(self.recorded(), [
+            "run", str(self.tree / "results"), self.given()[0], "--",
+            str(self.tree / "scripts" / "test-e2e.sh"), "bench-fs-fxfs-guest-dax"])
+
+    def test_the_rounds_record_goes_beside_the_benchs_report(self):
+        # Where bench-ab.py reads both: bench-rounds.sh's round directory.
+        status, errors = self.job("case", env={"CLADEFS_BENCH_RESULTS": "/round/1"})
+        self.assertEqual((status, errors), (0, self.moved()))
+        self.assertEqual(self.recorded(),
+                         ["run", "/round/1", self.given()[0], "--",
+                          str(self.tree / "scripts" / "test-e2e.sh"), "case"])
 
     def test_the_stores_caches_and_root_filesystems_are_no_results(self):
         status, errors = self.job("--tag", "bench")
@@ -161,6 +192,8 @@ class Rounds(unittest.TestCase):
         self.assertNotIn("CLADEFS_EXTENTD_REMOTE=", text)
         self.assertNotIn("CLADEFS_E2E_RESULTS=", text)
         self.assertNotIn("/scripts/test-e2e.sh\" \"$case\"", text)
+        # Nor the round's record here, of the results' disk: the job's, of its stores' (TASK-375).
+        self.assertNotIn("contamination.py", text.split("set -euo pipefail")[1])
 
 
 if __name__ == "__main__":

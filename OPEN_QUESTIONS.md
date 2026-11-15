@@ -29,6 +29,17 @@ Decided without you:
 - **Orderings stronger than needed stay as written** (14 groups, docs/memory-ordering.md). Weakening them would rest on an argument no model checks, for no measurable gain. *Instead:* weaken them to Relaxed now. *Undo:* TASK-444.2.3, once its models exist.
 - **`RemoteExtentStore::on_committed` returns the latest commit heard as it began listening** (TASK-444.2.2), and a second call panics. That closes the gap that two calls (listen, then `committed()`) left. *Undo:* none needed; `committed()` stays.
 
+## A round others wrote beside: what counts, and what the comparison does with it (TASK-375, 2026-11-15)
+
+Decided without you:
+- **Bounds: the task's**, others' writes past 10 MB/s over the round or 50 MB/s in any minute (`CLADEFS_CONTAMINATION_*` set others). ubu1's notes fit them: 0.5-6.3 MB/s of the scratch zvol's writes weren't the measurement's in clean rounds (ext4's journal among them), capped work beside one writes 25-27 MB/s, the loader 186. So ordinary fxjob work writing at its cap to the scratch disk marks a round. *Instead:* 32 MB/s, to let capped work pass. *Undo:* the two defaults.
+- **Reads and pressure are recorded, not judged** (`CLADEFS_CONTAMINATION_STALL_PCT` names stall bounds): nothing measured says what others' reads cost, and a round's own tasks stall on each other (overcommitted vCPUs).
+- **Under the scratch zvol, others are also the pool's other datasets**, by ZFS's per-dataset counts (`/proc/spl/kstat/zfs/POOL/objset-*`): a loader in /home never passes zd0. These are bytes as written to files, not what reached the NVMe, and miss mapped files' pages and `zfs receive`; the NVMe's totals are recorded beside them, unjudged, as ZFS writes for no cgroup.
+- **Not checked is its own verdict**, never clean: no cgroup v2 cgroup with I/O accounting to the round's alone, a ZFS dataset or an overlay as the round's disk, no record. bench-ab.py lists such rounds and keeps their timings. *Instead:* leave them out too, which would empty every comparison made off ubu1 or from results of before today.
+- **A metric with no clean round on a side fails the comparison** (NO RESULT, exit 1), as a part that didn't run does. A contaminated round's failed checks still show in the failures table.
+- **Which metrics a load skews is by unit**: all but MiB, GiB, bytes, x, count. A new unit is taken as a timing until named there.
+- **bench-rounds.sh's record is of its job's scratch directory, where its stores are since TASK-397**, not of its results' directory, ubu1's ZFS home, which can't be checked: only the job can name that directory, so `scripts/test-e2e-job.sh` runs the cases under contamination.py, DISK its work directory, the record beside the bench's report (`CLADEFS_BENCH_RESULTS`, the round's directory). The run's log and report, written to ZFS home as it runs, count among the pool's other datasets' writes (small). *Instead:* bench-rounds.sh wrapping the job, the disk expanded by the job's shell, the copy of the results back inside the round.
+
 ## bench-rounds.sh's runs keep their stores on ext4 and their bucket on tmpfs (TASK-397, 2026-11-15)
 
 Its results' directory, ubu1's home, is ZFS, and held each run's stores and file bucket: a durable sync measured ZFS's syncs. Decided without you:

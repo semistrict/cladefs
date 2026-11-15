@@ -11,6 +11,9 @@
 # what drifts on the host moves both alike, and a round takes the workloads' time alone. Each
 # round's results go to RESULTS/NAME-rN, and scripts/bench-ab.py's comparison of the sides to
 # RESULTS/ab.md, the control CLADEFS_AB_CONTROL's case (default ext4-guest-kernel; empty: none).
+# Each round records what others wrote to its disk as it ran (RESULTS/NAME-rN/contamination.json,
+# scripts/contamination.py, whose bounds CLADEFS_CONTAMINATION_* set), and the comparison leaves the
+# timings of a round others wrote beside out, saying so (TASK-375).
 #
 # With CLADEFS_AB_SUITE=qualify (default fs, the bench), each round is the qualification instead
 # (scripts/qualify.sh, TASK-330.4), of LangSmith's pin against a candidate: its harness, the
@@ -163,7 +166,8 @@ if [[ $phase == build ]]; then
 fi
 
 # Runs side SIDE's round ROUND, with its name and its environment's words, its results in
-# RESULTS/NAME-rROUND.
+# RESULTS/NAME-rROUND, what others wrote to its disk meanwhile among them
+# (scripts/contamination.py, TASK-375), which scripts/bench-ab.py leaves a round's timings out for.
 round() {
     local side=$1 round=$2 name out
     local -a env command
@@ -180,7 +184,8 @@ round() {
         command=("$tools/scripts/bench.sh" "$iterations")
     fi
     echo "Round $round: $name" >&2
-    env "${env[@]}" "${command[@]}" > "$out.md" 2> "$out.log"
+    env "${env[@]}" "$tools/scripts/contamination.py" run "$out" -- "${command[@]}" \
+        > "$out.md" 2> "$out.log"
 }
 
 # A round of the qualification one of whose parts didn't run (qualify.sh's 3) ends the A/B there:

@@ -37,7 +37,10 @@
 # Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs (e2e, copied there as the run
 # ends, without the stores and the guests' root filesystems), and the fs bench's report as JSON
 # (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
-# round directories. The environment's CLADEFS_* variables pass to every run (sudo drops them
+# round directories; and what others wrote to the run's disk meanwhile (contamination.json there,
+# scripts/contamination.py, TASK-375), the job's scratch disk, the stores', which only the job
+# can name: test-e2e-job.sh runs the cases under it, a run others wrote beside left out of the
+# comparison's timings. The environment's CLADEFS_* variables pass to every run (sudo drops them
 # otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
 # and such. It fails if a run did; a run refused before it started (2: no ext4 for its stores,
 # artifacts it can't boot) ends the rounds there, as every other would be.
