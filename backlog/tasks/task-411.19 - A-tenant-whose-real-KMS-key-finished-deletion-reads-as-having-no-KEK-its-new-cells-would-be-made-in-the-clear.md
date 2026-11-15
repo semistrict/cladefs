@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:58'
-updated_date: '2026-11-15 09:49'
+updated_date: '2026-11-15 09:50'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -24,14 +24,14 @@ Found in TASK-411.17 (AWS KMS backend). A real KMS forgets a deleted key: AWS KM
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A tenant that had a KEK (it has sealed cells, or the host or bucket recorded one) is never given a cell in the clear after its KMS answers that its key is not found: a test with a KMS answering NotFound for a tenant with sealed cells shows the cell's making refused, naming the tenant
-- [ ] #2 doc-16 says how a tenant's KEK forgotten by the KMS is told from a tenant that never had one
+- [x] #1 A tenant that had a KEK (it has sealed cells, or the host or bucket recorded one) is never given a cell in the clear after its KMS answers that its key is not found: a test with a KMS answering NotFound for a tenant with sealed cells shows the cell's making refused, naming the tenant
+- [x] #2 doc-16 says how a tenant's KEK forgotten by the KMS is told from a tenant that never had one
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
@@ -63,4 +63,12 @@ Implemented (2026-11-15):
 - Filed TASK-411.24: a host with no KMS reads no marker and still makes clear cells for a sealed tenant.
 - Docs: doc-16 new section "A forgotten KEK told from none", AWS/OpenBao workaround text replaced; doc-7 layout row.
 - Validation (Mac): nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax (sim excluded): 1033 passed, 0 failed. clippy --all-targets on touched crates: no new warnings. scripts/upstream-changes.py --check: passes.
+
+Simulation sample: sim::one, SIM_SEEDS=10 from SIM_SEED=4119000, for all 23 profiles (collectors, fresh_cells, everything, forks, bases, stale, collected, takeovers, recreated, crashes, taken, children, recovering, failed, restores, forgotten, whole_restores, taking_ids, usurped, deleted_forking, wals, forked_wals, late_checkpoints): all passed. DoD #1 (macOS and Linux ubu1) not checked: Linux not run (Mac only for this task). DoD #3: no upstream code changed beyond fxdax-marked additions; left for review.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A tenant's sealed marker, tenants/<tenant>/sealed, tells a KEK the KMS forgot (AWS KMS after deletion, a deleted OpenBao key: both NoSuchTenant) from a tenant that never had one. keys::new_cell_kek, which every cell maker calls (store opening, fork into a new cell, FUSE control attach), creates the marker create-only before handing out a KEK, so before any sealed cell object exists; when the KMS says no such key, a present marker refuses the tenant as destroyed (Error::Kms naming tenant and marker, EACCES in fxdax), drops its pool and takings, and refuses forks. Cached per host: present for good, absent for KEKLESS_FOR, so a plaintext tenant costs at most one wrap and one HEAD per host per minute. A refill hearing NoSuchTenant drops the pool. The collector keeps the marker (Kind::Sealed). Verified on macOS: new tests in extent_remote keys (request lists counted), extent_store encrypted (opening, fork, clear twin, sweep keeps marker), fxdax remote (EACCES); a hand mutant without the marker check failed them; 1033 tests of the touched crates passed; 10 seeds of each of the 23 sim profiles passed; clippy clean; upstream-changes check passes. Docs: doc-16 section "A forgotten KEK told from none", AWS/OpenBao workaround text replaced, doc-7 layout row. Filed TASK-411.24 (hosts with no KMS read no marker).
+<!-- SECTION:FINAL_SUMMARY:END -->
