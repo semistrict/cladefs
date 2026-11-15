@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 21:47'
-updated_date: '2026-11-15 04:08'
+updated_date: '2026-11-15 04:41'
 labels:
   - task
 dependencies: []
@@ -60,6 +60,8 @@ ubu1 r t417a (8fea07c16, fork e7c0a413e): workspace 2698/2698 and the other work
 ubu1 t417c: fxfs-guest-snapshot, -snapshot-dax, -snapshot-volumes(-dax), -suspend-dax, -follow-dax, -follow-remount-dax pass; fxfs-guest-migrate-dax fails, as on main (TASK-419). User chose (2026-11-14) the queue seam before landing: the crate owns the workers, pause/resume and reset behind a RequestQueue trait the VMM implements.
 
 Landed on main 7998d1f86, vendor/firecracker e27792aef (series fxdax-v1.16.1-r7). Evidence: crate 43/43 on Linux, 30/30 on macOS; fork clippy -D warnings, 18 extent + 31 KVM tests; series check 23/23 both ways; ubu1 t417a workspace 2698/2698 and default guest suite, t417f default suite + snapshot/suspend/follow cases 23/23 on the same tip tree; fxfs-guest-migrate-dax fails as on main (TASK-419). Final qualification t417g of the merged commit still running at the push (user: push after basic tests).
+
+Final qualification t417g (merged 95d150a2a, fork e27792aef): workspace 2795/2795 and its other parts, firecracker part 18 + 31, guest default suite + snapshot/suspend/follow 23/23: all pass.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
