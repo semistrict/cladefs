@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 19:02'
-updated_date: '2026-11-15 19:03'
+updated_date: '2026-11-15 19:40'
 labels:
   - test
   - flaky
@@ -41,8 +41,21 @@ The store removes files in the background (cleaning, write-back, framing) while 
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Quiesce, not tolerate, where the test holds the store: Store::wait_idle (no framing, nor its durability/rename, nor the next log's preparation, nor look-ahead); data_files waits for it; the image test waits for the uploader (wait_uploaded), the store, and the collector's pass.
+2. One shared walker, cladefs::testing: files_holding (strict: a file gone fails) for quiesced/closed dirs; files_holding_beside (re-walks until a pass reads all it listed, keeping every pass's finds) for daemon tests that cannot wait.
+3. Sweep: control.rs and sqlite_extents daemon.rs (live daemon) -> beside; fuse.rs, fuse_mount.rs, sqlite image.rs, remote.rs's shred test (closed stores) -> strict helper.
+4. Prove: fail point segments::making_durable holds the rename, released in the list->open window: fails unfixed, passes fixed; Mac 300 runs each under load; ubu1 200 runs each, nextest --retries 0.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-15 19:10 UTC, coordinator (TASK-336/400 lane): taking it; a delegate fixes it.
+
+Cause: segments::make_durable renames framing-N to N on the store's durable thread after a commit/uploader closing; data_files and the image walk listed framing-N, then opened it after the rename (NotFound). Image test also races the uploader (acks remove files), the opener (spare log renamed) and the collector.
+Forced window (temporary tests, fail point segments::making_durable held, released between listing and opening): unfixed both fail with the CI errors (store: 'segments/0000000000000007/framing-0000000000000000 doesn't exist'; image: Os NotFound on .../segments/<branch>/framing-0000000000000000); fixed both pass.
+Mac natural rate unfixed: image 0/240 under load. Fixed: 300/300 each under load (16 parallel + 6 CPU hogs), 0 failures.
 <!-- SECTION:NOTES:END -->
