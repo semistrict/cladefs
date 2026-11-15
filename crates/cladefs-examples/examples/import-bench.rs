@@ -27,10 +27,10 @@
 //! times takes, and what compacting Fxfs's trees cost meanwhile: the allocator's, and the object
 //! stores' (TASK-92.46).
 
-use futures::executor::block_on;
 use cladefs::import::Importer;
 use cladefs::import::testing::{Entry, Kind, layer, whiteout};
 use cladefs::{Options, Storage, TreeCompactions};
+use futures::executor::block_on;
 use std::num::NonZeroU8;
 use std::time::{Duration, Instant};
 

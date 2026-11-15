@@ -672,9 +672,15 @@ async fn attempt<B: Bucket>(
         None => match origin {
             None => Layered::of(State::new(branch)),
             Some(origin) => {
-                let at =
-                    state_at(checkpoints, origin.parent, origin.at, &mut touched, branch.cell, false)
-                        .await;
+                let at = state_at(
+                    checkpoints,
+                    origin.parent,
+                    origin.at,
+                    &mut touched,
+                    branch.cell,
+                    false,
+                )
+                .await;
                 match at {
                     Ok(at) => Layered::inheriting(at, branch),
                     // A checkpoint of its own since, which the collector going by may have let
@@ -755,7 +761,13 @@ async fn segment_footer(
 
 /// `footer`, that of the object at `key`, which holds segment `seq` of `branch` by the writer of
 /// `epoch`, if it says so.
-fn placed(key: &str, footer: Footer, branch: Branch, seq: u64, epoch: u64) -> Result<Footer, Error> {
+fn placed(
+    key: &str,
+    footer: Footer,
+    branch: Branch,
+    seq: u64,
+    epoch: u64,
+) -> Result<Footer, Error> {
     if footer.branch != branch || footer.seq != seq || footer.epoch != epoch {
         return Err(Error::Corrupt(format!(
             "{key} holds segment {:x} of {} by epoch {:x}",
@@ -883,12 +895,16 @@ fn state_at<'a, B: Bucket>(
         };
         let from = state.through.map_or(0, |seq| seq + 1);
         let named = head.as_ref().expect("a head naming the segment at");
-        let mut footers = futures::stream::iter(named.segments(from).take_while(|&(seq, _)| seq <= at))
-            .map(|(seq, epoch)| async move {
-                let key = layout::segment(branch, seq, epoch);
-                Ok::<_, Error>((key, segment_footer((bucket, checkpoints.keys), branch, seq, epoch).await?))
-            })
-            .buffered(AT_ONCE);
+        let mut footers =
+            futures::stream::iter(named.segments(from).take_while(|&(seq, _)| seq <= at))
+                .map(|(seq, epoch)| async move {
+                    let key = layout::segment(branch, seq, epoch);
+                    Ok::<_, Error>((
+                        key,
+                        segment_footer((bucket, checkpoints.keys), branch, seq, epoch).await?,
+                    ))
+                })
+                .buffered(AT_ONCE);
         while let Some((key, footer)) = footers.try_next().await? {
             // A segment the head names goes only once a checkpoint covers it.
             let Some(footer) = footer else { return Err(Attempt::Restart) };
@@ -1060,7 +1076,8 @@ mod tests {
 
         committed(&bucket, &writer, 6, 2);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
+        let (on, rounds) =
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!(rounds, [tails(5..7)]);
         let anew = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
@@ -1082,11 +1099,13 @@ mod tests {
         let seq = bucket.served(writer.checkpoint()).0.unwrap().unwrap();
         committed(&bucket, &writer, 4, 1);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
-        let (on, rounds) = bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
+        let (on, rounds) =
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
         let on = on.unwrap();
         assert_eq!((on.checkpoint(), on.end(), on.state.last_commit), (Some((seq, 1)), 4, Some(4)));
         let checkpoint = vec![format!("get {}", layout::checkpoint(test_branch(1), seq, 1))];
-        let tail = |seq| format!("get {} last {}", layout::segment(test_branch(1), seq, 1), object::TAIL);
+        let tail =
+            |seq| format!("get {} last {}", layout::segment(test_branch(1), seq, 1), object::TAIL);
         assert_eq!(rounds, [checkpoint, vec![tail(3)]]);
     }
 
@@ -1252,7 +1271,9 @@ mod tests {
                 .unwrap();
             let key = layout::checkpoint(test_branch(2), seq, child.epoch());
             let overwrite = crate::bucket::PutMode::Overwrite;
-            crate::bucket::Bucket::put(&*bucket, &key, object.bytes.into(), overwrite).await.unwrap();
+            crate::bucket::Bucket::put(&*bucket, &key, object.bytes.into(), overwrite)
+                .await
+                .unwrap();
             // Read by another host, which decoded nothing of it before: a key names one object,
             // which a host's bucket keeps decoded (TASK-407).
             let corrupt = format!("{key} holds a checkpoint of 1/1/1");

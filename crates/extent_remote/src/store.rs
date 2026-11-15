@@ -1340,11 +1340,9 @@ pub(crate) mod tests {
                  request={request} marks={epoch}"
             )
         };
-        let ours =
-            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, seq: 4, epoch: 1 }";
+        let ours = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, seq: 4, epoch: 1 }";
         let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
-        let other =
-            "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, seq: 1, epoch: 1 }";
+        let other = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, seq: 1, epoch: 1 }";
         let theirs = reached("get", &theirs, layout::marks(Cell { tenant: 1, id: 2 }, 3), other, 3);
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
@@ -1978,7 +1976,9 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs() {
-        over_a_real_store(&std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket"));
+        over_a_real_store(
+            &std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket"),
+        );
     }
 
     /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a bucket
@@ -2019,7 +2019,8 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "needs Azurite: scripts/test-azurite.sh, CI's object-stores job"]
     fn azurite() {
-        let url = std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
+        let url =
+            std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
         over_a_real_store(&url);
     }
 }

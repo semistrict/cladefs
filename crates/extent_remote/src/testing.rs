@@ -632,16 +632,20 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let behind = checkpoint.is_none_or(|(_, by)| by != epoch);
         // What its head may yet name: of its epoch, or a later one, its segments and extents of
         // their own at or past its end, and its checkpoints newer than its own (TASK-407).
-        needed.extend(keys.iter().filter(|key| match layout::kind(key) {
-            layout::Kind::Segment { branch: of, seq, epoch: by }
-            | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
-                of == branch && by >= epoch && seq >= end
-            }
-            layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
-                of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
-            }
-            _ => false,
-        }).cloned());
+        needed.extend(
+            keys.iter()
+                .filter(|key| match layout::kind(key) {
+                    layout::Kind::Segment { branch: of, seq, epoch: by }
+                    | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
+                        of == branch && by >= epoch && seq >= end
+                    }
+                    layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
+                        of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
+                    }
+                    _ => false,
+                })
+                .cloned(),
+        );
         for (&extent, location) in &recovered.state.extents {
             needed.insert(location.key.clone());
             named.entry(location.key.clone()).or_default().insert(extent, location.len);
@@ -785,8 +789,7 @@ mod tests {
         let bucket = SimBucket::new();
         bucket.hold(test_branch(2), 1);
         let key = layout::segment(test_branch(2), 4, 1);
-        let footer =
-            layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
+        let footer = layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
         let stale = layout::Segment { data: Vec::new(), footer }.encode();
         let created = bucket.put(&key, stale.into(), PutMode::Create);
         assert_eq!(bucket.waiting(), 0);

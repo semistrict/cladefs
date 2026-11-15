@@ -52,7 +52,8 @@ fn survives_closing(name: &str) -> Vec<String> {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("image");
     let marker = noise(4096);
-    let (write, read) = (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
+    let (write, read) =
+        (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
     {
         let volume = Volume::open(
             Storage::create(&path, 256 << 20).unwrap().into_device(),

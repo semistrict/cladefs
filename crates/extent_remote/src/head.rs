@@ -171,7 +171,9 @@ async fn write(
         match bucket.put(key, bytes.clone(), mode.clone()).await {
             Ok(version) => return Ok(Held { head: head.clone(), version }),
             Err(
-                bucket::Error::AlreadyExists | bucket::Error::Precondition | bucket::Error::NotFound,
+                bucket::Error::AlreadyExists
+                | bucket::Error::Precondition
+                | bucket::Error::NotFound,
             ) => {
                 return match bucket::get(bucket, key).await {
                     Some(object) if object.bytes == bytes => {

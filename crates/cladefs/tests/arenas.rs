@@ -6,9 +6,9 @@
 //! what allocates in it: its tenant, the stores opened in it, and what reads into the extent cache
 //! for them. It goes once none of them holds it, and nothing allocates in it after.
 
-use futures::executor::block_on;
 use cladefs::pages::Arena;
 use cladefs::{Access, ExtentId, ExtentStore, VolatileSlice};
+use futures::executor::block_on;
 
 /// A store opened in an arena pages its extents in, through its window, once what made the arena
 /// for it lets go of it, as a tenant whose VM processes are gone does; and the arena goes with the

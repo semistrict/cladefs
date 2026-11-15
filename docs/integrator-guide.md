@@ -145,7 +145,7 @@ right after (TASK-277). So in every agent of yours that connects from the guest 
 `git-remote-fxfs`), whose asks to the sandbox manager are idempotent: `AttachBase` of a base that is
 already attached does nothing. Copy its rules, or call it from Rust.
 
-This needs cladefs's Firecracker series `fxdax-v1.16.1-r3` or later. When it takes a snapshot, it
+This needs cladefs's Firecracker series `fxdax-v1.16.1-r3` or later (from r8 on, `cladefs-v1.16.1-rN`). When it takes a snapshot, it
 queues an RST behind any response still in the guest's receive queue. On older series, the guest
 can take such a response after the reset: its connection then connects to nothing, and its reads
 hang forever.

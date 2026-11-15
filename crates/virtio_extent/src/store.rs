@@ -7,7 +7,9 @@
 
 use std::future::Future;
 
-use cladefs::{Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
+use cladefs::{
+    Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers,
+};
 
 /// The store a device's requests are served with ([`handle`](crate::handle)): each method one of
 /// the device's requests, as cladefs's `RemoteExtentStore` serves it, which its documentation

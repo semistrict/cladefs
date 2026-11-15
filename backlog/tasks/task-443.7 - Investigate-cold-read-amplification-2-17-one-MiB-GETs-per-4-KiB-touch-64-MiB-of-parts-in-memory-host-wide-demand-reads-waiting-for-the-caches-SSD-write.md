@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:25'
+updated_date: '2026-11-15 13:31'
 labels:
   - perf
   - review-2026-11-15
@@ -21,7 +22,7 @@ ordinal: 841000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-crates/extent_remote/src/fetch.rs read_ahead (AHEAD 16; a random read always fetches the next part; a second read in one part counts as sequential) is stacked under crates/fxdax/src/cache.rs PARTS_AHEAD 2, whose extra parts go out as demand; all share the host's 64-GET budget. RECENT keeps 64 MiB of fetched parts in memory for every tenant, so small-extent page-ins re-read and re-unpack 1 MiB each. Fetching::part hands the part to readers only after Cache::keep_part wrote it to the shared SSD, eviction's hole punches included. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
+crates/extent_remote/src/fetch.rs read_ahead (AHEAD 16; a random read always fetches the next part; a second read in one part counts as sequential) is stacked under crates/cladefs/src/cache.rs PARTS_AHEAD 2, whose extra parts go out as demand; all share the host's 64-GET budget. RECENT keeps 64 MiB of fetched parts in memory for every tenant, so small-extent page-ins re-read and re-unpack 1 MiB each. Fetching::part hands the part to readers only after Cache::keep_part wrote it to the shared SSD, eviction's hole punches included. Found by reading the code, not measured (docs/reviews/2026-11-15-sandbox-performance.md).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

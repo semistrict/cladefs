@@ -770,7 +770,8 @@ fn op() -> impl Strategy<Value = Op> {
 #[test]
 fn the_sims_model_does_as_fxfs_does() {
     let cases = std::env::var("CLADEFS_SIM_DIFF_CASES").map_or(64, |cases| cases.parse().unwrap());
-    let most: usize = std::env::var("CLADEFS_SIM_DIFF_OPS").map_or(48, |most| most.parse().unwrap());
+    let most: usize =
+        std::env::var("CLADEFS_SIM_DIFF_OPS").map_or(48, |most| most.parse().unwrap());
     let config = Config { cases, failure_persistence: None, ..Config::default() };
     let sequences = (any::<u64>(), prop::collection::vec(op(), 1..most));
     let tally = Tally::default();

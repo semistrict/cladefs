@@ -13,9 +13,9 @@
 
 mod common;
 
+use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSliceMut};
 use common::daemon::{CAPACITY, Daemon, failure, write};
 use common::{cache, copies, pattern};
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use tonic::Code;
 

@@ -168,6 +168,7 @@ mod host;
 mod kept;
 mod layout;
 mod mem;
+pub mod pages;
 mod raw;
 mod seals;
 mod segments;

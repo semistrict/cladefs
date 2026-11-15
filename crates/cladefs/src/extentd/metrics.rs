@@ -190,8 +190,7 @@ pub fn render() -> String {
             load(&requests.count)
         );
     }
-    out +=
-        "# HELP cladefs_extentd_request_errors_total VM processes' requests that failed, by kind.\n";
+    out += "# HELP cladefs_extentd_request_errors_total VM processes' requests that failed, by kind.\n";
     out += "# TYPE cladefs_extentd_request_errors_total counter\n";
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
         let _ = writeln!(
@@ -459,7 +458,8 @@ pub fn render() -> String {
         let _ = writeln!(out, "# HELP cladefs_extentd_{name} {help}");
         let _ = writeln!(out, "# TYPE cladefs_extentd_{name} {kind}");
         for (branch, status) in &uploads {
-            let _ = writeln!(out, "cladefs_extentd_{name}{{branch=\"{branch}\"}} {}", value(status));
+            let _ =
+                writeln!(out, "cladefs_extentd_{name}{{branch=\"{branch}\"}} {}", value(status));
         }
     }
 

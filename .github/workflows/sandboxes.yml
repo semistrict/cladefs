@@ -8,13 +8,13 @@
 # than its 4 CPUs, building and exporting Docker images, running pgbench, working git repositories
 # and writing LangSmith's own load. It fails on a guest kernel's report, a VM let go, a framing
 # past a second, a sandbox's command past its budget, or a daemon past its own
-# (scripts/budgets.py). The short mode, minutes, runs here by hand (workflow_dispatch) for now, and
-# goes on every push from ci.yml once main passes it, its framings past a second on the runner's
-# disk and CPUs today (TASK-310, TASK-336). The long mode runs on ubu1 alone, by hand, before each
-# pin handed to LangSmith (scripts/qualify.sh, TASK-330.4): it ran a 16 GB runner out of memory at
-# every size tried, and nobody pays for a larger one (TASK-330.5). On a runner made a host of
-# guests, the guest kernel kept between runs by what it's built from (.github/actions' guest-host
-# and guest-kernel).
+# (scripts/budgets.py). The short mode, minutes, runs on every push to main (ci.yml), since main
+# passes it on the runner's disk and CPUs (TASK-336, TASK-400, TASK-401), and here by hand
+# (workflow_dispatch). The long mode runs on ubu1 alone, by hand, before each pin handed to
+# LangSmith (scripts/qualify.sh, TASK-330.4): it ran a 16 GB runner out of memory at every size
+# tried, and nobody pays for a larger one (TASK-330.5). On a runner made a host of guests, the
+# guest kernel kept between runs by what it's built from (.github/actions' guest-host and
+# guest-kernel), and the artifacts' builds by the lock files.
 name: Sandboxes
 
 on:
@@ -34,10 +34,38 @@ jobs:
       - uses: ./.github/actions/guest-host
       - uses: ./.github/actions/guest-kernel
         id: kernel
+      # The artifacts' builds of the last run whose lock files were these, or of the nearest: their
+      # dependencies, built whole 10 minutes of the job, 6 with these (1.5 GB). cladefs's own
+      # crates, new in a checkout, build each time, twice: for the daemon, and in the VMM's copy,
+      # which builds in target/firecracker (run 43718512917: the job 10.5 minutes, the run 3.3).
+      - uses: actions/cache/restore@v6
+        id: cargo-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            guest/tests/target
+          key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock', 'vendor/firecracker.lock') }}
+          restore-keys: sandboxes-cargo-
       # What the run boots and serves it with, built once: the guest tests' own tests are CI's
-      # guest part's, which scripts/test-e2e.sh runs first unless its artifacts are prebuilt.
+      # guest part's, which scripts/test-e2e.sh runs first unless its artifacts are prebuilt. No
+      # incremental build of the runner, which only grows the cache.
       - name: Build the run's artifacts
         run: CLADEFS_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts" scripts/test-e2e.sh
+        env:
+          CARGO_INCREMENTAL: 0
+      # Kept once built, whatever the run says after: a run that fails its checks would build it
+      # all again.
+      - uses: actions/cache/save@v6
+        if: steps.cargo-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            guest/tests/target
+          key: sandboxes-cargo-${{ hashFiles('Cargo.lock', 'guest/tests/Cargo.lock', 'vendor/firecracker.lock') }}
       # As root, as the guest part's tests run: podman makes the guests' root images. What the
       # runner spends, every 30 s, goes in the results (resources.log, scripts/lib/resources.sh).
       - name: scripts/sandboxes.sh short

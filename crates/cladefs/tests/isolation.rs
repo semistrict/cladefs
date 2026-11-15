@@ -15,8 +15,8 @@
 
 mod common;
 
-use common::{cache, holds, pattern};
 use cladefs::RemoteExtentStore;
+use common::{cache, holds, pattern};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};

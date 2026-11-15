@@ -184,7 +184,9 @@ pub fn moves_of(key: &str) -> Result<String, crate::Error> {
 /// cell's: `<C>moves/<rest>` for `<C><rest>`.
 pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
     let Some((cell, rest)) = in_cell(prefix) else {
-        return Err(crate::Error::Corrupt(format!("{prefix}: no cell's object, which has no moves")));
+        return Err(crate::Error::Corrupt(format!(
+            "{prefix}: no cell's object, which has no moves"
+        )));
     };
     Ok(format!("{}{MOVES}{rest}", cell.prefix()))
 }
@@ -897,11 +899,15 @@ mod tests {
     fn passes_moves_of_one_object_are_at_keys_of_their_own() {
         let cell = Cell { tenant: 0xa, id: 0xc };
         let sealed = segment(Branch { cell, id: 3 }, 7, 2);
-        let (first, second) = (super::moves(&sealed, 1).unwrap(), super::moves(&sealed, 2).unwrap());
+        let (first, second) =
+            (super::moves(&sealed, 1).unwrap(), super::moves(&sealed, 2).unwrap());
         assert_ne!(first, second);
         let prefix = moves_of(&sealed).unwrap();
         assert!(first.starts_with(&prefix) && second.starts_with(&prefix));
-        assert_eq!((moved_from(&first), moved_from(&second)), (Some(sealed.clone()), Some(sealed.clone())));
+        assert_eq!(
+            (moved_from(&first), moved_from(&second)),
+            (Some(sealed.clone()), Some(sealed.clone()))
+        );
         let next = segment(Branch { cell, id: 3 }, 8, 2);
         assert!(!super::moves(&next, 1).unwrap().starts_with(&prefix));
         assert!(!moves(&first).starts_with(&prefix));
@@ -1043,7 +1049,10 @@ mod tests {
         assert_eq!((head.end, &head.runs[..]), (6, &[(0, 1), (4, 3)][..]));
         let named: Vec<_> = head.segments(2).collect();
         assert_eq!(named, [(2, 1), (3, 1), (4, 3), (5, 3)]);
-        assert_eq!((head.epoch_of(3), head.epoch_of(4), head.epoch_of(6)), (Some(1), Some(3), None));
+        assert_eq!(
+            (head.epoch_of(3), head.epoch_of(4), head.epoch_of(6)),
+            (Some(1), Some(3), None)
+        );
         assert_eq!(head.segment(branch, 5), Some(segment(branch, 5, 3)));
         assert_eq!(head.clone().holding(3, 5), head, "nothing named twice, nor taken back");
         let checkpointed = Head { checkpoint: Some((4, 3)), ..head };

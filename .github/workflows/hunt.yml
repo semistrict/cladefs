@@ -277,7 +277,7 @@ jobs:
             -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)' \
             > hunt/soak.log 2>&1 || status=$?
           grep -E '^soak: |panicked|PASS|FAIL' hunt/soak.log | tee -a "$GITHUB_STEP_SUMMARY" || true
-          exit ${status:-0}
+          exit "${status:-0}"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

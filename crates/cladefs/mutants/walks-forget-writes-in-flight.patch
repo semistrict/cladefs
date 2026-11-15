@@ -5,8 +5,8 @@
 # Killer: extentd::disk::tests::writes_not_done_stay_counted_across_walks
 --- a/crates/cladefs/src/extentd/disk.rs
 +++ b/crates/cladefs/src/extentd/disk.rs
-@@ -202,7 +202,7 @@
-         let writing = self.writing.load(Ordering::SeqCst);
+@@ -212,7 +212,7 @@ impl Disk {
+         }
          let walked = walk(&self.dir);
          // Only admissions add to it meanwhile.
 -        let delta = (walked + writing).wrapping_sub(before);

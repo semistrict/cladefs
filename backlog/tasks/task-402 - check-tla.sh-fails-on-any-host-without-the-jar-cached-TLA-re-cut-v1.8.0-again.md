@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-13 17:01'
+updated_date: '2026-11-15 11:36'
 labels:
   - tla
   - scripts
@@ -22,8 +23,8 @@ scripts/check-tla.sh pins tla2tools v1.8.0 (sha256 011267fc...), a pre-release T
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 check-tla.sh runs on a host with an empty ~/.cache/fxdax/tla
-- [ ] #2 The pinned jar can't change under the pin again (a release that stays put, or the jar kept where fxdax controls it)
+- [ ] #1 check-tla.sh runs on a host with an empty ~/.cache/cladefs/tla
+- [ ] #2 The pinned jar can't change under the pin again (a release that stays put, or the jar kept where cladefs controls it)
 <!-- AC:END -->
 
 ## Definition of Done

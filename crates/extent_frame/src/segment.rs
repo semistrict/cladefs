@@ -487,14 +487,10 @@ mod tests {
         let footer = closing.close(Contents { own: vec![(7, 512)], ..Contents::default() });
         assert_eq!(start.admit(&footer), Ok(closing));
         // A footer of another place than the next the chain closes: refused, saying both.
-        let misplaced = |place: &str| {
-            format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4))
-        };
+        let misplaced =
+            |place: &str| format!("a segment of branch {place}, not {:?}", (branch(2), 9, 4));
         for (wrong, refused) in [
-            (
-                Footer { branch: branch(3), ..footer.clone() },
-                misplaced("1/2/3, number 9, epoch 4"),
-            ),
+            (Footer { branch: branch(3), ..footer.clone() }, misplaced("1/2/3, number 9, epoch 4")),
             (
                 Footer {
                     branch: Branch { cell: Cell { tenant: 1, id: 3 }, ..branch(2) },
@@ -502,14 +498,8 @@ mod tests {
                 },
                 misplaced("1/3/2, number 9, epoch 4"),
             ),
-            (
-                Footer { seq: 10, ..footer.clone() },
-                misplaced("1/2/2, number 10, epoch 4"),
-            ),
-            (
-                Footer { epoch: 5, ..footer },
-                misplaced("1/2/2, number 9, epoch 5"),
-            ),
+            (Footer { seq: 10, ..footer.clone() }, misplaced("1/2/2, number 10, epoch 4")),
+            (Footer { epoch: 5, ..footer }, misplaced("1/2/2, number 9, epoch 5")),
         ] {
             assert_eq!(start.admit(&wrong), Err(Corrupt(refused)), "{wrong:?}");
         }

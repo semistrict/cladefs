@@ -31,9 +31,9 @@
 
 #![cfg(target_os = "linux")]
 
-use futures::executor::block_on;
 use cladefs::fuse::{Mount, MountOptions};
 use cladefs::{FileType, Filesystem, Node, SetAttr, Storage};
+use futures::executor::block_on;
 use proptest::prelude::*;
 use proptest::strategy::Union;
 use proptest::test_runner::{Config, TestCaseError, TestRunner};
@@ -1860,8 +1860,8 @@ fn differential(subject: Subject, cases: u32) {
 /// module's docs.
 #[test]
 fn random_calls_on_a_mount_come_to_what_they_do_on_tmpfs() {
-    let cases =
-        std::env::var("CLADEFS_FUSE_DIFFERENTIAL_CASES").map_or(256, |cases| cases.parse().unwrap());
+    let cases = std::env::var("CLADEFS_FUSE_DIFFERENTIAL_CASES")
+        .map_or(256, |cases| cases.parse().unwrap());
     differential(Subject::Mount, cases);
 }
 

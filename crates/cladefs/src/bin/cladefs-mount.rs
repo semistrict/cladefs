@@ -200,14 +200,16 @@ fn mount(args: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
         }
         _ => anyhow::bail!("--control and --stores go together: {USAGE}"),
     };
-    cladefs::signals::spawn_taking_no_signals("cladefs-mount signals", move || match stop.wait() {
-        Ok(signal) => {
-            log::info!("cladefs-mount: unmounting, on signal {signal}, once nothing uses it");
-            if let Err(error) = unmounter.unmount(true) {
-                log::error!("cladefs-mount: {error:#}");
+    cladefs::signals::spawn_taking_no_signals("cladefs-mount signals", move || {
+        match stop.wait() {
+            Ok(signal) => {
+                log::info!("cladefs-mount: unmounting, on signal {signal}, once nothing uses it");
+                if let Err(error) = unmounter.unmount(true) {
+                    log::error!("cladefs-mount: {error:#}");
+                }
             }
+            Err(error) => log::error!("cladefs-mount: waiting for SIGINT or SIGTERM: {error}"),
         }
-        Err(error) => log::error!("cladefs-mount: waiting for SIGINT or SIGTERM: {error}"),
     })?;
     log::info!("cladefs-mount: mounted at {}", mountpoint.display());
     let mut stdout = std::io::stdout().lock();

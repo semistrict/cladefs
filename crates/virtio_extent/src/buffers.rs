@@ -187,7 +187,9 @@ impl Writer<'_> {
                 .iter()
                 // SAFETY: Guest memory the request gives the device to write, which outlives it,
                 // and which the guest may access as it is copied (`Buffers::push_writable`).
-                .map(|part| unsafe { cladefs::VolatileSliceMut::from_raw_parts(part.ptr, part.len) })
+                .map(|part| unsafe {
+                    cladefs::VolatileSliceMut::from_raw_parts(part.ptr, part.len)
+                })
                 .collect(),
         )
     }

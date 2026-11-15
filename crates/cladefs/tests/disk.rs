@@ -12,12 +12,12 @@
 
 mod common;
 
-use common::daemon::{CAPACITY, Daemon, failure};
-use common::pattern;
 use cladefs::extentd::disk::STORE_MADE;
 use cladefs::extentd::memory::label;
 use cladefs::extentd::metrics::render;
 use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use common::daemon::{CAPACITY, Daemon, failure};
+use common::pattern;
 use std::path::Path;
 use std::time::{Duration, Instant};
 use tonic::Code;

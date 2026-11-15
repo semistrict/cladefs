@@ -8,9 +8,9 @@
 //! The client here encodes and decodes messages by hand, from Linux's `include/uapi/linux/fuse.h`,
 //! independently of the server's definitions.
 
-use futures::executor::block_on;
 use cladefs::fuse::Server;
 use cladefs::{Filesystem, Storage, pages};
+use futures::executor::block_on;
 
 const STORAGE_SIZE: u64 = 16 << 20;
 const ROOT: u64 = 1;

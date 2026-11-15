@@ -801,7 +801,8 @@ impl Syscalls {
     /// ([`HostMemory::private_memory`]).
     fn private_memory_fd(len: usize) -> std::io::Result<OwnedFd> {
         // SAFETY: Creates a memory object, which is owned below.
-        let fd = unsafe { libc::memfd_create(c"cladefs-private-pages".as_ptr(), libc::MFD_CLOEXEC) };
+        let fd =
+            unsafe { libc::memfd_create(c"cladefs-private-pages".as_ptr(), libc::MFD_CLOEXEC) };
         if fd < 0 {
             return Err(std::io::Error::last_os_error());
         }

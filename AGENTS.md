@@ -68,6 +68,10 @@ The user's rule (2026-11-05), not a phase: cladefs never migrates data. On-disk,
 
 The user's rule (2026-11-11): when the cheap way of doing something can't work, fail hard (refuse to start or open, return the error) so the setup gets fixed. Never fall back, silently or with only a log line, to a way that costs vastly more: a copy where a rename failed, the bucket where a local file was meant to serve, a slow path on an unexpected error. Check such a precondition up front where it can be checked (two directories on one filesystem, a cache usable), and treat an existing warn-and-carry-on path that degrades performance as a bug. Found by TASK-350: the host cache's rename of uploaded WAL segments failed across filesystems (EXDEV), a warning hid it, and every read past the daemon's memory went to the bucket, ~30 ms each.
 
+## Never rely on the OS page cache for substantial data: one memory budget
+
+The user's rule (2026-11-15, TASK-433): cladefs holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`cladefs::extentd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the stores' page cache (`extent_store::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by cladefs, holding the same bytes again: two budgets of one memory end badly. So every file holding a store's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `extent_remote::direct`, `extent_store::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `extent_store::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. Tests that read store files behind its back write the page cache back first (`pages::shared().write_back_all()`).
+
 ## Never write a test around a bug
 
 The user's rule (2026-11-12): when a test only passes by steering clear of what the code under test
@@ -77,6 +81,27 @@ test bent around a bug with no task merges never. The workaround goes when the b
 by TASK-293: the collector never compacted compressed segments, as it measured live bytes against
 their compressed size. TASK-175's compaction test had fed it incompressible bytes "so that the
 objects' sizes are their extents'" a week before, with no task filed.
+
+A commit that weakens a check (an assertion gone, a test ignored or removed, a bound loosened, a
+count of cases or seeds lowered, an invariant or mutant dropped) says why in a `Weakens-tests:`
+line of its message: the bug's task, or why it is no weaker. CI's `test-weakening` job fails a push
+without one (`scripts/test-weakening.py`; `git config core.hooksPath scripts/hooks` checks at
+commit).
+
+## Agents check agents: split roles, a second vendor's review
+
+Models make tests and code agree by weakening the tests, and approve their own work (doc-17). So:
+
+- **Split roles** when one agent writes the failing test and another the fix (a bug's reproducer,
+  best-of-N): each session writes its role, `implement` or `test`, to `.agent-role` at its
+  worktree's root before anything else, and `scripts/agent-role-guard.py` (a hook in
+  `.claude/settings.json`) holds it to its side: an implementer can't touch tests, specs, mutants
+  or known failures, nor take an assertion out of code; a test writer can't touch code.
+- **Load-bearing changes** (dax.c and the fs/dax.c patches, the journal and super-block, the
+  extent store's and bucket's commit paths, unsafe code, atomics) get two reviews before landing:
+  the `verifying-reviewer` agent (`.claude/agents/`), and Codex through
+  `scripts/review-change.sh`, given the same instructions. Both report only; a finding counts once
+  its reproducer is written and red.
 
 ## Every bug exposes a blind spot: close it, then look around it
 

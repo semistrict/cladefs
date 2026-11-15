@@ -421,7 +421,8 @@ impl Cache {
     pub fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
         let stored = {
             let kept = self.kept.lock().unwrap();
-            let stored = kept.objects.get(key).and_then(|object| object.parts.stored.get(part as usize));
+            let stored =
+                kept.objects.get(key).and_then(|object| object.parts.stored.get(part as usize));
             let Some(&stored) = stored else { return Ok(()) };
             stored
         };

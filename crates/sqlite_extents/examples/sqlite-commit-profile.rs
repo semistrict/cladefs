@@ -302,8 +302,9 @@ fn main() {
             cladefs::RemoteExtentStore::connect(&socket, root.join("daemon"), 64 << 30).unwrap();
         let store = Arc::new(store);
         let window = sqlite_extents::daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device =
-            DeviceHolder::new(Timing(DeviceHolder::new(cladefs::RemoteDevice::new(store).unwrap())));
+        let device = DeviceHolder::new(Timing(DeviceHolder::new(
+            cladefs::RemoteDevice::new(store).unwrap(),
+        )));
         let volume =
             Volume::open_mapped(device, Box::new(TimingWindow(window)), Options::default())
                 .unwrap();

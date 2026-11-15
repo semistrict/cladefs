@@ -71,7 +71,8 @@ fn sweeps_write_their_metrics() {
     ] {
         assert!(metrics.lines().any(|had| had == line), "{line} in {metrics}");
     }
-    let peak = metrics.lines().find_map(|line| line.strip_prefix("cladefs_gc_peak_resident_bytes "));
+    let peak =
+        metrics.lines().find_map(|line| line.strip_prefix("cladefs_gc_peak_resident_bytes "));
     let peak: u64 = peak.unwrap().parse().unwrap();
     assert!((1 << 20..1 << 34).contains(&peak), "a process's memory, at most: {peak}");
 }

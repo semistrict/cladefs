@@ -133,7 +133,8 @@ fn main() -> anyhow::Result<()> {
         );
     }
     // cladefs: what its uploads may hold at once (TASK-317).
-    if let Some(bytes) = std::env::var_os("CLADEFS_EXTENTD_UPLOAD_MEMORY").filter(|b| !b.is_empty()) {
+    if let Some(bytes) = std::env::var_os("CLADEFS_EXTENTD_UPLOAD_MEMORY").filter(|b| !b.is_empty())
+    {
         let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
         let bytes = bytes.context("CLADEFS_EXTENTD_UPLOAD_MEMORY must be a number of bytes")?;
         cladefs::remote::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
@@ -152,12 +153,13 @@ fn main() -> anyhow::Result<()> {
     }
     let listener = cladefs::extentd::bind_owner_only(&socket)
         .with_context(|| format!("listening at {socket}"))?;
-    if let Some(control) = std::env::var_os("CLADEFS_EXTENTD_GRPC").filter(|path| !path.is_empty()) {
-        let tenants = match std::env::var_os("CLADEFS_EXTENTD_TENANTS").filter(|dir| !dir.is_empty())
-        {
-            Some(dir) => std::path::PathBuf::from(dir),
-            None => std::path::Path::new(&control).with_file_name("tenants"),
-        };
+    if let Some(control) = std::env::var_os("CLADEFS_EXTENTD_GRPC").filter(|path| !path.is_empty())
+    {
+        let tenants =
+            match std::env::var_os("CLADEFS_EXTENTD_TENANTS").filter(|dir| !dir.is_empty()) {
+                Some(dir) => std::path::PathBuf::from(dir),
+                None => std::path::Path::new(&control).with_file_name("tenants"),
+            };
         std::fs::create_dir_all(&tenants)
             .with_context(|| format!("making {}", tenants.display()))?;
         // It can do everything: its user's alone, as the VM socket (TASK-159).

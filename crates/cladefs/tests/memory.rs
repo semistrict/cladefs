@@ -11,11 +11,11 @@
 
 mod common;
 
-use common::daemon::{CAPACITY, Daemon, failure};
-use common::{memory, pattern, read_window};
 use cladefs::extentd::memory::label;
 use cladefs::extentd::metrics::render;
 use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use common::daemon::{CAPACITY, Daemon, failure};
+use common::{memory, pattern, read_window};
 use tonic::Code;
 
 /// The kernel's chunks of physical memory, which memory is held, and limited, in.

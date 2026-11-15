@@ -2,10 +2,10 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Does it compile, and do its tests pass: scripts/test.sh, as on a laptop, a part a job. No guest
-# kernels nor VMs, which boot on GitHub's runners too, as they have KVM, in workflows of their own:
-# the nightly's guest suites (nightly.yml) and the sandboxes (sandboxes.yml); elsewhere on a Linux
-# host with KVM (scripts/test-e2e.sh).
+# Does it compile, and do its tests pass: scripts/test.sh, as on a laptop, a part a job. Guest
+# kernels and VMs boot on GitHub's runners too, as they have KVM: the sandboxes' short mode on every
+# push to main (sandboxes.yml), the nightly's guest suites (nightly.yml); elsewhere on a Linux host
+# with KVM (scripts/test-e2e.sh).
 name: CI
 
 on:
@@ -282,6 +282,37 @@ jobs:
         run: >-
           cargo nextest run -p cladefs --lib --run-ignored all --no-capture
           -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
+
+  # A commit weakening a check (an assertion gone, a test ignored, a count lowered, an invariant
+  # dropped) says why in a 'Weakens-tests:' line (scripts/test-weakening.py, TASK-444.9): the
+  # commit-msg hook asks it of a clone that installed scripts/hooks; this, of every push and pull
+  # request.
+  test-weakening:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Commits that weaken checks say why
+        env:
+          BEFORE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          AFTER: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: |
+          # A new branch's push has no before: what it brings beyond main.
+          if [[ $BEFORE == 0000000000000000000000000000000000000000 ]]; then
+            BEFORE=$(git merge-base origin/main "$AFTER")
+          fi
+          scripts/test-weakening.py "$BEFORE..$AFTER"
+
+  # TASK-330.1: the sandboxes' short mode, LangSmith's CI's topology on the runner's KVM (two extent
+  # daemons, an S3 bucket on one ext4 disk, more vCPUs than CPUs), which found TASK-310 and TASK-311
+  # where the suites didn't. On every push to main; by hand on a branch (sandboxes.yml's
+  # workflow_dispatch). Its long mode is ubu1's, by hand (scripts/qualify.sh, TASK-330.5).
+  sandboxes:
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/sandboxes.yml
 
   # guide/: the codebase guide, which cites code by exact snippets. Its build fails when a snippet
   # no longer occurs exactly once in its file, or evidence it cites is gone, so code changes that

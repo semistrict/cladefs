@@ -126,7 +126,9 @@ const LEVEL: i32 = 1;
 fn level() -> i32 {
     static CHOSEN: std::sync::LazyLock<i32> =
         std::sync::LazyLock::new(|| match std::env::var("CLADEFS_ZSTD_LEVEL") {
-            Ok(level) => level.parse().unwrap_or_else(|_| panic!("CLADEFS_ZSTD_LEVEL is {level:?}")),
+            Ok(level) => {
+                level.parse().unwrap_or_else(|_| panic!("CLADEFS_ZSTD_LEVEL is {level:?}"))
+            }
             Err(_) => LEVEL,
         });
     *CHOSEN

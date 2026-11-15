@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-08 14:09'
+updated_date: '2026-11-15 11:35'
 labels:
   - tests
   - harness
@@ -17,7 +18,7 @@ ordinal: 691000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-scripts/test-e2e.sh puts the run-wide daemon's FXDAX_EXTENTD_CACHE in ${TMPDIR:-/tmp} ("on disk, as production's daemon does", TASK-164.12), but on the GCE hosts /tmp is a tmpfs, while the stores' directories are under the run's results on the root ext4 disk. Cache::adopt renames a leaving segment or extent file into the cache, so every adoption fails with EXDEV (os error 18), the file is removed instead, and extentd.log carries one WARN per file: val-A3 (run-20261108T120712Z-567f2024, 08d444ef7, fxdax-test-r956-k6) has 14,304 "extents/... into the cache ... Invalid cross-device link" and 7,173 "segments/..." lines, full-c (096fa2233) 9,086 and 4,680. So the guest suites never exercise adoption (TASK-165.4/165.8) as production does, and the warnings bury the log's real ones. Found investigating xattrs_bounded/append_writeback budget overruns.
+scripts/test-e2e.sh puts the run-wide daemon's CLADEFS_EXTENTD_CACHE in ${TMPDIR:-/tmp} ("on disk, as production's daemon does", TASK-164.12), but on the GCE hosts /tmp is a tmpfs, while the stores' directories are under the run's results on the root ext4 disk. Cache::adopt renames a leaving segment or extent file into the cache, so every adoption fails with EXDEV (os error 18), the file is removed instead, and extentd.log carries one WARN per file: val-A3 (run-20261108T120712Z-567f2024, 08d444ef7, cladefs-test-r956-k6) has 14,304 "extents/... into the cache ... Invalid cross-device link" and 7,173 "segments/..." lines, full-c (096fa2233) 9,086 and 4,680. So the guest suites never exercise adoption (TASK-165.4/165.8) as production does, and the warnings bury the log's real ones. Found investigating xattrs_bounded/append_writeback budget overruns.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

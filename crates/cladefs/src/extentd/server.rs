@@ -950,7 +950,10 @@ fn roots() -> Option<&'static [PathBuf]> {
                     .filter_map(|root| match root.canonicalize() {
                         Ok(root) => Some(root),
                         Err(err) => {
-                            log::error!("extentd: CLADEFS_EXTENTD_ROOTS: {}: {err}", root.display());
+                            log::error!(
+                                "extentd: CLADEFS_EXTENTD_ROOTS: {}: {err}",
+                                root.display()
+                            );
                             None
                         }
                     })

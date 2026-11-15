@@ -11,9 +11,9 @@
 
 #![cfg(target_os = "linux")]
 
-use futures::executor::block_on;
 use cladefs::fuse::MountOptions;
 use cladefs::{Filesystem, SetAttr, Storage};
+use futures::executor::block_on;
 use std::ffi::CString;
 use std::io::{BufRead as _, ErrorKind, Read as _, Seek as _, Write as _};
 use std::os::unix::ffi::OsStrExt as _;
@@ -437,7 +437,10 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let (one, two) = ("0000000000000001", "0000000000000002");
     // A new cell of each tenant's, of no volumes: nothing shown.
     let attach = |tenant: &str, cell: &str| {
-        cladefs_mount_command(&["attach", socket, tenant, cell]).lines().map(str::to_owned).collect()
+        cladefs_mount_command(&["attach", socket, tenant, cell])
+            .lines()
+            .map(str::to_owned)
+            .collect()
     };
     let new: Vec<String> = attach("1", "0");
     let a = new[0].clone();

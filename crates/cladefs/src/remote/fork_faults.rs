@@ -225,7 +225,8 @@ impl World {
                         && block_on(branch::create(&*bucket, child, 0)).is_ok()
                     {
                         taken.store(true, Ordering::SeqCst);
-                        let taking = extent_remote::head::take(&*bucket, child, rand::random(), TOKEN);
+                        let taking =
+                            extent_remote::head::take(&*bucket, child, rand::random(), TOKEN);
                         assert_eq!(block_on(taking).map(|held| held.head.epoch), Ok(1));
                     }
                 })

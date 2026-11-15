@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-11 12:36'
+updated_date: '2026-11-15 11:39'
 labels: []
 dependencies: []
 ordinal: 713000
@@ -14,7 +15,7 @@ ordinal: 713000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-On ubu1 (2026-11-11), CARGO_TARGET_DIR=~/src/fxdax-t350-target scripts/test-e2e.sh built the runner into that directory and then failed: 'guest/tests/target/debug/runner: No such file or directory' (line 51; FXDAX_GUEST_AGENT at line 177 has the same path). Memory said TASK-305 made test-e2e.sh honour CARGO_TARGET_DIR.
+On ubu1 (2026-11-11), CARGO_TARGET_DIR=~/src/fxdax-t350-target scripts/test-e2e.sh built the runner into that directory and then failed: 'guest/tests/target/debug/runner: No such file or directory' (line 51; CLADEFS_GUEST_AGENT at line 177 has the same path). Memory said TASK-305 made test-e2e.sh honour CARGO_TARGET_DIR.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

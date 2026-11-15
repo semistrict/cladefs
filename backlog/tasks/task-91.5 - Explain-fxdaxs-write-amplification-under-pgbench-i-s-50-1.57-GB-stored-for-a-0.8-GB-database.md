@@ -1,11 +1,12 @@
 ---
 id: TASK-91.5
 title: >-
-  Explain fxdax's write amplification under pgbench -i -s 50: 1.57 GB stored for
-  a 0.8 GB database
+  Explain cladefs's write amplification under pgbench -i -s 50: 1.57 GB stored
+  for a 0.8 GB database
 status: To Do
 assignee: []
 created_date: '2026-10-22 18:22'
+updated_date: '2026-11-15 11:35'
 labels: []
 dependencies: []
 parent_task_id: TASK-91

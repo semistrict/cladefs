@@ -1282,7 +1282,8 @@ fn sent() -> BoxedStrategy<Sent> {
 /// TASK-149.39: random requests, valid and malformed, to one server: see the module's docs.
 #[test]
 fn random_requests_are_answered_as_the_protocol_says() {
-    let cases = std::env::var("CLADEFS_FUSE_FUZZ_CASES").map_or(256, |cases| cases.parse().unwrap());
+    let cases =
+        std::env::var("CLADEFS_FUSE_FUZZ_CASES").map_or(256, |cases| cases.parse().unwrap());
     let config =
         Config { cases, failure_persistence: None, max_shrink_time: 300_000, ..Config::default() };
     // INIT first, as the kernel sends it, then the rest.

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:33'
+updated_date: '2026-11-15 13:31'
 labels: []
 dependencies: []
 references:
@@ -20,12 +21,12 @@ ordinal: 852000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Linux kernel AI review has standardised on Chris Mason review-prompts (MIT) and Sashiko (Apache-2.0, Claude Code backend supported): ~85% true findings, ~97% on critical ones, at LSF/MM 2026; Darrick Wong posted 12+ series of LLM-found pre-existing XFS bugs in 2026. Without a reproducer gate, netdev maintainers spend ~50% of their time disproving reviews. Mason dax.md is pmem-only; fxdax writable DAX on write-once extents needs its own context. Runs vary: aggregate several.
+Linux kernel AI review has standardised on Chris Mason review-prompts (MIT) and Sashiko (Apache-2.0, Claude Code backend supported): ~85% true findings, ~97% on critical ones, at LSF/MM 2026; Darrick Wong posted 12+ series of LLM-found pre-existing XFS bugs in 2026. Without a reproducer gate, netdev maintainers spend ~50% of their time disproving reviews. Mason dax.md is pmem-only; cladefs writable DAX on write-once extents needs its own context. Runs vary: aggregate several.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An fxfs/DAX context file states fxdax invariants (doc-4, doc-9, doc-13, specs/dax-cow, dead-ends) in the review-prompts subsystem format
+- [ ] #1 An fxfs/DAX context file states cladefs invariants (doc-4, doc-9, doc-13, specs/dax-cow, dead-ends) in the review-prompts subsystem format
 - [ ] #2 A known-issues file lists accepted risks so they stop being reported
 - [ ] #3 A sweep of guest/linux/fs/fxfs and the fs/dax.c patches for pre-existing bugs ran 3-5 times; findings recurring or confirmed by a verifier agent are recorded
 - [ ] #4 A finding enters the backlog only with a guest/sim seed, a scenario or a guest case that fails

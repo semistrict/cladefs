@@ -1962,7 +1962,9 @@ impl World {
                         recovered.state.extents.values().map(|location| &location.key).collect();
                     text += &format!(
                         "branch {branch:x} from {origin:?}: checkpoint {:?}, end {}, epoch {}, names {keys:?}\n",
-                        recovered.checkpoint(), recovered.end(), recovered.epoch()
+                        recovered.checkpoint(),
+                        recovered.end(),
+                        recovered.epoch()
                     );
                 }
                 Err(error) => text += &format!("branch {branch:x}: {error}\n"),

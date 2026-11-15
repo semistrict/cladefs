@@ -10,10 +10,10 @@
 
 mod common;
 
-use common::daemon::{CAPACITY, Daemon, failure, name, write};
-use common::{copies, pattern};
 use cladefs::extentd::control::proto::{AttachBaseRequest, MakePublicRequest};
 use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSliceMut};
+use common::daemon::{CAPACITY, Daemon, failure, name, write};
+use common::{copies, pattern};
 use std::path::{Path, PathBuf};
 use tonic::Code;
 

@@ -65,7 +65,9 @@ impl Settings {
         match var("CLADEFS_LOG_FORMAT").as_deref() {
             None | Some("" | "text") => {}
             Some("json") => settings.format = Format::Json,
-            Some(other) => return Err(format!("CLADEFS_LOG_FORMAT is text or json, not {other:?}")),
+            Some(other) => {
+                return Err(format!("CLADEFS_LOG_FORMAT is text or json, not {other:?}"));
+            }
         }
         let levels = var("CLADEFS_LOG_LEVEL").unwrap_or_default();
         let level = |text: &str| {
