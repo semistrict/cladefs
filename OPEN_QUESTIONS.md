@@ -10,6 +10,18 @@ audits the host crates' Rust atomics with loom only; dax.c's barriers wait.
 
 # Decisions
 
+## specs/journal: transactions, Recover, and five of them in the model (TASK-444.1, 2026-11-15)
+
+Trace validation needed the spec to say what the code does: a record is now a transaction of
+several objects at one offset, a flush's BeginFlush carries its parent's mutations, and a power cut
+followed by a mount (`Recover`, replay's rebuilding of the objects' offsets, `offset + 1` skip
+included) is an action, with two new rules and their mutations (replayFromOffsets,
+beginFlushApart). That multiplied the state space: the model checks five transactions with the two
+objects alike (SYMMETRY), 1.3M states in about a minute; six (`JournalDeep`, tagged deep) takes
+well over ten minutes; seven, the old size, didn't finish in 20. Every mutation still fails at five.
+Otherwise: split the model into parts (no choice made once fits `\* part:`), or drop Recover from
+the default model. Undo: MaxLen in Journal.cfg.
+
 ## Kani excluded: its backend CBMC is BSD-4-Clause (doc-17, 2026-11-15)
 
 Kani (Apache-2.0) runs on CBMC, whose LICENSE has the 4-clause BSD advertising clause, not
