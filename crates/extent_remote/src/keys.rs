@@ -649,16 +649,11 @@ impl Kms {
                 Err(error) => failed = Some(error),
             }
         }
-        if let Some(error) = failed {
-            match self.heard(tenant, Err::<(), _>(error)) {
-                Err(kms::Error::NoSuchTenant { .. }) => {}
-                Err(error) => {
-                    log::warn!("fxdax: refilling tenant {tenant}'s pool of KEKs: {error}")
-                }
-                Ok(()) => unreachable!(),
-            }
-        } else if !wrapped.is_empty() {
-            self.answered(tenant);
+        match failed {
+            Some(error) if revokes(&error) => self.revoked(tenant, error.to_string()),
+            Some(kms::Error::NoSuchTenant { .. }) => {}
+            Some(error) => log::warn!("fxdax: refilling tenant {tenant}'s pool of KEKs: {error}"),
+            None => self.answered(tenant),
         }
         let mut pools = self.pools.lock().unwrap();
         if pools.eras.get(&tenant).copied().unwrap_or(0) != era {
@@ -1207,7 +1202,8 @@ pub async fn inheriting(
 /// nothing then; then gives its record its first DEK and the keys it inherits rewrapped under that
 /// KEK, in one conditional update ([`Inherited`]). A cell made there already, by another, is
 /// left as it is, its own KEK used, and the pool's given back. A record given its keys already is
-/// left so. Returns the record as it left it.
+/// left so. Its record is read as the cell is made: two round trips, a create and an update.
+/// Returns the record as it left it.
 pub async fn give_inherited(
     bucket: &impl Bucket,
     mut inheriting: Inheriting,
@@ -1215,7 +1211,11 @@ pub async fn give_inherited(
 ) -> Result<Record, Error> {
     let child = inheriting.child;
     let (secret, kek) = inheriting.kek.clone().expect("a KEK until a cell is made with it");
-    let (object, made) = crate::cell::make(bucket, child.cell, holder, &kek).await?;
+    // The record read as the cell is made: what the update starts from, a round trip less.
+    let record = layout::record(child);
+    let making = crate::cell::make(bucket, child.cell, holder, &kek);
+    let (made, found) = futures::join!(making, bucket::get(bucket, &record));
+    let (object, made) = made?;
     let kms = inheriting.kms.clone();
     let kek = match made {
         true => {
@@ -1233,7 +1233,9 @@ pub async fn give_inherited(
     };
     let deks = vec![wrap_dek((&kek.0, kek.1), child, FIRST, &Secret::random())];
     let inherited = inherit(&inheriting.source, child, (&kek.0, kek.1));
-    give_keys(bucket, child, (deks, inherited)).await
+    let keys = (deks, inherited);
+    branch::give_deks_found(bucket, child, found, |had| had.deks.is_empty().then(|| keys.clone()))
+        .await
 }
 
 /// What a host gives its stores to seal and read under (TASK-411.3): its KMS, if it has one, and

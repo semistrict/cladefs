@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 22:02'
+updated_date: '2026-11-15 00:21'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -621,6 +621,17 @@ the host's part cache, fetching what it lacks.
   its directory goes; its host crashing part way leaves a directory with no store, which deleting
   finishes, and a fork that stands or never was, as the bucket has it. This replaced `copy_store`,
   which forked by copying every file, and then local lineage, a record in the parent's store.
+- **Keys** *(fxdax, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of a sealed branch into
+  another cell, as every fork a host makes is, asks before anything is made for what its child
+  inherits (`Remote::inheriting`): the keys its parent's store holds and a KEK for the child's
+  cell from the host's pool, no KMS call; refused (`EACCES`, `ENOTSUP`) it makes nothing. Once
+  the child's record is made, its host makes the child's cell with that KEK, create-only, and
+  gives the record the child's first DEK and the inherited ones rewrapped under the KEK, by a
+  conditional update, before the child's directory is made; a failure there fails the fork, which
+  is deleted as any. The record stays create-only and the same whoever writes it (its keys come
+  after, by its child's host or first writer). The parent's checkpoint at the fork point
+  (References, below) is authenticated under the parent's DEK by whoever writes it: its writer,
+  its deletion under the host's KMS, a failed fork's claim likewise.
 
 ## Points
 
@@ -649,6 +660,12 @@ The steps of a fork of point P to child C:
    than P, and the record doesn't say P is shared (`Error::NotShared`, `EACCES`; TASK-395.7). The
    read is made then whatever the rule that checks for deletion says.
 3. C's record, updated with a condition: no longer being made. Only then does the fork succeed.
+4. fxdax (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
+   makes is: C's cell, made with a KEK of the host's pool, and C's record given its keys by a
+   conditional update: its DEK and those it inherits, from the host's copy of P, rewrapped under
+   that KEK (doc-16). A point keeps no key; its copies read under its origin's cell's. Asked for
+   before step 1, from the copy's keys, a fork whose keys the host can't give (its origin's tenant
+   heard revoked, C's tenant with no KEK) makes nothing.
 
 **What keeps C's data.** C needs just what P does. A pass that finds P live keeps that; so does one
 that finds C. The danger is a pass that finds neither, or takes P for deleted with C unseen:
@@ -693,7 +710,9 @@ says it (another's is corrupt), and only the trusted control API sets it, at the
 (ForkStore's `shared`, after the point is made) or later (SharePoint, `fxdaxctl share`), and clears
 it (`unshare`). The check is step 2's read, which every fork of a point makes, on any host, so that
 unsharing stops the forks whose reads come after, and those made stand. A fork refused leaves C's
-record being made, which its host deletes, as for a point deleted. No tenant is special: tenant 0's
+record being made, which its host deletes, as for a point deleted. *(TASK-411.4)* A clone keeps the keys it inherits
+rewrapped under its own cell's KEK, so that the point's tenant shredding its KEK stops new clones
+(no copy of the point opens) and breaks none made. No tenant is special: tenant 0's
 points are shared or not as any other's. Forks of branches with writers into another tenant's cell
 (a public base forked into a tenant's directory) are not checked yet (TASK-395.9).
 

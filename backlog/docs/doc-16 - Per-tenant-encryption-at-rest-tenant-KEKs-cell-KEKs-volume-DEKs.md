@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 23:05'
+updated_date: '2026-11-15 00:21'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2) and TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) and TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**) are implemented.
 
 ## Goals
 
@@ -177,9 +177,8 @@ dropped with its pool, never written out unwrapped.
   unwrap for three. A cell the host made unwraps nothing. Branch DEKs are unwrapped locally.
 - **Rings.** Opening a store builds a `keys::Ring`: its branch's DEK generations (the newest seals
   new objects) and its ancestors' along their origins, read from their records and unwrapped under
-  the cell's KEK. An ancestor of another cell with DEKs is refused (`Error::Inherited`, `ENOTSUP`):
-  forks across cells of sealed branches wait for TASK-411.4's rewrap, and fxdax refuses them
-  before anything is made. A branch's first writer gives its record its first DEK by a conditional
+  the cell's KEK. (An ancestor of another cell with DEKs was refused, `Error::Inherited`, until
+  TASK-411.4 rewrapped them: below.) A branch's first writer gives its record its first DEK by a conditional
   update (`keys::with_dek`): records written by a parent's writers for a fork name none, so that
   they stay the same whoever writes them. Points have none. Every writer and reader of the store
   holds the ring: the writer (fences sealed, checkpoints authenticated, recovery checked), the
@@ -200,5 +199,90 @@ dropped with its pool, never written out unwrapped.
   (WAL recovery runs before the store's keys are known) and sealed as the store opens
   (`wal::reseal`, by `Dir::replace`, atomic).
 - **Not yet:** open segments and large extents' raw files are in the clear until sealed
-  (TASK-411.5); collector compaction of sealed objects (TASK-411.6); forks across cells
-  (TASK-411.4).
+  (TASK-411.5); collector compaction of sealed objects (TASK-411.6).
+
+## What TASK-411.4 made
+
+- **Format.** A record gains `inherited: Vec<Inherited { branch, dek: Dek { generation, kek,
+  wrapped } }>`: the DEK of every ancestor of another cell whose objects the branch reads, each
+  generation, wrapped by the record's own cell's KEK of generation `kek`, with AES-KW under
+  `HKDF(cell KEK, info = "fxdax inherited dek wrap" || holder (tenant, cell, id) || ancestor
+  (tenant, cell, id) || generation)`: copied to another record, or of another ancestor, or
+  relabelled, it fails AES-KW. `layout::FORMAT` 10 is extended, not bumped: it is unreleased (main
+  is at 7), as FORMAT 2 of `extent_frame` was for TASK-411.2. They are given with the branch's
+  first DEK, in one conditional update (`branch::give_deks`): **a record with DEKs holds all it
+  inherits from other cells** (given), its readers needing no other cell's KEK.
+- **Who gives them.** A fork's host, as it makes the fork (`extent_store::upload::Remote`):
+  `Remote::inheriting(child)`, before anything of the fork is made (its commit, a point's clone's
+  record), takes the keys the parent's store holds in memory (its ring: its own DEKs and every
+  ancestor's) and a KEK for the child's cell from the host's pool (`keys::inheriting`); then
+  `Remote::forked(epoch, child, inheriting)`, once the child's record is made, makes the child's
+  cell with that KEK (`cell::make`: create-only, held by no placement, token 0, so that any
+  placement takes it; the host's `keys::Kms` keeps the KEK for the cell's first taking here, so
+  that the child's store opening here unwraps nothing), and gives the child's record its first DEK
+  and the parent's keys rewrapped under the new KEK (`keys::give_inherited`). A failure there fails
+  the fork, which fxdax deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
+  child's writer gives its own DEK as before, and with it what the parent's record inherits), for
+  a point, nor for a fork of branches in the clear: plaintext forks make no request more, no KMS
+  call. A child its fork's host did not give keys to (its host died between the record and the
+  give, or a fork recorded by the parent's next writer or deletion) is given them by its first
+  writer (`keys::with_dek`), reading across, below.
+- **Points keep no key**, nothing writing them: their copies read what they name by crossing into
+  their origins' cells (one unwrap of the origin's cell KEK a taking, cached), and forks of them,
+  restores and shared points' clones, rewrap from the copy's ring like any other fork: so the
+  point's owner shredding its tenant stops new forks of it (no copy opens) and breaks no clone. A
+  host holding a copy open, told the tenant's KEK is revoked (`Kms::revoked`), refuses forks of it
+  before anything is made.
+- **Rings** (`keys::ring`): a given record is read with its own cell's KEK alone: its DEKs, its
+  inherited ones, and its same-cell ancestors' records; a sealed ancestor of another cell it holds
+  not is refused (`Error::Inherited`). A record without its keys (a point, a fork's child before
+  they are given, a branch of a cell in the clear) crosses into each sealed ancestor's cell, its
+  object read and its KEK unwrapped, taking its DEKs and inherited ones; but a writer of a cell in
+  the clear inheriting anything sealed is refused, and so is a fork of a sealed store into a cell
+  in the clear, before anything is made (`ENOTSUP`): no sealed data goes into the clear.
+- **KMS calls on the fork's path: none**, its cell KEK from the pool, the parent's keys in memory.
+  The child's first opening on the forking host: none. On another host: one unwrap of the child's
+  cell KEK, as for any cell taken.
+- **Pools** (`keys::Pooling`; fxdax: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
+  a take leaving a pool low, or a sealed store of the tenant opening, refills it in a batch of
+  wraps at once, off the fork's path (`Kms::refill`, `Kms::filled`); an empty pool wraps one on the
+  path. `Kms::revoked(tenant)`, called on every revoked or destroyed answer of the KMS (a refill's,
+  an unwrap's) and by the control API (TASK-411.7's to wire), drops the tenant's pool, a refill
+  going adding nothing, and its cached cell KEKs, and marks it refused: no refill, no fork
+  inheriting its keys, until a KMS call for it succeeds again. KEKs a pool wrapped before a
+  destruction nothing has heard of yet still make cells, unreadable from the first, until a refill
+  or another call hears it.
+- **Checkpoints at fork points** (`recovery::checkpoint_at`, which `branch::record_fork` writes
+  for a child of another cell) are authenticated under the parent's DEK, if it is sealed, as its
+  writers' are: a child holding the parent's keys refuses one in the clear. Its writer's ring seals
+  them (`branch::record_fork_under`, `keys::Parents::Held`); a deletion recording a sealed
+  branch's forks, the host's KMS (`branch::delete_under`, `extent_store::upload::delete_branch`):
+  with none, it fails rather than write one the child refuses (so `fxdax-gc --delete-branch`,
+  which has no KMS, deletes no sealed branch with an unrecorded fork into another cell); a failed
+  fork's claim, the host's KMS (`branch::delete_fork_under`). Asked for only when one is to be
+  written.
+- **Rotation** rewraps a record's inherited DEKs with its own; `add_generation` keeps them.
+- **Generations a child reads.** A child keeps the generations its parent's lineage had when it
+  was given its keys; what it reads of its parent was sealed under them (segments up to the fork
+  point, the checkpoint there, written before the child's record). TASK-411.6's compaction must
+  keep an object's generation when it rewrites one a child inherits, or the child loses it.
+- **Crashes in the middle of a fork** (doc-7's protocol unchanged: the record create-only before
+  the keys, forks of points on many hosts each giving its own child, failed forks deleted): before
+  the record, nothing is given and the pooled KEK goes back (`Inheriting` gives it back when
+  dropped unused); the record made, the keys not given: the directory left unmade is deleted,
+  deleting the child, and any opener of the child gives them itself, crossing once; the cell made
+  and the keys not given: a keyed cell of no volume stays, as cells' objects do, and the child's
+  opener uses its KEK; keys given: as any fork. A give racing a deletion or another give is
+  conditional: `Deleted` fails the fork, another's keys stand.
+- **specs/bucket** is unchanged: it models records by their kinds, origins and deletion, the
+  objects the collector keeps, and who writes what; keys change none of those (a record's keys are
+  a conditional update that keeps its kind, origin and deletion, read by no pass), the child's
+  cell object is no object a pass keeps or deletes, the checkpoint at the fork point is written
+  where and when it was, and a deletion refused for want of a KMS is a deletion stopping partway,
+  which the model has.
+- **Fork latency** (`cargo run --release -p fxdax-examples --example fork-bench`, on a Mac, a
+  memory bucket, 2026-11-14): a fork of a store of 64 extents into a new cell, median, sealed 32-34
+  ms, in the clear 31-35 ms, with a KMS or none: the same within noise; 3 bucket requests more a
+  sealed fork (the cell's create, the record's read beside it, its update), 47.5 against 44.5. With
+  10 ms a request (`FXDAX_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
+  more. No KMS call. Linux numbers: the user's, later.

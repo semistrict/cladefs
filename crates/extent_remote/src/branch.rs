@@ -127,9 +127,29 @@ pub async fn create_forked(bucket: &impl Bucket, child: Branch, owner: u64) -> R
 pub async fn give_deks(
     bucket: &impl Bucket,
     branch: Branch,
+    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
+) -> Result<Record, Error> {
+    give_deks_from(bucket, branch, Start::Read, deks).await
+}
+
+/// [`give_deks`], from `found`, `branch`'s record as a read before found it, raw: so that a fork's
+/// host reads it as it makes the child's cell, a round trip less (TASK-411.4).
+pub(crate) async fn give_deks_found(
+    bucket: &impl Bucket,
+    branch: Branch,
+    found: Option<Object>,
+    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
+) -> Result<Record, Error> {
+    give_deks_from(bucket, branch, Start::Found(found), deks).await
+}
+
+async fn give_deks_from(
+    bucket: &impl Bucket,
+    branch: Branch,
+    start: Start,
     mut deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
 ) -> Result<Record, Error> {
-    change(bucket, branch, Start::Read, |found| match found {
+    change(bucket, branch, start, |found| match found {
         None => Err(Error::NoBranch),
         Some(found) if found.deleted => Err(Error::Deleted),
         Some(found) => match deks(&found) {
