@@ -210,7 +210,9 @@ jobs:
   # TASK-149.20, which found `fxdaxctl take` of a new copy at a later placement refused there.
   # fxdax: and the AWS KMS backend's, against local-kms (MIT), its emulator, which
   # scripts/test-local-kms.sh installs with Go and each test starts (TASK-411.17): no AWS account,
-  # nor credentials but dummy ones.
+  # nor credentials but dummy ones; and the OpenBao Transit backend's, against OpenBao's release
+  # binary (MPL-2.0), which scripts/test-openbao.sh fetches, checked by its digest, each test
+  # starting a dev server of its own (TASK-411.16): no secrets.
   object-stores:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -246,6 +248,8 @@ jobs:
           cache: false
       - name: The AWS KMS tests, against local-kms
         run: scripts/test-local-kms.sh --no-fail-fast
+      - name: The OpenBao KMS tests, against a bao dev server
+        run: scripts/test-openbao.sh --no-fail-fast
 
   # TASK-330.3: the extent daemon against a degraded bucket, five minutes of it, its VM processes
   # writing all the while (extentd::tests::soak): its memory within its budget, the bucket's
