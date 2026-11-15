@@ -533,15 +533,15 @@ impl<D: Dir> Framer<D> {
     /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
     /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
     /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
-    /// thread of the store's runs outside of. fxdax: of a clear raw file alone: a sealed segment's
-    /// parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
+    /// thread of the store's runs outside of. fxdax: of a sealed raw file too, its part seen as
+    /// stored and packed, and held, in the clear, in memory, until its framing seals it
+    /// (TASK-411.23, TASK-421).
     fn look(
         &self,
         raw: &RawFile<D::File>,
         part: u64,
         look: Look,
     ) -> io::Result<(Seen, Option<Hold>)> {
-        assert!(raw.clear().is_some(), "a sealed raw file's part looked at ahead");
         if !self.dir.concurrent() || cfg!(feature = "shuttle") {
             let (seen, packed) = framing::see(raw, part, look)?;
             return Ok((seen, packed.map(|packed| self.held.hold(packed))));
@@ -2216,13 +2216,16 @@ impl<D: Dir> Store<D> {
 
     /// fxdax: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its own
     /// file, framed: in place, if none of its parts compresses, as an object of such parts holds
-    /// them as they are, where they are (`extent_frame::Packer`), its raw file that file then, its
-    /// tail appended, renamed; or else in a file of its own, as [`Store::write_own`] frames one,
-    /// the parts before the first that compresses copied there. A large extent's data was written
-    /// twice, in its raw file, which the host's disk wrote back as its guest wrote it, and in the
-    /// framed file: as much again as its guest wrote, its framings and the disk's other writers
-    /// waiting behind it (TASK-310). In place, its bytes don't change, which a read of the raw
-    /// file in progress reads. Returns the bytes it copied: none in place.
+    /// them as they are, where they are (`extent_frame::Packer::in_place`), its raw file that file
+    /// then, its tail appended, renamed; or else in a file of its own, as [`Store::write_own`]
+    /// frames one, the parts before the first that compresses copied there. A large extent's data
+    /// was written twice, in its raw file, which the host's disk wrote back as its guest wrote it,
+    /// and in the framed file: as much again as its guest wrote, its framings and the disk's other
+    /// writers waiting behind it (TASK-310). In place, its bytes don't change, which a read of the
+    /// raw file in progress reads. Returns the bytes it copied: none in place. fxdax: a sealed
+    /// store's in place too, its raw file's XTS sectors the object's parts, each tagged as it is
+    /// read, stored, then decrypted to be packed (TASK-411.23); its parts before the first that
+    /// compresses are not its copy's, sealed with AES-GCM: framed anew, whole, in a copy then.
     fn seal_own(
         &self,
         state: &mut State<D::File>,
@@ -2231,24 +2234,41 @@ impl<D: Dir> Store<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        // fxdax: sealed, no part's packed bytes are its data, and it is framed in a copy
-        // (TASK-411.2, TASK-411.3); its raw file's are not either, encrypted (TASK-411.5).
-        let mut packer = extent_frame::Packer::new(self.keys.sealing());
-        let clear = raw.clear().filter(|_| packer.key().is_none()).cloned();
+        let sealing = self.keys.sealing();
+        let mut packer = extent_frame::Packer::new(sealing);
+        let sectors = raw.sectors().map(|key| &**key);
+        // fxdax: in place, its raw file sealed as its object would be in a copy (TASK-411.23).
+        let in_place = sectors.is_some() == sealing.is_some()
+            && (sectors.is_none() || len.is_multiple_of(SECTOR));
+        let mut raw_parts = Vec::new();
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
         let mut framed: Option<D::File> = None;
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
-            raw.read_cached(buf, at)?;
+            if in_place && framed.is_none() {
+                raw.file().read_cached(buf, at)?;
+                let parts =
+                    (buf.chunks(extent_frame::PART as usize).zip(at / extent_frame::PART..))
+                        .map(|(part, index)| extent_frame::RawPart::of(index, part, sectors));
+                raw_parts.extend(parts);
+                raw.decrypt(at, buf);
+            } else {
+                raw.read_cached(buf, at)?;
+            }
             let end = packer.end();
             let packed = packer.push(buf);
             // As they are, where they are, as those before.
-            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
+            if framed.is_none() && in_place && packer.stored_raw() {
                 continue;
             }
             let file = match &mut framed {
                 Some(file) => file,
+                None if end > 0 && sealing.is_some() => {
+                    self.write_own(state, extent, len, |at, buf| raw.read_cached(buf, at))?;
+                    state.unreferenced.doomed.push(raw_path);
+                    return Ok(len);
+                }
                 None => {
                     let file =
                         self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
@@ -2259,21 +2279,25 @@ impl<D: Dir> Store<D> {
             file.write_at(&packed, end)?;
             written::wrote(written::Kind::Own, packed.len());
         }
-        let end = packer.end();
-        let (tail, parts) = packer.finish_parts(&own_footer(extent));
-        let (file, copied) = match framed {
+        let (file, copied, (tail, parts)) = match framed {
             Some(file) => {
-                file.write_at(&tail, end)?;
+                let end = packer.end();
+                let finished = packer.finish_parts(&own_footer(extent));
+                file.write_at(&finished.0, end)?;
                 state.unreferenced.doomed.push(raw_path);
-                (Arc::new(file), len)
+                (Arc::new(file), len, finished)
             }
             None => {
-                let raw = clear.expect("an extent framed in place is in the clear");
-                raw.write_at(&tail, end)?;
+                let mut in_place = extent_frame::Packer::in_place(raw.sectors().cloned());
+                in_place.push_raw_parts(raw_parts);
+                let end = in_place.end();
+                let finished = in_place.finish_parts(&own_footer(extent));
+                let file = raw.file().clone();
+                file.write_at(&finished.0, end)?;
                 self.dir
                     .rename(&raw_path, &path)
                     .with_context(|| format!("renaming {raw_path}"))?;
-                (raw, 0)
+                (file, 0, finished)
             }
         };
         written::wrote(written::Kind::Own, tail.len());
@@ -3192,10 +3216,10 @@ impl<D: Dir> Store<D> {
 
 /// The bytes of an extent's data framed at once in its own file ([`Store::write_own`],
 /// [`Store::seal_own`]).
-const OWN_CHUNK: u64 = 16 * extent_frame::PART;
+pub(crate) const OWN_CHUNK: u64 = 16 * extent_frame::PART;
 
-/// fxdax: copies the first `len` bytes of `from`, a raw file, into `to`, where they are, so many
-/// at a time: the parts of an extent framed in place before the first that compressed
+/// fxdax: copies the first `len` bytes of `from`, a raw file in the clear, into `to`, where they
+/// are, so many at a time: the parts of an extent framed in place before the first that compressed
 /// ([`Store::seal_own`], TASK-310).
 fn copy_range<F: File>(from: &RawFile<F>, to: &F, len: u64) -> Result<(), Error> {
     let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);

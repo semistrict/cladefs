@@ -259,6 +259,18 @@ fn holds(bytes: &[u8], piece: &[u8]) -> bool {
     bytes.windows(piece.len()).any(|window| window == piece)
 }
 
+/// The key the segment at `key`, `bytes`, its data noise, closed as its store wrote it, is sealed
+/// under: framed in place, its raw file's XTS sectors (TASK-411.23); or, holding no data, in a
+/// copy, sealed with AES-GCM. Panics otherwise.
+fn segment_key(key: &str, bytes: &[u8]) -> KeyId {
+    let frame = extent_frame::Frame::of(bytes).unwrap();
+    match (frame.data_len, frame.seal) {
+        (1.., extent_frame::Seal::Sectors { key, .. }) => key,
+        (0, extent_frame::Seal::Sealed { key, .. }) => key,
+        (len, seal) => panic!("{key}, of {len} bytes of data: {seal:?}"),
+    }
+}
+
 /// AC #1, #2: three volumes of a cell opened by a host, the first making it: the cell's KEK
 /// wrapped by its tenant's in the KMS, its branches' DEKs by it, each kept only so, no plaintext
 /// of either nor of their data in any object; their segments sealed under their own branch's DEK,
@@ -314,11 +326,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
         let kind = layout::kind(key);
         match kind {
             layout::Kind::Segment { branch, .. } => {
-                let sealed = seal();
-                let extent_frame::Seal::Sealed { key: id, .. } = sealed else {
-                    panic!("{key}: {sealed:?}")
-                };
-                assert_eq!(id.branch, branch.id, "{key}");
+                assert_eq!(segment_key(key, bytes).branch, branch.id, "{key}");
             }
             layout::Kind::Checkpoint { branch, .. } => {
                 let sealed = seal();
@@ -429,11 +437,7 @@ fn generations_seal_new_objects_and_rotations_rewrap() {
     assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: 7, generation: 2 });
     written(&store, &remote, ExtentId::new(7, 2), &noise(2, 4096));
     let first = location(&store, ExtentId::new(7, 2)).key;
-    let sealed = extent_frame::Frame::of(&world.object(&first)).unwrap().seal;
-    assert!(
-        matches!(sealed, extent_frame::Seal::Sealed { key, .. } if key.generation == 2),
-        "{first}: {sealed:?}"
-    );
+    assert_eq!(segment_key(&first, &world.object(&first)), KeyId { branch: 7, generation: 2 });
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), 4096), Ok(noise(1, 4096)));
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
     let deks_before: Vec<_> = branches.iter().map(|&branch| world.record(branch).deks).collect();
@@ -621,11 +625,7 @@ fn forks_and_points_within_a_sealed_cell_read_what_they_inherit() {
     let own = ExtentId::new(8, forked_remote.next_sequence().max(1));
     written(&forked_store, &forked_remote, own, &noise(2, 4096));
     let at = location(&forked_store, own).key;
-    let sealed = extent_frame::Frame::of(&world.object(&at)).unwrap().seal;
-    assert!(
-        matches!(sealed, extent_frame::Seal::Sealed { key, .. } if key.branch == 8),
-        "{sealed:?}"
-    );
+    assert_eq!(segment_key(&at, &world.object(&at)), KeyId { branch: 8, generation: 1 });
     assert_eq!(read(&world, &host, &forked_store, own, 4096), Ok(noise(2, 4096)));
 
     // A point, of the parent's cell: no DEK of its own, nothing writing it.
@@ -970,11 +970,17 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear() {
 /// The paths of the files of `dir` that hold any of `data`'s sectors' first 32 bytes: data the
 /// store wrote, in the clear.
 fn clear_files(dir: &MemDir, data: &[u8]) -> Vec<String> {
+    in_the_clear(dir.files(), data)
+}
+
+/// The names of `files`, by their names and bytes, that hold any of `data`'s sectors' first 32
+/// bytes.
+fn in_the_clear(files: Vec<(String, Vec<u8>)>, data: &[u8]) -> Vec<String> {
     let pieces: std::collections::HashSet<&[u8]> =
         data.chunks(4096).map(|sector| &sector[..32]).collect();
-    (dir.files().into_iter())
+    (files.into_iter())
         .filter(|(_, bytes)| bytes.windows(32).any(|window| pieces.contains(window)))
-        .map(|(path, _)| path)
+        .map(|(name, _)| name)
         .collect()
 }
 
@@ -1114,21 +1120,22 @@ fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
     assert_eq!(crate::on_disk(&MemDir::new()).unwrap(), None, "no store");
 }
 
-/// TASK-400 in a sealed store (TASK-411.5): a sealed store's segment that compresses has none of
-/// its parts packed or held as it fills, its parts' bytes in its raw file ciphertext, and its
-/// framing, in a copy, reads every part back through the raw file, decrypting, then packs and
-/// seals it: nothing of its data in any file of its directory, nor held, and read back as written.
-/// Its clear twin holds its whole parts packed as they are written, and its framing reads only its
-/// last, never whole. Both on a directory whose I/O is its callers' alone, which packs ahead then
-/// and there, so that what is held is known at the commit.
+/// TASK-421, TASK-400 in a sealed store: a sealed store's segment that compresses has its whole
+/// parts packed and held as they are written, in the clear, in memory, as its clear twin's are; its
+/// framing, in a copy, reads only its last part back, never whole, and seals what was held under
+/// its object's key: nothing of its data in any file of its directory, nor held once framed, and
+/// read back as written. Both on a directory whose I/O is its callers' alone, which packs ahead
+/// then and there, so that what is held is known at the commit. Before, a sealed store held
+/// nothing and read all its parts back (TASK-411.5).
 #[test]
-fn sealed_stores_hold_no_parts_packed_ahead() {
+fn sealed_stores_hold_parts_packed_ahead_and_seal_them_framing() {
     const MIB: usize = 1 << 20;
     // Letters at random, sixteen of them: compresses by about half, framed in a copy.
     let text = |seed: u64, len: usize| -> Vec<u8> {
         noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
     };
     let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { 4096 });
+    let mut holdings = Vec::new();
     for sealed in [true, false] {
         let world = World::new();
         let host = world.host(5);
@@ -1147,17 +1154,15 @@ fn sealed_stores_hold_no_parts_packed_ahead() {
         }
         store.commit(None).unwrap();
         let holding = held.counts();
-        match sealed {
-            true => assert_eq!(holding, crate::HeldCounts::default(), "sealed: none held"),
-            false => assert!(holding.bytes > 2 * MIB as u64, "clear: held {holding:?}"),
-        }
+        assert!(holding.bytes > 2 * MIB as u64, "sealed {sealed}: held {holding:?}");
+        holdings.push(holding.bytes);
         let before = crate::framing_reads().0;
         store.close_segment().unwrap();
         store.commit(None).unwrap();
         store.closed(usize::MAX).unwrap();
         let read_back = crate::framing_reads().0 - before;
-        let all = 6 * MIB as u64 + 4096;
-        assert_eq!(read_back, if sealed { all } else { 4096 }, "sealed {sealed}: read back");
+        assert_eq!(read_back, 4096, "sealed {sealed}: the last part alone read back");
+        assert_eq!(held.counts().bytes, 0, "sealed {sealed}: taken");
         for sequence in 1..=7 {
             let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
             let mut buf = vec![0; data.len()];
@@ -1167,11 +1172,211 @@ fn sealed_stores_hold_no_parts_packed_ahead() {
                 assert_eq!(clear_files(&dir, &data), Vec::<String>::new(), "{extent:?}");
             }
         }
+        remote.cut_short()();
+    }
+    assert_eq!(holdings[0], holdings[1], "held alike, sealed or not");
+}
+
+/// The seals of the framed files of `dir` whose paths start with `kind`, by their paths.
+fn seals_of(dir: &MemDir, kind: &str) -> Vec<(String, extent_frame::Seal)> {
+    let files = files_of(dir, kind).into_iter();
+    files.map(|(path, bytes)| (path, extent_frame::Frame::of(&bytes).unwrap().seal)).collect()
+}
+
+/// TASK-411.23, AC #2: a sealed store frames in place what compresses too little, as its clear
+/// twin does, writing what it writes: a segment of noise, and of a little text, whose framing
+/// compresses it all to tell, framed in place, its tail alone written, the object of its raw
+/// file's XTS sectors (`Seal::Sectors`); a large extent of noise sealed in place, its raw file its
+/// framed file; one of noise then text framed in a copy, sealed with AES-GCM, and so one whose text
+/// follows a framing chunk of noise, framed anew whole (`Store::seal_own`). The bytes written of
+/// guests' data, raw, copied, framed and own, are the clear twin's, byte for byte; the logs, MACed,
+/// alone differ. Before, a sealed store framed every segment and large extent in a copy, writing
+/// its data twice. Nothing of the data is in the clear in the sealed store's directory nor its
+/// bucket, and all of it reads back, here and fetched.
+#[test]
+fn sealed_stores_frame_in_place_writing_what_clear_stores_write() {
+    const MIB: usize = 1 << 20;
+    let text = |seed: u64, len: usize| -> Vec<u8> {
+        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
+    };
+    let large = crate::Options::default().large_extent as usize;
+    let data = |sequence: u64| match sequence {
+        1..=6 => noise(sequence, MIB),
+        7 => text(sequence, MIB / 2),
+        8 => noise(sequence, large + 8 * 4096),
+        9 => [noise(sequence, large), text(sequence, MIB)].concat(),
+        // A framing chunk's worth of noise, then text: framed anew in a copy, sealed.
+        _ => [noise(sequence, crate::store::OWN_CHUNK as usize), text(sequence, MIB)].concat(),
+    };
+    let mut wrote = Vec::new();
+    for sealed in [true, false] {
+        let world = World::new();
+        let host = world.host(5);
+        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let dir = made(branch, "a");
+        let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+        let (store, remote) = open_with(&world, &host, &dir, quiet).unwrap();
+        assert_eq!(store.keys().sealing().is_some(), sealed);
+        let before = (crate::written(), crate::segments_framed_in_place());
+        for sequence in 1..=10 {
+            store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
+        }
+        store.commit(None).unwrap();
+        store.close_segment().unwrap();
+        store.commit(None).unwrap();
+        store.wait_framed().unwrap();
+        let (after, in_place) = (crate::written(), crate::segments_framed_in_place() - before.1);
+        assert_eq!(in_place, 1, "sealed {sealed}: the segment framed in place");
+        let delta = |of: fn(&crate::Written) -> u64| of(&after) - of(&before.0);
+        let written =
+            (delta(|w| w.raw), delta(|w| w.copied), delta(|w| w.framed), delta(|w| w.own));
+        let guests: u64 = (1..=10).map(|sequence| data(sequence).len() as u64).sum();
+        assert_eq!(written.0, guests, "sealed {sealed}: raw, as the guests wrote");
+        assert_eq!(written.1, 0, "sealed {sealed}: nothing copied");
+        assert!(written.2 < 64 << 10, "sealed {sealed}: the segment's tail alone: {written:?}");
+        let copies = (data(9).len() + data(10).len()) as u64;
+        let noise = (large + crate::store::OWN_CHUNK as usize) as u64;
+        assert!(
+            written.3 > noise && written.3 < copies,
+            "sealed {sealed}: extents 9 and 10, their text compressed: {written:?}"
+        );
+        wrote.push(written);
+        // In place: the raw file's sectors, sealed; as written, in the clear.
+        let in_place = |seal: &extent_frame::Seal| match sealed {
+            true => matches!(seal, extent_frame::Seal::Sectors { .. }),
+            false => *seal == extent_frame::Seal::Clear,
+        };
+        let segments = seals_of(&dir, "segments/");
+        assert_eq!(segments.len(), 1, "{segments:?}");
+        assert!(in_place(&segments[0].1), "sealed {sealed}: {segments:?}");
+        let own = seals_of(&dir, "extents/");
+        let own: Vec<_> = own
+            .into_iter()
+            .map(|(path, seal)| (path, in_place(&seal), seal.keyed().is_some()))
+            .collect();
+        let extent_of =
+            |sequence: u64| crate::layout::extent_path(ExtentId::new(branch.id, sequence));
+        let expected = vec![
+            (extent_of(8), true, sealed),
+            (extent_of(9), !sealed, sealed),
+            (extent_of(10), !sealed, sealed),
+        ];
+        assert_eq!(own, expected, "sealed {sealed}: 8 in place, 9 and 10 in copies");
+        let all: Vec<u8> = (1..=10).flat_map(data).collect();
+        for sequence in 1..=10 {
+            let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
+            let mut buf = vec![0; data.len()];
+            store.read(extent, 0, &mut buf).unwrap();
+            assert!(buf == data, "sealed {sealed}: {extent:?} read back");
+        }
+        remote.wait_uploaded(store.epoch().unwrap()).unwrap();
         if sealed {
-            assert_eq!(held.counts(), crate::HeldCounts::default(), "sealed: none held framing");
+            assert_eq!(clear_files(&dir, &all), Vec::<String>::new());
+            assert_eq!(in_the_clear(world.objects(), &all), Vec::<String>::new());
+            for sequence in [1, 8] {
+                let extent = ExtentId::new(branch.id, sequence);
+                let at = location(&store, extent);
+                let seal = extent_frame::Frame::of(&world.object(&at.key)).unwrap().seal;
+                assert!(matches!(seal, extent_frame::Seal::Sectors { .. }), "{}: {seal:?}", at.key);
+                let fetched = fetched(&world, &host.memory, extent, &at).unwrap();
+                assert!(fetched == data(sequence), "{extent:?} fetched");
+            }
         }
         remote.cut_short()();
     }
+    assert_eq!(wrote[0], wrote[1], "sealed and clear stores write alike");
+}
+
+/// TASK-411.23, the TASK-411.9 pattern: a sealed store crashed as a segment framed in place is
+/// being made durable, its framed file, the raw file's sectors and their tail, written under its
+/// own name (`layout::framing_path`) and linked, not synced: each crash closes the segment again
+/// from its raw file and log, in a copy, sealed (its raw file's tail past its runs not read),
+/// reopened with its directory failing after each of the opening's operations in turn until one
+/// opens, no file holding its data in the clear at any point; it reads back. Crashed once its
+/// framing is durable, the store reads the segment from its framed file, the object of its raw
+/// file's sectors, framed in place.
+#[test]
+fn segments_framed_in_place_sealed_recover_from_crashes() {
+    use std::sync::Mutex;
+    use std::sync::mpsc::channel;
+    let world = World::new();
+    let host = world.host(5);
+    let branch = test_branch(7);
+    let dir = made(branch, "a");
+    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let extent = ExtentId::new(branch.id, 1);
+    let data = noise(1, (2 << 20) + 8 * 4096);
+    let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
+    store.write(extent, 0, &data).unwrap();
+    store.commit(None).unwrap();
+    store.flush().unwrap();
+    let (framing, framed) = channel();
+    let framing = Mutex::new(framing);
+    let framing = fail::FailGuard::with_callback("segments::framing", move || {
+        let _ = framing.lock().unwrap().send(());
+    })
+    .unwrap();
+    let (holding, held) = channel();
+    let (go, gone) = channel::<()>();
+    let (holding, gone) = (Mutex::new(holding), Mutex::new(gone));
+    let durable = fail::FailGuard::with_callback("segments::making_durable", move || {
+        let _ = holding.lock().unwrap().send(());
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    let before = crate::segments_framed_in_place();
+    store.close_segment().unwrap();
+    store.commit(None).unwrap();
+    framed.recv().unwrap();
+    held.recv().unwrap();
+    assert_eq!(crate::segments_framed_in_place() - before, 1, "framed in place");
+    let torn = (0..4).map(|seed| dir.crash(seed)).collect::<Vec<_>>();
+    drop((framing, durable, go));
+    store.wait_framed().unwrap();
+    let whole = dir.crash(0);
+    remote.cut_short()();
+    drop(store);
+
+    for (seed, crashed) in torn.iter().enumerate() {
+        assert_eq!(clear_files(crashed, &data), Vec::<String>::new(), "seed {seed}");
+        let (store, remote) = open_with(&world, &host, &crashed.crash(0), quiet.clone()).unwrap();
+        assert_eq!(
+            read(&world, &host, &store, extent, data.len()),
+            Ok(data.clone()),
+            "seed {seed}"
+        );
+        let segments: Vec<String> =
+            files_of(crashed, "segments/").into_iter().map(|(path, _)| path).collect();
+        assert!(segments.iter().all(|path| path.contains("framing")), "seed {seed}: {segments:?}");
+        remote.cut_short()();
+    }
+    let crashed = &torn[0];
+    let mut attempts = 0;
+    let (store, remote) = loop {
+        let attempt = crashed.crash(0);
+        attempt.fail_after(Some(attempts));
+        let opened = open_with(&world, &host, &attempt, quiet.clone());
+        assert_eq!(clear_files(&attempt, &data), Vec::<String>::new(), "budget {attempts}");
+        match opened {
+            Ok(opened) if !attempt.has_failed() => break opened,
+            Ok((_, remote)) => remote.cut_short()(),
+            Err(_) => {}
+        }
+        attempts += 1;
+    };
+    assert!(attempts > 10, "the opening took {attempts} operations");
+    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
+    remote.cut_short()();
+    drop(store);
+
+    // Durable: read from its framed file, framed in place.
+    let segments = seals_of(&whole, "segments/");
+    let [(_, seal)] = &segments[..] else { panic!("{segments:?}") };
+    assert!(matches!(seal, extent_frame::Seal::Sectors { .. }), "{seal:?}");
+    let (store, remote) = open_with(&world, &host, &whole, quiet).unwrap();
+    assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
+    assert_eq!(clear_files(&whole, &data), Vec::<String>::new());
+    remote.cut_short()();
 }
 
 /// TASK-411.5, AC #5: a write's bytes, as a caller writing them by an I/O of its own takes them
@@ -1545,8 +1750,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
         objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
     assert!(!segments.is_empty(), "no segment of {branch}");
     for (key, segment) in segments {
-        let seal = extent_frame::Frame::of(segment).unwrap().seal;
-        assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+        assert_eq!(segment_key(key, segment), KeyId { branch: branch.id, generation: 1 });
     }
     for (key, bytes) in objects {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");

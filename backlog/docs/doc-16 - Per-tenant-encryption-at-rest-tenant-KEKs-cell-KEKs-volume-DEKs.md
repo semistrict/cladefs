@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 09:42'
+updated_date: '2026-11-15 11:10'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -13,7 +13,7 @@ updated_date: '2026-11-15 05:44'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**) and TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**, which settles TASK-421) are implemented.
 
 Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`fxdax-gc --delete-branch` under `FXDAX_KMS`) and TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**) are implemented.
 
@@ -391,8 +391,9 @@ dropped with its pool, never written out unwrapped.
   (`Recovered::close`, TASK-411.9): the log's header MAC and every record's MAC checked under the
   DEK and salt it names (a log changed, or under a DEK the ring lacks, refuses the opening, naming
   the segment), the raw data decrypted, then sealed into FORMAT 2 parts.
-- **Framing.** Closing a segment reads its raw file through `RawFile` (decrypting) and seals it, as
-  TASK-411.3 did. **Sealed stores never frame in place** (segments nor large extents): a sealed
+- **Framing.** *(Superseded by TASK-411.23, below: sealed stores frame in place, look ahead and
+  hold parts as clear ones do; kept for the history.)* Closing a segment reads its raw file
+  through `RawFile` (decrypting) and seals it, as TASK-411.3 did. **Sealed stores never frame in place** (segments nor large extents): a sealed
   object's bytes are AES-GCM parts and tags, not the XTS sectors the raw file holds, so framing in
   place would write every byte again anyway, and a crash part way would leave a file neither raw
   nor framed. `RawFile::clear` hands the inner file to in-place framing only in the clear.
@@ -864,3 +865,137 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   (tenant 0's stores in the clear) fails fxfs-guest's check with 21 findings (a cell with no KEK,
   segments, checkpoints and moves framed in the clear, clear logs, the canary in a segment) and
   the run's part cache's copy of that segment.
+
+## What TASK-411.23 made
+
+*(decided, the user, 2026-11-15)* **Sealed stores frame in place.** TASK-411.15 found
+fxfs-guest-sandboxes failing sealed: the stores wrote 1.90 and 1.87 times what the guests wrote,
+against a budget of 1.5 (1.16 in the clear), and framings took up to 1094 ms against 1000 ms,
+because a sealed store never framed in place (TASK-411.5, above): 0 segments in place against
+55-58 in the clear, each segment written twice, its XTS raw file then its GCM copy. Now the
+incompressible parts of a sealed object keep the raw file's XTS sectors as they are, each tagged,
+and a sealed store frames in place exactly when a clear one does.
+
+- **Format.** `extent_frame` FORMAT 2 gains a seal kind, 3, `Seal::Sectors { key, salt }`
+  (`Keyed::Sectors`), not a new FORMAT: FORMAT 2 is unreleased and no bucket needs keeping (the
+  user's decision of 2026-11-14, as for TASK-411.3's extensions). An object of kind 3 is a sealed
+  raw file framed in place: every part stored raw where the raw file holds it, its AES-256-XTS
+  sectors as they are, under the raw file's own key, `Xts::derive(dek, salt, "fxdax raw file")`,
+  the sector's place in the object its tweak, which is its place in the raw file (parts begin at
+  multiples of `PART`, a multiple of `SECTOR`). Its trailer names the DEK (branch, generation) and
+  the raw file's salt, so a reader derives the same key; there is no other salt. Each part's tag,
+  in its table entry's 16 bytes (the entry's layout unchanged), is HMAC-SHA256 truncated to 128 bits
+  (`Secret::tag`) under `dek.derive(salt, ["fxdax raw part tag"])`, of the part's associated data as
+  a GCM part's (index, encoding, stored and unpacked lengths) and then its stored bytes, the
+  ciphertext. Its footer and table are MACed as any keyed object's, under
+  `dek.derive(salt, ["fxdax frame mac"])`; `restamp` works under its key as for a sealed object.
+  The key is one object, `ObjectKey::sectors`, which the store's `raw::Sealer` holds for the raw
+  file's encryption too: one derivation for both. A table naming a part of kind 3 that is not raw,
+  or not whole sectors, is corrupt (`part N, not whole sectors of a raw file`), to readers holding
+  no key as well.
+- **Readers.** Holding the DEK: the part's CRC, then its tag (constant time), then XTS decryption,
+  in `Part::open`, `Part::unpack` and `Part::unpack_into`; `Part::as_is` is false. Every reader
+  goes through those unchanged: the host's fetchers and the part cache (stored bytes kept as they
+  are), the store's framed files, `extent_frame::data`, the collector's compaction
+  (`layout::data_under`). Holding none: CRCs alone (`extent_frame::check`, WAL recovery's
+  `whole_footer`, the collector's marking), parts refused (`Error::NoKey`). The collector's moves of
+  a kind-3 object are sealed with AES-GCM under the key its trailer names (`Seal::keyed`), as for
+  any sealed object.
+- **No object mixes XTS and GCM parts.** As in the clear, a segment is framed in place only when
+  compressing it would save too little of the whole (`framing::IN_PLACE_SAVING`, `Look`), every
+  part raw then, compressible ones too; otherwise in a copy, every part compressed if that shrinks
+  it and sealed with AES-256-GCM. A large extent likewise: in place only if no part compresses.
+- **Why HMAC, not GMAC.** A deterministic MAC needs no nonce. A raw file's part may be tagged more
+  than once: by a look ahead, again by a framing that reads it (a part the look ahead missed, a
+  framing run again), and its last part at another length across a crash, recovery closing the
+  segment from its log. GMAC with the part's index as its nonce would then authenticate other bytes
+  under a nonce used before, which gives away its authentication key. HMAC-SHA256 with the CPUs'
+  SHA extensions (ubu1's Ryzen 9 8945HS has `sha_ni`; Apple's M-series SHA2) runs about 2 GB/s,
+  paid once a part by the look ahead. Truncated to 128 bits (RFC 2104, 5; NIST SP 800-107, 5.3.3):
+  a forgery succeeds with probability 2^-128 a try.
+- **The composition.** Encrypt-then-MAC under independent subkeys of one DEK and salt (HKDF infos
+  `fxdax raw file` + `data`/`tweak`, `fxdax raw part tag`, `fxdax frame mac`,
+  `fxdax raw file log mac`), the tag checked before anything is decrypted. The tag binds a part's
+  bytes, index, encoding and lengths; the salt binds it to its raw file (a part of another raw file
+  of the same data and DEK fails, tested); the table's MAC binds each part's place, which is its
+  sectors' tweaks, and its CRC: a part read at another place decrypts to other bytes, and a table
+  saying so fails its MAC. CRC32C is not a MAC: the tag is what refuses a part changed with its CRC
+  made to match (tested).
+- **Each sector of a segment's raw file is written once.** XTS is deterministic for a key and
+  tweak: a sector written again with other bytes under the same key shows one who sees both
+  versions which 16-byte blocks changed. A segment's writes take ranges past its end alone
+  (`Segments::reserve`, `Segments::append`: `segment.len += len`), never overlapping (`Ahead::ended`
+  asserts each part's bytes are written once); an abandoned write's range is dead space, never
+  given out again; a short write retried (`Write::stored`'s callers, TASK-411.5) writes the same
+  bytes, the same ciphertext; each segment's raw file is made anew (spares are logs, never raw
+  files) with a salt drawn for it (`Sealer::new`), so no two raw files share a key, a fenced
+  writer's and its successor's among them; recovery never writes into a raw file (it reads it and
+  frames the segment in a copy, `Recovered::close`); a framing in place writes only its tail, in
+  the clear, past the data's sectors. A segment's dead space holds what was written there under its
+  own key, or nothing: its object carries no other key's ciphertext.
+- **Large extents' raw files may be written again.** A guest may write a block of an open large
+  extent twice before it is sealed, and its sectors are then rewritten under one key and tweak:
+  the exposure of full-disk encryption (dm-crypt's XTS), on the host's disk only, to one who reads
+  it at two times, as since TASK-411.5. The bucket and the part cache get the sealed state alone,
+  one version a salt: a raw file is framed once, and an extent opened again after its seal writes a
+  new raw file with a new salt (`create_raw`). Framing in place adds no exposure; it stops writing
+  a second copy.
+- **Writers.** `segments::frame_segment` frames in place when the segment is quiet, holds data, its
+  raw file is sealed iff the store seals (a raw file of the other kind, say a recovered one, goes
+  to a copy), and, sealed, its length is whole sectors (always, TASK-411.8); the decision is the
+  clear one. What is seen of a part, by a look ahead or a framing's read, is `RawPart::of` its
+  stored bytes, read through the host's page cache (CRC and tag), then a look at them decrypted
+  (`framing::read_seen`); in place, `Packer::in_place(raw.sectors())` takes those parts
+  (`push_raw_parts`) and the tail is written past the data, in the clear, and linked, as before.
+  `Store::seal_own` (large extents): `in_place_parts` reads each chunk's stored bytes (CRC, tag),
+  decrypts it, and compresses it to tell (`extent_frame::stores_raw`); all raw, the raw file is
+  the object, its tail appended, renamed; else `write_own` frames it in a copy. (A clear large
+  extent whose parts compress only after some that don't was framed by copying its raw prefix; it
+  is now framed by `write_own` whole, its prefix read and compressed again: rare, and noise
+  compresses fast.)
+- **TASK-421, settled here.** A sealed segment is looked at ahead as a clear one is
+  (`Segment::new` gives every segment an `Ahead`; `Store::look` lost its assertion): the stored
+  bytes' CRC and tag, and a look at their decryption, so that a framing in place reads back only
+  the parts the look ahead missed. Parts packed ahead are packed in the clear and held in memory
+  (`HeldParts`), which holds plaintext as the extent cache does (Goals: keeping plaintext from the
+  host is not one); a framing in a copy seals each under its object's key, drawn as it begins
+  (`PackedPart::sealed`, byte for byte what `PartPacker::pack` makes under that key, tested), so no
+  object key is drawn before its framing, none outlives it, and a part's nonce, its index, is used
+  once under it (a framing run again draws a new salt). Held parts never leave memory; one let go
+  of is read back through `RawFile`, decrypting, as before. So TASK-421's three criteria hold
+  (`sealed_stores_hold_parts_packed_ahead_and_seal_them_framing`,
+  `sealed_raw_files_parts_are_seen_as_stored_and_held_as_data`), its task closed by this one.
+- **Tests.** `extent_keys` `tags_are_truncated_macs_of_their_pieces` (pinned against Python's
+  hmac); `extent_frame` `objects_of_raw_files_sectors_read_under_their_key_alone` (the raw file's
+  sectors byte for byte, no plaintext, whole, by parts, by ranges, restamped, keyless check, no
+  key, another DEK), `parts_of_raw_files_sectors_changed_or_moved_fail` (a byte with its CRC made
+  to match, a tag, another index, another place, another salt, a table of compressed or short
+  parts), `parts_packed_in_the_clear_seal_as_parts_packed_sealed`,
+  `objects_framed_in_place_under_aes_gcm_keys_are_refused`; `extent_store` `segments::tests`
+  `sealed_segments_of_noise_are_framed_in_place` (seen ahead, the last part alone read, its raw
+  file its framed file, its tail alone written, `Seal::Sectors` of the raw file's salt, read with
+  the key, not without, no plaintext) and `sealed_segments_parts_are_held_ahead_and_sealed_framing`;
+  `framing::tests::sealed_raw_files_parts_are_seen_as_stored_and_held_as_data`;
+  `upload::encrypted::sealed_stores_frame_in_place_writing_what_clear_stores_write` (below),
+  `segments_framed_in_place_sealed_recover_from_crashes` (the TASK-411.9 pattern: crashed as the
+  framing in place is made durable, four crash seeds and an opening failed after each of its
+  operations in turn, never a byte in the clear, the segment closed again in a copy, read back;
+  crashed once durable, read from the object of its sectors),
+  `sealed_stores_hold_parts_packed_ahead_and_seal_them_framing`; the tests that asserted sealed
+  segments of noise were `Seal::Sealed` now assert `Seal::Sectors` (`segment_key`).
+- **Written, sealed against clear, Mac.**
+  `sealed_stores_frame_in_place_writing_what_clear_stores_write`: a segment of 6 MiB of noise and
+  512 KiB of text (its framing compresses it all to tell, then frames it in place), a large extent
+  of noise (in place) and one of noise then text (in a copy): the sealed store's raw, copied, framed
+  and own bytes equal its clear twin's, byte for byte; only the logs differ (their MACs).
+  `store-bench framing` prints the bytes written and the segments framed in place.
+- **fxfs-guest-sandboxes, ubu1** (2026-11-15, 02302b95, `scripts/sandboxes.sh short`, kernel
+  `release-c87bcefc`, under fxjob): sealed (test-e2e.sh's KMS, tenants 0-15 with KEKs), the case
+  passes: the stores wrote **1.21 times** what the guests did (host-a 1.22, host-b 1.21; budget
+  1.5; was 1.90 and 1.87), 66 and 63 segments framed in place (was 0), framings within their
+  second, the slowest 111.0 and 129.2 ms (was up to 1093.9 ms), none over budget; framings read
+  0.13-0.14 GiB back, the looks ahead 5.4 GiB a host. Its clear twin, the same build with a KMS
+  holding no KEK: 1.17 (1.17, 1.18), 58 and 59 in place, the slowest framings 122.9 and 231.6 ms.
+  Per guest byte, sealed: raw 1.0, copied 0.14-0.15, framed 0.06-0.07, own 0, log 0.007. The run's
+  end check over the bucket found three tenant-0 cells of the run's first three branches, not the
+  case's daemons', made with no KEK (TASK-411.26), so `sandboxes.sh` exits 1 though the case passes.
