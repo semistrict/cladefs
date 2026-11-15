@@ -29,6 +29,11 @@ use std::sync::Arc;
 /// in the file its tweak. What reaches an open segment is whole sectors (TASK-411.8).
 pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 
+/// The most a raw file's write encrypts at once, through a buffer of its own ([`RawFile`]'s
+/// `write_at`): whole sectors.
+const ENCRYPTING_MOST: usize = 1 << 20;
+const _: () = assert!((ENCRYPTING_MOST as u64).is_multiple_of(SECTOR));
+
 /// cladefs: how a sealed store's raw file is encrypted, and its log authenticated: under subkeys of
 /// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
 /// the key of the object the file is once framed in place (TASK-411.23).
@@ -169,12 +174,19 @@ impl<F: File> File for RawFile<F> {
         self.read_with(buf, offset, |file, buf, offset| file.read_cached(buf, offset))
     }
 
-    /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors.
+    /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors: of
+    /// [`ENCRYPTING_MOST`] bytes at most, a write larger written a piece at a time, so that it holds
+    /// that much more, not its own size again, outside what its caller bounds (the extent daemon's
+    /// room for requests' buffers). A crash may leave some pieces written, as it may of any write.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let mut sealed = Aligned::new(buf.len());
-        sealed.as_mut_slice().copy_from_slice(buf);
-        self.encrypt(offset, sealed.as_mut_slice())?;
-        self.file.write_at(sealed.as_slice(), offset)
+        let mut sealed = Aligned::new(buf.len().min(ENCRYPTING_MOST));
+        for (piece, at) in buf.chunks(ENCRYPTING_MOST).zip((offset..).step_by(ENCRYPTING_MOST)) {
+            let sealed = &mut sealed.as_mut_slice()[..piece.len()];
+            sealed.copy_from_slice(piece);
+            self.encrypt(at, sealed)?;
+            self.file.write_at(sealed, at)?;
+        }
+        Ok(())
     }
 
     fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
@@ -206,6 +218,25 @@ mod tests {
     fn sealer() -> Arc<Sealer> {
         let key = KeyId { branch: 7, generation: 1 };
         Arc::new(Sealer::new(&Secret::from_bytes(&[5; 32]), key))
+    }
+
+    /// A write larger than [`ENCRYPTING_MOST`], encrypted and written a piece at a time, stores
+    /// what encrypting it whole would, each sector under its own tweak, and reads back whole.
+    #[test]
+    fn large_writes_are_encrypted_a_piece_at_a_time_as_if_whole() {
+        let dir = MemDir::new();
+        let len = 2 * ENCRYPTING_MOST + 3 * SECTOR as usize;
+        let data: Vec<u8> = (0..len).map(|at| (at % 253) as u8).collect();
+        let raw = RawFile::new(dir.create("sealed", true).unwrap(), sealer());
+        raw.write_at(&data, SECTOR).unwrap();
+        let mut whole = data.clone();
+        raw.encrypt(SECTOR, &mut whole).unwrap();
+        let mut stored = vec![0; len];
+        raw.file().read_at(&mut stored, SECTOR).unwrap();
+        assert!(stored == whole, "stored otherwise than encrypted whole");
+        let mut read = vec![0; len];
+        raw.read_at(&mut read, SECTOR).unwrap();
+        assert!(read == data, "read back otherwise than written");
     }
 
     /// A sealed raw file stores no byte of what was written, and reads it back, at any offset and
