@@ -3,7 +3,7 @@ id: doc-2
 title: 'Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store'
 type: specification
 created_date: '2026-10-13 19:53'
-updated_date: '2026-11-07 02:53'
+updated_date: '2026-11-15 13:41'
 ---
 # Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store
 
@@ -16,26 +16,26 @@ are provisional, and milestone 1 settles them (see Open decisions).
 DAX (doc-13). Milestone 1's open question, the write path, was decided on 2026-11-04 from the
 first-principles review's measurements (docs/reviews/2026-11-04-first-principles.md, section 1):
 sealed extents alone on DAX, a store's page copied on write, data written by `WRITE` requests at
-writeback (doc-13, TASK-164). The host's page cache is fxdax's own extent cache
-(`crates/fxdax/src/cache.rs`); the in-process Zircon kernel was deleted (TASK-96.1). The plan below
+writeback (doc-13, TASK-164). The host's page cache is cladefs's own extent cache
+(`crates/cladefs/src/cache.rs`); the in-process Zircon kernel was deleted (TASK-96.1). The plan below
 is kept as written, with revisions marked.
 
 ## Why
 
-fxdax serves an Fxfs filesystem from the host to a guest over virtio-fs. File data is fast:
+cladefs serves an Fxfs filesystem from the host to a guest over virtio-fs. File data is fast:
 
 - DAX reads and writes are within 2x of ext4 in the guest;
 - mmap reads match ext4.
 
 Metadata is not. On GCE under nested KVM, creates, cold stats, readdir and unlinks are 8-55x slower than
 ext4 (docs/measurements/gce-fs-bench-2026-10-10T2202Z). libkrun's own virtio-fs passthrough is 6-36x
-slower too, so the cost is the transport, not fxdax.
+slower too, so the cost is the transport, not cladefs.
 
 Every uncached metadata operation is a round trip of ~80-190 µs:
 
 - the guest notifies the device;
 - the host thread wakes;
-- fxdax handles the request, in 17-22 µs;
+- cladefs handles the request, in 17-22 µs;
 - the device interrupts the guest, which then takes two more exits to the VMM and a worker handoff.
 
 Caching (TASK-25.9) and guest halt polling (TASK-25.10) cut the number and cost of round trips. They
@@ -78,10 +78,10 @@ Settled in a design review on 2026-10-13.
    - Memory is one copy across forks. That includes file data that forks read after the fork, for
      example files from the base image that each fork reads later.
    - A fork costs O(1), whatever the filesystem's size.
-9. **Linux hosts only.** The VMM is libkrun: fxdax's device, DAX window, userfaultfd faults and KVM
+9. **Linux hosts only.** The VMM is libkrun: cladefs's device, DAX window, userfaultfd faults and KVM
    pre-faulting already work there. It gains KVM snapshot and fork, modelled on Firecracker's.
-   *Revised 2026-10-17 (TASK-40):* the VMM is Firecracker, which the sandboxes fxdax serves run;
-   fxdax's device, DAX window, userfaultfd faults and pre-faulting moved there, and libkrun was
+   *Revised 2026-10-17 (TASK-40):* the VMM is Firecracker, which the sandboxes cladefs serves run;
+   cladefs's device, DAX window, userfaultfd faults and pre-faulting moved there, and libkrun was
    removed. Snapshots with the device attached are TASK-39.1.
 10. **The host persists to remote object storage,** with native support for both GCS and S3. This lets:
     - a VM resume or fork on any host;
@@ -98,12 +98,12 @@ Settled in a design review on 2026-10-13.
     writer, fenced by a lease taken with conditional writes.
 14. **Each host caches in two tiers:** memory, as the shared pages mapped into VMs, and local NVMe. Both
     tiers are disposable.
-15. **fxdax evolves into this design** rather than being kept alongside it.
+15. **cladefs evolves into this design** rather than being kept alongside it.
 
 ## Architecture
 
 ```
- guest kernel                         host (Firecracker + fxdax)             object storage
+ guest kernel                         host (Firecracker + cladefs)             object storage
 ┌───────────────────────────┐        ┌──────────────────────────────┐      ┌─────────────────────┐
 │ VFS                       │        │ extent-store device          │      │ segments (packed    │
 │  └ Fxfs (ported)          │ virtio │  ├ extent index per branch   │ GCS  │  extents, commit    │
@@ -177,14 +177,14 @@ A shared extent is reclaimed only when every branch that inherited it has freed 
 with back-references in btrfs snapshots. Each branch records its own frees, and garbage collection
 decides.
 
-**Page cache.** The shared pages are fxdax's extent cache (`crates/fxdax/src/cache.rs`), physical memory
+**Page cache.** The shared pages are cladefs's extent cache (`crates/cladefs/src/cache.rs`), physical memory
 keyed by extent (the in-process kernel's pager-backed memory until TASK-96.1). The DAX windows map it
 with:
 
-- userfaultfd faults (`crates/fxdax/src/dax/uffd.rs`);
+- userfaultfd faults (`crates/cladefs/src/dax/uffd.rs`);
 - write-protect faults, a store's copy on write (doc-13);
 - KVM pre-faulting;
-- the EFAULT retry (`crates/fxdax/src/dax/failures.rs`).
+- the EFAULT retry (`crates/cladefs/src/dax/failures.rs`).
 
 Every VM and fork on the host maps the same pages for the same extent. Behind memory sits a cache on
 local NVMe, and behind that, ranged reads from object storage with read-ahead.
@@ -239,13 +239,13 @@ Provisional choices, which milestone 1 or the fork milestone settles:
 3. **How a fork's writes stay private.** Settled by doc-4: each branch mints extents under its own ID,
    and shared extents never change. The reclamation rules are finalised before fork work starts.
 
-## What fxdax keeps and what changes
+## What cladefs keeps and what changes
 
 **Kept:**
 
 - the in-process Zircon kernel as the host's page cache (VMOs, pager, eviction, memory pressure);
 - the DAX window machinery: the second stage, userfaultfd, pre-faulting, the EFAULT retry;
-- libkrun integration and the device loop on fxdax's executor;
+- libkrun integration and the device loop on cladefs's executor;
 - the benchmark and its GCE infrastructure.
 
 **Changed:**
@@ -255,7 +255,7 @@ Provisional choices, which milestone 1 or the fork milestone settles:
 - Host persistence moves from an image file to object storage, through local caches.
 
 *Revised 2026-11-06:* the Zircon kernel port was deleted (TASK-96.1): the extent cache, physical memory
-and DAX windows are fxdax's own. libkrun was removed for Firecracker (TASK-40).
+and DAX windows are cladefs's own. libkrun was removed for Firecracker (TASK-40).
 
 ## Milestones
 
@@ -283,7 +283,7 @@ and DAX windows are fxdax's own. libkrun was removed for Firecracker (TASK-40).
 
   The first task is a spike to size it.
 - **Extent IDs in Fxfs's tree** change its on-disk records, replace its allocator, and end its
-  in-place writes: a large deviation from upstream that has to be kept maintainable. fxdax's image
+  in-place writes: a large deviation from upstream that has to be kept maintainable. cladefs's image
   files become a local extent store, so one Fxfs serves the host and the guest.
 - **Faults per 4 KiB page** under nested virtualization limit cold DAX reads (TASK-25.3). Shared extents
   favour 2 MiB host pages, which conflicts with fine-grained copy-on-write.

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a sweep of the collector over every cell of a bucket, as `fxdax-gc` runs it (TASK-395.5):
+//! cladefs: a sweep of the collector over every cell of a bucket, as `cladefs-gc` runs it (TASK-395.5):
 //! a pass over each cell, so many at once, beside the sweeps of any number of other processes.
 //!
 //! The cells come from delimiter listings a page at a time ([`crate::cell::listed`]), each page
@@ -64,7 +64,7 @@ pub struct Sweep {
     /// or all of them the sweep's own task's, one at a time between their requests (tests, a
     /// runtime of one thread).
     pub spawned: bool,
-    /// fxdax: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
+    /// cladefs: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
     /// any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not to
     /// be had at a pass before is now ([`Heard`], TASK-411.13).
     pub kms: Option<extent_keys::kms::Shared>,
@@ -221,7 +221,7 @@ impl Sweep {
         let started = Instant::now();
         // What another pass did after this, it leaves be.
         let since = bucket.now();
-        // fxdax: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
+        // cladefs: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
         // (TASK-411.13).
         let heard = Heard::new();
         let mut swept = Swept::default();

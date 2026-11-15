@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
-use fxdax::{Errno, ExtentStore, RemoteExtentStore};
+use cladefs::{Errno, ExtentStore, RemoteExtentStore};
 use virtio_extent::protocol::*;
 use virtio_extent::{
     BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Notices, WindowVm, handle,
@@ -28,11 +28,11 @@ const RESPONSE: usize = size_of::<Response>();
 /// branches in a bucket in its memory, as of placement 1, unless the test's environment names
 /// others (scripts/test.sh's firecracker part names memory:///vmm). The daemon logs to standard
 /// error, which a failed test shows: its EIO opening a store with no bucket named said nothing of
-/// why (fxdax TASK-220).
+/// why (cladefs TASK-220).
 fn host() {
-    let _ = fxdax::extentd::logging::to_stderr();
+    let _ = cladefs::extentd::logging::to_stderr();
     for (name, value) in
-        [("FXDAX_EXTENTD_REMOTE", "memory:///branches"), ("FXDAX_EXTENTD_TOKEN", "1")]
+        [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")]
     {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
@@ -73,7 +73,7 @@ fn daemon() -> TestDir {
     host();
     let dir = TestDir::new();
     let listener = std::os::unix::net::UnixListener::bind(dir.socket()).unwrap();
-    std::thread::spawn(move || fxdax::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::extentd::serve(listener));
     dir
 }
 
@@ -90,8 +90,8 @@ fn store() -> (RemoteExtentStore, TestDir) {
 
 /// The requests of `kind` the daemons of this process have served (their metrics).
 fn served(kind: &str) -> u64 {
-    let metrics = fxdax::extentd::metrics::render();
-    let name = format!("fxdax_extentd_requests_total{{kind=\"{kind}\"}} ");
+    let metrics = cladefs::extentd::metrics::render();
+    let name = format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}} ");
     let line = (metrics.lines()).find_map(|line| line.strip_prefix(&name));
     let line = line.unwrap_or_else(|| panic!("no {kind} requests counted in {metrics}"));
     line.parse().unwrap()
@@ -181,7 +181,7 @@ fn errno(errno: Errno) -> u32 {
     errno.raw().cast_unsigned()
 }
 
-/// fxdax TASK-111.4: the guest's stats, text, go to the daemon, as the answer to the ask the
+/// cladefs TASK-111.4: the guest's stats, text, go to the daemon, as the answer to the ask the
 /// request names; what isn't text, or is longer than the daemon takes, is refused.
 #[test]
 fn stats_go_to_the_daemon() {
@@ -258,7 +258,7 @@ fn writes_and_reads() {
     assert_eq!(request(&store, &read, data.len() + RESPONSE).1, errno(Errno::ENOENT));
 }
 
-/// fxdax: a FREE with FREE_MANY, of a flush's dead extents, as many as the guest's Fxfs names in
+/// cladefs: a FREE with FREE_MANY, of a flush's dead extents, as many as the guest's Fxfs names in
 /// one (257), frees them in one request of the daemon's, not one each, each a round trip to it
 /// (TASK-92.13).
 #[test]
@@ -268,8 +268,8 @@ fn frees_many_in_one_request() {
     let data = vec![7; BLOCK];
     let ids: Vec<ExtentIdLe> = (1..=EXTENTS)
         .map(|sequence| {
-            let id = fxdax::ExtentId { branch: store.branch(), sequence };
-            store.write(id, 0, &[fxdax::VolatileSlice::from(&data[..])]).unwrap();
+            let id = cladefs::ExtentId { branch: store.branch(), sequence };
+            store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
             ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() }
         })
         .collect();
@@ -327,17 +327,17 @@ fn roots_and_info() {
             available: (1u64 << 20).to_le(),
             next_sequence: 0,
             // The store's branch is kept in the daemon's bucket: its writer mints from its range,
-            // its first lease's (fxdax's doc-7, The head).
+            // its first lease's (cladefs's doc-7, The head).
             sequence_floor: (1u64 << 40).to_le(),
             branch: store.branch().to_le(),
         }
     );
-    // fxdax: room for what comes before the branch alone, as a driver without F_FREEZE had, is
+    // cladefs: room for what comes before the branch alone, as a driver without F_FREEZE had, is
     // refused (TASK-141.3).
     let short = std::mem::offset_of!(Info, branch);
     assert_eq!(request(&store, &info, short + RESPONSE).1, errno(Errno::EINVAL));
 
-    // fxdax: a WRITE's commit sets the root after its data, which isn't the data's; there is no
+    // cladefs: a WRITE's commit sets the root after its data, which isn't the data's; there is no
     // root without a commit to set it.
     let data = [7u8; BLOCK];
     let rooted = IoArgs { root_len: 6u32.to_le(), ..io(&store, 1, 0, BLOCK) };
@@ -348,8 +348,8 @@ fn roots_and_info() {
     assert_eq!(status, 0);
     assert_eq!(&written[..6], b"second");
     let mut back = vec![0; BLOCK];
-    let id = fxdax::ExtentId { branch: store.branch(), sequence: 1 };
-    store.read(id, 0, &mut [fxdax::VolatileSliceMut::from(&mut back[..])]).unwrap();
+    let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
+    store.read(id, 0, &mut [cladefs::VolatileSliceMut::from(&mut back[..])]).unwrap();
     assert_eq!(back, data);
     let uncommitted = bytes(
         VIRTIO_EXTENT_T_WRITE,
@@ -360,7 +360,7 @@ fn roots_and_info() {
     assert_eq!(request(&store, &uncommitted, RESPONSE).1, errno(Errno::EINVAL));
 }
 
-/// fxdax: a follower's device reads its writer's store as of its view's commit, advances to the
+/// cladefs: a follower's device reads its writer's store as of its view's commit, advances to the
 /// writer's latest, lets go of the commits before and pins extents; what the writer wrote since it
 /// reads as ENOENT, and what would write, it refuses (EROFS). A writer's device refuses a
 /// follower's requests (EINVAL).
@@ -374,8 +374,8 @@ fn follows_a_writer() {
         let _ = heard.send(epoch);
     });
     let data = vec![7; BLOCK];
-    let id = fxdax::ExtentId { branch: store.branch(), sequence: 1 };
-    store.write(id, 0, &[fxdax::VolatileSlice::from(&data[..])]).unwrap();
+    let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
+    store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
     store.commit(None).unwrap();
     let epoch = commits.recv().unwrap();
     let read_ = bytes(VIRTIO_EXTENT_T_READ, 0, Some(io(&store, 1, 0, BLOCK)), &[]);
@@ -404,7 +404,7 @@ fn follows_a_writer() {
     assert_eq!(request(&store, &advance, size_of::<Epoch>() + RESPONSE).1, errno(Errno::EINVAL));
 }
 
-/// fxdax TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
+/// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
 /// it may name, of extents of its branch or another's, at offsets near the store's ends or at the
 /// ends of a u64, the device answers it, with a status, no more than the room it was given
 /// written, and goes on serving. Seeded by proptest, which says the case if one fails.
@@ -465,7 +465,7 @@ fn refuses_bad_requests() {
     let short = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(&store, 1, 0, BLOCK)), &[1; 100]);
     assert_eq!(request(&store, &short, RESPONSE).1, errno(Errno::EINVAL));
     // Without a DAX window, one map or many; and a MAP flag the device doesn't know, of the
-    // request or of one of its maps (`F_MAP_MANY`): fxdax: writable DAX's `MAP_WRITE` among them
+    // request or of one of its maps (`F_MAP_MANY`): cladefs: writable DAX's `MAP_WRITE` among them
     // (backlog doc-13).
     let entries = |flags: &[u32]| -> Vec<u8> {
         (flags.iter())
@@ -487,7 +487,7 @@ fn refuses_bad_requests() {
         let map = bytes(VIRTIO_EXTENT_T_MAP, unknown, Some(MapArgs::default()), &[]);
         assert_eq!(request(&store, &map, RESPONSE).1, errno(Errno::EINVAL));
     }
-    // fxdax: zeros, and PRIVATE, of a store without a window that copies on write (doc-13).
+    // cladefs: zeros, and PRIVATE, of a store without a window that copies on write (doc-13).
     let zeros = entries(&[VIRTIO_EXTENT_MAP_ZEROS]);
     let map = bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_MANY, Some(MapArgs::default()), &zeros);
     assert_eq!(request(&store, &map, RESPONSE).1, errno(Errno::EINVAL));
@@ -499,7 +499,7 @@ fn refuses_bad_requests() {
     assert_eq!(request(&store, &map, RESPONSE).1, errno(Errno::EINVAL));
 }
 
-/// fxdax: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the
+/// cladefs: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the
 /// device lists what it names in its own memory, and a chain naming the same guest memory again
 /// and again names as much as it likes, which grew the VMM by as much. Up to it, the request is
 /// served.
@@ -677,7 +677,7 @@ fn windows_are_where_snapshots_had_them() {
     let mut space = [0u8; size_of::<ConfigSpace>()];
     device.read_config(0, &mut space);
     let private_max = ConfigSpace::read_from_bytes(&space).unwrap().private_max;
-    assert_eq!(u64::from_le(private_max), (4 << 20) / fxdax::pages::page_size());
+    assert_eq!(u64::from_le(private_max), (4 << 20) / cladefs::pages::page_size());
     device.activate(device.features(), Arc::new(Counted::default())).unwrap();
 
     let freeze = bytes::<Info>(VIRTIO_EXTENT_T_FREEZE, VIRTIO_EXTENT_FREEZE_FROZEN, None, &[]);

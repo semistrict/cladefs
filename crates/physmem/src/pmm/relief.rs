@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! fxdax's own: the relief of starved arenas (`arenas`, TASK-50.3). An allocation that finds its
+//! cladefs's own: the relief of starved arenas (`arenas`, TASK-50.3). An allocation that finds its
 //! arena starved asks for relief, and one that can wait waits for it: the PMM's relief thread
 //! frees pages for each arena asked for since its last pass, and starved still (TASK-79.76), with
 //! the evictor its user gives it ([`relieve_with`]), the arena's own past its own cap, any
@@ -44,11 +44,11 @@ struct Reliever {
 static RELIEVER: OnceLock<Option<Arc<Reliever>>> = OnceLock::new();
 
 thread_local! {
-    /// fxdax: on the relief thread, the arena its evictor is evicting for, while it is (TASK-161).
+    /// cladefs: on the relief thread, the arena its evictor is evicting for, while it is (TASK-161).
     static RELIEVING: Cell<Option<ArenaId>> = const { Cell::new(None) };
 }
 
-/// fxdax: the arena relief's pass is evicting for, if this is the relief thread, in its evictor:
+/// cladefs: the arena relief's pass is evicting for, if this is the relief thread, in its evictor:
 /// the pages it frees, quarantined, are owed to it until they come back (`Arenas::owe`).
 pub(super) fn relieving() -> Option<ArenaId> {
     RELIEVING.get()
@@ -58,7 +58,7 @@ fn reliever() -> Option<&'static Reliever> {
     RELIEVER.get()?.as_deref()
 }
 
-/// fxdax: starts the relief of starved arenas, on a thread of the PMM's own, which frees pages
+/// cladefs: starts the relief of starved arenas, on a thread of the PMM's own, which frees pages
 /// with `evict`: given the arena whose pages to free, or none for any arena's, and how many bytes
 /// at least, it frees what it may of them and returns the bytes it freed. It is called without the
 /// PMM's lock, and must not wait for an allocation that waits for relief, as its own thread
@@ -135,7 +135,7 @@ impl Drop for Gone<'_> {
 }
 
 impl PmmNode {
-    /// fxdax: what an allocation of `arena`'s fails with, which found it starved, held to
+    /// cladefs: what an allocation of `arena`'s fails with, which found it starved, held to
     /// `starved`, as the node's lock, `locked`, shows it still. With relief, it asks for it, and
     /// one that may `wait` is told to wait for it, unless the arena is exhausted, or relief gone,
     /// when it fails. Relief is asked for without the lock. Without relief it fails. A failure with
@@ -162,7 +162,7 @@ impl PmmNode {
         status
     }
 
-    /// fxdax: fails an allocation that found its arena starved: reported as the node's failure if
+    /// cladefs: fails an allocation that found its arena starved: reported as the node's failure if
     /// there is no free page at all, of any arena's, as memory is out (TASK-79.70); otherwise the
     /// arena's own, as other arenas' chunks hold the free pages.
     fn starved_failure(&self) -> Failed {

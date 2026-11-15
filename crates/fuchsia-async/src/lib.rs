@@ -49,6 +49,6 @@ pub use fuchsia_async_macro::{run, run_singlethreaded, run_until_stalled};
 
 pub mod condition;
 /// Testing support for repeated runs
-// fxdax: its threads aren't the guest kernel's (TASK-26.6).
+// cladefs: its threads aren't the guest kernel's (TASK-26.6).
 #[cfg(not(target_os = "none"))]
 pub mod test_support;

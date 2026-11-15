@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: scripts of operations on a few files, as fsx makes them, which a guest runs against a
+//! cladefs: scripts of operations on a few files, as fsx makes them, which a guest runs against a
 //! model of their bytes (TASK-149.2): what both the host and the guest build. A script is a pure
 //! function of a seed, so that the guest makes it from the seed alone, and a replay is told that
 //! and the operations to drop (`DROP_VAR`, as the kernel's command line carries the guest's
@@ -16,7 +16,7 @@
 //! `script_run` does it, and [`shrink`] and [`shrink_failure`] take the running of a script as an
 //! argument, so that all of it is tested on any host.
 //!
-//! fxdax: the wide mix ([`WIDE`], TASK-44.15) adds what a VFS asks of a file beyond those: ranges
+//! cladefs: the wide mix ([`WIDE`], TASK-44.15) adds what a VFS asks of a file beyond those: ranges
 //! cloned and copied, zeroed and allocated, msyncs and fdatasyncs, stores through mappings made for
 //! them, private ones too, O_DIRECT, a file's page cache dropped, and a file closed, evicted and
 //! opened again. The model says each operation's outcome, its errno too, as the VFS's own checks
@@ -26,10 +26,10 @@
 use std::fmt;
 
 /// The guest's seed of a script.
-pub const SEED_VAR: &str = "FXDAX_RANDOM_OPS_SEED";
+pub const SEED_VAR: &str = "CLADEFS_RANDOM_OPS_SEED";
 /// The operations to drop from a script, by their index in the whole of it: `12-40,100-110`.
-pub const DROP_VAR: &str = "FXDAX_RANDOM_OPS_DROP";
-/// How many runs of a script a shrink may take: FXDAX_SHRINK_TRIES's, or else this many, enough for
+pub const DROP_VAR: &str = "CLADEFS_RANDOM_OPS_DROP";
+/// How many runs of a script a shrink may take: CLADEFS_SHRINK_TRIES's, or else this many, enough for
 /// a pair of operations among thousands.
 pub const TRIES: usize = 64;
 /// The longest value `DROP_VAR` may have: it goes on the kernel's command line, of 2048 bytes,
@@ -51,10 +51,10 @@ const CHECK_EVERY: usize = 256;
 /// Of the operations, one in this many has a clone after it, and a store in a child.
 const CLONE_ONE_IN: u64 = 32;
 const FORK_ONE_IN: u64 = 16;
-/// fxdax: the most pages an O_DIRECT read or write takes.
+/// cladefs: the most pages an O_DIRECT read or write takes.
 const DIRECT_PAGES: u64 = 4;
 
-/// fxdax: errnos the model says, as Linux numbers them (asm-generic/errno-base.h), which this
+/// cladefs: errnos the model says, as Linux numbers them (asm-generic/errno-base.h), which this
 /// crate's builds on any host agree on.
 pub mod errno {
     pub const EINVAL: i32 = 22;
@@ -64,7 +64,7 @@ pub mod errno {
     pub const EFBIG: i32 = 27;
 }
 
-/// fxdax: what an operation came to, or should: how many bytes it did (written, stored, read,
+/// cladefs: what an operation came to, or should: how many bytes it did (written, stored, read,
 /// cloned or copied; 0 for an operation that says none), or the errno it failed with.
 pub type Outcome = Result<u64, i32>;
 
@@ -89,21 +89,21 @@ pub mod kind {
     pub const DIED: &str = "died";
     /// The VM ran out of time.
     pub const HANG: &str = "hang";
-    /// fxdax: the reference filesystem doesn't do as the model says: the model's mistake, or the
+    /// cladefs: the reference filesystem doesn't do as the model says: the model's mistake, or the
     /// kernel's, not the filesystem's under test (`differential`).
     pub const REFERENCE_DIFFERS: &str = "reference differs";
-    /// fxdax: the filesystems' timestamps changed otherwise, in ways not allowed (`differential`).
+    /// cladefs: the filesystems' timestamps changed otherwise, in ways not allowed (`differential`).
     pub const TIMES_DIFFER: &str = "times differ";
-    /// fxdax: on a DAX mount, no file read in again was DAX: the run looked at the page cache.
+    /// cladefs: on a DAX mount, no file read in again was DAX: the run looked at the page cache.
     pub const NEVER_DAX: &str = "never DAX";
-    /// fxdax: no time compared changed on either filesystem: the comparison looked at nothing.
+    /// cladefs: no time compared changed on either filesystem: the comparison looked at nothing.
     pub const NO_TIMES: &str = "no times changed";
-    /// fxdax: after the VM was killed, a file holds what none of its states since its last fsync
+    /// cladefs: after the VM was killed, a file holds what none of its states since its last fsync
     /// held ([`Survivals`], TASK-149.2).
     pub const KILLED_DIFFERS: &str = "killed differs";
 }
 
-/// fxdax: what a line of a guest's saying how the filesystems' times differed starts with
+/// cladefs: what a line of a guest's saying how the filesystems' times differed starts with
 /// (`differential`), and what one allowed says before why.
 pub const TIMES: &str = "times: ";
 pub const ALLOWED: &str = " (allowed: ";
@@ -170,7 +170,7 @@ pub enum Op {
     Clone { from: usize, to: usize },
     /// Every file read whole, through read(2) and its mapping, and checked.
     Check,
-    /// fxdax: FICLONERANGE of `len` bytes, or to the source's end if 0, at `from_place` of `from`,
+    /// cladefs: FICLONERANGE of `len` bytes, or to the source's end if 0, at `from_place` of `from`,
     /// onto `to_place` of `to`, which may be the same file: the offsets and length rounded down to
     /// blocks if `aligned`, as most are, and the rest refused, as the VFS refuses them.
     CloneRange {
@@ -181,71 +181,71 @@ pub enum Op {
         len: u64,
         aligned: bool,
     },
-    /// fxdax: copy_file_range of `len` bytes, as many calls as it takes.
+    /// cladefs: copy_file_range of `len` bytes, as many calls as it takes.
     Copy { from: usize, from_place: Place, to: usize, to_place: Place, len: u64 },
-    /// fxdax: fallocate's FALLOC_FL_ZERO_RANGE, the size kept or grown to the range's end.
+    /// cladefs: fallocate's FALLOC_FL_ZERO_RANGE, the size kept or grown to the range's end.
     Zero { file: usize, place: Place, len: u64, keep_size: bool },
-    /// fxdax: fallocate's allocation, which leaves the bytes as they were, the size kept or grown.
+    /// cladefs: fallocate's allocation, which leaves the bytes as they were, the size kept or grown.
     Allocate { file: usize, place: Place, len: u64, keep_size: bool },
-    /// fxdax: msync(MS_SYNC) of the kept mapping's pages around `len` bytes at `place`.
+    /// cladefs: msync(MS_SYNC) of the kept mapping's pages around `len` bytes at `place`.
     Msync { file: usize, place: Place, len: u64 },
-    /// fxdax: fdatasync.
+    /// cladefs: fdatasync.
     Fdatasync { file: usize },
-    /// fxdax: stores within the file's size through a mapping made for them and gone after:
+    /// cladefs: stores within the file's size through a mapping made for them and gone after:
     /// shared, or `private`, whose stores the file never sees.
     MapStore { file: usize, place: Place, len: u64, data: u64, private: bool },
-    /// fxdax: an O_DIRECT write, or read, of `pages` pages at the page `place` falls in.
+    /// cladefs: an O_DIRECT write, or read, of `pages` pages at the page `place` falls in.
     Direct { file: usize, place: Place, pages: u64, data: u64, write: bool },
-    /// fxdax: the file's page cache dropped (POSIX_FADV_DONTNEED), what the kept mapping maps too.
+    /// cladefs: the file's page cache dropped (POSIX_FADV_DONTNEED), what the kept mapping maps too.
     Drop { file: usize },
-    /// fxdax: the file closed, its kept mapping gone, its inode evicted, and the file opened and
+    /// cladefs: the file closed, its kept mapping gone, its inode evicted, and the file opened and
     /// mapped again: on a DAX mount, a file read in again once its writes are sealed is DAX, its
     /// stores copying on write, where one created and kept open stays in the page cache.
     Reopen { file: usize },
-    /// fxdax: a call with arguments no well-behaved caller passes (TASK-149.16), which the VFS
+    /// cladefs: a call with arguments no well-behaved caller passes (TASK-149.16), which the VFS
     /// refuses as it is, whatever the filesystem's largest file: an offset and a length past i64's
     /// end together, a negative offset, a length of nothing. `k` places it near the end.
     Limit { file: usize, call: Limit, k: u64, len: u64 },
-    /// fxdax: a write, or a truncation, `k` bytes either side of `base`, far past what the model
+    /// cladefs: a write, or a truncation, `k` bytes either side of `base`, far past what the model
     /// holds, on a scratch file of the run's own (`Run`'s far file): past a small DAX window's end,
     /// at ext4's largest file's end, a DAX mount's, i64's. What it comes to is the filesystem's
     /// largest file's, which a run is told ([`far`], `Options::largest`).
     Far { base: u64, k: i64, len: u64, data: u64, truncate: bool },
-    /// fxdax: mmap of `len` bytes of the file at `place`, a page's start if `aligned`: refused
+    /// cladefs: mmap of `len` bytes of the file at `place`, a page's start if `aligned`: refused
     /// (`EINVAL`) at no page's start, or of nothing; else read through, past the file's end too, to
     /// its last page's.
     MapOdd { file: usize, place: Place, len: u64, aligned: bool },
-    /// fxdax: a new shared mapping of the file's pages at `place`, MAP_FIXED over the same pages of
+    /// cladefs: a new shared mapping of the file's pages at `place`, MAP_FIXED over the same pages of
     /// the kept mapping of `over`, which may be another file's, its stores through it within the
     /// file; `over`'s pages then mapped back.
     MapFixed { file: usize, over: usize, place: Place, len: u64, data: u64 },
-    /// fxdax: a new mapping of the file's pages at `place`, remapped (mremap) twice as large, moved
+    /// cladefs: a new mapping of the file's pages at `place`, remapped (mremap) twice as large, moved
     /// if it must, its stores through it within the file.
     Mremap { file: usize, place: Place, len: u64, data: u64 },
-    /// fxdax: madvise of the kept mapping's pages at `place`: DONTNEED, which leaves the file, or
+    /// cladefs: madvise of the kept mapping's pages at `place`: DONTNEED, which leaves the file, or
     /// REMOVE, which punches them; at no page's start if `odd`, `EINVAL`.
     Madvise { file: usize, place: Place, len: u64, remove: bool, odd: bool },
-    /// fxdax: a truncation down to `size` and back, while a thread stores through the kept mapping
+    /// cladefs: a truncation down to `size` and back, while a thread stores through the kept mapping
     /// below it.
     TruncateRacing { file: usize, size: u64, place: Place, len: u64, data: u64 },
-    /// fxdax: a write(2) from a buffer whose bytes past its `good`th fault (TASK-149.16): it
+    /// cladefs: a write(2) from a buffer whose bytes past its `good`th fault (TASK-149.16): it
     /// stops there, or short of it, at an offset of the file no page's start, as the copy got.
     FaultingWrite { file: usize, place: Place, len: u64, good: u64, data: u64 },
-    /// fxdax: a write(2) from the kept mapping of its own file, `by` bytes on from where it writes:
+    /// cladefs: a write(2) from the kept mapping of its own file, `by` bytes on from where it writes:
     /// the same bytes, if 0, or bytes apart, in pages they may share. Not overlapping bytes, which
     /// a write copies as memcpy does, its result undefined: the guest's x86 copy wrote bytes of a
     /// line before it read them, which the source at 17 bytes on from them held (GCE r868).
     WriteFromMapping { file: usize, place: Place, len: u64, by: u64 },
-    /// fxdax: the kept mapping read through, whole, so that each page the file has is mapped, then
+    /// cladefs: the kept mapping read through, whole, so that each page the file has is mapped, then
     /// made read-only (mprotect) and writable again, all of it, whose PTEs the kernel changes in
     /// batches, then stored to within the file (TASK-149.42): to a page only read, as it comes,
     /// whose store must fault, which makes it private.
     ProtectKept { file: usize, place: Place, len: u64, data: u64 },
-    /// fxdax: as [`Op::ProtectKept`], the kept mapping moved (mremap), its PTEs with it.
+    /// cladefs: as [`Op::ProtectKept`], the kept mapping moved (mremap), its PTEs with it.
     MoveKept { file: usize, place: Place, len: u64, data: u64 },
 }
 
-/// fxdax: the calls of [`Op::Limit`].
+/// cladefs: the calls of [`Op::Limit`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
     /// pwrite whose offset and length pass i64's end: `EINVAL` (rw_verify_area).
@@ -276,9 +276,9 @@ pub struct Mix {
     pub files: usize,
     pub clones: bool,
     pub forks: bool,
-    /// fxdax: whether the operations are drawn from the wide mix's, [`wide_op`]'s, too.
+    /// cladefs: whether the operations are drawn from the wide mix's, [`wide_op`]'s, too.
     pub wide: bool,
-    /// fxdax: whether hostile operations are drawn too, [`hostile_op`]'s (TASK-149.16).
+    /// cladefs: whether hostile operations are drawn too, [`hostile_op`]'s (TASK-149.16).
     pub hostile: bool,
 }
 
@@ -288,9 +288,9 @@ pub const ONE_FILE: Mix =
 /// `fxfs-guest-script`'s.
 pub const SEVERAL_FILES: Mix =
     Mix { ops: 3000, files: 3, clones: true, forks: true, wide: false, hostile: false };
-/// fxdax: `fxfs-guest-fsx`'s (TASK-44.15).
+/// cladefs: `fxfs-guest-fsx`'s (TASK-44.15).
 pub const WIDE: Mix = Mix { wide: true, ..SEVERAL_FILES };
-/// fxdax: `fxfs-guest-fsx`'s since TASK-149.16: the wide mix, and hostile operations.
+/// cladefs: `fxfs-guest-fsx`'s since TASK-149.16: the wide mix, and hostile operations.
 pub const HOSTILE: Mix = Mix { hostile: true, ..WIDE };
 
 /// Where an operation goes: anywhere, or near a chunk's end, a page's, or the file's.
@@ -347,11 +347,11 @@ pub fn generate(seed: u64, mix: Mix) -> Vec<Op> {
     script
 }
 
-/// fxdax: the kinds of operation the wide mix draws from, one each: [`generate`]'s 17 first, in
+/// cladefs: the kinds of operation the wide mix draws from, one each: [`generate`]'s 17 first, in
 /// their proportions, then [`wide_op`]'s.
 const WIDE_KINDS: u64 = 32;
 
-/// fxdax: the wide mix's operation of `kind`, one of [`generate`]'s draws past its own 17, on
+/// cladefs: the wide mix's operation of `kind`, one of [`generate`]'s draws past its own 17, on
 /// `file` at `place`, of `len` bytes of `data`'s, as [`generate`] drew them: ranges cloned and copied
 /// twice as often as the rest, between any two files, a file and itself too.
 fn wide_op(
@@ -394,10 +394,10 @@ fn wide_op(
     }
 }
 
-/// fxdax: of the operations, one in this many has a hostile one after it, in the hostile mix.
+/// cladefs: of the operations, one in this many has a hostile one after it, in the hostile mix.
 const HOSTILE_ONE_IN: u64 = 4;
 
-/// fxdax: where [`Op::Far`]'s offsets are drawn around: a file's offsets past a small DAX window's
+/// cladefs: where [`Op::Far`]'s offsets are drawn around: a file's offsets past a small DAX window's
 /// end (512 MiB, 1 GiB, as a file larger than its window maps them in turn), ext4's largest file
 /// (16 TiB less a block, 4 KiB blocks), a DAX mount's (i64's end less a chunk), i64's, and between
 /// those (1 PiB).
@@ -410,7 +410,7 @@ const FAR: [u64; 6] = [
     1 << 50,
 ];
 
-/// fxdax: a hostile operation (TASK-149.16), of [`Op`]'s last eleven, its arguments drawn here, or
+/// cladefs: a hostile operation (TASK-149.16), of [`Op`]'s last eleven, its arguments drawn here, or
 /// a range of a file cloned or copied onto itself, overlapping.
 fn hostile_op(rng: &mut Rng, mix: Mix) -> Op {
     let file = rng.next(mix.files as u64) as usize;
@@ -548,7 +548,7 @@ pub enum Step {
         to: usize,
     },
     Check,
-    /// fxdax: the wide mix's.
+    /// cladefs: the wide mix's.
     CloneRange {
         from: usize,
         src: u64,
@@ -607,7 +607,7 @@ pub enum Step {
     Reopen {
         file: usize,
     },
-    /// fxdax: the hostile mix's (TASK-149.16). `at` as the call has it, negative too.
+    /// cladefs: the hostile mix's (TASK-149.16). `at` as the call has it, negative too.
     Limit {
         file: usize,
         call: Limit,
@@ -681,7 +681,7 @@ pub enum Step {
 }
 
 impl Step {
-    /// fxdax: what kind of operation it is, as differences between filesystems are counted.
+    /// cladefs: what kind of operation it is, as differences between filesystems are counted.
     pub fn kind(&self) -> &'static str {
         match self {
             Step::Write { .. } => "write",
@@ -733,7 +733,7 @@ impl Step {
         }
     }
 
-    /// fxdax: what `file` is to it, as differences between filesystems are counted.
+    /// cladefs: what `file` is to it, as differences between filesystems are counted.
     pub fn role(&self, file: usize) -> Role {
         match *self {
             Step::Clone { from, to }
@@ -777,7 +777,7 @@ impl Step {
         }
     }
 
-    /// fxdax: the file whose bytes or size it changes, if it changes one: a clone's or a copy's
+    /// cladefs: the file whose bytes or size it changes, if it changes one: a clone's or a copy's
     /// destination.
     pub fn changes(&self) -> Option<usize> {
         match *self {
@@ -804,7 +804,7 @@ impl Step {
         }
     }
 
-    /// fxdax: the bytes it changes, as the model has the files before it: the file, the range,
+    /// cladefs: the bytes it changes, as the model has the files before it: the file, the range,
     /// and for a clone's or a copy's, where in which file the first came from.
     pub fn reach(&self, model: &Model) -> Option<Reach> {
         let size = |file: usize| model.files[file].len() as u64;
@@ -847,7 +847,7 @@ impl Step {
         Some(Reach { file, start, end, source })
     }
 
-    /// fxdax: whether its timestamps are its own to say: not a store's through a shared mapping,
+    /// cladefs: whether its timestamps are its own to say: not a store's through a shared mapping,
     /// whose times change at a write fault, which comes as the filesystem's cache has the page,
     /// written back or not, which filesystems differ in.
     pub fn says_its_times(&self) -> bool {
@@ -863,7 +863,7 @@ impl Step {
         )
     }
 
-    /// fxdax: whether its outcome is its filesystem's own, by its largest file ([`far`]), which
+    /// cladefs: whether its outcome is its filesystem's own, by its largest file ([`far`]), which
     /// filesystems differ in, as the model says each's.
     pub fn outcome_is_the_filesystems(&self) -> bool {
         matches!(self, Step::Far { .. })
@@ -965,7 +965,7 @@ impl fmt::Display for Step {
     }
 }
 
-/// fxdax: the bytes a step changes ([`Step::reach`]): `start` to `end` of `file`, and where the
+/// cladefs: the bytes a step changes ([`Step::reach`]): `start` to `end` of `file`, and where the
 /// first came from, a clone's or a copy's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reach {
@@ -975,7 +975,7 @@ pub struct Reach {
     pub source: Option<(usize, u64)>,
 }
 
-/// fxdax: what a file is to a step: the one it's on, a clone's or a copy's source or destination,
+/// cladefs: what a file is to a step: the one it's on, a clone's or a copy's source or destination,
 /// or another.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Role {
@@ -1155,7 +1155,7 @@ impl Model {
         (at, Rng::new(data).bytes(len.min(size - at) as usize))
     }
 
-    /// fxdax: what `step` should come to, done whole: what it does, or the errno it fails with.
+    /// cladefs: what `step` should come to, done whole: what it does, or the errno it fails with.
     pub fn outcome(&self, step: &Step) -> Outcome {
         let read = |file: usize, at: u64, len: u64| len.min(self.size(file).saturating_sub(at));
         match *step {
@@ -1196,7 +1196,7 @@ impl Model {
         }
     }
 
-    /// fxdax: does what `step` does, done whole, as [`Model::outcome`] says it comes to.
+    /// cladefs: does what `step` does, done whole, as [`Model::outcome`] says it comes to.
     pub fn apply(&mut self, step: &Step) {
         match *step {
             Step::Write { file, at, ref data }
@@ -1256,7 +1256,7 @@ impl Model {
         }
     }
 
-    /// fxdax: what FICLONERANGE of `len` bytes, or to the source's end if 0, at `src` of `from` onto
+    /// cladefs: what FICLONERANGE of `len` bytes, or to the source's end if 0, at `src` of `from` onto
     /// `dst` of `to` comes to, as the VFS checks it before a filesystem sees it, with no flags
     /// (fs/remap_range.c: generic_remap_file_range_prep, generic_remap_checks,
     /// generic_remap_check_len; and ioctl_file_clone): the bytes it clones, or EINVAL. FICLONE is
@@ -1295,7 +1295,7 @@ impl Model {
         Ok(count)
     }
 
-    /// fxdax: what copy_file_range of `len` bytes at `src` of `from` to `dst` of `to` comes to, as
+    /// cladefs: what copy_file_range of `len` bytes at `src` of `from` to `dst` of `to` comes to, as
     /// the VFS checks it (fs/read_write.c: generic_copy_file_checks), however many calls it takes:
     /// what lies within the source, or EINVAL for ranges of one file that overlap.
     pub fn copy_range(&self, from: usize, src: u64, to: usize, dst: u64, len: u64) -> Outcome {
@@ -1415,7 +1415,7 @@ impl Model {
     }
 }
 
-/// fxdax: the largest file a filesystem holds, its superblock's `s_maxbytes`: the VFS's own
+/// cladefs: the largest file a filesystem holds, its superblock's `s_maxbytes`: the VFS's own
 /// (MAX_LFS_FILESIZE), as XFS's and Fxfs's without a DAX window are; Fxfs's with one, a chunk short
 /// of the VFS's (fxfs_vfs_fill_super); and ext4's of blocks of `block` bytes, its extents' 32-bit
 /// block numbers' (ext4_max_size).
@@ -1425,7 +1425,7 @@ pub const fn largest_ext4(block: u64) -> u64 {
     ((1 << 32) - 1) * block
 }
 
-/// fxdax: what [`Step::Far`] comes to, a write of `len` bytes at `at` of an empty file, or a
+/// cladefs: what [`Step::Far`] comes to, a write of `len` bytes at `at` of an empty file, or a
 /// truncation to `at`, on a filesystem whose largest file is `largest`, as the VFS checks it
 /// (pwrite64, rw_verify_area, generic_write_check_limits; do_ftruncate, inode_newsize_ok): `EINVAL`
 /// at a negative offset, or past i64's end, `EFBIG` at the largest file's end or past it, and a
@@ -1443,14 +1443,14 @@ pub fn far(at: u64, len: u64, truncate: bool, largest: u64) -> Outcome {
     }
 }
 
-/// fxdax: the index in the whole of `seed`'s script of `len` operations before which a killed run
+/// cladefs: the index in the whole of `seed`'s script of `len` operations before which a killed run
 /// stops (TASK-149.2): it does those before it of what's kept, says so, and waits to be killed.
 /// Never 0, so that something is done, nor past the end.
 pub fn kill_index(seed: u64, len: usize) -> usize {
     1 + Rng::new(seed ^ 0x6b69_6c6c_6564).next(len.max(2) as u64 - 1) as usize
 }
 
-/// fxdax: what a file may hold after its VM is killed, as of the operations done (TASK-149.2): the
+/// cladefs: what a file may hold after its VM is killed, as of the operations done (TASK-149.2): the
 /// sizes it had since its last fsync, and of each of its pages, the contents it had since then,
 /// past its end reading zeros. Writeback writes pages as they are when it takes them, and a kill
 /// keeps what it wrote, so that each page, and the size, may be of a state of its own. Kept page
@@ -1462,7 +1462,7 @@ pub struct Survivals {
     pages: Vec<std::collections::HashSet<Vec<u8>>>,
 }
 
-/// fxdax: `data`'s page `index`, past its end reading zeros.
+/// cladefs: `data`'s page `index`, past its end reading zeros.
 fn page_of(data: &[u8], index: usize) -> Vec<u8> {
     let mut page = vec![0; PAGE as usize];
     let start = (index * PAGE as usize).min(data.len());
@@ -1522,7 +1522,7 @@ impl Survivals {
     }
 }
 
-/// fxdax: what an operation a full volume refused came to, where it isn't what the model says of
+/// cladefs: what an operation a full volume refused came to, where it isn't what the model says of
 /// it done whole, which a killed run's guest says for the host to replay (TASK-149.2): the file it
 /// changes, as long as `len`, reading as the operation done whole has it over `ranges`, and as it
 /// was elsewhere, as a write or a child's store cut short, a clone that stopped, and a truncate or
@@ -1534,7 +1534,7 @@ pub enum Partial {
     Unsynced,
 }
 
-/// fxdax: what a line of a guest's saying an operation's [`Partial`] starts with: `partial INDEX
+/// cladefs: what a line of a guest's saying an operation's [`Partial`] starts with: `partial INDEX
 /// unsynced`, or `partial INDEX LEN START-END,...`.
 pub const PARTIAL: &str = "partial ";
 
@@ -1610,7 +1610,7 @@ impl Partial {
     }
 }
 
-/// fxdax: what each of `files` may hold after a kill before the script's operation `kill`, of
+/// cladefs: what each of `files` may hold after a kill before the script's operation `kill`, of
 /// `script` done in order, its outcomes the model's, but for those a full volume refused, as
 /// `partials` says them: each file's [`Survivals`] since its last fsync, which a refused one isn't.
 pub fn survivals(
@@ -1782,7 +1782,7 @@ pub fn shrink_failure(
 mod tests {
     use super::*;
 
-    /// fxdax: after a kill, a file holds a size it had since its last fsync, and each page as one of
+    /// cladefs: after a kill, a file holds a size it had since its last fsync, and each page as one of
     /// its states since then had it, which may be of different states; not what it held before
     /// that fsync, nor bytes no state held, nor a size none had. A file the kill lost the creation
     /// of is empty (TASK-149.2).
@@ -1839,7 +1839,7 @@ mod tests {
         assert!(before[0].hold(Some(&state(3))).is_err(), "a write after the kill kept");
     }
 
-    /// fxdax: what a refused operation left is said, read back, and replayed: a write cut short,
+    /// cladefs: what a refused operation left is said, read back, and replayed: a write cut short,
     /// and a refused fsync, which makes nothing durable; a byte neither as it was nor as it would
     /// be can't be said (TASK-149.2).
     #[test]
@@ -1877,7 +1877,7 @@ mod tests {
         assert!(survivals[0].hold(Some(&data[..])).is_err(), "the write whole, which was cut");
     }
 
-    /// fxdax: a killed run stops at an operation of the script, never before its first.
+    /// cladefs: a killed run stops at an operation of the script, never before its first.
     #[test]
     fn kill_indices_fall_within_the_script() {
         for seed in 0..1000 {

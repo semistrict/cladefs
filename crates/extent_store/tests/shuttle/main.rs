@@ -1,16 +1,16 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the store's writer, the closer of its open segment and its uploader, run together under
+//! cladefs: the store's writer, the closer of its open segment and its uploader, run together under
 //! Shuttle (awslabs/shuttle), whose scheduler chooses every interleaving of their threads at each
 //! lock, condition variable and file operation, and replays a failing one from its seed
 //! (TASK-44.4).
 //!
 //! The writer writes extents (some in segments, some large enough for files of their own), frees
 //! some, and commits, ordered or durably, recording what the store holds as of each commit. The
-//! closer closes the open segment between commits, as fxdax's uploader has the store do. The
-//! uploader, as fxdax's does, closes it too and takes each segment closed once its commits are
+//! closer closes the open segment between commits, as cladefs's uploader has the store do. The
+//! uploader, as cladefs's does, closes it too and takes each segment closed once its commits are
 //! durable; it reads what each of the segment's commits wrote and the extents its footer names
 //! (from the store, or kept for it if freed since), and releases its commits. Their history is
 //! checked:
@@ -70,7 +70,7 @@ const OPTIONS: Options = Options {
     open_files: 2,
     view_lag: None,
     view_kept_bytes: None,
-    // fxdax: flushes of either kind, holding their runs or checking them (TASK-301).
+    // cladefs: flushes of either kind, holding their runs or checking them (TASK-301).
     held_most: 8 << 10,
 };
 /// The chain of a writer of the branch in object storage, whose segments the store closes.
@@ -152,7 +152,7 @@ fn run() {
     run_with(RUN);
 }
 
-/// One run of the writer, the closer, the uploader and a follower: fxdax: the uploader
+/// One run of the writer, the closer, the uploader and a follower: cladefs: the uploader
 /// acknowledging what it takes, the bucket keeps nothing of the frees past their segments'
 /// acknowledgements, so that views alone keep them then (TASK-165.9).
 fn following() {
@@ -245,7 +245,7 @@ fn run_with(Run { steps, follow }: Run) {
             loop {
                 // Whether the writer was done before this round: then it takes everything.
                 let done = written.load(Ordering::SeqCst);
-                // As fxdax's uploader does (remote.rs): closes the open segment between commits,
+                // As cladefs's uploader does (remote.rs): closes the open segment between commits,
                 // and takes the segments closed whose commits are durable, reading them and their
                 // extents' own files.
                 store.close_now().unwrap();
@@ -451,7 +451,7 @@ fn run_with(Run { steps, follow }: Run) {
     store.commit(None).expect("the last commit failed");
 }
 
-/// fxdax: what the uploader uploaded, as far as the store's reads need it once their data is in
+/// cladefs: what the uploader uploaded, as far as the store's reads need it once their data is in
 /// the bucket: each object's data, unframed, by its key (TASK-165.8); and the footers the uploader
 /// acknowledged, in order, the branch's history there, which a crash's store opens as of
 /// (TASK-165.9).
@@ -484,7 +484,7 @@ impl Bucket {
     }
 
     /// `read`, a read of an extent from its start into `buf`; or, its data being in the bucket,
-    /// what its error says is there, as fxdax's fetcher reads it.
+    /// what its error says is there, as cladefs's fetcher reads it.
     fn read(
         &self,
         buf: &mut [u8],
@@ -507,7 +507,7 @@ impl Bucket {
     }
 }
 
-/// fxdax: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
+/// cladefs: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
 fn bucket_key<F>(closed: &extent_store::Closed<F>) -> String {
     extent_remote::layout::segment(closed.footer.branch, closed.footer.seq, closed.footer.epoch)
 }
@@ -681,7 +681,7 @@ fn freeing_during_a_write() {
 }
 
 /// One run of an uploader beginning while commits are made durable: a writer orders commits, a
-/// flusher makes them durable, and the uploader begins, as fxdax's does, as of the store's latest
+/// flusher makes them durable, and the uploader begins, as cladefs's does, as of the store's latest
 /// commit, closes the open segment between commits, and takes the segments closed. A crash
 /// recovers at least the last commit of each segment it took: it takes only those of commits a
 /// flush made durable, not those of commits a flush took and has yet to sync.

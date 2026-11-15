@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -12,14 +12,14 @@ from script import SCRIPTS, load
 
 headers = load("license-headers")
 
-FXDAX_BSD = (
-    "// Copyright 2026 The fxdax Authors. All rights reserved.\n"
+CLADEFS_BSD = (
+    "// Copyright 2026 The cladefs Authors. All rights reserved.\n"
     "// Use of this source code is governed by a BSD-style license that can be\n"
     "// found in the LICENSE file.\n\nfn main() {}\n"
 )
 DUAL = (
     "// SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause\n"
-    "// Copyright 2026 The fxdax Authors.\n\nint main(void) { return 0; }\n"
+    "// Copyright 2026 The cladefs Authors.\n\nint main(void) { return 0; }\n"
 )
 # A port of Fuchsia's, citing what it ports.
 PORT = (
@@ -33,25 +33,25 @@ PORT = (
 class LicenseHeadersTest(unittest.TestCase):
     def test_mutants_patches_are_not_checked(self):
         for path in (
-            "crates/fxdax/mutants/tenants-disks-unlimited.patch",
+            "crates/cladefs/mutants/tenants-disks-unlimited.patch",
             "guest/mutants/task-149.33-chunks-only-aligned.patch",
         ):
             self.assertTrue(headers.MUTANT.search(path), path)
-        for path in ("guest/linux/patches/0001-dax.patch", "crates/fxdax/src/mutants.rs"):
+        for path in ("guest/linux/patches/0001-dax.patch", "crates/cladefs/src/mutants.rs"):
             self.assertFalse(headers.MUTANT.search(path), path)
         self.assertEqual([path for path in headers.files() if headers.MUTANT.search(path)], [])
-        self.assertIn("crates/fxdax/mutants.sh", list(headers.files()))
+        self.assertIn("crates/cladefs/mutants.sh", list(headers.files()))
 
     def test_the_sim_diffs_shim_is_guest_sims_license(self):
         shim = "crates/fxfs-sim-diff/shim/shim.c"
         self.assertEqual(headers.needs(shim, DUAL), ("spdx", "GPL-2.0 OR BSD-3-Clause"))
         self.assertEqual(headers.problems(shim, DUAL), [])
         self.assertEqual(
-            headers.problems(shim, FXDAX_BSD.replace("//", "/*", 1)),
+            headers.problems(shim, CLADEFS_BSD.replace("//", "/*", 1)),
             ["no SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause"],
         )
-        # The crate's Rust is fxdax's, BSD.
-        self.assertEqual(headers.problems("crates/fxfs-sim-diff/src/lib.rs", FXDAX_BSD), [])
+        # The crate's Rust is cladefs's, BSD.
+        self.assertEqual(headers.problems("crates/fxfs-sim-diff/src/lib.rs", CLADEFS_BSD), [])
 
     def test_ports_without_the_checkout_need_fuchsias_copyright_and_one_notice(self):
         path = "crates/fxfs/src/lib.rs"

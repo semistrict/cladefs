@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-11 14:39'
-updated_date: '2026-11-11 15:16'
+updated_date: '2026-11-15 11:37'
 labels:
   - extentd
   - testing
@@ -19,7 +19,7 @@ ordinal: 743000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Replaying Hunt run 42949975683's hostile seeds for TASK-343 on ubu1 (FXDAX_HOSTILE_CASES=1920, under fxjob --mem 8G, nice 10), on trees from TASK-92.41 on, while other agents' jobs loaded the host:
+Replaying Hunt run 42949975683's hostile seeds for TASK-343 on ubu1 (CLADEFS_HOSTILE_CASES=1920, under fxjob --mem 8G, nice 10), on trees from TASK-92.41 on, while other agents' jobs loaded the host:
 - seed 55 on tmpfs, case 811: "mallory's store didn't commit". The durable COMMIT's status was None: SharedAnswers::wait timed out after WAIT, 60 s, or the connection ended unanswered.
 - seed 54 on ZFS, case 907: the same assertion.
 - seed 55 on ZFS: "a connection of mallory's never ended: Timeout" (WAIT*4).

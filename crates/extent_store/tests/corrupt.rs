@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a byte of a framed file, a closed segment's or a sealed extent's own, that the host's
+//! cladefs: a byte of a framed file, a closed segment's or a sealed extent's own, that the host's
 //! disk damaged fails whatever reads it, rather than giving another byte, and goes nowhere under a
 //! CRC of its own (TASK-153.11): the store's reads, which the guest's and the extent cache's
 //! page-ins are (`Store::read`), the uploader's (`Store::read_kept`, and the segments it takes as

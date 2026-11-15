@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -70,13 +70,13 @@ class PjdfstestFuseTest(unittest.TestCase):
     def test_every_known_failure_has_a_task(self):
         fuse.known(fuse.KNOWN.read_text())
 
-    def test_ci_runs_it_as_root_on_fxdax_mount(self):
+    def test_ci_runs_it_as_root_on_cladefs_mount(self):
         ci = (SCRIPTS.parent / ".github" / "workflows" / "ci.yml").read_text()
         job = re.search(r"^  pjdfstest-fuse:\n(.*?)(?=^  \S|\Z)", ci, re.MULTILINE | re.DOTALL)
         self.assertIsNotNone(job, "no pjdfstest-fuse job")
         job = job.group(1)
-        self.assertIn("cargo build --locked -p fxdax --bin fxdax-mount", job)
-        self.assertRegex(job, r"sudo .*scripts/pjdfstest-fuse\.py target/debug/fxdax-mount")
+        self.assertIn("cargo build --locked -p cladefs --bin cladefs-mount", job)
+        self.assertRegex(job, r"sudo .*scripts/pjdfstest-fuse\.py target/debug/cladefs-mount")
         for package in ["fuse3", "autoconf", "automake"]:
             self.assertIn(package, job)
 

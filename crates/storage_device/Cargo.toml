@@ -19,18 +19,18 @@ num.workspace = true
 rand.workspace = true
 serde.workspace = true
 storage_ptr_slice.workspace = true
-# fxdax: the errors of extent.rs.
+# cladefs: the errors of extent.rs.
 thiserror.workspace = true
 zx.workspace = true
 
-# fxdax: what the fuzz targets (crates/fxfs/fuzz) make extents of.
+# cladefs: what the fuzz targets (crates/fxfs/fuzz) make extents of.
 [target.'cfg(fuzz)'.dependencies]
 arbitrary.workspace = true
 
 [dev-dependencies]
 fuchsia.workspace = true
 fuchsia-async.workspace = true
-# fxdax: what a buffer source's mapping maps, for its tests.
+# cladefs: what a buffer source's mapping maps, for its tests.
 libc.workspace = true
 
 # The workspace's lints.

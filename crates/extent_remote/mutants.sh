@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
@@ -11,7 +11,7 @@
 #
 #   mutants.sh [--check] [NAME...]
 #
-# Each mutant's log is kept in $FXDAX_MUTANTS_LOGS (default: a new directory, which it names). The
+# Each mutant's log is kept in $CLADEFS_MUTANTS_LOGS (default: a new directory, which it names). The
 # tree has the mutant in it while it runs. Each patch applies as it is, with no fuzz: one that needs
 # any has drifted from the code it changes. --check runs nothing: it applies and reverses each patch
 # in a copy of what it changes, in a second, as CI does. A patch that doesn't apply fails either.
@@ -48,7 +48,7 @@ if [[ -n $check ]]; then
 fi
 
 failed=0
-logs=${FXDAX_MUTANTS_LOGS:-$(mktemp -d)}
+logs=${CLADEFS_MUTANTS_LOGS:-$(mktemp -d)}
 mkdir -p "$logs"
 echo "logs: $logs"
 printf '%-40s %-8s %s\n' mutant time fate

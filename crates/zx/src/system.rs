@@ -9,7 +9,7 @@ use bitflags::bitflags;
 ///
 /// Wraps the
 /// [zx_system_get_page_size](https://fuchsia.dev/fuchsia-src/reference/syscalls/system_get_page_size.md)
-/// syscall. fxdax: on a host, which has none of Zircon's syscalls (TASK-96.1), the host's page
+/// syscall. cladefs: on a host, which has none of Zircon's syscalls (TASK-96.1), the host's page
 /// size. The guest kernel's Fxfs asks for none.
 pub fn system_get_page_size() -> u32 {
     #[cfg(any(target_os = "fuchsia", target_os = "none"))]

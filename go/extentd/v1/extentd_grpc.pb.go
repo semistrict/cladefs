@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // The extent daemon's control API (TASK-43.3): what the host's VM manager, which launches the
-// VMMs, asks fxdax-extentd to do with the VMs' disks, the extent stores it serves them. It is
-// served over a Unix socket (`FXDAX_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
+// VMMs, asks cladefs-extentd to do with the VMs' disks, the extent stores it serves them. It is
+// served over a Unix socket (`CLADEFS_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
 // its umask (TASK-159), as every caller may do everything. VM processes do not use it: they keep
 // the extent protocol on the daemon's VM sockets, which carries their memory as file descriptors.
 //
@@ -62,7 +62,7 @@
 // FAILED_PRECONDITION and errno EBUSY, unless the call says otherwise.
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
-// `fxdax-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
+// `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
 // EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
@@ -88,7 +88,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: fxdax/extentd/v1/extentd.proto
+// source: cladefs/extentd/v1/extentd.proto
 
 package extentdv1
 
@@ -105,32 +105,32 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Extentd_CreateStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/CreateStore"
-	Extentd_ImportImage_FullMethodName      = "/fxdax.extentd.v1.Extentd/ImportImage"
-	Extentd_ForkStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/ForkStore"
-	Extentd_DeleteStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/DeleteStore"
-	Extentd_DropStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/DropStore"
-	Extentd_ResizeStore_FullMethodName      = "/fxdax.extentd.v1.Extentd/ResizeStore"
-	Extentd_PlaceStore_FullMethodName       = "/fxdax.extentd.v1.Extentd/PlaceStore"
-	Extentd_MakePublic_FullMethodName       = "/fxdax.extentd.v1.Extentd/MakePublic"
-	Extentd_SharePoint_FullMethodName       = "/fxdax.extentd.v1.Extentd/SharePoint"
-	Extentd_AttachBase_FullMethodName       = "/fxdax.extentd.v1.Extentd/AttachBase"
-	Extentd_SyncStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/SyncStore"
-	Extentd_StatStore_FullMethodName        = "/fxdax.extentd.v1.Extentd/StatStore"
-	Extentd_ListStores_FullMethodName       = "/fxdax.extentd.v1.Extentd/ListStores"
-	Extentd_GetStats_FullMethodName         = "/fxdax.extentd.v1.Extentd/GetStats"
-	Extentd_GetSnapshot_FullMethodName      = "/fxdax.extentd.v1.Extentd/GetSnapshot"
-	Extentd_Grant_FullMethodName            = "/fxdax.extentd.v1.Extentd/Grant"
-	Extentd_Revoke_FullMethodName           = "/fxdax.extentd.v1.Extentd/Revoke"
-	Extentd_SetMemoryLimit_FullMethodName   = "/fxdax.extentd.v1.Extentd/SetMemoryLimit"
-	Extentd_SetMemoryWeight_FullMethodName  = "/fxdax.extentd.v1.Extentd/SetMemoryWeight"
-	Extentd_SetTenantRoom_FullMethodName    = "/fxdax.extentd.v1.Extentd/SetTenantRoom"
-	Extentd_ShrinkMemory_FullMethodName     = "/fxdax.extentd.v1.Extentd/ShrinkMemory"
-	Extentd_SetDiskLimit_FullMethodName     = "/fxdax.extentd.v1.Extentd/SetDiskLimit"
-	Extentd_GetTenantDisk_FullMethodName    = "/fxdax.extentd.v1.Extentd/GetTenantDisk"
-	Extentd_SetPeers_FullMethodName         = "/fxdax.extentd.v1.Extentd/SetPeers"
-	Extentd_ShredCell_FullMethodName        = "/fxdax.extentd.v1.Extentd/ShredCell"
-	Extentd_ForgetTenantKeys_FullMethodName = "/fxdax.extentd.v1.Extentd/ForgetTenantKeys"
+	Extentd_CreateStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/CreateStore"
+	Extentd_ImportImage_FullMethodName      = "/cladefs.extentd.v1.Extentd/ImportImage"
+	Extentd_ForkStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/ForkStore"
+	Extentd_DeleteStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/DeleteStore"
+	Extentd_DropStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/DropStore"
+	Extentd_ResizeStore_FullMethodName      = "/cladefs.extentd.v1.Extentd/ResizeStore"
+	Extentd_PlaceStore_FullMethodName       = "/cladefs.extentd.v1.Extentd/PlaceStore"
+	Extentd_MakePublic_FullMethodName       = "/cladefs.extentd.v1.Extentd/MakePublic"
+	Extentd_SharePoint_FullMethodName       = "/cladefs.extentd.v1.Extentd/SharePoint"
+	Extentd_AttachBase_FullMethodName       = "/cladefs.extentd.v1.Extentd/AttachBase"
+	Extentd_SyncStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/SyncStore"
+	Extentd_StatStore_FullMethodName        = "/cladefs.extentd.v1.Extentd/StatStore"
+	Extentd_ListStores_FullMethodName       = "/cladefs.extentd.v1.Extentd/ListStores"
+	Extentd_GetStats_FullMethodName         = "/cladefs.extentd.v1.Extentd/GetStats"
+	Extentd_GetSnapshot_FullMethodName      = "/cladefs.extentd.v1.Extentd/GetSnapshot"
+	Extentd_Grant_FullMethodName            = "/cladefs.extentd.v1.Extentd/Grant"
+	Extentd_Revoke_FullMethodName           = "/cladefs.extentd.v1.Extentd/Revoke"
+	Extentd_SetMemoryLimit_FullMethodName   = "/cladefs.extentd.v1.Extentd/SetMemoryLimit"
+	Extentd_SetMemoryWeight_FullMethodName  = "/cladefs.extentd.v1.Extentd/SetMemoryWeight"
+	Extentd_SetTenantRoom_FullMethodName    = "/cladefs.extentd.v1.Extentd/SetTenantRoom"
+	Extentd_ShrinkMemory_FullMethodName     = "/cladefs.extentd.v1.Extentd/ShrinkMemory"
+	Extentd_SetDiskLimit_FullMethodName     = "/cladefs.extentd.v1.Extentd/SetDiskLimit"
+	Extentd_GetTenantDisk_FullMethodName    = "/cladefs.extentd.v1.Extentd/GetTenantDisk"
+	Extentd_SetPeers_FullMethodName         = "/cladefs.extentd.v1.Extentd/SetPeers"
+	Extentd_ShredCell_FullMethodName        = "/cladefs.extentd.v1.Extentd/ShredCell"
+	Extentd_ForgetTenantKeys_FullMethodName = "/cladefs.extentd.v1.Extentd/ForgetTenantKeys"
 )
 
 // ExtentdClient is the client API for Extentd service.
@@ -242,7 +242,7 @@ type ExtentdClient interface {
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
 	// them, for it before the bucket, and it serves them the parts it owns. Those it had are kept,
 	// down or not. FAILED_PRECONDITION (ENOTSUP) if the daemon serves no peers (it was started
-	// without FXDAX_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
+	// without CLADEFS_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(ctx context.Context, in *SetPeersRequest, opts ...grpc.CallOption) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
@@ -641,7 +641,7 @@ type ExtentdServer interface {
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
 	// them, for it before the bucket, and it serves them the parts it owns. Those it had are kept,
 	// down or not. FAILED_PRECONDITION (ENOTSUP) if the daemon serves no peers (it was started
-	// without FXDAX_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
+	// without CLADEFS_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
@@ -1242,7 +1242,7 @@ func _Extentd_ForgetTenantKeys_Handler(srv interface{}, ctx context.Context, dec
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Extentd_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "fxdax.extentd.v1.Extentd",
+	ServiceName: "cladefs.extentd.v1.Extentd",
 	HandlerType: (*ExtentdServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -1351,5 +1351,5 @@ var Extentd_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "fxdax/extentd/v1/extentd.proto",
+	Metadata: "cladefs/extentd/v1/extentd.proto",
 }

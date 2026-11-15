@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Measure fxdax-gc's sweeps over a bucket of files of many cells (TASK-395.5): how long a sweep
-# takes, and the most memory it holds, by how many passes it runs at once. It builds fxdax-gc and
-# fxdax-gc-fill (release, extent_remote alone), fills WORK/bucket-SIDE once with FXDAX_GC_TENANTS
-# tenants (100) of FXDAX_GC_CELLS cells (100) of a branch of FXDAX_GC_SEGMENTS segments (95), the
-# largest cell's FXDAX_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
-# files at most; then, for each count of FXDAX_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
-# (hard links on Linux, clones on macOS) FXDAX_GC_SWEEPS times (2, or 1): the first deleting and
+# Measure cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5): how long a sweep
+# takes, and the most memory it holds, by how many passes it runs at once. It builds cladefs-gc and
+# cladefs-gc-fill (release, extent_remote alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
+# tenants (100) of CLADEFS_GC_CELLS cells (100) of a branch of CLADEFS_GC_SEGMENTS segments (95), the
+# largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
+# files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
+# (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2, or 1): the first deleting and
 # compacting half of every branch, the second deleting what the first compacted, and little else.
 #
-# Each SIDE=TREE is a tree whose fxdax-gc and fxdax-gc-fill are built (in WORK/target-SIDE) and
+# Each SIDE=TREE is a tree whose cladefs-gc and cladefs-gc-fill are built (in WORK/target-SIDE) and
 # measured, each with a bucket its own fill made, for an A/B of commits (TASK-395.17); with none,
-# this tree's, as side `this`. The sweeps go in FXDAX_GC_ROUNDS rounds (1), each of every count on
+# this tree's, as side `this`. The sweeps go in CLADEFS_GC_ROUNDS rounds (1), each of every count on
 # every side, the sides in turn first (A B, then B A), so that what drifts on the host moves all
-# alike. Each sweep's metrics (fxdax-gc --metrics) and log go to
+# alike. Each sweep's metrics (cladefs-gc --metrics) and log go to
 # RESULTS/sweep-SIDE-COUNT-rROUND-SWEEP.{prom,log}, the buckets' shapes to RESULTS/fill-SIDE.txt,
 # a table of the sweeps to RESULTS/gc-sweep.md, and, with more than a round, each side's and
 # count's median, least and most seconds a sweep. On ubu1, scripts/gc-sweep-host.sh runs it, as a
@@ -30,17 +30,17 @@ mkdir -p "$1" "$2"
 work=$(cd "$1" && pwd)
 results=$(cd "$2" && pwd)
 shift 2
-tenants=${FXDAX_GC_TENANTS:-100}
-cells=${FXDAX_GC_CELLS:-100}
-segments=${FXDAX_GC_SEGMENTS:-95}
-largest=${FXDAX_GC_LARGEST:-950}
-at_once=${FXDAX_GC_AT_ONCE:-1 4 16 64}
-sweeps=${FXDAX_GC_SWEEPS:-2}
-rounds=${FXDAX_GC_ROUNDS:-1}
+tenants=${CLADEFS_GC_TENANTS:-100}
+cells=${CLADEFS_GC_CELLS:-100}
+segments=${CLADEFS_GC_SEGMENTS:-95}
+largest=${CLADEFS_GC_LARGEST:-950}
+at_once=${CLADEFS_GC_AT_ONCE:-1 4 16 64}
+sweeps=${CLADEFS_GC_SWEEPS:-2}
+rounds=${CLADEFS_GC_ROUNDS:-1}
 for count in "$tenants" "$cells" "$segments" "$largest" "$rounds" $at_once; do
     [[ $count =~ ^[1-9][0-9]*$ ]] || { echo "$count: not a count" >&2; exit 2; }
 done
-[[ $sweeps == 1 || $sweeps == 2 ]] || { echo "FXDAX_GC_SWEEPS is 1 or 2" >&2; exit 2; }
+[[ $sweeps == 1 || $sweeps == 2 ]] || { echo "CLADEFS_GC_SWEEPS is 1 or 2" >&2; exit 2; }
 case $(uname) in
     Linux) copy=(cp -al) ;;
     Darwin) copy=(cp -Rc) ;;
@@ -51,9 +51,9 @@ esac
 sides=()
 bins=()
 if (( $# == 0 )); then
-    echo "== building fxdax-gc and fxdax-gc-fill" >&2
+    echo "== building cladefs-gc and cladefs-gc-fill" >&2
     cargo build --release -q --manifest-path "$repo/Cargo.toml" -p extent_remote \
-        --bin fxdax-gc --bin fxdax-gc-fill
+        --bin cladefs-gc --bin cladefs-gc-fill
     sides=(this)
     bins=("${CARGO_TARGET_DIR:-$repo/target}/release")
 fi
@@ -62,10 +62,10 @@ for pair in "$@"; do
     [[ $pair == *=* && $side =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
         { echo "$pair: SIDE=TREE, SIDE in lower-case letters, digits and -" >&2; exit 2; }
     tree=$(cd "${pair#*=}" && pwd)
-    echo "== $side: building fxdax-gc and fxdax-gc-fill of $tree" >&2
+    echo "== $side: building cladefs-gc and cladefs-gc-fill of $tree" >&2
     # A target of its own, as two trees sharing one would link each other's crates.
     CARGO_TARGET_DIR=$work/target-$side cargo build --release -q \
-        --manifest-path "$tree/Cargo.toml" -p extent_remote --bin fxdax-gc --bin fxdax-gc-fill
+        --manifest-path "$tree/Cargo.toml" -p extent_remote --bin cladefs-gc --bin cladefs-gc-fill
     sides+=("$side")
     bins+=("$work/target-$side/release")
 done
@@ -79,7 +79,7 @@ for i in "${!sides[@]}"; do
         if [[ -e $bucket ]]; then rm -r -- "$bucket"; fi
         echo "== $side: filling $bucket: $tenants tenants of $cells cells of $segments segments" >&2
         started=$SECONDS
-        "${bins[i]}/fxdax-gc-fill" "$bucket" "$tenants" "$cells" "$segments" "$largest" \
+        "${bins[i]}/cladefs-gc-fill" "$bucket" "$tenants" "$cells" "$segments" "$largest" \
             > "$bucket.fill"
         sync
         echo "filled in $((SECONDS - started)) s" >&2
@@ -118,19 +118,19 @@ for (( round = 1; round <= rounds; round++ )); do
             for (( sweep = 1; sweep <= sweeps; sweep++ )); do
                 echo "== $side, $n at once, round $round, sweep $sweep" >&2
                 name=$results/sweep-$side-$n-r$round-$sweep
-                "${bins[i]}/fxdax-gc" "file://$swept/" --grace 0 --at-once "$n" \
+                "${bins[i]}/cladefs-gc" "file://$swept/" --grace 0 --at-once "$n" \
                     --metrics "$name.prom" 2> "$name.log"
                 tail -n 2 "$name.log" >&2
-                seconds=$(metric "$name.prom" fxdax_gc_sweep_seconds)
-                requests=$(awk '$1 ~ /^fxdax_gc_sweep_requests/ { sum += $2 } END { print sum }' \
+                seconds=$(metric "$name.prom" cladefs_gc_sweep_seconds)
+                requests=$(awk '$1 ~ /^cladefs_gc_sweep_requests/ { sum += $2 } END { print sum }' \
                     "$name.prom")
                 printf '| %s | %s | %s | %s | %.1f | %s | %s | %s | %s | %.0f |\n' \
                     "$side" "$n" "$round" "$sweep" "$seconds" \
-                    "$(metric "$name.prom" 'fxdax_gc_sweep_cells{outcome="passed"}')" \
-                    "$(metric "$name.prom" 'fxdax_gc_sweep_objects{action="deleted"}')" \
-                    "$(metric "$name.prom" 'fxdax_gc_sweep_objects{action="compacted"}')" \
+                    "$(metric "$name.prom" 'cladefs_gc_sweep_cells{outcome="passed"}')" \
+                    "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="deleted"}')" \
+                    "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="compacted"}')" \
                     "$requests" \
-                    "$(awk '$1 == "fxdax_gc_peak_resident_bytes" { print $2 / 1048576 }' \
+                    "$(awk '$1 == "cladefs_gc_peak_resident_bytes" { print $2 / 1048576 }' \
                         "$name.prom")" \
                     >> "$table"
                 printf '%s\t%s\t%s\t%s\n' "$side" "$n" "$sweep" "$seconds" >> "$times"

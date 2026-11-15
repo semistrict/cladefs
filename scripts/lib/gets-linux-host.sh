@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Measure ranged GETs from object storage (fxdax-gets) on an x86-64
+# Measure ranged GETs from object storage (cladefs-gets) on an x86-64
 # Linux host, as root, into RESULTS/gets.md (scripts/gets-host.sh).
 #
 # Usage: gets-linux-host.sh SOURCE RESULTS URL OBJECT_MIB SECS
@@ -15,8 +15,8 @@ mib=${4:?the size of the object required}
 secs=${5:?the seconds each measurement takes required}
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
 host_setup
-# The benchmark's tree, whose build of fxdax this shares.
+# The benchmark's tree, whose build of cladefs this shares.
 host_tree bench-tree
 host_record > "$results/host.txt"
-cargo build --release --manifest-path "$repo/Cargo.toml" -p fxdax --bin fxdax-gets
-"$repo/target/release/fxdax-gets" "$url" "$mib" "$secs" > "$results/gets.md"
+cargo build --release --manifest-path "$repo/Cargo.toml" -p cladefs --bin cladefs-gets
+"$repo/target/release/cladefs-gets" "$url" "$mib" "$secs" > "$results/gets.md"

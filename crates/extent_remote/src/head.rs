@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a branch's head (doc-7, The head; TASK-407): its writer's lease and its commit, one
+//! cladefs: a branch's head (doc-7, The head; TASK-407): its writer's lease and its commit, one
 //! object ([`Head`]). Every object of a branch's is written once, at a key naming its writer's
 //! epoch, and is the branch's only once the head names it: a writer acknowledges its segments by
 //! swapping the head to name them, with the condition that it is still the version it last wrote,
@@ -171,7 +171,9 @@ async fn write(
         match bucket.put(key, bytes.clone(), mode.clone()).await {
             Ok(version) => return Ok(Held { head: head.clone(), version }),
             Err(
-                bucket::Error::AlreadyExists | bucket::Error::Precondition | bucket::Error::NotFound,
+                bucket::Error::AlreadyExists
+                | bucket::Error::Precondition
+                | bucket::Error::NotFound,
             ) => {
                 return match bucket::get(bucket, key).await {
                     Some(object) if object.bytes == bytes => {

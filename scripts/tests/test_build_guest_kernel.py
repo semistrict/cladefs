@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -91,7 +91,7 @@ class RustInTheKernel(unittest.TestCase):
                 "PATH": f"{bin_}:/usr/bin:/bin",
                 "HOME": str(self.directory),
                 "FAKE": str(fake),
-                "FXDAX_GUEST_KERNEL_WORK": str(self.work),
+                "CLADEFS_GUEST_KERNEL_WORK": str(self.work),
                 **(env or {}),
             },
             capture_output=True,
@@ -111,15 +111,15 @@ class RustInTheKernel(unittest.TestCase):
 
     def test_the_kernel_is_built_with_the_commit_the_tree_is_of(self):
         """TASK-111.7: fs/fxfs shows it in /proc/fs/fxfs/build (scripts/build-commit.sh)."""
-        self.build("", env={"FXDAX_BUILD_COMMIT": "0123abcd-dirty"})
+        self.build("", env={"CLADEFS_BUILD_COMMIT": "0123abcd-dirty"})
         builds = [line for line in (self.directory / "fake" / "make").read_text().splitlines()
                   if line.endswith(" vmlinux")]
         self.assertEqual(len(builds), 1, builds)
         self.assertIn(" FXFS_BUILD_COMMIT=0123abcd-dirty vmlinux", builds[0])
 
     def test_the_kernel_is_built_with_as_many_jobs_as_asked(self):
-        """TASK-276.6: FXDAX_GUEST_KERNEL_JOBS, on a host others share; the CPUs otherwise."""
-        for env, jobs in [({}, "-j8"), ({"FXDAX_GUEST_KERNEL_JOBS": "4"}, "-j4")]:
+        """TASK-276.6: CLADEFS_GUEST_KERNEL_JOBS, on a host others share; the CPUs otherwise."""
+        for env, jobs in [({}, "-j8"), ({"CLADEFS_GUEST_KERNEL_JOBS": "4"}, "-j4")]:
             with self.subTest(env):
                 self.build("", env=env)
                 builds = [line for line in (self.directory / "fake" / "make").read_text()
@@ -128,9 +128,9 @@ class RustInTheKernel(unittest.TestCase):
                 self.assertIn(f" {jobs} ", builds[0])
 
     def test_rust_checks_build_with_debug_assertions_and_overflow_checks(self):
-        """TASK-149.1: FXDAX_GUEST_KERNEL_RUST_CHECKS=1 turns both on, which are off otherwise."""
+        """TASK-149.1: CLADEFS_GUEST_KERNEL_RUST_CHECKS=1 turns both on, which are off otherwise."""
         for checks, profile in [({}, "false false"),
-                                ({"FXDAX_GUEST_KERNEL_RUST_CHECKS": "1"}, "true true")]:
+                                ({"CLADEFS_GUEST_KERNEL_RUST_CHECKS": "1"}, "true true")]:
             with self.subTest(checks):
                 self.assertEqual(self.build("", env=checks)[0], 0)
                 self.assertEqual((self.directory / "fake" / "cargo").read_text(), profile + "\n")

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: what tests of fxdax's additions to the handle
+//! cladefs's own, a child of data_object_handle.rs: what tests of cladefs's additions to the handle
 //! count of a filesystem: its device's round trips, what its transactions take of its journal, and
 //! what its commits hold of records.
 
@@ -18,7 +18,7 @@ use std::time::Duration;
 use storage_device::DeviceHolder;
 use storage_device::fake_device::FakeDevice;
 
-/// fxdax: what each of a filesystem's transactions takes of its journal, as it is charged
+/// cladefs: what each of a filesystem's transactions takes of its journal, as it is charged
 /// (`ObjectManager::last_journal_usage`), as the filesystem's post-commit hook finds it, which
 /// runs before the next transaction commits: from the journal's end after the transaction
 /// before, or past the padding of a sync or a compaction between the two, which the journal's
@@ -58,7 +58,7 @@ impl JournalUsages {
     }
 }
 
-/// fxdax: a filesystem of 4 KiB blocks, as the guest's, which writes the journal only when
+/// cladefs: a filesystem of 4 KiB blocks, as the guest's, which writes the journal only when
 /// something waits for it, on a device of `branch`; the round trips its device's requests
 /// take; and what its transactions take of its journal.
 pub(super) async fn writeback_filesystem(
@@ -68,7 +68,7 @@ pub(super) async fn writeback_filesystem(
     (fs, trips, journal)
 }
 
-/// fxdax: `writeback_filesystem`, with what its commits hold of records, which `Hooks` sees
+/// cladefs: `writeback_filesystem`, with what its commits hold of records, which `Hooks` sees
 /// while it's kept.
 pub(super) async fn counted_filesystem(
     branch: u64,
@@ -122,7 +122,7 @@ pub(super) async fn create_file(fs: &FxFilesystem) -> DataObjectHandle<ObjectSto
     file
 }
 
-/// fxdax: `count` writes of `data`, the first at `offset`, each `step` blocks of `bs` bytes
+/// cladefs: `count` writes of `data`, the first at `offset`, each `step` blocks of `bs` bytes
 /// after the last.
 pub(super) fn every<'a>(
     data: &'a [u8],
@@ -134,7 +134,7 @@ pub(super) fn every<'a>(
     (0..count).map(|i| (offset + (i * step * bs) as u64, data)).collect()
 }
 
-/// fxdax: what each of a filesystem's commits holds of records for the journal, from when
+/// cladefs: what each of a filesystem's commits holds of records for the journal, from when
 /// `Commits::take` was last called, by a hook that sees every transaction committed.
 #[derive(Default)]
 pub(super) struct Commits(Mutex<Vec<u64>>);

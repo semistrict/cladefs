@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Tasks writing, mapping, sealing, truncating and evicting at once, their interleaving the seed's:
  * the same seed plays the same run, whose trace hash says so.

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: the pages of a file whose data frozen owners hold
+//! cladefs's own, a child of data_object_handle.rs: the pages of a file whose data frozen owners hold
 //! (volume snapshots, which share their source's layers and extents), which can be cached and
 //! shared by extent and offset.
 
@@ -19,7 +19,7 @@ use anyhow::{Error, ensure};
 use std::ops::Range;
 use storage_device::{ExtentId, ExtentRange};
 
-/// fxdax: a page of an object whose content is data on the device that a frozen owner holds (see
+/// cladefs: a page of an object whose content is data on the device that a frozen owner holds (see
 /// `Allocator::snapshot`), and so does not change while the owner is frozen.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FrozenPage {
@@ -32,7 +32,7 @@ pub struct FrozenPage {
 }
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: the pages of `page_size` bytes in `range`, which must be aligned to them, whose
+    /// cladefs: the pages of `page_size` bytes in `range`, which must be aligned to them, whose
     /// content is data that frozen owners hold: unencrypted, in a single extent, fully written and
     /// held by one owner. Pages past the end of the object are its caller's to leave out, as their
     /// content is zero past it.

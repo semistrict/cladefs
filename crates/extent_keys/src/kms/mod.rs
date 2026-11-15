@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what fxdax needs of a KMS, where each tenant's KEK is kept and never leaves
+//! cladefs's own: what cladefs needs of a KMS, where each tenant's KEK is kept and never leaves
 //! (backlog doc-16, Goals): to wrap a key under a tenant's KEK, and to unwrap what it wrapped.
 //! Nothing else: creating, rotating, revoking and destroying a KEK are the tenant's, done out of
 //! band in its KMS, so they are not in [`Kms`]. Backends, each a module of its own, named by
@@ -41,7 +41,7 @@ pub trait Kms: Send + Sync + 'static {
     ) -> impl Future<Output = Result<Secret, Error>> + Send;
 }
 
-/// fxdax: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
+/// cladefs: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
 /// [`Kms`] is one.
 pub trait Dyn: Send + Sync + 'static {
     /// [`Kms::wrap`].
@@ -64,10 +64,10 @@ impl<K: Kms> Dyn for K {
     }
 }
 
-/// fxdax: the KMS a host's processes are configured with, shared (TASK-411.3).
+/// cladefs: the KMS a host's processes are configured with, shared (TASK-411.3).
 pub type Shared = std::sync::Arc<dyn Dyn>;
 
-/// fxdax: the KMS `url` names (TASK-411.3), by its scheme:
+/// cladefs: the KMS `url` names (TASK-411.3), by its scheme:
 ///
 /// - `local:///DIR`: a [`LocalKms`] keeping its tenants' KEKs under the directory `DIR`;
 /// - `openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE]` (`openbaos://` over TLS): OpenBao's
@@ -99,7 +99,7 @@ pub enum Error {
     /// [`LocalKms::create`] of a tenant that has a KEK, or had one.
     #[error("tenant {tenant}: a KEK exists already")]
     Exists { tenant: u64 },
-    /// The tenant took fxdax's rights to its KEK away, for now: it may give them back.
+    /// The tenant took cladefs's rights to its KEK away, for now: it may give them back.
     #[error("tenant {tenant}: its KEK is revoked")]
     Revoked { tenant: u64 },
     /// The tenant's KEK is gone for good, and with it everything wrapped under it: the tenant is

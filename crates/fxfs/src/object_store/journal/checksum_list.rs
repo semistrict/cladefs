@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal/checksum_list.rs`. fxdax: ranges are within
+// Fuchsia's `src/storage/fxfs/src/object_store/journal/checksum_list.rs`. cladefs: ranges are within
 // extents of the extent store (backlog doc-4), so entries are found by extent and offset, not by
 // device offset.
 
@@ -35,7 +35,7 @@ struct Block {
     /// The journal offset at which the block was deallocated, which it holds valid until:
     /// u64::MAX, until it is.
     end_journal_offset: u64,
-    /// fxdax: the references it has that a reflink added, each of which goes before the block does.
+    /// cladefs: the references it has that a reflink added, each of which goes before the block does.
     shared: u64,
 }
 
@@ -116,7 +116,7 @@ impl ChecksumList {
             return Ok(());
         }
         let ExtentRange { extent, range: mut device_range } = device_range;
-        // fxdax: as a journal record says, which may be anything: they must divide the range into
+        // cladefs: as a journal record says, which may be anything: they must divide the range into
         // chunks no larger than a block may be.
         let len = device_range.length()?;
         ensure!(
@@ -141,7 +141,7 @@ impl ChecksumList {
         // since that's the only thing we can actually roll back. On the first write, we create the
         // checksum entry, and if any further checksums come in, we add them to the existing list.
         //
-        // fxdax: a reflink's extents share a block and never write it, so they add no checksums.
+        // cladefs: a reflink's extents share a block and never write it, so they add no checksums.
         // What they change is when it dies (`mark_referenced`).
         let mut gap_entries = Vec::new();
         let mut r = self
@@ -221,12 +221,12 @@ impl ChecksumList {
     }
 
     /// Marks an extent as deallocated.  If this journal-offset ends up being replayed, it means
-    /// that we can skip a previously queued checksum: fxdax, of the blocks with no other reference.
+    /// that we can skip a previously queued checksum: cladefs, of the blocks with no other reference.
     pub fn mark_deallocated(&mut self, journal_offset: u64, device_range: ExtentRange) {
         self.for_each_block(journal_offset, device_range, |block| block.release(journal_offset));
     }
 
-    /// fxdax: marks an extent as referenced `delta` times more, or fewer: a reflink. A block a file
+    /// cladefs: marks an extent as referenced `delta` times more, or fewer: a reflink. A block a file
     /// still holds must be right, whichever of its references went: skipping its checksum for the
     /// first to go, a write the crash lost was replayed, and the other reference read what the
     /// device held.
@@ -383,7 +383,7 @@ mod tests {
         assert_eq!(list.clone().verify(&device, 10).await.expect("verify failed"), 1);
     }
 
-    /// fxdax: a journal record's checksums say what chunks its range is in, which may be anything.
+    /// cladefs: a journal record's checksums say what chunks its range is in, which may be anything.
     #[fuchsia::test]
     async fn test_checksums_that_do_not_divide_a_range() {
         let mut list = ChecksumList::new(0);

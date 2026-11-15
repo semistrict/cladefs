@@ -60,17 +60,17 @@ pub struct Directory<S: HandleOwner> {
     dir_type: Mutex<DirType>,
 }
 
-/// fxdax: the longest target a symlink's record holds, as upstream limits targets to.
+/// cladefs: the longest target a symlink's record holds, as upstream limits targets to.
 pub const MAX_INLINE_SYMLINK: usize = 256;
 
-/// fxdax: the longest target an unencrypted symlink has: PATH_MAX - 1, as Linux's, beyond
+/// cladefs: the longest target an unencrypted symlink has: PATH_MAX - 1, as Linux's, beyond
 /// _POSIX_SYMLINK_MAX.
 pub const MAX_LONG_SYMLINK: usize = 4095;
 
-/// fxdax: a longer target's chunks are inline extended attributes of the symlink, named
+/// cladefs: a longer target's chunks are inline extended attributes of the symlink, named
 /// `LONG_SYMLINK_XATTR` and their index, each small enough for a record, which listing a
 /// symlink's extended attributes leaves out.
-pub(crate) const LONG_SYMLINK_XATTR: &[u8] = b"fxdax.symlink.";
+pub(crate) const LONG_SYMLINK_XATTR: &[u8] = b"cladefs.symlink.";
 const LONG_SYMLINK_CHUNK: usize = 2048;
 
 /// The name of a long symlink target's chunk `index`.
@@ -885,7 +885,7 @@ impl<S: HandleOwner> Directory<S> {
         self.create_child_file_with_options(transaction, name, HandleOptions::default()).await
     }
 
-    /// fxdax: as `create_child_file`, a file whose entry says `descriptor`: a regular file's
+    /// cladefs: as `create_child_file`, a file whose entry says `descriptor`: a regular file's
     /// (`File`), or a special file's (`Special`), which the POSIX mode the caller gives it in
     /// `transaction` must say too, as fsck checks. Unless `times`, the directory's times are left
     /// be, which the caller keeps (the guest's kernel writes them back with the directory): one
@@ -998,7 +998,7 @@ impl<S: HandleOwner> Directory<S> {
         // Limit the length of link that might be too big to put in the tree.
         // https://pubs.opengroup.org/onlinepubs/9699919799/basedefs/limits.h.html.
         // See _POSIX_SYMLINK_MAX.
-        // fxdax: unencrypted symlinks' targets may be longer, up to MAX_LONG_SYMLINK, which they
+        // cladefs: unencrypted symlinks' targets may be longer, up to MAX_LONG_SYMLINK, which they
         // keep outside their records (see `LONG_SYMLINK_XATTR`).
         let encrypted = self.dir_type().is_encrypted();
         ensure!(
@@ -1070,7 +1070,7 @@ impl<S: HandleOwner> Directory<S> {
                 }
             }
             _ => {
-                // fxdax: a target too long for the symlink's record is in records of its own, and
+                // cladefs: a target too long for the symlink's record is in records of its own, and
                 // the record's target empty, as no target otherwise is.
                 let long = link.len() > MAX_INLINE_SYMLINK;
                 let inline = if long { Vec::new() } else { link.clone() };
@@ -1219,14 +1219,14 @@ impl<S: HandleOwner> Directory<S> {
         .await
     }
 
-    /// fxdax: whether a child's record is keyed by its name as given, which removing it then
+    /// cladefs: whether a child's record is keyed by its name as given, which removing it then
     /// needn't look up (`txn_remove_known_child`): not in a directory whose names are casefolded
     /// or encrypted.
     pub fn names_are_keys(&self) -> bool {
         self.dir_type() == DirType::Normal
     }
 
-    /// fxdax: removes `name`, which the caller knows links `object_id`, a file, symlink or special
+    /// cladefs: removes `name`, which the caller knows links `object_id`, a file, symlink or special
     /// file, as `replace_child` unlinks it, without looking the name up where `names_are_keys`:
     /// and returns whether it was the object's last name, which puts the object in the graveyard
     /// (`ObjectStore::txn_tombstone_unlinked` may take it out again). The times of the directory
@@ -2027,7 +2027,7 @@ async fn replace_child_with_object_impl<'a, S: HandleOwner>(
         )) => {
             let was_last_ref = dst.0.store().adjust_refs(transaction, old_id, -1).await?;
             if was_last_ref {
-                // fxdax: purged as every unlinked object tombstoned in a caller's transaction is,
+                // cladefs: purged as every unlinked object tombstoned in a caller's transaction is,
                 // which takes back the graveyard entry the unlink added, and a trim's before it,
                 // which upstream's purge left for an object gone. What it can't purge completely
                 // in this transaction stays in the graveyard.
@@ -2798,7 +2798,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    /// fxdax: a file created untimed is named in its directory, which keeps its times.
+    /// cladefs: a file created untimed is named in its directory, which keeps its times.
     #[fuchsia::test]
     async fn test_create_child_node_untimed() {
         let device = DeviceHolder::new(FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE));
@@ -3290,7 +3290,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    /// fxdax: a name the caller knows the object of removed, by its key, unlooked-up, or in a
+    /// cladefs: a name the caller knows the object of removed, by its key, unlooked-up, or in a
     /// directory whose names aren't their keys, looked up, in any case it folds to: the object's
     /// other names stay, its last puts it in the graveyard, and the times are left be. A name
     /// linking another object is refused (TASK-149.36).
@@ -3862,7 +3862,7 @@ mod tests {
         fs.close().await.expect("Close failed");
     }
 
-    // fxdax: a target longer than a record holds, up to PATH_MAX - 1, which survives remounting,
+    // cladefs: a target longer than a record holds, up to PATH_MAX - 1, which survives remounting,
     // isn't among the symlink's extended attributes, and goes with the symlink.
     #[fuchsia::test]
     async fn test_long_symlink() {

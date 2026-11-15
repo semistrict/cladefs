@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -43,7 +43,7 @@ impl Commit {
 
 /// What one segment's commits make, by the lengths of the extents they seal: the contents of its
 /// footer, once closed on its writer's chain ([`Plan::close`]); the extents in its data one after
-/// another, from where its data begins. fxdax: as a store's segment does, its footer seals what its
+/// another, from where its data begins. cladefs: as a store's segment does, its footer seals what its
 /// commits sealed that the branch holds as of its last, and frees what they freed that a commit
 /// held: one sealed by a commit and freed by a later is a free alone, which spends it; one a commit
 /// seals and frees itself no commit held, and is neither (TASK-160.15, TASK-165.3).
@@ -268,7 +268,7 @@ impl Unframed {
         self.frame_under(None)
     }
 
-    /// fxdax: its objects, framed, sealed as `sealing` says (TASK-411.3).
+    /// cladefs: its objects, framed, sealed as `sealing` says (TASK-411.3).
     pub fn frame_under(self, sealing: layout::Sealing<'_>) -> Objects {
         self.data.frame_under(&self.footer, sealing)
     }
@@ -292,7 +292,7 @@ impl Data {
         self.frame_under(footer, None)
     }
 
-    /// fxdax: its objects, as [`Data::frame`], sealed as `sealing` says (TASK-411.3).
+    /// cladefs: its objects, as [`Data::frame`], sealed as `sealing` says (TASK-411.3).
     pub fn frame_under(&self, footer: &Footer, sealing: layout::Sealing<'_>) -> Objects {
         let own = (footer.own())
             .map(|(extent, location)| {

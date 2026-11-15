@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-11 14:59'
+updated_date: '2026-11-15 11:35'
 labels: []
 dependencies: []
 priority: high
@@ -15,7 +16,7 @@ ordinal: 742000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-User, 2026-11-11: the extent daemon's memory must work like Linux's page cache. Today it is a fixed pool set at start (fxdax-extentd's MEMORY_BYTES, else physmem::DEFAULT_MEMORY_BYTES = 1 GiB), with per-tenant caps (TASK-50.3, control API SetMemoryLimit). On ubu1 (docs/measurements/ubu1-loop-baseline-2026-11-11) random reads over a working set past 1 GiB fell to 43-66 IOPS while the host had free RAM, where the baseline's host page cache took all of it. Under DAX the daemon's memory is a guest's only file cache, and fxdax is the only thing on its hosts: no memory may sit idle.
+User, 2026-11-11: the extent daemon's memory must work like Linux's page cache. Today it is a fixed pool set at start (cladefs-extentd's MEMORY_BYTES, else physmem::DEFAULT_MEMORY_BYTES = 1 GiB), with per-tenant caps (TASK-50.3, control API SetMemoryLimit). On ubu1 (docs/measurements/ubu1-loop-baseline-2026-11-11) random reads over a working set past 1 GiB fell to 43-66 IOPS while the host had free RAM, where the baseline's host page cache took all of it. Under DAX the daemon's memory is a guest's only file cache, and cladefs is the only thing on its hosts: no memory may sit idle.
 
 Linux's page cache has no size: it takes whatever is free, kswapd reclaims it from low watermarks (MemAvailable), and cgroups protect shares (memory.low/min) and weigh reclaim. Do the same:
 - Grow into free host memory, no fixed cap; keep a headroom for VMs' own memory and the host.

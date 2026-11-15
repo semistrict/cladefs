@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the parts of segments packed as they fill, held in memory until their framings
+//! cladefs: the parts of segments packed as they fill, held in memory until their framings
 //! ([`HeldParts`], TASK-400): what a framing in a copy writes of each, so that it reads none of
 //! them back from its raw file.
 //!
@@ -21,7 +21,7 @@
 //! A part held is derived from the raw file, which stays the source of truth until the framed file
 //! is durable: one let go is read back and packed by its framing, as before. So what holds parts
 //! may let any go at any time, as the host's memory runs short ([`HeldParts::evict_to`]): a
-//! daemon's governor, before any tenant's cached pages (`fxdax`'s extentd). Newest first: a
+//! daemon's governor, before any tenant's cached pages (`cladefs`'s extentd). Newest first: a
 //! segment's framing is near for those held longest, and those held last are those whose raw pages
 //! the host is likeliest to hold still, as it lets the least recently used go first.
 //!
@@ -34,7 +34,7 @@ use crate::framing::Stored;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-/// fxdax: the parts of segments packed ahead of their framings, held in memory for the stores that
+/// cladefs: the parts of segments packed ahead of their framings, held in memory for the stores that
 /// share it, as the module's docs say.
 #[derive(Default)]
 pub struct HeldParts {
@@ -51,7 +51,7 @@ struct Held {
     counts: HeldCounts,
 }
 
-/// fxdax: what parts [`HeldParts`] holds, and held, in bytes of memory.
+/// cladefs: what parts [`HeldParts`] holds, and held, in bytes of memory.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeldCounts {
     /// Those held now.
@@ -149,7 +149,7 @@ impl HeldParts {
     }
 }
 
-/// fxdax: a part to hold once packed ([`HeldParts::pend`]), as the packing ahead fills it, or skips
+/// cladefs: a part to hold once packed ([`HeldParts::pend`]), as the packing ahead fills it, or skips
 /// it. Dropped neither, it is held never.
 pub(crate) struct Pending {
     key: u64,
@@ -208,7 +208,7 @@ impl HeldParts {
     }
 }
 
-/// fxdax: a part held ([`HeldParts::hold`]): its segment's, which its framing takes, if it is still
+/// cladefs: a part held ([`HeldParts::hold`]): its segment's, which its framing takes, if it is still
 /// held then ([`Hold::take`]). Dropped, the part is held no more.
 pub(crate) struct Hold {
     key: u64,

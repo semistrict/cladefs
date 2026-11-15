@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // The extent daemon's control API (TASK-43.3): what the host's VM manager, which launches the
-// VMMs, asks fxdax-extentd to do with the VMs' disks, the extent stores it serves them. It is
-// served over a Unix socket (`FXDAX_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
+// VMMs, asks cladefs-extentd to do with the VMs' disks, the extent stores it serves them. It is
+// served over a Unix socket (`CLADEFS_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
 // its umask (TASK-159), as every caller may do everything. VM processes do not use it: they keep
 // the extent protocol on the daemon's VM sockets, which carries their memory as file descriptors.
 //
@@ -62,7 +62,7 @@
 // FAILED_PRECONDITION and errno EBUSY, unless the call says otherwise.
 //
 // Errors are gRPC statuses whose code follows the errno the daemon failed with, which the
-// `fxdax-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
+// `cladefs-errno` metadata entry carries, as a decimal number (Linux's): ENOENT is NOT_FOUND,
 // EEXIST ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
@@ -88,7 +88,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: fxdax/extentd/v1/extentd.proto
+// source: cladefs/extentd/v1/extentd.proto
 
 package extentdv1
 
@@ -140,11 +140,11 @@ func (x VolumeKind) String() string {
 }
 
 func (VolumeKind) Descriptor() protoreflect.EnumDescriptor {
-	return file_fxdax_extentd_v1_extentd_proto_enumTypes[0].Descriptor()
+	return file_cladefs_extentd_v1_extentd_proto_enumTypes[0].Descriptor()
 }
 
 func (VolumeKind) Type() protoreflect.EnumType {
-	return &file_fxdax_extentd_v1_extentd_proto_enumTypes[0]
+	return &file_cladefs_extentd_v1_extentd_proto_enumTypes[0]
 }
 
 func (x VolumeKind) Number() protoreflect.EnumNumber {
@@ -153,7 +153,7 @@ func (x VolumeKind) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use VolumeKind.Descriptor instead.
 func (VolumeKind) EnumDescriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
 }
 
 // Makes an empty store.
@@ -181,14 +181,14 @@ type CreateStoreRequest struct {
 	// is, unless it takes a branch it has.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
 	// What the volume holds, which says what opens it.
-	Kind          VolumeKind `protobuf:"varint,7,opt,name=kind,proto3,enum=fxdax.extentd.v1.VolumeKind" json:"kind,omitempty"`
+	Kind          VolumeKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.extentd.v1.VolumeKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *CreateStoreRequest) Reset() {
 	*x = CreateStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[0]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -200,7 +200,7 @@ func (x *CreateStoreRequest) String() string {
 func (*CreateStoreRequest) ProtoMessage() {}
 
 func (x *CreateStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[0]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -213,7 +213,7 @@ func (x *CreateStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateStoreRequest.ProtoReflect.Descriptor instead.
 func (*CreateStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *CreateStoreRequest) GetPath() string {
@@ -280,7 +280,7 @@ type CreateStoreResponse struct {
 
 func (x *CreateStoreResponse) Reset() {
 	*x = CreateStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[1]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -292,7 +292,7 @@ func (x *CreateStoreResponse) String() string {
 func (*CreateStoreResponse) ProtoMessage() {}
 
 func (x *CreateStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[1]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -305,7 +305,7 @@ func (x *CreateStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateStoreResponse.ProtoReflect.Descriptor instead.
 func (*CreateStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{1}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *CreateStoreResponse) GetBranch() uint64 {
@@ -351,7 +351,7 @@ type ImportImageRequest struct {
 
 func (x *ImportImageRequest) Reset() {
 	*x = ImportImageRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[2]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -363,7 +363,7 @@ func (x *ImportImageRequest) String() string {
 func (*ImportImageRequest) ProtoMessage() {}
 
 func (x *ImportImageRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[2]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -376,7 +376,7 @@ func (x *ImportImageRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportImageRequest.ProtoReflect.Descriptor instead.
 func (*ImportImageRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{2}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *ImportImageRequest) GetPath() string {
@@ -429,7 +429,7 @@ type ImportImageResponse struct {
 
 func (x *ImportImageResponse) Reset() {
 	*x = ImportImageResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[3]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -441,7 +441,7 @@ func (x *ImportImageResponse) String() string {
 func (*ImportImageResponse) ProtoMessage() {}
 
 func (x *ImportImageResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[3]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -454,7 +454,7 @@ func (x *ImportImageResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ImportImageResponse.ProtoReflect.Descriptor instead.
 func (*ImportImageResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{3}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ImportImageResponse) GetBranch() uint64 {
@@ -507,7 +507,7 @@ type ForkStoreRequest struct {
 
 func (x *ForkStoreRequest) Reset() {
 	*x = ForkStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[4]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -519,7 +519,7 @@ func (x *ForkStoreRequest) String() string {
 func (*ForkStoreRequest) ProtoMessage() {}
 
 func (x *ForkStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[4]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -532,7 +532,7 @@ func (x *ForkStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkStoreRequest.ProtoReflect.Descriptor instead.
 func (*ForkStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{4}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ForkStoreRequest) GetFrom() string {
@@ -578,7 +578,7 @@ type ForkStoreResponse struct {
 
 func (x *ForkStoreResponse) Reset() {
 	*x = ForkStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[5]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -590,7 +590,7 @@ func (x *ForkStoreResponse) String() string {
 func (*ForkStoreResponse) ProtoMessage() {}
 
 func (x *ForkStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[5]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -603,7 +603,7 @@ func (x *ForkStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForkStoreResponse.ProtoReflect.Descriptor instead.
 func (*ForkStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{5}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ForkStoreResponse) GetBranch() uint64 {
@@ -638,7 +638,7 @@ type DeleteStoreRequest struct {
 
 func (x *DeleteStoreRequest) Reset() {
 	*x = DeleteStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[6]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -650,7 +650,7 @@ func (x *DeleteStoreRequest) String() string {
 func (*DeleteStoreRequest) ProtoMessage() {}
 
 func (x *DeleteStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[6]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -663,7 +663,7 @@ func (x *DeleteStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteStoreRequest.ProtoReflect.Descriptor instead.
 func (*DeleteStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{6}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *DeleteStoreRequest) GetPath() string {
@@ -682,7 +682,7 @@ type DeleteStoreResponse struct {
 
 func (x *DeleteStoreResponse) Reset() {
 	*x = DeleteStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[7]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -694,7 +694,7 @@ func (x *DeleteStoreResponse) String() string {
 func (*DeleteStoreResponse) ProtoMessage() {}
 
 func (x *DeleteStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[7]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -707,7 +707,7 @@ func (x *DeleteStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DeleteStoreResponse.ProtoReflect.Descriptor instead.
 func (*DeleteStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{7}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{7}
 }
 
 // Deletes this host's copy of a store.
@@ -721,7 +721,7 @@ type DropStoreRequest struct {
 
 func (x *DropStoreRequest) Reset() {
 	*x = DropStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[8]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -733,7 +733,7 @@ func (x *DropStoreRequest) String() string {
 func (*DropStoreRequest) ProtoMessage() {}
 
 func (x *DropStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[8]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -746,7 +746,7 @@ func (x *DropStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropStoreRequest.ProtoReflect.Descriptor instead.
 func (*DropStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{8}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *DropStoreRequest) GetPath() string {
@@ -765,7 +765,7 @@ type DropStoreResponse struct {
 
 func (x *DropStoreResponse) Reset() {
 	*x = DropStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[9]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -777,7 +777,7 @@ func (x *DropStoreResponse) String() string {
 func (*DropStoreResponse) ProtoMessage() {}
 
 func (x *DropStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[9]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -790,7 +790,7 @@ func (x *DropStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DropStoreResponse.ProtoReflect.Descriptor instead.
 func (*DropStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{9}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{9}
 }
 
 // Sets a store's capacity.
@@ -806,7 +806,7 @@ type ResizeStoreRequest struct {
 
 func (x *ResizeStoreRequest) Reset() {
 	*x = ResizeStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[10]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -818,7 +818,7 @@ func (x *ResizeStoreRequest) String() string {
 func (*ResizeStoreRequest) ProtoMessage() {}
 
 func (x *ResizeStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[10]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -831,7 +831,7 @@ func (x *ResizeStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResizeStoreRequest.ProtoReflect.Descriptor instead.
 func (*ResizeStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{10}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ResizeStoreRequest) GetPath() string {
@@ -857,7 +857,7 @@ type ResizeStoreResponse struct {
 
 func (x *ResizeStoreResponse) Reset() {
 	*x = ResizeStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[11]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -869,7 +869,7 @@ func (x *ResizeStoreResponse) String() string {
 func (*ResizeStoreResponse) ProtoMessage() {}
 
 func (x *ResizeStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[11]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -882,7 +882,7 @@ func (x *ResizeStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResizeStoreResponse.ProtoReflect.Descriptor instead.
 func (*ResizeStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{11}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{11}
 }
 
 // Places a store.
@@ -898,7 +898,7 @@ type PlaceStoreRequest struct {
 
 func (x *PlaceStoreRequest) Reset() {
 	*x = PlaceStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[12]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -910,7 +910,7 @@ func (x *PlaceStoreRequest) String() string {
 func (*PlaceStoreRequest) ProtoMessage() {}
 
 func (x *PlaceStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[12]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -923,7 +923,7 @@ func (x *PlaceStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceStoreRequest.ProtoReflect.Descriptor instead.
 func (*PlaceStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{12}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PlaceStoreRequest) GetPath() string {
@@ -949,7 +949,7 @@ type PlaceStoreResponse struct {
 
 func (x *PlaceStoreResponse) Reset() {
 	*x = PlaceStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[13]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -961,7 +961,7 @@ func (x *PlaceStoreResponse) String() string {
 func (*PlaceStoreResponse) ProtoMessage() {}
 
 func (x *PlaceStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[13]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -974,7 +974,7 @@ func (x *PlaceStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceStoreResponse.ProtoReflect.Descriptor instead.
 func (*PlaceStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{13}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{13}
 }
 
 // Shares a point, or no longer.
@@ -990,7 +990,7 @@ type SharePointRequest struct {
 
 func (x *SharePointRequest) Reset() {
 	*x = SharePointRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[14]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1002,7 +1002,7 @@ func (x *SharePointRequest) String() string {
 func (*SharePointRequest) ProtoMessage() {}
 
 func (x *SharePointRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[14]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1015,7 +1015,7 @@ func (x *SharePointRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SharePointRequest.ProtoReflect.Descriptor instead.
 func (*SharePointRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{14}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *SharePointRequest) GetPath() string {
@@ -1041,7 +1041,7 @@ type SharePointResponse struct {
 
 func (x *SharePointResponse) Reset() {
 	*x = SharePointResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[15]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1053,7 @@ func (x *SharePointResponse) String() string {
 func (*SharePointResponse) ProtoMessage() {}
 
 func (x *SharePointResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[15]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1066,7 @@ func (x *SharePointResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SharePointResponse.ProtoReflect.Descriptor instead.
 func (*SharePointResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{15}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{15}
 }
 
 // Makes a store a public base.
@@ -1083,7 +1083,7 @@ type MakePublicRequest struct {
 
 func (x *MakePublicRequest) Reset() {
 	*x = MakePublicRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[16]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1095,7 +1095,7 @@ func (x *MakePublicRequest) String() string {
 func (*MakePublicRequest) ProtoMessage() {}
 
 func (x *MakePublicRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[16]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1108,7 +1108,7 @@ func (x *MakePublicRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePublicRequest.ProtoReflect.Descriptor instead.
 func (*MakePublicRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{16}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *MakePublicRequest) GetPath() string {
@@ -1134,7 +1134,7 @@ type MakePublicResponse struct {
 
 func (x *MakePublicResponse) Reset() {
 	*x = MakePublicResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[17]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1146,7 +1146,7 @@ func (x *MakePublicResponse) String() string {
 func (*MakePublicResponse) ProtoMessage() {}
 
 func (x *MakePublicResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[17]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1159,7 +1159,7 @@ func (x *MakePublicResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use MakePublicResponse.ProtoReflect.Descriptor instead.
 func (*MakePublicResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{17}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{17}
 }
 
 // Attaches a fork to a store.
@@ -1175,7 +1175,7 @@ type AttachBaseRequest struct {
 
 func (x *AttachBaseRequest) Reset() {
 	*x = AttachBaseRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[18]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1187,7 +1187,7 @@ func (x *AttachBaseRequest) String() string {
 func (*AttachBaseRequest) ProtoMessage() {}
 
 func (x *AttachBaseRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[18]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1200,7 +1200,7 @@ func (x *AttachBaseRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachBaseRequest.ProtoReflect.Descriptor instead.
 func (*AttachBaseRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{18}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *AttachBaseRequest) GetStore() string {
@@ -1226,7 +1226,7 @@ type AttachBaseResponse struct {
 
 func (x *AttachBaseResponse) Reset() {
 	*x = AttachBaseResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[19]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1238,7 +1238,7 @@ func (x *AttachBaseResponse) String() string {
 func (*AttachBaseResponse) ProtoMessage() {}
 
 func (x *AttachBaseResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[19]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1251,7 +1251,7 @@ func (x *AttachBaseResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachBaseResponse.ProtoReflect.Descriptor instead.
 func (*AttachBaseResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{19}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{19}
 }
 
 // Waits for a store's commits to be in object storage.
@@ -1265,7 +1265,7 @@ type SyncStoreRequest struct {
 
 func (x *SyncStoreRequest) Reset() {
 	*x = SyncStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[20]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1277,7 +1277,7 @@ func (x *SyncStoreRequest) String() string {
 func (*SyncStoreRequest) ProtoMessage() {}
 
 func (x *SyncStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[20]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1290,7 +1290,7 @@ func (x *SyncStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncStoreRequest.ProtoReflect.Descriptor instead.
 func (*SyncStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{20}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SyncStoreRequest) GetPath() string {
@@ -1309,7 +1309,7 @@ type SyncStoreResponse struct {
 
 func (x *SyncStoreResponse) Reset() {
 	*x = SyncStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[21]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1321,7 +1321,7 @@ func (x *SyncStoreResponse) String() string {
 func (*SyncStoreResponse) ProtoMessage() {}
 
 func (x *SyncStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[21]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1334,7 +1334,7 @@ func (x *SyncStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SyncStoreResponse.ProtoReflect.Descriptor instead.
 func (*SyncStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{21}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{21}
 }
 
 // Asks what a store is, and holds.
@@ -1348,7 +1348,7 @@ type StatStoreRequest struct {
 
 func (x *StatStoreRequest) Reset() {
 	*x = StatStoreRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[22]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1360,7 +1360,7 @@ func (x *StatStoreRequest) String() string {
 func (*StatStoreRequest) ProtoMessage() {}
 
 func (x *StatStoreRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[22]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1373,7 +1373,7 @@ func (x *StatStoreRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatStoreRequest.ProtoReflect.Descriptor instead.
 func (*StatStoreRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{22}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *StatStoreRequest) GetPath() string {
@@ -1432,7 +1432,7 @@ type StatStoreResponse struct {
 
 func (x *StatStoreResponse) Reset() {
 	*x = StatStoreResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[23]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1444,7 +1444,7 @@ func (x *StatStoreResponse) String() string {
 func (*StatStoreResponse) ProtoMessage() {}
 
 func (x *StatStoreResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[23]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1457,7 +1457,7 @@ func (x *StatStoreResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StatStoreResponse.ProtoReflect.Descriptor instead.
 func (*StatStoreResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{23}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *StatStoreResponse) GetBranch() uint64 {
@@ -1595,7 +1595,7 @@ type ListStoresRequest struct {
 
 func (x *ListStoresRequest) Reset() {
 	*x = ListStoresRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[24]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1607,7 +1607,7 @@ func (x *ListStoresRequest) String() string {
 func (*ListStoresRequest) ProtoMessage() {}
 
 func (x *ListStoresRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[24]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1620,7 +1620,7 @@ func (x *ListStoresRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListStoresRequest.ProtoReflect.Descriptor instead.
 func (*ListStoresRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{24}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{24}
 }
 
 // The stores the daemon serves, in no order.
@@ -1634,7 +1634,7 @@ type ListStoresResponse struct {
 
 func (x *ListStoresResponse) Reset() {
 	*x = ListStoresResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[25]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1646,7 +1646,7 @@ func (x *ListStoresResponse) String() string {
 func (*ListStoresResponse) ProtoMessage() {}
 
 func (x *ListStoresResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[25]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1659,7 +1659,7 @@ func (x *ListStoresResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListStoresResponse.ProtoReflect.Descriptor instead.
 func (*ListStoresResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{25}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *ListStoresResponse) GetStores() []*ListedStore {
@@ -1682,7 +1682,7 @@ type ListedStore struct {
 
 func (x *ListedStore) Reset() {
 	*x = ListedStore{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[26]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1694,7 +1694,7 @@ func (x *ListedStore) String() string {
 func (*ListedStore) ProtoMessage() {}
 
 func (x *ListedStore) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[26]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1707,7 +1707,7 @@ func (x *ListedStore) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListedStore.ProtoReflect.Descriptor instead.
 func (*ListedStore) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{26}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *ListedStore) GetPath() string {
@@ -1733,7 +1733,7 @@ type GetStatsRequest struct {
 
 func (x *GetStatsRequest) Reset() {
 	*x = GetStatsRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[27]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1745,7 +1745,7 @@ func (x *GetStatsRequest) String() string {
 func (*GetStatsRequest) ProtoMessage() {}
 
 func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[27]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1758,7 +1758,7 @@ func (x *GetStatsRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsRequest.ProtoReflect.Descriptor instead.
 func (*GetStatsRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{27}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{27}
 }
 
 // What the daemon did since it started: counters, which only grow, so that a measurement is the
@@ -1811,7 +1811,7 @@ type GetStatsResponse struct {
 
 func (x *GetStatsResponse) Reset() {
 	*x = GetStatsResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[28]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1823,7 +1823,7 @@ func (x *GetStatsResponse) String() string {
 func (*GetStatsResponse) ProtoMessage() {}
 
 func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[28]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1836,7 +1836,7 @@ func (x *GetStatsResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetStatsResponse.ProtoReflect.Descriptor instead.
 func (*GetStatsResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{28}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *GetStatsResponse) GetMaps() uint64 {
@@ -1983,7 +1983,7 @@ type GetSnapshotRequest struct {
 
 func (x *GetSnapshotRequest) Reset() {
 	*x = GetSnapshotRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[29]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1995,7 +1995,7 @@ func (x *GetSnapshotRequest) String() string {
 func (*GetSnapshotRequest) ProtoMessage() {}
 
 func (x *GetSnapshotRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[29]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2008,7 +2008,7 @@ func (x *GetSnapshotRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSnapshotRequest.ProtoReflect.Descriptor instead.
 func (*GetSnapshotRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{29}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *GetSnapshotRequest) GetWaitMs() uint32 {
@@ -2028,9 +2028,9 @@ type GetSnapshotResponse struct {
 	TakenUnixNs uint64 `protobuf:"varint,1,opt,name=taken_unix_ns,json=takenUnixNs,proto3" json:"taken_unix_ns,omitempty"`
 	// The commit the daemon was built of.
 	Build string `protobuf:"bytes,2,opt,name=build,proto3" json:"build,omitempty"`
-	// Its counters: those its metrics name fxdax_extentd_NAME_total, as `window_open_maps_refused`.
+	// Its counters: those its metrics name cladefs_extentd_NAME_total, as `window_open_maps_refused`.
 	Counters map[string]uint64 `protobuf:"bytes,3,rep,name=counters,proto3" json:"counters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// Its gauges: those its metrics name fxdax_extentd_NAME.
+	// Its gauges: those its metrics name cladefs_extentd_NAME.
 	Gauges map[string]uint64 `protobuf:"bytes,4,rep,name=gauges,proto3" json:"gauges,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	// Its VM processes that opened a store, in the order they connected.
 	Vms           []*VmSnapshot `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
@@ -2040,7 +2040,7 @@ type GetSnapshotResponse struct {
 
 func (x *GetSnapshotResponse) Reset() {
 	*x = GetSnapshotResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[30]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2052,7 +2052,7 @@ func (x *GetSnapshotResponse) String() string {
 func (*GetSnapshotResponse) ProtoMessage() {}
 
 func (x *GetSnapshotResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[30]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2065,7 +2065,7 @@ func (x *GetSnapshotResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetSnapshotResponse.ProtoReflect.Descriptor instead.
 func (*GetSnapshotResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{30}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *GetSnapshotResponse) GetTakenUnixNs() uint64 {
@@ -2139,7 +2139,7 @@ type VmSnapshot struct {
 
 func (x *VmSnapshot) Reset() {
 	*x = VmSnapshot{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[31]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2151,7 +2151,7 @@ func (x *VmSnapshot) String() string {
 func (*VmSnapshot) ProtoMessage() {}
 
 func (x *VmSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[31]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2164,7 +2164,7 @@ func (x *VmSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use VmSnapshot.ProtoReflect.Descriptor instead.
 func (*VmSnapshot) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{31}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *VmSnapshot) GetConnection() uint64 {
@@ -2259,7 +2259,7 @@ type GuestSnapshot struct {
 
 func (x *GuestSnapshot) Reset() {
 	*x = GuestSnapshot{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[32]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2271,7 +2271,7 @@ func (x *GuestSnapshot) String() string {
 func (*GuestSnapshot) ProtoMessage() {}
 
 func (x *GuestSnapshot) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[32]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2284,7 +2284,7 @@ func (x *GuestSnapshot) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GuestSnapshot.ProtoReflect.Descriptor instead.
 func (*GuestSnapshot) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{32}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *GuestSnapshot) GetBuild() string {
@@ -2319,7 +2319,7 @@ type Histogram struct {
 
 func (x *Histogram) Reset() {
 	*x = Histogram{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[33]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2331,7 +2331,7 @@ func (x *Histogram) String() string {
 func (*Histogram) ProtoMessage() {}
 
 func (x *Histogram) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[33]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2344,7 +2344,7 @@ func (x *Histogram) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Histogram.ProtoReflect.Descriptor instead.
 func (*Histogram) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{33}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Histogram) GetBuckets() []uint64 {
@@ -2374,7 +2374,7 @@ type ObjectStorageStats struct {
 
 func (x *ObjectStorageStats) Reset() {
 	*x = ObjectStorageStats{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[34]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2386,7 +2386,7 @@ func (x *ObjectStorageStats) String() string {
 func (*ObjectStorageStats) ProtoMessage() {}
 
 func (x *ObjectStorageStats) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[34]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2399,7 +2399,7 @@ func (x *ObjectStorageStats) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ObjectStorageStats.ProtoReflect.Descriptor instead.
 func (*ObjectStorageStats) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{34}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *ObjectStorageStats) GetRequests() map[string]uint64 {
@@ -2453,7 +2453,7 @@ type GrantRequest struct {
 
 func (x *GrantRequest) Reset() {
 	*x = GrantRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[35]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2465,7 +2465,7 @@ func (x *GrantRequest) String() string {
 func (*GrantRequest) ProtoMessage() {}
 
 func (x *GrantRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[35]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2478,7 +2478,7 @@ func (x *GrantRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantRequest.ProtoReflect.Descriptor instead.
 func (*GrantRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{35}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *GrantRequest) GetTenant() string {
@@ -2527,7 +2527,7 @@ type GrantResponse struct {
 
 func (x *GrantResponse) Reset() {
 	*x = GrantResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[36]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2539,7 +2539,7 @@ func (x *GrantResponse) String() string {
 func (*GrantResponse) ProtoMessage() {}
 
 func (x *GrantResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[36]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2552,7 +2552,7 @@ func (x *GrantResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GrantResponse.ProtoReflect.Descriptor instead.
 func (*GrantResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{36}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *GrantResponse) GetSocket() string {
@@ -2573,7 +2573,7 @@ type RevokeRequest struct {
 
 func (x *RevokeRequest) Reset() {
 	*x = RevokeRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[37]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2585,7 +2585,7 @@ func (x *RevokeRequest) String() string {
 func (*RevokeRequest) ProtoMessage() {}
 
 func (x *RevokeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[37]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2598,7 +2598,7 @@ func (x *RevokeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeRequest.ProtoReflect.Descriptor instead.
 func (*RevokeRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{37}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *RevokeRequest) GetTenant() string {
@@ -2617,7 +2617,7 @@ type RevokeResponse struct {
 
 func (x *RevokeResponse) Reset() {
 	*x = RevokeResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[38]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2629,7 +2629,7 @@ func (x *RevokeResponse) String() string {
 func (*RevokeResponse) ProtoMessage() {}
 
 func (x *RevokeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[38]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2642,7 +2642,7 @@ func (x *RevokeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RevokeResponse.ProtoReflect.Descriptor instead.
 func (*RevokeResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{38}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{38}
 }
 
 // Limits the memory of a tenant, or of every tenant.
@@ -2661,7 +2661,7 @@ type SetMemoryLimitRequest struct {
 
 func (x *SetMemoryLimitRequest) Reset() {
 	*x = SetMemoryLimitRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[39]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2673,7 +2673,7 @@ func (x *SetMemoryLimitRequest) String() string {
 func (*SetMemoryLimitRequest) ProtoMessage() {}
 
 func (x *SetMemoryLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[39]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2686,7 +2686,7 @@ func (x *SetMemoryLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryLimitRequest.ProtoReflect.Descriptor instead.
 func (*SetMemoryLimitRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{39}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *SetMemoryLimitRequest) GetTenant() string {
@@ -2712,7 +2712,7 @@ type SetMemoryLimitResponse struct {
 
 func (x *SetMemoryLimitResponse) Reset() {
 	*x = SetMemoryLimitResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[40]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2724,7 +2724,7 @@ func (x *SetMemoryLimitResponse) String() string {
 func (*SetMemoryLimitResponse) ProtoMessage() {}
 
 func (x *SetMemoryLimitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[40]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2737,7 +2737,7 @@ func (x *SetMemoryLimitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryLimitResponse.ProtoReflect.Descriptor instead.
 func (*SetMemoryLimitResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{40}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{40}
 }
 
 // Weighs a tenant's memory.
@@ -2754,7 +2754,7 @@ type SetMemoryWeightRequest struct {
 
 func (x *SetMemoryWeightRequest) Reset() {
 	*x = SetMemoryWeightRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[41]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2766,7 +2766,7 @@ func (x *SetMemoryWeightRequest) String() string {
 func (*SetMemoryWeightRequest) ProtoMessage() {}
 
 func (x *SetMemoryWeightRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[41]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2779,7 +2779,7 @@ func (x *SetMemoryWeightRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryWeightRequest.ProtoReflect.Descriptor instead.
 func (*SetMemoryWeightRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{41}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *SetMemoryWeightRequest) GetTenant() string {
@@ -2805,7 +2805,7 @@ type SetMemoryWeightResponse struct {
 
 func (x *SetMemoryWeightResponse) Reset() {
 	*x = SetMemoryWeightResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[42]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[42]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2817,7 +2817,7 @@ func (x *SetMemoryWeightResponse) String() string {
 func (*SetMemoryWeightResponse) ProtoMessage() {}
 
 func (x *SetMemoryWeightResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[42]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[42]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2830,7 +2830,7 @@ func (x *SetMemoryWeightResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetMemoryWeightResponse.ProtoReflect.Descriptor instead.
 func (*SetMemoryWeightResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{42}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{42}
 }
 
 // Sets the room of a tenant's connections.
@@ -2848,7 +2848,7 @@ type SetTenantRoomRequest struct {
 
 func (x *SetTenantRoomRequest) Reset() {
 	*x = SetTenantRoomRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[43]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[43]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2860,7 +2860,7 @@ func (x *SetTenantRoomRequest) String() string {
 func (*SetTenantRoomRequest) ProtoMessage() {}
 
 func (x *SetTenantRoomRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[43]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[43]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2873,7 +2873,7 @@ func (x *SetTenantRoomRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTenantRoomRequest.ProtoReflect.Descriptor instead.
 func (*SetTenantRoomRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{43}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{43}
 }
 
 func (x *SetTenantRoomRequest) GetTenant() string {
@@ -2899,7 +2899,7 @@ type SetTenantRoomResponse struct {
 
 func (x *SetTenantRoomResponse) Reset() {
 	*x = SetTenantRoomResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[44]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[44]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2911,7 +2911,7 @@ func (x *SetTenantRoomResponse) String() string {
 func (*SetTenantRoomResponse) ProtoMessage() {}
 
 func (x *SetTenantRoomResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[44]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[44]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2924,7 +2924,7 @@ func (x *SetTenantRoomResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetTenantRoomResponse.ProtoReflect.Descriptor instead.
 func (*SetTenantRoomResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{44}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{44}
 }
 
 // Evicts pages toward a target.
@@ -2940,7 +2940,7 @@ type ShrinkMemoryRequest struct {
 
 func (x *ShrinkMemoryRequest) Reset() {
 	*x = ShrinkMemoryRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[45]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[45]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2952,7 +2952,7 @@ func (x *ShrinkMemoryRequest) String() string {
 func (*ShrinkMemoryRequest) ProtoMessage() {}
 
 func (x *ShrinkMemoryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[45]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[45]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2965,7 +2965,7 @@ func (x *ShrinkMemoryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShrinkMemoryRequest.ProtoReflect.Descriptor instead.
 func (*ShrinkMemoryRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{45}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{45}
 }
 
 func (x *ShrinkMemoryRequest) GetTenant() string {
@@ -2993,7 +2993,7 @@ type ShrinkMemoryResponse struct {
 
 func (x *ShrinkMemoryResponse) Reset() {
 	*x = ShrinkMemoryResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[46]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[46]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3005,7 +3005,7 @@ func (x *ShrinkMemoryResponse) String() string {
 func (*ShrinkMemoryResponse) ProtoMessage() {}
 
 func (x *ShrinkMemoryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[46]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[46]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3018,7 +3018,7 @@ func (x *ShrinkMemoryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShrinkMemoryResponse.ProtoReflect.Descriptor instead.
 func (*ShrinkMemoryResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{46}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{46}
 }
 
 func (x *ShrinkMemoryResponse) GetBytes() uint64 {
@@ -3043,7 +3043,7 @@ type SetDiskLimitRequest struct {
 
 func (x *SetDiskLimitRequest) Reset() {
 	*x = SetDiskLimitRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[47]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[47]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3055,7 +3055,7 @@ func (x *SetDiskLimitRequest) String() string {
 func (*SetDiskLimitRequest) ProtoMessage() {}
 
 func (x *SetDiskLimitRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[47]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[47]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3068,7 +3068,7 @@ func (x *SetDiskLimitRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskLimitRequest.ProtoReflect.Descriptor instead.
 func (*SetDiskLimitRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{47}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{47}
 }
 
 func (x *SetDiskLimitRequest) GetTenant() string {
@@ -3094,7 +3094,7 @@ type SetDiskLimitResponse struct {
 
 func (x *SetDiskLimitResponse) Reset() {
 	*x = SetDiskLimitResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[48]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[48]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3106,7 +3106,7 @@ func (x *SetDiskLimitResponse) String() string {
 func (*SetDiskLimitResponse) ProtoMessage() {}
 
 func (x *SetDiskLimitResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[48]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[48]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3119,13 +3119,13 @@ func (x *SetDiskLimitResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetDiskLimitResponse.ProtoReflect.Descriptor instead.
 func (*SetDiskLimitResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{48}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{48}
 }
 
 // The hosts sharing the daemon's bucket.
 type SetPeersRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Each `HOST:PORT`, as it serves its peers (its FXDAX_EXTENTD_PEER_ADDRESS), spelled as every
+	// Each `HOST:PORT`, as it serves its peers (its CLADEFS_EXTENTD_PEER_ADDRESS), spelled as every
 	// host spells it: this host's among them or not.
 	Addresses     []string `protobuf:"bytes,1,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -3134,7 +3134,7 @@ type SetPeersRequest struct {
 
 func (x *SetPeersRequest) Reset() {
 	*x = SetPeersRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[49]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[49]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3146,7 +3146,7 @@ func (x *SetPeersRequest) String() string {
 func (*SetPeersRequest) ProtoMessage() {}
 
 func (x *SetPeersRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[49]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[49]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3159,7 +3159,7 @@ func (x *SetPeersRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPeersRequest.ProtoReflect.Descriptor instead.
 func (*SetPeersRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{49}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{49}
 }
 
 func (x *SetPeersRequest) GetAddresses() []string {
@@ -3178,7 +3178,7 @@ type SetPeersResponse struct {
 
 func (x *SetPeersResponse) Reset() {
 	*x = SetPeersResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[50]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[50]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3190,7 +3190,7 @@ func (x *SetPeersResponse) String() string {
 func (*SetPeersResponse) ProtoMessage() {}
 
 func (x *SetPeersResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[50]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[50]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3203,7 +3203,7 @@ func (x *SetPeersResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SetPeersResponse.ProtoReflect.Descriptor instead.
 func (*SetPeersResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{50}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{50}
 }
 
 // Asks what a tenant's disk takes.
@@ -3217,7 +3217,7 @@ type GetTenantDiskRequest struct {
 
 func (x *GetTenantDiskRequest) Reset() {
 	*x = GetTenantDiskRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[51]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[51]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3229,7 +3229,7 @@ func (x *GetTenantDiskRequest) String() string {
 func (*GetTenantDiskRequest) ProtoMessage() {}
 
 func (x *GetTenantDiskRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[51]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[51]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3242,7 +3242,7 @@ func (x *GetTenantDiskRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTenantDiskRequest.ProtoReflect.Descriptor instead.
 func (*GetTenantDiskRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{51}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{51}
 }
 
 func (x *GetTenantDiskRequest) GetTenant() string {
@@ -3266,7 +3266,7 @@ type GetTenantDiskResponse struct {
 
 func (x *GetTenantDiskResponse) Reset() {
 	*x = GetTenantDiskResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[52]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[52]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3278,7 +3278,7 @@ func (x *GetTenantDiskResponse) String() string {
 func (*GetTenantDiskResponse) ProtoMessage() {}
 
 func (x *GetTenantDiskResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[52]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[52]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3291,7 +3291,7 @@ func (x *GetTenantDiskResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetTenantDiskResponse.ProtoReflect.Descriptor instead.
 func (*GetTenantDiskResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{52}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{52}
 }
 
 func (x *GetTenantDiskResponse) GetBytes() uint64 {
@@ -3321,7 +3321,7 @@ type ShredCellRequest struct {
 
 func (x *ShredCellRequest) Reset() {
 	*x = ShredCellRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[53]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[53]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3333,7 +3333,7 @@ func (x *ShredCellRequest) String() string {
 func (*ShredCellRequest) ProtoMessage() {}
 
 func (x *ShredCellRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[53]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[53]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3346,7 +3346,7 @@ func (x *ShredCellRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredCellRequest.ProtoReflect.Descriptor instead.
 func (*ShredCellRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{53}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{53}
 }
 
 func (x *ShredCellRequest) GetTenant() uint64 {
@@ -3377,7 +3377,7 @@ type ShredCellResponse struct {
 
 func (x *ShredCellResponse) Reset() {
 	*x = ShredCellResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[54]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[54]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3389,7 +3389,7 @@ func (x *ShredCellResponse) String() string {
 func (*ShredCellResponse) ProtoMessage() {}
 
 func (x *ShredCellResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[54]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[54]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3402,7 +3402,7 @@ func (x *ShredCellResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ShredCellResponse.ProtoReflect.Descriptor instead.
 func (*ShredCellResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{54}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{54}
 }
 
 func (x *ShredCellResponse) GetKeksRemoved() uint32 {
@@ -3432,7 +3432,7 @@ type ForgetTenantKeysRequest struct {
 
 func (x *ForgetTenantKeysRequest) Reset() {
 	*x = ForgetTenantKeysRequest{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[55]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[55]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3444,7 +3444,7 @@ func (x *ForgetTenantKeysRequest) String() string {
 func (*ForgetTenantKeysRequest) ProtoMessage() {}
 
 func (x *ForgetTenantKeysRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[55]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[55]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3457,7 +3457,7 @@ func (x *ForgetTenantKeysRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForgetTenantKeysRequest.ProtoReflect.Descriptor instead.
 func (*ForgetTenantKeysRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{55}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{55}
 }
 
 func (x *ForgetTenantKeysRequest) GetTenant() uint64 {
@@ -3485,7 +3485,7 @@ type ForgetTenantKeysResponse struct {
 
 func (x *ForgetTenantKeysResponse) Reset() {
 	*x = ForgetTenantKeysResponse{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[56]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[56]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3497,7 +3497,7 @@ func (x *ForgetTenantKeysResponse) String() string {
 func (*ForgetTenantKeysResponse) ProtoMessage() {}
 
 func (x *ForgetTenantKeysResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[56]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[56]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3510,7 +3510,7 @@ func (x *ForgetTenantKeysResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ForgetTenantKeysResponse.ProtoReflect.Descriptor instead.
 func (*ForgetTenantKeysResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{56}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{56}
 }
 
 func (x *ForgetTenantKeysResponse) GetForgotten() *Forgotten {
@@ -3539,7 +3539,7 @@ type Forgotten struct {
 
 func (x *Forgotten) Reset() {
 	*x = Forgotten{}
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[57]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3551,7 +3551,7 @@ func (x *Forgotten) String() string {
 func (*Forgotten) ProtoMessage() {}
 
 func (x *Forgotten) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_extentd_v1_extentd_proto_msgTypes[57]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3564,7 +3564,7 @@ func (x *Forgotten) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Forgotten.ProtoReflect.Descriptor instead.
 func (*Forgotten) Descriptor() ([]byte, []int) {
-	return file_fxdax_extentd_v1_extentd_proto_rawDescGZIP(), []int{57}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{57}
 }
 
 func (x *Forgotten) GetStores() uint32 {
@@ -3602,19 +3602,19 @@ func (x *Forgotten) GetBytes() uint64 {
 	return 0
 }
 
-var File_fxdax_extentd_v1_extentd_proto protoreflect.FileDescriptor
+var File_cladefs_extentd_v1_extentd_proto protoreflect.FileDescriptor
 
-const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
+const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\n" +
-	"\x1efxdax/extentd/v1/extentd.proto\x12\x10fxdax.extentd.v1\"\xdf\x01\n" +
+	" cladefs/extentd/v1/extentd.proto\x12\x12cladefs.extentd.v1\"\xe1\x01\n" +
 	"\x12CreateStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x06 \x01(\x04R\x04cell\x120\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1c.fxdax.extentd.v1.VolumeKindR\x04kindB\b\n" +
+	"\x04cell\x18\x06 \x01(\x04R\x04cell\x122\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1e.cladefs.extentd.v1.VolumeKindR\x04kindB\b\n" +
 	"\x06_token\"Y\n" +
 	"\x13CreateStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
@@ -3694,13 +3694,13 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x11oldest_pending_ms\x18\x10 \x01(\x04R\x0foldestPendingMs\x12\x16\n" +
 	"\x06tenant\x18\x11 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x12 \x01(\x04R\x04cell\"\x13\n" +
-	"\x11ListStoresRequest\"K\n" +
-	"\x12ListStoresResponse\x125\n" +
-	"\x06stores\x18\x01 \x03(\v2\x1d.fxdax.extentd.v1.ListedStoreR\x06stores\"Z\n" +
+	"\x11ListStoresRequest\"M\n" +
+	"\x12ListStoresResponse\x127\n" +
+	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.extentd.v1.ListedStoreR\x06stores\"\\\n" +
 	"\vListedStore\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\x127\n" +
-	"\x04stat\x18\x02 \x01(\v2#.fxdax.extentd.v1.StatStoreResponseR\x04stat\"\x11\n" +
-	"\x0fGetStatsRequest\"\xf3\x05\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\x129\n" +
+	"\x04stat\x18\x02 \x01(\v2%.cladefs.extentd.v1.StatStoreResponseR\x04stat\"\x11\n" +
+	"\x0fGetStatsRequest\"\xf5\x05\n" +
 	"\x10GetStatsResponse\x12\x12\n" +
 	"\x04maps\x18\x01 \x01(\x04R\x04maps\x12\x15\n" +
 	"\x06map_ns\x18\x02 \x01(\x04R\x05mapNs\x12\x16\n" +
@@ -3717,8 +3717,8 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\n" +
 	"prefetches\x18\v \x01(\x04R\n" +
 	"prefetches\x12\x18\n" +
-	"\aunpacks\x18\f \x01(\x04R\aunpacks\x12P\n" +
-	"\x0eobject_storage\x18\r \x01(\v2$.fxdax.extentd.v1.ObjectStorageStatsH\x00R\robjectStorage\x88\x01\x01\x12\x18\n" +
+	"\aunpacks\x18\f \x01(\x04R\aunpacks\x12R\n" +
+	"\x0eobject_storage\x18\r \x01(\v2&.cladefs.extentd.v1.ObjectStorageStatsH\x00R\robjectStorage\x88\x01\x01\x12\x18\n" +
 	"\acommits\x18\x0e \x01(\x04R\acommits\x12\x1b\n" +
 	"\tcommit_ns\x18\x0f \x01(\x04R\bcommitNs\x12&\n" +
 	"\x0fcommit_store_ns\x18\x12 \x01(\x04R\rcommitStoreNs\x12$\n" +
@@ -3727,19 +3727,19 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x10segment_close_ns\x18\x16 \x01(\x04R\x0esegmentCloseNsB\x11\n" +
 	"\x0f_object_storageJ\x04\b\x10\x10\x11J\x04\b\x11\x10\x12J\x04\b\x13\x10\x14R\x0fcommit_write_nsR\x14commit_written_bytesR\x0ecommit_seal_ns\"-\n" +
 	"\x12GetSnapshotRequest\x12\x17\n" +
-	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\x93\x03\n" +
+	"\await_ms\x18\x01 \x01(\rR\x06waitMs\"\x99\x03\n" +
 	"\x13GetSnapshotResponse\x12\"\n" +
 	"\rtaken_unix_ns\x18\x01 \x01(\x04R\vtakenUnixNs\x12\x14\n" +
-	"\x05build\x18\x02 \x01(\tR\x05build\x12O\n" +
-	"\bcounters\x18\x03 \x03(\v23.fxdax.extentd.v1.GetSnapshotResponse.CountersEntryR\bcounters\x12I\n" +
-	"\x06gauges\x18\x04 \x03(\v21.fxdax.extentd.v1.GetSnapshotResponse.GaugesEntryR\x06gauges\x12.\n" +
-	"\x03vms\x18\x05 \x03(\v2\x1c.fxdax.extentd.v1.VmSnapshotR\x03vms\x1a;\n" +
+	"\x05build\x18\x02 \x01(\tR\x05build\x12Q\n" +
+	"\bcounters\x18\x03 \x03(\v25.cladefs.extentd.v1.GetSnapshotResponse.CountersEntryR\bcounters\x12K\n" +
+	"\x06gauges\x18\x04 \x03(\v23.cladefs.extentd.v1.GetSnapshotResponse.GaugesEntryR\x06gauges\x120\n" +
+	"\x03vms\x18\x05 \x03(\v2\x1e.cladefs.extentd.v1.VmSnapshotR\x03vms\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
 	"\vGaugesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x88\x05\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"\x90\x05\n" +
 	"\n" +
 	"VmSnapshot\x12\x1e\n" +
 	"\n" +
@@ -3748,14 +3748,14 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x06branch\x18\x02 \x01(\x04R\x06branch\x12\x12\n" +
 	"\x04path\x18\x03 \x01(\tR\x04path\x12\x1a\n" +
 	"\bfollower\x18\x04 \x01(\bR\bfollower\x12\x14\n" +
-	"\x05build\x18\x05 \x01(\tR\x05build\x12F\n" +
-	"\bcounters\x18\x06 \x03(\v2*.fxdax.extentd.v1.VmSnapshot.CountersEntryR\bcounters\x12@\n" +
-	"\x06gauges\x18\a \x03(\v2(.fxdax.extentd.v1.VmSnapshot.GaugesEntryR\x06gauges\x12@\n" +
-	"\x06window\x18\b \x03(\v2(.fxdax.extentd.v1.VmSnapshot.WindowEntryR\x06window\x12\x1a\n" +
+	"\x05build\x18\x05 \x01(\tR\x05build\x12H\n" +
+	"\bcounters\x18\x06 \x03(\v2,.cladefs.extentd.v1.VmSnapshot.CountersEntryR\bcounters\x12B\n" +
+	"\x06gauges\x18\a \x03(\v2*.cladefs.extentd.v1.VmSnapshot.GaugesEntryR\x06gauges\x12B\n" +
+	"\x06window\x18\b \x03(\v2*.cladefs.extentd.v1.VmSnapshot.WindowEntryR\x06window\x12\x1a\n" +
 	"\banswered\x18\t \x01(\bR\banswered\x12\x1b\n" +
 	"\tanswer_ns\x18\n" +
-	" \x01(\x04R\banswerNs\x12:\n" +
-	"\x05guest\x18\v \x01(\v2\x1f.fxdax.extentd.v1.GuestSnapshotH\x00R\x05guest\x88\x01\x01\x1a;\n" +
+	" \x01(\x04R\banswerNs\x12<\n" +
+	"\x05guest\x18\v \x01(\v2!.cladefs.extentd.v1.GuestSnapshotH\x00R\x05guest\x88\x01\x01\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a9\n" +
@@ -3765,26 +3765,26 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\vWindowEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01B\b\n" +
-	"\x06_guest\"\xda\x02\n" +
+	"\x06_guest\"\xe0\x02\n" +
 	"\rGuestSnapshot\x12\x14\n" +
-	"\x05build\x18\x01 \x01(\tR\x05build\x12I\n" +
-	"\bcounters\x18\x02 \x03(\v2-.fxdax.extentd.v1.GuestSnapshot.CountersEntryR\bcounters\x12O\n" +
+	"\x05build\x18\x01 \x01(\tR\x05build\x12K\n" +
+	"\bcounters\x18\x02 \x03(\v2/.cladefs.extentd.v1.GuestSnapshot.CountersEntryR\bcounters\x12Q\n" +
 	"\n" +
-	"histograms\x18\x03 \x03(\v2/.fxdax.extentd.v1.GuestSnapshot.HistogramsEntryR\n" +
+	"histograms\x18\x03 \x03(\v21.cladefs.extentd.v1.GuestSnapshot.HistogramsEntryR\n" +
 	"histograms\x1a;\n" +
 	"\rCountersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1aZ\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a\\\n" +
 	"\x0fHistogramsEntry\x12\x10\n" +
-	"\x03key\x18\x01 \x01(\tR\x03key\x121\n" +
-	"\x05value\x18\x02 \x01(\v2\x1b.fxdax.extentd.v1.HistogramR\x05value:\x028\x01\"%\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x123\n" +
+	"\x05value\x18\x02 \x01(\v2\x1d.cladefs.extentd.v1.HistogramR\x05value:\x028\x01\"%\n" +
 	"\tHistogram\x12\x18\n" +
-	"\abuckets\x18\x01 \x03(\x04R\abuckets\"\xfb\x03\n" +
-	"\x12ObjectStorageStats\x12N\n" +
-	"\brequests\x18\x01 \x03(\v22.fxdax.extentd.v1.ObjectStorageStats.RequestsEntryR\brequests\x12^\n" +
-	"\x0euploaded_bytes\x18\x02 \x03(\v27.fxdax.extentd.v1.ObjectStorageStats.UploadedBytesEntryR\ruploadedBytes\x12)\n" +
-	"\x10downloaded_bytes\x18\x03 \x01(\x04R\x0fdownloadedBytes\x12N\n" +
-	"\bfailures\x18\x04 \x03(\v22.fxdax.extentd.v1.ObjectStorageStats.FailuresEntryR\bfailures\x1a;\n" +
+	"\abuckets\x18\x01 \x03(\x04R\abuckets\"\x81\x04\n" +
+	"\x12ObjectStorageStats\x12P\n" +
+	"\brequests\x18\x01 \x03(\v24.cladefs.extentd.v1.ObjectStorageStats.RequestsEntryR\brequests\x12`\n" +
+	"\x0euploaded_bytes\x18\x02 \x03(\v29.cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntryR\ruploadedBytes\x12)\n" +
+	"\x10downloaded_bytes\x18\x03 \x01(\x04R\x0fdownloadedBytes\x12P\n" +
+	"\bfailures\x18\x04 \x03(\v24.cladefs.extentd.v1.ObjectStorageStats.FailuresEntryR\bfailures\x1a;\n" +
 	"\rRequestsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\x1a@\n" +
@@ -3843,15 +3843,15 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\f_limit_bytes\">\n" +
 	"\x10ShredCellRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x02 \x01(\x04R\x04cell\"q\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\"s\n" +
 	"\x11ShredCellResponse\x12!\n" +
-	"\fkeks_removed\x18\x01 \x01(\rR\vkeksRemoved\x129\n" +
-	"\tforgotten\x18\x02 \x01(\v2\x1b.fxdax.extentd.v1.ForgottenR\tforgotten\"C\n" +
+	"\fkeks_removed\x18\x01 \x01(\rR\vkeksRemoved\x12;\n" +
+	"\tforgotten\x18\x02 \x01(\v2\x1d.cladefs.extentd.v1.ForgottenR\tforgotten\"C\n" +
 	"\x17ForgetTenantKeysRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x10\n" +
-	"\x03why\x18\x02 \x01(\tR\x03why\"U\n" +
-	"\x18ForgetTenantKeysResponse\x129\n" +
-	"\tforgotten\x18\x01 \x01(\v2\x1b.fxdax.extentd.v1.ForgottenR\tforgotten\"}\n" +
+	"\x03why\x18\x02 \x01(\tR\x03why\"W\n" +
+	"\x18ForgetTenantKeysResponse\x12;\n" +
+	"\tforgotten\x18\x01 \x01(\v2\x1d.cladefs.extentd.v1.ForgottenR\tforgotten\"}\n" +
 	"\tForgotten\x12\x16\n" +
 	"\x06stores\x18\x01 \x01(\rR\x06stores\x12\x14\n" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
@@ -3861,197 +3861,197 @@ const file_fxdax_extentd_v1_extentd_proto_rawDesc = "" +
 	"\n" +
 	"VolumeKind\x12\x14\n" +
 	"\x10VOLUME_KIND_FXFS\x10\x00\x12\x16\n" +
-	"\x12VOLUME_KIND_SQLITE\x10\x012\xb7\x12\n" +
-	"\aExtentd\x12Z\n" +
-	"\vCreateStore\x12$.fxdax.extentd.v1.CreateStoreRequest\x1a%.fxdax.extentd.v1.CreateStoreResponse\x12Z\n" +
-	"\vImportImage\x12$.fxdax.extentd.v1.ImportImageRequest\x1a%.fxdax.extentd.v1.ImportImageResponse\x12T\n" +
-	"\tForkStore\x12\".fxdax.extentd.v1.ForkStoreRequest\x1a#.fxdax.extentd.v1.ForkStoreResponse\x12Z\n" +
-	"\vDeleteStore\x12$.fxdax.extentd.v1.DeleteStoreRequest\x1a%.fxdax.extentd.v1.DeleteStoreResponse\x12T\n" +
-	"\tDropStore\x12\".fxdax.extentd.v1.DropStoreRequest\x1a#.fxdax.extentd.v1.DropStoreResponse\x12Z\n" +
-	"\vResizeStore\x12$.fxdax.extentd.v1.ResizeStoreRequest\x1a%.fxdax.extentd.v1.ResizeStoreResponse\x12W\n" +
+	"\x12VOLUME_KIND_SQLITE\x10\x012\x9f\x13\n" +
+	"\aExtentd\x12^\n" +
+	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
+	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +
+	"\tForkStore\x12$.cladefs.extentd.v1.ForkStoreRequest\x1a%.cladefs.extentd.v1.ForkStoreResponse\x12^\n" +
+	"\vDeleteStore\x12&.cladefs.extentd.v1.DeleteStoreRequest\x1a'.cladefs.extentd.v1.DeleteStoreResponse\x12X\n" +
+	"\tDropStore\x12$.cladefs.extentd.v1.DropStoreRequest\x1a%.cladefs.extentd.v1.DropStoreResponse\x12^\n" +
+	"\vResizeStore\x12&.cladefs.extentd.v1.ResizeStoreRequest\x1a'.cladefs.extentd.v1.ResizeStoreResponse\x12[\n" +
 	"\n" +
-	"PlaceStore\x12#.fxdax.extentd.v1.PlaceStoreRequest\x1a$.fxdax.extentd.v1.PlaceStoreResponse\x12W\n" +
+	"PlaceStore\x12%.cladefs.extentd.v1.PlaceStoreRequest\x1a&.cladefs.extentd.v1.PlaceStoreResponse\x12[\n" +
 	"\n" +
-	"MakePublic\x12#.fxdax.extentd.v1.MakePublicRequest\x1a$.fxdax.extentd.v1.MakePublicResponse\x12W\n" +
+	"MakePublic\x12%.cladefs.extentd.v1.MakePublicRequest\x1a&.cladefs.extentd.v1.MakePublicResponse\x12[\n" +
 	"\n" +
-	"SharePoint\x12#.fxdax.extentd.v1.SharePointRequest\x1a$.fxdax.extentd.v1.SharePointResponse\x12W\n" +
+	"SharePoint\x12%.cladefs.extentd.v1.SharePointRequest\x1a&.cladefs.extentd.v1.SharePointResponse\x12[\n" +
 	"\n" +
-	"AttachBase\x12#.fxdax.extentd.v1.AttachBaseRequest\x1a$.fxdax.extentd.v1.AttachBaseResponse\x12T\n" +
-	"\tSyncStore\x12\".fxdax.extentd.v1.SyncStoreRequest\x1a#.fxdax.extentd.v1.SyncStoreResponse\x12T\n" +
-	"\tStatStore\x12\".fxdax.extentd.v1.StatStoreRequest\x1a#.fxdax.extentd.v1.StatStoreResponse\x12W\n" +
+	"AttachBase\x12%.cladefs.extentd.v1.AttachBaseRequest\x1a&.cladefs.extentd.v1.AttachBaseResponse\x12X\n" +
+	"\tSyncStore\x12$.cladefs.extentd.v1.SyncStoreRequest\x1a%.cladefs.extentd.v1.SyncStoreResponse\x12X\n" +
+	"\tStatStore\x12$.cladefs.extentd.v1.StatStoreRequest\x1a%.cladefs.extentd.v1.StatStoreResponse\x12[\n" +
 	"\n" +
-	"ListStores\x12#.fxdax.extentd.v1.ListStoresRequest\x1a$.fxdax.extentd.v1.ListStoresResponse\x12Q\n" +
-	"\bGetStats\x12!.fxdax.extentd.v1.GetStatsRequest\x1a\".fxdax.extentd.v1.GetStatsResponse\x12Z\n" +
-	"\vGetSnapshot\x12$.fxdax.extentd.v1.GetSnapshotRequest\x1a%.fxdax.extentd.v1.GetSnapshotResponse\x12H\n" +
-	"\x05Grant\x12\x1e.fxdax.extentd.v1.GrantRequest\x1a\x1f.fxdax.extentd.v1.GrantResponse\x12K\n" +
-	"\x06Revoke\x12\x1f.fxdax.extentd.v1.RevokeRequest\x1a .fxdax.extentd.v1.RevokeResponse\x12c\n" +
-	"\x0eSetMemoryLimit\x12'.fxdax.extentd.v1.SetMemoryLimitRequest\x1a(.fxdax.extentd.v1.SetMemoryLimitResponse\x12f\n" +
-	"\x0fSetMemoryWeight\x12(.fxdax.extentd.v1.SetMemoryWeightRequest\x1a).fxdax.extentd.v1.SetMemoryWeightResponse\x12`\n" +
-	"\rSetTenantRoom\x12&.fxdax.extentd.v1.SetTenantRoomRequest\x1a'.fxdax.extentd.v1.SetTenantRoomResponse\x12]\n" +
-	"\fShrinkMemory\x12%.fxdax.extentd.v1.ShrinkMemoryRequest\x1a&.fxdax.extentd.v1.ShrinkMemoryResponse\x12]\n" +
-	"\fSetDiskLimit\x12%.fxdax.extentd.v1.SetDiskLimitRequest\x1a&.fxdax.extentd.v1.SetDiskLimitResponse\x12`\n" +
-	"\rGetTenantDisk\x12&.fxdax.extentd.v1.GetTenantDiskRequest\x1a'.fxdax.extentd.v1.GetTenantDiskResponse\x12Q\n" +
-	"\bSetPeers\x12!.fxdax.extentd.v1.SetPeersRequest\x1a\".fxdax.extentd.v1.SetPeersResponse\x12T\n" +
-	"\tShredCell\x12\".fxdax.extentd.v1.ShredCellRequest\x1a#.fxdax.extentd.v1.ShredCellResponse\x12i\n" +
-	"\x10ForgetTenantKeys\x12).fxdax.extentd.v1.ForgetTenantKeysRequest\x1a*.fxdax.extentd.v1.ForgetTenantKeysResponseB5Z3github.com/semistrict/fxdax/go/extentd/v1;extentdv1b\x06proto3"
+	"ListStores\x12%.cladefs.extentd.v1.ListStoresRequest\x1a&.cladefs.extentd.v1.ListStoresResponse\x12U\n" +
+	"\bGetStats\x12#.cladefs.extentd.v1.GetStatsRequest\x1a$.cladefs.extentd.v1.GetStatsResponse\x12^\n" +
+	"\vGetSnapshot\x12&.cladefs.extentd.v1.GetSnapshotRequest\x1a'.cladefs.extentd.v1.GetSnapshotResponse\x12L\n" +
+	"\x05Grant\x12 .cladefs.extentd.v1.GrantRequest\x1a!.cladefs.extentd.v1.GrantResponse\x12O\n" +
+	"\x06Revoke\x12!.cladefs.extentd.v1.RevokeRequest\x1a\".cladefs.extentd.v1.RevokeResponse\x12g\n" +
+	"\x0eSetMemoryLimit\x12).cladefs.extentd.v1.SetMemoryLimitRequest\x1a*.cladefs.extentd.v1.SetMemoryLimitResponse\x12j\n" +
+	"\x0fSetMemoryWeight\x12*.cladefs.extentd.v1.SetMemoryWeightRequest\x1a+.cladefs.extentd.v1.SetMemoryWeightResponse\x12d\n" +
+	"\rSetTenantRoom\x12(.cladefs.extentd.v1.SetTenantRoomRequest\x1a).cladefs.extentd.v1.SetTenantRoomResponse\x12a\n" +
+	"\fShrinkMemory\x12'.cladefs.extentd.v1.ShrinkMemoryRequest\x1a(.cladefs.extentd.v1.ShrinkMemoryResponse\x12a\n" +
+	"\fSetDiskLimit\x12'.cladefs.extentd.v1.SetDiskLimitRequest\x1a(.cladefs.extentd.v1.SetDiskLimitResponse\x12d\n" +
+	"\rGetTenantDisk\x12(.cladefs.extentd.v1.GetTenantDiskRequest\x1a).cladefs.extentd.v1.GetTenantDiskResponse\x12U\n" +
+	"\bSetPeers\x12#.cladefs.extentd.v1.SetPeersRequest\x1a$.cladefs.extentd.v1.SetPeersResponse\x12X\n" +
+	"\tShredCell\x12$.cladefs.extentd.v1.ShredCellRequest\x1a%.cladefs.extentd.v1.ShredCellResponse\x12m\n" +
+	"\x10ForgetTenantKeys\x12+.cladefs.extentd.v1.ForgetTenantKeysRequest\x1a,.cladefs.extentd.v1.ForgetTenantKeysResponseB7Z5github.com/semistrict/cladefs/go/extentd/v1;extentdv1b\x06proto3"
 
 var (
-	file_fxdax_extentd_v1_extentd_proto_rawDescOnce sync.Once
-	file_fxdax_extentd_v1_extentd_proto_rawDescData []byte
+	file_cladefs_extentd_v1_extentd_proto_rawDescOnce sync.Once
+	file_cladefs_extentd_v1_extentd_proto_rawDescData []byte
 )
 
-func file_fxdax_extentd_v1_extentd_proto_rawDescGZIP() []byte {
-	file_fxdax_extentd_v1_extentd_proto_rawDescOnce.Do(func() {
-		file_fxdax_extentd_v1_extentd_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fxdax_extentd_v1_extentd_proto_rawDesc), len(file_fxdax_extentd_v1_extentd_proto_rawDesc)))
+func file_cladefs_extentd_v1_extentd_proto_rawDescGZIP() []byte {
+	file_cladefs_extentd_v1_extentd_proto_rawDescOnce.Do(func() {
+		file_cladefs_extentd_v1_extentd_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_cladefs_extentd_v1_extentd_proto_rawDesc), len(file_cladefs_extentd_v1_extentd_proto_rawDesc)))
 	})
-	return file_fxdax_extentd_v1_extentd_proto_rawDescData
+	return file_cladefs_extentd_v1_extentd_proto_rawDescData
 }
 
-var file_fxdax_extentd_v1_extentd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_fxdax_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
-var file_fxdax_extentd_v1_extentd_proto_goTypes = []any{
-	(VolumeKind)(0),                  // 0: fxdax.extentd.v1.VolumeKind
-	(*CreateStoreRequest)(nil),       // 1: fxdax.extentd.v1.CreateStoreRequest
-	(*CreateStoreResponse)(nil),      // 2: fxdax.extentd.v1.CreateStoreResponse
-	(*ImportImageRequest)(nil),       // 3: fxdax.extentd.v1.ImportImageRequest
-	(*ImportImageResponse)(nil),      // 4: fxdax.extentd.v1.ImportImageResponse
-	(*ForkStoreRequest)(nil),         // 5: fxdax.extentd.v1.ForkStoreRequest
-	(*ForkStoreResponse)(nil),        // 6: fxdax.extentd.v1.ForkStoreResponse
-	(*DeleteStoreRequest)(nil),       // 7: fxdax.extentd.v1.DeleteStoreRequest
-	(*DeleteStoreResponse)(nil),      // 8: fxdax.extentd.v1.DeleteStoreResponse
-	(*DropStoreRequest)(nil),         // 9: fxdax.extentd.v1.DropStoreRequest
-	(*DropStoreResponse)(nil),        // 10: fxdax.extentd.v1.DropStoreResponse
-	(*ResizeStoreRequest)(nil),       // 11: fxdax.extentd.v1.ResizeStoreRequest
-	(*ResizeStoreResponse)(nil),      // 12: fxdax.extentd.v1.ResizeStoreResponse
-	(*PlaceStoreRequest)(nil),        // 13: fxdax.extentd.v1.PlaceStoreRequest
-	(*PlaceStoreResponse)(nil),       // 14: fxdax.extentd.v1.PlaceStoreResponse
-	(*SharePointRequest)(nil),        // 15: fxdax.extentd.v1.SharePointRequest
-	(*SharePointResponse)(nil),       // 16: fxdax.extentd.v1.SharePointResponse
-	(*MakePublicRequest)(nil),        // 17: fxdax.extentd.v1.MakePublicRequest
-	(*MakePublicResponse)(nil),       // 18: fxdax.extentd.v1.MakePublicResponse
-	(*AttachBaseRequest)(nil),        // 19: fxdax.extentd.v1.AttachBaseRequest
-	(*AttachBaseResponse)(nil),       // 20: fxdax.extentd.v1.AttachBaseResponse
-	(*SyncStoreRequest)(nil),         // 21: fxdax.extentd.v1.SyncStoreRequest
-	(*SyncStoreResponse)(nil),        // 22: fxdax.extentd.v1.SyncStoreResponse
-	(*StatStoreRequest)(nil),         // 23: fxdax.extentd.v1.StatStoreRequest
-	(*StatStoreResponse)(nil),        // 24: fxdax.extentd.v1.StatStoreResponse
-	(*ListStoresRequest)(nil),        // 25: fxdax.extentd.v1.ListStoresRequest
-	(*ListStoresResponse)(nil),       // 26: fxdax.extentd.v1.ListStoresResponse
-	(*ListedStore)(nil),              // 27: fxdax.extentd.v1.ListedStore
-	(*GetStatsRequest)(nil),          // 28: fxdax.extentd.v1.GetStatsRequest
-	(*GetStatsResponse)(nil),         // 29: fxdax.extentd.v1.GetStatsResponse
-	(*GetSnapshotRequest)(nil),       // 30: fxdax.extentd.v1.GetSnapshotRequest
-	(*GetSnapshotResponse)(nil),      // 31: fxdax.extentd.v1.GetSnapshotResponse
-	(*VmSnapshot)(nil),               // 32: fxdax.extentd.v1.VmSnapshot
-	(*GuestSnapshot)(nil),            // 33: fxdax.extentd.v1.GuestSnapshot
-	(*Histogram)(nil),                // 34: fxdax.extentd.v1.Histogram
-	(*ObjectStorageStats)(nil),       // 35: fxdax.extentd.v1.ObjectStorageStats
-	(*GrantRequest)(nil),             // 36: fxdax.extentd.v1.GrantRequest
-	(*GrantResponse)(nil),            // 37: fxdax.extentd.v1.GrantResponse
-	(*RevokeRequest)(nil),            // 38: fxdax.extentd.v1.RevokeRequest
-	(*RevokeResponse)(nil),           // 39: fxdax.extentd.v1.RevokeResponse
-	(*SetMemoryLimitRequest)(nil),    // 40: fxdax.extentd.v1.SetMemoryLimitRequest
-	(*SetMemoryLimitResponse)(nil),   // 41: fxdax.extentd.v1.SetMemoryLimitResponse
-	(*SetMemoryWeightRequest)(nil),   // 42: fxdax.extentd.v1.SetMemoryWeightRequest
-	(*SetMemoryWeightResponse)(nil),  // 43: fxdax.extentd.v1.SetMemoryWeightResponse
-	(*SetTenantRoomRequest)(nil),     // 44: fxdax.extentd.v1.SetTenantRoomRequest
-	(*SetTenantRoomResponse)(nil),    // 45: fxdax.extentd.v1.SetTenantRoomResponse
-	(*ShrinkMemoryRequest)(nil),      // 46: fxdax.extentd.v1.ShrinkMemoryRequest
-	(*ShrinkMemoryResponse)(nil),     // 47: fxdax.extentd.v1.ShrinkMemoryResponse
-	(*SetDiskLimitRequest)(nil),      // 48: fxdax.extentd.v1.SetDiskLimitRequest
-	(*SetDiskLimitResponse)(nil),     // 49: fxdax.extentd.v1.SetDiskLimitResponse
-	(*SetPeersRequest)(nil),          // 50: fxdax.extentd.v1.SetPeersRequest
-	(*SetPeersResponse)(nil),         // 51: fxdax.extentd.v1.SetPeersResponse
-	(*GetTenantDiskRequest)(nil),     // 52: fxdax.extentd.v1.GetTenantDiskRequest
-	(*GetTenantDiskResponse)(nil),    // 53: fxdax.extentd.v1.GetTenantDiskResponse
-	(*ShredCellRequest)(nil),         // 54: fxdax.extentd.v1.ShredCellRequest
-	(*ShredCellResponse)(nil),        // 55: fxdax.extentd.v1.ShredCellResponse
-	(*ForgetTenantKeysRequest)(nil),  // 56: fxdax.extentd.v1.ForgetTenantKeysRequest
-	(*ForgetTenantKeysResponse)(nil), // 57: fxdax.extentd.v1.ForgetTenantKeysResponse
-	(*Forgotten)(nil),                // 58: fxdax.extentd.v1.Forgotten
-	nil,                              // 59: fxdax.extentd.v1.GetSnapshotResponse.CountersEntry
-	nil,                              // 60: fxdax.extentd.v1.GetSnapshotResponse.GaugesEntry
-	nil,                              // 61: fxdax.extentd.v1.VmSnapshot.CountersEntry
-	nil,                              // 62: fxdax.extentd.v1.VmSnapshot.GaugesEntry
-	nil,                              // 63: fxdax.extentd.v1.VmSnapshot.WindowEntry
-	nil,                              // 64: fxdax.extentd.v1.GuestSnapshot.CountersEntry
-	nil,                              // 65: fxdax.extentd.v1.GuestSnapshot.HistogramsEntry
-	nil,                              // 66: fxdax.extentd.v1.ObjectStorageStats.RequestsEntry
-	nil,                              // 67: fxdax.extentd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                              // 68: fxdax.extentd.v1.ObjectStorageStats.FailuresEntry
+var file_cladefs_extentd_v1_extentd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_cladefs_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
+var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
+	(VolumeKind)(0),                  // 0: cladefs.extentd.v1.VolumeKind
+	(*CreateStoreRequest)(nil),       // 1: cladefs.extentd.v1.CreateStoreRequest
+	(*CreateStoreResponse)(nil),      // 2: cladefs.extentd.v1.CreateStoreResponse
+	(*ImportImageRequest)(nil),       // 3: cladefs.extentd.v1.ImportImageRequest
+	(*ImportImageResponse)(nil),      // 4: cladefs.extentd.v1.ImportImageResponse
+	(*ForkStoreRequest)(nil),         // 5: cladefs.extentd.v1.ForkStoreRequest
+	(*ForkStoreResponse)(nil),        // 6: cladefs.extentd.v1.ForkStoreResponse
+	(*DeleteStoreRequest)(nil),       // 7: cladefs.extentd.v1.DeleteStoreRequest
+	(*DeleteStoreResponse)(nil),      // 8: cladefs.extentd.v1.DeleteStoreResponse
+	(*DropStoreRequest)(nil),         // 9: cladefs.extentd.v1.DropStoreRequest
+	(*DropStoreResponse)(nil),        // 10: cladefs.extentd.v1.DropStoreResponse
+	(*ResizeStoreRequest)(nil),       // 11: cladefs.extentd.v1.ResizeStoreRequest
+	(*ResizeStoreResponse)(nil),      // 12: cladefs.extentd.v1.ResizeStoreResponse
+	(*PlaceStoreRequest)(nil),        // 13: cladefs.extentd.v1.PlaceStoreRequest
+	(*PlaceStoreResponse)(nil),       // 14: cladefs.extentd.v1.PlaceStoreResponse
+	(*SharePointRequest)(nil),        // 15: cladefs.extentd.v1.SharePointRequest
+	(*SharePointResponse)(nil),       // 16: cladefs.extentd.v1.SharePointResponse
+	(*MakePublicRequest)(nil),        // 17: cladefs.extentd.v1.MakePublicRequest
+	(*MakePublicResponse)(nil),       // 18: cladefs.extentd.v1.MakePublicResponse
+	(*AttachBaseRequest)(nil),        // 19: cladefs.extentd.v1.AttachBaseRequest
+	(*AttachBaseResponse)(nil),       // 20: cladefs.extentd.v1.AttachBaseResponse
+	(*SyncStoreRequest)(nil),         // 21: cladefs.extentd.v1.SyncStoreRequest
+	(*SyncStoreResponse)(nil),        // 22: cladefs.extentd.v1.SyncStoreResponse
+	(*StatStoreRequest)(nil),         // 23: cladefs.extentd.v1.StatStoreRequest
+	(*StatStoreResponse)(nil),        // 24: cladefs.extentd.v1.StatStoreResponse
+	(*ListStoresRequest)(nil),        // 25: cladefs.extentd.v1.ListStoresRequest
+	(*ListStoresResponse)(nil),       // 26: cladefs.extentd.v1.ListStoresResponse
+	(*ListedStore)(nil),              // 27: cladefs.extentd.v1.ListedStore
+	(*GetStatsRequest)(nil),          // 28: cladefs.extentd.v1.GetStatsRequest
+	(*GetStatsResponse)(nil),         // 29: cladefs.extentd.v1.GetStatsResponse
+	(*GetSnapshotRequest)(nil),       // 30: cladefs.extentd.v1.GetSnapshotRequest
+	(*GetSnapshotResponse)(nil),      // 31: cladefs.extentd.v1.GetSnapshotResponse
+	(*VmSnapshot)(nil),               // 32: cladefs.extentd.v1.VmSnapshot
+	(*GuestSnapshot)(nil),            // 33: cladefs.extentd.v1.GuestSnapshot
+	(*Histogram)(nil),                // 34: cladefs.extentd.v1.Histogram
+	(*ObjectStorageStats)(nil),       // 35: cladefs.extentd.v1.ObjectStorageStats
+	(*GrantRequest)(nil),             // 36: cladefs.extentd.v1.GrantRequest
+	(*GrantResponse)(nil),            // 37: cladefs.extentd.v1.GrantResponse
+	(*RevokeRequest)(nil),            // 38: cladefs.extentd.v1.RevokeRequest
+	(*RevokeResponse)(nil),           // 39: cladefs.extentd.v1.RevokeResponse
+	(*SetMemoryLimitRequest)(nil),    // 40: cladefs.extentd.v1.SetMemoryLimitRequest
+	(*SetMemoryLimitResponse)(nil),   // 41: cladefs.extentd.v1.SetMemoryLimitResponse
+	(*SetMemoryWeightRequest)(nil),   // 42: cladefs.extentd.v1.SetMemoryWeightRequest
+	(*SetMemoryWeightResponse)(nil),  // 43: cladefs.extentd.v1.SetMemoryWeightResponse
+	(*SetTenantRoomRequest)(nil),     // 44: cladefs.extentd.v1.SetTenantRoomRequest
+	(*SetTenantRoomResponse)(nil),    // 45: cladefs.extentd.v1.SetTenantRoomResponse
+	(*ShrinkMemoryRequest)(nil),      // 46: cladefs.extentd.v1.ShrinkMemoryRequest
+	(*ShrinkMemoryResponse)(nil),     // 47: cladefs.extentd.v1.ShrinkMemoryResponse
+	(*SetDiskLimitRequest)(nil),      // 48: cladefs.extentd.v1.SetDiskLimitRequest
+	(*SetDiskLimitResponse)(nil),     // 49: cladefs.extentd.v1.SetDiskLimitResponse
+	(*SetPeersRequest)(nil),          // 50: cladefs.extentd.v1.SetPeersRequest
+	(*SetPeersResponse)(nil),         // 51: cladefs.extentd.v1.SetPeersResponse
+	(*GetTenantDiskRequest)(nil),     // 52: cladefs.extentd.v1.GetTenantDiskRequest
+	(*GetTenantDiskResponse)(nil),    // 53: cladefs.extentd.v1.GetTenantDiskResponse
+	(*ShredCellRequest)(nil),         // 54: cladefs.extentd.v1.ShredCellRequest
+	(*ShredCellResponse)(nil),        // 55: cladefs.extentd.v1.ShredCellResponse
+	(*ForgetTenantKeysRequest)(nil),  // 56: cladefs.extentd.v1.ForgetTenantKeysRequest
+	(*ForgetTenantKeysResponse)(nil), // 57: cladefs.extentd.v1.ForgetTenantKeysResponse
+	(*Forgotten)(nil),                // 58: cladefs.extentd.v1.Forgotten
+	nil,                              // 59: cladefs.extentd.v1.GetSnapshotResponse.CountersEntry
+	nil,                              // 60: cladefs.extentd.v1.GetSnapshotResponse.GaugesEntry
+	nil,                              // 61: cladefs.extentd.v1.VmSnapshot.CountersEntry
+	nil,                              // 62: cladefs.extentd.v1.VmSnapshot.GaugesEntry
+	nil,                              // 63: cladefs.extentd.v1.VmSnapshot.WindowEntry
+	nil,                              // 64: cladefs.extentd.v1.GuestSnapshot.CountersEntry
+	nil,                              // 65: cladefs.extentd.v1.GuestSnapshot.HistogramsEntry
+	nil,                              // 66: cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
+	nil,                              // 67: cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                              // 68: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
 }
-var file_fxdax_extentd_v1_extentd_proto_depIdxs = []int32{
-	0,  // 0: fxdax.extentd.v1.CreateStoreRequest.kind:type_name -> fxdax.extentd.v1.VolumeKind
-	27, // 1: fxdax.extentd.v1.ListStoresResponse.stores:type_name -> fxdax.extentd.v1.ListedStore
-	24, // 2: fxdax.extentd.v1.ListedStore.stat:type_name -> fxdax.extentd.v1.StatStoreResponse
-	35, // 3: fxdax.extentd.v1.GetStatsResponse.object_storage:type_name -> fxdax.extentd.v1.ObjectStorageStats
-	59, // 4: fxdax.extentd.v1.GetSnapshotResponse.counters:type_name -> fxdax.extentd.v1.GetSnapshotResponse.CountersEntry
-	60, // 5: fxdax.extentd.v1.GetSnapshotResponse.gauges:type_name -> fxdax.extentd.v1.GetSnapshotResponse.GaugesEntry
-	32, // 6: fxdax.extentd.v1.GetSnapshotResponse.vms:type_name -> fxdax.extentd.v1.VmSnapshot
-	61, // 7: fxdax.extentd.v1.VmSnapshot.counters:type_name -> fxdax.extentd.v1.VmSnapshot.CountersEntry
-	62, // 8: fxdax.extentd.v1.VmSnapshot.gauges:type_name -> fxdax.extentd.v1.VmSnapshot.GaugesEntry
-	63, // 9: fxdax.extentd.v1.VmSnapshot.window:type_name -> fxdax.extentd.v1.VmSnapshot.WindowEntry
-	33, // 10: fxdax.extentd.v1.VmSnapshot.guest:type_name -> fxdax.extentd.v1.GuestSnapshot
-	64, // 11: fxdax.extentd.v1.GuestSnapshot.counters:type_name -> fxdax.extentd.v1.GuestSnapshot.CountersEntry
-	65, // 12: fxdax.extentd.v1.GuestSnapshot.histograms:type_name -> fxdax.extentd.v1.GuestSnapshot.HistogramsEntry
-	66, // 13: fxdax.extentd.v1.ObjectStorageStats.requests:type_name -> fxdax.extentd.v1.ObjectStorageStats.RequestsEntry
-	67, // 14: fxdax.extentd.v1.ObjectStorageStats.uploaded_bytes:type_name -> fxdax.extentd.v1.ObjectStorageStats.UploadedBytesEntry
-	68, // 15: fxdax.extentd.v1.ObjectStorageStats.failures:type_name -> fxdax.extentd.v1.ObjectStorageStats.FailuresEntry
-	58, // 16: fxdax.extentd.v1.ShredCellResponse.forgotten:type_name -> fxdax.extentd.v1.Forgotten
-	58, // 17: fxdax.extentd.v1.ForgetTenantKeysResponse.forgotten:type_name -> fxdax.extentd.v1.Forgotten
-	34, // 18: fxdax.extentd.v1.GuestSnapshot.HistogramsEntry.value:type_name -> fxdax.extentd.v1.Histogram
-	1,  // 19: fxdax.extentd.v1.Extentd.CreateStore:input_type -> fxdax.extentd.v1.CreateStoreRequest
-	3,  // 20: fxdax.extentd.v1.Extentd.ImportImage:input_type -> fxdax.extentd.v1.ImportImageRequest
-	5,  // 21: fxdax.extentd.v1.Extentd.ForkStore:input_type -> fxdax.extentd.v1.ForkStoreRequest
-	7,  // 22: fxdax.extentd.v1.Extentd.DeleteStore:input_type -> fxdax.extentd.v1.DeleteStoreRequest
-	9,  // 23: fxdax.extentd.v1.Extentd.DropStore:input_type -> fxdax.extentd.v1.DropStoreRequest
-	11, // 24: fxdax.extentd.v1.Extentd.ResizeStore:input_type -> fxdax.extentd.v1.ResizeStoreRequest
-	13, // 25: fxdax.extentd.v1.Extentd.PlaceStore:input_type -> fxdax.extentd.v1.PlaceStoreRequest
-	17, // 26: fxdax.extentd.v1.Extentd.MakePublic:input_type -> fxdax.extentd.v1.MakePublicRequest
-	15, // 27: fxdax.extentd.v1.Extentd.SharePoint:input_type -> fxdax.extentd.v1.SharePointRequest
-	19, // 28: fxdax.extentd.v1.Extentd.AttachBase:input_type -> fxdax.extentd.v1.AttachBaseRequest
-	21, // 29: fxdax.extentd.v1.Extentd.SyncStore:input_type -> fxdax.extentd.v1.SyncStoreRequest
-	23, // 30: fxdax.extentd.v1.Extentd.StatStore:input_type -> fxdax.extentd.v1.StatStoreRequest
-	25, // 31: fxdax.extentd.v1.Extentd.ListStores:input_type -> fxdax.extentd.v1.ListStoresRequest
-	28, // 32: fxdax.extentd.v1.Extentd.GetStats:input_type -> fxdax.extentd.v1.GetStatsRequest
-	30, // 33: fxdax.extentd.v1.Extentd.GetSnapshot:input_type -> fxdax.extentd.v1.GetSnapshotRequest
-	36, // 34: fxdax.extentd.v1.Extentd.Grant:input_type -> fxdax.extentd.v1.GrantRequest
-	38, // 35: fxdax.extentd.v1.Extentd.Revoke:input_type -> fxdax.extentd.v1.RevokeRequest
-	40, // 36: fxdax.extentd.v1.Extentd.SetMemoryLimit:input_type -> fxdax.extentd.v1.SetMemoryLimitRequest
-	42, // 37: fxdax.extentd.v1.Extentd.SetMemoryWeight:input_type -> fxdax.extentd.v1.SetMemoryWeightRequest
-	44, // 38: fxdax.extentd.v1.Extentd.SetTenantRoom:input_type -> fxdax.extentd.v1.SetTenantRoomRequest
-	46, // 39: fxdax.extentd.v1.Extentd.ShrinkMemory:input_type -> fxdax.extentd.v1.ShrinkMemoryRequest
-	48, // 40: fxdax.extentd.v1.Extentd.SetDiskLimit:input_type -> fxdax.extentd.v1.SetDiskLimitRequest
-	52, // 41: fxdax.extentd.v1.Extentd.GetTenantDisk:input_type -> fxdax.extentd.v1.GetTenantDiskRequest
-	50, // 42: fxdax.extentd.v1.Extentd.SetPeers:input_type -> fxdax.extentd.v1.SetPeersRequest
-	54, // 43: fxdax.extentd.v1.Extentd.ShredCell:input_type -> fxdax.extentd.v1.ShredCellRequest
-	56, // 44: fxdax.extentd.v1.Extentd.ForgetTenantKeys:input_type -> fxdax.extentd.v1.ForgetTenantKeysRequest
-	2,  // 45: fxdax.extentd.v1.Extentd.CreateStore:output_type -> fxdax.extentd.v1.CreateStoreResponse
-	4,  // 46: fxdax.extentd.v1.Extentd.ImportImage:output_type -> fxdax.extentd.v1.ImportImageResponse
-	6,  // 47: fxdax.extentd.v1.Extentd.ForkStore:output_type -> fxdax.extentd.v1.ForkStoreResponse
-	8,  // 48: fxdax.extentd.v1.Extentd.DeleteStore:output_type -> fxdax.extentd.v1.DeleteStoreResponse
-	10, // 49: fxdax.extentd.v1.Extentd.DropStore:output_type -> fxdax.extentd.v1.DropStoreResponse
-	12, // 50: fxdax.extentd.v1.Extentd.ResizeStore:output_type -> fxdax.extentd.v1.ResizeStoreResponse
-	14, // 51: fxdax.extentd.v1.Extentd.PlaceStore:output_type -> fxdax.extentd.v1.PlaceStoreResponse
-	18, // 52: fxdax.extentd.v1.Extentd.MakePublic:output_type -> fxdax.extentd.v1.MakePublicResponse
-	16, // 53: fxdax.extentd.v1.Extentd.SharePoint:output_type -> fxdax.extentd.v1.SharePointResponse
-	20, // 54: fxdax.extentd.v1.Extentd.AttachBase:output_type -> fxdax.extentd.v1.AttachBaseResponse
-	22, // 55: fxdax.extentd.v1.Extentd.SyncStore:output_type -> fxdax.extentd.v1.SyncStoreResponse
-	24, // 56: fxdax.extentd.v1.Extentd.StatStore:output_type -> fxdax.extentd.v1.StatStoreResponse
-	26, // 57: fxdax.extentd.v1.Extentd.ListStores:output_type -> fxdax.extentd.v1.ListStoresResponse
-	29, // 58: fxdax.extentd.v1.Extentd.GetStats:output_type -> fxdax.extentd.v1.GetStatsResponse
-	31, // 59: fxdax.extentd.v1.Extentd.GetSnapshot:output_type -> fxdax.extentd.v1.GetSnapshotResponse
-	37, // 60: fxdax.extentd.v1.Extentd.Grant:output_type -> fxdax.extentd.v1.GrantResponse
-	39, // 61: fxdax.extentd.v1.Extentd.Revoke:output_type -> fxdax.extentd.v1.RevokeResponse
-	41, // 62: fxdax.extentd.v1.Extentd.SetMemoryLimit:output_type -> fxdax.extentd.v1.SetMemoryLimitResponse
-	43, // 63: fxdax.extentd.v1.Extentd.SetMemoryWeight:output_type -> fxdax.extentd.v1.SetMemoryWeightResponse
-	45, // 64: fxdax.extentd.v1.Extentd.SetTenantRoom:output_type -> fxdax.extentd.v1.SetTenantRoomResponse
-	47, // 65: fxdax.extentd.v1.Extentd.ShrinkMemory:output_type -> fxdax.extentd.v1.ShrinkMemoryResponse
-	49, // 66: fxdax.extentd.v1.Extentd.SetDiskLimit:output_type -> fxdax.extentd.v1.SetDiskLimitResponse
-	53, // 67: fxdax.extentd.v1.Extentd.GetTenantDisk:output_type -> fxdax.extentd.v1.GetTenantDiskResponse
-	51, // 68: fxdax.extentd.v1.Extentd.SetPeers:output_type -> fxdax.extentd.v1.SetPeersResponse
-	55, // 69: fxdax.extentd.v1.Extentd.ShredCell:output_type -> fxdax.extentd.v1.ShredCellResponse
-	57, // 70: fxdax.extentd.v1.Extentd.ForgetTenantKeys:output_type -> fxdax.extentd.v1.ForgetTenantKeysResponse
+var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
+	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VolumeKind
+	27, // 1: cladefs.extentd.v1.ListStoresResponse.stores:type_name -> cladefs.extentd.v1.ListedStore
+	24, // 2: cladefs.extentd.v1.ListedStore.stat:type_name -> cladefs.extentd.v1.StatStoreResponse
+	35, // 3: cladefs.extentd.v1.GetStatsResponse.object_storage:type_name -> cladefs.extentd.v1.ObjectStorageStats
+	59, // 4: cladefs.extentd.v1.GetSnapshotResponse.counters:type_name -> cladefs.extentd.v1.GetSnapshotResponse.CountersEntry
+	60, // 5: cladefs.extentd.v1.GetSnapshotResponse.gauges:type_name -> cladefs.extentd.v1.GetSnapshotResponse.GaugesEntry
+	32, // 6: cladefs.extentd.v1.GetSnapshotResponse.vms:type_name -> cladefs.extentd.v1.VmSnapshot
+	61, // 7: cladefs.extentd.v1.VmSnapshot.counters:type_name -> cladefs.extentd.v1.VmSnapshot.CountersEntry
+	62, // 8: cladefs.extentd.v1.VmSnapshot.gauges:type_name -> cladefs.extentd.v1.VmSnapshot.GaugesEntry
+	63, // 9: cladefs.extentd.v1.VmSnapshot.window:type_name -> cladefs.extentd.v1.VmSnapshot.WindowEntry
+	33, // 10: cladefs.extentd.v1.VmSnapshot.guest:type_name -> cladefs.extentd.v1.GuestSnapshot
+	64, // 11: cladefs.extentd.v1.GuestSnapshot.counters:type_name -> cladefs.extentd.v1.GuestSnapshot.CountersEntry
+	65, // 12: cladefs.extentd.v1.GuestSnapshot.histograms:type_name -> cladefs.extentd.v1.GuestSnapshot.HistogramsEntry
+	66, // 13: cladefs.extentd.v1.ObjectStorageStats.requests:type_name -> cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
+	67, // 14: cladefs.extentd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
+	68, // 15: cladefs.extentd.v1.ObjectStorageStats.failures:type_name -> cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
+	58, // 16: cladefs.extentd.v1.ShredCellResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
+	58, // 17: cladefs.extentd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
+	34, // 18: cladefs.extentd.v1.GuestSnapshot.HistogramsEntry.value:type_name -> cladefs.extentd.v1.Histogram
+	1,  // 19: cladefs.extentd.v1.Extentd.CreateStore:input_type -> cladefs.extentd.v1.CreateStoreRequest
+	3,  // 20: cladefs.extentd.v1.Extentd.ImportImage:input_type -> cladefs.extentd.v1.ImportImageRequest
+	5,  // 21: cladefs.extentd.v1.Extentd.ForkStore:input_type -> cladefs.extentd.v1.ForkStoreRequest
+	7,  // 22: cladefs.extentd.v1.Extentd.DeleteStore:input_type -> cladefs.extentd.v1.DeleteStoreRequest
+	9,  // 23: cladefs.extentd.v1.Extentd.DropStore:input_type -> cladefs.extentd.v1.DropStoreRequest
+	11, // 24: cladefs.extentd.v1.Extentd.ResizeStore:input_type -> cladefs.extentd.v1.ResizeStoreRequest
+	13, // 25: cladefs.extentd.v1.Extentd.PlaceStore:input_type -> cladefs.extentd.v1.PlaceStoreRequest
+	17, // 26: cladefs.extentd.v1.Extentd.MakePublic:input_type -> cladefs.extentd.v1.MakePublicRequest
+	15, // 27: cladefs.extentd.v1.Extentd.SharePoint:input_type -> cladefs.extentd.v1.SharePointRequest
+	19, // 28: cladefs.extentd.v1.Extentd.AttachBase:input_type -> cladefs.extentd.v1.AttachBaseRequest
+	21, // 29: cladefs.extentd.v1.Extentd.SyncStore:input_type -> cladefs.extentd.v1.SyncStoreRequest
+	23, // 30: cladefs.extentd.v1.Extentd.StatStore:input_type -> cladefs.extentd.v1.StatStoreRequest
+	25, // 31: cladefs.extentd.v1.Extentd.ListStores:input_type -> cladefs.extentd.v1.ListStoresRequest
+	28, // 32: cladefs.extentd.v1.Extentd.GetStats:input_type -> cladefs.extentd.v1.GetStatsRequest
+	30, // 33: cladefs.extentd.v1.Extentd.GetSnapshot:input_type -> cladefs.extentd.v1.GetSnapshotRequest
+	36, // 34: cladefs.extentd.v1.Extentd.Grant:input_type -> cladefs.extentd.v1.GrantRequest
+	38, // 35: cladefs.extentd.v1.Extentd.Revoke:input_type -> cladefs.extentd.v1.RevokeRequest
+	40, // 36: cladefs.extentd.v1.Extentd.SetMemoryLimit:input_type -> cladefs.extentd.v1.SetMemoryLimitRequest
+	42, // 37: cladefs.extentd.v1.Extentd.SetMemoryWeight:input_type -> cladefs.extentd.v1.SetMemoryWeightRequest
+	44, // 38: cladefs.extentd.v1.Extentd.SetTenantRoom:input_type -> cladefs.extentd.v1.SetTenantRoomRequest
+	46, // 39: cladefs.extentd.v1.Extentd.ShrinkMemory:input_type -> cladefs.extentd.v1.ShrinkMemoryRequest
+	48, // 40: cladefs.extentd.v1.Extentd.SetDiskLimit:input_type -> cladefs.extentd.v1.SetDiskLimitRequest
+	52, // 41: cladefs.extentd.v1.Extentd.GetTenantDisk:input_type -> cladefs.extentd.v1.GetTenantDiskRequest
+	50, // 42: cladefs.extentd.v1.Extentd.SetPeers:input_type -> cladefs.extentd.v1.SetPeersRequest
+	54, // 43: cladefs.extentd.v1.Extentd.ShredCell:input_type -> cladefs.extentd.v1.ShredCellRequest
+	56, // 44: cladefs.extentd.v1.Extentd.ForgetTenantKeys:input_type -> cladefs.extentd.v1.ForgetTenantKeysRequest
+	2,  // 45: cladefs.extentd.v1.Extentd.CreateStore:output_type -> cladefs.extentd.v1.CreateStoreResponse
+	4,  // 46: cladefs.extentd.v1.Extentd.ImportImage:output_type -> cladefs.extentd.v1.ImportImageResponse
+	6,  // 47: cladefs.extentd.v1.Extentd.ForkStore:output_type -> cladefs.extentd.v1.ForkStoreResponse
+	8,  // 48: cladefs.extentd.v1.Extentd.DeleteStore:output_type -> cladefs.extentd.v1.DeleteStoreResponse
+	10, // 49: cladefs.extentd.v1.Extentd.DropStore:output_type -> cladefs.extentd.v1.DropStoreResponse
+	12, // 50: cladefs.extentd.v1.Extentd.ResizeStore:output_type -> cladefs.extentd.v1.ResizeStoreResponse
+	14, // 51: cladefs.extentd.v1.Extentd.PlaceStore:output_type -> cladefs.extentd.v1.PlaceStoreResponse
+	18, // 52: cladefs.extentd.v1.Extentd.MakePublic:output_type -> cladefs.extentd.v1.MakePublicResponse
+	16, // 53: cladefs.extentd.v1.Extentd.SharePoint:output_type -> cladefs.extentd.v1.SharePointResponse
+	20, // 54: cladefs.extentd.v1.Extentd.AttachBase:output_type -> cladefs.extentd.v1.AttachBaseResponse
+	22, // 55: cladefs.extentd.v1.Extentd.SyncStore:output_type -> cladefs.extentd.v1.SyncStoreResponse
+	24, // 56: cladefs.extentd.v1.Extentd.StatStore:output_type -> cladefs.extentd.v1.StatStoreResponse
+	26, // 57: cladefs.extentd.v1.Extentd.ListStores:output_type -> cladefs.extentd.v1.ListStoresResponse
+	29, // 58: cladefs.extentd.v1.Extentd.GetStats:output_type -> cladefs.extentd.v1.GetStatsResponse
+	31, // 59: cladefs.extentd.v1.Extentd.GetSnapshot:output_type -> cladefs.extentd.v1.GetSnapshotResponse
+	37, // 60: cladefs.extentd.v1.Extentd.Grant:output_type -> cladefs.extentd.v1.GrantResponse
+	39, // 61: cladefs.extentd.v1.Extentd.Revoke:output_type -> cladefs.extentd.v1.RevokeResponse
+	41, // 62: cladefs.extentd.v1.Extentd.SetMemoryLimit:output_type -> cladefs.extentd.v1.SetMemoryLimitResponse
+	43, // 63: cladefs.extentd.v1.Extentd.SetMemoryWeight:output_type -> cladefs.extentd.v1.SetMemoryWeightResponse
+	45, // 64: cladefs.extentd.v1.Extentd.SetTenantRoom:output_type -> cladefs.extentd.v1.SetTenantRoomResponse
+	47, // 65: cladefs.extentd.v1.Extentd.ShrinkMemory:output_type -> cladefs.extentd.v1.ShrinkMemoryResponse
+	49, // 66: cladefs.extentd.v1.Extentd.SetDiskLimit:output_type -> cladefs.extentd.v1.SetDiskLimitResponse
+	53, // 67: cladefs.extentd.v1.Extentd.GetTenantDisk:output_type -> cladefs.extentd.v1.GetTenantDiskResponse
+	51, // 68: cladefs.extentd.v1.Extentd.SetPeers:output_type -> cladefs.extentd.v1.SetPeersResponse
+	55, // 69: cladefs.extentd.v1.Extentd.ShredCell:output_type -> cladefs.extentd.v1.ShredCellResponse
+	57, // 70: cladefs.extentd.v1.Extentd.ForgetTenantKeys:output_type -> cladefs.extentd.v1.ForgetTenantKeysResponse
 	45, // [45:71] is the sub-list for method output_type
 	19, // [19:45] is the sub-list for method input_type
 	19, // [19:19] is the sub-list for extension type_name
@@ -4059,35 +4059,35 @@ var file_fxdax_extentd_v1_extentd_proto_depIdxs = []int32{
 	0,  // [0:19] is the sub-list for field type_name
 }
 
-func init() { file_fxdax_extentd_v1_extentd_proto_init() }
-func file_fxdax_extentd_v1_extentd_proto_init() {
-	if File_fxdax_extentd_v1_extentd_proto != nil {
+func init() { file_cladefs_extentd_v1_extentd_proto_init() }
+func file_cladefs_extentd_v1_extentd_proto_init() {
+	if File_cladefs_extentd_v1_extentd_proto != nil {
 		return
 	}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[0].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[28].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[31].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[35].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[39].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[43].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[47].OneofWrappers = []any{}
-	file_fxdax_extentd_v1_extentd_proto_msgTypes[52].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[0].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[28].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[31].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[35].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[39].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[43].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[47].OneofWrappers = []any{}
+	file_cladefs_extentd_v1_extentd_proto_msgTypes[52].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fxdax_extentd_v1_extentd_proto_rawDesc), len(file_fxdax_extentd_v1_extentd_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_extentd_v1_extentd_proto_rawDesc), len(file_cladefs_extentd_v1_extentd_proto_rawDesc)),
 			NumEnums:      1,
 			NumMessages:   68,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_fxdax_extentd_v1_extentd_proto_goTypes,
-		DependencyIndexes: file_fxdax_extentd_v1_extentd_proto_depIdxs,
-		EnumInfos:         file_fxdax_extentd_v1_extentd_proto_enumTypes,
-		MessageInfos:      file_fxdax_extentd_v1_extentd_proto_msgTypes,
+		GoTypes:           file_cladefs_extentd_v1_extentd_proto_goTypes,
+		DependencyIndexes: file_cladefs_extentd_v1_extentd_proto_depIdxs,
+		EnumInfos:         file_cladefs_extentd_v1_extentd_proto_enumTypes,
+		MessageInfos:      file_cladefs_extentd_v1_extentd_proto_msgTypes,
 	}.Build()
-	File_fxdax_extentd_v1_extentd_proto = out.File
-	file_fxdax_extentd_v1_extentd_proto_goTypes = nil
-	file_fxdax_extentd_v1_extentd_proto_depIdxs = nil
+	File_cladefs_extentd_v1_extentd_proto = out.File
+	file_cladefs_extentd_v1_extentd_proto_goTypes = nil
+	file_cladefs_extentd_v1_extentd_proto_depIdxs = nil
 }

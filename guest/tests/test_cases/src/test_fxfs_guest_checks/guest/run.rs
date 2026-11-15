@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the agent's running of the checks, each in a process of its own: the agent run again,
+//! cladefs: the agent's running of the checks, each in a process of its own: the agent run again,
 //! the check named in its environment ([`ALONE`]), to a deadline, the check's budget (TASK-168),
 //! of the guest's time: what the guest waited for the host's answers to its device's requests, the
 //! host's time, is left out of it ([`Clock`], TASK-263).
@@ -20,7 +20,7 @@ use std::process::{Command, ExitStatus};
 use std::sync::mpsc::{self, RecvTimeoutError};
 
 /// In a check's process's environment, the check it runs.
-const ALONE: &str = "FXDAX_CHECK";
+const ALONE: &str = "CLADEFS_CHECK";
 
 /// How long a check's processes, killed, may take to end: past it, the guest is too stuck for the
 /// checks after to run.
@@ -43,11 +43,11 @@ impl TestFxfsGuestChecks {
         BODIES[at](self);
     }
 
-    /// In the agent: runs the suite's checks, FXDAX_CHECKS's if it names any, each in a process
+    /// In the agent: runs the suite's checks, CLADEFS_CHECKS's if it names any, each in a process
     /// of its own, and says OK, or which failed.
     fn run_all(&self) {
         let guest = Guest::set_up();
-        let only = std::env::var("FXDAX_CHECKS").unwrap_or_default();
+        let only = std::env::var("CLADEFS_CHECKS").unwrap_or_default();
         let checks = self.checks(&only).unwrap();
         let scale = scale();
         let mut failed = Vec::new();
@@ -55,9 +55,9 @@ impl TestFxfsGuestChecks {
             let budget = check.budget.mul_f64(scale);
             let (mut clock, host) = (Clock::start(), HostTook::now());
             let ended = guest.run(check.name, budget, &mut clock);
-            // fxdax: and what else of its time was the host's: its CPUs' and its requests'.
+            // cladefs: and what else of its time was the host's: its CPUs' and its requests'.
             eprintln!("{}: the host took {}", check.name, host.since());
-            // fxdax: each check's time, against its budget, and the host's, in the run's log
+            // cladefs: each check's time, against its budget, and the host's, in the run's log
             // (TASK-168, TASK-263).
             let (took, host) = (clock.guest(), clock.host);
             let times = format!("{took:.2?} of {budget:.2?}, and {host:.2?} the host's");
@@ -172,7 +172,7 @@ fn mounted() -> bool {
     mounts.lines().any(|mount| mount.split_whitespace().nth(1) == Some(MNT))
 }
 
-/// fxdax: a check's time, the guest's: the time since it began, but for what the guest waited
+/// cladefs: a check's time, the guest's: the time since it began, but for what the guest waited
 /// meanwhile for the host, the device having a request in flight (the driver's `busy_ns`). The
 /// host's time differs from host to host, and with their load: its disk's, making the guest's
 /// commits durable, 4 times as long on some GCE hosts as on others; and its writes', which took
@@ -217,13 +217,13 @@ impl Clock {
     }
 }
 
-/// fxdax: what a check's time is against its budget, of `guest`'s time and `host`'s: the guest's,
+/// cladefs: what a check's time is against its budget, of `guest`'s time and `host`'s: the guest's,
 /// or a [`HOST_SCALE`]th of the host's, whichever is more ([`Clock`]).
 fn charged(guest: Duration, host: Duration) -> Duration {
     guest.max(host.div_f64(HOST_SCALE))
 }
 
-/// fxdax: what of the guest's time the host took, so far: the time its vCPUs waited for the host's
+/// cladefs: what of the guest's time the host took, so far: the time its vCPUs waited for the host's
 /// CPUs (steal), and the device's requests, by type, how many and how long they took, all told
 /// (the driver's `requests` and `request_ns`), which overlap. Of a check, the difference of two:
 /// where its time went besides the guest (TASK-263).
@@ -290,7 +290,7 @@ fn run_to(
     let group = child.id() as libc::pid_t;
     let (exited, exits) = mpsc::channel();
     std::thread::spawn(move || exited.send(child.wait().expect("waiting for a check")));
-    // fxdax: till `budget` is spent, which a wall clock's time may not have spent (TASK-263).
+    // cladefs: till `budget` is spent, which a wall clock's time may not have spent (TASK-263).
     let ended = loop {
         let left = budget.saturating_sub(spent());
         if left.is_zero() {
@@ -395,7 +395,7 @@ mod tests {
         assert!(began.elapsed() < REAP, "took {:?}", began.elapsed());
     }
 
-    /// fxdax: time `spent` leaves out isn't a check's: one that runs past its budget, all of it
+    /// cladefs: time `spent` leaves out isn't a check's: one that runs past its budget, all of it
     /// time left out, runs on, and ends as it would have, before its budget of time not left out
     /// is up (TASK-263); and one whose time left out stops growing is killed at its budget.
     #[test]
@@ -418,7 +418,7 @@ mod tests {
         assert!(took >= Duration::from_millis(500) && took < REAP, "took {took:?}");
     }
 
-    /// fxdax: the host's time counts a [`HOST_SCALE`]th: a check waiting on a device that never
+    /// cladefs: the host's time counts a [`HOST_SCALE`]th: a check waiting on a device that never
     /// answers is killed, as a hang (TASK-263).
     #[test]
     fn the_hosts_time_counts_a_fraction() {

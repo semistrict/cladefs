@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal/reader.rs`. fxdax: the reader reads the
+// Fuchsia's `src/storage/fxfs/src/object_store/journal/reader.rs`. cladefs: the reader reads the
 // journal ahead of the blocks it verifies (`ReadAhead`), and its handle's extents change only
 // through it, so that it forgets what it read ahead through those replaced (`push_extent`,
 // `truncate_extents`, `discard_extents`). What it reads of an image, which may be anything, is
@@ -20,10 +20,10 @@ use storage_device::ExtentRange;
 use storage_device::buffer::BufferRef;
 use storage_units::BlockSize;
 
-/// fxdax: the most blocks a reader reads ahead at once (`ReadAhead`).
+/// cladefs: the most blocks a reader reads ahead at once (`ReadAhead`).
 const READ_AHEAD_BLOCKS: usize = 32;
 
-/// fxdax: the blocks a reader read ahead of those it verified, from its `read_offset` on. It reads
+/// cladefs: the blocks a reader read ahead of those it verified, from its `read_offset` on. It reads
 /// them a window at once, each window twice as long as the last, up to READ_AHEAD_BLOCKS: replaying
 /// the journal, whose blocks are each an extent of their own, and each a round trip to the device to
 /// read, waits for one round trip per window rather than per block (TASK-92.18). As windows double,
@@ -92,7 +92,7 @@ pub struct JournalReader {
     // The next offset we should read from in handle.
     read_offset: u64,
 
-    // fxdax: the blocks read ahead, from `read_offset` on.
+    // cladefs: the blocks read ahead, from `read_offset` on.
     ahead: ReadAhead,
 
     // The file offset for next record due to be deserialized.
@@ -138,7 +138,7 @@ impl JournalReader {
         }
     }
 
-    /// fxdax: reads on from `checkpoint`, which it read up to, as a reader new from it would: a
+    /// cladefs: reads on from `checkpoint`, which it read up to, as a reader new from it would: a
     /// follower's (backlog doc-8), which reads the journal again from the end of its last whole
     /// transaction once its device holds more of it. The handle keeps the extents it knows; what
     /// was read ahead, which the device may now hold more of, is forgotten.
@@ -184,7 +184,7 @@ impl JournalReader {
 
     /// To allow users to flush a block, they can store a record that indicates the rest of the
     /// block should be skipped.  When that record is read, users should call this function.
-    /// fxdax: it fails if the block wasn't read, as one a journal starts in that doesn't verify
+    /// cladefs: it fails if the block wasn't read, as one a journal starts in that doesn't verify
     /// (`consume`).
     pub fn skip_to_end_of_block(&mut self) -> Result<(), Error> {
         let bs = self.block_size();
@@ -195,13 +195,13 @@ impl JournalReader {
         Ok(())
     }
 
-    /// fxdax: the handle, whose extents change only through the reader (`push_extent`,
+    /// cladefs: the handle, whose extents change only through the reader (`push_extent`,
     /// `truncate_extents`, `discard_extents`).
     pub fn handle(&self) -> &dyn JournalHandle {
         self.handle.as_ref()
     }
 
-    /// fxdax: adds an extent at the handle's end (`JournalHandle::push_extent`). The extents
+    /// cladefs: adds an extent at the handle's end (`JournalHandle::push_extent`). The extents
     /// before stay, and what was read ahead through them, unless the extent replaced them, as a
     /// bootstrap handle's first replaces its initial extent. How far it reaches is what an image
     /// says.
@@ -221,7 +221,7 @@ impl JournalReader {
         Ok(())
     }
 
-    /// fxdax: drops the handle's extents from `offset` on (`JournalHandle::truncate_extents`), and
+    /// cladefs: drops the handle's extents from `offset` on (`JournalHandle::truncate_extents`), and
     /// what was read ahead through them.
     pub fn truncate_extents(&mut self, offset: u64) -> Result<(), Error> {
         self.handle.truncate_extents(offset)?;
@@ -229,7 +229,7 @@ impl JournalReader {
         Ok(())
     }
 
-    /// fxdax: discards the handle's extents added at `discard_offset` or later
+    /// cladefs: discards the handle's extents added at `discard_offset` or later
     /// (`JournalHandle::discard_extents`), and what was read ahead through them, past those left.
     pub fn discard_extents(&mut self, discard_offset: u64) {
         self.handle.discard_extents(discard_offset);
@@ -251,7 +251,7 @@ impl JournalReader {
         match T::deserialize_from_version(&mut cursor, version) {
             Ok(record) => {
                 let consumed = cursor.position() as usize;
-                // fxdax: what's read of a corrupt journal may be as long as a record may be, which
+                // cladefs: what's read of a corrupt journal may be as long as a record may be, which
                 // the writer keeps shorter than a block.
                 ensure!(
                     consumed < self.block_size().get() as usize,
@@ -310,7 +310,7 @@ impl JournalReader {
             self.buf.resize(self.buf_range.end + bs, 0);
             let last_read_checksum = self.last_read_checksum();
 
-            // Read the next block's worth, verify its checksum, and append it to |buf|. fxdax: of
+            // Read the next block's worth, verify its checksum, and append it to |buf|. cladefs: of
             // those read ahead, reading the next window if none is.
             assert!(block_size.is_aligned(self.read_offset));
             if !self.read_block(self.buf_range.end).await? {
@@ -373,7 +373,7 @@ impl JournalReader {
         Ok(())
     }
 
-    /// fxdax: copies the block at `read_offset` to `buf` at `at`, having read it ahead with those
+    /// cladefs: copies the block at `read_offset` to `buf` at `at`, having read it ahead with those
     /// after it, as many as the handle has of the next window (`ReadAhead`), unless it was. Returns
     /// whether there was one: none is past the handle's end.
     async fn read_block(&mut self, at: usize) -> Result<bool, Error> {
@@ -388,7 +388,7 @@ impl JournalReader {
         Ok(true)
     }
 
-    /// fxdax: moves past the block at `read_offset`, which `buf` now holds, taking it of those read
+    /// cladefs: moves past the block at `read_offset`, which `buf` now holds, taking it of those read
     /// ahead.
     fn advance(&mut self) {
         let block_size = self.block_size();
@@ -396,14 +396,14 @@ impl JournalReader {
         self.read_offset += block_size;
     }
 
-    /// fxdax: forgets what was read ahead from `offset` on, which the handle's extents no longer
+    /// cladefs: forgets what was read ahead from `offset` on, which the handle's extents no longer
     /// map as they did.
     fn forget_from(&mut self, offset: u64) {
         self.ahead.keep(offset.saturating_sub(self.read_offset) as usize);
     }
 
     // Used after deserializing to indicate how many bytes were deserialized and adjusts the buffer
-    // pointers accordingly. fxdax: no more than the buffer holds, of the blocks verified, so that
+    // pointers accordingly. cladefs: no more than the buffer holds, of the blocks verified, so that
     // each block end crossed has the checksum it takes, and a checkpoint always has one: a skip to
     // the end of a block a journal started in that didn't verify, which was never read, took the
     // only one, and the checkpoint after indexed none (TASK-149.23). It takes one for each end
@@ -496,7 +496,7 @@ mod tests {
         handle.write_or_append(Some(offset), buf.as_ref()).await.expect("overwrite failed");
     }
 
-    /// fxdax: a journal of records, 0 on, filling `blocks` blocks, and how many records it holds:
+    /// cladefs: a journal of records, 0 on, filling `blocks` blocks, and how many records it holds:
     /// the last block ends with padding, which `skip_to_end_of_block` skips.
     async fn journal(device: &dyn storage_device::Device, blocks: u64) -> (Vec<u8>, u64) {
         let mut writer = JournalWriter::new(BLOCK_SIZE, 0);
@@ -512,7 +512,7 @@ mod tests {
         (buf.to_vec(), records)
     }
 
-    /// fxdax: writes `data` to `device`, at the start of `extent`.
+    /// cladefs: writes `data` to `device`, at the start of `extent`.
     async fn write_to(
         device: &dyn storage_device::Device,
         extent: storage_device::ExtentId,
@@ -523,7 +523,7 @@ mod tests {
         device.write(extent, 0, buf.as_ref()).await.expect("write failed");
     }
 
-    /// fxdax: reads `records`, and then the end of the journal.
+    /// cladefs: reads `records`, and then the end of the journal.
     async fn read_records(reader: &mut JournalReader, records: std::ops::Range<u64>) {
         for record in records {
             assert_eq!(
@@ -538,7 +538,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a reader reads ahead of what it consumes, in windows that double up to
+    /// cladefs: a reader reads ahead of what it consumes, in windows that double up to
     /// `READ_AHEAD_BLOCKS`, each of whose blocks it reads at once: through the journal's handle,
     /// whose blocks are each an extent of their own, it waits for a round trip to the device per
     /// window, not per block (TASK-92.18).
@@ -575,7 +575,7 @@ mod tests {
         assert_eq!((trips.reads.count(), trips.reads.trips()), (127, 8));
     }
 
-    /// fxdax: what a reader read ahead through extents its handle replaces is forgotten, and read
+    /// cladefs: what a reader read ahead through extents its handle replaces is forgotten, and read
     /// again through those that replace them: extents truncated, extents discarded, and a bootstrap
     /// handle's initial extent. Each reader below has read the journal's third block ahead,
     /// through an extent that doesn't hold it, when the one holding it replaces that.
@@ -647,7 +647,7 @@ mod tests {
         read_records(&mut reader, 2..records).await;
     }
 
-    /// fxdax: a record may be as long as a block, which a writer never writes: what a corrupt
+    /// cladefs: a record may be as long as a block, which a writer never writes: what a corrupt
     /// journal holds is refused.
     #[fuchsia::test]
     async fn test_record_as_long_as_a_block() {
@@ -693,7 +693,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a reader that starts within a block that doesn't verify read none of it, and can't
+    /// cladefs: a reader that starts within a block that doesn't verify read none of it, and can't
     /// skip to its end: that took the one checksum it had, and the checkpoint after indexed none,
     /// as a mount does when a super-block says the journal starts there (TASK-149.23).
     #[fuchsia::test]
@@ -719,7 +719,7 @@ mod tests {
         assert_eq!(reader.journal_file_checkpoint(), checkpoint);
     }
 
-    /// fxdax: a record of a corrupt journal may cross two block ends, as no writer's does: the
+    /// cladefs: a record of a corrupt journal may cross two block ends, as no writer's does: the
     /// reader moves past both checksums, and the checkpoint after is where the record ends, with
     /// the checksum of the block it ends in (TASK-149.23).
     #[fuchsia::test]
@@ -769,7 +769,7 @@ mod tests {
         assert_eq!(reader.journal_file_checkpoint(), end);
     }
 
-    /// fxdax: where an extent ends is what a super-block's record says.
+    /// cladefs: where an extent ends is what a super-block's record says.
     #[fuchsia::test]
     async fn test_extents_past_any_offset() {
         use crate::object_store::journal::bootstrap_handle::BootstrapObjectHandle;
@@ -827,7 +827,7 @@ mod tests {
         assert_eq!(reader.deserialize().await.expect("deserialize failed"), ReadResult::Some(7u32));
     }
 
-    /// fxdax: a follower's reader reads on from where it last read whole records, once the
+    /// cladefs: a follower's reader reads on from where it last read whole records, once the
     /// journal holds more.
     #[fuchsia::test]
     async fn test_rewind_reads_on() {

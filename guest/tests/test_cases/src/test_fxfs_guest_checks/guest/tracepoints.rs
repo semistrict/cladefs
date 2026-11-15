@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the guest Fxfs's tracepoints (fs/fxfs/fxfs_trace.h, TASK-44.16), as tracefs shows them:
+//! cladefs: the guest Fxfs's tracepoints (fs/fxfs/fxfs_trace.h, TASK-44.16), as tracefs shows them:
 //! a write, an fsync, and on a DAX mount a load and a store through a mapping, each step's events
 //! in order, with the fields they say.
 
@@ -222,7 +222,7 @@ fn check_pairs(events: &[Event]) {
     assert!(ended > 0, "no request ended in the trace");
 }
 
-/// fxdax: the tracepoints (TASK-44.16): a file written with write(2) and fsynced, each step's
+/// cladefs: the tracepoints (TASK-44.16): a file written with write(2) and fsynced, each step's
 /// events in order (check_fsync); on a DAX mount, the file read in sealed, DAX, mapped shared, a
 /// page loaded, which faults and MAPs the window, and stored to, which faults writable and makes
 /// the window's page private (PRIVATE) within what the MAP mapped, then fsynced, its writeback

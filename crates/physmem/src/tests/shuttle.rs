@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Physical memory under Shuttle (awslabs/shuttle, the `shuttle` feature), lifted from fxdax's
+//! Physical memory under Shuttle (awslabs/shuttle, the `shuttle` feature), lifted from cladefs's
 //! port of the Zircon kernel (`vm::unittests::shuttle_tests`): an allocation of an arena's pages
 //! racing the arena's removal; a chunk going back, outside the PMM's lock, racing an allocation it
 //! makes room for, and its arena's removal; and a page freed racing its second stage's unmapping

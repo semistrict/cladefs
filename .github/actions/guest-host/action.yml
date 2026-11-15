@@ -1,14 +1,14 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# A GitHub runner made a host of fxdax's guests, as the workflows that boot them use it
+# A GitHub runner made a host of cladefs's guests, as the workflows that boot them use it
 # (sandboxes.yml, nightly.yml's guest suites, TASK-284): GitHub's runners have KVM, nested, which
 # their user is given here, with /dev/userfaultfd; what builds the guest kernel, Firecracker and
 # its seccomp filters, and makes the guests' root images (scripts/lib/linux-host-setup.sh's, as a
 # host's); and Rust, with musl's target, which Firecracker is built for under its filter.
 name: Guest host
-description: Let the runner boot fxdax's guests, and build what they boot
+description: Let the runner boot cladefs's guests, and build what they boot
 
 runs:
   using: composite
@@ -18,7 +18,7 @@ runs:
       run: |
         echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"
         KERNEL=="userfaultfd", GROUP="kvm", MODE="0666"' |
-            sudo tee /etc/udev/rules.d/99-fxdax-kvm.rules
+            sudo tee /etc/udev/rules.d/99-cladefs-kvm.rules
         sudo udevadm control --reload-rules
         sudo udevadm trigger --name-match=kvm
         sudo udevadm trigger --name-match=userfaultfd

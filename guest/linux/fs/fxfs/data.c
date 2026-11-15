@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
- * fxdax: changes of a regular file as a whole: its size (truncate, fallocate, a DAX write stopped
+ * cladefs: changes of a regular file as a whole: its size (truncate, fallocate, a DAX write stopped
  * short), holes punched, ranges reflinked. Each is one sequence whatever holds the file's data,
  * the page cache or the DAX window, which does its own around it (vfs.h's fxfs_data_ops): so that
  * guest/sim, which builds this as it is, with dax.c's operations, tests what the kernel runs
@@ -24,7 +24,7 @@ static const struct fxfs_data_ops *fxfs_data_ops(struct inode *inode)
 
 /*
  * Makes `inode` `size` bytes long, with the attributes `iattr` sets, if any, and writes them back.
- * Its inode lock held. fxdax: every change of a file's size goes here: a DAX write stopped short
+ * Its inode lock held. cladefs: every change of a file's size goes here: a DAX write stopped short
  * made its own, telling Fxfs nothing of the window's last block, which Fxfs moved from under it to
  * zero what it held past the end (TASK-150.9).
  */
@@ -42,7 +42,7 @@ int fxfs_data_resize(struct inode *inode, loff_t size, struct mnt_idmap *idmap, 
 		setattr_copy(idmap, inode, iattr);
 	err = fxfs_vfs_write_attr(inode, FXFS_SET_SIZE | (ops->keeps_tail ? FXFS_SET_KEEP_TAIL : 0));
 	/*
-	 * fxdax: with no room, a file grown goes back to its size: nothing is past its old end yet,
+	 * cladefs: with no room, a file grown goes back to its size: nothing is past its old end yet,
 	 * and the inode saying a size Fxfs hasn't would lose it at eviction. A cut borrows the room
 	 * it needs (TASK-60), and its pages are gone either way.
 	 */
@@ -104,12 +104,12 @@ long fxfs_data_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		return -ENODEV;
 	inode_lock(inode);
 	err = inode_newsize_ok(inode, end);
-	/* fxdax: whatever it changes: setuid goes, as for any write (xfstests generic/683). */
+	/* cladefs: whatever it changes: setuid goes, as for any write (xfstests generic/683). */
 	if (!err)
 		err = file_modified(file);
 	if (!err && (mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE)))
 		err = fxfs_data_punch(inode, offset, min(end, i_size_read(inode)));
-	/* fxdax: what it can't reserve it can refuse (xfstests generic/213). */
+	/* cladefs: what it can't reserve it can refuse (xfstests generic/213). */
 	if (!err && !(mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_ZERO_RANGE))) {
 		struct fxfs_statfs statfs;
 

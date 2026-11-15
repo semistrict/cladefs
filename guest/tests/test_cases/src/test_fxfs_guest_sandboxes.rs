@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: sandboxes as LangSmith's CI runs them (TASK-330.1), the shape of host their suites
+//! cladefs: sandboxes as LangSmith's CI runs them (TASK-330.1), the shape of host their suites
 //! found TASK-310 and TASK-311 on and ours didn't: two sandbox hosts, each with an extent daemon
 //! of its own; one disk under both, an ext4 one, holding their stores, their part caches and the
 //! bucket, an S3 server's (RustFS, Apache-2.0), whose objects are on that disk too; and many VMs
@@ -11,9 +11,9 @@
 //! all the while.
 //!
 //! scripts/sandboxes.sh runs it: it starts the S3 server with its data on the disk the case's
-//! directory is on, names its bucket (FXDAX_EXTENTD_REMOTE, an `s3://` URL, and the server's
-//! address and credentials, AWS_*) and its data's directory (FXDAX_SANDBOX_BUCKET_DIR), which this
-//! checks is on the case's disk. FXDAX_SANDBOX_MODE says how much: `short` (the default), eight
+//! directory is on, names its bucket (CLADEFS_EXTENTD_REMOTE, an `s3://` URL, and the server's
+//! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
+//! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
 //! LangSmith's controlled load's sixteen, eight at a time, each doing more, by hand on ubu1 before
 //! each pin handed to LangSmith (scripts/qualify.sh, TASK-330.5).
@@ -121,14 +121,14 @@ mod host {
     use super::*;
 
     use crate::common::{
-        Measured, ProcessCosts, cgroup_memory, control, fxdax_guest_should_run, resident,
+        Measured, ProcessCosts, cgroup_memory, control, cladefs_guest_should_run, resident,
         setup_rootfs,
     };
     use crate::test_fxfs_guest_docker::host::{DockerFiles, buildx};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, bail, ensure};
-    use fxdax::import::testing::{layer, oci_layout};
+    use cladefs::import::testing::{layer, oci_layout};
     use std::ffi::CString;
     use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
@@ -148,7 +148,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     /// A VM's own store's, for its database, repository or files.
     const DATA_CAPACITY: u64 = 8 * GIB;
 
-    /// How much a run does: FXDAX_SANDBOX_MODE's.
+    /// How much a run does: CLADEFS_SANDBOX_MODE's.
     struct Mode {
         name: &'static str,
         /// The VMs at once, and in all.
@@ -173,15 +173,15 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     /// GitHub's). Its writers each write what LangSmith's controlled load's VMs did.
     fn short(role: Role) -> Vec<(&'static str, String)> {
         let settings: &[(&str, u64)] = match role {
-            Role::Builder => &[("FXDAX_DOCKER_BUILDS", 1), ("FXDAX_DOCKER_BUILD_MIB", 256)],
+            Role::Builder => &[("CLADEFS_DOCKER_BUILDS", 1), ("CLADEFS_DOCKER_BUILD_MIB", 256)],
             Role::Pgbench => &[
-                ("FXDAX_PGBENCH_SCALE", 10),
-                ("FXDAX_PGBENCH_RUNS", 1),
-                ("FXDAX_PGBENCH_RUN_SECS", 60),
+                ("CLADEFS_PGBENCH_SCALE", 10),
+                ("CLADEFS_PGBENCH_RUNS", 1),
+                ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("FXDAX_SANDBOX_GIT_FILES", 1000), ("FXDAX_SANDBOX_GIT_COMMITS", 30)],
+            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 1000), ("CLADEFS_SANDBOX_GIT_COMMITS", 30)],
             Role::Writer => {
-                &[("FXDAX_SHARED_DISK_LARGE_MIB", 768), ("FXDAX_SHARED_DISK_FILES", 3000)]
+                &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
         };
         settings.iter().map(|(var, value)| (*var, value.to_string())).collect()
@@ -218,22 +218,22 @@ RUN apk add --no-cache postgresql postgresql-contrib git
     /// accounts, the sandbox team's, three times.
     fn long(role: Role) -> Vec<(&'static str, String)> {
         let settings: &[(&str, u64)] = match role {
-            Role::Builder => &[("FXDAX_DOCKER_BUILDS", 3), ("FXDAX_DOCKER_BUILD_MIB", 512)],
+            Role::Builder => &[("CLADEFS_DOCKER_BUILDS", 3), ("CLADEFS_DOCKER_BUILD_MIB", 512)],
             Role::Pgbench => &[
-                ("FXDAX_PGBENCH_SCALE", 50),
-                ("FXDAX_PGBENCH_RUNS", 3),
-                ("FXDAX_PGBENCH_RUN_SECS", 60),
+                ("CLADEFS_PGBENCH_SCALE", 50),
+                ("CLADEFS_PGBENCH_RUNS", 3),
+                ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("FXDAX_SANDBOX_GIT_FILES", 3000), ("FXDAX_SANDBOX_GIT_COMMITS", 100)],
+            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 3000), ("CLADEFS_SANDBOX_GIT_COMMITS", 100)],
             Role::Writer => {
-                &[("FXDAX_SHARED_DISK_LARGE_MIB", 768), ("FXDAX_SHARED_DISK_FILES", 3000)]
+                &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
         };
         settings.iter().map(|(var, value)| (*var, value.to_string())).collect()
     }
 
     fn mode() -> anyhow::Result<Mode> {
-        match std::env::var("FXDAX_SANDBOX_MODE").as_deref() {
+        match std::env::var("CLADEFS_SANDBOX_MODE").as_deref() {
             Err(_) | Ok("short") => Ok(Mode {
                 name: "short",
                 at_once: 8,
@@ -258,7 +258,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 windows: (GIB / 2, GIB / 4),
                 timeout_secs: 7200,
             }),
-            Ok(other) => bail!("FXDAX_SANDBOX_MODE is short or long, not {other:?}"),
+            Ok(other) => bail!("CLADEFS_SANDBOX_MODE is short or long, not {other:?}"),
         }
     }
 
@@ -311,7 +311,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             .context("running tar")?;
         ensure!(tar.status.success(), "tar of {}: {}", root.display(), tar.status);
         let docker = DockerFiles::new(dir, Some(buildx()?))?;
-        oci_layout(layout, "fxdax/sandbox:1", &[tar.stdout, layer(&docker.entries())?])?;
+        oci_layout(layout, "cladefs/sandbox:1", &[tar.stdout, layer(&docker.entries())?])?;
         Ok(())
     }
 
@@ -341,9 +341,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             machine.extent_store_served("extents", &data, DATA_CAPACITY, window, &host.socket);
         }
         let mut env = vec![
-            ("FXDAX_SANDBOX_ROLE", sandbox.role.name().to_owned()),
-            ("FXDAX_SHARED_DISK_SEED", sandbox.vm.to_string()),
-            ("FXDAX_PGBENCH_ROLE", "load".to_owned()),
+            ("CLADEFS_SANDBOX_ROLE", sandbox.role.name().to_owned()),
+            ("CLADEFS_SHARED_DISK_SEED", sandbox.vm.to_string()),
+            ("CLADEFS_PGBENCH_ROLE", "load".to_owned()),
         ];
         env.extend((mode.settings)(sandbox.role));
         for (var, value) in env {
@@ -515,18 +515,18 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             written as f64 / GIB as f64,
             written as f64 / raw.max(1) as f64,
             stats.get("segments_framed_in_place").copied().unwrap_or(0),
-            // fxdax: what framings read of segments' data, and looks ahead as they filled
+            // cladefs: what framings read of segments' data, and looks ahead as they filled
             // (TASK-400).
             stats.get("framing_read_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("seen_ahead_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
-            // fxdax: the parts packed as segments filled, held until their framings: in all, taken
+            // cladefs: the parts packed as segments filled, held until their framings: in all, taken
             // by them, at most at once, and let go of by the memory governor (TASK-400).
             stats.get("held_parts_held_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("held_parts_taken_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("held_parts_peak_bytes").copied().unwrap_or(0) as f64 / (1 << 20) as f64,
             stats.get("held_parts_evicted_bytes").copied().unwrap_or(0) as f64 / GIB as f64,
             stats.get("held_parts_evicted").copied().unwrap_or(0),
-            // fxdax: and those their framings found not packed yet, or never packed, the packing
+            // cladefs: and those their framings found not packed yet, or never packed, the packing
             // ahead behind, which they read and packed (TASK-400).
             stats.get("held_parts_late").copied().unwrap_or(0),
             stats.get("held_parts_skipped").copied().unwrap_or(0),
@@ -542,14 +542,14 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let dir = &test_setup.tmp_dir;
             let mut tally = Tally::default();
             // The topology: the bucket an S3 server's, its data on the case's disk.
-            let remote = std::env::var("FXDAX_EXTENTD_REMOTE").unwrap_or_default();
+            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
             ensure!(
                 remote.starts_with("s3://"),
-                "FXDAX_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
+                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
                  starts one"
             );
-            let bucket_dir = std::env::var_os("FXDAX_SANDBOX_BUCKET_DIR")
-                .context("FXDAX_SANDBOX_BUCKET_DIR does not name the bucket's data")?;
+            let bucket_dir = std::env::var_os("CLADEFS_SANDBOX_BUCKET_DIR")
+                .context("CLADEFS_SANDBOX_BUCKET_DIR does not name the bucket's data")?;
             {
                 use std::os::unix::fs::MetadataExt as _;
                 let (disk, bucket) =
@@ -566,13 +566,13 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let layout = dir.join("sandbox-image");
             image(dir, &root, &layout)?;
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("fxdax-sandboxes")?;
+            let sockets = tempdir::TempDir::new("cladefs-sandboxes")?;
             let mut hosts = Vec::new();
             for (at, name) in ["host-a", "host-b"].into_iter().enumerate() {
                 let socket = sockets.path().join(format!("{name}.sock"));
                 // Each host's own placement.
                 let token = (at + 1).to_string();
-                let env = [("FXDAX_EXTENTD_TOKEN", std::ffi::OsStr::new(&token))];
+                let env = [("CLADEFS_EXTENTD_TOKEN", std::ffi::OsStr::new(&token))];
                 let daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,
@@ -755,10 +755,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
 
     impl Test for TestFxfsGuestSandboxes {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("FXDAX_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("FXDAX_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
+                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -913,7 +913,7 @@ mod guest {
     /// TASK-330.4's A/B).
     fn git(dir: &str, args: &[&str]) -> String {
         let output = Command::new("git")
-            .args(["-c", "user.name=sandbox", "-c", "user.email=sandbox@fxdax"])
+            .args(["-c", "user.name=sandbox", "-c", "user.email=sandbox@cladefs"])
             .args(["-c", "gc.autoDetach=false", "-C", dir])
             .args(args)
             .output()
@@ -949,12 +949,12 @@ mod guest {
         text
     }
 
-    /// The git role: a repository of FXDAX_SANDBOX_GIT_FILES files on the VM's own store, made
-    /// over FXDAX_SANDBOX_GIT_COMMITS commits, each changing a tenth of its files and adding one;
+    /// The git role: a repository of CLADEFS_SANDBOX_GIT_FILES files on the VM's own store, made
+    /// over CLADEFS_SANDBOX_GIT_COMMITS commits, each changing a tenth of its files and adding one;
     /// packed; cloned, not by links, and the clone checked whole.
     fn git_role() {
         let (files, commits) =
-            (count("FXDAX_SANDBOX_GIT_FILES", 500), count("FXDAX_SANDBOX_GIT_COMMITS", 20));
+            (count("CLADEFS_SANDBOX_GIT_FILES", 500), count("CLADEFS_SANDBOX_GIT_COMMITS", 20));
         mount_data();
         let repo = format!("{MNT}/repo");
         fs::create_dir_all(&repo).unwrap();
@@ -1008,7 +1008,7 @@ mod guest {
 
     impl Test for TestFxfsGuestSandboxes {
         fn in_guest(self: Box<Self>) {
-            let role = std::env::var("FXDAX_SANDBOX_ROLE").unwrap();
+            let role = std::env::var("CLADEFS_SANDBOX_ROLE").unwrap();
             let role = Role::named(&role).unwrap_or_else(|| panic!("no role {role}"));
             let stop = Arc::new(AtomicBool::new(false));
             let commands = std::thread::spawn({

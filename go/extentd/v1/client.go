@@ -1,15 +1,15 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Package extentdv1 is the Go client of fxdax's extent daemon's control API, fxdax.extentd.v1
-// (crates/fxdax/proto/fxdax/extentd/v1/extentd.proto, TASK-219): its messages and gRPC stubs,
+// Package extentdv1 is the Go client of cladefs's extent daemon's control API, cladefs.extentd.v1
+// (crates/cladefs/proto/cladefs/extentd/v1/extentd.proto, TASK-219): its messages and gRPC stubs,
 // generated from the .proto by go/generate.sh, and [NewClient], which connects to a daemon's
-// control socket as fxdax's Rust client does (fxdax::extentd::control::Client).
+// control socket as cladefs's Rust client does (cladefs::extentd::control::Client).
 //
-// The package at a commit of fxdax is the API of the daemon built from that commit:
+// The package at a commit of cladefs is the API of the daemon built from that commit:
 //
-//	go get github.com/semistrict/fxdax/go@<commit>
+//	go get github.com/semistrict/cladefs/go@<commit>
 package extentdv1
 
 import (
@@ -29,7 +29,7 @@ import (
 
 // ErrnoKey is the metadata entry of a failed call's status that holds the errno the daemon failed
 // with, a decimal number.
-const ErrnoKey = "fxdax-errno"
+const ErrnoKey = "cladefs-errno"
 
 // Client is a client of an extent daemon's control API, and of the standard health service
 // (grpc.health.v1.Health) the control socket serves too: SERVING while the daemon accepts VM
@@ -51,7 +51,7 @@ type Client struct {
 }
 
 // NewClient returns a client of the control API of the extent daemon whose control socket is at
-// socket (the daemon's FXDAX_EXTENTD_GRPC). As [grpc.NewClient], it connects at its first call,
+// socket (the daemon's CLADEFS_EXTENTD_GRPC). As [grpc.NewClient], it connects at its first call,
 // and again whenever the connection is lost; opts are added to its own.
 func NewClient(socket string, opts ...grpc.DialOption) (*Client, error) {
 	// The target names no host: the dialer connects to the socket, whatever it asks for, so that

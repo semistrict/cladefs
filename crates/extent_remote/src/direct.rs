@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: reads and writes of the host's files bypassing its page cache (TASK-433): `O_DIRECT` on
-//! Linux, `F_NOCACHE` on macOS, where the file system allows. fxdax keeps what it caches in memory
+//! cladefs: reads and writes of the host's files bypassing its page cache (TASK-433): `O_DIRECT` on
+//! Linux, `F_NOCACHE` on macOS, where the file system allows. cladefs keeps what it caches in memory
 //! of its own, budgeted (its extent cache, the fetchers' parts, held parts); the host's page cache
 //! is a second memory, unbudgeted, holding the same bytes again, which the files it writes and
 //! reads keep out of.

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: AES-256-XTS (IEEE 1619-2007, without ciphertext stealing), the cipher a store's raw
+//! cladefs's own: AES-256-XTS (IEEE 1619-2007, without ciphertext stealing), the cipher a store's raw
 //! files are encrypted with a sector at a time (backlog doc-16, TASK-411.5): an open segment's, and
 //! a large extent's own, read back by offset until they are framed, need a cipher that keeps
 //! lengths and reads any sector alone. aws-lc-rs has none; this is Fuchsia's `storage_xts` (as

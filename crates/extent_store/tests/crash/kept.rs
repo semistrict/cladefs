@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
+//! cladefs: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
 //! uploader uploading and acknowledging on a runtime's threads as the workload goes, crashes at a
 //! random point; then the branch is taken from the bucket alone, its disk lost, and the store is
 //! opened again from what the crash left. Taken from the bucket, it holds a prefix of the commits
@@ -11,7 +11,7 @@
 //! taking it fenced. Not a function of its seed alone, as the rounds of `rounds` are: the
 //! uploader's threads interleave with the workload as they will.
 //!
-//! fxdax: passes of the collector run over the bucket all along the workload, compacting, each
+//! cladefs: passes of the collector run over the bucket all along the workload, compacting, each
 //! after the last, on the host's runtime, as its collector would; one is cut at a random request
 //! of its, as the host dies under it ([`Cut`]); and a full pass runs after the crash, before the
 //! branch is taken and the store opened again (TASK-291.2). Once it was, passes run alone, and
@@ -71,19 +71,11 @@ impl Host {
     /// The host crashes: what it had going reaches the bucket no more, as a dead host's work does
     /// not, but its writes landed so far. Its stores and uploaders, which go on until dropped,
     /// write to what it reached before; what opens on it from now on reaches a copy of that, as
-    /// it is now.
+    /// it is at one instant ([`InMemory::fork`], under its lock). Copied key by key, the uploader
+    /// going on, a segment put after the listing and the head swapped before it was read left a
+    /// copy whose head named a segment it lacked (TASK-432).
     fn crash(&self) {
-        let before = self.memory.borrow().clone();
-        let copy = Arc::new(InMemory::new());
-        self.runtime.block_on(async {
-            use futures::StreamExt as _;
-            use object_store::{ObjectStore as _, ObjectStoreExt as _};
-            for meta in before.list(None).collect::<Vec<_>>().await {
-                let location = meta.unwrap().location;
-                let bytes = before.get(&location).await.unwrap().bytes().await.unwrap();
-                copy.put(&location, bytes.into()).await.unwrap();
-            }
-        });
+        let copy = Arc::new(self.memory.borrow().fork());
         *self.bucket.borrow_mut() = Arc::new(Bucket::new(copy.clone(), ""));
         *self.memory.borrow_mut() = copy;
     }

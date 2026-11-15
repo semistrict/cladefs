@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -29,10 +29,10 @@ class Rounds(unittest.TestCase):
 
     def test_a_phase_is_the_build_or_the_rounds(self):
         """The driver builds the sides as work, then runs the rounds as a measurement, each a phase
-        of the host script (FXDAX_AB_PHASE); another phase is refused before anything runs."""
+        of the host script (CLADEFS_AB_PHASE); another phase is refused before anything runs."""
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"
-        status, _, err = bash(f"{host} /t /r a b 2 a b", {"FXDAX_AB_PHASE": "measure"})
-        self.assertEqual((status, err), (2, "FXDAX_AB_PHASE is build or rounds, or unset for both\n"))
+        status, _, err = bash(f"{host} /t /r a b 2 a b", {"CLADEFS_AB_PHASE": "measure"})
+        self.assertEqual((status, err), (2, "CLADEFS_AB_PHASE is build or rounds, or unset for both\n"))
 
     def test_sourced_it_does_nothing_but_define(self):
         host = SCRIPTS / "lib" / "bench-ab-linux-host.sh"
@@ -63,18 +63,18 @@ class Artifacts(unittest.TestCase):
     def e2e(self, **env):
         results = tempfile.mkdtemp()
         return bash(f"{SCRIPTS / 'test-e2e.sh'} fxfs-guest",
-                    {"FXDAX_E2E_RESULTS": results, **env})
+                    {"CLADEFS_E2E_RESULTS": results, **env})
 
     def test_building_artifacts_and_running_prebuilt_ones_are_one_or_the_other(self):
-        status, _, err = self.e2e(FXDAX_E2E_BUILD_ONLY="/a", FXDAX_E2E_PREBUILT="/b")
+        status, _, err = self.e2e(CLADEFS_E2E_BUILD_ONLY="/a", CLADEFS_E2E_PREBUILT="/b")
         self.assertEqual(
-            (status, err), (2, "FXDAX_E2E_BUILD_ONLY and FXDAX_E2E_PREBUILT: one or the other\n"))
+            (status, err), (2, "CLADEFS_E2E_BUILD_ONLY and CLADEFS_E2E_PREBUILT: one or the other\n"))
 
     def test_prebuilt_artifacts_take_no_build_per_run(self):
-        for mode in ["FXDAX_E2E_PREBUILT", "FXDAX_E2E_BUILD_ONLY"]:
-            status, _, err = self.e2e(**{mode: "/b"}, FXDAX_FIRECRACKER_SECCOMP="log")
+        for mode in ["CLADEFS_E2E_PREBUILT", "CLADEFS_E2E_BUILD_ONLY"]:
+            status, _, err = self.e2e(**{mode: "/b"}, CLADEFS_FIRECRACKER_SECCOMP="log")
             self.assertEqual(
-                (status, err), (2, "prebuilt artifacts take no FXDAX_FIRECRACKER_SECCOMP=log\n"),
+                (status, err), (2, "prebuilt artifacts take no CLADEFS_FIRECRACKER_SECCOMP=log\n"),
                 mode)
 
     def test_prebuilt_artifacts_are_jailed_by_their_own_jailer(self):
@@ -82,21 +82,21 @@ class Artifacts(unittest.TestCase):
         them takes; those built with none hold none, and a jailed run of them is refused."""
         unjailed = tempfile.mkdtemp()
         (Path(unjailed) / "artifacts.txt").write_text("seccomp none\n")
-        status, _, err = self.e2e(FXDAX_E2E_PREBUILT=unjailed, FXDAX_FIRECRACKER_JAIL="1")
+        status, _, err = self.e2e(CLADEFS_E2E_PREBUILT=unjailed, CLADEFS_FIRECRACKER_JAIL="1")
         self.assertEqual((status, err), (2, f"{unjailed} holds no jailer, built with no seccomp "
-                                            "filter: FXDAX_FIRECRACKER_JAIL needs one\n"))
+                                            "filter: CLADEFS_FIRECRACKER_JAIL needs one\n"))
         text = (SCRIPTS / "test-e2e.sh").read_text()
-        self.assertIn('export FXDAX_FIRECRACKER_JAILER="$prebuilt/jailer"', text)
-        self.assertIn('if [[ -n $build_only || -n ${FXDAX_FIRECRACKER_JAIL:-} ]]; then\n'
+        self.assertIn('export CLADEFS_FIRECRACKER_JAILER="$prebuilt/jailer"', text)
+        self.assertIn('if [[ -n $build_only || -n ${CLADEFS_FIRECRACKER_JAIL:-} ]]; then\n'
                       '            env "$musl_cflags" "$firecracker_cargo" build --release -p jailer',
                       text)
         self.assertIn("artifacts+=(jailer)", text)
 
     def test_a_directory_of_no_artifacts_is_refused(self):
         empty = tempfile.mkdtemp()
-        status, _, err = self.e2e(FXDAX_E2E_PREBUILT=empty)
+        status, _, err = self.e2e(CLADEFS_E2E_PREBUILT=empty)
         self.assertEqual(
-            (status, err), (2, f"{empty} holds no artifacts (FXDAX_E2E_BUILD_ONLY makes them)\n"))
+            (status, err), (2, f"{empty} holds no artifacts (CLADEFS_E2E_BUILD_ONLY makes them)\n"))
 
 
 if __name__ == "__main__":

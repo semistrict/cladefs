@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Gates a run of pgbench and of DAX's cases on throughput and memory.
@@ -11,7 +11,7 @@ round-K/CASE/log.txt), each directory's rounds after the last's:
 
 - pgbench's (test_fxfs_guest_pgbench.rs): their runs' tps in order, RUNS a VM as the guest's output
   beside the log says (stdout.txt's `OK runs RUNS`), as many VMs as one daemon served
-  (FXDAX_PGBENCH_VMS). On the guest's Fxfs without a DAX window (fxfs-guest-pgbench: no-dax), or
+  (CLADEFS_PGBENCH_VMS). On the guest's Fxfs without a DAX window (fxfs-guest-pgbench: no-dax), or
   with one, its stores copying on write (-dax: dax), each VM making its database; on a database a
   base holds, each VM running on a fork of it (fxfs-guest-pgbench-forked, -dax-forked:
   no-dax-forked, dax-forked), its files read in, which DAX maps; so, each VM kept running until the
@@ -76,7 +76,7 @@ first-touch mappings cost more nested), never compared across.
 
 Usage: scripts/pgbench-gate.py [--host nested|bare-metal] [--json PATH] RESULTS...
 
-The thresholds: FXDAX_GATE_<GATE> (its name in capitals, dashes as underscores), or DEFAULTS'.
+The thresholds: CLADEFS_GATE_<GATE> (its name in capitals, dashes as underscores), or DEFAULTS'.
 """
 
 import argparse
@@ -435,8 +435,8 @@ def gates(measured, thresholds, density=None, bigmap=None):
 
 
 def thresholds():
-    """The gates' thresholds: the environment's FXDAX_GATE_<GATE>, or their defaults."""
-    return {name: float(os.environ.get(f"FXDAX_GATE_{name.upper().replace('-', '_')}", default))
+    """The gates' thresholds: the environment's CLADEFS_GATE_<GATE>, or their defaults."""
+    return {name: float(os.environ.get(f"CLADEFS_GATE_{name.upper().replace('-', '_')}", default))
             for name, default in DEFAULTS.items()}
 
 

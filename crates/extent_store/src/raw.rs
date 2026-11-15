@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
+//! cladefs: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
 //! hold a guest's writes until they are framed, read back by offset meanwhile. A store whose
 //! branch is in the clear writes them as they are written, as it always did. A sealed store's are
@@ -27,7 +27,7 @@ use std::sync::Arc;
 /// in the file its tweak. What reaches an open segment is whole sectors (TASK-411.8).
 pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 
-/// fxdax: how a sealed store's raw file is encrypted, and its log authenticated: under subkeys of
+/// cladefs: how a sealed store's raw file is encrypted, and its log authenticated: under subkeys of
 /// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5).
 pub(crate) struct Sealer {
     pub key: KeyId,
@@ -44,8 +44,8 @@ impl Sealer {
 
     /// The sealer of a raw file encrypted under `dek`, which `key` names, from `salt`.
     pub fn of(dek: &Secret, key: KeyId, salt: Salt) -> Self {
-        let xts = Xts::derive(dek, &salt, b"fxdax raw file");
-        Self { key, salt, xts, mac: dek.derive(&salt, &[b"fxdax raw file log mac"]) }
+        let xts = Xts::derive(dek, &salt, b"cladefs raw file");
+        Self { key, salt, xts, mac: dek.derive(&salt, &[b"cladefs raw file log mac"]) }
     }
 
     /// The MAC of `bytes`, of the file's log, at `at` in it: so that none is taken for another's,
@@ -78,7 +78,7 @@ fn at_bytes(at: u64, bytes: &[u8]) -> Vec<u8> {
     all
 }
 
-/// fxdax: a raw file of a store's (see the module's docs): its bytes as written, in the clear, or
+/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, in the clear, or
 /// sealed, encrypted a sector at a time. As a [`File`] it reads and writes what was written,
 /// encrypting and decrypting if sealed: a sealed one takes writes of whole sectors alone, and reads
 /// the sectors a read is in whole. What it stores, as stored, is [`RawFile::file`]'s.

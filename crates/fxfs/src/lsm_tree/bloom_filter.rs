@@ -84,13 +84,13 @@ pub struct BloomFilterStats {
 /// falling back to returning true.
 pub const MAX_HASH_PARTITIONS: usize = 4;
 
-/// fxdax: the most partitions of a key a bloom filter hashes one by one: 16 TiB's, of an extent's.
+/// cladefs: the most partitions of a key a bloom filter hashes one by one: 16 TiB's, of an extent's.
 /// Past that, which only a corrupt layer holds, it holds everything, which queries take for what it
 /// may hold: for the writer, as `MAX_HASH_PARTITIONS` is for the reader, a key's length, which is
 /// what an image says, was how long a compaction spun.
 const MAX_INSERTED_PARTITIONS: usize = 1 << 24;
 
-/// fxdax: the most hashes a bloom filter may say it takes for each query: `estimate_params` chooses
+/// cladefs: the most hashes a bloom filter may say it takes for each query: `estimate_params` chooses
 /// about ten. It says so on disk, and a query spins for as many as it says.
 const MAX_NUM_HASHES: usize = 64;
 
@@ -368,7 +368,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a key as long as an image says is hashed no longer than a key may reasonably be, and
+    /// cladefs: a key as long as an image says is hashed no longer than a key may reasonably be, and
     /// the filter then says nothing is missing: of any part of it, or anything else.
     #[test]
     fn test_key_of_any_length() {
@@ -381,7 +381,7 @@ mod tests {
         }
     }
 
-    /// fxdax: how many hashes a filter says it takes is how long its queries take.
+    /// cladefs: how many hashes a filter says it takes is how long its queries take.
     #[test]
     fn test_hash_count_is_bounded() {
         let buf = [0u8; 16];

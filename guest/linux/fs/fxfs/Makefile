@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 obj-$(CONFIG_FXFS_FS) += fxfs.o
 fxfs-y := rt.o super.o data.o device.o fxfs_rust.o
 fxfs-$(CONFIG_FS_DAX) += dax.o pages.o
 
-# fxdax: what a kernel with GCOV_KERNEL counts (FXDAX_GUEST_KERNEL_COVERAGE, TASK-119.14).
+# cladefs: what a kernel with GCOV_KERNEL counts (CLADEFS_GUEST_KERNEL_COVERAGE, TASK-119.14).
 GCOV_PROFILE_dax.o := y
 GCOV_PROFILE_data.o := y
 GCOV_PROFILE_device.o := y
 GCOV_PROFILE_pages.o := y
 GCOV_PROFILE_super.o := y
 
-# fxdax: the commit the build is of, which /proc/fs/fxfs/build shows: scripts/build-guest-kernel.sh
+# cladefs: the commit the build is of, which /proc/fs/fxfs/build shows: scripts/build-guest-kernel.sh
 # gives it, as scripts/build-commit.sh says (TASK-111.7).
-# fxdax: the tracepoints device.c defines, whose header define_trace.h reads again from here
+# cladefs: the tracepoints device.c defines, whose header define_trace.h reads again from here
 # (fxfs_trace.h, TASK-44.16).
 CFLAGS_device.o += -I$(src)
 

@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 arm64, x86: tasks' stacks of 64 KiB, as Fxfs's operations need
 
 Fxfs's operations take more than the 16 KiB a task's stack has: mounting
-with a journal to replay takes about 34 (fxdax's TASK-26.9, which would
+with a journal to replay takes about 34 (cladefs's TASK-26.9, which would
 bring them back to 16).
 
 diff --git a/arch/arm64/include/asm/memory.h b/arch/arm64/include/asm/memory.h
@@ -14,7 +14,7 @@ diff --git a/arch/arm64/include/asm/memory.h b/arch/arm64/include/asm/memory.h
  #define DIRECT_MAP_PHYSMEM_END	__pa(PAGE_END - 1)
  
 -#define MIN_THREAD_SHIFT	(14 + KASAN_THREAD_SHIFT)
-+/* fxdax: 64 KiB, as Fxfs's operations need more than 16 (fs/fxfs, TASK-26.9). */
++/* cladefs: 64 KiB, as Fxfs's operations need more than 16 (fs/fxfs, TASK-26.9). */
 +#define MIN_THREAD_SHIFT	(16 + KASAN_THREAD_SHIFT)
  
  /*
@@ -27,7 +27,7 @@ diff --git a/arch/x86/include/asm/page_64_types.h b/arch/x86/include/asm/page_64
  #endif
  
 -#define THREAD_SIZE_ORDER	(2 + KASAN_STACK_ORDER)
-+/* fxdax: 64 KiB, as Fxfs's operations need more than 16 (fs/fxfs, TASK-26.9). */
++/* cladefs: 64 KiB, as Fxfs's operations need more than 16 (fs/fxfs, TASK-26.9). */
 +#define THREAD_SIZE_ORDER	(4 + KASAN_STACK_ORDER)
  #define THREAD_SIZE  (PAGE_SIZE << THREAD_SIZE_ORDER)
  

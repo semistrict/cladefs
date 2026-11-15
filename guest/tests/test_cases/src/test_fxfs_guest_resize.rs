@@ -1,14 +1,14 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Test resizing an extent store while the guest kernel's Fxfs has it mounted
-// (fxdax's TASK-37).
+// (cladefs's TASK-37).
 //
-// The host boots the kernel fxdax's scripts/build-guest-kernel.sh builds, which
-// FXDAX_GUEST_KERNEL names, with an extent-store device on a new store, which
+// The host boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which
+// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new store, which
 // the guest formats as it mounts it. Then, step by step, as the guest asks over
-// vsock, the host resizes the store through fxdax's extent daemon, as fxdaxctl
+// vsock, the host resizes the store through cladefs's extent daemon, as cladefsctl
 // resize does, and answers there: it grows the store, which the guest's statfs and
 // allocator take while mounted, the guest then writing more than the first size
 // held; shrinks it, above what the filesystem holds, which the guest agrees to;
@@ -36,7 +36,7 @@ const PORT: u32 = 5050;
 mod host {
     use super::*;
 
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::io::{BufRead, BufReader, Write};
@@ -67,7 +67,7 @@ mod host {
 
     impl Test for TestFxfsGuestResize {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         /// The guest writes 112 MiB, in steps the host takes.
@@ -79,14 +79,14 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let extentd = std::path::PathBuf::from(
-                std::env::var_os("FXDAX_EXTENTD").expect("FXDAX_EXTENTD names the daemon"),
+                std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             vm.extent_store("extents", &store, CAPACITY, 0)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
-                std::env::temp_dir().join(format!("fxdax-resize-{}.vsock", std::process::id()));
+                std::env::temp_dir().join(format!("cladefs-resize-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
             vm.vsock(&uds);
             let resizing = store.clone();
@@ -103,7 +103,7 @@ mod host {
             if output != "OK\n" {
                 return TestOutcome::Fail(format!("expected exactly \"OK\\n\", got {output:?}"));
             }
-            let store = fxdax::ExtentStore::open(test_setup.tmp_dir.join("extents"))
+            let store = cladefs::ExtentStore::open(test_setup.tmp_dir.join("extents"))
                 .expect("open the extent store");
             assert_eq!(store.info().unwrap().capacity, STEPS[1].1);
             TestOutcome::Pass

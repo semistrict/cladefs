@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -124,7 +124,7 @@ impl Builder {
 
 mod local {
     //! Thread-local values: a thread's are in a block its kernel task points to (`fxfs_tls`, a
-    //! field fxdax's guest kernel adds to `task_struct`), made as the thread first uses one, and
+    //! field cladefs's guest kernel adds to `task_struct`), made as the thread first uses one, and
     //! dropped when the task exits. Interrupts have no thread of their own, so a value used there
     //! panics.
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # The kernel's sources this directory builds against, in TREE, where there is no configured tree of
 # the guest's kernel: the release scripts/build-guest-kernel.sh builds, those of its files the

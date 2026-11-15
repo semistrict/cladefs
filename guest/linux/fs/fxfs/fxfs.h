@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * The filesystem, in Rust (guest/rust/fxfs-linux), as the VFS glue in super.c calls it. Each call
  * may sleep. Errors are negative errnos. The VFS checks what it can first: that names exist or
@@ -16,7 +16,7 @@ struct fxfs_filesystem;
 struct fxfs;
 struct fxfs_device;
 
-/* The volume a mount naming none mounts, which fxdax's images keep a filesystem's files in. */
+/* The volume a mount naming none mounts, which cladefs's images keep a filesystem's files in. */
 #define FXFS_DEFAULT_VOLUME "default"
 
 /* An inode's attributes. Its inode number is its object's ID in its volume, its own. */
@@ -51,7 +51,7 @@ struct fxfs_attr {
 #define FXFS_SET_KEEP_TAIL (1 << 7)
 
 /*
- * fxdax: the attribute flags (chattr) an inode's mode keeps above the kernel's 16 bits: Fxfs's
+ * cladefs: the attribute flags (chattr) an inode's mode keeps above the kernel's 16 bits: Fxfs's
  * objects have no record of them of their own, and its mode is 32 bits.
  */
 #define FXFS_MODE_IMMUTABLE (1u << 16)
@@ -92,7 +92,7 @@ void fxfs_init(void);
 /*
  * Opens Fxfs on the extent-store device tagged with the `len` bytes of `source`, formatting it if
  * its store holds nothing yet, with an empty default volume: 0, or a -errno (-ENOENT if there is no
- * such device). Fxfs sizes what it keeps in memory by the `memory` bytes the kernel has. fxdax:
+ * such device). Fxfs sizes what it keeps in memory by the `memory` bytes the kernel has. cladefs:
  * read-only if `read_only`, or if the device follows a store another VM writes.
  */
 int fxfs_open(const char *source, size_t len, u64 memory, bool read_only,
@@ -101,19 +101,19 @@ int fxfs_open(const char *source, size_t len, u64 memory, bool read_only,
 void fxfs_close(struct fxfs_filesystem *filesystem);
 /*
  * Mounts the volume named with the `len` bytes of `volume`, and fills in its root directory's
- * attributes: 0, or a -errno (-ENOENT if there is no such volume). fxdax: read-only if `read_only`,
+ * attributes: 0, or a -errno (-ENOENT if there is no such volume). cladefs: read-only if `read_only`,
  * or if the filesystem is. On a follower's device only the default volume mounts (-EINVAL): it
  * follows that writer (fxfs_follow) on the superblock `vfs`'s primitives (fxfs_vfs_follow_*, below).
  */
 int fxfs_mount(struct fxfs_filesystem *filesystem, const char *volume, size_t len, bool read_only,
 	       void *vfs, struct fxfs **fs, struct fxfs_attr *root);
-/* fxdax: whether a volume mounted on the filesystem follows its device's writer. */
+/* cladefs: whether a volume mounted on the filesystem follows its device's writer. */
 bool fxfs_filesystem_follows(struct fxfs_filesystem *filesystem);
-/* fxdax: whether the filesystem is mounted read-only, and whether it follows its writer. */
+/* cladefs: whether the filesystem is mounted read-only, and whether it follows its writer. */
 bool fxfs_read_only(struct fxfs *fs);
 bool fxfs_follows(struct fxfs *fs);
 /*
- * fxdax: a follower's batch (backlog doc-8): the writer's commits since those applied, fetched;
+ * cladefs: a follower's batch (backlog doc-8): the writer's commits since those applied, fetched;
  * holding the fill barrier, what the kernel caches of what they change dropped
  * (fxfs_vfs_drop_file), the commits applied, and the kernel's inodes settled
  * (fxfs_vfs_settle_file); then the commit it was as of let go of. 0, or a -errno (-ESTALE once
@@ -121,7 +121,7 @@ bool fxfs_follows(struct fxfs *fs);
  */
 int fxfs_follow(struct fxfs *fs);
 /*
- * fxdax: holds the file `ino`, which the kernel opens, on a follower: one the writer deletes reads
+ * cladefs: holds the file `ino`, which the kernel opens, on a follower: one the writer deletes reads
  * as it was until the last open closes (fxfs_release). 0, or a -errno: -ENOENT if a batch deleted
  * it since the open looked it up, which holds nothing.
  */
@@ -129,7 +129,7 @@ int fxfs_hold(struct fxfs *fs, u64 ino);
 void fxfs_release(struct fxfs *fs, u64 ino);
 
 /*
- * fxdax: a follower's primitives, of the superblock `vfs` (super.c), which the filesystem's Rust
+ * cladefs: a follower's primitives, of the superblock `vfs` (super.c), which the filesystem's Rust
  * runs its protocol on (crates/follower): its fill barrier, held shared by a reader
  * (fxfs_vfs_fill_begin, vfs.h), which a tree read checks it holds, in a debug kernel.
  */
@@ -141,22 +141,22 @@ void fxfs_vfs_follow_assert_filling(void *vfs);
 /* The follower's state is as of a commit no earlier than `epoch`'s: its batch settled. */
 #define FXFS_FOLLOW_SETTLED 1
 void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch);
-/* fxdax: whether the tests have a follower's batches fail (vfs.h). */
+/* cladefs: whether the tests have a follower's batches fail (vfs.h). */
 bool fxfs_vfs_follow_failing(void);
 /*
- * fxdax: a follower's batch takes its fill barrier exclusively, waiting for the readers holding it,
+ * cladefs: a follower's batch takes its fill barrier exclusively, waiting for the readers holding it,
  * from before it drops what it changes until it has applied and settled it; and lets go of it.
  */
 void fxfs_vfs_follow_barrier_take(void *vfs);
 void fxfs_vfs_follow_barrier_release(void *vfs);
 
-/* fxdax: bytes of a follower's file a batch changed, from `start` to `end`, exclusive. */
+/* cladefs: bytes of a follower's file a batch changed, from `start` to `end`, exclusive. */
 struct fxfs_range {
 	u64 start;
 	u64 end;
 };
 /*
- * fxdax: a follower's batch, holding its fill barrier (fxfs_vfs_follow_barrier_take), drops what
+ * cladefs: a follower's batch, holding its fill barrier (fxfs_vfs_follow_barrier_take), drops what
  * the kernel keeps of what it changes before it applies the change: the `count` `ranges` of the
  * file `ino`'s data; the dentries of the directory `ino`, which revalidate. Once applied, the file
  * `ino`'s inode takes its attributes, `attr`, or, `gone`, none, no name linking it.
@@ -169,7 +169,7 @@ void fxfs_unmount(struct fxfs *fs);
 /* Makes what the filesystem holds durable: sync, syncfs. */
 int fxfs_sync(struct fxfs *fs);
 /*
- * fxdax: freezes the filesystem, each of whose volumes the VFS has synced, its writers stopped:
+ * cladefs: freezes the filesystem, each of whose volumes the VFS has synced, its writers stopped:
  * makes it durable, holds its background work, and closes the device to writes until it thaws,
  * nothing open on it; -EBUSY if writes kept coming. Thawing, it takes the device's branch, a fork's
  * of its own in a VM restored from a snapshot taken frozen, and writes again (TASK-39.1).
@@ -185,7 +185,7 @@ int fxfs_thaw(struct fxfs_filesystem *filesystem);
 void fxfs_set_fail_thaw_at(u32 step);
 u32 fxfs_fail_thaw_at(void);
 /*
- * fxdax: a shared volume's (backlog doc-10). fxfs_flush_volume puts all a volume holds in one layer,
+ * cladefs: a shared volume's (backlog doc-10). fxfs_flush_volume puts all a volume holds in one layer,
  * with the filesystem not frozen. fxfs_manifest writes what describes it to `buf`, with the
  * filesystem frozen: its size, or a -errno (-EBUSY if the journal holds anything of it, -ERANGE if
  * it takes more than `size` bytes). fxfs_import makes the volume named with the `len` bytes of
@@ -214,9 +214,9 @@ int fxfs_punch(struct fxfs *fs, u64 ino, u64 offset, u64 len);
  * open, or it is gone.
  */
 int fxfs_getattr(struct fxfs *fs, u64 ino, struct fxfs_attr *attr);
-/* fxdax: as fxfs_getattr, but of an object no name links too, which something holds open. */
+/* cladefs: as fxfs_getattr, but of an object no name links too, which something holds open. */
 int fxfs_attr_of_open(struct fxfs *fs, u64 ino, struct fxfs_attr *attr);
-/* fxdax: how far the journal is written: every commit moves it, all of it applied. */
+/* cladefs: how far the journal is written: every commit moves it, all of it applied. */
 u64 fxfs_journal_offset(struct fxfs *fs);
 /* Writes back what the kernel keeps of inode `ino`: the attributes `set` says. */
 int fxfs_write_inode(struct fxfs *fs, u64 ino, const struct fxfs_setattr *set);
@@ -238,7 +238,7 @@ int fxfs_readdir(struct fxfs *fs, u64 dir, u64 index, const char *after, size_t 
  * left them: the directories', and those of the inodes it linked.
  */
 
-/* fxdax: an extended attribute a new inode is made with (fxfs_create): its full name, its value. */
+/* cladefs: an extended attribute a new inode is made with (fxfs_create): its full name, its value. */
 struct fxfs_xattr {
 	const char *name;
 	size_t name_len;
@@ -248,7 +248,7 @@ struct fxfs_xattr {
 
 /*
  * Creates `name` in directory `dir` as `mode` says: a directory, a regular file, or a special
- * file (FIFO, socket or device `rdev`), owned by `uid` and `gid`. fxdax: with the `nr_xattrs`
+ * file (FIFO, socket or device `rdev`), owned by `uid` and `gid`. cladefs: with the `nr_xattrs`
  * extended attributes `xattrs`, the ACLs it inherits, in the same transaction (TASK-79.29).
  */
 int fxfs_create(struct fxfs *fs, u64 dir, const char *name, size_t len, u32 mode, u64 rdev,
@@ -267,7 +267,7 @@ int fxfs_symlink(struct fxfs *fs, u64 dir, const char *name, size_t len, const c
 /* Copies up to `len` bytes of symlink `ino`'s target to `buf`, returning its length. */
 ssize_t fxfs_readlink(struct fxfs *fs, u64 ino, char *buf, size_t len);
 /*
- * fxdax: makes file `dst`'s `len` bytes at `dst_offset` share the extents holding file `src`'s at
+ * cladefs: makes file `dst`'s `len` bytes at `dst_offset` share the extents holding file `src`'s at
  * `offset` (a reflink), copying nothing, and `dst` `size` bytes long if it is shorter: its
  * attributes in `attr`. The offsets and `len` are block aligned. -EOPNOTSUPP for extents written
  * in place, which can't be shared.
@@ -314,13 +314,13 @@ int fxfs_exchange(struct fxfs *fs, u64 dir, const char *name, size_t len, u64 ne
 		  struct fxfs_attr *new_attr, struct fxfs_attr *dir_attr,
 		  struct fxfs_attr *new_dir_attr);
 /*
- * fxdax: how many records Fxfs caches (its objects', names' and data's), and frees up to `count` of
+ * cladefs: how many records Fxfs caches (its objects', names' and data's), and frees up to `count` of
  * them, those used least recently first, returning how many it freed: the superblock's shrinker's.
  */
 u64 fxfs_cached_objects(struct fxfs *fs);
 u64 fxfs_free_cached_objects(struct fxfs *fs, u64 count);
 /*
- * fxdax: writes what the filesystem waited on, and its device's requests took, as lines of a name
+ * cladefs: writes what the filesystem waited on, and its device's requests took, as lines of a name
  * and a number, into the `len` bytes at `buf`, as much as fits; returns how long it is (TASK-91.7).
  */
 size_t fxfs_stats(struct fxfs_filesystem *filesystem, char *buf, size_t len);
@@ -340,7 +340,7 @@ struct fxfs_read_part {
 };
 
 /*
- * fxdax: reads file `ino` from `offset` into the `count` buffers `parts`, one after another, as
+ * cladefs: reads file `ino` from `offset` into the `count` buffers `parts`, one after another, as
  * fxfs_read into one, but from the device's transfer buffer straight into them: readahead's folios
  * (TASK-92.9). Returns how many bytes it read.
  */
@@ -362,24 +362,24 @@ struct fxfs_write_part {
 /*
  * Writes each of the `count` parts of `parts` to file `ino`, as fxfs_write writes one, in as few
  * transactions as hold them, each with one write to the device: the page cache's writeback of a
- * file's folios, contiguous or not, in any order. No two share a block. fxdax: `dirty` bytes of
+ * file's folios, contiguous or not, in any order. No two share a block. cladefs: `dirty` bytes of
  * the file's dirty pages, which they write, have room reserved (fxfs_reserve_dirty), which pays
  * for them: a filesystem filled since doesn't fail them (TASK-80).
  */
 int fxfs_write_many(struct fxfs *fs, u64 ino, const struct fxfs_write_part *parts, size_t count,
 		    u64 dirty);
 /*
- * fxdax: reserves room for `bytes` more of file `ino`'s data, whole pages, which the page cache
+ * cladefs: reserves room for `bytes` more of file `ino`'s data, whole pages, which the page cache
  * dirties: 0, or -ENOSPC if the filesystem hasn't room for them, and for writing them back
  * (TASK-80).
  */
 int fxfs_reserve_dirty(struct fxfs *fs, u64 ino, u64 bytes);
-/* fxdax: as fxfs_reserve_dirty, for pages dirtied whether the filesystem has room or not. */
+/* cladefs: as fxfs_reserve_dirty, for pages dirtied whether the filesystem has room or not. */
 void fxfs_reserve_dirty_what_fits(struct fxfs *fs, u64 ino, u64 bytes);
-/* fxdax: releases the room of `bytes` of file `ino`'s dirty pages, dropped unwritten. */
+/* cladefs: releases the room of `bytes` of file `ino`'s dirty pages, dropped unwritten. */
 void fxfs_release_dirty(struct fxfs *fs, u64 ino, u64 bytes);
 /*
- * fxdax: fault injection (TASK-164.2): the next `count` of fxfs_write_many's transactions fail with
+ * cladefs: fault injection (TASK-164.2): the next `count` of fxfs_write_many's transactions fail with
  * EIO once their blocks are written, before they commit, leaving the file as a crash between the
  * two would: its old blocks, the new ones named by no record.
  */

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * guest/sim's kernel, as much of it as its model of Fxfs (guest/sim/fxfs/fxfs.c) calls, for a
  * process of one thread (sim/sim.h): memory, locks that never wait, and the extent store under the

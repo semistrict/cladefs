@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ describe("the repo's evidence", () => {
   test("a mutant's header parses into its kernel, killer and story", () => {
     const m = parseMutant(
       "x.patch",
-      "# SPDX-License-Identifier: GPL-2.0\n# Copyright 2026 The fxdax Authors.\n#\n# Kernel: sim\n# Killer: scenarios cow_swap_during_write\n#\n# TASK-1: a swap\n# under the semaphore shared.\n\n--- a/guest/linux/fs/fxfs/dax.c\n+++ b/guest/linux/fs/fxfs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
+      "# SPDX-License-Identifier: GPL-2.0\n# Copyright 2026 The cladefs Authors.\n#\n# Kernel: sim\n# Killer: scenarios cow_swap_during_write\n#\n# TASK-1: a swap\n# under the semaphore shared.\n\n--- a/guest/linux/fs/fxfs/dax.c\n+++ b/guest/linux/fs/fxfs/dax.c\n@@ -1 +1 @@\n-a\n+b\n",
     );
     expect(m).toEqual({
       file: "x.patch",

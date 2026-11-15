@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: how far the journal has got, in each of the senses its writing, syncing and zeroing need,
+//! cladefs: how far the journal has got, in each of the senses its writing, syncing and zeroing need,
 //! as one value, changed only by what happens to the journal, a method each, after which the
 //! orders between them are checked (in debug builds). Upstream keeps six of these as fields of the
 //! journal's `Inner`. On a device whose extents are written once, a sync's barrier follows the
@@ -34,17 +34,17 @@ use std::ops::Range;
 
 #[derive(Debug, Default)]
 pub(super) struct JournalPosition {
-    // The offset that we can zero the journal up to now that it is no longer needed. fxdax: none
+    // The offset that we can zero the journal up to now that it is no longer needed. cladefs: none
     // once zeroed as far.
     zero_offset: Option<u64>,
 
-    // fxdax: how far it has zeroed towards it, a slice a commit.
+    // cladefs: how far it has zeroed towards it, a slice a commit.
     zeroed_to: u64,
 
     // The journal offset that we most recently flushed to the device.
     device_flushed_offset: u64,
 
-    // fxdax: how much of the journal had been written when the device was last flushed, which the
+    // cladefs: how much of the journal had been written when the device was last flushed, which the
     // flush made durable: padding written after `device_flushed_offset` too, which needs no flush.
     device_flushed_end: u64,
 
@@ -62,21 +62,21 @@ pub(super) struct JournalPosition {
     // have been discarded.
     valid_to: u64,
 
-    // fxdax: how far the journal was written when a barrier last followed its write.
+    // cladefs: how far the journal was written when a barrier last followed its write.
     barrier_written: u64,
 
     // The last offset we flushed to the journal file.
     flushed_offset: u64,
 
-    // fxdax: where a sync flushing the device padded the journal to: the flush of the journal
+    // cladefs: where a sync flushing the device padded the journal to: the flush of the journal
     // that writes as far ends with a barrier (`POST_BARRIER`), which is the sync's flush of the
     // device, one request rather than two.
     barrier_wanted: u64,
 
-    // fxdax: the offset up to which something waits for the journal to be written.
+    // cladefs: the offset up to which something waits for the journal to be written.
     flush_wanted: u64,
 
-    // fxdax: the syncs flushing the device begun, each numbered as it begins, and the latest done
+    // cladefs: the syncs flushing the device begun, each numbered as it begins, and the latest done
     // (`Journal::next_sync`, `Journal::synced`): group commit, as ext4's jbd2 has it.
     syncs_begun: u64,
     synced: u64,

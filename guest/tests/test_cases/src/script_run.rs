@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the interpreter of the scripts `script` makes, which does their operations on files, each
+//! cladefs: the interpreter of the scripts `script` makes, which does their operations on files, each
 //! with a mapping of it kept across all of them, and checks them against the model (TASK-149.2).
 //! Nothing here is of Fxfs: the tests below run it on the host's filesystems.
 //!
@@ -50,7 +50,7 @@ pub fn from_env(seed: u64, mix: Mix) -> (Vec<(usize, Op)>, usize) {
     numbered(seed, mix, &drops)
 }
 
-/// fxdax: the operations of `mix`'s script of `seed` less those `drops` drops, as `DROP_VAR`
+/// cladefs: the operations of `mix`'s script of `seed` less those `drops` drops, as `DROP_VAR`
 /// says them, as [`from_env`] has them.
 pub fn numbered(seed: u64, mix: Mix, drops: &str) -> (Vec<(usize, Op)>, usize) {
     let ops = script::generate(seed, mix);
@@ -72,13 +72,13 @@ pub fn free(name: &str) -> u64 {
     stat.f_bfree as u64 * stat.f_frsize as u64
 }
 
-/// fxdax: the largest file of the ext4 filesystem `name` is on, by its blocks' size.
+/// cladefs: the largest file of the ext4 filesystem `name` is on, by its blocks' size.
 pub fn ext4_largest(name: &str) -> u64 {
     script::largest_ext4(statvfs(name).f_bsize as u64)
 }
 
 /// Takes all the room but `left` on a filesystem, or as much as it gives, with the file `ballast`:
-/// after making what needs room to be made. fxdax: the room left as the ballast is closed, which
+/// after making what needs room to be made. cladefs: the room left as the ballast is closed, which
 /// is when XFS gives back the blocks it took ahead of the file's end (speculative preallocation,
 /// xfs_release): a MiB or two, which a script's files then fit in, when filled with the ballast
 /// open (`a_filesystem_filled_has_the_room_asked_once_the_ballast_closes`; CI run 42420025615).
@@ -133,7 +133,7 @@ impl Mapping {
         Ok(Self { bytes: map.cast(), len })
     }
 
-    /// fxdax: none, in place of one gone.
+    /// cladefs: none, in place of one gone.
     fn none() -> Self {
         Self { bytes: std::ptr::null_mut(), len: 0 }
     }
@@ -142,7 +142,7 @@ impl Mapping {
         unsafe { std::slice::from_raw_parts(self.bytes.add(at as usize), len) }
     }
 
-    /// fxdax: the mapping remapped `len` bytes long (mremap), and moved, to where a reservation of
+    /// cladefs: the mapping remapped `len` bytes long (mremap), and moved, to where a reservation of
     /// that many bytes was.
     fn moved(self, len: usize) -> io::Result<Self> {
         let to = Self::of(-1, 0, len, libc::MAP_PRIVATE)?;
@@ -158,7 +158,7 @@ impl Mapping {
     }
 }
 
-/// fxdax: maps `len` bytes of `fd` from `offset` at `place`, shared, MAP_FIXED over whatever was
+/// cladefs: maps `len` bytes of `fd` from `offset` at `place`, shared, MAP_FIXED over whatever was
 /// mapped there: part of a mapping kept, which unmaps it.
 fn map_fixed(place: *mut u8, fd: libc::c_int, offset: u64, len: usize) -> io::Result<()> {
     let prot = libc::PROT_READ | libc::PROT_WRITE;
@@ -171,7 +171,7 @@ fn map_fixed(place: *mut u8, fd: libc::c_int, offset: u64, len: usize) -> io::Re
     Ok(())
 }
 
-/// fxdax: a buffer holding `bytes`, whose next byte faults: they end where a page that allows no
+/// cladefs: a buffer holding `bytes`, whose next byte faults: they end where a page that allows no
 /// access starts.
 struct Faulting {
     _mapping: Mapping,
@@ -219,21 +219,21 @@ fn done(ret: libc::c_int) -> io::Result<u64> {
     if ret < 0 { Err(io::Error::last_os_error()) } else { Ok(0) }
 }
 
-/// fxdax: a file's modification and change times, as fstat has them.
+/// cladefs: a file's modification and change times, as fstat has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Times {
     mtime: (i64, i64),
     ctime: (i64, i64),
 }
 
-/// fxdax: of a file, which of its times a step changed.
+/// cladefs: of a file, which of its times a step changed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Changed {
     pub mtime: bool,
     pub ctime: bool,
 }
 
-/// fxdax: what a step came to on a filesystem.
+/// cladefs: what a step came to on a filesystem.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Effect {
     /// The operation, as the model resolved it.
@@ -250,11 +250,11 @@ pub struct Ran {
     pub model: Model,
     pub done: Vec<String>,
     pub refused: usize,
-    /// fxdax: how many files read in again were DAX.
+    /// cladefs: how many files read in again were DAX.
     pub dax: usize,
 }
 
-/// fxdax: what a run's filesystem is, and may do.
+/// cladefs: what a run's filesystem is, and may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Options {
     /// Whether it may refuse operations for lack of room.
@@ -268,7 +268,7 @@ pub struct Options {
     /// Its largest file, which says what a far step comes to (`script::far`): the VFS's, but for
     /// ext4 ([`ext4_largest`]) and Fxfs with a DAX window (`script::LARGEST_DAX`).
     pub largest: u64,
-    /// fxdax: whether the run says, on its standard output, what each operation it refused came
+    /// cladefs: whether the run says, on its standard output, what each operation it refused came
     /// to (`script::Partial`), for a host to replay the model by once it has killed the VM
     /// (TASK-149.2).
     pub partials: bool,
@@ -281,7 +281,7 @@ impl Default for Options {
     }
 }
 
-/// fxdax: the kernel's fault injection (failslab and fail_page_alloc, a debug kernel's: TASK-44.10)
+/// cladefs: the kernel's fault injection (failslab and fail_page_alloc, a debug kernel's: TASK-44.10)
 /// for the calls a run makes on its files alone, as a seed says: of a script of `seed`, which of
 /// each operation's calls fails which of its allocations, so that a replay of the script, or of a
 /// part of it, fails the same (TASK-44.15). Not by the attributes' probability, which the kernel's
@@ -314,7 +314,7 @@ impl Faults {
         let set = |kind: &str, name: &str, value: &str| {
             let path = format!("{}/{kind}/{name}", Self::DEBUGFS);
             fs::write(&path, value).unwrap_or_else(|err| {
-                panic!("{path}: {err} (the debug kernel injects faults: FXDAX_GUEST_KERNEL_BUILD=debug)")
+                panic!("{path}: {err} (the debug kernel injects faults: CLADEFS_GUEST_KERNEL_BUILD=debug)")
             });
         };
         for kind in Self::KINDS {
@@ -347,12 +347,12 @@ impl Faults {
         (rng.next(Self::ONE_IN) == 0).then(|| 1 + rng.next(Self::NTH))
     }
 
-    /// fxdax: whether the kernel has fault injection, a task's fail-nth (a debug kernel's).
+    /// cladefs: whether the kernel has fault injection, a task's fail-nth (a debug kernel's).
     pub fn available() -> bool {
         std::path::Path::new("/proc/thread-self/fail-nth").exists()
     }
 
-    /// fxdax: makes `call` with its `nth` allocation that may fail failing; and whether it failed
+    /// cladefs: makes `call` with its `nth` allocation that may fail failing; and whether it failed
     /// one, as it may make fewer.
     pub fn failing<T>(
         &self,
@@ -397,7 +397,7 @@ impl Faults {
     }
 }
 
-/// fxdax: the agent's /proc/thread-self/fail-nth, the task's that runs the scripts (Faults).
+/// cladefs: the agent's /proc/thread-self/fail-nth, the task's that runs the scripts (Faults).
 static FAIL_NTH: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
 
 /// A script's files, as a run has them.
@@ -410,23 +410,23 @@ pub struct Run {
     pub(crate) model: Model,
     options: Options,
     faults: Option<Faults>,
-    /// fxdax: the operation being done, and how many of its calls fault injection has seen, and
+    /// cladefs: the operation being done, and how many of its calls fault injection has seen, and
     /// how many failed (Faults).
     calls: Cell<(usize, u64)>,
     pub injected: Cell<u64>,
-    /// fxdax: each file's times after the step before.
+    /// cladefs: each file's times after the step before.
     times: Vec<Times>,
     /// Each operation done, as it was resolved, and what the filesystem refused of it.
     pub done: Vec<String>,
     /// How many it refused.
     pub refused: usize,
-    /// fxdax: how many files read in again were DAX.
+    /// cladefs: how many files read in again were DAX.
     pub dax: usize,
-    /// fxdax: each step that changed a file, by its index and as done, and what it reached.
+    /// cladefs: each step that changed a file, by its index and as done, and what it reached.
     touches: Vec<(usize, String, Reach)>,
-    /// fxdax: the byte of which file a check found differing from the model, the first.
+    /// cladefs: the byte of which file a check found differing from the model, the first.
     differed: Cell<Option<(usize, u64)>>,
-    /// fxdax: the file far steps write, empty between them, once made (`Run::far_file`).
+    /// cladefs: the file far steps write, empty between them, once made (`Run::far_file`).
     far: Option<fs::File>,
 }
 
@@ -463,7 +463,7 @@ impl Run {
         }
     }
 
-    /// fxdax: says what `step`, the script's `index`th, which the filesystem refused, came to, of
+    /// cladefs: says what `step`, the script's `index`th, which the filesystem refused, came to, of
     /// the file it changes as the model had it before, `before`, if it changes one
     /// (`script::Partial`); an fsync refused made nothing durable.
     fn say_partial(
@@ -492,7 +492,7 @@ impl Run {
         Ok(())
     }
 
-    /// fxdax: has the run's calls on its files fail their allocations as `faults` says, ENOMEM
+    /// cladefs: has the run's calls on its files fail their allocations as `faults` says, ENOMEM
     /// then a refusal.
     pub fn inject(&mut self, faults: Faults) {
         self.faults = Some(faults);
@@ -521,7 +521,7 @@ impl Run {
         let reach = step.reach(&self.model);
         self.done.push(step.to_string());
         let refused = self.refused;
-        // fxdax: what the file it changes held, to say what a refusal left of it.
+        // cladefs: what the file it changes held, to say what a refusal left of it.
         let said = self.options.partials && self.options.full;
         let before =
             step.changes().filter(|_| said).map(|file| (file, self.model.files[file].clone()));
@@ -547,7 +547,7 @@ impl Run {
         panic!("seed {seed}: {failure}; {}", self.history());
     }
 
-    /// fxdax: what came before the operation the run is at, and what was refused, for a failure.
+    /// cladefs: what came before the operation the run is at, and what was refused, for a failure.
     pub fn history(&self) -> String {
         let last = &self.done[self.done.len().saturating_sub(24)..];
         let refused: Vec<_> = (self.done.iter().enumerate())
@@ -562,7 +562,7 @@ impl Run {
         )
     }
 
-    /// fxdax: the steps that changed the byte a check found differing, the latest first, back
+    /// cladefs: the steps that changed the byte a check found differing, the latest first, back
     /// through the clones and copies it came by to where it was written: what a failure that
     /// doesn't replay, under fault injection, has to say of how it came about.
     fn lineage(&self) -> String {
@@ -602,7 +602,7 @@ impl Run {
         Ran { model: self.model, done: self.done, refused: self.refused, dax: self.dax }
     }
 
-    /// fxdax: makes `file` hold `bytes`, as another run's model has it after a refusal there,
+    /// cladefs: makes `file` hold `bytes`, as another run's model has it after a refusal there,
     /// outside the script: written whole, its times taken anew.
     pub fn adopt(&mut self, file: usize, bytes: &[u8]) -> Result<(), Failure> {
         let failed = |err: io::Error| Failure {
@@ -885,7 +885,7 @@ impl Run {
         Ok(data.len())
     }
 
-    /// fxdax: a call with arguments no well-behaved caller passes, `call` of `len` bytes at `at` of
+    /// cladefs: a call with arguments no well-behaved caller passes, `call` of `len` bytes at `at` of
     /// `file`, as the model has `step`: whose outcome, a clone's on a filesystem without reflinks, is
     /// the model's, `expected`.
     fn limit(
@@ -947,7 +947,7 @@ impl Run {
         }
     }
 
-    /// fxdax: the run's far file, which far steps write, made empty at the first, evicted and read
+    /// cladefs: the run's far file, which far steps write, made empty at the first, evicted and read
     /// in again, so that on a DAX mount it is DAX.
     fn far_file(&mut self) -> io::Result<libc::c_int> {
         if self.far.is_none() {
@@ -959,7 +959,7 @@ impl Run {
         Ok(self.far.as_ref().expect("the far file").as_raw_fd())
     }
 
-    /// fxdax: a far step, `step`: a write of `data` at `at` of the far file, or its truncation to
+    /// cladefs: a far step, `step`: a write of `data` at `at` of the far file, or its truncation to
     /// `at`, which comes to `expected` if it is the filesystem's to say. What it did is checked,
     /// through read(2) and a mapping, and the far file made empty again.
     fn far(
@@ -999,7 +999,7 @@ impl Run {
         Ok(outcome)
     }
 
-    /// fxdax: checks the far file holds `data` at `at`, and nothing else, or, `truncate`, that it
+    /// cladefs: checks the far file holds `data` at `at`, and nothing else, or, `truncate`, that it
     /// is `at` bytes long.
     fn check_far(&self, at: u64, data: &[u8], truncate: bool) -> Result<(), Failed> {
         let far = self.far.as_ref().expect("the far file");
@@ -1041,7 +1041,7 @@ impl Run {
         Ok(())
     }
 
-    /// fxdax: mmap of `len` bytes at `at` of `file`, as the model has `step`: its bytes within the
+    /// cladefs: mmap of `len` bytes at `at` of `file`, as the model has `step`: its bytes within the
     /// file's last page, the file's, then zeros, checked.
     fn map_odd(&mut self, step: &Step, file: usize, at: u64, len: u64) -> Result<Outcome, Failed> {
         let fd = self.files[file].as_raw_fd();
@@ -1062,7 +1062,7 @@ impl Run {
         Ok(Ok(0))
     }
 
-    /// fxdax: stores `data` at `at` of `file` through a mapping of its pages MAP_FIXED over the same
+    /// cladefs: stores `data` at `at` of `file` through a mapping of its pages MAP_FIXED over the same
     /// pages of the mapping kept of `over`, whose own are then mapped back, if it's another's.
     fn map_fixed(
         &mut self,
@@ -1089,7 +1089,7 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// fxdax: stores `data` at `at` of `file` through a mapping made for them, half of them before
+    /// cladefs: stores `data` at `at` of `file` through a mapping made for them, half of them before
     /// it is remapped twice as large, and moved (mremap), half after; then reads them back through
     /// it.
     fn mremap(&mut self, file: usize, at: u64, data: &[u8]) -> Result<Outcome, Failed> {
@@ -1121,7 +1121,7 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// fxdax: reads all `file` holds through the kept mapping, so that each of its pages is
+    /// cladefs: reads all `file` holds through the kept mapping, so that each of its pages is
     /// mapped, checked against the model; then makes the mapping read-only and writable again
     /// (mprotect), or moves it (mremap), as `step` says, the kernel changing its PTEs in batches;
     /// then stores `data` at `at` through it, maybe to a page only read, whose store must fault and
@@ -1159,7 +1159,7 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// fxdax: truncates `file` down to `size` and back, again and again, while a child stores
+    /// cladefs: truncates `file` down to `size` and back, again and again, while a child stores
     /// `data` at `at`, below both, through the mapping kept, again and again; then checks the file
     /// around the store and the size it went down to.
     fn truncate_racing(
@@ -1197,7 +1197,7 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// fxdax: fallocate of `mode` on `len` bytes at `at` of `file`, as the model has `step`.
+    /// cladefs: fallocate of `mode` on `len` bytes at `at` of `file`, as the model has `step`.
     fn allocate(
         &mut self,
         step: &Step,
@@ -1218,7 +1218,7 @@ impl Run {
 
     /// Stores `data` at `mapped`, of a file's mapping, from a child, which inherits it: all of it,
     /// or on a filesystem with no room left, as much as the child got to store before it died.
-    /// fxdax: the child stores it `passes` times over, while this process calls `race` until the
+    /// cladefs: the child stores it `passes` times over, while this process calls `race` until the
     /// child is done, if it's given, and once at least.
     fn store_in_child(
         &mut self,
@@ -1316,7 +1316,7 @@ impl Run {
         }
     }
 
-    /// fxdax: copy_file_range of `len` bytes at `src` of `from` to `dst` of `to`, as many calls as
+    /// cladefs: copy_file_range of `len` bytes at `src` of `from` to `dst` of `to`, as many calls as
     /// it takes, each going on where the one before stopped: what they copied.
     fn copy(
         &mut self,
@@ -1373,7 +1373,7 @@ impl Run {
         Ok(Ok(copied))
     }
 
-    /// fxdax: has the model hold what a copy that has got to `src` of `from` and `dst` of `to`
+    /// cladefs: has the model hold what a copy that has got to `src` of `from` and `dst` of `to`
     /// copied, the `copied` bytes before them, read before any was written: a file and itself
     /// never overlap.
     fn copied(&mut self, from: usize, src: u64, to: usize, dst: u64, copied: u64) {
@@ -1384,7 +1384,7 @@ impl Run {
         self.model.write(to, dst - copied, &bytes);
     }
 
-    /// fxdax: stores `data` at `at` of `file` through a mapping of its pages made for them, gone
+    /// cladefs: stores `data` at `at` of `file` through a mapping of its pages made for them, gone
     /// after: shared, and the file holds them, or private, and only the mapping does, which reads
     /// as the file with them.
     fn map_store(
@@ -1423,14 +1423,14 @@ impl Run {
         Ok(Ok(stored as u64))
     }
 
-    /// fxdax: `file` opened again, with O_DIRECT.
+    /// cladefs: `file` opened again, with O_DIRECT.
     fn open_direct(&self, file: usize) -> Result<fs::File, Failed> {
         let mut options = fs::OpenOptions::new();
         options.read(true).write(true).custom_flags(libc::O_DIRECT);
         options.open(&self.names[file]).map_err(|err| errno("open with O_DIRECT", &err))
     }
 
-    /// fxdax: closes `file`, its kept mapping gone, evicts its inode, written back and its pages
+    /// cladefs: closes `file`, its kept mapping gone, evicts its inode, written back and its pages
     /// dropped, and opens and maps it again; on a DAX mount, notes whether it is DAX now.
     fn reopen(&mut self, file: usize) -> Result<(), Failed> {
         drop(std::mem::replace(&mut self.maps[file], Mapping::none()));
@@ -1453,7 +1453,7 @@ impl Run {
         Ok(())
     }
 
-    /// fxdax: which times of each file the step just done changed.
+    /// cladefs: which times of each file the step just done changed.
     fn times_changed(&mut self) -> Result<Vec<Changed>, Failed> {
         let mut changed = Vec::with_capacity(self.files.len());
         for (file, before) in self.files.iter().zip(&mut self.times) {
@@ -1467,7 +1467,7 @@ impl Run {
         Ok(changed)
     }
 
-    /// fxdax: notes that byte `at` of `file` differs from the model, if no byte did before.
+    /// cladefs: notes that byte `at` of `file` differs from the model, if no byte did before.
     fn differs_at(&self, file: usize, at: u64) {
         if self.differed.get().is_none() {
             self.differed.set(Some((file, at)));
@@ -1541,7 +1541,7 @@ impl Run {
         self.check(file, 0, size + PAGE).map(drop)
     }
 
-    /// fxdax: checks `file`'s size, and its bytes around `len` at `at`, a page either side, against
+    /// cladefs: checks `file`'s size, and its bytes around `len` at `at`, a page either side, against
     /// the model: at once after a step that may leave them as it shouldn't.
     fn check_around(&self, file: usize, at: u64, len: u64) -> Result<(), Failed> {
         let (size, want) = (self.length(file)?, self.model.files[file].len() as u64);
@@ -1553,7 +1553,7 @@ impl Run {
     }
 
     /// Checks all of `file`, its size, and through read(2) and its mapping, against the model; and
-    /// fxdax: if the run seeks, that each hole SEEK_HOLE and SEEK_DATA find reads as zeros.
+    /// cladefs: if the run seeks, that each hole SEEK_HOLE and SEEK_DATA find reads as zeros.
     fn check_whole(&self, file: usize) -> Result<(), Failed> {
         self.check_read(file)?;
         let model = &self.model.files[file];
@@ -1568,7 +1568,7 @@ impl Run {
         Ok(())
     }
 
-    /// fxdax: walks `file`'s holes and data, SEEK_DATA from each hole's start and SEEK_HOLE from
+    /// cladefs: walks `file`'s holes and data, SEEK_DATA from each hole's start and SEEK_HOLE from
     /// each run of data's: what the filesystem says is a hole must be zeros in the model.
     fn check_holes(&self, file: usize) -> Result<(), Failed> {
         let (fd, model) = (self.files[file].as_raw_fd(), &self.model.files[file]);
@@ -1608,12 +1608,12 @@ impl Run {
     }
 }
 
-/// fxdax: a failure, of a check after a step that came to `outcome`, saying so.
+/// cladefs: a failure, of a check after a step that came to `outcome`, saying so.
 fn came_to(outcome: Outcome) -> impl FnOnce(Failed) -> Failed {
     move |(kind, what)| (kind, format!("{what}, after the step came to {outcome:?}"))
 }
 
-/// fxdax: what failing to come to `expected`, coming to `outcome`, says of `step`.
+/// cladefs: what failing to come to `expected`, coming to `outcome`, says of `step`.
 fn unexpected(step: &Step, outcome: Outcome, expected: Outcome) -> Failed {
     match (outcome, expected) {
         (Err(errno), _) => {
@@ -1631,7 +1631,7 @@ fn unexpected(step: &Step, outcome: Outcome, expected: Outcome) -> Failed {
     }
 }
 
-/// fxdax: unlinks the files `names`, those there are, for a run to make anew, inodes of their own,
+/// cladefs: unlinks the files `names`, those there are, for a run to make anew, inodes of their own,
 /// as a boot's run of a script does. A run makes a file there is empty, which keeps its inode, and
 /// with it what the filesystem made of it: on a DAX mount, a file read in again is DAX, where one
 /// made in a run isn't till it is (`Step::Reopen`). A shrink's run of a script, in the guest that
@@ -1653,7 +1653,7 @@ fn open(name: &str, empty: bool) -> fs::File {
     options.open(name).unwrap_or_else(|err| panic!("open {name}: {err}"))
 }
 
-/// fxdax: faults in the `len` bytes at `bytes`, a call's buffer, before the call: the kernel's copy
+/// cladefs: faults in the `len` bytes at `bytes`, a call's buffer, before the call: the kernel's copy
 /// to a page of it not there faults it in, and a fault whose allocation fault injection failed is
 /// the call's EFAULT, which is no filesystem's (GCE r783).
 fn touch(bytes: *mut u8, len: usize) {
@@ -1662,14 +1662,14 @@ fn touch(bytes: *mut u8, len: usize) {
     }
 }
 
-/// fxdax: faults in the `len` bytes at `bytes`, a call's source, reading them.
+/// cladefs: faults in the `len` bytes at `bytes`, a call's source, reading them.
 fn fault_in(bytes: *const u8, len: usize) {
     for at in pages(len) {
         unsafe { bytes.add(at).read_volatile() };
     }
 }
 
-/// fxdax: of `len` bytes, one in each page they reach, wherever in a page they start: every
+/// cladefs: of `len` bytes, one in each page they reach, wherever in a page they start: every
 /// page's worth, and the last.
 fn pages(len: usize) -> impl Iterator<Item = usize> {
     (0..len).step_by(PAGE as usize).chain(len.checked_sub(1))
@@ -1682,7 +1682,7 @@ fn store(mapped: *mut u8, data: &[u8]) {
     }
 }
 
-/// fxdax: `file`'s times.
+/// cladefs: `file`'s times.
 fn times(file: &fs::File) -> io::Result<Times> {
     let metadata = file.metadata()?;
     Ok(Times {
@@ -1691,7 +1691,7 @@ fn times(file: &fs::File) -> io::Result<Times> {
     })
 }
 
-/// fxdax: whether the kernel accesses `file` through a DAX window: STATX_ATTR_DAX.
+/// cladefs: whether the kernel accesses `file` through a DAX window: STATX_ATTR_DAX.
 fn is_dax(file: &fs::File) -> bool {
     const STATX_ATTR_DAX: u64 = 0x200000;
     // struct statx: stx_attributes at byte 8.
@@ -1764,7 +1764,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// fxdax: the wide mix's scripts on XFS, whose reflinks hold the model's rules of a range's
+    /// cladefs: the wide mix's scripts on XFS, whose reflinks hold the model's rules of a range's
     /// clone (`Model::clone_range`) to the VFS's: each refusal the model says, the kernel makes, and
     /// no other. Through every operation's outcome and the bytes after it.
     #[test]
@@ -1784,7 +1784,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// fxdax: and on ext4, with no reflinks, its clones copies of what the model says they take.
+    /// cladefs: and on ext4, with no reflinks, its clones copies of what the model says they take.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn wide_scripts_pass_on_a_filesystem_without_reflinks() {
@@ -1800,7 +1800,7 @@ pub(crate) mod tests {
         assert_hold(&names, &ran.model);
     }
 
-    /// fxdax: the hostile mix's scripts (TASK-149.16), on XFS, with reflinks, and on ext4 as
+    /// cladefs: the hostile mix's scripts (TASK-149.16), on XFS, with reflinks, and on ext4 as
     /// fxfs-guest-fsx's reference has it, its clones copies: every errno the model says of them,
     /// the kernel says. XFS's without writes from buffers that fault, which leave what a page held
     /// in a hole (`a_write_stopped_short_in_a_hole_leaves_zeros`).
@@ -1835,7 +1835,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// fxdax: a write from a buffer that faults partway, into a hole, unaligned, which ends in a
+    /// cladefs: a write from a buffer that faults partway, into a hole, unaligned, which ends in a
     /// page it writes part of: what it didn't write of that page stays a hole's, zeros. Not on XFS,
     /// whose iomap marks the page up to date as it zeroes what lies outside the write, before the
     /// copy, and keeps a short one, the rest of what the write was to cover holding what the page
@@ -1874,7 +1874,7 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// fxdax: an O_DIRECT read of the page an append from a buffer that faults stopped short in,
+    /// cladefs: an O_DIRECT read of the page an append from a buffer that faults stopped short in,
     /// and past it, on ext4 as fxfs-guest-fsx's reference has it. With delayed allocation, Linux
     /// 6.18's ext4 and 7.2's leave the blocks the write reserved past the end it reached, which
     /// iomap's direct read finds delayed and fails, EIO ("Direct I/O collision with buffered
@@ -1906,7 +1906,7 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// fxdax: files made anew are a run's own, not an earlier run's made empty, whose inodes keep
+    /// cladefs: files made anew are a run's own, not an earlier run's made empty, whose inodes keep
     /// what the filesystem made of them: its mode, here.
     #[test]
     fn files_made_anew_are_not_an_earlier_runs() {
@@ -1922,7 +1922,7 @@ pub(crate) mod tests {
         assert_ne!(mode, 0o600, "the earlier run's file, made empty");
     }
 
-    /// fxdax: hostile steps, each, on ext4: what each comes to, and what the files hold after.
+    /// cladefs: hostile steps, each, on ext4: what each comes to, and what the files hold after.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn hostile_steps_come_to_what_the_model_says() {
@@ -2005,7 +2005,7 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// fxdax: each operation's outcome, which a step's effect says, is the model's: a range clone
+    /// cladefs: each operation's outcome, which a step's effect says, is the model's: a range clone
     /// refused as the VFS refuses it, a copy shortened at the source's end; and a refusal and a
     /// read change no file's times. That a write changes them a host's kernel may not show: before
     /// 6.13, its filesystems' times are coarse, and a write in the tick the file was made in leaves
@@ -2060,7 +2060,7 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// fxdax: a private mapping's stores are its own, the file's as they were; a file reopened is
+    /// cladefs: a private mapping's stores are its own, the file's as they were; a file reopened is
     /// as it was, and its times too.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
@@ -2091,7 +2091,7 @@ pub(crate) mod tests {
         assert_hold(&names, &run.model);
     }
 
-    /// fxdax: a byte found differing says what changed it, back through the clone it came by.
+    /// cladefs: a byte found differing says what changed it, back through the clone it came by.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_byte_that_differs_says_what_changed_it() {
@@ -2118,7 +2118,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// fxdax: which call of which operation fault injection fails is the seed's alone, so that a
+    /// cladefs: which call of which operation fault injection fails is the seed's alone, so that a
     /// replay, or a shrink's try without some operations, fails the same of those left: one call
     /// in Faults::ONE_IN, one of its first Faults::NTH allocations.
     #[test]
@@ -2135,7 +2135,7 @@ pub(crate) mod tests {
         assert_eq!(faults.of(8).nth(5, 1), other.nth(5, 1));
     }
 
-    /// fxdax: a hole SEEK_DATA skips must read as zeros: the model holding data there fails.
+    /// cladefs: a hole SEEK_DATA skips must read as zeros: the model holding data there fails.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]
     fn a_hole_over_data_fails() {
@@ -2189,7 +2189,7 @@ pub(crate) mod tests {
 
     /// A filesystem of `len` bytes, by `mkfs` and `args`, on a loop device, mounted in `dir`.
     ///
-    /// fxdax: root's alone, which mount(8) needs for a loop device: no unprivileged way gives a
+    /// cladefs: root's alone, which mount(8) needs for a loop device: no unprivileged way gives a
     /// test a kernel's ext4 or XFS of its own (a user namespace mounts neither, and FUSE's, as
     /// fuse2fs, are not the kernel's, which the tests hold the model to). So every test that makes
     /// one is ignored, its reason saying so, and runs as root alone, with nextest's `--run-ignored all`,
@@ -2208,7 +2208,7 @@ pub(crate) mod tests {
             Self::mounted(dir, len, mkfs, args, "loop")
         }
 
-        /// fxdax: of the mount's `options`.
+        /// cladefs: of the mount's `options`.
         fn mounted(
             dir: &std::path::Path,
             len: u64,
@@ -2230,7 +2230,7 @@ pub(crate) mod tests {
             Self { mountpoint }
         }
 
-        /// fxdax: ext4 as fxfs-guest-fsx's reference has it: with no delayed allocation
+        /// cladefs: ext4 as fxfs-guest-fsx's reference has it: with no delayed allocation
         /// (`test_fxfs_guest_fsx::REFERENCE_OPTIONS`).
         pub(crate) fn reference(dir: &std::path::Path) -> Self {
             Self::mounted(dir, 300 << 20, "mkfs.ext4", &["-q", "-F"], "loop,nodelalloc")
@@ -2253,9 +2253,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// FXDAX_SCRIPT_SEEDS asks for more seeds of the tests that run scripts, to hunt.
+    /// CLADEFS_SCRIPT_SEEDS asks for more seeds of the tests that run scripts, to hunt.
     fn seeds() -> u64 {
-        std::env::var("FXDAX_SCRIPT_SEEDS").map_or(1, |seeds| seeds.parse().unwrap())
+        std::env::var("CLADEFS_SCRIPT_SEEDS").map_or(1, |seeds| seeds.parse().unwrap())
     }
 
     /// Runs `mix`'s scripts on `dir`, with `LEFT` bytes of room, and checks that some operations
@@ -2303,7 +2303,7 @@ pub(crate) mod tests {
         refuses_on(&xfs.mountpoint, SEVERAL_FILES);
     }
 
-    /// fxdax: a filesystem filled leaves no more room than asked once the ballast is closed: XFS
+    /// cladefs: a filesystem filled leaves no more room than asked once the ballast is closed: XFS
     /// takes blocks ahead of a growing file's end (speculative preallocation), a MiB or two, which
     /// it gives back as the file closes (xfs_release). Measured with the ballast open, a fill left
     /// 2.2 MiB once it closed, a run in three on OrbStack's kernel, in which a script's files, full

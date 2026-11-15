@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* The simulator's own interface, which tests drive: tasks, the scheduler, and a mounted file. */
 #ifndef _SIM_SIM_H
 #define _SIM_SIM_H
@@ -84,7 +84,7 @@ u64 sim_device_map_requests(void);
  * `skip` more of them; or one MAP or UNMAP in `odds`, from the seed, until told 0: how many have.
  */
 void sim_device_fail(u32 type, u64 skip, u64 count);
-/* fxdax: as sim_device_fail, failing them with `err`, a -errno, as the guest's device may (ENOMEM). */
+/* cladefs: as sim_device_fail, failing them with `err`, a -errno, as the guest's device may (ENOMEM). */
 void sim_device_fail_with(u32 type, u64 skip, u64 count, int err);
 void sim_device_fail_odds(unsigned int odds);
 u64 sim_device_failed(void);
@@ -207,7 +207,7 @@ void fxfs_sim_fail(unsigned int odds);
  */
 void fxfs_sim_hold_commits(bool hold);
 /*
- * fxdax: as fxfs_set_fail_commits (fxfs.dax_fail_commits), the next `count` writebacks failing
+ * cladefs: as fxfs_set_fail_commits (fxfs.dax_fail_commits), the next `count` writebacks failing
  * before their commits with `err`, a -errno: ENOMEM, Fxfs finding no memory (TASK-207).
  */
 void fxfs_sim_fail_commits_with(u64 count, int err);

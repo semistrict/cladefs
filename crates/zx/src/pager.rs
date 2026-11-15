@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax: `Pager::supply_shared_pages` binds `zx_pager_supply_shared_pages`, which the in-process
+// cladefs: `Pager::supply_shared_pages` binds `zx_pager_supply_shared_pages`, which the in-process
 // kernel adds to Zircon's syscalls.
 
 //! Type-safe bindings for Zircon pager objects.

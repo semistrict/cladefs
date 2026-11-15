@@ -8,7 +8,7 @@
 //! kernel's, as they are on Fuchsia, rather than the emulated handles upstream uses on hosts.
 //!
 //! There are no channels or wire format: a proxy calls the object serving its protocol in-process
-//! (see `endpoints`), which is all fxdax's tests of FIDL-serving code need.
+//! (see `endpoints`), which is all cladefs's tests of FIDL-serving code need.
 
 /// As `fuchsia_handles` in `src/lib/fidl/rust/fidl/src/handle.rs` aliases the zircon library.
 pub use zx::{

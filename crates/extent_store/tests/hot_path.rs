@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: how long a store's hot paths take a call, each looking up an extent's life: a page-in's
+//! cladefs: how long a store's hot paths take a call, each looking up an extent's life: a page-in's
 //! `locate`, a view's `locate_view`, a write's opening and finish, and a free; the store holding
 //! tens of thousands of extents, keeping as many freed, and having spent their numbers
 //! (TASK-160.18). A measurement, not a check: ignored, run in release,

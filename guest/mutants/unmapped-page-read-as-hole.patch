@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # Kernel: sim
 # Killer: hole_mapped_then_written
@@ -18,7 +18,7 @@
  		fxfs_dax_put_range(dax, range);
  		return -EIO;
 -	}
--	/* fxdax: a page of the file with no window page is no hole: mapped first. */
+-	/* cladefs: a page of the file with no window page is no hole: mapped first. */
 -	if (!dax->read_only && !fxfs_dax_pages_mapped(range->state, page)) {
 -		up_read(&file->sem);
 -		err = fxfs_dax_map_missing(inode, range, page,

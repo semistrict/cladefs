@@ -1,15 +1,15 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Podman-based rootfs provisioning for tests that need a full Linux rootfs.
 //!
 //! `prepare_rootfs` builds a podman image from a Containerfile string, creates a container,
 //! and pipes `podman export` directly into `tar -x` to populate the destination directory.
-//! The image tag is derived from the hash of the Containerfile content (`fxdax-test-<hash>`),
+//! The image tag is derived from the hash of the Containerfile content (`cladefs-test-<hash>`),
 //! so podman's layer cache makes rebuilds fast when the Containerfile hasn't changed.
 //!
-//! fxdax: and the files its build takes from the host ([`Download`]), each fetched once into the
+//! cladefs: and the files its build takes from the host ([`Download`]), each fetched once into the
 //! host's cache, checked by its sha256, and given to the build in a context directory of its own
 //! (TASK-297).
 
@@ -19,7 +19,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// fxdax: a root filesystem's image: its Containerfile, and the files its build takes from the
+/// cladefs: a root filesystem's image: its Containerfile, and the files its build takes from the
 /// host, which it copies in by their names (`COPY NAME ...`).
 #[derive(Clone, Copy)]
 pub struct Image {
@@ -34,7 +34,7 @@ impl Image {
     }
 }
 
-/// fxdax: a file an image's build takes from the host, fetched into the host's cache at most once
+/// cladefs: a file an image's build takes from the host, fetched into the host's cache at most once
 /// ([`cache_dir`]), and checked by its sha256 as it is fetched and each time it is used: from the
 /// first of its sources that serves it, each tried again before the next. A build that fetched
 /// it from one host, each time, failed whenever that host was slow or down, skipping every case
@@ -48,17 +48,17 @@ pub struct Download {
     pub sources: &'static [&'static str],
 }
 
-/// fxdax: the host's cache of downloads, FXDAX_DOWNLOADS, or `fxdax/downloads` in the user's cache
+/// cladefs: the host's cache of downloads, CLADEFS_DOWNLOADS, or `cladefs/downloads` in the user's cache
 /// directory (XDG_CACHE_HOME, or ~/.cache), as scripts/test-e2e.sh keeps Docker's.
 fn cache_dir() -> anyhow::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("FXDAX_DOWNLOADS") {
+    if let Some(dir) = std::env::var_os("CLADEFS_DOWNLOADS") {
         return Ok(dir.into());
     }
     let cache = match std::env::var_os("XDG_CACHE_HOME") {
         Some(cache) => PathBuf::from(cache),
         None => PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?).join(".cache"),
     };
-    Ok(cache.join("fxdax").join("downloads"))
+    Ok(cache.join("cladefs").join("downloads"))
 }
 
 /// The sha256 of `bytes`, in hexadecimal, as sha256sum(1) says it.
@@ -141,7 +141,7 @@ fn image_tag(image: &Image) -> anyhow::Result<String> {
     for download in image.downloads {
         described += &format!("\n{} {}", download.name, download.sha256);
     }
-    Ok(format!("fxdax-test-{}", &sha256(described.as_bytes())?[..16]))
+    Ok(format!("cladefs-test-{}", &sha256(described.as_bytes())?[..16]))
 }
 
 fn podman_available() -> bool {
@@ -165,9 +165,9 @@ pub fn prepare_rootfs(image: &Image, dest: &Path) -> anyhow::Result<()> {
 
     let tag = image_tag(image)?;
     let containerfile = image.containerfile;
-    // fxdax: the build's context, its downloads alone, from the host's cache, rather than this
+    // cladefs: the build's context, its downloads alone, from the host's cache, rather than this
     // process's directory, whatever it held.
-    let context = tempdir::TempDir::new("fxdax-rootfs-context").context("the build's context")?;
+    let context = tempdir::TempDir::new("cladefs-rootfs-context").context("the build's context")?;
     let cache = cache_dir()?;
     for download in image.downloads {
         let cached = download.fetched(&cache)?;

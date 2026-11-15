@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: room for the data a page cache holds dirty, reserved as it dirties it, so that a write
+//! cladefs: room for the data a page cache holds dirty, reserved as it dirties it, so that a write
 //! the filesystem has no room for fails then, with ENOSPC, and its writeback, later, never finds
 //! the filesystem full (TASK-80): the guest kernel's buffered writes reserved nothing, and their
 //! writeback, failing, dropped the data. As Fuchsia's pager-backed files reserve as their pages

@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-08 20:32'
+updated_date: '2026-11-15 11:37'
 labels: []
 dependencies: []
 ordinal: 695000
@@ -19,7 +20,7 @@ cargo fmt --all --check on main at 4f336f788 reports diffs in crates/extent_stor
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 cargo fmt --all --check is clean for fxdax's own crates
+- [ ] #1 cargo fmt --all --check is clean for cladefs's own crates
 - [ ] #2 CI fails on unformatted code, vendored trees excluded
 <!-- AC:END -->
 

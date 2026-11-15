@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: fsx-style random operations on the guest's Fxfs, differential against ext4 in the same
+//! cladefs: fsx-style random operations on the guest's Fxfs, differential against ext4 in the same
 //! guest (TASK-44.15, TASK-149.12): scripts of the wide mix (`script::WIDE`: writes, stores through
 //! mappings kept, made and private, reads, truncations, punches, ranges zeroed, allocated, cloned
 //! and copied, fsyncs, fdatasyncs, msyncs, O_DIRECT, page caches dropped and files evicted and read
@@ -11,11 +11,11 @@
 //! file's, ranges onto themselves, mappings at odd offsets, MAP_FIXED over those kept, moved by
 //! mremap, madvised away, truncations racing stores, writes from buffers that fault partway and
 //! from the file's own mapping), seed after seed for
-//! FXDAX_FSX_SECS (one script if 0), each on three files of Fxfs's and three of ext4's, a disk of
+//! CLADEFS_FSX_SECS (one script if 0), each on three files of Fxfs's and three of ext4's, a disk of
 //! the guest's own, step by step, both held to the model and to each other (`differential`).
 //!
-//! Each script's seed is said as it starts, FXDAX_SEED replaying it with FXDAX_FSX_SECS=0. A failure
-//! is shrunk in the guest, a try a run of the script, no boot, for FXDAX_FSX_SHRINK_SECS at most;
+//! Each script's seed is said as it starts, CLADEFS_SEED replaying it with CLADEFS_FSX_SECS=0. A failure
+//! is shrunk in the guest, a try a run of the script, no boot, for CLADEFS_FSX_SHRINK_SECS at most;
 //! the host replays what it shrank to once, from a boot, to say whether that replays it. A guest
 //! that died, hung or complained is shrunk by the host, a VM each try (`script_vm`), as
 //! fxfs-guest-script's are. The last script's files stay in the store, with their models, which
@@ -42,11 +42,11 @@ pub struct TestFxfsGuestFsx {
 
 /// How long a run starts scripts for, in seconds, in the host's environment and the guest's: one
 /// script if 0.
-const SECS: &str = "FXDAX_FSX_SECS";
+const SECS: &str = "CLADEFS_FSX_SECS";
 /// How long the guest may shrink a failed script for, in seconds: not at all if 0.
-const SHRINK_SECS: &str = "FXDAX_FSX_SHRINK_SECS";
+const SHRINK_SECS: &str = "CLADEFS_FSX_SHRINK_SECS";
 /// In the guest's environment, the reference's disk.
-const REFERENCE: &str = "FXDAX_FSX_REFERENCE";
+const REFERENCE: &str = "CLADEFS_FSX_REFERENCE";
 /// The reference's mount options: no delayed allocation, whose blocks a write that stopped short
 /// left reserved past the end it reached, which an O_DIRECT read past it found delayed and failed,
 /// EIO (Linux 6.18's ext4 and iomap_dio_iter; GCE r860, TASK-149.16). Allocating as it writes,
@@ -61,7 +61,7 @@ const SEED_LINE: &str = "script seed ";
 /// What the guest says of a script it shrank, before the drops that leave what still fails.
 const SHRUNK_LINE: &str = "shrunk: ";
 
-/// FXDAX_FSX_SECS's or FXDAX_FSX_SHRINK_SECS's, or `default`.
+/// CLADEFS_FSX_SECS's or CLADEFS_FSX_SHRINK_SECS's, or `default`.
 fn secs(var: &str, default: u64) -> u64 {
     std::env::var(var)
         .map_or(default, |secs| secs.parse().unwrap_or_else(|_| panic!("{var} is {secs:?}")))
@@ -80,7 +80,7 @@ fn model(n: usize) -> String {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, guest_kernel_slowness, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, guest_kernel_slowness, setup_rootfs};
     use crate::script::{self, Failure, HOSTILE, kind};
     use crate::script_vm::{self, Replays};
     use crate::test_fxfs_guest_checks::host::seed;
@@ -88,7 +88,7 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use futures::executor::block_on;
-    use fxdax::{Filesystem, Storage};
+    use cladefs::{Filesystem, Storage};
     use std::ffi::CString;
     use std::path::Path;
     use std::time::Duration;
@@ -206,7 +206,7 @@ mod host {
             let len = script::generate(seed, HOSTILE).len();
             format!(
                 "{failure}\nrun seed {run}: the guest shrank script seed {seed} to {} of {len} \
-                 operations, {replayed}; FXDAX_SEED={seed} {}={drops} {SECS}=0 replays it:\n  {}",
+                 operations, {replayed}; CLADEFS_SEED={seed} {}={drops} {SECS}=0 replays it:\n  {}",
                 kept.len(),
                 script::DROP_VAR,
                 kept.join("\n  ")
@@ -214,7 +214,7 @@ mod host {
         }
 
         fn create_images(test_setup: &TestSetup) -> anyhow::Result<()> {
-            let image = test_setup.tmp_dir.join("fxdax.img");
+            let image = test_setup.tmp_dir.join("cladefs.img");
             block_on(async {
                 let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE)?).await?;
                 fs.close().await?;
@@ -235,13 +235,13 @@ mod host {
     impl Test for TestFxfsGuestFsx {
         /// Not -faults-dax but on the debug kernel, whose fault injection it uses.
         fn should_run(&self) -> ShouldRun {
-            let build = std::env::var("FXDAX_GUEST_KERNEL_BUILD").unwrap_or_default();
+            let build = std::env::var("CLADEFS_GUEST_KERNEL_BUILD").unwrap_or_default();
             if self.faults && build != "debug" {
                 return ShouldRun::No(
-                    "fault injection is the debug kernel's: FXDAX_GUEST_KERNEL_BUILD=debug",
+                    "fault injection is the debug kernel's: CLADEFS_GUEST_KERNEL_BUILD=debug",
                 );
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         /// Its scripts' time, the shrink's, and a script's and a boot's past them, as the guest
@@ -258,7 +258,7 @@ mod host {
             let mut vm = Vm::new(2, 1024)?;
             vm.guest_kernel()?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
-            vm.extent_store("fxdax", &test_setup.tmp_dir.join("fxdax.img"), IMAGE_SIZE, window)?;
+            vm.extent_store("cladefs", &test_setup.tmp_dir.join("cladefs.img"), IMAGE_SIZE, window)?;
             let device = vm.disk("reference", &test_setup.tmp_dir.join("ext4.img"))?;
             vm.env(&CString::new(format!("{REFERENCE}={device}"))?);
             vm.env(&CString::new(format!("{SECS}={}", secs(SECS, DEFAULT_SECS)))?);
@@ -267,7 +267,7 @@ mod host {
                 secs(SHRINK_SECS, DEFAULT_SHRINK_SECS)
             ))?);
             let seed = seed();
-            eprintln!("{}: seed {seed} (FXDAX_SEED={seed} replays it)", test_setup.test_case);
+            eprintln!("{}: seed {seed} (CLADEFS_SEED={seed} replays it)", test_setup.test_case);
             std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
             script_vm::pass_script(&mut vm, seed)?;
             if self.delay {
@@ -297,7 +297,7 @@ mod host {
                 ));
             }
             let files: Vec<_> = (0..HOSTILE.files).map(|n| (file(n), model(n))).collect();
-            match script_vm::stored_as_modelled(&test_setup.tmp_dir.join("fxdax.img"), &files) {
+            match script_vm::stored_as_modelled(&test_setup.tmp_dir.join("cladefs.img"), &files) {
                 Some(failure) => TestOutcome::Fail(format!("the last script's files: {failure}")),
                 None => TestOutcome::Pass,
             }
@@ -364,7 +364,7 @@ mod guest {
     /// How many of a shrunk script's operations the guest lists.
     const LISTED: usize = 64;
 
-    /// Mounts ext4 from the disk FXDAX_FSX_REFERENCE names, with REFERENCE_OPTIONS.
+    /// Mounts ext4 from the disk CLADEFS_FSX_REFERENCE names, with REFERENCE_OPTIONS.
     fn mount_reference() {
         fs::create_dir_all(MNT).unwrap();
         let device = CString::new(std::env::var(REFERENCE).unwrap()).unwrap();

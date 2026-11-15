@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/transaction.rs`. fxdax snapshots (volume snapshots
+// Fuchsia's `src/storage/fxfs/src/object_store/transaction.rs`. cladefs snapshots (volume snapshots
 // that share their source's layers and extents) deviate from upstream here: AllocatorMutation gains
 // a Snapshot variant, last, so that the others serialize as they did, and LockKey a Commits variant,
 // a store's commits, which a snapshot of it holds back (TASK-241). A transaction counts what its
@@ -76,7 +76,7 @@ pub const TRANSACTION_MAX_JOURNAL_USAGE: u64 = 24_576;
 pub const TRANSACTION_METADATA_MAX_AMOUNT: u64 =
     reserved_space_from_journal_usage(TRANSACTION_MAX_JOURNAL_USAGE);
 
-/// fxdax: how much of TRANSACTION_MAX_JOURNAL_USAGE a transaction's records may take before it is
+/// cladefs: how much of TRANSACTION_MAX_JOURNAL_USAGE a transaction's records may take before it is
 /// full (`Transaction::room`). The rest is for what comes after a loop last asked: what it adds
 /// before it next asks, a file's size and allocated size as it stops, a commit's own records, the
 /// padding of the sync before it (`ObjectManager::needs_borrow_for_journal`), and the checksums of
@@ -107,7 +107,7 @@ pub enum MutationV63 {
     EndFlush,
     /// Volume has been deleted. Requires we remove it from the set of managed ObjectStore.
     DeleteVolume,
-    /// fxdax: the metadata space borrowed, `borrowed`, before a transaction that may borrow
+    /// cladefs: the metadata space borrowed, `borrowed`, before a transaction that may borrow
     /// accounts for its own journal usage, which it does from `from`, the journal offset where the
     /// last transaction's ended, padding since included, four times over; and `paid`, the most of
     /// that its own reservation pays, which it doesn't borrow (`MetadataReservation::Borrowing`).
@@ -229,7 +229,7 @@ pub enum AllocatorMutationV60 {
     /// ObjectStore is still in use due to a high risk of corruption. Similarly, owner_object_id
     /// should never be reused for the same reasons.
     MarkForDeletion(u64),
-    /// fxdax: a snapshot of the store `source_store_object_id` into the new store
+    /// cladefs: a snapshot of the store `source_store_object_id` into the new store
     /// `new_store_object_id`. The source's current data owner is frozen, and its extents shared by
     /// both stores; the source allocates under `new_owner_object_id` from then on. Added last, so
     /// that the other variants serialize as they did.
@@ -238,7 +238,7 @@ pub enum AllocatorMutationV60 {
         new_store_object_id: u64,
         new_owner_object_id: u64,
     },
-    /// fxdax: `device_range`, allocated, referenced `delta` times more (or fewer, if negative)
+    /// cladefs: `device_range`, allocated, referenced `delta` times more (or fewer, if negative)
     /// by files' extents: reflinks (the allocator's "References"). Each of its parts' reference
     /// count changes by `delta`; a part none references any more is deallocated. A transaction
     /// holds one for a range, as it holds one of any mutation (`Transaction::add_reference`).
@@ -248,7 +248,7 @@ pub enum AllocatorMutationV60 {
         owner_object_id: u64,
         delta: i64,
     },
-    /// fxdax: `device_range`, of a shared extent alive, which an allocation of `owner_object_id`
+    /// cladefs: `device_range`, of a shared extent alive, which an allocation of `owner_object_id`
     /// that dropped took, and the extent keeps, as it is written once (TASK-211): the extent
     /// reaches as far as its end, with the range counted 0 (the allocator's "Shared extents"). A
     /// drop writes nothing of its own; this records it, so that a mount sizes the extent as far as
@@ -353,7 +353,7 @@ pub enum LockKey {
         store_object_id: u64,
     },
 
-    /// fxdax: a store's commits: each takes it to read, in `FxFilesystem::commit_transaction`,
+    /// cladefs: a store's commits: each takes it to read, in `FxFilesystem::commit_transaction`,
     /// after its keys are promoted to write locks, for each store it changes; a snapshot of the
     /// store takes it to write, before its flush, and holds it until it commits, so that no commit
     /// of the store comes between the two (TASK-241).
@@ -631,7 +631,7 @@ pub enum MetadataReservation {
     // A metadata reservation was made when the transaction was created.
     Reservation(Reservation),
 
-    // fxdax: metadata space for this transaction is borrowed, as for `Borrowed`, but for what a
+    // cladefs: metadata space for this transaction is borrowed, as for `Borrowed`, but for what a
     // metadata reservation made when the transaction was created pays for.
     Borrowing(Reservation),
 
@@ -659,7 +659,7 @@ pub struct Transaction<'a> {
     // Addressed by (owner_object_id, object_id).
     new_objects: BTreeSet<(u64, u64)>,
 
-    /// fxdax: the directories whose names this changes without their locks
+    /// cladefs: the directories whose names this changes without their locks
     /// (`change_names_unlocked`), by (owner_object_id, object_id).
     unlocked_names: BTreeSet<(u64, u64)>,
 
@@ -669,13 +669,13 @@ pub struct Transaction<'a> {
     /// Set if this transaction contains data (i.e. includes any extent mutations).
     includes_write: bool,
 
-    /// fxdax: what the records of `mutations` take of the journal.
+    /// cladefs: what the records of `mutations` take of the journal.
     mutation_bytes: u64,
 
-    /// fxdax: what the records of `checksums` take of the journal.
+    /// cladefs: what the records of `checksums` take of the journal.
     checksum_bytes: u64,
 
-    /// fxdax: whether it is made as a commit holds the commit lock: the journal's own
+    /// cladefs: whether it is made as a commit holds the commit lock: the journal's own
     /// (`Journal::make_room`). What an allocation for it short of room syncs commits nothing,
     /// which would wait for that lock, its own task's (TASK-233).
     pub holding_commits: bool,
@@ -725,7 +725,7 @@ impl<'a> Transaction<'a> {
         &self.mutations
     }
 
-    /// fxdax: what this transaction's records take of the journal, as it would write them now:
+    /// cladefs: what this transaction's records take of the journal, as it would write them now:
     /// what a transaction must keep to TRANSACTION_MAX_JOURNAL_USAGE, which reserves that much
     /// metadata space. Neither its mutations nor their extents say it: a mutation may be tens of
     /// bytes, or a block's checksums of an extent's, thousands.
@@ -733,18 +733,18 @@ impl<'a> Transaction<'a> {
         self.mutation_bytes + self.checksum_bytes
     }
 
-    /// fxdax: how many bytes more of records this transaction has room for: what a loop splitting
+    /// cladefs: how many bytes more of records this transaction has room for: what a loop splitting
     /// its work across commits adds up to before it commits and goes on.
     pub fn room(&self) -> u64 {
         TRANSACTION_ROOM.saturating_sub(self.journal_bytes())
     }
 
-    /// fxdax: whether it has no room left, and whatever goes on adding to it should commit first.
+    /// cladefs: whether it has no room left, and whatever goes on adding to it should commit first.
     pub fn is_full(&self) -> bool {
         self.room() == 0
     }
 
-    /// fxdax: has this change names in the directory `object_id` of the store `store_object_id`
+    /// cladefs: has this change names in the directory `object_id` of the store `store_object_id`
     /// without the directory's lock, which the caller doesn't take: as it keeps whatever else
     /// would change, or read, the names it changes from doing so meanwhile, as the lock would, and
     /// changes nothing else of the directory. As the guest's queued unlinks (doc-6) remove names,
@@ -811,7 +811,7 @@ impl<'a> Transaction<'a> {
         }
     }
 
-    /// fxdax: takes the mutation equal to `mutation` out, if there is one, which its size goes with.
+    /// cladefs: takes the mutation equal to `mutation` out, if there is one, which its size goes with.
     fn take_mutation(&mut self, mutation: &TxnMutation<'a>) -> Option<TxnMutation<'a>> {
         let taken = self.mutations.take(mutation)?;
         self.mutation_bytes -= mutation_record_bytes(taken.object_id, &taken.mutation);
@@ -874,7 +874,7 @@ impl<'a> Transaction<'a> {
         Some(replaced.mutation)
     }
 
-    /// fxdax: adds `delta` to the references of `device_range` this transaction makes
+    /// cladefs: adds `delta` to the references of `device_range` this transaction makes
     /// (`AllocatorMutation::Reference`) for the allocator `allocator_object_id`, folding it into
     /// those it makes already: a transaction holds each mutation once, so that two of one range
     /// would otherwise be one.
@@ -1124,7 +1124,7 @@ impl<'a> Transaction<'a> {
         self.fs.clone().commit_transaction(self, |_| {}).await?;
         assert!(self.mutations.is_empty());
         self.fs.lock_manager().downgrade_locks(&self.txn_locks);
-        // fxdax: what it goes on to commit is a transaction of its own, which its metadata
+        // cladefs: what it goes on to commit is a transaction of its own, which its metadata
         // reservation must pay for as a new one's would (TASK-58).
         self.fs.clone().renew_metadata_reservation(self)
     }
@@ -2354,7 +2354,7 @@ mod tests {
         assert!(ObjectMutationIterator::new(&mut iter).is_none());
     }
 
-    /// fxdax: a name changed in a directory the transaction doesn't lock is checked as unlocked
+    /// cladefs: a name changed in a directory the transaction doesn't lock is checked as unlocked
     /// (a debug assertion), unless the transaction says it changes the directory's names unlocked.
     #[fuchsia::test]
     async fn test_change_names_unlocked() {
@@ -2399,7 +2399,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a transaction counts what its records take of the journal, as they replace each
+    /// cladefs: a transaction counts what its records take of the journal, as they replace each
     /// other and go, and its checksums', until a commit takes them, and is full at TRANSACTION_ROOM.
     #[fuchsia::test]
     async fn test_a_transaction_says_how_much_room_it_has_left() {

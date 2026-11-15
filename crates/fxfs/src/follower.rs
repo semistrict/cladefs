@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: a read-only mount follows its writer (backlog doc-8, The follower in Fxfs;
+//! cladefs's own: a read-only mount follows its writer (backlog doc-8, The follower in Fxfs;
 //! TASK-42.4).
 //!
 //! A follower is a read-only mount on a device that reads a store another mount writes, as of one

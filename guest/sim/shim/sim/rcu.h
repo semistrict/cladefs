@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * RCU: readers count; callbacks run, in the scheduler, once no task is a reader, which is later
  * than a grace period need be but never sooner. A use after call_rcu's free, past readers, is

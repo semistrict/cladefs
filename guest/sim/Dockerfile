@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # What linux.sh runs this directory in where the host isn't Linux: clang and lld to build it, git
 # for kernel-tree.sh, llvm for ASan's symbolizer, and what its scripts use.

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// fxdax: an extended attribute set reads as set while it is written back, not as before it
+/// cladefs: an extended attribute set reads as set while it is written back, not as before it
 /// was, as a reader of overlayfs's opaque flag on a directory would find (TASK-79.51).
 pub(super) fn test_xattrs_read_as_written_back() {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -51,7 +51,7 @@ pub(super) fn test_xattrs_read_as_written_back() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a full filesystem refuses an extended attribute it has no room for (ENOSPC), as ext4's
+/// cladefs: a full filesystem refuses an extended attribute it has no room for (ENOSPC), as ext4's
 /// does, rather than keep it in memory and lose it behind fsync's 0 as its writeback fails: small
 /// ones, which take only the journal's room, set until one is refused, which isn't there; each set
 /// before it durable, read back remounted, as is one set once there is room again (TASK-199).
@@ -80,7 +80,7 @@ pub(super) fn test_xattr_on_full_filesystem_is_refused() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: on a full filesystem, a creation in a directory with a default ACL fails whole (ENOSPC,
+/// cladefs: on a full filesystem, a creation in a directory with a default ACL fails whole (ENOSPC,
 /// no name made) or makes its file or directory with the ACLs it inherits: they go in its
 /// creation's transaction (TASK-79.29), as ext4 sets them in its creation's handle. Set after it,
 /// in a transaction of their own as a setxattr's is (TASK-199), a creation whose ACLs then found no
@@ -126,7 +126,7 @@ pub(super) fn test_inherited_acls_on_full_filesystem() {
 
 /// A file or directory, removed as this goes, and synced, its room free again: if a check that
 /// filled the filesystem failed, for the checks after it.
-/// fxdax: writes that find the filesystem full share the syncs that make room (TASK-149.25): many
+/// cladefs: writes that find the filesystem full share the syncs that make room (TASK-149.25): many
 /// writers, each with its file, write together on a full filesystem, round after round, each
 /// write making room before it fails (fxfs_vfs_make_room), and syncs made for them are far fewer
 /// than the writes that asked: one begun after a write found no room is room enough. A sync each, 128 writers at ENOSPC,
@@ -171,7 +171,7 @@ pub(super) fn test_writers_on_a_full_filesystem_share_syncs() {
     drop(names);
 }
 
-/// fxdax: a file that filled the filesystem, removed, gives back all the data it took, but for
+/// cladefs: a file that filled the filesystem, removed, gives back all the data it took, but for
 /// the staging extent's reach (fxfs's `STAGING_SIZE`); and the free space changes by nothing else
 /// but Fxfs's metadata, held and reserved. Fxfs holds back four times what the journal took since
 /// its trees were last flushed, which a sync doesn't do, to write them
@@ -273,7 +273,7 @@ fn fill_until_enospc(name: &str) {
     file.sync_all().unwrap();
 }
 
-/// fxdax: extended attributes set keep none of the kernel's memory: setxattrs of names of their
+/// cladefs: extended attributes set keep none of the kernel's memory: setxattrs of names of their
 /// own, 64,000 bytes each (Fxfs's most), until twice the guest's memory or the filesystem is full,
 /// end with the OOM killer not run, each written as it is set, none made durable on its own, and
 /// refused (ENOSPC) once the filesystem is full, which its 256 MiB are first. Kept in memory until
@@ -318,7 +318,7 @@ pub(super) fn test_xattrs_bounded() {
         refused,
         "{set} bytes of extended attributes set, of {memory} bytes' memory, none refused"
     );
-    // fxdax: and what each asked of the host: a write, as it is set, and none waited for the
+    // cladefs: and what each asked of the host: a write, as it is set, and none waited for the
     // host's disk, made durable by the sync after, not by itself. The host's time is left out of
     // the budget, which bounds the guest's (TASK-263): what the sets ask of it, this counts.
     // 4,540 writes for the check's 3,967 sets, the sync's and the removal's among them, in each
@@ -328,7 +328,7 @@ pub(super) fn test_xattrs_bounded() {
     assert!(writes >= sets, "{sets} sets: {fill_host}, not one written as each was set");
     assert!(writes <= sets + sets / 4, "{sets} sets: {fill_host}, more than 1.25 each");
     assert_eq!(fill_host.durable_commits, 0, "{sets} sets: {fill_host}");
-    // fxdax: where its time goes, against its budget (TASK-168): what was set made durable, then
+    // cladefs: where its time goes, against its budget (TASK-168): what was set made durable, then
     // the files removed, and their room freed; and in each what was asked of the host, and what it
     // took, which the budget leaves out (TASK-263).
     let (began, host) = (Instant::now(), Host::now());
@@ -357,7 +357,7 @@ fn vmstat(name: &str) -> u64 {
     line.unwrap().parse().unwrap()
 }
 
-/// fxdax: an inode whose writeback failed, as sync's or the flusher's, whose errors nothing
+/// cladefs: an inode whose writeback failed, as sync's or the flusher's, whose errors nothing
 /// reports, stays dirty: the next fsync writes it back, or fails as it does, until it is durable
 /// (fxfs.fail_write_inode). The VFS took it for clean, and the fsync after found nothing to write:
 /// 0, and a chmod lost at the next eviction (TASK-199).
@@ -441,7 +441,7 @@ pub(super) fn test_acls() {
     assert_eq!(may_open(1234, libc::O_RDONLY), 0, "the user the ACL names can't read");
     assert_eq!(may_open(1236, libc::O_RDONLY), 1, "another user could read");
     assert_eq!(may_open(1234, libc::O_WRONLY), 0, "the user the ACL names can't write");
-    // fxdax: a chmod takes the group's write away, and the mask's with it, so the user the
+    // cladefs: a chmod takes the group's write away, and the mask's with it, so the user the
     // ACL names may no longer write (TASK-79.96): chmod left the ACL as it was.
     fs::set_permissions(path("acl-file"), fs::Permissions::from_mode(0o640)).unwrap();
     assert_eq!(may_open(1234, libc::O_WRONLY), 1, "the user the ACL names can still write");
@@ -728,7 +728,7 @@ pub(super) fn test_multigrain_times() {
     fs::remove_file(&file).unwrap();
 }
 
-/// fxdax: a time past what Fxfs holds, 64 bits of nanoseconds, is clamped as it is set, as the
+/// cladefs: a time past what Fxfs holds, 64 bits of nanoseconds, is clamped as it is set, as the
 /// superblock says: not only once the inode is read in again (TASK-79.55).
 pub(super) fn test_timestamps_clamped() {
     use std::os::unix::ffi::OsStrExt;

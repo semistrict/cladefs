@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 //! [`Buffers`], readable or writable as the descriptor says; nothing here knows of any VMM's
 //! queues or guest memory.
 
-use fxdax::Errno;
+use cladefs::Errno;
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::protocol::RequestHeader;
@@ -28,7 +28,7 @@ unsafe impl Sync for Segment {}
 /// Why a descriptor chain is no request's buffers.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BuffersError {
-    /// fxdax TASK-79.25: more bytes to write than the used ring's length holds, a u32, as a chain
+    /// cladefs TASK-79.25: more bytes to write than the used ring's length holds, a u32, as a chain
     /// of descriptors naming the same memory again may give: the device writes them whole, and
     /// says how much it wrote there.
     #[error(
@@ -132,14 +132,14 @@ impl<'a> Reader<'a> {
 
     /// The next `len` bytes, as the store copies them out of guest memory: as long as the request
     /// lives, so that what comes after them can be read too.
-    pub(crate) fn slices(&mut self, len: usize) -> Result<Vec<fxdax::VolatileSlice<'a>>, Errno> {
+    pub(crate) fn slices(&mut self, len: usize) -> Result<Vec<cladefs::VolatileSlice<'a>>, Errno> {
         let parts = range(self.segments, self.offset, len).ok_or(Errno::EINVAL)?;
         self.offset += len;
         Ok(parts
             .iter()
             // SAFETY: Guest memory the request names, which outlives it, and which the guest may
             // change as it is copied (`Buffers::push_readable`).
-            .map(|part| unsafe { fxdax::VolatileSlice::from_raw_parts(part.ptr, part.len) })
+            .map(|part| unsafe { cladefs::VolatileSlice::from_raw_parts(part.ptr, part.len) })
             .collect())
     }
 
@@ -181,13 +181,15 @@ impl Writer<'_> {
         &self,
         offset: usize,
         len: usize,
-    ) -> Option<Vec<fxdax::VolatileSliceMut<'_>>> {
+    ) -> Option<Vec<cladefs::VolatileSliceMut<'_>>> {
         Some(
             range(self.segments, offset, len)?
                 .iter()
                 // SAFETY: Guest memory the request gives the device to write, which outlives it,
                 // and which the guest may access as it is copied (`Buffers::push_writable`).
-                .map(|part| unsafe { fxdax::VolatileSliceMut::from_raw_parts(part.ptr, part.len) })
+                .map(|part| unsafe {
+                    cladefs::VolatileSliceMut::from_raw_parts(part.ptr, part.len)
+                })
                 .collect(),
         )
     }
@@ -220,7 +222,7 @@ impl Writer<'_> {
 mod tests {
     use super::*;
 
-    /// fxdax TASK-79.25: a chain whose descriptors give the device more bytes to write than a
+    /// cladefs TASK-79.25: a chain whose descriptors give the device more bytes to write than a
     /// u32 holds, naming the same memory again and again, is refused, not served: its used
     /// length couldn't say what the device wrote, which aborted the VMM.
     #[test]

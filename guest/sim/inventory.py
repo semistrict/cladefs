@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 """What a guest source uses of the kernel, as the compiler sees it against the real headers.
 
   inventory.py KERNEL SOURCE...

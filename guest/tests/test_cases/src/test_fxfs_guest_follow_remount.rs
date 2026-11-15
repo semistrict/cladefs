@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -40,7 +40,7 @@ const COLD: usize = 64;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs, spawn_daemon};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::ffi::CString;
@@ -51,7 +51,7 @@ mod host {
     use std::time::{Duration, Instant};
 
     const CAPACITY: u64 = 256 << 20;
-    /// What fxdax's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
+    /// What cladefs's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
     const EXTENTD_LOST: i32 = 158;
     /// How long a VM takes at most to exit once its daemon is gone.
     const BOUND: Duration = Duration::from_secs(10);
@@ -60,7 +60,7 @@ mod host {
 
     /// In the temporary directory, as a socket's path is short (SUN_LEN).
     fn socket(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fxdax-remount-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("cladefs-remount-{}-{name}", std::process::id()))
     }
 
     /// A VM's place: what the test needs of it wherever it boots one.
@@ -95,7 +95,7 @@ mod host {
             } else {
                 vm.extent_store_served("extents", self.store, CAPACITY, window, self.extentd);
             }
-            vm.env(&CString::new(format!("FXDAX_FOLLOW={role}"))?);
+            vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
             vm.vsock(&uds);
             let api = Vm::api_socket(name);
             Ok((vm.spawn_api(self.root, &self.setup.test_case, name, &api)?, listener))
@@ -221,7 +221,7 @@ mod host {
 
     impl Test for TestFxfsGuestFollowRemount {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -428,7 +428,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             fs::create_dir_all(MNT).unwrap();
             mount();
-            match std::env::var("FXDAX_FOLLOW").unwrap().as_str() {
+            match std::env::var("CLADEFS_FOLLOW").unwrap().as_str() {
                 "writer" => writer(),
                 "next-writer" => next_writer(),
                 "follower" => follower(),

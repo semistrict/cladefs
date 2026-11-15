@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Qualify fxdax on an x86-64 Linux KVM host, as root. It runs the
-# workspace's tests (unless FXDAX_WORKSPACE_TESTS=0; FXDAX_TEST_ARGS, split at
-# spaces, are cargo nextest's arguments, such as a filter), then fxdax's guest
-# tests (unless FXDAX_GUEST_TESTS=0; scripts/test-e2e.sh; TESTs name them),
-# whose DAX window takes KVM's faults through userfaultfd. With FXDAX_HOST_TRACE, a bpftrace
+# Qualify cladefs on an x86-64 Linux KVM host, as root. It runs the
+# workspace's tests (unless CLADEFS_WORKSPACE_TESTS=0; CLADEFS_TEST_ARGS, split at
+# spaces, are cargo nextest's arguments, such as a filter), then cladefs's guest
+# tests (unless CLADEFS_GUEST_TESTS=0; scripts/test-e2e.sh; TESTs name them),
+# whose DAX window takes KVM's faults through userfaultfd. With CLADEFS_HOST_TRACE, a bpftrace
 # script of SOURCE's traces the host as the guest tests run, its maps in RESULTS/host-trace.txt
-# (scripts/extent-transport.bt, TASK-164.11.1). With FXDAX_GUEST_KERNEL_BUILD set
+# (scripts/extent-transport.bt, TASK-164.11.1). With CLADEFS_GUEST_KERNEL_BUILD set
 # (release; debug: lockdep, KCSAN, DEBUG_ATOMIC_SLEEP; kasan: KASAN, KFENCE, lockdep; or coverage:
 # gcov of fs/fxfs, which leaves coverage/ in the results, scripts/guest-coverage.py), the guest
 # tests run on a guest kernel it builds from the source (scripts/build-guest-kernel.sh), not
-# FXDAX_GUEST_KERNEL's; with neither set, on a release one it builds (TASK-130: without one, every
+# CLADEFS_GUEST_KERNEL's; with neither set, on a release one it builds (TASK-130: without one, every
 # guest case skipped). It builds in trees that persist between runs, so that a run builds only
 # what changed.
 #
@@ -33,68 +33,68 @@ host_record > "$results/host.txt"
 # scripts/test.sh's parts but the Go client's, which CI's go job runs: these hosts have no Go
 # (go.mod wants 1.26, newer than Ubuntu's), and the part, added by TASK-219, failed every run here
 # with exit 127, the parts after it unrun (2026-11-07, TASK-222's run).
-export FXDAX_TEST_PARTS=${FXDAX_TEST_PARTS:-clippy workspace sim shuttle scripts guest firecracker}
+export CLADEFS_TEST_PARTS=${CLADEFS_TEST_PARTS:-clippy workspace sim shuttle scripts guest firecracker}
 
-if [[ ${FXDAX_WORKSPACE_TESTS:-1} != 0 ]]; then
-    echo "== fxdax tests" >&2
-    read -ra test_args <<< "${FXDAX_TEST_ARGS:-}"
+if [[ ${CLADEFS_WORKSPACE_TESTS:-1} != 0 ]]; then
+    echo "== cladefs tests" >&2
+    read -ra test_args <<< "${CLADEFS_TEST_ARGS:-}"
     "$repo/scripts/test.sh" --no-fail-fast "${test_args[@]}" \
-        > "$results/fxdax-tests.log" 2>&1 || status=$?
-    echo "fxdax tests: exit $status" >&2
+        > "$results/cladefs-tests.log" 2>&1 || status=$?
+    echo "cladefs tests: exit $status" >&2
 fi
 
-if [[ ${FXDAX_GUEST_TESTS:-1} == 0 ]]; then
+if [[ ${CLADEFS_GUEST_TESTS:-1} == 0 ]]; then
     exit "$status"
 fi
-if [[ -z ${FXDAX_GUEST_KERNEL:-} ]]; then
-    FXDAX_GUEST_KERNEL_BUILD=${FXDAX_GUEST_KERNEL_BUILD:-release}
+if [[ -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    CLADEFS_GUEST_KERNEL_BUILD=${CLADEFS_GUEST_KERNEL_BUILD:-release}
 fi
-case ${FXDAX_GUEST_KERNEL_BUILD:-} in
+case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
     '') ;;
     release | debug | kasan | coverage | rust-checks)
-        echo "== guest kernel ($FXDAX_GUEST_KERNEL_BUILD)" >&2
-        if ! host_kernel "$FXDAX_GUEST_KERNEL_BUILD"; then
+        echo "== guest kernel ($CLADEFS_GUEST_KERNEL_BUILD)" >&2
+        if ! host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"; then
             echo "guest kernel: failed, see guest-kernel.log" >&2
             exit 1
         fi
-        export FXDAX_GUEST_KERNEL=$host_kernel_image
+        export CLADEFS_GUEST_KERNEL=$host_kernel_image
         # Its kind, which the guest tests' time limits scale by (TASK-168).
-        export FXDAX_GUEST_KERNEL_BUILD
-        sha256sum "$FXDAX_GUEST_KERNEL" > "$results/guest-kernel.txt"
+        export CLADEFS_GUEST_KERNEL_BUILD
+        sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
         ;;
     *)
-        echo "FXDAX_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks" >&2
+        echo "CLADEFS_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks" >&2
         exit 2
         ;;
 esac
-if [[ ${FXDAX_GUEST_KERNEL_BUILD:-} == coverage ]]; then
-    export FXDAX_COVERAGE="$results/coverage-counts"
-    mkdir -p "$FXDAX_COVERAGE"
+if [[ ${CLADEFS_GUEST_KERNEL_BUILD:-} == coverage ]]; then
+    export CLADEFS_COVERAGE="$results/coverage-counts"
+    mkdir -p "$CLADEFS_COVERAGE"
 fi
 # A crash leaves a core, whose threads' stacks the results keep, and only those, as the host goes
 # with the core: a VMM died of SIGSEGV in a soak, and nothing said where (2026-10-31). Private
 # memory alone (coredump_filter): a guest's and a daemon's arenas are shared. Not on a host of
-# one's own (FXDAX_HOST_PROVISIONED), whose core pattern is that of every process there, others'
+# one's own (CLADEFS_HOST_PROVISIONED), whose core pattern is that of every process there, others'
 # runs' too, and its own setup's.
 cores="$results/cores"
 mkdir -p "$cores"
-if [[ ${FXDAX_HOST_PROVISIONED:-} != 1 ]]; then
+if [[ ${CLADEFS_HOST_PROVISIONED:-} != 1 ]]; then
     sysctl -q -w kernel.core_pattern="$cores/core.%p"
     ulimit -c unlimited
     echo 0x11 > /proc/self/coredump_filter
 fi
 echo "== guest tests" >&2
 tracer=
-if [[ -n ${FXDAX_HOST_TRACE:-} ]]; then
+if [[ -n ${CLADEFS_HOST_TRACE:-} ]]; then
     host_need bpftrace
     # What it says, its first MiB, the rest read and dropped, which a closed pipe would kill it
     # for: extent-transport.bt had it say 700 MB over a 30-minute case (GCE r810, r811).
-    bpftrace -q -o "$results/host-trace.txt" "$repo/$FXDAX_HOST_TRACE" \
+    bpftrace -q -o "$results/host-trace.txt" "$repo/$CLADEFS_HOST_TRACE" \
         2> >({ head -c 1048576; cat > /dev/null; } > "$results/host-trace.log") &
     tracer=$!
 fi
 e2e_status=0
-FXDAX_E2E_RESULTS="$results/e2e" "$repo/scripts/test-e2e.sh" "$@" > "$results/e2e.log" 2>&1 ||
+CLADEFS_E2E_RESULTS="$results/e2e" "$repo/scripts/test-e2e.sh" "$@" > "$results/e2e.log" 2>&1 ||
     e2e_status=$?
 echo "guest tests: exit $e2e_status" >&2
 # The tracer prints its maps as it is interrupted.
@@ -108,8 +108,8 @@ for core in "$cores"/core.*; do
     eu-stack -l -i -n 512 --core="$core" > "$core.stacks.txt" 2>&1 || true
     rm "$core"
 done
-if [[ -n ${FXDAX_COVERAGE:-} ]]; then
-    "$repo/scripts/guest-coverage.py" "$FXDAX_COVERAGE" "$(dirname "$(find "$host_kernel_work" \
+if [[ -n ${CLADEFS_COVERAGE:-} ]]; then
+    "$repo/scripts/guest-coverage.py" "$CLADEFS_COVERAGE" "$(dirname "$(find "$host_kernel_work" \
         -path '*/fs/fxfs/dax.gcno' -print -quit)")" "$results/coverage" ||
         echo "guest coverage: failed" >&2
 fi

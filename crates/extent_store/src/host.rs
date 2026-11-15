@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Stores in directories of the host's, as fxdax's images and extentd's stores are: a directory
+//! Stores in directories of the host's, as cladefs's images and extentd's stores are: a directory
 //! holds one store, of one branch (TASK-165.7). Forks, points and deletions are the bucket's,
 //! which the store's description names: the store makes nothing of them but the commit that names
 //! a fork ([`Store::commit_fork`]).
@@ -15,7 +15,7 @@ use extent_frame::segment::Branch;
 use std::path::Path;
 
 /// Makes a new store at `path`, which must be a directory holding no store, as `description`
-/// describes. fxdax: its description names `bucket`, the URL of the bucket its branch is kept in,
+/// describes. cladefs: its description names `bucket`, the URL of the bucket its branch is kept in,
 /// as every host's store's does (TASK-165.6); it is unmade until its maker says it is whole
 /// ([`Store::made`], TASK-196). Its description is made last: until it is durable, the directory
 /// is no store, whatever else is in it. Opening it takes its branch in the bucket
@@ -31,7 +31,7 @@ pub fn create_host(
     Store::make(&HostDir::new(path, direct)?, description, Some(bucket), Some(volume))
 }
 
-/// fxdax: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
+/// cladefs: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
 /// saying it is not goes, durably, its maker having let it go.
 pub fn made_host(path: &Path) -> Result<(), Error> {
     match std::fs::remove_file(path.join(UNMADE)) {
@@ -44,14 +44,14 @@ pub fn made_host(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// fxdax: whether `path` is a directory a store's making left unmade, its maker stopping part
+/// cladefs: whether `path` is a directory a store's making left unmade, its maker stopping part
 /// way: no store, which deleting finishes (TASK-79.84, TASK-196). Its description, made last of
 /// its directory, is not there; or it says it was never made whole ([`Store::made`]).
 pub fn unmade_host(path: &Path) -> bool {
     path.is_dir() && (!path.join(DESCRIPTION).exists() || path.join(UNMADE).exists())
 }
 
-/// fxdax: places the store at `path` (TASK-39.7): records, durably, in its description, the
+/// cladefs: places the store at `path` (TASK-39.7): records, durably, in its description, the
 /// fencing token its writer takes its branch's lease with from then on, the boot ID of the
 /// placement it is, which a later placement's exceeds. A writer takes the lease only with a token
 /// as high as the last writer's: a placement cut off takes no branch back from the one after it.
@@ -70,7 +70,7 @@ pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     written().with_context(|| format!("placing {}", path.display()))
 }
 
-/// fxdax: the fencing token of the placement of the store at `path`, if it was placed
+/// cladefs: the fencing token of the placement of the store at `path`, if it was placed
 /// ([`place_host`]).
 pub fn host_token(path: &Path) -> Result<Option<u64>, Error> {
     Ok(store_file(path)?.token)
@@ -225,7 +225,7 @@ pub fn host_branch(path: &Path) -> Result<Branch, Error> {
     Ok(store_file(path)?.branch)
 }
 
-/// fxdax: the URL of the bucket the store at `path` keeps its branch in, as its description names
+/// cladefs: the URL of the bucket the store at `path` keeps its branch in, as its description names
 /// it: none for a store of memory's, which names none (TASK-165.6).
 pub fn host_bucket(path: &Path) -> Result<Option<String>, Error> {
     Ok(store_file(path)?.bucket)

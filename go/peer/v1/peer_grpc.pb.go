@@ -1,11 +1,11 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // What the extent daemons of hosts sharing a bucket serve each other (TASK-406.2): parts of the
 // bucket's objects, each owned by one of them, which a host asks its owner for before the bucket,
 // so that a part many hosts read comes from the bucket about once for them all. Served over TCP at
-// each daemon's FXDAX_EXTENTD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
+// each daemon's CLADEFS_EXTENTD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
 // every host can read the whole bucket already. A part is asked for by its object's key and its
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
@@ -15,7 +15,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.2
 // - protoc             (unknown)
-// source: fxdax/peer/v1/peer.proto
+// source: cladefs/peer/v1/peer.proto
 
 package peerv1
 
@@ -32,7 +32,7 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	Peer_GetPart_FullMethodName = "/fxdax.peer.v1.Peer/GetPart"
+	Peer_GetPart_FullMethodName = "/cladefs.peer.v1.Peer/GetPart"
 )
 
 // PeerClient is the client API for Peer service.
@@ -133,7 +133,7 @@ func _Peer_GetPart_Handler(srv interface{}, ctx context.Context, dec func(interf
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
 var Peer_ServiceDesc = grpc.ServiceDesc{
-	ServiceName: "fxdax.peer.v1.Peer",
+	ServiceName: "cladefs.peer.v1.Peer",
 	HandlerType: (*PeerServer)(nil),
 	Methods: []grpc.MethodDesc{
 		{
@@ -142,5 +142,5 @@ var Peer_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "fxdax/peer/v1/peer.proto",
+	Metadata: "cladefs/peer/v1/peer.proto",
 }

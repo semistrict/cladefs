@@ -1,7 +1,7 @@
 --- a/crates/fxfs-posix/src/lib.rs
 +++ b/crates/fxfs-posix/src/lib.rs
 @@ -988,7 +988,7 @@
-             // fxdax: its entry says which special file it is, if it is one, as its mode does; the
+             // cladefs: its entry says which special file it is, if it is one, as its mode does; the
              // directory's times are the kernel's, which writes them back with it.
              let descriptor = ObjectDescriptor::of_file(Some(mode));
 -            let times = !P::KEEPS_DIRECTORY_TIMES;

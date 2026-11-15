@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
- * The virtio extent-store device (fxdax's backlog doc-4, which specifies it), and the guest
+ * The virtio extent-store device (cladefs's backlog doc-4, which specifies it), and the guest
  * kernel's driver of it (drivers/virtio_extent), which the guest's Fxfs stores its filesystem
  * through: extents it names, written once and sealed by the next commit, freed whole, a root
  * naming where its filesystem starts, and a DAX window that sealed extents map into.
@@ -14,10 +14,10 @@
 #define VIRTIO_ID_EXTENT 0x4658 /* "FX" */
 
 /*
- * fxdax: the device's protocol version, its configuration's first field, which no version moves
- * (fxdax's TASK-141.3): a change to any of its requests, flags, features, configuration or what
+ * cladefs: the device's protocol version, its configuration's first field, which no version moves
+ * (cladefs's TASK-141.3): a change to any of its requests, flags, features, configuration or what
  * they mean makes a new one. The driver refuses a device of another at probe, naming both, as
- * fxdax's rule has every format refuse another, rather than serve it with what both happen to
+ * cladefs's rule has every format refuse another, rather than serve it with what both happen to
  * know. The features say what the device is configured as, not what it can do: the driver takes
  * every one the device offers, and the device refuses its activation otherwise. Firecracker's
  * device's is VIRTIO_EXTENT_VERSION in vendor/firecracker's virtio/extent/mod.rs.
@@ -25,8 +25,8 @@
 #define VIRTIO_EXTENT_VERSION 1
 
 /*
- * Shared memory region 0 is a DAX window, and MAP and UNMAP work. fxdax: the window copies on write
- * (fxdax's doc-13): it maps sealed extents and zeros alone, read-only, and a store to one of its
+ * Shared memory region 0 is a DAX window, and MAP and UNMAP work. cladefs: the window copies on write
+ * (cladefs's doc-13): it maps sealed extents and zeros alone, read-only, and a store to one of its
  * pages gives the device a private page holding what the page held, at the same address, until a
  * MAP or UNMAP over it; at most the configuration's `private_max` of them. MAP takes MAP_ZEROS, and
  * PRIVATE works. A follower's window (READ_ONLY) takes no store, nor PRIVATE. Bits 1, 9 and 10,
@@ -44,33 +44,33 @@
 /*
  * FREEZE tells the device the filesystem is frozen, or thawed: a snapshot of the VM is taken
  * frozen, and a VM restored from it, whose store is a fork of its own, learns its branch, which
- * INFO says, as its filesystem thaws (fxdax's TASK-39.1).
+ * INFO says, as its filesystem thaws (cladefs's TASK-39.1).
  */
 #define VIRTIO_EXTENT_F_FREEZE 4
 /*
- * The device follows a store another VM writes, read-only (fxdax's doc-8): ADVANCE, LET_GO, PIN
+ * The device follows a store another VM writes, read-only (cladefs's doc-8): ADVANCE, LET_GO, PIN
  * and UNPIN work, and the configuration's `committed` changes as the writer commits, telling the
  * guest with a configuration change. The driver sends nothing that writes.
  */
 #define VIRTIO_EXTENT_F_READ_ONLY 5
 /*
  * FREE takes FREE_MANY: its data names more extents to free, each a struct virtio_extent_id,
- * after the one its arguments do: a flush's dead extents in one request (fxdax's TASK-41).
+ * after the one its arguments do: a flush's dead extents in one request (cladefs's TASK-41).
  */
 #define VIRTIO_EXTENT_F_FREE_MANY 6
 /*
  * MAP takes MAP_MANY: its data holds more maps, each a struct virtio_extent_map_entry, after the
- * one its arguments say: the pieces of a file's chunk mapped in one request (fxdax's TASK-91.4).
+ * one its arguments say: the pieces of a file's chunk mapped in one request (cladefs's TASK-91.4).
  */
 #define VIRTIO_EXTENT_F_MAP_MANY 7
 /*
  * MAP takes MAP_AHEAD: the guest accesses the pages it maps next, as it maps them to read, and the
- * device maps them for it ahead of its accesses (fxdax's TASK-112.1).
+ * device maps them for it ahead of its accesses (cladefs's TASK-112.1).
  */
 #define VIRTIO_EXTENT_F_MAP_AHEAD 8
 /*
- * fxdax: the host asks the guest for its stats: the configuration's `stats_asked` changes, telling
- * it with a configuration change, and the guest answers with STATS (fxdax's TASK-111.4).
+ * cladefs: the host asks the guest for its stats: the configuration's `stats_asked` changes, telling
+ * it with a configuration change, and the guest answers with STATS (cladefs's TASK-111.4).
  */
 #define VIRTIO_EXTENT_F_STATS 11
 
@@ -125,7 +125,7 @@
 #define VIRTIO_EXTENT_COMMIT_DURABLE (1 << 0)
 #define VIRTIO_EXTENT_COMMIT_ROOT (1 << 1)
 /*
- * MAP: its data holds more maps (F_MAP_MANY); accessed next (F_MAP_AHEAD); fxdax: zeros, its extent
+ * MAP: its data holds more maps (F_MAP_MANY); accessed next (F_MAP_AHEAD); cladefs: zeros, its extent
  * ignored, which a store makes a private page of zeros. Bit 0, writable DAX's MAP_WRITE, is unused.
  */
 #define VIRTIO_EXTENT_MAP_MANY (1 << 1)
@@ -142,7 +142,7 @@
 #define VIRTIO_EXTENT_FREEZE_FROZEN (1 << 0)
 
 struct virtio_extent_config {
-	/* fxdax: VIRTIO_EXTENT_VERSION, first in every version. */
+	/* cladefs: VIRTIO_EXTENT_VERSION, first in every version. */
 	__le32 version;
 	__u8 tag[36];
 	__le32 num_request_queues;
@@ -306,7 +306,7 @@ struct vext_request {
 	 * VIRTIO_EXTENT_COMMIT_ROOT; FREE's further extents, with VIRTIO_EXTENT_FREE_MANY; MAP's
 	 * further maps, with VIRTIO_EXTENT_MAP_MANY; ROOT's buffer, of max_root bytes and a struct
 	 * virtio_extent_root_len after them; INFO's struct virtio_extent_info; ADVANCE's struct
-	 * virtio_extent_epoch; STATS's text. fxdax: READ's and WRITE's length too: one length for all
+	 * virtio_extent_epoch; STATS's text. cladefs: READ's and WRITE's length too: one length for all
 	 * data (TASK-160.7).
 	 */
 	void *data;
@@ -324,9 +324,9 @@ struct vext_request {
 	struct virtio_extent_req hdr;
 	/* When it was queued, for the device's `request_ns`. */
 	u64 queued_ns;
-	/* fxdax: the queue it went to, which its caller may poll for it (virtio_extent_call). */
+	/* cladefs: the queue it went to, which its caller may poll for it (virtio_extent_call). */
 	struct vext_queue *queue;
-	/* fxdax: the CPU it was queued on, which its completion's is compared with (TASK-276). */
+	/* cladefs: the CPU it was queued on, which its completion's is compared with (TASK-276). */
 	int cpu;
 	union {
 		struct virtio_extent_io io;
@@ -363,11 +363,11 @@ int virtio_extent_call(struct virtio_extent *vext, struct vext_request *req);
 
 /*
  * The DAX window's dax_device, with FS_DAX, through which its memory is reached
- * (dax_direct_access), and the window's length; or NULL if the device has none. fxdax: one
+ * (dax_direct_access), and the window's length; or NULL if the device has none. cladefs: one
  * accessor of the window, its memory reached no other way (TASK-92.8).
  */
 struct dax_device *virtio_extent_dax(struct virtio_extent *vext, u64 *window_len);
-/* fxdax: the most private pages the device's DAX window holds at once (F_DAX), or 0. */
+/* cladefs: the most private pages the device's DAX window holds at once (F_DAX), or 0. */
 u64 virtio_extent_private_max(struct virtio_extent *vext);
 /* Whether a WRITE may carry WRITE_COMMIT (F_WRITE_COMMIT). */
 bool virtio_extent_write_commit(struct virtio_extent *vext);
@@ -387,7 +387,7 @@ bool virtio_extent_read_only(struct virtio_extent *vext);
 /* F_READ_ONLY: the epoch of the writer's latest commit, as the configuration says now. */
 u64 virtio_extent_committed(struct virtio_extent *vext);
 /*
- * fxdax: F_READ_ONLY: a follower's device has a connection to its store, which keeps its writer
+ * cladefs: F_READ_ONLY: a follower's device has a connection to its store, which keeps its writer
  * from opening it once it was cut off (doc-4). virtio_extent_close, as its filesystem unmounts,
  * nothing in flight that any task waits for, resets the device, which lets the store go.
  * virtio_extent_open, as one mounts, has the device open the store anew, as of its writer's latest
@@ -412,7 +412,7 @@ void virtio_extent_set_config_changed(struct virtio_extent *vext, vext_config_ch
 				      void *arg);
 
 /*
- * fxdax: has the driver answer the host's asks for the guest's stats (F_STATS) with what
+ * cladefs: has the driver answer the host's asks for the guest's stats (F_STATS) with what
  * `stats(arg, buf, len)` writes in the `len` bytes at `buf`, VIRTIO_EXTENT_MAX_STATS: how many
  * bytes, or a -errno; with nothing while `stats` is NULL, or fails. Called from a work item, it may
  * sleep; once this returns, the one set before is called no more.

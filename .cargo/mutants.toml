@@ -2,9 +2,9 @@
 # which no test checks; and test code cargo-mutants doesn't see is (`#[cfg(all(test, feature =
 # "shuttle"))]` modules, and the fixtures tests build images with).
 exclude_globs = [
-    "crates/fxdax/src/bin/fxdax-gets.rs",
+    "crates/cladefs/src/bin/cladefs-gets.rs",
     "**/shuttle_tests.rs",
-    "crates/fxdax/src/import/testing.rs",
+    "crates/cladefs/src/import/testing.rs",
     "crates/follower/src/shuttle_*.rs",
 ]
 # The same modules written inline.

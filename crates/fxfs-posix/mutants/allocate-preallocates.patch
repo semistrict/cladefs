@@ -13,4 +13,4 @@ diff --git a/crates/fxfs-posix/src/lib.rs b/crates/fxfs-posix/src/lib.rs
 +        self.file(ino).await?.allocate(range).await
      }
  
-     /// fxdax: the attributes of the object `ino`, for a file handle (open_by_handle_at, NFS):
+     /// cladefs: the attributes of the object `ino`, for a file handle (open_by_handle_at, NFS):

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: a reflink (FICLONE, FICLONERANGE,
+//! cladefs's own, a child of data_object_handle.rs: a reflink (FICLONE, FICLONERANGE,
 //! copy_file_range) shares a file's extents with another file's range, copying no data.
 
 use super::DataObjectHandle;
@@ -20,7 +20,7 @@ use std::ops::Range;
 use storage_device::ExtentRange;
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: makes `dst`'s bytes from `dst_offset` share the extents holding this file's bytes
+    /// cladefs: makes `dst`'s bytes from `dst_offset` share the extents holding this file's bytes
     /// `range` (a reflink: FICLONE, FICLONERANGE, copy_file_range), copying no data: `dst`'s
     /// extents there go, and this file's take their place, each referenced once more
     /// (`Allocator::reference`), its holes holes there. Writes to either file afterwards move the
@@ -159,7 +159,7 @@ mod tests {
     use std::ops::Range;
     use std::sync::Arc;
 
-    /// fxdax: files to clone between, in the root store's root directory.
+    /// cladefs: files to clone between, in the root store's root directory.
     struct Clones {
         fs: OpenFxFilesystem,
         store: Arc<ObjectStore>,
@@ -239,7 +239,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a clone across a hole takes no more commits however long the hole is: counted as
+    /// cladefs: a clone across a hole takes no more commits however long the hole is: counted as
     /// bytes to clone, one of exabytes (xfstests' generic/303) committed for ever, and the journal,
     /// which couldn't keep up, panicked the guest with a write larger than its transfer buffer.
     #[fuchsia::test]
@@ -278,7 +278,7 @@ mod tests {
         assert_eq!(buffer.to_vec(), data);
     }
 
-    /// fxdax: a clone of a file's range, holes and all, shares its extents, copying nothing, in
+    /// cladefs: a clone of a file's range, holes and all, shares its extents, copying nothing, in
     /// place of what the clone held there: each file reads as it should, before and after either is
     /// written, which moves the blocks it changes; fsck finds nothing wrong, after a remount too;
     /// and the extents are freed once neither file holds them.
@@ -351,7 +351,7 @@ mod tests {
         clones.fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a file can share its extents with itself, three times, and give up every reference
+    /// cladefs: a file can share its extents with itself, three times, and give up every reference
     /// in one truncation, which frees them; fsck finds nothing wrong between. The references are
     /// read back from the allocator's layers, the journal compacted into them, after a remount
     /// (`test_clone_range` replays them from the journal).

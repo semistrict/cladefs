@@ -1,4 +1,4 @@
-# Working on fxdax
+# Working on cladefs
 
 ## Batch Rust changes; compile and test once per batch
 
@@ -28,15 +28,15 @@ of a batch.
 
 The user's rule (2026-11-11): every Linux run goes to ubu1, a
 physical host others' agents share, through the `scripts/*-host.sh` drivers
-(`scripts/lib/host.sh`; `FXDAX_HOST` names another host): `test-host.sh`, `bench-host.sh`,
+(`scripts/lib/host.sh`; `CLADEFS_HOST` names another host): `test-host.sh`, `bench-host.sh`,
 `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
 `mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
 `fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
-tree by default, `FXDAX_HOST_COMMIT` names another), its own target directories, its job under
+tree by default, `CLADEFS_HOST_COMMIT` names another), its own target directories, its job under
 `fxjob` (`--bench` for measurements), results copied back, worktree removed. Guest kernels come
 from a cache on the host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
-number as `FXDAX_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
+number as `CLADEFS_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
 run needs installed goes there as a step, never into a run.
 
 ## Commit in batches, only what compiled and passed its tests
@@ -62,7 +62,7 @@ Check the file before starting work: an answer may be there. As soon as the user
 
 ## No migrations, ever: formats change outright
 
-The user's rule (2026-11-05), not a phase: fxdax never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
+The user's rule (2026-11-05), not a phase: cladefs never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
 
 ## No silent fallbacks to a costlier path: fail hard
 
@@ -70,7 +70,7 @@ The user's rule (2026-11-11): when the cheap way of doing something can't work, 
 
 ## Never rely on the OS page cache for substantial data: one memory budget
 
-The user's rule (2026-11-15, TASK-433): fxdax holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`fxdax::extentd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the stores' page cache (`extent_store::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by fxdax, holding the same bytes again: two budgets of one memory end badly. So every file holding a store's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `extent_remote::direct`, `extent_store::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `extent_store::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. Tests that read store files behind its back write the page cache back first (`pages::shared().write_back_all()`).
+The user's rule (2026-11-15, TASK-433): cladefs holds what it caches in memory of its own, under one budget, which the extent daemon's governor bounds (`cladefs::extentd::memory`, `governor`): the extent cache's arenas, held parts, fetches' parts and tails, uploads, and the stores' page cache (`extent_store::pages`). The host's page cache is a second memory, counted as free by the governor, unbudgeted by cladefs, holding the same bytes again: two budgets of one memory end badly. So every file holding a store's data, or a cache's, is read and written bypassing it (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; `extent_remote::direct`, `extent_store::HostDir`). What the host's page cache gave (write-behind, reads of what was just written, batching into large writes), get from `extent_store::pages`, which does it under the budget; a new data path that needs caching or buffering uses it, or a budgeted holder of its own the governor counts, never the host's. Small metadata (a lock file, a description) may go through it; data, never. Tests that read store files behind its back write the page cache back first (`pages::shared().write_back_all()`).
 
 ## Never write a test around a bug
 
@@ -94,7 +94,7 @@ or don't check. The fix is half the work. For each one:
    invariant, so that it finds this bug and its kin. Put the bug back and see the test go red. A
    seed pinned as a regression test is on top of this, not instead of it.
 3. **Look around it:** find the same blind spot elsewhere. Search for code sharing the pattern, and
-   use coverage (`FXDAX_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/fxfs`)
+   use coverage (`CLADEFS_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/fxfs`)
    to list what near the bug no test runs. Each place found gets a test or a task.
 4. **Record it** in the fix's task notes: how it was found, the blind spot, the test added, and what
    step 3 turned up. Testing too large for the fix goes in a task under TASK-149, ranked by how

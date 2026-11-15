@@ -17,11 +17,11 @@ Each finding below was weighed for this reader before the design used it.
   - Why it fits an expert: forming a hypothesis and checking it against the code is how experts
     read code anyway.
 - **Design it before seeing ours.** Page Pilot's fsync step asks for your sequence before showing
-  fxdax's.
+  cladefs's.
   - Source: problem solving before instruction, Sinha & Kapur 2021, 53 studies: g = 0.36, up to
     0.58 for designs that follow productive-failure principles. It reverses for young children
     and for domain-general skills.
-  - Why it fits: an expert's own design is the best contrast for fxdax's.
+  - Why it fits: an expert's own design is the best contrast for cladefs's.
 - **Remove a rule, see what breaks.** The safety-catch lab removes a rule from the TLA+ model and
   replays TLC's counterexample.
   - Source: interactive worked examples, Tithi et al. 2026, n = 155. Find-and-fix examples helped

@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal/super_block.rs`. fxdax: a super-block's
+// Fuchsia's `src/storage/fxfs/src/object_store/journal/super_block.rs`. cladefs: a super-block's
 // extents are ranges of extents in the extent store (backlog doc-4), not of the device, which are
 // written once: each super-block is written to new extents, freeing those it was written to before,
 // and the store's root (`Root`) names where each instance starts, rather than fixed locations. What
@@ -81,7 +81,7 @@ pub const SUPER_BLOCK_CHUNK_SIZE: u64 = 65536;
 /// Each superblock is one block but may contain records that extend its own length.
 pub(crate) const MIN_SUPER_BLOCK_SIZE: u64 = 4096;
 
-/// fxdax: past any journal's end: a super-block saying otherwise is refused.
+/// cladefs: past any journal's end: a super-block saying otherwise is refused.
 const MAX_JOURNAL_OFFSET: u64 = 1 << 62;
 
 /// All superblocks start with the magic bytes "FxfsSupr".
@@ -114,7 +114,7 @@ impl SuperBlockInstance {
     }
 }
 
-/// fxdax: the extent store's root (backlog doc-4), which names where each super-block instance
+/// cladefs: the extent store's root (backlog doc-4), which names where each super-block instance
 /// starts: the first extent of the last one written of each. (Note that a [SuperBlockInstance] may
 /// still have multiple extents.)
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -330,7 +330,7 @@ async fn read(
             SuperBlockRecord::ObjectItem(item) => Mutation::insert_object(item.key, item.value),
             SuperBlockRecord::End => break,
         };
-        // fxdax: these are checked as the journal's are.
+        // cladefs: these are checked as the journal's are.
         ensure!(
             Journal::validate_mutation(&mutation, block_size),
             anyhow!(FxfsError::Inconsistent).context("Bad record in the super-block")
@@ -404,7 +404,7 @@ pub fn compact_root_parent(
 /// All super-block load/save operations should be via the methods on this type.
 pub(super) struct SuperBlockManager {
     pub next_instance: Mutex<SuperBlockInstance>,
-    /// fxdax: the store's root, as last loaded or set, held while a barrier sets the next
+    /// cladefs: the store's root, as last loaded or set, held while a barrier sets the next
     /// (`set_root`).
     root: futures::lock::Mutex<Root>,
     metrics: SuperBlockMetrics,
@@ -419,7 +419,7 @@ impl SuperBlockManager {
         }
     }
 
-    /// fxdax: makes a barrier that sets the root to the last one set as `change` changes it, which
+    /// cladefs: makes a barrier that sets the root to the last one set as `change` changes it, which
     /// `barrier` makes, given the root's bytes, saying whether it set it (a barrier that failed may
     /// have been made without them). Barriers set roots one at a time, each changing the last set:
     /// two at once could set them in either order, and a root composed before another but set
@@ -439,7 +439,7 @@ impl SuperBlockManager {
         Ok(set)
     }
 
-    /// fxdax: the journal's end the last root set records (`Root::journal_end`).
+    /// cladefs: the journal's end the last root set records (`Root::journal_end`).
     pub async fn journal_end(&self) -> u64 {
         self.root.lock().await.journal_end
     }
@@ -461,7 +461,7 @@ impl SuperBlockManager {
             read(device.clone(), block_size, SuperBlockInstance::A),
             read(device.clone(), block_size, SuperBlockInstance::B)
         ) {
-            // fxdax: the first's error, whose kind it keeps (`FxfsError::InvalidVersion` for a
+            // cladefs: the first's error, whose kind it keeps (`FxfsError::InvalidVersion` for a
             // filesystem of another version), with the second's.
             (Err(e1), Err(e2)) => {
                 return Err(
@@ -613,7 +613,7 @@ impl SuperBlockHeader {
                 FxfsError::Inconsistent
             );
 
-            // fxdax: none is the invalid ID: a graveyard's, what adds to it asserts as much.
+            // cladefs: none is the invalid ID: a graveyard's, what adds to it asserts as much.
             ensure!(
                 [
                     super_block_header.root_parent_store_object_id,
@@ -633,7 +633,7 @@ impl SuperBlockHeader {
                 FxfsError::Inconsistent
             );
 
-            // fxdax: where the journal starts is where a reader starts: within a block's contents,
+            // cladefs: where the journal starts is where a reader starts: within a block's contents,
             // and nowhere near the end of what offsets can count.
             let start = super_block_header.journal_checkpoint.file_offset;
             ensure!(
@@ -642,7 +642,7 @@ impl SuperBlockHeader {
                 anyhow!(FxfsError::Inconsistent).context("Bad journal checkpoint")
             );
 
-            // fxdax: each refusal is `FxfsError::InvalidVersion`, as a layer's of a later version
+            // cladefs: each refusal is `FxfsError::InvalidVersion`, as a layer's of a later version
             // is, so that a mount of a filesystem of any version but the latest says so. Nothing is
             // migrated (AGENTS.md): `EARLIEST_SUPPORTED_VERSION` is the latest.
             if super_block_version < EARLIEST_SUPPORTED_VERSION {
@@ -688,7 +688,7 @@ struct SuperBlockWriter<'a, S: HandleOwner> {
     writer: JournalWriter,
     size: u64,
     reservation: &'a Reservation,
-    /// fxdax: the super-block's first extent, which the root names.
+    /// cladefs: the super-block's first extent, which the root names.
     first_extent: Option<ExtentRange>,
 }
 
@@ -700,7 +700,7 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
         super_block_header: &SuperBlockHeader,
         reservation: &'a Reservation,
     ) -> Result<Self, Error> {
-        // fxdax: the super-block is written to new extents, as extents are written once, and the
+        // cladefs: the super-block is written to new extents, as extents are written once, and the
         // extents it was written to before are freed, giving the space back to `reservation`.
         handle
             .truncate_with_options(
@@ -726,7 +726,7 @@ impl<'a, S: HandleOwner> SuperBlockWriter<'a, S> {
     }
 
     pub async fn write_root_parent_item(&mut self, record: ObjectItem) -> Result<(), Error> {
-        // fxdax: enough for this record and any Extent record before it, and the End record after
+        // cladefs: enough for this record and any Extent record before it, and the End record after
         // the last, rather than a chunk, as the space allocated past what is written is freed
         // (see `finalize`).
         let min_len = self.writer.journal_file_checkpoint().file_offset
@@ -805,7 +805,7 @@ impl RecordReader {
     }
 }
 
-// fxdax: what the targets of crates/fxfs/fuzz run: a super-block written as a writer would have
+// cladefs: what the targets of crates/fxfs/fuzz run: a super-block written as a writer would have
 // written it, checksums right, holding what no writer would.
 #[cfg(fuzz)]
 pub mod fuzz {
@@ -974,7 +974,7 @@ mod tests {
 
     async fn filesystem_and_super_block_handles()
     -> (OpenFxFilesystem, DataObjectHandle<ObjectStore>, DataObjectHandle<ObjectStore>) {
-        // fxdax: calm: what a super-block takes depends on the size of its extents' numbers.
+        // cladefs: calm: what a super-block takes depends on the size of its extents' numbers.
         let device = DeviceHolder::new(
             FakeDevice::new(TEST_DEVICE_BLOCK_COUNT, TEST_DEVICE_BLOCK_SIZE.get() as u32).calm(),
         );
@@ -1010,7 +1010,7 @@ mod tests {
         const JOURNAL_OBJECT_ID: u64 = 5;
 
         // Confirm that the (first) super-block is expected size.
-        // fxdax: it is what was written, one block.
+        // cladefs: it is what was written, one block.
         assert_eq!(
             ObjectStore::open_object(
                 &fs.root_store(),
@@ -1170,13 +1170,13 @@ mod tests {
             .await
             .expect("open_object failed")
             .get_size(),
-            // fxdax: the journal has grown meanwhile, and its blocks are extents of their own, each
+            // cladefs: the journal has grown meanwhile, and its blocks are extents of their own, each
             // a record in the root parent store, which the super-block holds.
             3 * MIN_SUPER_BLOCK_SIZE
         );
     }
 
-    /// fxdax: writes `buf` as `instance`'s first extent, to a new extent, which the root names.
+    /// cladefs: writes `buf` as `instance`'s first extent, to a new extent, which the root names.
     async fn write_raw_super_block(
         device: &Arc<dyn Device>,
         instance: SuperBlockInstance,
@@ -1287,7 +1287,7 @@ mod tests {
 
         {
             let fs = FxFilesystem::open(device).await.expect("open failed");
-            // fxdax: the filesystem's own, which alone sets the root, its barriers included.
+            // cladefs: the filesystem's own, which alone sets the root, its barriers included.
             let manager = &fs.journal().super_block_manager;
             // To test wrapping, we need to get into a state where the current generation is
             // u64::MAX. Since we have A and B, and wrapping comparison is used, we need to set them
@@ -1544,7 +1544,7 @@ mod tests {
         );
     }
 
-    /// fxdax: writes as both instances of `device`'s super-block one that starts the journal at
+    /// cladefs: writes as both instances of `device`'s super-block one that starts the journal at
     /// `file_offset`, whose records are `records`, and says whether it loads.
     async fn loads(
         device: &Arc<dyn Device>,
@@ -1578,7 +1578,7 @@ mod tests {
         SuperBlockManager::new().load(device.clone(), BlockSize::SIZE_4KIB).await.is_ok()
     }
 
-    /// fxdax: where a super-block starts the journal may be anything: a reader may start within a
+    /// cladefs: where a super-block starts the journal may be anything: a reader may start within a
     /// block's contents, and not near the end of what offsets can count.
     #[fuchsia::test]
     async fn test_journal_checkpoint_validation() {
@@ -1590,7 +1590,7 @@ mod tests {
         assert!(!loads(&device, u64::MAX - 4096, &[]).await);
     }
 
-    /// fxdax: a mount of a filesystem whose super-blocks start its journal anywhere is refused,
+    /// cladefs: a mount of a filesystem whose super-blocks start its journal anywhere is refused,
     /// wherever that is: in a block's seal, which panicked a reader, before the journal's extents,
     /// which panicked their handle, past them, near the end of what offsets can count, or within
     /// a block that doesn't verify, which panicked replay's end.
@@ -1674,7 +1674,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a super-block's records are checked as the journal's are: an extent's key must be on
+    /// cladefs: a super-block's records are checked as the journal's are: an extent's key must be on
     /// the filesystem's blocks' bounds, whatever its value.
     #[fuchsia::test]
     async fn test_records_are_validated() {
@@ -1689,7 +1689,7 @@ mod tests {
         assert!(!loads(&device, 0, &[record(0..512)]).await);
     }
 
-    /// fxdax: a root's extents run backwards as easily as forwards, in an image, and don't
+    /// cladefs: a root's extents run backwards as easily as forwards, in an image, and don't
     /// deserialize if they do.
     #[fuchsia::test]
     async fn test_root_extents_are_validated() {
@@ -1771,7 +1771,7 @@ mod tests {
         write_sb(SuperBlockInstance::B, 3, 4, 5, 6, 4).await;
         assert!(manager.load((*device).clone(), BLOCK_SIZE).await.is_err());
 
-        // Fxdax: an object ID that is none, of any, as a graveyard's panicked a compaction.
+        // Cladefs: an object ID that is none, of any, as a graveyard's panicked a compaction.
         for ids in
             [[0, 4, 5, 6, 7], [3, 0, 5, 6, 7], [3, 4, 0, 6, 7], [3, 4, 5, 0, 7], [3, 4, 5, 6, 0]]
         {
@@ -1838,7 +1838,7 @@ mod tests {
         assert_eq!(*manager.next_instance.lock(), SuperBlockInstance::B);
     }
 
-    /// fxdax: what of a filesystem's super-blocks says the version before the latest.
+    /// cladefs: what of a filesystem's super-blocks says the version before the latest.
     #[derive(Clone, Copy, Debug)]
     enum Says {
         /// Their own.
@@ -1849,7 +1849,7 @@ mod tests {
         Layers,
     }
 
-    /// fxdax: a filesystem whose super-blocks say the version before the latest (60, as of 61), of
+    /// cladefs: a filesystem whose super-blocks say the version before the latest (60, as of 61), of
     /// their own, their journal's or the earliest of its layers', is refused at mount, the version
     /// named, and nothing of it written: nothing is migrated (AGENTS.md), so a mount reads no
     /// version but the latest.

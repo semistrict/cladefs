@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what tests of the protocol need (the `testing` feature, TASK-88): a bucket whose requests
+//! cladefs: what tests of the protocol need (the `testing` feature, TASK-88): a bucket whose requests
 //! take effect when the test says ([`SimBucket`]): in any order, failing before or after taking
 //! effect, or after whoever made them has gone; a writer's creates of segments, if it says, only
 //! once an object at their keys was deleted; and the collector's moves, which a test follows as a
@@ -23,7 +23,7 @@ enum Op {
     GetRange(String, ByteRange),
     Head(String),
     List(String),
-    /// fxdax: a page of a level of keys (TASK-395.5): where the page before ended, if any, and
+    /// cladefs: a page of a level of keys (TASK-395.5): where the page before ended, if any, and
     /// how many it holds at most.
     ListDelimited(String, Option<String>, usize),
     Put(String, Vec<u8>, PutMode),
@@ -493,7 +493,7 @@ impl Bucket for Direct {
     }
 }
 
-/// fxdax: the live branches of every cell of `bucket`, as `fxdax-gc --branches` lists them
+/// cladefs: the live branches of every cell of `bucket`, as `cladefs-gc --branches` lists them
 /// (TASK-395.4).
 pub async fn live(
     bucket: &impl Bucket,
@@ -507,7 +507,7 @@ pub async fn live(
     Ok(live)
 }
 
-/// fxdax: sweeps of the collector over every cell of `bucket`, of `options`, each as a holder of
+/// cladefs: sweeps of the collector over every cell of `bucket`, of `options`, each as a holder of
 /// its own, until two in a row delete and compact nothing: their reports, summed. Two, as a pass
 /// over a dead cell retires the references that kept what its parents' cells reclaim at their next,
 /// and a pass retiring them again deletes nothing (TASK-395.4). It fails as a sweep fails, and
@@ -529,10 +529,10 @@ pub async fn collect_until_quiet(
     panic!("{SWEEPS} sweeps of the collector, which kept doing something: {total:?}");
 }
 
-/// fxdax: how many sweeps [`collect_until_quiet`] runs at most.
+/// cladefs: how many sweeps [`collect_until_quiet`] runs at most.
 pub const SWEEPS: u64 = 32;
 
-/// fxdax: what the collector should have collected of `bucket` and left (TASK-390), once
+/// cladefs: what the collector should have collected of `bucket` and left (TASK-390), once
 /// passes ran alone, of `compact_below`, past the grace period, the branches' writers all done:
 /// each a line, `garbage left: KEY`, an object no live branch needs, or `left uncompacted: KEY, ...`,
 /// one a live branch names whose live extents take less than `compact_below` of its data, its
@@ -545,7 +545,7 @@ pub const SWEEPS: u64 = 32;
 /// was the simulation's end checks; TASK-293's compressed segments, never compacted, went unseen
 /// by every test outside it.
 ///
-/// fxdax: per cell and conservatively, as doc-7 has the collector since TASK-395: each fork point a
+/// cladefs: per cell and conservatively, as doc-7 has the collector since TASK-395: each fork point a
 /// reference names, or a live branch's fork to another cell, is needed whole, its state's extents
 /// along their ways from where they were sealed, and what recovering it reads, whatever its
 /// children hold of it; a reference is garbage once its child is deleted, of that origin, in
@@ -632,16 +632,20 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         let behind = checkpoint.is_none_or(|(_, by)| by != epoch);
         // What its head may yet name: of its epoch, or a later one, its segments and extents of
         // their own at or past its end, and its checkpoints newer than its own (TASK-407).
-        needed.extend(keys.iter().filter(|key| match layout::kind(key) {
-            layout::Kind::Segment { branch: of, seq, epoch: by }
-            | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
-                of == branch && by >= epoch && seq >= end
-            }
-            layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
-                of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
-            }
-            _ => false,
-        }).cloned());
+        needed.extend(
+            keys.iter()
+                .filter(|key| match layout::kind(key) {
+                    layout::Kind::Segment { branch: of, seq, epoch: by }
+                    | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
+                        of == branch && by >= epoch && seq >= end
+                    }
+                    layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
+                        of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
+                    }
+                    _ => false,
+                })
+                .cloned(),
+        );
         for (&extent, location) in &recovered.state.extents {
             needed.insert(location.key.clone());
             named.entry(location.key.clone()).or_default().insert(extent, location.len);
@@ -715,7 +719,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     }
     let mut left = Vec::new();
     for key in &keys {
-        // fxdax: cells' objects stay, as their branches' records do, their epochs fencing their
+        // cladefs: cells' objects stay, as their branches' records do, their epochs fencing their
         // volumes' leases; blocks of object IDs taken, for good (TASK-364); and the collector's
         // leases and marks, and references not yet retirable (TASK-395).
         let kept = match layout::kind(key) {
@@ -785,8 +789,7 @@ mod tests {
         let bucket = SimBucket::new();
         bucket.hold(test_branch(2), 1);
         let key = layout::segment(test_branch(2), 4, 1);
-        let footer =
-            layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
+        let footer = layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
         let stale = layout::Segment { data: Vec::new(), footer }.encode();
         let created = bucket.put(&key, stale.into(), PutMode::Create);
         assert_eq!(bucket.waiting(), 0);

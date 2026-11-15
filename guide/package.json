@@ -1,5 +1,5 @@
 {
-  "name": "fxdax-guide",
+  "name": "cladefs-guide",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -28,7 +28,7 @@
     "vitest": "^5.1.0",
     "web-tree-sitter": "^0.27.2"
   },
-  "description": "fxdax Flight School: an interactive guide to the fxdax codebase, built from its own code, docs, specs and tests",
+  "description": "cladefs Flight School: an interactive guide to the cladefs codebase, built from its own code, docs, specs and tests",
   "scripts": {
     "index": "node tools/index.ts",
     "evidence": "node tools/evidence.ts",

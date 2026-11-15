@@ -1,0 +1,251 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! An extent daemon serving on threads of a test's process, and a client of its control API.
+
+use cladefs::extentd::control::proto::extentd_client::ExtentdClient;
+use cladefs::extentd::control::proto::*;
+use cladefs::extentd::control::{connect, errno};
+use cladefs::extentd::{serve, serve_control};
+use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use tonic::Code;
+use tonic::transport::Channel;
+
+/// A daemon serving in `dir`: its VM socket's path, and a client of its control API, which
+/// `runtime` runs.
+pub struct Daemon {
+    pub vms: PathBuf,
+    pub client: ExtentdClient<Channel>,
+    pub runtime: tokio::runtime::Runtime,
+}
+
+impl Daemon {
+    pub fn new(dir: &Path) -> Self {
+        super::host();
+        let (vms, control) = (dir.join("vms.sock"), dir.join("control.sock"));
+        let listener = UnixListener::bind(&vms).unwrap();
+        std::thread::spawn(move || serve(listener));
+        let listener = UnixListener::bind(&control).unwrap();
+        let tenants = dir.join("tenants");
+        std::fs::create_dir(&tenants).unwrap();
+        std::thread::spawn(move || serve_control(listener, tenants));
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let client = runtime.block_on(connect(&control)).unwrap();
+        Self { vms, client, runtime }
+    }
+
+    /// A VM process's store at `path`, created with `capacity` bytes if it doesn't exist.
+    pub fn open(&self, path: &Path, capacity: u64) -> RemoteExtentStore {
+        RemoteExtentStore::connect(&self.vms, path, capacity).unwrap()
+    }
+
+    /// Makes a store at `path` of `branch`, an Fxfs volume of its cell: a new cell if its cell's
+    /// ID is 0, a new branch there if its ID is (TASK-364).
+    pub fn create(
+        &mut self,
+        path: &Path,
+        branch: cladefs::Branch,
+        token: Option<u64>,
+    ) -> Result<cladefs::Branch, tonic::Status> {
+        let request = CreateStoreRequest {
+            path: name(path),
+            capacity: CAPACITY,
+            branch: branch.id,
+            token,
+            tenant: branch.cell.tenant,
+            cell: branch.cell.id,
+            kind: 0,
+        };
+        let response = self.runtime.block_on(self.client.create_store(request))?.into_inner();
+        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::Branch { cell, id: response.branch })
+    }
+
+    /// The branch of the store at `path`, in its cell, as StatStore says it (TASK-364).
+    pub fn branch(&mut self, path: &Path) -> Result<cladefs::Branch, tonic::Status> {
+        let stat = self.stat(path)?;
+        let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
+        Ok(cladefs::Branch { cell, id: stat.branch })
+    }
+
+    pub fn stat(&mut self, path: &Path) -> Result<StatStoreResponse, tonic::Status> {
+        let request = StatStoreRequest { path: name(path) };
+        Ok(self.runtime.block_on(self.client.stat_store(request))?.into_inner())
+    }
+
+    pub fn fork(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
+        self.fork_store(from, to, (false, false))
+    }
+
+    /// Makes a point of the store at `from`, at `to` (ForkStore's `point`).
+    pub fn point(&mut self, from: &Path, to: &Path) -> Result<cladefs::Branch, tonic::Status> {
+        self.fork_store(from, to, (true, false))
+    }
+
+    /// Forks the store at `from` to `to` (ForkStore): a point if `point`, shared if `shared`
+    /// (TASK-395.7).
+    pub fn fork_store(
+        &mut self,
+        from: &Path,
+        to: &Path,
+        (point, shared): (bool, bool),
+    ) -> Result<cladefs::Branch, tonic::Status> {
+        let request = ForkStoreRequest { from: name(from), to: name(to), point, shared };
+        let response = self.runtime.block_on(self.client.fork_store(request))?.into_inner();
+        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::Branch { cell, id: response.branch })
+    }
+
+    pub fn resize(&mut self, path: &Path, capacity: u64) -> Result<(), tonic::Status> {
+        let request = ResizeStoreRequest { path: name(path), capacity };
+        self.runtime.block_on(self.client.resize_store(request)).map(drop)
+    }
+
+    pub fn place(&mut self, path: &Path, token: u64) -> Result<(), tonic::Status> {
+        let request = PlaceStoreRequest { path: name(path), token };
+        self.runtime.block_on(self.client.place_store(request)).map(drop)
+    }
+
+    /// Shares the point the store at `path` is of, or no longer (SharePoint, TASK-395.7).
+    pub fn share(&mut self, path: &Path, shared: bool) -> Result<(), tonic::Status> {
+        let request = SharePointRequest { path: name(path), shared };
+        self.runtime.block_on(self.client.share_point(request)).map(drop)
+    }
+
+    pub fn make_public(&mut self, path: &Path) -> Result<(), tonic::Status> {
+        let request = MakePublicRequest { path: name(path), generation: false };
+        self.runtime.block_on(self.client.make_public(request)).map(drop)
+    }
+
+    pub fn sync(&mut self, path: &Path) -> Result<(), tonic::Status> {
+        let request = SyncStoreRequest { path: name(path) };
+        self.runtime.block_on(self.client.sync_store(request)).map(drop)
+    }
+
+    pub fn delete(&mut self, path: &Path) -> Result<(), tonic::Status> {
+        let request = DeleteStoreRequest { path: name(path) };
+        self.runtime.block_on(self.client.delete_store(request)).map(drop)
+    }
+
+    pub fn drop_store(&mut self, path: &Path) -> Result<(), tonic::Status> {
+        let request = DropStoreRequest { path: name(path) };
+        self.runtime.block_on(self.client.drop_store(request)).map(drop)
+    }
+
+    pub fn import(&mut self, path: &Path, image: &Path) -> Result<cladefs::Branch, tonic::Status> {
+        let request = ImportImageRequest {
+            path: name(path),
+            capacity: CAPACITY,
+            image: name(image),
+            reference: String::new(),
+            tenant: 0,
+        };
+        let response = self.runtime.block_on(self.client.import_image(request))?.into_inner();
+        let cell = cladefs::Cell { tenant: response.tenant, id: response.cell };
+        Ok(cladefs::Branch { cell, id: response.branch })
+    }
+
+    /// Grants `tenant`, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`, its
+    /// socket, given to `uid`, if named.
+    pub fn grant(
+        &mut self,
+        tenant: &str,
+        id: u64,
+        dir: &Path,
+        uid: Option<u32>,
+    ) -> Result<PathBuf, tonic::Status> {
+        let (tenant, dir) = (tenant.to_owned(), name(dir));
+        let request = GrantRequest { tenant, dir, uid, gid: None, id };
+        Ok(self.runtime.block_on(self.client.grant(request))?.into_inner().socket.into())
+    }
+
+    pub fn revoke(&mut self, tenant: &str) -> Result<(), tonic::Status> {
+        let request = RevokeRequest { tenant: tenant.to_owned() };
+        self.runtime.block_on(self.client.revoke(request)).map(drop)
+    }
+
+    /// The stores the daemon serves, by their paths, in order.
+    pub fn list(&mut self) -> Vec<(PathBuf, StatStoreResponse)> {
+        let listed = self.runtime.block_on(self.client.list_stores(ListStoresRequest {}));
+        let mut stores: Vec<_> = (listed.unwrap().into_inner().stores.into_iter())
+            .map(|store| (PathBuf::from(store.path), store.stat.unwrap()))
+            .collect();
+        stores.sort_by(|a, b| a.0.cmp(&b.0));
+        stores
+    }
+
+    /// Limits the memory of `tenant`, or of every tenant, to `bytes`, or lifts the limit.
+    pub fn set_memory_limit(
+        &mut self,
+        tenant: Option<&str>,
+        bytes: Option<u64>,
+    ) -> Result<(), tonic::Status> {
+        let request =
+            SetMemoryLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
+        self.runtime.block_on(self.client.set_memory_limit(request)).map(drop)
+    }
+
+    /// Shrinks the memory of `tenant`, or of every tenant, toward `target` bytes, and returns what
+    /// is held then.
+    pub fn shrink_memory(
+        &mut self,
+        tenant: Option<&str>,
+        target: u64,
+    ) -> Result<u64, tonic::Status> {
+        let request = ShrinkMemoryRequest {
+            tenant: tenant.unwrap_or_default().to_owned(),
+            target_bytes: target,
+        };
+        Ok(self.runtime.block_on(self.client.shrink_memory(request))?.into_inner().bytes)
+    }
+
+    /// Limits the disk of `tenant`, or of every tenant, to `bytes`, or lifts the limit (TASK-94).
+    pub fn set_disk_limit(
+        &mut self,
+        tenant: Option<&str>,
+        bytes: Option<u64>,
+    ) -> Result<(), tonic::Status> {
+        let request = SetDiskLimitRequest { tenant: tenant.unwrap_or_default().to_owned(), bytes };
+        self.runtime.block_on(self.client.set_disk_limit(request)).map(drop)
+    }
+
+    /// What the disk of `tenant`, or of every tenant, takes, counted now, and its limit.
+    pub fn tenant_disk(
+        &mut self,
+        tenant: Option<&str>,
+    ) -> Result<(u64, Option<u64>), tonic::Status> {
+        let request = GetTenantDiskRequest { tenant: tenant.unwrap_or_default().to_owned() };
+        let response = self.runtime.block_on(self.client.get_tenant_disk(request))?.into_inner();
+        Ok((response.bytes, response.limit_bytes))
+    }
+
+    pub fn stats(&mut self) -> GetStatsResponse {
+        self.runtime.block_on(self.client.get_stats(GetStatsRequest {})).unwrap().into_inner()
+    }
+}
+
+/// A branch to make anew: of a new cell of no tenant's, a new ID there (TASK-364).
+pub const NEW: cladefs::Branch =
+    cladefs::Branch { cell: cladefs::Cell { tenant: 0, id: 0 }, id: 0 };
+
+pub const CAPACITY: u64 = 1 << 26;
+
+pub fn name(path: &Path) -> String {
+    path.to_str().unwrap().to_owned()
+}
+
+/// The code and errno of a call that failed.
+pub fn failure<T: std::fmt::Debug>(result: Result<T, tonic::Status>) -> (Code, Errno) {
+    let status = result.expect_err("the call succeeded");
+    (status.code(), errno(&status).expect("the status carries an errno"))
+}
+
+/// Writes `bytes` as the first extent of `store` and commits, setting its root to `root`.
+pub fn write(store: &RemoteExtentStore, bytes: &[u8], root: &[u8]) {
+    let extent = ExtentId { branch: store.branch(), sequence: 1 };
+    store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
+    store.commit(Some(root)).unwrap();
+}

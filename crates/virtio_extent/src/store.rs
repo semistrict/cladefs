@@ -1,16 +1,18 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What serving the device's requests asks of its store: on Linux, fxdax's `RemoteExtentStore`,
+//! What serving the device's requests asks of its store: on Linux, cladefs's `RemoteExtentStore`,
 //! the device's connection to the extent daemon; a fake one in tests.
 
 use std::future::Future;
 
-use fxdax::{Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
+use cladefs::{
+    Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers,
+};
 
 /// The store a device's requests are served with ([`handle`](crate::handle)): each method one of
-/// the device's requests, as fxdax's `RemoteExtentStore` serves it, which its documentation
+/// the device's requests, as cladefs's `RemoteExtentStore` serves it, which its documentation
 /// describes. Errors are the request's status.
 pub trait Store: Send + Sync {
     /// The branch the guest mints extents of.
@@ -90,13 +92,13 @@ pub trait Store: Send + Sync {
 }
 
 #[cfg(target_os = "linux")]
-impl Store for fxdax::RemoteExtentStore {
+impl Store for cladefs::RemoteExtentStore {
     fn branch(&self) -> u64 {
-        fxdax::RemoteExtentStore::branch(self)
+        cladefs::RemoteExtentStore::branch(self)
     }
 
     fn copies_on_write(&self) -> bool {
-        fxdax::RemoteExtentStore::copies_on_write(self)
+        cladefs::RemoteExtentStore::copies_on_write(self)
     }
 
     fn read(
@@ -141,7 +143,7 @@ impl Store for fxdax::RemoteExtentStore {
     }
 
     fn prefault(&self, window_offset: u64, len: u64) {
-        fxdax::RemoteExtentStore::prefault(self, window_offset, len);
+        cladefs::RemoteExtentStore::prefault(self, window_offset, len);
     }
 
     fn unmap(

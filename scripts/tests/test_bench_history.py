@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -54,7 +54,7 @@ class History(unittest.TestCase):
             },
             files={
                 "source.txt": "revision 584459ba0d1e2f3a\nfirecracker 0abc\nchanged  M scripts/bench.sh\n",
-                "host.txt": "Linux fxdax-bench\nTook 494s.\n",
+                "host.txt": "Linux cladefs-bench\nTook 494s.\n",
                 "note.md": "A writer with followers.\n\nIterations: 1.\n",
             },
         )

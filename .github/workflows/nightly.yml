@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -37,7 +37,7 @@ jobs:
       # In a tarball, which keeps their modes, as an artifact's files alone don't.
       - name: Build the suite's artifacts
         run: |
-          FXDAX_E2E_BUILD_ONLY="$HOME/guest/artifacts" scripts/test-e2e.sh
+          CLADEFS_E2E_BUILD_ONLY="$HOME/guest/artifacts" scripts/test-e2e.sh
           cp "$VMLINUX" ~/guest/vmlinux
           tar -C ~/guest -cf ~/guest.tar .
         env:
@@ -88,9 +88,9 @@ jobs:
         run: |
           vmstat -w -t 60 &
           sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" "TMPDIR=$WORK/tmp" \
-            "FXDAX_E2E_PREBUILT=$WORK/artifacts" "FXDAX_GUEST_KERNEL=$WORK/vmlinux" \
-            FXDAX_FIRECRACKER_JAIL=1 FXDAX_FIRECRACKER_SECCOMP=real \
-            "FXDAX_E2E_RESULTS=$WORK/results" \
+            "CLADEFS_E2E_PREBUILT=$WORK/artifacts" "CLADEFS_GUEST_KERNEL=$WORK/vmlinux" \
+            CLADEFS_FIRECRACKER_JAIL=1 CLADEFS_FIRECRACKER_SECCOMP=real \
+            "CLADEFS_E2E_RESULTS=$WORK/results" \
             scripts/test-e2e-rustfs.sh --tag nightly --shard "$SHARD"
       # What the cases said, but for their stores, images and caches: the runner's user's, as
       # root's guest roots' directories aren't readable to it.

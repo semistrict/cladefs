@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,7 +19,7 @@
 # A run's directory DIR, named for the run (run-..., host_run_name), holds tree, a worktree of
 # COMMIT of the host's clone REPO (a path in the home, or absolute), and trees/LABEL, one of each
 # other COMMIT, which the host script builds in, each its target directories its own; results, the
-# host script's results, and work, its work directory (FXDAX_HOST_WORK); what the driver copied there (patch,
+# host script's results, and work, its work directory (CLADEFS_HOST_WORK); what the driver copied there (patch,
 # guest-kernel); and job, the job's command, which the driver copied there too, its log, its pid,
 # its exit status and its lock, which the job holds as long as it runs.
 #
@@ -48,7 +48,7 @@
 # fxjob kills what is left of its scope itself since TASK-353; reap stays for what it can't reach:
 # cancel's TERM ends the job's shell, freeing its lock, while fxjob still reaps, and a job whose
 # fxjob was killed outright, or is older than that, leaves its scope to reap here.
-# FXDAX_HOST_PROC names the processes' directory (default /proc), for the tests.
+# CLADEFS_HOST_PROC names the processes' directory (default /proc), for the tests.
 set -euo pipefail
 
 # The job's command runs as root, sudo's, with the user's Rust (scripts/lib/host.sh's
@@ -66,7 +66,7 @@ give_back() {
 # reap NAME kills the processes left in the scope of the job NAME, each process's cgroup naming it
 # (fxjob-NAME-PID.scope), and succeeds once none is left.
 reap() {
-    local name=$1 proc=${FXDAX_HOST_PROC:-/proc} pids tries
+    local name=$1 proc=${CLADEFS_HOST_PROC:-/proc} pids tries
     for (( tries = 0; tries < 30; tries++ )); do
         pids=$(grep -l -- "/fxjob-$name-[0-9]*\.scope\$" "$proc"/[0-9]*/cgroup 2> /dev/null |
             sed 's|.*/\([0-9]*\)/cgroup$|\1|') || true

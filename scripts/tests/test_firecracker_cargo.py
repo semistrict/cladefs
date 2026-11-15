@@ -1,10 +1,10 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/firecracker-cargo.sh, which builds Firecracker as fxdax builds it (TASK-269): in
-a copy of vendor/firecracker whose vmm manifest has fxdax's crate as a dependency and whose lock is
-fxdax's, neither of which the series has. In a repository of its own laid out as this one, with a
+"""Tests of scripts/firecracker-cargo.sh, which builds Firecracker as cladefs builds it (TASK-269): in
+a copy of vendor/firecracker whose vmm manifest has cladefs's crate as a dependency and whose lock is
+cladefs's, neither of which the series has. In a repository of its own laid out as this one, with a
 cargo that records how it was run."""
 
 import os
@@ -16,14 +16,14 @@ from pathlib import Path
 
 from script import SCRIPTS
 
-VMM_MANIFEST = '[package]\nname = "vmm"\n\n[features]\nfxdax = []\n\n[dependencies]\nlibc = "0.2"\n'
+VMM_MANIFEST = '[package]\nname = "vmm"\n\n[features]\ncladefs = []\n\n[dependencies]\nlibc = "0.2"\n'
 
 
 class FirecrackerCargoTest(unittest.TestCase):
     def setUp(self):
         scratch = tempfile.TemporaryDirectory()
         self.addCleanup(scratch.cleanup)
-        self.root = Path(scratch.name).resolve() / "fxdax"
+        self.root = Path(scratch.name).resolve() / "cladefs"
         (self.root / "scripts").mkdir(parents=True)
         shutil.copy(SCRIPTS / "firecracker-cargo.sh", self.root / "scripts")
         self.src = self.root / "vendor/firecracker"
@@ -32,7 +32,7 @@ class FirecrackerCargoTest(unittest.TestCase):
         (self.src / "Cargo.lock").write_text("the series' lock\n")
         (self.src / "README.md").write_text("upstream\n")
         (self.src / ".git").write_text("gitdir: elsewhere\n")
-        (self.root / "vendor/firecracker.lock").write_text("fxdax's lock\n")
+        (self.root / "vendor/firecracker.lock").write_text("cladefs's lock\n")
         self.tree = self.root / "target/firecracker"
         # cargo: each run's directory and words in calls; `metadata --locked` fails if $STALE.
         bin_ = Path(scratch.name) / "bin"
@@ -44,8 +44,8 @@ class FirecrackerCargoTest(unittest.TestCase):
         (bin_ / "cargo").chmod(0o755)
         self.env = {**os.environ, "PATH": f"{bin_}:{os.environ['PATH']}",
                     "CALLS": str(self.calls)}
-        for name in ["FXDAX_FIRECRACKER_SRC", "FXDAX_FIRECRACKER_TREE",
-                     "FXDAX_FIRECRACKER_UNLOCKED"]:
+        for name in ["CLADEFS_FIRECRACKER_SRC", "CLADEFS_FIRECRACKER_TREE",
+                     "CLADEFS_FIRECRACKER_UNLOCKED"]:
             self.env.pop(name, None)
 
     def run_script(self, *args, **env):
@@ -55,16 +55,16 @@ class FirecrackerCargoTest(unittest.TestCase):
     def cargo_calls(self):
         return self.calls.read_text().splitlines() if self.calls.exists() else []
 
-    def test_builds_in_a_copy_with_fxdaxs_crates_and_lock(self):
-        done = self.run_script("build", "-p", "firecracker", "--features", "fxdax")
+    def test_builds_in_a_copy_with_cladefss_crates_and_lock(self):
+        done = self.run_script("build", "-p", "firecracker", "--features", "cladefs")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertEqual(
             (self.tree / "src/vmm/Cargo.toml").read_text(),
-            VMM_MANIFEST + "\n# fxdax: its crates, which the fxdax feature builds against "
+            VMM_MANIFEST + "\n# cladefs: its crates, which the cladefs feature builds against "
             "(scripts/firecracker-cargo.sh).\n"
-            f'[dependencies.fxdax]\npath = "{self.root}/crates/fxdax"\n'
+            f'[dependencies.cladefs]\npath = "{self.root}/crates/cladefs"\n'
             f'[dependencies.virtio_extent]\npath = "{self.root}/crates/virtio_extent"\n')
-        self.assertEqual((self.tree / "Cargo.lock").read_text(), "fxdax's lock\n")
+        self.assertEqual((self.tree / "Cargo.lock").read_text(), "cladefs's lock\n")
         self.assertEqual((self.tree / "README.md").read_text(), "upstream\n")
         self.assertFalse((self.tree / ".git").exists())
         # The series' own stay as they are.
@@ -72,7 +72,7 @@ class FirecrackerCargoTest(unittest.TestCase):
         self.assertEqual((self.src / "Cargo.lock").read_text(), "the series' lock\n")
         self.assertEqual(self.cargo_calls(), [
             f"{self.tree} metadata --locked --format-version 1",
-            f"{self.tree} build -p firecracker --features fxdax",
+            f"{self.tree} build -p firecracker --features cladefs",
         ])
 
     def test_a_copy_again_rewrites_only_what_changed(self):
@@ -92,7 +92,7 @@ class FirecrackerCargoTest(unittest.TestCase):
         self.assertIn("vendor/firecracker.lock is not as Cargo resolves the tree", done.stderr)
         self.assertEqual(self.cargo_calls(), [f"{self.tree} metadata --locked --format-version 1"])
         self.calls.unlink()
-        done = self.run_script("build", STALE="1", FXDAX_FIRECRACKER_UNLOCKED="1")
+        done = self.run_script("build", STALE="1", CLADEFS_FIRECRACKER_UNLOCKED="1")
         self.assertEqual(done.returncode, 0)
         self.assertEqual(self.cargo_calls(), [f"{self.tree} build"])
 
@@ -109,7 +109,7 @@ class FirecrackerCargoTest(unittest.TestCase):
         self.assertEqual((self.root / "vendor/firecracker.lock").read_text(), "resolved\n")
 
     def test_a_copy_outside_the_repo_is_refused(self):
-        done = self.run_script("build", FXDAX_FIRECRACKER_TREE="/tmp/elsewhere")
+        done = self.run_script("build", CLADEFS_FIRECRACKER_TREE="/tmp/elsewhere")
         self.assertEqual(done.returncode, 2)
         self.assertIn("is not in", done.stderr)
         self.assertEqual(self.cargo_calls(), [])

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the other hosts sharing a host's bucket, which its fetcher asks for parts before the
+//! cladefs: the other hosts sharing a host's bucket, which its fetcher asks for parts before the
 //! bucket (TASK-406.2): each part of an object has an owner among them, which keeps it once it
 //! fetched it, so that a part many hosts read, as the forks of a popular base booting on many cold
 //! hosts do, comes from the bucket about once for them all, not once for each.

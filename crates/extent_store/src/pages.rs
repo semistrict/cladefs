@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the store's page cache (TASK-433): what holds the bytes its data files are written with
+//! cladefs: the store's page cache (TASK-433): what holds the bytes its data files are written with
 //! until they are on the host's disk, and for as long after as memory allows, in memory of the
-//! process's own, which the extent daemon governs with the rest (`fxdax::extentd::memory`). Its
+//! process's own, which the extent daemon governs with the rest (`cladefs::extentd::memory`). Its
 //! files bypass the host's page cache (`O_DIRECT`), so that no byte a store holds is held twice,
 //! in two memories each budgeted as if the other weren't there. It does what the host's did for
 //! them, as Linux's does (mm/filemap.c, mm/page-writeback.c, fs/fs-writeback.c):
@@ -382,7 +382,7 @@ impl<F: File> Cached<F> {
 
     /// Writes back the dirty pages in `range`: what a read of the file's own, around the cache, is
     /// to be preceded by, so that it reads what was written (an image's device,
-    /// `fxdax::storage::image`).
+    /// `cladefs::storage::image`).
     pub fn settle(&self, range: Range<u64>) -> io::Result<()> {
         self.shared.flush(range, None)
     }

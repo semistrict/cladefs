@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,7 @@ pub trait File: Send + Sync + 'static {
     /// Reads `buf.len()` bytes at `offset`. Bytes past the file's end read as zeros.
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()>;
 
-    /// fxdax: reads as [`File::read_at`] does, but, on Linux, through the host's page cache, which
+    /// cladefs: reads as [`File::read_at`] does, but, on Linux, through the host's page cache, which
     /// `read_at` bypasses. The store reads its raw files so: the open segment's, those of segments
     /// being framed or filled, and open extents' own. It wrote them lately, through the cache,
     /// which holds their pages still, dirty or not yet let go; a read bypassing the cache writes
@@ -36,7 +36,7 @@ pub trait File: Send + Sync + 'static {
     /// Writes `buf` at `offset`.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()>;
 
-    /// fxdax: has the host write the `len` bytes at `offset` back to its disk, written through its
+    /// cladefs: has the host write the `len` bytes at `offset` back to its disk, written through its
     /// page cache, and waits for them; durable only once synced. A writer of a large file writes
     /// it back so, a piece at a time, as it writes, that the sync after has little left: a sync of
     /// a whole framed segment's data at once filled the disk's queue, which the syncs a daemon's
@@ -46,7 +46,7 @@ pub trait File: Send + Sync + 'static {
         Ok(())
     }
 
-    /// fxdax: has the host begin writing the `len` bytes at `offset` back to its disk, written
+    /// cladefs: has the host begin writing the `len` bytes at `offset` back to its disk, written
     /// through its page cache, waiting for none of it; durable only once synced. A file written
     /// as a guest writes, as the open segment's raw file is, is written back so behind its writes,
     /// that the disk writes as they come rather than all at once at the sync after (TASK-221). A
@@ -61,7 +61,7 @@ pub trait File: Send + Sync + 'static {
     /// Makes what was written to the file durable.
     fn sync(&self) -> io::Result<()>;
 
-    /// fxdax: makes what was written to the file durable, as [`File::sync`] does, but leaves its
+    /// cladefs: makes what was written to the file durable, as [`File::sync`] does, but leaves its
     /// pages in the host's page cache, if they are there: for a file written and synced again and
     /// again, as the open segment's raw file is, whose pages go with it once it is removed
     /// (TASK-92.23).
@@ -85,7 +85,7 @@ pub trait Dir: Send + Sync + 'static {
     /// Removes the file at `path`.
     fn remove(&self, path: &str) -> io::Result<()>;
 
-    /// fxdax: renames the file at `from` to `to`, which is not there, at once: in one directory, a
+    /// cladefs: renames the file at `from` to `to`, which is not there, at once: in one directory, a
     /// crash leaves it at one or the other, as `sync_dir` makes durable (TASK-301); from one
     /// directory to another, its entry in each is durable once that directory is synced, so that a
     /// crash may leave it at both, or at neither (TASK-310). By default, unsupported.
@@ -94,7 +94,7 @@ pub trait Dir: Send + Sync + 'static {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
 
-    /// fxdax: makes `to`, which is not there, another name of the file at `from`, which keeps its
+    /// cladefs: makes `to`, which is not there, another name of the file at `from`, which keeps its
     /// own (a hard link): `to`'s entry durable once its directory is synced. What a segment framed
     /// in place is put among framed ones by, its raw file then its framed file, the raw name going
     /// once its commits are durable (TASK-310). By default, unsupported: segments are framed in
@@ -128,23 +128,23 @@ pub trait Dir: Send + Sync + 'static {
     /// Lets the directory go, once taken ([`Dir::take`]).
     fn let_go(&self) {}
 
-    /// fxdax: claims the directory's store for one store open in this process: what refuses a
+    /// cladefs: claims the directory's store for one store open in this process: what refuses a
     /// second opening of it, or its deletion while open, at once, rather than wait for itself
     /// (TASK-165.7). A directory no other opening sees claims nothing.
     fn claim(&self) -> io::Result<()> {
         Ok(())
     }
 
-    /// fxdax: lets the claim go, once claimed ([`Dir::claim`]).
+    /// cladefs: lets the claim go, once claimed ([`Dir::claim`]).
     fn unclaim(&self) {}
 
-    /// fxdax: the path on the host's file system of the file at `path`, if it is on it: what a
+    /// cladefs: the path on the host's file system of the file at `path`, if it is on it: what a
     /// store's file leaving it for the host's cache of objects is renamed from (TASK-165.8).
     fn host_path(&self, _path: &str) -> Option<PathBuf> {
         None
     }
 
-    /// fxdax: whether the store may do I/O in the directory on threads of its own, alongside its
+    /// cladefs: whether the store may do I/O in the directory on threads of its own, alongside its
     /// callers': framing a closed segment off the commit that closed it (TASK-41), and syncing a
     /// flush's files at once (TASK-92.42). Without, its callers' threads do all of it, one
     /// operation at a time, in an order their calls alone decide: as a directory needs that fails
@@ -173,7 +173,7 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A directory of the host's.
 ///
-/// fxdax: every file of it bypasses the host's page cache where its file system allows
+/// cladefs: every file of it bypasses the host's page cache where its file system allows
 /// (`O_DIRECT` on Linux, `F_NOCACHE` on macOS), its reads and writes by the blocks around them,
 /// from memory aligned to them (`extent_remote::direct`), so that no byte of a store's is held in
 /// the host's page cache, a memory no budget of the process's counts (TASK-433). Extents' files
@@ -184,7 +184,7 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// by whatever name, shares its pages. A file removed drops its pages, its dirty ones unwritten.
 /// Until TASK-433, they were written through the host's page cache, read around it, and synced
 /// keeping the open segment's pages there (TASK-92.23). Syncing a file is `fdatasync` on Linux,
-/// and a directory's entries `fsync`, each of which flushes the drive's cache too. fxdax: on macOS
+/// and a directory's entries `fsync`, each of which flushes the drive's cache too. cladefs: on macOS
 /// each is an `F_BARRIERFSYNC`, which leaves the drive's cache to `barrier`, an `F_FULLFSYNC`, but
 /// orders what it synced before what is written after (TASK-92.48). They were std's `sync_data`
 /// and `sync_all`, each an `F_FULLFSYNC` there, which flushed the drive's cache at every sync. Run
@@ -209,7 +209,7 @@ pub struct HostDir {
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<std::fs::File>,
-    /// fxdax: its extents' files open, by name, each with its pages, which every opening of it
+    /// cladefs: its extents' files open, by name, each with its pages, which every opening of it
     /// shares (TASK-433); a file's pages go with its last opening, its dirty ones written back.
     cached: Mutex<std::collections::HashMap<String, crate::pages::WeakCached<DiskFile>>>,
 }
@@ -295,7 +295,7 @@ impl Dir for HostDir {
         self.file(path, file, data)
     }
 
-    /// fxdax: and drops its pages, the dirty ones unwritten, if no other name nor opening has
+    /// cladefs: and drops its pages, the dirty ones unwritten, if no other name nor opening has
     /// them (TASK-433): those still open keep them, written back to the file removed.
     fn remove(&self, path: &str) -> io::Result<()> {
         std::fs::remove_file(self.path.join(path))?;
@@ -351,7 +351,7 @@ impl Dir for HostDir {
         Ok(names)
     }
 
-    /// fxdax: a file handed to the host by its path, as the host's cache of objects takes one
+    /// cladefs: a file handed to the host by its path, as the host's cache of objects takes one
     /// by renaming it (TASK-165.8), has its dirty pages written back first, and its pages dropped:
     /// the host reads and moves it around the store's page cache (TASK-433).
     fn host_path(&self, path: &str) -> Option<PathBuf> {
@@ -379,7 +379,7 @@ impl Dir for HostDir {
     }
 
     /// Takes the directory with an exclusive `flock` of it, which a descriptor of the directory's
-    /// of the process's holds until the process lets it go, or exits. fxdax: the process's
+    /// of the process's holds until the process lets it go, or exits. cladefs: the process's
     /// takings of it share that, counted, each `HostDir` of it taking it once: what is taken in
     /// this process another opening of it here shares, as a store's uploader stopping, which
     /// holds it ([`Store::hold_dir`](crate::Store::hold_dir)), and its store's next opening do;
@@ -448,11 +448,11 @@ impl Dir for HostDir {
     }
 }
 
-/// fxdax: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
+/// cladefs: the directories this process has taken ([`Dir::take`]), by their devices and inodes:
 /// how many takings of each, and the descriptor holding the `flock`.
 static TAKEN: Mutex<BTreeMap<DirId, (usize, Arc<std::fs::File>)>> = Mutex::new(BTreeMap::new());
 
-/// fxdax: the directories whose stores this process has open ([`Dir::claim`]).
+/// cladefs: the directories whose stores this process has open ([`Dir::claim`]).
 static CLAIMED: Mutex<BTreeSet<DirId>> = Mutex::new(BTreeSet::new());
 
 /// A directory's device and inode, which name it however a path names it.
@@ -508,7 +508,7 @@ impl HostFile {
         }
     }
 
-    /// fxdax: writes back the pages the page cache holds dirty in `range` and drops every page
+    /// cladefs: writes back the pages the page cache holds dirty in `range` and drops every page
     /// there, if the file is cached: what an I/O of a caller's own on its descriptor
     /// ([`AsRawFd`]) is to be preceded by, as an image's device's is, so that it reads what was
     /// written, and what it writes no page hides (TASK-433).
@@ -519,7 +519,7 @@ impl HostFile {
         }
     }
 
-    /// fxdax: as [`HostFile::settle`] does, before a write of a caller's own on its descriptor,
+    /// cladefs: as [`HostFile::settle`] does, before a write of a caller's own on its descriptor,
     /// which also drops the pages there and takes the file to go as far as `range` at least, so
     /// that what the caller writes no page hides, and reads see all of it (TASK-433).
     pub fn settle_for_write(&self, range: std::ops::Range<u64>) -> io::Result<()> {
@@ -588,7 +588,7 @@ impl File for HostFile {
     }
 }
 
-/// fxdax: a file of the host's disk, bypassing its page cache if `direct` ([`HostDir`]): read and
+/// cladefs: a file of the host's disk, bypassing its page cache if `direct` ([`HostDir`]): read and
 /// written by the blocks around what is asked, from memory aligned to them, the block ending the
 /// last write held, so that an append, a log's, reads nothing back (`extent_remote::direct`,
 /// TASK-433).
@@ -631,7 +631,7 @@ impl File for DiskFile {
     }
 }
 
-/// fxdax: syncs `file` on macOS by the first of `syncs`, `fcntl`s of macOS's, that its file system
+/// cladefs: syncs `file` on macOS by the first of `syncs`, `fcntl`s of macOS's, that its file system
 /// supports; or, if none, by an `fsync`, which is all there is then (TASK-92.48). Not std's
 /// `sync_all`, which is an `F_FULLFSYNC` there.
 #[cfg(target_os = "macos")]
@@ -653,7 +653,7 @@ fn sync_with(file: &std::fs::File, syncs: &[libc::c_int]) -> io::Result<()> {
     again_if_interrupted(|| unsafe { libc::fsync(fd) })
 }
 
-/// fxdax: what `call`, a system call that returns -1 if it fails, gave, called again while a
+/// cladefs: what `call`, a system call that returns -1 if it fails, gave, called again while a
 /// signal interrupts it, as std's own calls are.
 #[cfg(target_os = "macos")]
 fn again_if_interrupted(call: impl Fn() -> libc::c_int) -> io::Result<()> {

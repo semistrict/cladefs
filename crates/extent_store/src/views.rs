@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: views of a branch as of a commit, through which followers read the store while
+//! cladefs's own: views of a branch as of a commit, through which followers read the store while
 //! its writer goes on (backlog doc-8, Store views; TASK-42.2).
 //!
 //! A commit seals every extent written before it, and an extent's ID is never used again, so the

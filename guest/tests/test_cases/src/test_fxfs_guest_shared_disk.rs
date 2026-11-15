@@ -1,16 +1,16 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what extentd asks of a disk it shares with many VMs, and with the bucket (TASK-310): a
+//! cladefs: what extentd asks of a disk it shares with many VMs, and with the bucket (TASK-310): a
 //! sandbox host's CI, whose daemon wrote some 2.3 times what its guests wrote, its framings stalled
 //! for seconds behind its own write-back. The case's daemon, its own, keeps its stores, its file
 //! bucket and its part cache in the case's directory, one disk, as such a host's daemon keeps its
-//! stores, and its bucket server its objects, on one. VMs boot FXDAX_SHARED_DISK_AT_ONCE at a time
-//! (8), FXDAX_SHARED_DISK_VMS in all (16), each on a new store; each guest writes a large file,
-//! FXDAX_SHARED_DISK_LARGE_MIB (768), of bytes that don't compress, and fsyncs it; then
-//! FXDAX_SHARED_DISK_FILES files (3,000) of 8 KiB, synced at once (syncfs), or each fsynced with
-//! FXDAX_SHARED_DISK_FSYNC=1, commits small enough for their records to hold their data; reads them back, its
+//! stores, and its bucket server its objects, on one. VMs boot CLADEFS_SHARED_DISK_AT_ONCE at a time
+//! (8), CLADEFS_SHARED_DISK_VMS in all (16), each on a new store; each guest writes a large file,
+//! CLADEFS_SHARED_DISK_LARGE_MIB (768), of bytes that don't compress, and fsyncs it; then
+//! CLADEFS_SHARED_DISK_FILES files (3,000) of 8 KiB, synced at once (syncfs), or each fsynced with
+//! CLADEFS_SHARED_DISK_FSYNC=1, commits small enough for their records to hold their data; reads them back, its
 //! caches dropped, checking each; deletes them, and syncs again. With a DAX window or without.
 //!
 //! The host says, as `shared-disk:` lines on its standard error, the case's log: what the guests
@@ -52,7 +52,7 @@ const SMALL: usize = 8 << 10;
 mod host {
     use super::*;
 
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
@@ -106,7 +106,7 @@ mod host {
 
     /// What of the daemon's past extentd's turn its log `log` warns of, each line saying `what`
     /// then how long it took: how many, the longest's milliseconds, and the milliseconds of all.
-    /// Its framings (`extent store: framing `); fxdax: and its makings of segments framed durable
+    /// Its framings (`extent store: framing `); cladefs: and its makings of segments framed durable
     /// (`segments framed durable`, TASK-310).
     fn slow(log: &str, what: &str) -> (u64, f64, f64) {
         let took = log.lines().filter_map(|line| {
@@ -131,13 +131,13 @@ mod host {
         machine.guest_kernel()?;
         machine.extent_store_served("extents", &store, CAPACITY, window, socket);
         for var in
-            ["FXDAX_SHARED_DISK_LARGE_MIB", "FXDAX_SHARED_DISK_FILES", "FXDAX_SHARED_DISK_FSYNC"]
+            ["CLADEFS_SHARED_DISK_LARGE_MIB", "CLADEFS_SHARED_DISK_FILES", "CLADEFS_SHARED_DISK_FSYNC"]
         {
             if let Ok(value) = std::env::var(var) {
                 machine.env(&CString::new(format!("{var}={value}"))?);
             }
         }
-        machine.env(&CString::new(format!("FXDAX_SHARED_DISK_SEED={vm}"))?);
+        machine.env(&CString::new(format!("CLADEFS_SHARED_DISK_SEED={vm}"))?);
         machine.root_image(&format!("{name}.rootfs.ext4"));
         machine.spawn_api(root, &test_setup.test_case, &name, &Vm::api_socket(&name))
     }
@@ -171,12 +171,12 @@ mod host {
     impl TestFxfsGuestSharedDisk {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let (vms, at_once) =
-                (count("FXDAX_SHARED_DISK_VMS", 16)?, count("FXDAX_SHARED_DISK_AT_ONCE", 8)?);
-            ensure!(at_once > 0, "FXDAX_SHARED_DISK_AT_ONCE is 0");
+                (count("CLADEFS_SHARED_DISK_VMS", 16)?, count("CLADEFS_SHARED_DISK_AT_ONCE", 8)?);
+            ensure!(at_once > 0, "CLADEFS_SHARED_DISK_AT_ONCE is 0");
             let root = setup_rootfs(test_setup)?;
             let dir = &test_setup.tmp_dir;
             // Short, as a Unix socket's path is.
-            let sockets = tempdir::TempDir::new("fxdax-shared-disk")?;
+            let sockets = tempdir::TempDir::new("cladefs-shared-disk")?;
             let socket = sockets.path().join("extentd.sock");
             // Its bucket and part cache in the case's directory, on the stores' disk
             // (crate::common::spawn_daemon's defaults), unless this process names others.
@@ -248,12 +248,12 @@ mod host {
                 kinds.join(" "),
                 gib(written.saturating_sub(stored)),
             );
-            // fxdax: segments whose data was written once, and commits spanning segments
+            // cladefs: segments whose data was written once, and commits spanning segments
             // (TASK-310, TASK-92.41).
             let once = ["segments_framed_in_place", "commits_spanning_segments"]
                 .map(|name| format!("{name}={}", stats.get(name).copied().unwrap_or(0)));
             eprintln!("shared-disk: {}", once.join(" "));
-            // fxdax: the framings' syncs, made apart, for segments framed meanwhile together
+            // cladefs: the framings' syncs, made apart, for segments framed meanwhile together
             // (TASK-310).
             eprintln!(
                 "shared-disk: slow_durable={} slowest_durable_ms={:.1} slow_durable_ms={:.0} \
@@ -299,10 +299,10 @@ mod host {
 
     impl Test for TestFxfsGuestSharedDisk {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("FXDAX_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("FXDAX_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
+                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -359,9 +359,9 @@ mod guest {
 
     impl Test for TestFxfsGuestSharedDisk {
         fn in_guest(self: Box<Self>) {
-            let seed = count("FXDAX_SHARED_DISK_SEED", 0) << 32;
+            let seed = count("CLADEFS_SHARED_DISK_SEED", 0) << 32;
             let (large_mib, files) =
-                (count("FXDAX_SHARED_DISK_LARGE_MIB", 768), count("FXDAX_SHARED_DISK_FILES", 3000));
+                (count("CLADEFS_SHARED_DISK_LARGE_MIB", 768), count("CLADEFS_SHARED_DISK_FILES", 3000));
             fs::create_dir_all(MNT).unwrap();
             let (source, target, fstype) = (
                 CString::new("extents").unwrap(),
@@ -385,7 +385,7 @@ mod guest {
             // The small files, synced at once.
             let small = format!("{MNT}/small");
             fs::create_dir(&small).unwrap();
-            let fsync_each = count("FXDAX_SHARED_DISK_FSYNC", 0) != 0;
+            let fsync_each = count("CLADEFS_SHARED_DISK_FSYNC", 0) != 0;
             let mut bytes = vec![0; SMALL];
             for at in 0..files {
                 fill(seed + large_mib + at, &mut bytes);

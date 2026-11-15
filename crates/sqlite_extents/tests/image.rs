@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a volume on an fxdax image: an extent store on disk, its branch kept in a bucket
+//! SQLite on a volume on an cladefs image: an extent store on disk, its branch kept in a bucket
 //! beside it (TASK-296).
 
 mod common;
 
-use fxdax::Storage;
+use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_extents::{Options, Registration, Volume, register};
 use std::path::Path;
@@ -28,7 +28,7 @@ fn a_sealed_database_on_an_image_survives_closing() {
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     // The tenant of the images `Storage` makes: the common tenant's, 0.
     kms.create(0).unwrap();
-    fxdax::remote::set_kms(Arc::new(kms)).unwrap();
+    cladefs::remote::set_kms(Arc::new(kms)).unwrap();
     assert_eq!(survives_closing("sealed"), Vec::<String>::new());
 }
 
@@ -48,11 +48,12 @@ fn noise(len: usize) -> Vec<u8> {
 /// Writes a database on a new image, closes it, opens it again and checks it, its VFSs named after
 /// `name`: returns the files of the image holding the data of a row of [`noise`] in the clear.
 fn survives_closing(name: &str) -> Vec<String> {
-    // Under the build's temporary directory, where direct I/O works, as fxdax's image tests have.
+    // Under the build's temporary directory, where direct I/O works, as cladefs's image tests have.
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("image");
     let marker = noise(4096);
-    let (write, read) = (format!("fxdax-image-write-{name}"), format!("fxdax-image-read-{name}"));
+    let (write, read) =
+        (format!("cladefs-image-write-{name}"), format!("cladefs-image-read-{name}"));
     {
         let volume = Volume::open(
             Storage::create(&path, 256 << 20).unwrap().into_device(),
@@ -158,13 +159,13 @@ fn open(path: &Path) -> Storage {
 fn a_clone_and_its_image_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (path, clone) = (dir.path().join("image"), dir.path().join("clone"));
-    let mounted = mount(Storage::create(&path, 256 << 20).unwrap(), "fxdax-clone-fill");
+    let mounted = mount(Storage::create(&path, 256 << 20).unwrap(), "cladefs-clone-fill");
     let mut parent_rows = common::fill(&mounted.2);
     unmount(mounted);
 
     let cloned = futures::executor::block_on(open(&path).clone_to(&clone)).unwrap();
-    let parent = mount(open(&path), "fxdax-clone-parent");
-    let fork = mount(cloned, "fxdax-clone-fork");
+    let parent = mount(open(&path), "cladefs-clone-parent");
+    let fork = mount(cloned, "cladefs-clone-fork");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.2, &fork_rows);
     common::change_parent(&parent.2, &mut parent_rows);
@@ -175,7 +176,7 @@ fn a_clone_and_its_image_go_their_own_ways() {
     unmount(parent);
 
     for (path, rows) in [(&path, parent_rows), (&clone, fork_rows)] {
-        let mounted = mount(open(path), "fxdax-clone-reopened");
+        let mounted = mount(open(path), "cladefs-clone-reopened");
         common::check(&mounted.2, &rows);
         unmount(mounted);
     }

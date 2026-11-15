@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -70,7 +70,7 @@ class BaseTest(unittest.TestCase):
         return git(self.repo, "rev-parse", "HEAD")
 
     def run_scope(self, *args):
-        env = {key: value for key, value in os.environ.items() if key != "FXDAX_GUEST_SIM"}
+        env = {key: value for key, value in os.environ.items() if key != "CLADEFS_GUEST_SIM"}
         done = subprocess.run([SCRIPT, *args], cwd=self.repo, capture_output=True, text=True,
                               env=env, check=True)
         return done.stdout.strip()
@@ -91,11 +91,11 @@ class BaseTest(unittest.TestCase):
     def test_a_dispatch_may_ask_for_either(self):
         self.commit("guest/sim/zloop.sh")
         for asked in ["full", "smoke"]:
-            env = {**os.environ, "FXDAX_GUEST_SIM": asked}
+            env = {**os.environ, "CLADEFS_GUEST_SIM": asked}
             done = subprocess.run([SCRIPT, self.base], cwd=self.repo, capture_output=True,
                                   text=True, env=env, check=True)
             self.assertEqual(done.stdout.strip(), asked)
-        env = {**os.environ, "FXDAX_GUEST_SIM": "auto"}
+        env = {**os.environ, "CLADEFS_GUEST_SIM": "auto"}
         done = subprocess.run([SCRIPT, self.base], cwd=self.repo, capture_output=True, text=True,
                               env=env, check=True)
         self.assertEqual(done.stdout.strip(), "full")

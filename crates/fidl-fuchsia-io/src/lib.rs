@@ -1,5 +1,5 @@
 // Copyright 2018 The Fuchsia Authors. All rights reserved.
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -11,7 +11,7 @@
 //! The `File`, `Directory` and `Symlink` protocols are served in-process (see
 //! the `fidl` stand-in's `endpoints`): their proxies call a `FileServer`,
 //! `DirectoryServer` or `SymlinkServer`, with the methods of the protocols
-//! fxdax's tests use.
+//! cladefs's tests use.
 
 mod protocols;
 
@@ -425,7 +425,7 @@ pub struct DirectoryInfo {
     pub attributes: Option<NodeAttributes2>,
 }
 
-/// `fuchsia.io/Representation` (flexible resource union), without `Node`, which fxdax doesn't
+/// `fuchsia.io/Representation` (flexible resource union), without `Node`, which cladefs doesn't
 /// serve.
 #[derive(Debug)]
 pub enum Representation {
@@ -434,7 +434,7 @@ pub enum Representation {
     Symlink(SymlinkInfo),
 }
 
-/// `fuchsia.io/Options` (table), with the fields fxdax's tests use.
+/// `fuchsia.io/Options` (table), with the fields cladefs's tests use.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
     pub attributes: Option<NodeAttributesQuery>,

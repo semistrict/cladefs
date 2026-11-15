@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # Open bugs' failures, which zloop.sh counts apart rather than failing for: a line each, the task,
 # then an extended regex of the line saying how a run failed (lib.sh's sim_failure_line). Each is

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # Kernel: sim
 # Killer: scenarios cow_truncate_held
@@ -18,7 +18,7 @@
  	if (mapped)
  		err = fxfs_device_unmap(dax->dev, range->window_offset,
  					(u64)range->pages << PAGE_SHIFT);
--	/* fxdax: the UNMAP freed its private pages, unless it failed. */
+-	/* cladefs: the UNMAP freed its private pages, unless it failed. */
 -	fxfs_dax_dropped(dax, range, fxfs_dax_pages_unmap(range->state, 0, range->pages), !err);
  	fxfs_dax_free_range(dax, range, err);
  }
