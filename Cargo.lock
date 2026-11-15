@@ -549,6 +549,7 @@ dependencies = [
  "bitflags",
  "cladefs",
  "event-listener",
+ "extent_files",
  "extent_frame",
  "extent_keys",
  "extent_remote",

@@ -191,7 +191,7 @@ impl<'a> Encoded<'a> {
 /// The flags requests of `kind` know: `EINVAL` for a kind no request is of.
 fn known_flags(kind: u32) -> Result<u32, Errno> {
     Ok(match kind {
-        OPEN => OPEN_CREATE | OPEN_FORK_FROM | OPEN_READ_ONLY | OPEN_SQLITE,
+        OPEN => OPEN_CREATE | OPEN_FORK_FROM | OPEN_READ_ONLY | OPEN_SQLITE | OPEN_MEMORY,
         READ => READ_TRANSFER,
         WRITE => {
             WRITE_BARRIER | WRITE_COMMIT | WRITE_DURABLE | WRITE_LOCAL | WRITE_TRANSFER | WRITE_ROOT
@@ -261,7 +261,9 @@ impl<'a> Request<'a> {
                 let mut open = match opening {
                     Opening::Existing => message(0, [0; 5]).carrying(path),
                     Opening::Create(capacity, kind) => {
-                        let flags = OPEN_CREATE | flag(*kind == Kind::Sqlite, OPEN_SQLITE);
+                        let flags = OPEN_CREATE
+                            | flag(*kind == Kind::Sqlite, OPEN_SQLITE)
+                            | flag(*kind == Kind::Memory, OPEN_MEMORY);
                         message(flags, [*capacity, 0, 0, 0, 0]).carrying(path)
                     }
                     Opening::ForkFrom { from, branch, capacity } => {
@@ -390,6 +392,9 @@ impl<'a> Request<'a> {
                     OPEN_CREATE => (&payload[..], Opening::Create(args[0], Kind::Fxfs)),
                     flags if flags == OPEN_CREATE | OPEN_SQLITE => {
                         (&payload[..], Opening::Create(args[0], Kind::Sqlite))
+                    }
+                    flags if flags == OPEN_CREATE | OPEN_MEMORY => {
+                        (&payload[..], Opening::Create(args[0], Kind::Memory))
                     }
                     OPEN_READ_ONLY => (&payload[..], Opening::ReadOnly),
                     OPEN_FORK_FROM => {
@@ -1047,6 +1052,7 @@ mod tests {
             open(Opening::Existing),
             open(Opening::Create(a, Kind::Fxfs)),
             open(Opening::Create(a, Kind::Sqlite)),
+            open(Opening::Create(a, Kind::Memory)),
             open(Opening::ForkFrom { from, branch: b, capacity: a }),
             open(Opening::ReadOnly),
             read(d % (MAX_PAYLOAD + 1), ReadInto::Reply),

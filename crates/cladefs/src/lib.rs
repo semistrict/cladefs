@@ -123,14 +123,16 @@ pub mod faults;
 mod fence;
 mod filesystem;
 pub mod fuse;
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-mod hearing;
 #[cfg(test)]
 mod heap;
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+mod hearing;
 mod host_store;
 mod image;
 pub mod import;
 mod memory;
+#[cfg(target_os = "linux")]
+pub mod memory_volume;
 mod node;
 pub mod pages;
 mod profile;

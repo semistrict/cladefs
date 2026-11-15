@@ -115,6 +115,8 @@ const (
 	VolumeKind_VOLUME_KIND_FXFS VolumeKind = 0
 	// A database of sqlite_extents, which its VFS alone opens.
 	VolumeKind_VOLUME_KIND_SQLITE VolumeKind = 1
+	// A VM's memory: an extent_files volume of one file, its image (TASK-456).
+	VolumeKind_VOLUME_KIND_MEMORY VolumeKind = 2
 )
 
 // Enum value maps for VolumeKind.
@@ -122,10 +124,12 @@ var (
 	VolumeKind_name = map[int32]string{
 		0: "VOLUME_KIND_FXFS",
 		1: "VOLUME_KIND_SQLITE",
+		2: "VOLUME_KIND_MEMORY",
 	}
 	VolumeKind_value = map[string]int32{
 		"VOLUME_KIND_FXFS":   0,
 		"VOLUME_KIND_SQLITE": 1,
+		"VOLUME_KIND_MEMORY": 2,
 	}
 )
 
@@ -3857,11 +3861,12 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*:\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*R\n" +
 	"\n" +
 	"VolumeKind\x12\x14\n" +
 	"\x10VOLUME_KIND_FXFS\x10\x00\x12\x16\n" +
-	"\x12VOLUME_KIND_SQLITE\x10\x012\x9f\x13\n" +
+	"\x12VOLUME_KIND_SQLITE\x10\x01\x12\x16\n" +
+	"\x12VOLUME_KIND_MEMORY\x10\x022\x9f\x13\n" +
 	"\aExtentd\x12^\n" +
 	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
 	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +

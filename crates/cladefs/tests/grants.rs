@@ -141,6 +141,38 @@ fn tenants_reach_no_store_of_another_tenants_cell() {
     assert_eq!(daemon.branch(&globex.join("vm")).unwrap().cell.tenant, 0xb);
 }
 
+/// TASK-456.2: a tenant's memory volume, a VM's memory in a cell of the tenant's, opens through
+/// the tenant's socket alone: another tenant's VM processes, given its path, are refused
+/// (`EACCES`), and it reads as its tenant wrote it.
+#[test]
+fn tenants_reach_no_memory_volume_of_another_tenants_cell() {
+    use cladefs::memory_volume::MemoryVolume;
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
+    std::fs::create_dir(&acme).unwrap();
+    std::fs::create_dir(&globex).unwrap();
+    let ours = daemon.grant("acme", 0xa, &acme, None).unwrap();
+    let theirs = daemon.grant("globex", 0xb, &globex, None).unwrap();
+    let size = 64 * 4096;
+    let their_memory = MemoryVolume::open(&theirs, &globex.join("memory"), size).unwrap();
+    their_memory.write(0, &[7; 4096]).unwrap();
+    their_memory.commit().unwrap();
+    their_memory.close().unwrap();
+    assert_eq!(daemon.branch(&globex.join("memory")).unwrap().cell.tenant, 0xb);
+
+    let moved = acme.join("moved");
+    std::fs::rename(globex.join("memory"), &moved).unwrap();
+    let refused = MemoryVolume::open(&ours, &moved, size).err().and_then(|err| err.errno());
+    assert_eq!(refused, Some(Errno::EACCES));
+    std::fs::rename(&moved, globex.join("memory")).unwrap();
+    let their_memory = MemoryVolume::open(&theirs, &globex.join("memory"), size).unwrap();
+    let mut page = [0; 4096];
+    their_memory.read(0, &mut page).unwrap();
+    assert_eq!(page, [7; 4096]);
+    their_memory.close().unwrap();
+}
+
 /// TASK-364: a point of another tenant's, which its VM manager gives a tenant (TASK-154), the
 /// tenant's VM processes restore from, each restore a store of a cell of the tenant's own.
 /// TASK-395.7: while it is shared: before, and once unshared, a restore is refused (EACCES),

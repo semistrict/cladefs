@@ -3,9 +3,11 @@ id: TASK-456.2
 title: >-
   Memory volumes: a cell volume kind holding a sparse image of guest memory
   pages
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:33'
+updated_date: '2026-11-15 20:13'
 labels:
   - memory
   - host
@@ -35,3 +37,12 @@ A third cell::Kind beside fxfs and sqlite (extent_remote/src/cell.rs): a store w
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. extent_files: holes written: a file's dirty chunks are data or holes (punch of whole chunks); a commit places a hole as no ref, leaving the block it replaces; reads of it zeros.
+2. extent_remote::cell::Kind::Memory ('memory'); extentd: wire OPEN_MEMORY beside OPEN_SQLITE (wire version bump), codec, control API VolumeKind::MEMORY, client open_memory; Go bindings regenerated.
+3. cladefs::memory_volume: a memory volume opened through the daemon (as sqlite_extents::daemon opens SQLite's): an extent_files volume of one file, 'memory', of the guest memory's size; write pages and holes, commit them at once, read pages, the runs of pages a window maps.
+4. Tests: kind round trip and cell listing; tenant isolation (another tenant's open fails EACCES, as stores'); a batch of pages and holes committed once and a crash test with FakeDevice crashes (the image is the last commit's); a fork reads its parent's pages and stores only what it wrote (its own extents counted).
+<!-- SECTION:PLAN:END -->

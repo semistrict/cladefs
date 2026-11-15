@@ -443,6 +443,19 @@ impl Volume {
         block_on(file.pages.write(&**self.device, offset, data))
     }
 
+    /// Makes the `len` bytes of file `name` at `offset`, whole blocks, holes: they read as zeros,
+    /// and its next commit stores nothing for them (TASK-456.2).
+    pub fn punch(&self, name: &str, offset: u64, len: u64) -> Result<(), Error> {
+        let block_size = self.device.block_size() as u64;
+        if !offset.is_multiple_of(block_size) || !len.is_multiple_of(block_size) {
+            bail!("punching {len} bytes at {offset}, not whole blocks of {block_size}");
+        }
+        let mut inner = self.lock()?;
+        let file = Self::file(&mut inner, name);
+        file.pages.punch(offset / block_size..(offset + len) / block_size);
+        Ok(())
+    }
+
     pub fn truncate(&self, name: &str, size: u64) -> Result<(), Error> {
         let mut inner = self.lock()?;
         let file = Self::file(&mut inner, name);

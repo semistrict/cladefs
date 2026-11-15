@@ -322,6 +322,7 @@ impl Extentd for Control {
         let kind = match VolumeKind::try_from(kind) {
             Ok(VolumeKind::Fxfs) => Kind::Fxfs,
             Ok(VolumeKind::Sqlite) => Kind::Sqlite,
+            Ok(VolumeKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {

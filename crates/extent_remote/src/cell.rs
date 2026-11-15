@@ -42,6 +42,8 @@ pub enum Kind {
     Fxfs,
     /// A database of `sqlite_extents`.
     Sqlite,
+    /// A VM's memory: an `extent_files` volume of one file, its image (TASK-456).
+    Memory,
 }
 
 impl Kind {
@@ -50,12 +52,13 @@ impl Kind {
         match self {
             Self::Fxfs => "fxfs",
             Self::Sqlite => "sqlite",
+            Self::Memory => "memory",
         }
     }
 
     /// The kind `name` names ([`Kind::name`]).
     pub fn named(name: &str) -> Option<Self> {
-        [Self::Fxfs, Self::Sqlite].into_iter().find(|kind| kind.name() == name)
+        [Self::Fxfs, Self::Sqlite, Self::Memory].into_iter().find(|kind| kind.name() == name)
     }
 }
 
@@ -657,7 +660,7 @@ mod tests {
         let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), None)).unwrap();
         let refused = block_on(add_volume(&bucket, held, "a/b", FXFS));
         assert_eq!(refused, Err(Error::VolumeName("a/b".into())));
-        for kind in [Kind::Fxfs, Kind::Sqlite] {
+        for kind in [Kind::Fxfs, Kind::Sqlite, Kind::Memory] {
             assert_eq!(Kind::named(kind.name()), Some(kind));
         }
         assert_eq!(Kind::named("ext4"), None);

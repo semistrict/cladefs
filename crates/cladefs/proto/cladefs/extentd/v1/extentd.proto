@@ -251,6 +251,8 @@ enum VolumeKind {
   VOLUME_KIND_FXFS = 0;
   // A database of sqlite_extents, which its VFS alone opens.
   VOLUME_KIND_SQLITE = 1;
+  // A VM's memory: an extent_files volume of one file, its image (TASK-456).
+  VOLUME_KIND_MEMORY = 2;
 }
 
 // The store made.
