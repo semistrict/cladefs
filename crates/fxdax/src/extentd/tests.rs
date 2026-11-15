@@ -2477,9 +2477,8 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
             let volume = extent_remote::cell::Volume { branch: branch.id, kind };
             let volumes = std::collections::BTreeMap::from([(name.to_owned(), volume)]);
             assert_eq!((cell.volumes, cell.deleted), (volumes, false), "{name}");
-            let key = extent_remote::layout::lease(branch);
-            let lease = extent_remote::branch::lease(&*bucket, &key).await.unwrap().unwrap();
-            assert_eq!(lease.token, cell.epoch, "{name}: its lease taken with its cell's epoch");
+            let head = extent_remote::head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
 }
@@ -4888,10 +4887,10 @@ fn a_zygotes_restores_open_its_point_once() {
     let point = dir.path().join("point");
     store.fork_quiescent(&point).unwrap();
     drop(store);
-    // How many writers took the point's branch: its lease's epoch.
+    // How many writers took the point's branch: its head's epoch.
     let bucket = super::stores::remote_bucket().unwrap();
-    let lease = extent_remote::layout::lease(branch_at(&point));
-    let takings = || control(extent_remote::branch::lease_epoch(&*bucket, &lease)).unwrap();
+    let branch = branch_at(&point);
+    let takings = || control(extent_remote::head::epoch(&*bucket, branch)).unwrap();
     let taken = takings();
 
     let restoring: Vec<_> = (0..RESTORES)
