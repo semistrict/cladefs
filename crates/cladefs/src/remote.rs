@@ -421,6 +421,9 @@ pub mod peers;
 mod fork_faults;
 
 #[cfg(test)]
+mod lifecycle;
+
+#[cfg(test)]
 mod restore_faults;
 
 #[cfg(test)]
