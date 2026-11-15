@@ -119,6 +119,20 @@ pub fn tenant_of_prefix(prefix: &str) -> Option<u64> {
     hex(prefix.strip_prefix(TENANTS)?.strip_suffix('/')?)
 }
 
+/// fxdax: `tenant`'s sealed marker (doc-16, How a forgotten KEK is told from none; TASK-411.19):
+/// there once a cell of the tenant's was made sealed, created (create-only) before the first
+/// such cell's object, and kept for good, the collector never deleting it. A KMS saying the
+/// tenant has no KEK is then believed not: its KEK was forgotten (a real KMS's deleted key), and
+/// its cells are refused as destroyed, never made in the clear ([`crate::keys::new_cell_kek`]).
+/// Under the tenant's prefix, beside its cells', no cell's: a delimiter listing of the tenant's
+/// cells ([`cells_of`]) lists it not.
+pub fn sealed(tenant: u64) -> String {
+    format!("{TENANTS}{tenant:016x}/{SEALED}")
+}
+
+/// fxdax: what [`sealed`] names under a tenant's prefix.
+const SEALED: &str = "sealed";
+
 /// fxdax: the object of `cell` itself: who holds it, and its volumes ([`crate::cell`]).
 pub fn cell(cell: Cell) -> String {
     format!("{}cell", cell.prefix())
@@ -308,6 +322,10 @@ pub enum Kind<'a> {
     ObjectIds {
         block: u64,
     },
+    /// fxdax: a tenant's sealed marker ([`sealed`], TASK-411.19): no cell's, kept for good.
+    Sealed {
+        tenant: u64,
+    },
     /// fxdax: the collector's lease over a cell ([`gc_lease`]).
     GcLease {
         cell: Cell,
@@ -353,6 +371,7 @@ impl Kind<'_> {
             Self::Lease { .. } => "lease",
             Self::Cell { .. } => "cell",
             Self::ObjectIds { .. } => "objectid",
+            Self::Sealed { .. } => "sealed",
             Self::GcLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
             Self::Marking => "marking",
@@ -378,7 +397,7 @@ pub fn owner(key: &str) -> Option<Cell> {
         | Kind::Retired { parent: branch, .. } => Some(branch.cell),
         Kind::Cell { cell } | Kind::GcLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
-        Kind::ObjectIds { .. } | Kind::Marking | Kind::Unknown => None,
+        Kind::ObjectIds { .. } | Kind::Sealed { .. } | Kind::Marking | Kind::Unknown => None,
     }
 }
 
@@ -393,6 +412,11 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some(block) = key.strip_prefix(OBJECTIDS) {
             return Some(Kind::ObjectIds { block: hex(block)? });
+        }
+        if let Some(tenant) = (key.strip_prefix(TENANTS))
+            .and_then(|rest| rest.strip_suffix(SEALED)?.strip_suffix('/'))
+        {
+            return Some(Kind::Sealed { tenant: hex(tenant)? });
         }
         let (cell, rest) = in_cell(key)?;
         let branch = |id| Some(Branch { cell, id: hex(id)? });
@@ -826,6 +850,11 @@ mod tests {
         assert_eq!(objectid_block(0x2a), "objectid/000000000000002a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
+        assert_eq!(sealed(0x2a), "tenants/000000000000002a/sealed");
+        assert_eq!(kind(&sealed(0x2a)), Kind::Sealed { tenant: 0x2a });
+        assert_eq!(owner(&sealed(0x2a)), None);
+        assert_eq!(kind("tenants/2a/sealed"), Kind::Unknown);
+        assert_eq!(kind(&format!("{}sealed", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&gc_lease(cell)), Kind::GcLease { cell });
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);

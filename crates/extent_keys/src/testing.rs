@@ -4,7 +4,8 @@
 
 //! fxdax's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
 //! KMS that counts the calls made of it ([`Counted`]), so that a test can say how many a path
-//! costs: none on a fork's, one for a host taking a cell; AWS KMS's emulator, started for a test
+//! costs: none on a fork's, one for a host taking a cell; a KMS forgetting destroyed KEKs, as real
+//! ones forget deleted keys ([`Forgetting`], TASK-411.19); AWS KMS's emulator, started for a test
 //! ([`LocalAwsKms`], TASK-411.17); and an OpenBao dev server ([`openbao::DevServer`], TASK-411.16),
 //! the real KMS a test can start.
 
@@ -67,6 +68,53 @@ impl<K: Kms> Kms for Counted<K> {
     ) -> impl Future<Output = Result<Secret, Error>> + Send {
         self.unwraps.fetch_add(1, Ordering::Relaxed);
         self.inner.unwrap(tenant, wrapped)
+    }
+}
+
+/// A KMS that forgets a tenant's KEK once it is destroyed, as a real KMS forgets a deleted key: AWS
+/// KMS once its deletion's waiting period is over, OpenBao Transit's key deleted (TASK-411.19).
+/// Where `inner` answers [`Error::Destroyed`], it answers [`Error::NoSuchTenant`], as for a tenant
+/// that never had a KEK: so a [`crate::kms::LocalKms`]'s `destroy` reads as a real KMS's deletion.
+pub struct Forgetting<K> {
+    inner: K,
+}
+
+impl<K: Kms> Forgetting<K> {
+    pub fn new(inner: K) -> Self {
+        Self { inner }
+    }
+
+    /// The KMS it forgets for: a fake's destroying, say.
+    pub fn inner(&self) -> &K {
+        &self.inner
+    }
+}
+
+/// `answer`, a destruction told as no KEK at all.
+fn forgotten<T>(answer: Result<T, Error>) -> Result<T, Error> {
+    answer.map_err(|error| match error {
+        Error::Destroyed { tenant } => Error::NoSuchTenant { tenant },
+        error => error,
+    })
+}
+
+impl<K: Kms> Kms for Forgetting<K> {
+    fn wrap(
+        &self,
+        tenant: u64,
+        key: &Secret,
+    ) -> impl Future<Output = Result<Wrapped, Error>> + Send {
+        let wrapping = self.inner.wrap(tenant, key);
+        async move { forgotten(wrapping.await) }
+    }
+
+    fn unwrap(
+        &self,
+        tenant: u64,
+        wrapped: &Wrapped,
+    ) -> impl Future<Output = Result<Secret, Error>> + Send {
+        let unwrapping = self.inner.unwrap(tenant, wrapped);
+        async move { forgotten(unwrapping.await) }
     }
 }
 

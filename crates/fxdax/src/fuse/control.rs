@@ -224,7 +224,7 @@ impl proto::mount_server::Mount for Control {
                     let holding = async {
                         let kms = crate::remote::kms();
                         let kek = match make {
-                            true => keys::new_cell_kek(kms.as_ref(), cell.tenant).await?,
+                            true => keys::new_cell_kek(&*bucket, kms.as_ref(), cell.tenant).await?,
                             false => None,
                         };
                         let making = (make, kek.as_ref().map(|(_, kek)| kek));

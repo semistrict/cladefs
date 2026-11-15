@@ -17,6 +17,12 @@
 //! tenant (a revoked one makes no cell, in the clear least of all). That a tenant has none is
 //! believed for [`KEKLESS_FOR`], asking nothing more meanwhile (TASK-411.10).
 //!
+//! **A forgotten KEK is told from none** by the tenant's sealed marker in the bucket
+//! ([`layout::sealed`], TASK-411.19): the first sealed cell of a tenant's creates it before its
+//! own object, and a real KMS that deleted a tenant's key answers as for one never made
+//! (`NoSuchTenant`). A tenant with the marker so answered is refused as destroyed, its cells made
+//! neither sealed nor in the clear ([`new_cell_kek`]).
+//!
 //! **Opening a store** gives every writer and reader of it a [`Ring`]: its branch's DEKs, every
 //! generation of them, and its ancestors', unwrapped under the cell's KEK ([`ring`]); and which of
 //! those branches are sealed, whose objects in the clear its readers refuse ([`Ring::of`],
@@ -493,6 +499,16 @@ struct Pools {
     eras: HashMap<u64, u64>,
 }
 
+/// What a host found of a tenant's sealed marker ([`layout::sealed`], TASK-411.19).
+#[derive(Clone, Copy, Debug)]
+enum Marker {
+    /// There, seen or written by this host: believed for good, as nothing deletes it.
+    There,
+    /// Not there when it looked: believed for [`KEKLESS_FOR`] from then, as the KMS's word that
+    /// the tenant has no KEK is.
+    Absent(Instant),
+}
+
 /// How long a host believes the KMS that a tenant has no KEK, its cells made in the clear, asking
 /// it nothing for the tenant meanwhile (TASK-411.10): so that a host opening its stores, each
 /// asking for a KEK should its cell be made, calls the KMS once a minute at most, and a tenant
@@ -503,7 +519,8 @@ pub const KEKLESS_FOR: Duration = Duration::from_secs(60);
 /// A host's KMS, and what it keeps of what it asked it: each cell's KEKs, by the taking of the cell
 /// its object names, unwrapped once for all of it ([`CellKeys`]); a pool of new cell KEKs a tenant,
 /// wrapped by their tenants' KEKs ahead of the cells made with them; the tenants whose KEKs it
-/// last heard are revoked or destroyed; and those it heard have none ([`KEKLESS_FOR`]).
+/// last heard are revoked or destroyed; those it heard have none ([`KEKLESS_FOR`]); and what it
+/// found of tenants' sealed markers ([`Marker`], TASK-411.19).
 pub struct Kms {
     kms: kms::Shared,
     /// Each cell's KEKs unwrapped, by generation, and the taking they were unwrapped for: a
@@ -522,6 +539,8 @@ pub struct Kms {
     kekless: Mutex<HashMap<u64, Instant>>,
     /// The cells it was told are shredded, whose KEKs it unwraps no more ([`Kms::forget`]).
     shredded: Mutex<BTreeSet<Cell>>,
+    /// What it found of tenants' sealed markers ([`Marker`]).
+    markers: Mutex<HashMap<u64, Marker>>,
 }
 
 /// The error of a KMS's refusal, naming its tenant.
@@ -555,6 +574,7 @@ impl Kms {
             refused: Mutex::default(),
             kekless: Mutex::default(),
             shredded: Mutex::default(),
+            markers: Mutex::default(),
         })
     }
 
@@ -582,9 +602,68 @@ impl Kms {
         self.kekless.lock().unwrap().remove(&tenant);
     }
 
-    /// The KMS said `tenant` has no KEK: believed for [`KEKLESS_FOR`] from now.
+    /// The KMS said `tenant` has no KEK: believed for [`KEKLESS_FOR`] from now. Its pool, if any,
+    /// is dropped, a refill going adding nothing: KEKs wrapped by a KEK the KMS forgot since
+    /// (TASK-411.19), which would make cells unreadable from the first.
     fn has_no_kek(&self, tenant: u64) {
+        self.drop_pool(tenant);
         self.kekless.lock().unwrap().insert(tenant, Instant::now());
+    }
+
+    /// Drops `tenant`'s pool, a refill of it going adding nothing to the next.
+    fn drop_pool(&self, tenant: u64) {
+        let mut pools = self.pools.lock().unwrap();
+        pools.pools.remove(&tenant);
+        *pools.eras.entry(tenant).or_default() += 1;
+    }
+
+    /// Creates `tenant`'s sealed marker ([`layout::sealed`]), unless this host saw it there
+    /// already: create-only, one there already as good as this one's. Returns once it is there.
+    async fn mark(&self, bucket: &impl Bucket, tenant: u64) {
+        if matches!(self.markers.lock().unwrap().get(&tenant), Some(Marker::There)) {
+            return;
+        }
+        bucket::put_if_absent(bucket, &layout::sealed(tenant), layout::encode(&layout::FORMAT))
+            .await;
+        self.markers.lock().unwrap().insert(tenant, Marker::There);
+    }
+
+    /// Whether `tenant` has its sealed marker: a cell of its was made sealed. Seen once, believed
+    /// for good; not seen, believed for [`KEKLESS_FOR`], read again after.
+    async fn marked(&self, bucket: &impl Bucket, tenant: u64) -> bool {
+        let known = self.markers.lock().unwrap().get(&tenant).copied();
+        match known {
+            Some(Marker::There) => return true,
+            Some(Marker::Absent(seen)) if seen.elapsed() < KEKLESS_FOR => return false,
+            _ => {}
+        }
+        let there = bucket::exists(bucket, &layout::sealed(tenant)).await;
+        let found = match there {
+            true => Marker::There,
+            false => Marker::Absent(Instant::now()),
+        };
+        // Written by this host meanwhile: there, whatever this read found before.
+        let mut markers = self.markers.lock().unwrap();
+        let marker = markers.entry(tenant).and_modify(|had| {
+            if !matches!(had, Marker::There) {
+                *had = found;
+            }
+        });
+        matches!(marker.or_insert(found), Marker::There)
+    }
+
+    /// The refusal of `tenant`, whose KEK the KMS has none of, and whose sealed marker says it
+    /// had one: destroyed, a real KMS forgetting a key deleted (TASK-411.19). Noted as a KMS's
+    /// refusal saying so is ([`Kms::revoked`]): its pool and cells' KEKs dropped, no fork
+    /// inheriting its keys, until the KMS answers a call for it again.
+    fn forgotten(&self, tenant: u64) -> Error {
+        let why = format!(
+            "{}: the KMS has none, and {} says it had one",
+            kms::Error::Destroyed { tenant },
+            layout::sealed(tenant)
+        );
+        self.revoked(tenant, why.clone());
+        Error::Kms(why)
     }
 
     /// Whether the KMS said `tenant` has no KEK, less than [`KEKLESS_FOR`] ago.
@@ -606,11 +685,7 @@ impl Kms {
     /// of them goes on unasked; and no fork inherits its keys ([`inheriting`]), until the KMS
     /// answers a call for it again.
     pub fn revoked(&self, tenant: u64, why: impl Into<String>) {
-        {
-            let mut pools = self.pools.lock().unwrap();
-            pools.pools.remove(&tenant);
-            *pools.eras.entry(tenant).or_default() += 1;
-        }
+        self.drop_pool(tenant);
         self.takings.lock().unwrap().retain(|(cell, _), _| cell.tenant != tenant);
         self.refused.lock().unwrap().insert(tenant, why.into());
     }
@@ -936,14 +1011,33 @@ impl CellKeys {
 }
 
 /// The KEK a cell made by a host gets: one the host wrapped ahead, by its KMS, if it has one and
-/// the cell's tenant a KEK there ([`Kms::new_kek`]); none, the cell in the clear, otherwise.
+/// the cell's tenant a KEK there ([`Kms::new_kek`]); none, the cell in the clear, otherwise. What
+/// every maker of a cell asks before making it: a store's opening, a fork into a new cell
+/// ([`inheriting`]), the control API's attaching.
+///
+/// TASK-411.19: a KEK given, the tenant's sealed marker ([`layout::sealed`]) is there before this
+/// returns, created unless the host saw it before: so before any cell object keeping a KEK of
+/// it, which its maker writes after, and a crash between leaves a marker of a tenant that has a
+/// KEK, which is true. The KMS saying the tenant has none, the marker there, the tenant is
+/// refused as destroyed, naming it ([`Kms::forgotten`]): its KEK was forgotten, a real KMS's
+/// deleted key reading as one never made, and its cells are made neither sealed nor in the clear.
+/// A tenant that never had a sealed cell has no marker, its cells in the clear as before. Its
+/// absence is believed for [`KEKLESS_FOR`], as the KMS's word is: a host makes one wrap and one
+/// read of the marker a minute at most for a tenant with no KEK, however many of its stores open.
 pub async fn new_cell_kek(
+    bucket: &impl Bucket,
     kms: Option<&Arc<Kms>>,
     tenant: u64,
 ) -> Result<Option<(Arc<Secret>, Kek)>, Error> {
     let Some(kms) = kms else { return Ok(None) };
-    let made = kms.new_kek(tenant).await?;
-    Ok(made.map(|(secret, wrapped)| (secret, Kek { generation: FIRST, wrapped })))
+    match kms.new_kek(tenant).await? {
+        Some((secret, wrapped)) => {
+            kms.mark(bucket, tenant).await;
+            Ok(Some((secret, Kek { generation: FIRST, wrapped })))
+        }
+        None if kms.marked(bucket, tenant).await => Err(kms.forgotten(tenant)),
+        None => Ok(None),
+    }
 }
 
 /// What a holding of a cell that may have made it ([`crate::cell::hold`]) did with `kek`, the KEK
@@ -1300,8 +1394,10 @@ impl Drop for Inheriting {
 /// that a tenant of those branches' KEK is revoked or destroyed ([`Kms::revoked`]); if the
 /// child's tenant has no KEK, its cell in the clear ([`Error::Inherited`]: no sealed data goes
 /// into the clear); or as the KMS refuses a KEK for the child's cell, which comes from the host's
-/// pool, no call made then ([`Kms::new_kek`]).
+/// pool, no call made then ([`new_cell_kek`]: the child's tenant's sealed marker in `bucket` there
+/// before it returns, TASK-411.19).
 pub async fn inheriting(
+    bucket: &impl Bucket,
     kms: Option<&Arc<Kms>>,
     source: &Arc<Ring>,
     parent: Branch,
@@ -1324,7 +1420,7 @@ pub async fn inheriting(
             return Err(refused);
         }
     }
-    let kek = new_cell_kek(Some(kms), child.cell.tenant).await?;
+    let kek = new_cell_kek(bucket, Some(kms), child.cell.tenant).await?;
     let kek = Some(kek.ok_or(Error::Inherited { branch: child, from })?);
     Ok(Some(Inheriting { kms: kms.clone(), child, from, source: source.clone(), kek }))
 }
@@ -1427,7 +1523,7 @@ mod tests {
     use crate::record::Kind;
     use crate::testing::{Direct, SimBucket};
     use extent_keys::kms::LocalKms;
-    use extent_keys::testing::Counted;
+    use extent_keys::testing::{Counted, Forgetting};
     use futures::executor::block_on;
 
     /// A KMS holding tenant 1's KEK, counting its calls, and the host's over it.
@@ -1505,7 +1601,7 @@ mod tests {
     fn cell_keys_unwrap_once_a_taking_and_rings_follow_origins() {
         let (_dir, counted, kms) = kms();
         let bucket = Direct(SimBucket::new());
-        let kek = block_on(new_cell_kek(Some(&kms), TEST_CELL.tenant)).unwrap();
+        let kek = block_on(new_cell_kek(&bucket, Some(&kms), TEST_CELL.tenant)).unwrap();
         let (secret, wrapped) = kek.as_ref().map(|(secret, kek)| (secret.expose(), kek)).unwrap();
         let making = (true, Some(wrapped));
         let volume = Some(("root", cell::Volume { branch: 7, kind: Volume::Fxfs }));
@@ -1691,6 +1787,7 @@ mod tests {
         let shared: kms::Shared = counted.clone();
         let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
         let kms = Kms::pooled(shared, pooling);
+        let bucket = Direct(SimBucket::new());
         let tenant = TEST_CELL.tenant;
         let kek = runtime.block_on(kms.new_kek(tenant)).unwrap();
         assert!(kek.is_some());
@@ -1714,7 +1811,8 @@ mod tests {
             owner: 1,
             point: false,
         };
-        let refused = runtime.block_on(inheriting(Some(&kms), &source, test_branch(7), child));
+        let refused =
+            runtime.block_on(inheriting(&bucket, Some(&kms), &source, test_branch(7), child));
         assert_eq!(refused.map(|_| ()), Err(Error::Kms("tenant 1: its KEK is revoked".into())));
         // The KMS answering for it: refused no more, its pool refilled.
         assert!(runtime.block_on(kms.new_kek(tenant)).unwrap().is_some());
@@ -1723,13 +1821,16 @@ mod tests {
         assert_eq!(kms.in_pool(tenant), 3);
         // A point, or a child of the parent's cell, takes nothing.
         let point = crate::layout::Child { point: true, ..child };
-        let none = runtime.block_on(inheriting(Some(&kms), &source, test_branch(7), point));
+        let none =
+            runtime.block_on(inheriting(&bucket, Some(&kms), &source, test_branch(7), point));
         assert!(none.unwrap().is_none());
         let within = crate::layout::Child { branch: test_branch(8), ..child };
-        let none = runtime.block_on(inheriting(Some(&kms), &source, test_branch(7), within));
+        let none =
+            runtime.block_on(inheriting(&bucket, Some(&kms), &source, test_branch(7), within));
         assert!(none.unwrap().is_none());
         // Taken, then dropped unused: given back.
-        let taken = runtime.block_on(inheriting(Some(&kms), &source, test_branch(7), child));
+        let taken =
+            runtime.block_on(inheriting(&bucket, Some(&kms), &source, test_branch(7), child));
         assert_eq!(kms.in_pool(2), 0);
         drop(taken);
     }
@@ -1743,8 +1844,9 @@ mod tests {
         let runtime =
             tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build();
         let runtime = runtime.unwrap();
+        let bucket = Direct(SimBucket::new());
         let tenant = 2;
-        let new = || runtime.block_on(new_cell_kek(Some(&kms), tenant)).unwrap();
+        let new = || runtime.block_on(new_cell_kek(&bucket, Some(&kms), tenant)).unwrap();
         for _ in 0..3 {
             assert!(new().is_none());
         }
@@ -1761,6 +1863,158 @@ mod tests {
         // Its pool takes on from here as any tenant's.
         assert!(new().is_some());
         assert_eq!(counted.wraps(), 3);
+    }
+
+    /// A KMS holding tenant 1's KEK, forgetting it once destroyed as a real KMS forgets a deleted
+    /// key, counting its calls (TASK-411.19).
+    fn forgetting_kms() -> (tempfile::TempDir, Arc<Counted<Forgetting<LocalKms>>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalKms::open(dir.path().join("kms")).unwrap();
+        local.create(TEST_CELL.tenant).unwrap();
+        (dir, Arc::new(Counted::new(Forgetting::new(local))))
+    }
+
+    /// A host's KMS over `counted`, its pools refilled as `pooling` says, if given.
+    fn host_over(
+        counted: &Arc<Counted<Forgetting<LocalKms>>>,
+        pooling: Option<Pooling>,
+    ) -> Arc<Kms> {
+        let shared: kms::Shared = counted.clone();
+        match pooling {
+            Some(pooling) => Kms::pooled(shared, pooling),
+            None => Kms::new(shared),
+        }
+    }
+
+    /// TASK-411.19: a tenant's first new cell KEK writes its sealed marker before it is handed
+    /// out, once a host (another host's put finding it there); once the KMS forgets the tenant's
+    /// KEK, answering as for one never made, every host refuses its new cells as destroyed, naming
+    /// the tenant and the marker: none made in the clear. A host that saw the marker reads it no
+    /// more; one that did not reads it once, and asks neither again while the KMS's answer is
+    /// believed. A fork into a new cell of the tenant is refused alike.
+    #[test]
+    fn tenants_whose_kek_the_kms_forgot_are_refused_by_their_sealed_marker() {
+        let (_dir, counted) = forgetting_kms();
+        let runtime =
+            tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build();
+        let runtime = runtime.unwrap();
+        let _in = runtime.enter();
+        let sim = SimBucket::new();
+        let tenant = TEST_CELL.tenant;
+        let marker = layout::sealed(tenant);
+        let new = |kms: &Arc<Kms>| {
+            let (made, asked) = sim.served(new_cell_kek(&*sim, Some(kms), tenant));
+            (made.map(|kek| kek.map(|(_, kek)| kek.generation)), asked)
+        };
+        let first = host_over(&counted, None);
+        let put = format!("put {marker}");
+        assert_eq!(new(&first), (Ok(Some(FIRST)), vec![put.clone()]));
+        assert_eq!(new(&first), (Ok(Some(FIRST)), vec![]));
+        let second = host_over(&counted, None);
+        assert_eq!(new(&second), (Ok(Some(FIRST)), vec![put]));
+        assert_eq!(sim.keys(), std::slice::from_ref(&marker));
+        assert_eq!((counted.wraps(), counted.unwraps()), (3, 0));
+
+        counted.inner().inner().destroy(tenant).unwrap();
+        counted.reset();
+        let destroyed = "tenant 1: its KEK is destroyed: the KMS has none, and \
+                         tenants/0000000000000001/sealed says it had one";
+        let refused = Err(Error::Kms(destroyed.into()));
+        // A host that never saw the marker reads it, once.
+        let third = host_over(&counted, None);
+        assert_eq!(new(&third), (refused.clone(), vec![format!("head {marker}")]));
+        assert_eq!(new(&third), (refused.clone(), vec![]));
+        assert_eq!(third.refuses(tenant), Some(Error::Kms(destroyed.into())));
+        assert_eq!(counted.wraps(), 1);
+        // One that wrote it reads nothing.
+        assert_eq!(new(&first), (refused.clone(), vec![]));
+        assert_eq!(counted.wraps(), 2);
+        // Believed for `KEKLESS_FOR`, then asked again, the marker not read again.
+        runtime.block_on(tokio::time::advance(KEKLESS_FOR));
+        assert_eq!(new(&third), (refused.clone(), vec![]));
+        assert_eq!(counted.wraps(), 3);
+        // A fork of a sealed store into a new cell of the tenant's, on a host that wrote the
+        // marker: refused, asking the bucket nothing.
+        let source = Ring::sealing_for_tests(7, 1, Secret::random(), []);
+        let child = crate::layout::Child {
+            branch: Branch { cell: Cell { tenant, id: 9 }, id: 8 },
+            owner: 1,
+            point: false,
+        };
+        let parent = Branch { cell: Cell { tenant: 2, id: 1 }, id: 7 };
+        let (forking, asked) = sim.served(inheriting(&*sim, Some(&second), &source, parent, child));
+        let refused = Err(Error::Kms(destroyed.into()));
+        assert_eq!((forking.map(|_| ()), asked), (refused, vec![]));
+        assert_eq!(sim.keys(), [marker]);
+    }
+
+    /// TASK-411.19: a pool of a tenant whose KEK the KMS forgot goes as soon as a refill hears
+    /// the KMS has none: no cell is made with a KEK of it, and the next is refused by the marker.
+    #[test]
+    fn pools_of_tenants_whose_kek_the_kms_forgot_go() {
+        let (_dir, counted) = forgetting_kms();
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
+        let kms = host_over(&counted, Some(pooling));
+        let bucket = Direct(SimBucket::new());
+        let tenant = TEST_CELL.tenant;
+        let new = || runtime.block_on(new_cell_kek(&bucket, Some(&kms), tenant));
+        assert!(new().unwrap().is_some());
+        runtime.block_on(kms.filled(tenant));
+        assert_eq!((counted.wraps(), kms.in_pool(tenant)), (1 + 3, 3));
+        counted.inner().inner().destroy(tenant).unwrap();
+        // Taken down to fewer than 2: a refill, which hears the KMS has no KEK of the tenant's.
+        for left in [2, 1] {
+            assert!(new().unwrap().is_some());
+            assert_eq!(kms.in_pool(tenant), left);
+        }
+        runtime.block_on(kms.filled(tenant));
+        assert_eq!((counted.wraps(), kms.in_pool(tenant)), (1 + 3 + 3, 0));
+        let refused = new().map(drop).unwrap_err();
+        assert_eq!(
+            refused.to_string(),
+            "tenant 1: its KEK is destroyed: the KMS has none, and \
+             tenants/0000000000000001/sealed says it had one"
+        );
+        // Believed: no wrap asked meanwhile.
+        assert_eq!(counted.wraps(), 7);
+    }
+
+    /// TASK-411.19's cost: a tenant with no KEK, never sealed, has its cells made in the clear as
+    /// before, its marker read once a [`KEKLESS_FOR`], as the KMS is asked once, however many ask;
+    /// a tenant given a KEK then has its marker written as its first sealed cell's KEK is handed
+    /// out, and read no more.
+    #[test]
+    fn tenants_never_sealed_have_their_marker_read_once_a_while() {
+        let (_dir, counted) = forgetting_kms();
+        let runtime =
+            tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build();
+        let runtime = runtime.unwrap();
+        let _in = runtime.enter();
+        let sim = SimBucket::new();
+        let kms = host_over(&counted, None);
+        let tenant = 2;
+        let marker = layout::sealed(tenant);
+        let new = || {
+            let (made, asked) = sim.served(new_cell_kek(&*sim, Some(&kms), tenant));
+            (made.unwrap().map(|(_, kek)| kek.generation), asked)
+        };
+        let head = format!("head {marker}");
+        assert_eq!(new(), (None, vec![head.clone()]));
+        for _ in 0..9 {
+            assert_eq!(new(), (None, vec![]));
+        }
+        assert_eq!(counted.wraps(), 1);
+        runtime.block_on(tokio::time::advance(KEKLESS_FOR));
+        assert_eq!(new(), (None, vec![head]));
+        assert_eq!(new(), (None, vec![]));
+        assert_eq!(counted.wraps(), 2);
+        // Given a KEK: its marker written with its first sealed cell's KEK, its absence forgotten.
+        counted.inner().inner().create(tenant).unwrap();
+        runtime.block_on(tokio::time::advance(KEKLESS_FOR));
+        assert_eq!(new(), (Some(FIRST), vec![format!("put {marker}")]));
+        assert_eq!(new(), (Some(FIRST), vec![]));
+        assert_eq!(sim.keys(), [marker]);
     }
 
     /// A cell made by the host, held by `holder`, of a KEK of `kms`'s pool, and its keys.
@@ -1849,7 +2103,7 @@ mod tests {
     }
 
     fn made_cell(bucket: &impl Bucket, kms: &Arc<Kms>, cell: Cell, holder: u64) -> CellKeys {
-        let kek = block_on(new_cell_kek(Some(kms), cell.tenant)).unwrap();
+        let kek = block_on(new_cell_kek(bucket, Some(kms), cell.tenant)).unwrap();
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
         let (_, object) =
             block_on(crate::cell::hold(bucket, cell, (holder, holder), making, None)).unwrap();

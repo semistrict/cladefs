@@ -2583,6 +2583,49 @@ mod tests {
         assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
     }
 
+    /// TASK-411.19: a tenant whose sealed marker another host wrote, and whose KEK the KMS has
+    /// since forgotten (answering as for a tenant that never had one), gets no store opened here,
+    /// none made in the clear: `EACCES`, the cell not made. A tenant with no KEK and no marker
+    /// opens in the clear, as before.
+    #[test]
+    fn tenants_whose_kek_the_kms_forgot_open_no_store_in_the_clear() {
+        let keys = tempfile::tempdir().unwrap();
+        let local = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+        local.create(1).unwrap();
+        local.destroy(1).unwrap();
+        crate::remote::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let marker = extent_remote::layout::sealed(1);
+        let put = extent_remote::Bucket::put(
+            &*bucket,
+            &marker,
+            extent_remote::layout::encode(&extent_remote::layout::FORMAT).into(),
+            extent_remote::bucket::PutMode::Create,
+        );
+        futures::executor::block_on(put).unwrap();
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        let shredded = of(1);
+        let refused =
+            kept_in(dir.path().join("shredded"), (1 << 30, Some(shredded)), &bucket, idle());
+        assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
+        let cell = futures::executor::block_on(extent_remote::cell::read(&*bucket, shredded.cell));
+        assert_eq!(cell, Ok(None));
+        let clear = kept_in(dir.path().join("clear"), (1 << 30, Some(of(2))), &bucket, idle());
+        let clear = clear.unwrap();
+        let extent = write(&clear, 1, &pattern(1, BLOCK));
+        clear.commit(None).unwrap();
+        clear.wait_uploaded().unwrap();
+        let mut data = vec![0; BLOCK];
+        clear.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        assert!(data == pattern(1, BLOCK), "the clear store reads other bytes");
+        let record = futures::executor::block_on(branch::record(&*bucket, clear.branch()));
+        assert_eq!(record.unwrap().unwrap().deks, Vec::new());
+    }
+
     /// TASK-411.7: a host told a cell is shredded, or a tenant's KEK destroyed, forgets their keys:
     /// their stores open here are fenced, every request failing with `EACCES`, as their openings
     /// do; their extents leave the extent cache, pages and all; its fetchers forget their rings.

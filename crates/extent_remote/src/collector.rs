@@ -1904,7 +1904,8 @@ impl Pass {
                 // deletes, and an operator removes (TASK-264); and references, which the passes of
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
                 // (TASK-395.13). fxdax: a cell's object, which says who holds it, stays as its
-                // records do, and a block of object IDs taken for good (TASK-364).
+                // records do, and a block of object IDs taken for good (TASK-364); a tenant's
+                // sealed marker, no cell's, which no pass lists, for good too (TASK-411.19).
                 Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
@@ -1912,6 +1913,7 @@ impl Pass {
                 | Kind::Retired { .. }
                 | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Sealed { .. }
                 | Kind::Unknown => Fate::Stays,
             };
             match fate {
@@ -5900,7 +5902,8 @@ mod tests {
             let kms: kms::Shared = counted.clone();
             let host = keys::Kms::new(kms.clone());
             let bucket = store();
-            let kek = keys::new_cell_kek(Some(&host), layout::TEST_CELL.tenant).await.unwrap();
+            let kek =
+                keys::new_cell_kek(&*bucket, Some(&host), layout::TEST_CELL.tenant).await.unwrap();
             let making = (true, kek.as_ref().map(|(_, kek)| kek));
             let volume = crate::cell::Volume { branch: 1, kind: crate::cell::Kind::Fxfs };
             let (_, object) =
