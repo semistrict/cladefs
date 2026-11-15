@@ -64,4 +64,6 @@ The tree before TASK-407 again, FXDAX_BENCH_ITERATIONS=3 (RESULTS ~/src/fxdax-t3
 AC #1: the layout half is met and shown (store on /mnt/fxdax-scratch through fxjob's TMPDIR, bucket on /dev/shm, results back in RESULTS). Its number, within 10% of 30/s, is not met on main: 17.5/s, TASK-407's second request, not the layout's; left unchecked for the user's word (OPEN_QUESTIONS.md). AC #2 met: doc-12, TASK-322, TASK-371, three READMEs.
 DoD #1 not run: the change is scripts and notes alone (scripts' suite 326 green on macOS, shellcheck clean; Linux: the ubu1 runs above ran both scripts as they are). #2 scripts/upstream-changes.py --check passes. #3: no upstream code touched.
 ubu1 left as found: worktree, results, scratch directory removed; fxjob ps showed none of mine. /dev/shm holds 7 empty fxdax-e2e-bucket.* of 2026-11-10 to 11-13, others' (TASK-331, noted there).
+
+Correction: the tree measured as main, da0b78edd, is main 836047da0, this change, and six commits another agent made on this branch meanwhile (15b90ab05..cdd40860e: test-only benchmarks in fxdax and extent_store behind cfg(test) and the testing feature, fxdax-gc-fill, gc-sweep.sh; no kernel source, nothing a sync runs).
 <!-- SECTION:NOTES:END -->
