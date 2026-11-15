@@ -33,6 +33,8 @@ Main's CI 'test (clippy scripts)' fails since TASK-407.1 (c8344a37a, 3f500554b):
 
 <!-- SECTION:NOTES:BEGIN -->
 Fixed in ed6b01be6: the mutation (an own extent no head names deleted though its segment may be acknowledged) re-anchored on 'Kind::Extent { .. } => goes(!named && !self.ahead(kind))'; mutants.sh --check clean (scripts part: all mutant sets 0 broken); mutants.sh own-extents-in-flight-collected: killed by sim::forks_racing_collection, seed 4.
+
+2026-11-15, verified independently on the Mac (the same hunk as ed6b01be6's, made by a second session): mutants.sh --check 2 checked, 0 broken; mutants.sh own-extents-in-flight-collected killed by sim::forks_racing_collection, seed 4 (own extents of branch 2 gone; branches 2, 48, 58 lost acknowledged extents), 64 s; the killer clean (--cargo-profile sim): PASS, 8.3 s. scripts' part otherwise: unittest OK, check-exclusions, license-headers, every mutants --check (40, 4, 22, 2, 58) pass.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
