@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 09:42'
+updated_date: '2026-11-15 09:48'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -15,6 +15,9 @@ a branch lives in the bucket alone; a host keeps, on local disk, its stores' wri
 what the bucket doesn't have yet, and its part cache, of copies of what it does; opening a store is
 one recovery, from the bucket and the log. No local lineage, local checkpoint, index or marker is
 left, and what this document said of them is gone from it; doc-14 says what went and why.
+*Revised 2026-11-15 (TASK-407, format 11):* every key of a branch's objects is written once, and
+a branch's **head** says who writes it and what it holds: a commit is its PUTs, then the head's
+swap; the lease, fences, void segments and the collector's pins are gone (The head).
 
 doc-2 settled what milestone 3 must give:
 
@@ -49,14 +52,15 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   (WAL): each the very object it will be in the bucket, synced before its PUT. The **uploader**
   (`extent_store::upload`) PUTs them, and the extents of their own they name, up to 16 of a store's
   at once (`IN_FLIGHT`, 512 MiB of the host's upload budget over 32 MiB segments) and 64 requests
-  for the host, acknowledges them in order, their creates the fencing, and moves each acknowledged
+  for the host, acknowledges them in order, by swapping the branch's head to name them (The head,
+  TASK-407), and moves each acknowledged
   file into the host's **part cache** (`Cache::adopt`), or removes it. Commits stall at a lag bound
   in commits (4,096) and in bytes of WAL (1 GiB). What waits is on the host's disk; of it, the
   host holds in memory only what it uploads at once, its **upload memory** (512 MiB,
   `FXDAX_EXTENTD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
 - **Opening a store**, here or anywhere, the first time or after a crash, is one recovery (doc-14,
-  Opening a store): its writer takes the branch's lease with the placement's token, recovers the
-  branch from the bucket and fences its end; a segment left open is closed again from its log; the
+  Opening a store): its writer takes the branch's head with the placement's token and recovers the
+  branch from what the head names; a segment left open is closed again from its log; the
   WAL is put after the branch's end by its commits (Recovery on the same host). An empty store of
   a branch (`fxdaxctl take`) takes it so, holding its extents without their data, which is
   fetched as it is read.
@@ -110,11 +114,12 @@ Settled with the user on 2026-10-16:
 3. **When the lag reaches its bound, commits stall.** `COMMIT` stops completing; `WRITE`s and reads
    go on. A host that cannot reach object storage stops its guests' commits rather than lose more
    than the bound, as a hard NFS mount hangs.
-4. **Takeover is explicit.** No lease expires and no host heartbeats. Whatever moves a VM takes its
-   lease; the host that had it learns at its next upload, stops taking commits (`EROFS`) and stops
-   the VM. It can lose at most its unuploaded suffix, which its guest was never promised.
-   *Added 2026-10-18 (TASK-39.7):* a lease carries the **fencing token** of the placement that took
-   it, its boot ID, which a later placement's exceeds; a writer takes the lease only with a token
+4. **Takeover is explicit.** No head expires and no host heartbeats. Whatever moves a VM takes its
+   branch's head (The head; its lease until TASK-407); the host that had it learns at its next
+   acknowledgement, its swap of the head failing, stops taking commits (`EROFS`) and stops the VM.
+   It can lose at most its unacknowledged suffix, which its guest was never promised.
+   *Added 2026-10-18 (TASK-39.7):* a head carries the **fencing token** of the placement that took
+   it, its boot ID, which a later placement's exceeds; a writer takes the head only with a token
    as high, so a host cut off takes no branch back from the placement after it (`ESTALE`). A
    store's copy on a host carries its placement's token (`fxdaxctl place`, `take … TOKEN`). Before
    a clean stop, the system waits for a store's uploads (`fxdaxctl sync`, the extent daemon's control API's `SyncStore`).
@@ -163,19 +168,25 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | Key | What | Written |
 |---|---|---|
 | `<C>cell` | the cell's object: who holds it, at what epoch, by which placement's fencing token, its volumes by name (each a branch of the cell's, and a kind: `fxfs` or `sqlite`), whether it was deleted (Cells) | created, then updated with a condition |
-| `<C>segments/<branch>/<seq>` | sealed extents and a footer; `seq` dense from 0 | create-only, by the branch's writers |
+| `<C>segments/<branch>/<epoch>.<seq>` | sealed extents and a footer; `seq` dense from 0, `epoch` its writer's (The head) | create-only, by the writer of `epoch` alone |
 | `<C>extents/<branch>/<epoch>.<seq>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `seq`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
-| `<C>checkpoints/<branch>/<seq>` | the branch's state as of segment `seq` | create-only, by the branch's writers |
+| `<C>checkpoints/<branch>/<epoch>.<seq>` | the branch's state as of segment `seq`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
 | `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, whether a failed fork's claim | create; updated with a condition |
-| `<C>leases/<branch>` | the writer's epoch, who took it, and the token it was taken with: its cell's epoch (Cells) | created, then updated with a condition |
+| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407) | created, then swapped with a condition; never deleted |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
-| `<C>moves/<rest>` | the live extents of the object at `<C><rest>`, compacted, and where in it each is; `<C>moves/moves/<rest>` those moves' (Garbage collection) | create-only, by the collector |
+| `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a clone's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
 | `tenants/<tenant>/sealed` | fxdax: the tenant's sealed marker, its bytes the format, its being there all it says: a cell of the tenant's was made sealed, so a KMS answering that the tenant has no KEK has forgotten it, and its new cells are refused as destroyed, never made in the clear (doc-16, A forgotten KEK told from none; TASK-411.19) | create-only, one there already as good, by a host handing out the tenant's first new cell KEK, before the cell's object; kept for good: no cell's, so no pass lists it, and the collector keeps it (`Kind::Sealed`) if one did |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
+
+*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease
+and `gc/marking` is **written once**: created once, never written again, nor created again once
+deleted, so that a key names one object for as long as anyone reads it, and readers and caches go by
+the key alone (specs/bucket's `KeysWrittenOnce`; Reading). Keys of a writer's objects name its
+epoch, first, so that a checkpoint's table front-codes them; moves', their pass's.
 
 A branch is named by its cell and its ID (`layout::Branch`, displayed `TENANT/CELL/ID`): footers,
 fork children (`Child`) and origins (`Origin`) name branches so, so that recovery and the collector
@@ -190,14 +201,14 @@ the cells for a sweep (Sweeps) list it not, nor does any pass, which lists a cel
 ### Cells
 
 A cell is a tenant's unit of placement: one host at a time holds it, and writes every volume of
-it, each a branch of its own with a log, a lease and uploads of its own (one log per volume, the
+it, each a branch of its own with a log, a head and uploads of its own (one log per volume, the
 user's choice of 2026-11-11, over one log per cell, which would have had the store multiplex
 volumes). Taking a cell is one compare-and-swap of its object (`extent_remote::cell::take`): the
 epoch after its last taking's, refused to a placement of a lower token than the one holding it
-(`Stale`), refused once deleted. A volume's writer takes its branch's lease with the cell's epoch as
-its token (`extent_store::upload`): a later taking of the cell, elsewhere, takes the volumes' leases
-from it as any later writer does, and its writers learn of it at their next upload; it takes none
-back, its epoch lower. So a cell moves whole, fenced by the branches' own leases, which cells change
+(`Stale`), refused once deleted. A volume's writer takes its branch's head with the cell's epoch as
+its token (`extent_store::upload`): a later taking of the cell, elsewhere, takes the volumes' heads
+from it as any later writer does, and its writers learn of it at their next acknowledgement; it
+takes none back, its epoch lower. So a cell moves whole, fenced by the branches' own heads, which cells change
 nothing of (specs/bucket's model holds as it is). Every process of the host holding a cell takes it
 as one holder, its placement's token, so that a second taking by that holder goes on at its epoch
 rather than fencing the first: the extent daemon serving a cell's volumes to VMs and a FUSE mount
@@ -211,8 +222,8 @@ store of it is taken into. All in one compare-and-swap of the cell's object (`ce
 alone when nothing changes. Only the holder changes a cell's volumes, conditional on the epoch and
 holder it took it at (`Fenced` otherwise). Deleting a branch takes its cell first, deletes the
 branch with the cell's epoch, and takes its volume out of the cell. A cell's object stays, as
-branches' records do: its epoch fences its volumes' leases, so made anew at epoch 1 it would leave
-a branch whose lease a higher epoch took unopenable.
+branches' records do: its epoch fences its volumes' heads, so made anew at epoch 1 it would leave
+a branch whose head a higher epoch took unopenable.
 
 A store made alone, a VM's disk or an image, is the one volume of a new cell; a fork of one is the
 one volume of a new cell of its tenant's. Forking a cell of several volumes whole, at one cut, is
@@ -253,15 +264,17 @@ and its frees, and a branch's history can be rebuilt from its segments alone. A 
 Numbers are fixed-width hex, so listings sort.
 
 **Formats** *(added 2026-11-03, TASK-141.2; doc-11, rule 1).* A branch's record says first the
-format of its objects (`layout::FORMAT`, now 5: footers and checkpoints hold the capacity,
-TASK-165.3, a footer the runs of a commit it goes on with, TASK-92.41, a checkpoint the branch's
-fences, TASK-371, and a branch's objects are under its cell's prefix, TASK-364), so that a reader of
+format of its objects (`layout::FORMAT`, now 11: footers and checkpoints hold the capacity,
+TASK-165.3, a footer the runs of a commit it goes on with, TASK-92.41, a branch's objects are under
+its cell's prefix, TASK-364, keys and moves, its collection's, under it, TASK-395.2, records and
+cells keep keys, TASK-411.3, and a branch's head names what it holds, its keys written once,
+TASK-407), so that a reader of
 any format reads it before the rest: one of another format, newer or older, is refused (`Error::Format`, naming the branch and the format) before anything else of
 the branch is read or written. Every reader of a branch reads its record first: a
 writer taking it, a host attaching it, the collector, whose pass stops, deleting nothing in a
 bucket it can't read. Every framed object (segments, extents on their own, checkpoints, moves)
 ends with its frame's format, the last byte of its trailer's magic (`fxdaxob2` since TASK-411.2), which a reader of
-an older frame names rather than calls corrupt. A lease goes with its branch's record.
+an older frame names rather than calls corrupt. A head goes with its branch's record.
 
 **Kinds of record** *(added 2026-11-03, TASK-160.14).* A record's flags say together one of six
 kinds of branch, deleted or not: a root, of no parent; a fork's child with a branch of its own, its
@@ -272,9 +285,9 @@ origin; `point`, `forking` and `claimed` each go with an origin, one at most; `s
 `point` alone (fxdax, TASK-395.7: Shared points, under Points). Any other combination
 is refused as corrupt as the record is read (`record::Kind`), and what a record allows (whether a
 writer takes it, whether it is a given fork's child, whether the collector may drop it, whether
-its recovery failing lost nothing) is asked of its kind. Every create or update of a record or a
-lease is one compare-and-swap loop (`branch::transition`), its rules in what it makes of what it
-finds.
+its recovery failing lost nothing) is asked of its kind. Every create or update of a record is one
+compare-and-swap loop (`branch::transition`), its rules in what it makes of what it finds; a head's,
+a swap from the version its holder read (`head`).
 
 ## Segments
 
@@ -283,9 +296,8 @@ place is its offset in the data. The data is stored in parts of 1 MiB, each comp
 its own, or raw where that does not shrink it, at offsets in the object that are multiples of
 4 KiB. After the parts, a footer:
 
-- the branch, `seq`, the writer's lease epoch, and the commits it holds, by tags unique to each;
-- the segment it follows, by its `seq` and epoch: the last one before it that is not void
-  (Fencing);
+- the branch, `seq`, the writer's epoch, and the commits it holds, by tags unique to each (it names
+  no segment it follows since TASK-407: the head names the branch's segments);
 - for each extent sealed in it: ID, offset, length;
 - the extents of their own committed with it, and where they are;
 - the frees committed with it, the branch's own extents and inherited ones;
@@ -373,12 +385,12 @@ segments, not footers naming runs in other objects):*
   on with the next, landed alone, a rebase stamps again with its continuation alone (TASK-345).
 - **Readers** (`recovery::State::apply_contents`, the one replay) hold the runs a segment goes on
   with (`State::begun`) and seal them, where they are, as the segment ending the commit is applied,
-  before its own; a segment after them that neither goes on with the commit nor ends it, a later
-  writer's fence, leaves them unsealed: the commit, never acknowledged, never was. **Writers
+  before its own; a head whose end comes before the segment ending the commit, its writer taken
+  over, leaves them unsealed: the commit, never acknowledged, never was. **Writers
   acknowledge only segments that end their commits** (`Writer::acknowledge`), so that what a store
   lets go of, once acknowledged, the bucket has whole, and no acknowledged state, nor any
-  checkpoint, holds a commit begun. A WAL is put after a branch's end only between commits
-  (`Wal::rebase`): its segments going on with a commit the fence left unended are no end of the
+  checkpoint, holds a commit begun. A WAL is put after a branch's end by its commits
+  (`Wal::rebase`): its segments going on with a commit the head left unended are no end of the
   branch, and are stamped again after it, with the rest of the commit.
 
 ## Checkpoints
@@ -396,104 +408,74 @@ moved extents, and dropping forks whose children were deleted (32 children's rec
 a checkpoint, in turn: TASK-92.4).
 It names the extents moved where they went itself before it writes the checkpoint, only forward
 along their ways (another checkpoint of its own may have taken them further): so a checkpoint of
-the writer holding the lease names no extent further along its moves than the writer does, which the
+the writer holding the head names no extent further along its moves than the writer does, which the
 collector relies on (Garbage collection, TASK-175).
 
-**A branch's state** is its newest checkpoint, then the footers of its segments after it, in order,
-to the first one missing, skipping void ones. A branch with no checkpoint starts from its parent's
-state at its fork: the parent's newest checkpoint up to the fork point, then the parent's segments
-to it, or, with none, from the parent's own origin. **A reader that finds a segment missing** lists
-the checkpoints again: if one newer than its own has come, the collector may have removed the
-segment, which it covers, and the reader starts again; otherwise the branch ends there. The
-collector removes segments only once a checkpoint covers them, so this is exact. So does a reader
-that found no checkpoint of a branch and finds what it went to instead gone, its parent's record or
-state: if one of the branch's has come since, the collector, recovering the branch from it, may have
-removed that, a deleted parent's record, and the reader starts again (TASK-177).
+**A branch's state** is what its head names *(rewritten 2026-11-15, TASK-407)*: its checkpoint,
+then the footers of the segments it names after it, in order, read by their tails, 32 at once, their
+keys known (`recovery`; no listing, nothing void to skip). A checkpoint names itself in the head
+once its writer swaps it in, after creating it; one created and never named is no reader's. A
+branch with no checkpoint starts from its parent's state at its fork: the parent's newest checkpoint
+up to the fork point, then the segments its head names to it, or, with none, from the parent's own
+origin; a fork to another cell reads the parent's checkpoint at the fork point alone, by its key
+(Forks). **A reader that finds something its head named gone** reads the head again: changed, a
+newer checkpoint may cover what went, and it starts again; unchanged, the branch is lost. The
+collector removes a segment only once a checkpoint its head names covers it, so this is exact. So
+does a reader that found no checkpoint of a branch and finds what it went to instead gone, its
+parent's record or state: if the branch's head names one since, the collector, recovering the
+branch from it, may have removed that, a deleted parent's record, and the reader starts again
+(TASK-177).
 
-## Fencing
+## The head
 
-The lease says who should write a branch; the dense, create-only segments and their links enforce it.
+*Rewritten 2026-11-15 (TASK-407, format 11), replacing Fencing (TASK-28 to TASK-388):* the lease,
+the fence a writer created as it took a branch, the links between segments, void and late segments,
+gaps and the collector's pins of the positions a writer may still create at are gone. The head says
+who writes a branch and what the branch holds; keys written once do the rest. specs/bucket models
+it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
 
-- **Taking a branch** (on opening it, the first time or after a crash, here or elsewhere): update
-  `leases/<branch>` from epoch E to E+1 with a condition (S3 `If-Match`, GCS generation), unless
-  the lease's fencing token is higher than the taker's placement's (TASK-39.7), recover the
-  branch's state, and create the **fence**, an empty segment of epoch E+1, at its end. A segment an
-  earlier writer landed there first is the branch's: apply it, and put the fence after it.
-- **Each segment names the one it follows**, and one that does not follow the last before it that
-  is not void is **void**: readers skip it. An earlier writer's segment that lands after the fence
-  follows none of the branch's, and so does a writer's that lands where one of its own before it did
-  not.
-- **A deletion fences too** *(added 2026-11-05, TASK-183):* having ended the lease and recovered
-  the branch, it creates an empty segment of the final epoch at the end it found, applying a segment
-  landed there first and fencing after it, before it gives the forks' children their records. A
-  writer's segment in flight, never acknowledged, then lands nowhere in the branch, so every
-  deletion of it finds the same forks: two at once (a placement cut off and the latest one), the
-  second recovering past a fork's segment landed after the first marked the branch deleted, would
-  record the fork's child after a pass, reading the branch deleted and no record of the child, let
-  go of what it needs. A point, which no writer has, needs none.
-- **A deletion reads the record again** *(added 2026-11-12, TASK-380):* once its recovery is
-  fenced, before it gives the forks' children their records; deleted since, it is done. The fence
-  holds only while it is there: a pass, reading the branch deleted, deletes it with what no live
-  branch needs, the extents a writer taken over stored on their own ahead of its segment among it.
-  That segment, of a fork, landing where the fence was, and a second deletion, which read the
-  record live before the first marked it, recovering past it (the branch's segments kept to an
-  earlier fork, whose child lives), would record the fork's child, which names the extents the
-  pass deleted. Found live by that read, the record shows the recovery and its fence came before
-  any deletion marked it, so before any pass let go of a fence.
-- **Gaps:** segments past the branch's end, an earlier writer's landed past a gap, are void; the new
-  writer fills the gaps between them with empty segments, so that its own follow without one.
-- **A writer acknowledges a segment** once it and every one before it are created: its creates are
-  its fencing. *Revised 2026-11-12 (TASK-371):* it acknowledged them only once a read of the lease,
-  after them, showed the lease still its, a second round trip for every durable commit (a guest's
-  sync 3 a second at 25 ms of latency, of which these reads were a third). **The rule that makes
-  that safe, once** *(TASK-388, replacing three rules found one lost commit at a time: TASK-371's
-  two and TASK-383's)*: **the collector never frees a position a writer of a live branch, taken
-  over or taking it over, may still create at, for as long as such a writer may live**
-  (specs/bucket's `CreatesNeverFreed`). It is enough: a writer creates its segments in order and
-  acknowledges them in order, so it acknowledges nothing past the first create that fails. A
-  writer taken over fails at the first position past its own segments, as its successor's
-  recovery found every position before the successor's fence occupied, by its own segments or by
-  another's; so all it acknowledged is what its successor applied, as long as those positions stay
-  occupied. A writer taking over fences at the end it read, so all the last writer acknowledged
-  before is in what it applies, as long as what landed at and past that end stays until it fences.
-  The collector computes those positions in one function (`collector::pinned`), from a live
-  branch's state and its lease read after the listing: while a writer takes the branch over, its
-  lease of an epoch past the state's, **every segment**; otherwise **every fence**, the first
-  segment of each epoch its state applied, of every epoch, and **every stray**, a segment its state
-  read that is neither a fence nor of the epoch of the fence before it: void (an earlier writer's
-  landed late, following none applied) or late (an earlier epoch's following the last applied, as
-  an earlier writer's fence made after its successor's does). A writer's own segments but its fence
-  go once a checkpoint covers them: it creates each once. Checkpoints carry the fences and strays
-  (`State::fences`, `State::strays`); nothing says when no writer of an epoch can be left, so the
-  pins stay, a few objects per takeover. Each case is a rule a test turns off (`pins_fences`,
-  `pins_old_fences`, `pins_void_strays`, `pins_late_strays`, `pins_takings`), and specs/bucket's
-  mutation of each finds an acknowledged commit lost. A deleted branch keeps no pins, and its writer may then
-  acknowledge a commit no branch holds, which no one reads; but **a segment holding a fork is
-  acknowledged only once a read of the lease, after its creates, shows the lease still the
-  writer's** (`forks_after_lease`), as recording the fork's child would name segments the
-  collector let go of. *Its* is its taking, the lease's holder with its epoch, not its epoch alone:
-  the collector removes a deleted branch's lease, and a taking that read the record before the
-  deletion creates it again, at epoch 1, before it finds the branch deleted (TASK-179).
-- **Minting:** after recovering, the writer checks that the lease is still its, then mints extent IDs
-  from its epoch's range, the epoch shifted above bit 40 (`EPOCH_SHIFT`). No later writer's segment,
-  minted from a later range, is in what it recovered, and no other writer mints from its range, so
-  no ID names two extents, even one an earlier writer uploaded after a later took over. Host caches
-  keyed by extent ID rely on this.
-- **A writer finds out it was taken over** when a create fails on a segment of a later epoch, its
-  successor's fence or after it; or, acknowledging a fork, when a lease read after its creates
-  shows another taking. It answers `EROFS` from then on (doc-4) and its
-  VMM stops the guest. A create that fails on an earlier writer's segment, landed late where its own
-  was to go, means its later segments are void: it takes the branch again, which keeps its guest.
-  *Implemented 2026-11-06 (TASK-204):* the store's uploader (`extent_store::upload`) takes a lease
-  of its own, fences the branch past the late segment, and puts the store's write-ahead log after
-  the branch's end (`Store::rebase`), as opening the store does; a log another writer's commits
-  moved past still fails (`Diverged`, `ESTALE`), and a later writer's segment still fences it.
-- **An ambiguous create** (an error after the object landed, retried into a failed condition) is
-  resolved by reading the object back: if it holds what was written, the create succeeded. Lease
-  updates name who took the lease, so they are recognised the same way.
-- **Extents of their own** carry their uploader's epoch in their key, so writers of different epochs
-  never write the same key: each is a create-only PUT, and none is a multipart upload, which could
-  not be conditional (an extent is 64 MiB at most).
+- **The head**, `<C>heads/<branch>` (`layout::Head`, `extent_remote::head`): the epoch of its
+  writer's taking, who took it, and the fencing token it was taken with (its cell's epoch, Cells);
+  the end of the branch's segments, the runs of epochs they were written in, from which a segment's
+  key follows (`Head::epoch_of`), and the branch's newest checkpoint, by its number and its writer's
+  epoch. Its writer swaps it with a condition (S3 `If-Match`, GCS generation), from the version it
+  last wrote (`head::swap`). Nothing deletes it: a deleted branch's, final, fences its writers.
+- **Keys written once.** A writer's segment is at `segments/<branch>/<epoch>.<seq>`, its checkpoint
+  at `checkpoints/<branch>/<epoch>.<seq>`, an extent of its own at
+  `extents/<branch>/<epoch>.<seq>.<sequence>`, each created by the writer of `epoch` alone: two
+  writers' segments of one number land at two keys (rule `epoch_keys`; specs/bucket's
+  `NoEpochKeys`, whose writers of one key overwrite each other). A create that finds its key taken
+  is corrupt: no other writer writes it.
+- **A commit is its PUTs, then the head's swap** (`Writer::acknowledge`): once a segment and every
+  one before it are created, its extents of their own before it, the writer swaps the head to name
+  them, its end past them. Only what the head names is the branch's: a segment its writer uploaded
+  and never named, taken over first, never is, nor ever will be, and the collector deletes it
+  (`collector_epochs`, Garbage collection). A swap that finds the head changed is a later taking's
+  or a deletion's: the writer stops (`Fenced`), and answers `EROFS` from then on (doc-4), its VMM
+  stopping the guest. Written whatever is there, a writer taken over would write the head over its
+  successor's, which named the successor's commits (rule `head_swap`; `NoHeadSwap`: an
+  acknowledged commit lost).
+- **Taking a branch** (opening it, the first time or after a crash, here or elsewhere): the head
+  swapped from epoch E to E+1, unless its token is higher than the taker's placement's (TASK-39.7,
+  `Stale`), naming what it named; the branch recovered from it (Checkpoints); and the writer going
+  on from its end. What an earlier writer uploaded past the end, never named, is nothing of the
+  branch's: no fence, no gap to fill. A take reads the head once and swaps it, its record read at
+  once (TASK-165.11); the head it took is what it recovers from, read no more.
+- **Deletion** swaps the head to the final epoch (`Head::FINAL`), which no writer takes, naming
+  what it named, and recovers the branch from it: nothing swaps it after, so every deletion of the
+  branch finds the same forks, and gives their children their records before the branch is marked
+  deleted (TASK-183). A point, which no writer has, has no head to end.
+- **Minting:** a writer mints extent IDs from its epoch's range, the epoch shifted above bit 40
+  (`EPOCH_SHIFT`): what it recovered is what the head it took names, no later writer's segment
+  among it, and no other writer mints from its range, so no ID names two extents, even one an
+  earlier writer uploaded after a later took over. Host caches keyed by extent ID rely on this.
+- **An ambiguous swap or create** (an error after it took effect, retried into a failed condition)
+  is resolved by reading the object back: if it holds what was written, it took effect. Heads name
+  who took them, so a taking's swap is recognised the same way.
+- **What it costs.** A durable commit is two round trips one after the other, the segment's create
+  and the head's swap; before, its create alone, the fencing (TASK-371, which had taken a third
+  away). A take is the head's read and swap, then the recovery's reads, all of them at once, as
+  their keys are known. TASK-407.5 measures what a guest's sync pays for it.
 - **Startup** probes that the store honours conditional creates and updates, and refuses to run if
   not.
 
@@ -508,9 +490,9 @@ Each branch's commits go through:
    PUT (an extent is 64 MiB at most; no multipart upload), extents before the segments that name
    them, up to 16 segments of a store at once within the host's upload budget (64 requests, its
    upload memory: 512 MiB unless `FXDAX_EXTENTD_UPLOAD_MEMORY` says otherwise; Memory, below).
-5. **Acknowledged:** once every segment before it is uploaded too, its create the fencing; one
-   holding a fork, once a read of the lease after shows it still the writer's (Fencing, TASK-371); a segment going on with a commit, with the segment
-   ending it (Segments, TASK-92.41). Then `COMMIT_DURABLE` waiters up to it complete, the WAL's
+5. **Acknowledged:** once every segment before it is uploaded too, by the head's swap naming it
+   (The head, TASK-407); a segment going on with a commit, with the segment ending it (Segments,
+   TASK-92.41). Then `COMMIT_DURABLE` waiters up to it complete, the WAL's
    base moves past it, durably, and its files leave the store for the host's part cache.
 
 Invariants: what is uploaded never exceeds what is durable locally; a branch's committed segments are
@@ -521,13 +503,14 @@ a contiguous prefix; an object is uploaded before anything that names it.
 at most the upload interval (1 s) before its segment closes for the uploader; at either bound,
 commits stall (decision 3). A request object storage fails is retried, from 50 ms, doubling, to
 5 s apart (`extent_remote::store`), for as long as it fails, an ambiguous one resolved by reading
-back (Fencing); the host reports each store's upload progress (`UploadStatus`: what is not yet
+back (The head); the host reports each store's upload progress (`UploadStatus`: what is not yet
 acknowledged, and since when). *Added 2026-11-10 (TASK-314):* the store counts the requests that
 fail by kind and logs each kind's run of failures with the bucket's own error, as it starts, every
 30 s, and as it ends, so that a bucket failing for good (full, out of reach, refusing its
 credentials) says why its guests' commits wait; doc-12 says what the guest sees.
-A writer displaced by a late segment takes the branch again (Fencing); any other failure of its
-writer's stops the uploader, and its commits waiting to be durable fail.
+A failure of its writer's, a swap of the head refused as another took the branch among them, stops
+the uploader, and its commits waiting to be durable fail. (A writer displaced by a late segment
+took the branch again until TASK-407: no segment lands where another's goes now.)
 
 **Memory** *(added 2026-11-10, TASK-317).* A bucket that takes less than the guests write costs a
 host disk, not memory: what waits is the stores' write-ahead logs, durable on its disk (decision 3),
@@ -572,18 +555,18 @@ run whose daemon passed it (`scripts/budgets.py`), and the daemon's soak against
 holds it to it (`extentd::tests::soak`, TASK-330.3).
 
 **Recovery on the same host** *(rewritten 2026-11-07; doc-14, Opening a store)* is opening the
-store: its writer takes the branch and fences it; a segment left open is closed again from the
+store: its writer takes the branch's head; a segment left open is closed again from the
 whole records of its log, writes after the last durable commit dropped; and the WAL is put after
 the branch's end by its commits (`Wal::rebase`). If the branch's last commit is one of the WAL's,
 the WAL's segments to it landed: acknowledged now, into the cache. If it is the WAL's base, or the
-last the WAL's segments landed to, the rest are restamped on the new chain after the fence and
+last the WAL's segments landed to, the rest are restamped on the new chain after the head's end and
 upload as any closed segment: the guest keeps every commit made durable here. Otherwise another
 writer's commits moved the branch on, and the store refuses to open (`Diverged`, `ESTALE`) until
 `fxdaxctl take` drops its WAL, losing what its guest was never promised. Extents committed again
 are uploaded under the new writer's epoch, at its keys.
 
 **Opening on another host** is the same with an empty WAL, which never diverges: it takes the
-lease, fences, recovers the newest checkpoint and the footers after it, and serves the guest from
+head, recovers the checkpoint it names and the footers of the segments it names after it, and serves the guest from
 the host's part cache, fetching what it lacks.
 
 ## Forks
@@ -602,19 +585,19 @@ the host's part cache, fetching what it lacks.
   other, and two forks naming one child, neither's segment landing, both taking a record of their
   own, no longer both succeed, which a create reading back identical bytes took for its own
   (TASK-79.82). Every create-only write's bytes are so unique to their writer: segments by their
-  epochs, leases by their holders, records by their owners. An owner is no tenant: tenants are
+  epochs, heads by their holders, records by their owners. An owner is no tenant: tenants are
   authorized on each host by their directory and their VM manager (TASK-154).
 - **Inheriting is free:** the child's state starts as its parent's at the fork point, and the
   child's first checkpoint records it in full. Extents keep their IDs and locations in the parent's
   objects, which the collector keeps while the child holds them.
 - A free of an inherited extent drops only the freeing branch's claim: the parent's frees after the
   fork point do not touch the child, and the child's do not touch the parent.
-- **Deleting a branch** takes its lease at a final epoch (no writer takes it again, and the one it has
-  stops at its next acknowledgement), fences it at the end it recovered to (Fencing), gives the
+- **Deleting a branch** swaps its head to the final epoch (no writer takes it again, and the one it
+  has stops at its next acknowledgement), recovers it from that head (The head), gives the
   children of the forks in its state their records, then marks its record deleted. Deleting a
   fork's child before it has its record creates the record deleted. A deletion whose recovery of
   the branch finds something lost, the record deleted since by another deletion (a placement cut
-  off deletes once the latest one's deletion ended the lease), is done: that one gave the children
+  off deletes once the latest one's deletion ended the head), is done: that one gave the children
   their records, and the collector may have reclaimed what recovering the branch needs since
   (TASK-178).
 - **Deleted branches' records stay**, forks' children's and roots' alike: a parent's writer slow to
@@ -653,8 +636,8 @@ immutable instead.
 
 - **A point is a name for a state.** The fork that makes one, what a snapshot sends, is an ordinary
   fork of the VM's branch S, a commit of S's, whose footer lists the child in `points` too. Its
-  record says `point` from the first, and names S at the segment `at`. It has no lease, no segment
-  and no checkpoint, then or ever: no writer takes it (`Error::Point`), before touching a lease, so
+  record says `point` from the first, and names S at the segment `at`. It has no head, no segment
+  and no checkpoint, then or ever: no writer takes it (`Error::Point`), before touching a head, so
   that no path can. Its state is S's at `at`, for ever.
 - **A fork of a point is its child's record alone.** It names the point's origin as its own, so that
   to recovery and the collector the child is a fork of S at `at`, and nothing of the point's or S's
@@ -739,8 +722,9 @@ points are shared or not as any other's. Forks of branches with writers into ano
   concurrent misses on a part share one GET; misses go before read-ahead; 64 GETs in flight at
   most, within 64 MiB, for the host's fetchers together. Bodies are streamed into place
   (`get_opts`, not `get_ranges`, whose 10-way fan-out is fixed). An extent the collector moved is
-  read where it went. Every part is checked against its CRC; one that fails is read again, once,
-  by its object's tail fetched anew, then fails with `EIO`.
+  read where it went. Every part is checked against its CRC; one that fails is corrupt, `EIO`
+  (TASK-407.4: a key names one object for good, so a part failing its tail's CRC is no other
+  object's; until then, it was read again, once, by its object's tail fetched anew).
 - **The part cache** (`extent_remote::cache`, `FXDAX_EXTENTD_CACHE`), one per host, shared by its
   stores: sparse copies of objects at their keys (`fxdax-parts/<key>`), their tails and the parts
   kept, as stored (compressed), at their real offsets, filled by fetches and by acknowledged WAL
@@ -760,14 +744,13 @@ points are shared or not as any other's. Forks of branches with writers into ano
   GET budget, before the bucket, unless it is the owner. The owner serves it from its memory or
   part cache, or by one GET however many ask, keeping it (`Fetcher::stored_part`), and never asks
   another peer for it: a flight keys on whether it asks, so hosts that disagree on an owner for a
-  while never ask round in a ring. It serves a part only as the asker's tail says it is stored,
-  which its own must say too (NOT_FOUND otherwise, no failure), and only of framed objects
-  (segments, extents, checkpoints, moves), never records, leases, cells or references. The asker
+  while never ask round in a ring. It is asked for a part by its object's key and number alone
+  (TASK-407.4; NOT_FOUND if it holds none, no failure), and only of framed objects (segments,
+  extents, checkpoints, moves), never records, heads, cells or references. The asker
   checks what it is given against its tail's CRC and length; a part that fails, an error, or a
   peer past its deadline (1 s to connect, 5 s a request) falls back to the bucket and puts the
   peer down for 30 s, its parts going to the bucket meanwhile, never to another peer. Tails are
-  always the bucket's: a stale one from a peer would have a reader of an object recreated at its
-  key fail it twice, as corrupt. gRPC over TCP, unauthenticated, on the hosts' own network
+  always the bucket's own: a tail is what checks a part. gRPC over TCP, unauthenticated, on the hosts' own network
   (`proto/fxdax/peer/v1/peer.proto`): every host reads the whole bucket anyway. extentd:
   `FXDAX_EXTENTD_PEER_ADDRESS` (this host's address, listened at), `FXDAX_EXTENTD_PEERS` (the
   list at start, comma-separated), `SetPeers` (the list at any time); it needs a part cache. The
@@ -818,7 +801,7 @@ else, and deletes nothing else but the references it retires; it reads other cel
 |---|---|---|
 | `<C>gc/lease` | the cell's collector lease (`passed::GcLease`): the format; its epoch and holder; until when its pass holds the cell, and when the last pass over it that went through ended (TASK-395.5); and what the last pass over the cell to end recorded, carried by each taking to the next (Passes that skip, TASK-395.6, TASK-395.8); replaces `gc/lease` | created, then updated with a condition, by passes over the cell |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted | create-only, by the collector |
-| `<C>moves/<rest>` | the moves of the object at `<C><rest>`, and `<C>moves/moves/<rest>` those moves' moves: a reader of `<C><rest>` that finds it gone, or not naming the extent, reads `<C>moves/<rest>`, then `<C>moves/moves/<rest>` | create-only, by the cell's passes |
+| `<C>moves/<rest>/<pass>` | the moves of the object at `<C><rest>` by the cell's pass of epoch `pass`, and `<C>moves/moves/<rest>/<pass>/<pass>` those moves' moves: a reader that finds `<C><rest>` gone lists `<C>moves/<rest>/` and follows the latest pass's moves that name the extent, then those moves' (TASK-407.1: a pass slow to create its moves, after later passes made and deleted theirs, creates its own, never again a key once read; `moves_by_pass`, `NoMovesByPass`) | create-only, by the cell's passes |
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference: the fork of the cell's branch `parent` at its segment `at` to `child` of cell `<cell>` of `<tenant>`, each ID 16 hex digits; its bytes the format and the fork's owner (a writable fork's, from its footer; a clone's, its restore's), unique to the fork, so that every writer of it writes the same | create-only (an object of identical bytes there is success), before the child's record; deleted by the passes of the child's cell |
 
 A listing of `<C>refs/` with delimiter `/` gives the cell's parents with forks in other cells; of
@@ -1147,8 +1130,8 @@ The rest of a pass, unchanged within the cell:
   read may name further along their moves: a checkpoint of another writer's landing after the
   writer recovered the branch, or the parent's state a branch inherited them from, which its writer
   read as it was then. So **the way starts where each extent was sealed**, every moves on it kept,
-  unless the state's checkpoint is by the writer holding the branch's lease, read after the
-  checkpoint was listed (TASK-175); for a fork point's state, always.
+  unless the state's checkpoint is by the writer holding the branch's head, the head naming it
+  (TASK-175, TASK-407); for a fork point's state, always.
 - **Compaction** of objects whose live extents are under a fraction of their data: segments no
   recovery reads, and moves. Their live extents go to the object's moves, data and map in one
   object, written whole, so there is never compaction output without its map, and no orphan of it.
@@ -1160,21 +1143,24 @@ The rest of a pass, unchanged within the cell:
   destroyed, no KMS), the pass compacts what is in the clear and leaves the rest, counted in its
   report (`locked`, `uncompacted`), deleting as ever.
 - **Deletion** of what is listed and not needed:
-  - segments a checkpoint covers that hold no live extent, or were compacted a grace period ago;
-    never a live branch's segments at or past its end, which may be uploaded and not yet in it,
-    nor its pins, the positions a writer of it, taken over or taking it over, may still create at
-    (`collector::pinned`; Fencing, TASK-371, TASK-388);
-  - checkpoints no recovery read;
+  - segments a checkpoint the head names covers that hold no live extent, or were compacted a grace
+    period ago; and segments no head names nor may yet name *(rule `collector_epochs`, TASK-407,
+    replacing TASK-388's pins)*: of an epoch before the head's, whose writer's swaps can no longer
+    succeed, or of its epoch or later but before its end. Never a live branch's segment of the
+    head's epoch or later at or past its end, which its writer may yet name (`Ended::ahead`;
+    specs/bucket's `NoCollectorEpochs`);
+  - checkpoints no recovery read, but those of the head's epoch or later newer than the one it
+    names, which its writer may yet name;
   - extents of their own no state names, once no segment will name them: by what their keys
-    declare, the writer that uploaded each and the segment that names it, an earlier writer's once
-    a later one's segment is in the branch, and the current writer's once a segment is at its
-    segment's place. Not by the branch's next sequence number: extents are committed in no order
-    of their sequence numbers (TASK-79.3). *Decided 2026-11-03 (TASK-153.7):* a writer declares
+    declare, the writer that uploaded each and the segment that names it, by the same rule: of an
+    epoch before the head's, or of its epoch or later before its end. Not by the branch's next
+    sequence number: extents are committed in no order of their sequence numbers (TASK-79.3). *Decided 2026-11-03 (TASK-153.7):* a writer declares
     what it has in flight by these keys, written with the objects, rather than by an object of
     its own, which would have to land before what it covers and be read after the listing, two
     orderings more (`dead-ends/collector-in-flight-declarations.md`);
   - moves no state's way goes through, once compacted in turn or once their object is gone;
-  - no record, deleted or not (Forks, TASK-174); leases of branches with no live record.
+  - no record, deleted or not (Forks, TASK-174); no head, a deleted branch's final one fencing its
+    writers.
 
 **Time** (the grace period, by the store's clock) only spares readers that just looked an extent up
 a round trip; correctness does not depend on it.
@@ -1294,7 +1280,7 @@ each records its own: sweep a bucket with one set of options.
 
 **Why a pass that skips is as safe as one in full.** What a pass decides is a function of what it
 reads. What it reads under the cell's prefix is in its listing: an object written, written again (a
-record's or a lease's compare-and-swap, a writer's takeover), or deleted since changes the listing's
+record's compare-and-swap, a head's swap, a writer's takeover), or deleted since changes the listing's
 keys, ETags, versions, sizes or times; what is written after the listing began, behind its cursor,
 is a candidate of neither pass (`candidatesFirst`). So a listing of the digest recorded means the
 recorded pass's candidates are all there, listed before its reads, and nothing under the prefix it
@@ -1309,8 +1295,8 @@ read changed. What a pass reads outside the prefix, case by case:
   parent's cell was chosen for (References).
 - *The state at a fork point the cell keeps*: of its own branch, changed only by the cell's own
   compactions and checkpoints, under the prefix.
-- *Leases and takeovers*: branches' leases are under the prefix, and a takeover writes its branch's
-  again. The collector's lease is left out of the digest, as every pass writes it: passes at once
+- *Heads and takeovers*: branches' heads are under the prefix, and a takeover, or a writer's
+  acknowledgement, writes its branch's again. The collector's lease is left out of the digest, as every pass writes it: passes at once
   are fenced by it as before.
 - *A point's record in another cell*, read for a clone of the cell being made, to give it up once its
   point is deleted: it changes with nothing of the cell's. A pass that finds such a clone live
@@ -1391,7 +1377,7 @@ extent_store's and their uploaders `extent_store::upload`'s, on its own clock.
   collector until nothing changes: the bucket must hold only what the live branches need.
 - **Every acknowledged segment's objects exist:** after each step, what recovering each live branch
   read, and what holds each extent it names, or the moves saying where that went. Nothing writes a
-  point: no segment, checkpoint or writer's lease of one exists.
+  point: no segment, checkpoint or head of one exists.
 - **Each case** the survey found is a profile that makes it likely, run over hundreds of seeds:
   1. frees before and after a fork, by parent and child (`forks_and_frees`);
   2. chains of generations, with branches in the middle deleted (`forks_and_frees`);
@@ -1416,19 +1402,18 @@ extent_store's and their uploaders `extent_store::upload`'s, on its own clock.
      TASK-174);
   15. branches forking, deleted twice at once, by a placement cut off and the latest one, their
      fork segments in flight (`branches_deleted_twice_while_forking`, TASK-183).
-- **Each rule** has a test that turns it off and expects a seed to find what it violates: fences,
-  links between segments, the collector keeping fences and the segments of branches being taken
-  over, acknowledging a fork after a lease read, minting from the epoch's range,
+- **Each rule** has a test that turns it off and expects a seed to find what it violates: the head's
+  swap on its condition, keys naming their writers' epochs, the collector keeping what a head may
+  yet name (`takeovers_need_head_swaps`, `takeovers_need_epoch_keys`, `collection_needs_epochs`,
+  TASK-407), minting from the epoch's range,
   recording forks after their acknowledgement, listing before reading states, finding forks in
   states, deleting an earlier writer's extents only after a later one's segment, readers
   checking for a newer checkpoint, points refusing writers, forks of points reading the point after
   their records and saying they are being made, the collector giving those up, its listing the
   records after the states, records naming their owners, its keeping deleted roots' records
-  (`collection_needs_records_kept`, of `forks_ids_taken_by_roots_deleted`'s profile), and
-  deletions fencing the branch (`deletions_need_fences`, of
-  `branches_deleted_twice_while_forking`'s). The collector going by the segments
-  extents' keys name is shown needed by a test of its own
-  (`extents_ahead_of_their_segments_need_keys_naming_them`), as are ways starting at extents'
+  (`collection_needs_records_kept`, of `forks_ids_taken_by_roots_deleted`'s profile). Moves
+  keyed by their pass are shown needed by a test of their own
+  (`passes_creating_moves_late_need_moves_by_pass`, TASK-407.1), as are ways starting at extents'
   seals (`writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals`, and
   `ways_from_seals`, found by `recreated`'s seeds) and writers naming what their checkpoints move
   before writing them (`writers_naming_what_their_checkpoints_move_need_moves_taken_first`), and
@@ -1441,25 +1426,30 @@ extent_store's and their uploaders `extent_store::upload`'s, on its own clock.
   doc-14's WAL, at the level of what each step reads and writes, and TLC exhausts small models of
   it (`specs/bucket/*.cfg`) where the simulation samples. Each rule above is a member of its
   `Rules`, and a mutation of `specs/bucket/mutations` removes it and must find the violation it
-  prevents, run by `scripts/check-tla.sh` (`make check-tla`): the pins' cases, `pins_fences`,
-  `pins_old_fences`, `pins_void_strays`, `pins_late_strays` and `pins_takings` (`NoPinsFences`,
-  `NoPinsOldFences`, `NoPinsVoidStrays`, `NoPinsLateStrays`, `NoPinsTakings`; TASK-371, TASK-383,
-  TASK-388), which keep the property `CreatesNeverFreed`, and `forks_after_lease` (`NoForksAfterLease`), which took
-  `acks_after_lease`'s place (`NoAcksAfterLease`, TASK-371), `fence` (`NoFence`), `continuity` (`NoContinuity`), `epoch_sequences`
+  prevents, run by `scripts/check-tla.sh` (`make check-tla`). Since TASK-407 (2026-11-15), the
+  head's: `head_swap` (`NoHeadSwap`), `epoch_keys` (`NoEpochKeys`), `collector_epochs`
+  (`NoCollectorEpochs`) and `moves_by_pass` (`NoMovesByPass`, TASK-407.1), which keep the
+  properties `KeysWrittenOnce` and `HeadsCurrent`; and of before, `epoch_sequences`
   (`NoEpochSequences`), `records_after_ack` (`NoRecordsAfterAck`), `candidates_first`
-  (`NoCandidatesFirst`), `newest_checkpoint` (`NoNewestCheckpoint`), `forks_from_states`
-  (`NoForksFromStates`), `orphans_after_successor` (`NoOrphansAfterSuccessor`), `tokens`
-  (`NoTokens`), `delete_tokens` (`NoDeleteTokens`), `footers` (`NoFooters`), `fork_claims_ids`
-  (`NoForkClaimsIds`), `fork_claims_landed` (`NoForkClaimsLanded`), `points_take_no_writer`
-  (`NoPointsTakeNoWriter`), `forks_check_points` (`NoForksCheckPoints`), `forks_pending`
-  (`NoForksPending`), `collector_abandons` (`NoCollectorAbandons`), `records_relisted`
-  (`NoRecordsRelisted`), `records_owned` (`NoRecordsOwned`), `extent_keys_name_segments`
-  (`NoExtentKeysNameSegments`), `ways_from_seals` (`NoWaysFromSeals`, TASK-175's trace),
-  `moves_taken_first` (`NoMovesTakenFirst`), `leases_by_takings` (`NoLeasesByTakings`),
-  `passes_fenced_stop` (`NoPassesFencedStop`), `recoveries_by_origins` (`NoRecoveriesByOrigins`,
-  TASK-173), `records_kept` (`NoRecordsKept`, TASK-174), `deletions_fence` (`NoDeletionsFence`,
-  TASK-183), `deletions_reread` (`NoDeletionsReread`, TASK-380), and doc-14's `wal_follows` (`NoWalFollows`) and `wal_after_fence`
-  (`NoWalAfterFence`); `newest_checkpoint` has a second, of what a fork inherited
+  (`NoCandidatesFirst`), `forks_from_states` (`NoForksFromStates`), `tokens` (`NoTokens`),
+  `delete_tokens` (`NoDeleteTokens`), `fork_claims_ids` (`NoForkClaimsIds`), `fork_claims_landed`
+  (`NoForkClaimsLanded`), `points_take_no_writer` (`NoPointsTakeNoWriter`), `forks_check_points`
+  (`NoForksCheckPoints`), `forks_pending` (`NoForksPending`), `collector_abandons`
+  (`NoCollectorAbandons`), `records_relisted` (`NoRecordsRelisted`), `records_owned`
+  (`NoRecordsOwned`), `ways_from_seals` (`NoWaysFromSeals`, TASK-175's case, a fork's since the
+  head), `moves_taken_first` (`NoMovesTakenFirst`), `passes_fenced_stop` (`NoPassesFencedStop`),
+  `recoveries_by_origins` (`NoRecoveriesByOrigins`, TASK-173), `records_kept` (`NoRecordsKept`,
+  TASK-174), the references' (`NoReferences`, `NoReferencesFirst`, `NoReferencesHeld`,
+  `NoReferencesRelisted`, `NoReferencesTakenBack`, `NoRetirementsMarked`, `NoForkPointsKept`,
+  `NoClonesReferFirst`, `NoClonesRecordFirst`), and doc-14's `wal_follows` (`NoWalFollows`),
+  `acks_between_commits` (`NoAcksBetweenCommits`) and `whole_commits_kept` (`NoWholeCommitsKept`).
+  The head took away 22 rules and their mutations (TASK-407): the pins' cases (`pins_fences`,
+  `pins_old_fences`, `pins_void_strays`, `pins_late_strays`, `pins_takings`, which kept
+  `CreatesNeverFreed`), `forks_after_lease`, `fence`, `continuity`, `newest_checkpoint`,
+  `orphans_after_successor`, `footers`, `extent_keys_name_segments`, `leases_by_takings`,
+  `deletions_fence`, `deletions_reread`, and doc-14's `wal_after_fence` and `wal_continues`, of
+  what the head does by itself. Before it, `newest_checkpoint` had a second mutation, of what a fork
+  inherited
   (`NoNewestCheckpointInherited`, TASK-177), and branch::delete's taking a deletion done by another
   as done, which is no field of `Rules`, one of its own (`NoDeletionsDoneByOthers`, TASK-178). It
   found three holes, each fixed as a rule since: TASK-173, a child the collector recovered once, by
@@ -1467,7 +1457,8 @@ extent_store's and their uploaders `extent_store::upload`'s, on its own clock.
   (`recoveries_by_origins`); TASK-174, a deleted root's record dropped and made again by a parent's
   slow writer as a fork's child (`records_kept`); and TASK-183, two deletions of a branch at once,
   a never-acknowledged fork's segment landing between their recoveries, the second recording the
-  fork's child after a pass, reading the branch deleted, let go of its origin (`deletions_fence`).
+  fork's child after a pass, reading the branch deleted, let go of its origin (`deletions_fence`,
+  which the head's final swap does since TASK-407).
   The spec's header says where it differs from the code.
 - `SIM_SOAK=<n>` runs the profiles over n times the seeds; `SIM_SEED`, `SIM_SEEDS`, `SIM_PROFILE` and
   `SIM_OFF` run the ignored test `one` to debug a seed.

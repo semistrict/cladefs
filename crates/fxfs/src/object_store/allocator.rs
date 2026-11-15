@@ -3044,7 +3044,7 @@ mod tests {
     }
 
     /// fxdax: a filesystem reopened on a device whose floor is far past what it holds, as when
-    /// another writer of its branch takes it over (backlog doc-7, Fencing), mints from the floor,
+    /// another writer of its branch takes it over (backlog doc-7, The head), mints from the floor,
     /// and looks for extents a crash left below what the device holds only: not across the gap to
     /// the floor, which took a guest's allocator ever.
     #[fuchsia::test]

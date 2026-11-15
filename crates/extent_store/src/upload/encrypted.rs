@@ -569,7 +569,7 @@ fn hosts_fetchers_open_parts_under_the_keys_of_the_stores_they_serve() {
     // Served to a peer as stored, sealed.
     let tail = world.runtime.block_on(extent_remote::object::tail(&*world.bucket, &at.key));
     let stored = tail.unwrap().unwrap().parts.stored[0];
-    let served = world.runtime.block_on(fetcher.stored_part(&at.key, 0, &stored)).unwrap();
+    let served = world.runtime.block_on(fetcher.stored_part(&at.key, 0)).unwrap();
     assert_eq!(
         served.as_deref(),
         Some(&world.object(&at.key)[stored.range().start as usize..][..stored.len as usize])

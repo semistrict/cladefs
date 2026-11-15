@@ -95,11 +95,11 @@ export const layers: Layer[] = [
     what: "branches in S3 or GCS",
     role:
       "A branch is a VM's filesystem in a bucket: segments whose footers say what each commit did, " +
-      "with checkpoints of its index. One writer holds a branch's lease, and its segments are " +
-      "numbered without gaps; forks record where they were made and inherit without copying; " +
-      "the collector alone deletes.",
+      "with checkpoints of its index. One writer holds a branch's head, which names its segments " +
+      "and newest checkpoint, every key written once; forks record where they were made and " +
+      "inherit without copying; the collector alone deletes.",
     dirs: ["crates/extent_remote"],
-    anchors: ["upload", "acknowledge", "bucket", "fork_point", "fetcher", "es_fork"],
+    anchors: ["upload", "acknowledge", "head_swap", "bucket", "fork_point", "fetcher", "es_fork"],
     docs: ["doc-7", "doc-14"],
     provenance: "fxdax's own.",
   },

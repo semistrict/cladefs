@@ -19,7 +19,6 @@
 //! API, as hosts come and go. How a peer is reached is a [`Link`]'s: gRPC over TCP, in the daemon
 //! (`extentd::peers`).
 
-use extent_frame::Stored;
 use extent_remote::peer::{self, Peer};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
@@ -32,22 +31,20 @@ use std::time::{Duration, Instant};
 /// How long a peer that failed is asked nothing.
 pub const DOWN: Duration = Duration::from_secs(30);
 
-/// A part a host asks a peer for: the object's key, the part's number, and where and how the
-/// asker's tail says it is stored, which the peer gives only if its own says so too.
+/// A part a host asks a peer for: the object's key and the part's number, which name it for good,
+/// as the bucket's keys are written once (TASK-407).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Asked {
     /// The object's key.
     pub key: String,
     /// The part's number.
     pub part: u64,
-    /// Where and how the asker's tail says it is stored.
-    pub stored: Stored,
 }
 
 /// How a peer is reached.
 pub trait Link: Send + Sync {
-    /// The stored bytes of the part `asked` names, from the peer: none if it has no such part, as
-    /// stored so; an error if it failed to say, or refused.
+    /// The stored bytes of the part `asked` names, from the peer: none if it has no such part; an
+    /// error if it failed to say, or refused.
     fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>>;
 }
 
@@ -58,7 +55,7 @@ pub struct Counts {
     pub asked: u64,
     /// Parts their owners gave, checked: each a GET of the bucket's saved.
     pub given: u64,
-    /// Parts their owners didn't have, as asked.
+    /// Parts their owners didn't have.
     pub missing: u64,
     /// Peers' failures, each putting it down for [`DOWN`].
     pub failed: u64,
@@ -188,10 +185,10 @@ impl Health {
 }
 
 impl Peer for Member {
-    fn part(&self, key: &str, part: u64, stored: Stored) -> BoxFuture<'static, Option<Vec<u8>>> {
+    fn part(&self, key: &str, part: u64) -> BoxFuture<'static, Option<Vec<u8>>> {
         let health = self.health.clone();
         health.counters.asked.fetch_add(1, Ordering::Relaxed);
-        let getting = self.link.get(Asked { key: key.to_owned(), part, stored });
+        let getting = self.link.get(Asked { key: key.to_owned(), part });
         async move {
             match getting.await {
                 Ok(Some(bytes)) => {

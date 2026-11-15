@@ -20,7 +20,7 @@
 //! again by its reader. One cache at a time has a directory.
 
 use crate::object;
-use extent_frame::{Frame, Parts, Stored, TRAILER};
+use extent_frame::{Frame, Parts, TRAILER};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::File;
 use std::io;
@@ -319,29 +319,27 @@ impl Cache {
         }
     }
 
-    /// Whether part `part` of the object at `key` is kept, stored as `stored` says, as the cache's
-    /// index has it: reading nothing of its file, nor counting it read, as [`Cache::part`] does.
-    pub fn holds(&self, key: &str, part: u64, stored: &Stored) -> bool {
+    /// Whether part `part` of the object at `key` is kept, as the cache's index has it: reading
+    /// nothing of its file, nor counting it read, as [`Cache::part`] does. A part is named by its
+    /// object's key and its number for good, as a key is written once (TASK-407).
+    pub fn holds(&self, key: &str, part: u64) -> bool {
         let kept = self.kept.lock().unwrap();
-        kept.objects.get(key).is_some_and(|object| {
-            object.kept.contains_key(&part)
-                && object.parts.stored.get(part as usize) == Some(stored)
-        })
+        kept.objects.get(key).is_some_and(|object| object.kept.contains_key(&part))
     }
 
-    /// The stored bytes of part `part` of the object at `key`, if it is kept, stored as `stored`
-    /// says (as the reader's tail does), and they pass its CRC: one that fails is dropped.
-    pub fn part(&self, key: &str, part: u64, stored: &Stored) -> io::Result<Option<Vec<u8>>> {
-        {
+    /// The stored bytes of part `part` of the object at `key`, if it is kept, and they pass the CRC
+    /// its tail, kept with it, gives: one that fails is dropped.
+    pub fn part(&self, key: &str, part: u64) -> io::Result<Option<Vec<u8>>> {
+        let stored = {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get(key) else { return Ok(None) };
-            if !object.kept.contains_key(&part)
-                || object.parts.stored.get(part as usize) != Some(stored)
-            {
+            let Some(&stored) = object.parts.stored.get(part as usize) else { return Ok(None) };
+            if !object.kept.contains_key(&part) {
                 return Ok(None);
             }
             kept.touch(key, part);
-        }
+            stored
+        };
         let Some(bytes) = self.read(key, stored.range())? else { return Ok(None) };
         if stored.check(&bytes).is_ok() {
             return Ok(Some(bytes));
@@ -368,8 +366,8 @@ impl Cache {
 
     /// Keeps `tail`, the tail of the object at `key`, as read, evicting what was read least recently
     /// to make room: unless no room can be made, or its object is being removed, forgotten, or kept
-    /// or written already. Another object kept at its key, as one recreated there is, goes first,
-    /// unless parts of it are busy.
+    /// or written already. One kept at its key of other parts, which a key written once never has
+    /// (TASK-407), but a file the cache found corrupt, goes first, unless parts of it are busy.
     pub fn keep_tail(&self, key: &str, tail: &object::Tail) -> io::Result<()> {
         let len = tail.bytes.len() as u64;
         if len > self.capacity {
@@ -415,12 +413,18 @@ impl Cache {
         self.settle(key, TAIL, written)
     }
 
-    /// Keeps `bytes`, the stored bytes of part `part` of the object at `key`, which pass the CRC of
-    /// `stored`, where its tail says it is stored, evicting what was read least recently to make
-    /// room: unless no room can be made, or its object's tail isn't kept, as stored, or it is kept
-    /// or busy already. One kept torn, as a crash may leave a part, a reader finds failing its
-    /// CRC first ([`Cache::part`]), which drops it, and then keeps it anew.
-    pub fn keep_part(&self, key: &str, part: u64, stored: &Stored, bytes: &[u8]) -> io::Result<()> {
+    /// Keeps `bytes`, the stored bytes of part `part` of the object at `key`, checked against the
+    /// CRC its tail gives, where its tail, kept, says it is stored, evicting what was read least
+    /// recently to make room: unless no room can be made, or its object's tail isn't kept, or it
+    /// is kept or busy already. One kept torn, as a crash may leave a part, a reader finds failing
+    /// its CRC first ([`Cache::part`]), which drops it, and then keeps it anew.
+    pub fn keep_part(&self, key: &str, part: u64, bytes: &[u8]) -> io::Result<()> {
+        let stored = {
+            let kept = self.kept.lock().unwrap();
+            let stored = kept.objects.get(key).and_then(|object| object.parts.stored.get(part as usize));
+            let Some(&stored) = stored else { return Ok(()) };
+            stored
+        };
         debug_assert!(stored.check(bytes).is_ok(), "part {part} of {key}, kept unchecked");
         let len = stored.len;
         if len > self.capacity {
@@ -431,7 +435,7 @@ impl Cache {
             let mut kept = self.kept.lock().unwrap();
             let Some(object) = kept.objects.get_mut(key) else { return Ok(()) };
             if !object.readable()
-                || object.parts.stored.get(part as usize) != Some(stored)
+                || object.parts.stored.get(part as usize) != Some(&stored)
                 || object.kept.contains_key(&part)
                 || object.busy.contains_key(&part)
             {
@@ -520,8 +524,7 @@ impl Cache {
         }
     }
 
-    /// Drops the object at `key`: one whose part, read from the bucket, failed the CRC its tail
-    /// gives, as one recreated at its key's does.
+    /// Drops the object at `key`: one whose copy failed its CRCs.
     pub fn forget(&self, key: &str) -> io::Result<()> {
         let gone = self.kept.lock().unwrap().forget(key);
         self.evict(Vec::from_iter(gone))
@@ -972,7 +975,7 @@ mod tests {
             self.tail.parts.frame.parts()
         }
 
-        fn stored(&self, part: u64) -> Stored {
+        fn stored(&self, part: u64) -> extent_frame::Stored {
             self.tail.parts.stored[part as usize]
         }
 
@@ -996,7 +999,7 @@ mod tests {
         }
 
         fn keep_part(&self, cache: &Cache, part: u64) {
-            cache.keep_part(&self.key, part, &self.stored(part), self.part(part)).unwrap();
+            cache.keep_part(&self.key, part, self.part(part)).unwrap();
         }
 
         /// Keeps in `cache` what it finds there not: as a reader does, which fetches and keeps
@@ -1022,7 +1025,7 @@ mod tests {
 
         /// Part `part`'s stored bytes, as `cache` keeps them.
         fn read(&self, cache: &Cache, part: u64) -> Option<Vec<u8>> {
-            cache.part(&self.key, part, &self.stored(part)).unwrap()
+            cache.part(&self.key, part).unwrap()
         }
 
         /// Which of its parts `cache` keeps, read back as stored: none without its tail.
@@ -1193,8 +1196,8 @@ mod tests {
         assert_eq!(object.kept(&cache), [0, 1, 3]);
     }
 
-    /// A part is kept only with its object's tail, and as the tail kept says it is stored; one kept
-    /// is read only as stored so.
+    /// A part is kept only with its object's tail, where the tail kept says it is stored, and is
+    /// held by its object's key and its number (TASK-407).
     #[test]
     fn parts_are_kept_with_their_tails() {
         let dir = tempfile::tempdir().unwrap();
@@ -1204,38 +1207,14 @@ mod tests {
         assert_eq!((cache.bytes(), cache.keys()), (0, Vec::<String>::new()));
         object.keep_tail(&cache);
         assert_eq!(cache.tail(KEY).unwrap(), Some(object.tail.clone()));
-        // Another object's part, at its key.
-        let other = Object::noise(KEY, 2 * PART, 2);
-        other.keep_part(&cache, 1);
-        assert_eq!((other.read(&cache, 1), object.read(&cache, 1)), (None, None));
-        assert!(!cache.holds(KEY, 0, &object.stored(0)));
+        assert!(!cache.holds(KEY, 0));
         object.keep_part(&cache, 0);
-        assert_eq!(cache.part(KEY, 0, &object.stored(1)).unwrap(), None);
         assert_eq!(object.read(&cache, 0).as_deref(), Some(object.part(0)));
         assert_eq!(cache.bytes(), PART + object.tail_len());
-        // What it holds, as stored so: not part 1, nor part 0 as another object stores it.
-        assert!(cache.holds(KEY, 0, &object.stored(0)));
-        assert!(!cache.holds(KEY, 0, &object.stored(1)));
-        assert!(!cache.holds(KEY, 1, &object.stored(1)));
-        assert!(!cache.holds("segments/0000000000000002/0000000000000000", 0, &object.stored(0)));
-        cache.check();
-    }
-
-    /// Another object's tail at a key replaces what is kept there: none of it is of use to the new
-    /// one's readers.
-    #[test]
-    fn tails_of_objects_recreated_replace_what_is_kept() {
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Cache::open(dir.path(), 8 * PART, 0).unwrap();
-        let (old, new) = (Object::noise(KEY, 2 * PART, 1), Object::noise(KEY, PART, 2));
-        old.keep(&cache);
-        new.keep_tail(&cache);
-        assert_eq!(cache.tail(KEY).unwrap(), Some(new.tail.clone()));
-        assert_eq!((old.read(&cache, 0), new.read(&cache, 0)), (None, None));
-        assert_eq!(cache.bytes(), new.tail_len());
-        assert_eq!(std::fs::metadata(cache.path(KEY)).unwrap().len(), new.bytes.len() as u64);
-        new.keep_part(&cache, 0);
-        assert_eq!(new.kept(&cache), [0]);
+        // What it holds: part 0 of the object, not part 1, nor any part of another key.
+        assert!(cache.holds(KEY, 0));
+        assert!(!cache.holds(KEY, 1));
+        assert!(!cache.holds("segments/0000000000000002/0000000000000000", 0));
         cache.check();
     }
 
@@ -1274,7 +1253,7 @@ mod tests {
         object.keep(&cache);
         std::fs::remove_file(cache.path(KEY)).unwrap();
         std::fs::create_dir(cache.path(KEY)).unwrap();
-        let err = cache.part(KEY, 1, &object.stored(1)).unwrap_err();
+        let err = cache.part(KEY, 1).unwrap_err();
         assert_eq!(err.raw_os_error(), Some(libc::EISDIR), "{err}");
     }
 
@@ -1759,13 +1738,12 @@ mod tests {
         let keep = |object: &Object, parts: &[u64]| {
             let _ = cache.keep_tail(&object.key, &object.tail);
             for &part in parts {
-                let stored = object.stored(part);
-                let _ = cache.keep_part(&object.key, part, &stored, object.part(part));
+                let _ = cache.keep_part(&object.key, part, object.part(part));
             }
         };
         keep(&a, &[0, 1]);
         keep(&b, &[0]);
-        let _ = cache.part(&a.key, 0, &a.stored(0));
+        let _ = cache.part(&a.key, 0);
         // Evicts a's part 1, b, and a's part 0.
         keep(&c, &[0]);
         let _ = cache.forget(&a.key);
@@ -1774,7 +1752,7 @@ mod tests {
         let _ = cache.adopt(&e.key, &e.write_to(wal));
         keep(&b, &[0]);
         let _ = cache.tail(&e.key);
-        let _ = cache.part(&e.key, 1, &e.stored(1));
+        let _ = cache.part(&e.key, 1);
     }
 
     /// Checks the cache in `dir` opened after a crash: its index whole, within its capacity; no file

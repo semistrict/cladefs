@@ -10,7 +10,6 @@
 //! once, however many hosts ask at once ([`crate::remote::serving_peers`]).
 
 use crate::remote::peers::{Asked, Link, Peers};
-use extent_frame::{Encoding, Stored};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use proto::peer_client::PeerClient;
@@ -155,7 +154,7 @@ impl proto::peer_server::Peer for Server {
         &self,
         request: Request<GetPartRequest>,
     ) -> Result<Response<GetPartResponse>, Status> {
-        let GetPartRequest { bucket, key, part, offset, len, crc, encoding } = request.into_inner();
+        let GetPartRequest { bucket, key, part } = request.into_inner();
         if bucket != self.bucket {
             let theirs = format!("asked of {bucket}, this host's bucket being {}", self.bucket);
             return Err(Status::failed_precondition(theirs));
@@ -163,15 +162,7 @@ impl proto::peer_server::Peer for Server {
         if !extent_remote::peer::served(&key) {
             return Err(Status::invalid_argument(format!("{key}: no parts served")));
         }
-        let encoding = match proto::Encoding::try_from(encoding) {
-            Ok(proto::Encoding::Raw) => Encoding::Raw,
-            Ok(proto::Encoding::Zstd) => Encoding::Zstd,
-            Err(_) => return Err(Status::invalid_argument(format!("encoding {encoding}"))),
-        };
-        if len == 0 || len > 2 * extent_remote::layout::PART {
-            return Err(Status::invalid_argument(format!("part {part} of {key}, of {len} bytes")));
-        }
-        let asked = Asked { key, part, stored: Stored { offset, len, crc, encoding } };
+        let asked = Asked { key, part };
         match self.serving.part(asked).await {
             Ok(Some(bytes)) => {
                 SERVED.fetch_add(1, Ordering::Relaxed);
@@ -179,7 +170,7 @@ impl proto::peer_server::Peer for Server {
             }
             Ok(None) => {
                 SERVED_MISSING.fetch_add(1, Ordering::Relaxed);
-                Err(Status::not_found(format!("part {part}: not as asked")))
+                Err(Status::not_found(format!("part {part}: none")))
             }
             Err(err) => {
                 log::warn!("extentd: serving a peer part {part}: {err}");
@@ -211,20 +202,8 @@ struct Grpc {
 
 impl Link for Grpc {
     fn get(&self, asked: Asked) -> BoxFuture<'static, Result<Option<Vec<u8>>, String>> {
-        let Asked { key, part, stored } = asked;
-        let encoding = match stored.encoding {
-            Encoding::Raw => proto::Encoding::Raw,
-            Encoding::Zstd => proto::Encoding::Zstd,
-        };
-        let request = GetPartRequest {
-            bucket: self.bucket.clone(),
-            key,
-            part,
-            offset: stored.offset,
-            len: stored.len,
-            crc: stored.crc,
-            encoding: encoding.into(),
-        };
+        let Asked { key, part } = asked;
+        let request = GetPartRequest { bucket: self.bucket.clone(), key, part };
         let mut client = self.client.clone();
         async move {
             match client.get_part(request).await {

@@ -84,7 +84,7 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
     use extent_remote::Error;
     match failure {
-        Failure::Remote(Error::Fenced | Error::Displaced | Error::Deleted | Error::Point) => {
+        Failure::Remote(Error::Fenced | Error::Deleted | Error::Point) => {
             Some(Errno::EROFS)
         }
         Failure::Remote(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
@@ -405,13 +405,13 @@ pub struct Serving {
 }
 
 impl Serving {
-    /// The stored bytes of the part `asked` names, if the host has it as stored so: kept, or
+    /// The stored bytes of the part `asked` names, if the host has it: kept, or
     /// fetched from the bucket once, however many ask, on the remotes' runtime.
     pub async fn part(&self, asked: peers::Asked) -> Result<Option<Arc<[u8]>>, Failure> {
         let parts = self.parts.clone();
         let serving = self.runtime.spawn(async move {
-            let peers::Asked { key, part, stored } = asked;
-            Ok(parts.stored_part(&key, part, &stored).await?)
+            let peers::Asked { key, part } = asked;
+            Ok(parts.stored_part(&key, part).await?)
         });
         serving.await.map_err(|err| Failure::local(err, "serving a peer"))?
     }

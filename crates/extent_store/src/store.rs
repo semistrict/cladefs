@@ -176,7 +176,7 @@ pub struct Info {
     pub available: u64,
     /// One more than the highest sequence number of the store's branch's extents, freed or not
     /// since it opened; and, as it opened, of those it held. fxdax: those freed before, the
-    /// writer's floor is past, each opening's writer minting past its own (doc-7, Fencing).
+    /// writer's floor is past, each opening's writer minting past its own (doc-7, The head).
     pub next_sequence: u64,
     /// fxdax: of the bytes its extents hold, those of the extents its branch wrote, rather than
     /// inherited from the branches it was forked from, which may share them still (TASK-49).

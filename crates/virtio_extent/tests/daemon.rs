@@ -327,7 +327,7 @@ fn roots_and_info() {
             available: (1u64 << 20).to_le(),
             next_sequence: 0,
             // The store's branch is kept in the daemon's bucket: its writer mints from its range,
-            // its first lease's (fxdax's doc-7, Fencing).
+            // its first lease's (fxdax's doc-7, The head).
             sequence_floor: (1u64 << 40).to_le(),
             branch: store.branch().to_le(),
         }

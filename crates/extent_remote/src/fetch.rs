@@ -305,9 +305,8 @@ fn part_of(parts: &extent_frame::Parts, key: &str, part: u64) -> Result<extent_f
 /// its stores read it, within bounds that hold for the host, not for each store (TASK-92.21,
 /// TASK-92.22); and the GETs of parts in flight, which the reads of all of them that want a part
 /// while its GET is in flight share (TASK-92.43). The host's fetchers read one bucket, as they
-/// share one cache: what is kept is kept by key, as the cache keeps it; a part, kept or in flight,
-/// is taken only by a tail that says it is stored as it was, or is fetched by it ([`Flown`]), and a
-/// tail goes once a part fails the CRC it gives.
+/// share one cache: what is kept is kept by key, as the cache keeps it, and a part by its object's
+/// key and its number, which name it for good, as a key is written once (TASK-407).
 #[derive(Default)]
 pub struct Memory {
     tails: Mutex<Tails>,
@@ -444,9 +443,6 @@ enum Part {
     Data(Arc<Fetched>),
     /// The object is gone.
     Gone,
-    /// Its stored bytes fail the CRC its tail gives, or are past the object's end: the object is no
-    /// longer the one the tail is of, another created at its key since, or they are corrupt.
-    Changed,
 }
 
 /// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
@@ -477,9 +473,6 @@ impl Fetched {
     ) -> Result<Arc<[u8]>, Error> {
         if let Some(unpacked) = self.unpacked.get() {
             return Ok(unpacked.clone());
-        }
-        if opened.stored != self.part.stored {
-            return Err(Error::Corrupt(format!("part {part} of {key}, opened as another")));
         }
         let unpacked: Arc<[u8]> = match opened.as_is() {
             true => self.bytes.clone(),
@@ -520,13 +513,10 @@ struct Recent {
 }
 
 impl Recent {
-    /// Part `part` of the object at `key`, if kept, as `stored` says it is stored.
-    fn get(&mut self, key: &str, part: u64, stored: &extent_frame::Stored) -> Option<Arc<Fetched>> {
+    /// Part `part` of the object at `key`, if kept.
+    fn get(&mut self, key: &str, part: u64) -> Option<Arc<Fetched>> {
         let id = (key.to_owned(), part);
         let (used, fetched) = self.parts.get_mut(&id)?;
-        if fetched.part.stored != *stored {
-            return None;
-        }
         self.clock += 1;
         self.by_use.remove(used);
         *used = self.clock;
@@ -559,8 +549,6 @@ impl Recent {
 enum Found {
     Bytes(Vec<u8>),
     Gone,
-    /// The part of the object of this number was changed ([`Part::Changed`]).
-    Changed(u64),
 }
 
 /// The GETs of parts that reads wait for, the reads of a host's fetchers, each until its last
@@ -570,14 +558,12 @@ struct Parts {
     flights: HashMap<Flown, Waited>,
 }
 
-/// What a part's GET fetches, by which reads find it in flight: its object's key, the part's
-/// number, and where and how the tail it goes by says the part is stored. A read joins only a GET
-/// of the part as its own tail says it is stored, which the CRC its tail gives checks: never one
-/// by the tail of another object at the key, as one deleted and one recreated there are, whose
-/// part it would read by its own footer (TASK-92.43). fxdax: and whether it asks the part's owner
-/// first (TASK-406.2): a read a peer asked for asks no other, so that hosts that disagree on its
-/// owner, as peers being added and removed do for a while, never ask each other round in a ring.
-type Flown = (String, u64, extent_frame::Stored, bool);
+/// What a part's GET fetches, by which reads find it in flight: its object's key and the part's
+/// number, which name it for good, as a key is written once (TASK-92.43, TASK-407). fxdax: and
+/// whether it asks the part's owner first (TASK-406.2): a read a peer asked for asks no other, so
+/// that hosts that disagree on its owner, as peers being added and removed do for a while, never
+/// ask each other round in a ring.
+type Flown = (String, u64, bool);
 
 struct Waited {
     /// The budget it has its place in, the fetcher's that sent it, and its place there.
@@ -666,9 +652,9 @@ impl<B: Bucket> Fetcher<B> {
     }
 
     /// `len` bytes at `offset` in `extent`, at `location` or where the collector moved it from
-    /// there: as many as it holds. The object at a key holds the extent where its footer says, if
-    /// it names it; one that names it not, or is gone, the reader follows to its moves. One whose
-    /// parts fail the CRCs its tail, kept, gives is read again, once, by its tail fetched anew.
+    /// there: as many as it holds. The object at a key holds the extent where its footer says; one
+    /// gone, the reader follows to its moves. One there that names it not, or whose parts fail the
+    /// CRCs its tail gives, is corrupt: a key names one object for good (TASK-407).
     pub async fn read(
         &self,
         extent: ExtentId,
@@ -678,13 +664,11 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
     ) -> Result<Vec<u8>, Error> {
         let mut key = location.key.clone();
-        let mut again = true;
-        // Where the object at a key, by its tail, holds the extent: where its footer says.
-        let place = |_: &str, tail: &Tail| tail.extents.get(&extent).copied();
         for _ in 0..MOVES {
-            if let Some(tail) = self.shared.tail(&key).await?
-                && let Some((at, held)) = place(&key, &tail)
-            {
+            if let Some(tail) = self.shared.tail(&key).await? {
+                let Some(&(at, held)) = tail.extents.get(&extent) else {
+                    return Err(Error::Corrupt(format!("{key} holds no {extent:?}, named there")));
+                };
                 let range = at + offset.min(held)..at + offset.saturating_add(len).min(held);
                 if priority == Priority::Demand && !range.is_empty() {
                     self.read_ahead(&key, range.start / PART, (range.end - 1) / PART);
@@ -692,10 +676,6 @@ impl<B: Bucket> Fetcher<B> {
                 match self.data(&key, &tail, range, priority).await? {
                     Found::Bytes(bytes) => return Ok(bytes),
                     Found::Gone => {}
-                    Found::Changed(part) => {
-                        self.changed(&key, &tail, part, &mut again)?;
-                        continue;
-                    }
                 }
             }
             let moved = self.moved(extent, &key).await?;
@@ -708,22 +688,17 @@ impl<B: Bucket> Fetcher<B> {
     /// (doc-7, Checkpoints), rather than read whole: the checkpoint's tail, kept as other objects'
     /// are, holds its table, which says where the block that would hold the extent's entry is; the
     /// block is read by the parts it is in, as extents' data is, within the budget, and kept in the
-    /// cache. One whose parts fail the CRCs its tail, kept, gives is read again, once, by its tail
-    /// fetched anew. A checkpoint gone is lost.
+    /// cache. One whose parts fail the CRCs its tail gives is corrupt. A checkpoint gone is lost.
     pub async fn lookup(&self, key: &str, extent: ExtentId) -> Result<Option<Location>, Error> {
-        let mut again = true;
-        loop {
-            let tail = self.shared.tail(key).await?.ok_or_else(|| Error::Lost(key.to_owned()))?;
-            let Some(table) = &tail.table else {
-                return Err(Error::Corrupt(format!("{key} holds no checkpoint")));
-            };
-            let Some(block) = table.block(extent) else { return Ok(None) };
-            let range = block.offset..block.offset + u64::from(block.len);
-            match self.data(key, &tail, range, Priority::Demand).await? {
-                Found::Bytes(bytes) => return table.find(&bytes, block, extent),
-                Found::Gone => return Err(Error::Lost(key.to_owned())),
-                Found::Changed(part) => self.changed(key, &tail, part, &mut again)?,
-            }
+        let tail = self.shared.tail(key).await?.ok_or_else(|| Error::Lost(key.to_owned()))?;
+        let Some(table) = &tail.table else {
+            return Err(Error::Corrupt(format!("{key} holds no checkpoint")));
+        };
+        let Some(block) = table.block(extent) else { return Ok(None) };
+        let range = block.offset..block.offset + u64::from(block.len);
+        match self.data(key, &tail, range, Priority::Demand).await? {
+            Found::Bytes(bytes) => table.find(&bytes, block, extent),
+            Found::Gone => Err(Error::Lost(key.to_owned())),
         }
     }
 
@@ -752,7 +727,6 @@ impl<B: Bucket> Fetcher<B> {
                     fetched.unpacked(&part_of(&opened, key, number)?, key, number)?
                 }
                 Part::Gone => return Ok(Found::Gone),
-                Part::Changed => return Ok(Found::Changed(number)),
             };
             let at = start + bytes.len() as u64;
             let from = ((at % PART) as usize).min(part.len());
@@ -760,23 +734,6 @@ impl<B: Bucket> Fetcher<B> {
             bytes.extend_from_slice(&part[from..to]);
         }
         Ok(Found::Bytes(bytes))
-    }
-
-    /// Forgets `tail`, kept as the tail of the object at `key`, whose part `part` was changed, so
-    /// that the object is read once more by its tail fetched anew, unless it was `again`: then it
-    /// is corrupt.
-    fn changed(
-        &self,
-        key: &str,
-        tail: &Arc<Tail>,
-        part: u64,
-        again: &mut bool,
-    ) -> Result<(), Error> {
-        if !std::mem::take(again) {
-            return Err(Error::Corrupt(format!("part {part} of {key}, by its CRC, twice")));
-        }
-        self.shared.forget(key, tail);
-        Ok(())
     }
 
     /// The key of the moves of the object at `key` the collector moved `extent` to when it
@@ -833,7 +790,7 @@ impl<B: Bucket> Fetcher<B> {
             let Ok(Some(tail)) = this.shared.tail(&key).await else { return };
             let parts = parts.start..parts.end.min(tail.parts().frame.parts());
             let held = |part: &u64| match (&this.shared.cache, tail.part(&key, *part)) {
-                (Some(cache), Ok(opened)) => cache.holds(&key, *part, &opened.stored),
+                (Some(cache), Ok(_)) => cache.holds(&key, *part),
                 _ => false,
             };
             let parts = parts.filter(|part| !held(part));
@@ -846,31 +803,21 @@ impl<B: Bucket> Fetcher<B> {
         }));
     }
 
-    /// fxdax: the stored bytes of part `part` of the object at `key`, as `stored` says a peer that
-    /// asks for it has it stored (TASK-406.2): if this host's tail of the object says so too, kept
-    /// in its memory or its cache, or fetched from the bucket by one GET, however many ask at once,
-    /// and kept then, never asking another peer. None if the object is gone, or this host has
-    /// another of it at its key: older or newer, as the asker's tail and the CRCs it gives say.
-    pub async fn stored_part(
-        &self,
-        key: &str,
-        part: u64,
-        stored: &extent_frame::Stored,
-    ) -> Result<Option<Arc<[u8]>>, Error> {
+    /// fxdax: the stored bytes of part `part` of the object at `key`, which a peer asks for
+    /// (TASK-406.2): kept in this host's memory or its cache, or fetched from the bucket by one
+    /// GET, however many ask at once, and kept then, never asking another peer. None if the object
+    /// is gone, or holds no such part. The asker checks them against the CRC its own tail gives.
+    pub async fn stored_part(&self, key: &str, part: u64) -> Result<Option<Arc<[u8]>>, Error> {
         let Some(tail) = self.shared.tail(key).await? else { return Ok(None) };
-        if tail.part(key, part).ok().is_none_or(|ours| ours.stored != *stored) {
+        if tail.part(key, part).is_err() {
             return Ok(None);
         }
-        if let Some(fetched) = self.shared.recent_part(key, part, stored) {
+        if let Some(fetched) = self.shared.recent_part(key, part) {
             return Ok(Some(fetched.bytes.clone()));
         }
         match self.flight(key, part, &tail, Priority::Demand, None).await? {
             Part::Data(fetched) => Ok(Some(fetched.bytes.clone())),
             Part::Gone => Ok(None),
-            Part::Changed => {
-                self.shared.forget(key, &tail);
-                Ok(None)
-            }
         }
     }
 
@@ -885,8 +832,7 @@ impl<B: Bucket> Fetcher<B> {
         tail: &Arc<Tail>,
         priority: Priority,
     ) -> Result<Part, Error> {
-        let stored = tail.part(key, part)?.stored;
-        if let Some(fetched) = self.shared.recent_part(key, part, &stored) {
+        if let Some(fetched) = self.shared.recent_part(key, part) {
             return Ok(Part::Data(fetched));
         }
         let owner = self.shared.peers.as_ref().and_then(|peers| peers.owner(key, part));
@@ -894,8 +840,8 @@ impl<B: Bucket> Fetcher<B> {
     }
 
     /// Part `part` of the object at `key`, whose tail is `tail`, by the GET for it in flight, this
-    /// fetcher's or another of the host's, by a tail that says it is stored as `tail` does, asking
-    /// `owner` first or not as it does ([`Flown`]), or a new one. The GET goes, and gives up its
+    /// fetcher's or another of the host's, asking `owner` first or not as it does ([`Flown`]), or
+    /// a new one. The GET goes, and gives up its
     /// place in the budget, once no read waits for it.
     async fn flight(
         &self,
@@ -905,8 +851,8 @@ impl<B: Bucket> Fetcher<B> {
         priority: Priority,
         owner: Option<Arc<dyn Peer>>,
     ) -> Result<Part, Error> {
-        let stored = tail.part(key, part)?.stored;
-        let id: Flown = (key.to_owned(), part, stored, owner.is_some());
+        tail.part(key, part)?;
+        let id: Flown = (key.to_owned(), part, owner.is_some());
         let parts = &self.shared.memory.parts;
         let flight = {
             let mut parts = parts.lock().unwrap();
@@ -974,20 +920,17 @@ impl<B: Bucket> Fetching<B> {
     ) -> Result<Part, Error> {
         let opened = tail.part(key, part)?;
         let stored = opened.stored;
-        if let Some(fetched) = self.recent_part(key, part, &stored) {
+        if let Some(fetched) = self.recent_part(key, part) {
             return Ok(Part::Data(fetched));
         }
-        let bytes = match self.kept(key, part, &stored) {
+        let bytes = match self.kept(key, part) {
             Some(bytes) => bytes,
             None => {
                 let grant = granted.await;
                 let fetched = self.fetch(key, part, &stored, owner).await;
                 drop(grant);
-                let fetched = match fetched {
-                    Ok(fetched) => fetched,
-                    Err(missing) => return Ok(missing),
-                };
-                self.keep(key, tail, part, &fetched);
+                let Some(fetched) = fetched? else { return Ok(Part::Gone) };
+                self.keep(key, part, &fetched);
                 fetched
             }
         };
@@ -1000,41 +943,37 @@ impl<B: Bucket> Fetching<B> {
 
     /// The stored bytes of part `part` of the object at `key`, stored as `stored` says, checked
     /// against its CRC: from `owner`, the host that owns it, if another does and gives them; else
-    /// by a GET of the bucket's. Or what the bucket has instead ([`Part::Gone`],
-    /// [`Part::Changed`]).
+    /// by a GET of the bucket's. None if the object is gone. The bucket's failing the CRC, or past
+    /// the object's end, are corrupt: the object at a key is the one its tail is of, for good
+    /// (TASK-407).
     async fn fetch(
         &self,
         key: &str,
         part: u64,
         stored: &extent_frame::Stored,
         owner: Option<Arc<dyn Peer>>,
-    ) -> Result<Vec<u8>, Part> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         if let Some(owner) = owner
-            && let Some(bytes) = owner.part(key, part, *stored).await
+            && let Some(bytes) = owner.part(key, part).await
         {
             if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() {
-                return Ok(bytes);
+                return Ok(Some(bytes));
             }
             log::warn!("fxdax: part {part} of {key}, from its owner, fails its CRC");
             owner.failed();
         }
         let range = ByteRange::Bounded(stored.range());
         match bucket::get_range(&*self.bucket, key, range).await {
-            Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(fetched),
-            Ok(None) => Err(Part::Gone),
-            Ok(Some(_)) | Err(bucket::Past { .. }) => Err(Part::Changed),
+            Ok(Some(fetched)) if stored.check(&fetched).is_ok() => Ok(Some(fetched)),
+            Ok(None) => Ok(None),
+            Ok(Some(_)) => Err(Error::Corrupt(format!("part {part} of {key}, by its CRC"))),
+            Err(bucket::Past { .. }) => Err(Error::Corrupt(format!("part {part} of {key}, past its end"))),
         }
     }
 
-    /// Part `part` of the object at `key`, stored as `stored` says, if fetched last and kept in the
-    /// host's memory.
-    fn recent_part(
-        &self,
-        key: &str,
-        part: u64,
-        stored: &extent_frame::Stored,
-    ) -> Option<Arc<Fetched>> {
-        self.recent()?.get(key, part, stored)
+    /// Part `part` of the object at `key`, if fetched last and kept in the host's memory.
+    fn recent_part(&self, key: &str, part: u64) -> Option<Arc<Fetched>> {
+        self.recent()?.get(key, part)
     }
 
     /// The parts fetched last, in the host's memory, if it keeps the parts it fetches.
@@ -1050,10 +989,10 @@ impl<B: Bucket> Fetching<B> {
         Some(blocking(|| io(cache)))
     }
 
-    /// The stored bytes of part `part` of the object at `key`, stored as `stored` says, if the
-    /// cache has them: checked, those that fail dropped from the cache ([`Cache::part`]).
-    fn kept(&self, key: &str, part: u64, stored: &extent_frame::Stored) -> Option<Vec<u8>> {
-        match self.cached(|cache| cache.part(key, part, stored))? {
+    /// The stored bytes of part `part` of the object at `key`, if the cache has them: checked,
+    /// those that fail dropped from the cache ([`Cache::part`]).
+    fn kept(&self, key: &str, part: u64) -> Option<Vec<u8>> {
+        match self.cached(|cache| cache.part(key, part))? {
             Ok(bytes) => bytes,
             Err(err) => {
                 log::warn!("fxdax: reading part {part} of {key} from the cache: {err}");
@@ -1063,9 +1002,8 @@ impl<B: Bucket> Fetching<B> {
     }
 
     /// Keeps `bytes`, part `part`'s stored bytes, checked, in the cache.
-    fn keep(&self, key: &str, tail: &Tail, part: u64, bytes: &[u8]) {
-        let stored = &tail.parts().stored[part as usize];
-        if let Some(Err(err)) = self.cached(|cache| cache.keep_part(key, part, stored, bytes)) {
+    fn keep(&self, key: &str, part: u64, bytes: &[u8]) {
+        if let Some(Err(err)) = self.cached(|cache| cache.keep_part(key, part, bytes)) {
             log::warn!("fxdax: keeping part {part} of {key} in the cache: {err}");
         }
     }
@@ -1129,22 +1067,6 @@ impl<B: Bucket> Fetching<B> {
     fn keep_tail(&self, key: &str, tail: &object::Tail) {
         if let Some(Err(err)) = self.cached(|cache| cache.keep_tail(key, tail)) {
             log::warn!("fxdax: keeping the tail of {key} in the cache: {err}");
-        }
-    }
-
-    /// Forgets `tail`, kept as the tail of the object at `key`, if it still is: the object is read
-    /// by its tail fetched anew. The cache's copy of the object goes first, so that no read after
-    /// finds it there.
-    fn forget(&self, key: &str, tail: &Arc<Tail>) {
-        if let Some(Err(err)) = self.cached(|cache| cache.forget(key)) {
-            log::warn!("fxdax: dropping {key} from the cache: {err}");
-        }
-        let mut tails = self.memory.tails.lock().unwrap();
-        let kept = tails.kept.get(key).map(|kept| (kept.read, kept.flight.peek()));
-        if let Some((read, Some(Ok(Some(kept))))) = kept
-            && Arc::ptr_eq(kept, tail)
-        {
-            tails.remove(key, Some(read));
         }
     }
 }
@@ -1488,41 +1410,23 @@ mod tests {
         assert!(fetcher.shared.memory.parts.lock().unwrap().flights.is_empty());
     }
 
-    /// A part that fails its CRC is fetched again, once, by its object's tail fetched anew;
-    /// failing again, the read fails.
+    /// A part that fails its CRC is corrupt, and the read fails: the object at a key is the one its
+    /// tail is of, for good (TASK-407). Before, it was fetched again, once, by its object's tail
+    /// fetched anew, as an object recreated at its key would have it read.
     #[test]
-    fn parts_failing_their_crcs_are_fetched_again_once() {
+    fn parts_failing_their_crcs_are_corrupt() {
         let data = noise(PART + 100);
         let bucket = bucket(&data);
         let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
         let mut reads = Reads::new();
-        let location = location(PART + 100);
-        let good = whole(&data);
-        let mut flipped = good.clone();
+        let mut flipped = whole(&data);
         flipped[PART as usize + 7] ^= 1;
-        let put = |bytes: &[u8]| {
-            block_on(Direct(bucket.clone()).put(KEY, bytes.to_vec().into(), PutMode::Overwrite))
-                .unwrap();
-        };
+        block_on(Direct(bucket.clone()).put(KEY, flipped.into(), PutMode::Overwrite)).unwrap();
+        let read = reads.read(&fetcher, location(PART + 100), PART, 100, Priority::Demand);
         let (tail, part) =
             (format!("get {KEY} last {TAIL}"), format!("get {KEY} {PART}..{}", PART + 100));
-
-        // Corrupt when first read, whole when read again.
-        put(&flipped);
-        let read = reads.read(&fetcher, location.clone(), PART, 100, Priority::Demand);
-        bucket.complete(bucket.position("last").unwrap(), Fault::None);
-        reads.run();
-        bucket.complete(0, Fault::None);
-        reads.run();
-        put(&good);
-        assert_eq!(complete_all(&bucket, &mut reads), [tail.clone(), part.clone()]);
-        assert_eq!(reads.result(read), Some(Ok(data[PART as usize..].to_vec())));
-
-        // Corrupt both times.
-        put(&flipped);
-        let read = reads.read(&fetcher, location, PART, 100, Priority::Demand);
-        assert_eq!(complete_all(&bucket, &mut reads), [part.clone(), tail, part]);
-        let corrupt = format!("part 1 of {KEY}, by its CRC, twice");
+        assert_eq!(complete_all(&bucket, &mut reads), [tail, part]);
+        let corrupt = format!("part 1 of {KEY}, by its CRC");
         assert_eq!(reads.result(read), Some(Err(Error::Corrupt(corrupt))));
     }
 
@@ -1547,10 +1451,9 @@ mod tests {
         assert_eq!(reads.result(read), want);
     }
 
-    /// A part kept that fails its CRC is dropped and fetched; fetched twice failing it, the second
-    /// time by its object's tail fetched anew, the read fails. Read by a fetcher with a memory of
-    /// its own each time, which holds none of it: the part, and its object's tail, are in the
-    /// cache only.
+    /// A part kept that fails its CRC is dropped and fetched; fetched failing it too, the read
+    /// fails, corrupt. Read by a fetcher with a memory of its own each time, which holds none of
+    /// it: the part, and its object's tail, are in the cache only.
     #[test]
     fn parts_kept_failing_their_crcs_are_fetched() {
         let data = noise(PART);
@@ -1570,12 +1473,9 @@ mod tests {
         // The bucket's is whole.
         let read = reads.read(&fetcher(), location(PART), 0, 10, Priority::Demand);
         let part = format!("get {KEY} 0..{PART}");
-        let tail = format!("get {KEY} last {TAIL}");
         assert_eq!(complete_all(&bucket, &mut reads), std::slice::from_ref(&part));
         assert_eq!(reads.result(read), Some(Ok(data[..10].to_vec())));
-        let stored =
-            extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap().stored[0];
-        assert_eq!(cache.part(KEY, 0, &stored).unwrap(), Some(data.clone()));
+        assert_eq!(cache.part(KEY, 0).unwrap(), Some(data.clone()));
 
         // Neither is.
         let mut kept = std::fs::read(cache.path(KEY)).unwrap();
@@ -1585,10 +1485,10 @@ mod tests {
         flip(&mut object);
         block_on(Direct(bucket.clone()).put(KEY, object.into(), PutMode::Overwrite)).unwrap();
         let read = reads.read(&fetcher(), location(PART), 0, 10, Priority::Demand);
-        assert_eq!(complete_all(&bucket, &mut reads), [part.clone(), tail, part]);
-        let corrupt = format!("part 0 of {KEY}, by its CRC, twice");
+        assert_eq!(complete_all(&bucket, &mut reads), [part]);
+        let corrupt = format!("part 0 of {KEY}, by its CRC");
         assert_eq!(reads.result(read), Some(Err(Error::Corrupt(corrupt))));
-        assert_eq!(cache.part(KEY, 0, &stored).unwrap(), None);
+        assert_eq!(cache.part(KEY, 0).unwrap(), None);
     }
 
     /// Reads read ahead the part after them, and twice as many each time they go on where the
@@ -1714,17 +1614,6 @@ mod tests {
         assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
     }
 
-    /// The collector compacts the segment of `data` at [`KEY`] in `bucket` ([`compacted`]); and a
-    /// writer taken over, its create landing late, creates another segment at its key, as long,
-    /// whose footer names another extent where [`EXTENT`] was.
-    fn compacted_and_recreated(bucket: &Arc<SimBucket>, data: &[u8]) {
-        compacted(bucket, data);
-        let direct = Direct(bucket.clone());
-        let other: Vec<u8> = data.iter().map(|byte| byte ^ 0x5a).collect();
-        let stale = segment(&other, vec![(ExtentId::new(1, 9), MOVED.0, MOVED.1)]);
-        block_on(direct.put(KEY, stale.into(), PutMode::Create)).unwrap();
-    }
-
     /// Reads 50 bytes at 100 in [`EXTENT`], at [`MOVED`] in the object at [`KEY`], with `fetcher`.
     fn read_moved(bucket: &SimBucket, fetcher: &Rc<Fetcher<SimBucket>>) -> Option<Read> {
         let mut reads = Reads::new();
@@ -1734,46 +1623,16 @@ mod tests {
         reads.result(read)
     }
 
-    /// TASK-79.18: a read of an extent at a key where a writer taken over recreated an object the
-    /// collector deleted, whose footer names other extents, reads the extent where the collector
-    /// moved it, not the bytes the object holds there.
+    /// A read by a fetcher that kept the tail of an object the collector compacted and deleted since
+    /// finds its part gone, and reads the extent where the collector moved it: as the object at a
+    /// key is the one its tail is of, for good (TASK-407), a tail kept is never another's.
     #[test]
-    fn reads_follow_moves_past_objects_recreated_at_their_keys() {
-        let data = noise(3000);
-        let bucket = holding_moved(&data);
-        compacted_and_recreated(&bucket, &data);
-        let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
-        assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
-    }
-
-    /// TASK-79.18: so does a read by a fetcher that kept the tail of the object deleted, whose
-    /// parts the one recreated fails the CRCs of.
-    #[test]
-    fn reads_by_tails_kept_follow_moves_past_objects_recreated_at_their_keys() {
+    fn reads_by_tails_kept_follow_moves_of_objects_gone() {
         let data = noise(3000);
         let bucket = holding_moved(&data);
         let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
         assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
-        compacted_and_recreated(&bucket, &data);
-        assert_eq!(read_moved(&bucket, &fetcher), Some(Ok(data[1100..1150].to_vec())));
-    }
-
-    /// TASK-92.22: so does a read by a fetcher whose memory holds none of the object, as once the
-    /// host's let it go, which finds the tail of the object deleted in the cache, but not the part
-    /// holding the extent: the part of the object recreated fails the tail's CRC, and the tail,
-    /// forgotten in the cache too, is read anew, from the bucket.
-    #[test]
-    fn reads_by_tails_kept_in_the_cache_follow_moves_past_objects_recreated_at_their_keys() {
-        let data = noise(3000);
-        let bucket = holding_moved(&data);
-        let dir = tempfile::tempdir().unwrap();
-        let cache = Arc::new(Cache::open(dir.path(), 8 * PART, 0).unwrap());
-        let fetcher =
-            || Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), Some(cache.clone())));
-        assert_eq!(read_moved(&bucket, &fetcher()), Some(Ok(data[1100..1150].to_vec())));
-        cache.forget_part(KEY, 0).unwrap();
-        compacted_and_recreated(&bucket, &data);
-        let fetcher = fetcher();
+        compacted(&bucket, &data);
         let mut reads = Reads::new();
         let at = Location { key: KEY.into(), offset: MOVED.0, len: MOVED.1 };
         let read = reads.read(&fetcher, at, 100, 50, Priority::Demand);
@@ -1784,58 +1643,12 @@ mod tests {
             complete_all(&bucket, &mut reads),
             [
                 format!("get {KEY} 0..3000"),
-                format!("get {KEY} last {TAIL}"),
                 format!("list {}", layout::moves_of(KEY).unwrap()),
                 format!("get {moves} last {TAIL}"),
                 format!("get {moves} {:?}", moved.unwrap().stored[0].range()),
             ]
         );
         assert_eq!(reads.result(read), Some(Ok(data[1100..1150].to_vec())));
-    }
-
-    /// TASK-79.40: so does a read by a fetcher that kept the tail of the object deleted, the part
-    /// holding the extent past the end of the one recreated, shorter: the read of the part, which
-    /// object storage refuses, is not retried for ever, but shows the object changed.
-    #[test]
-    fn reads_by_tails_kept_past_the_end_of_objects_recreated_follow_moves() {
-        let data = noise(PART + 3000);
-        let at = (PART + 1000, 1000);
-        let bucket = holding(segment(&data, vec![(EXTENT, at.0, at.1)]));
-        let fetcher = Rc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
-        let location = Location { key: KEY.into(), offset: at.0, len: at.1 };
-        let read = || {
-            let mut reads = Reads::new();
-            let read = reads.read(&fetcher, location.clone(), 100, 50, Priority::Demand);
-            let asked = complete_all(&bucket, &mut reads);
-            (reads.result(read), asked)
-        };
-        let want = data[(at.0 + 100) as usize..][..50].to_vec();
-        assert_eq!(read().0, Some(Ok(want.clone())));
-        // Compacted, then a segment far shorter recreated at its key.
-        let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len: at.1 };
-        let moved = data[at.0 as usize..][..at.1 as usize].to_vec();
-        let moves =
-            layout::with_footer(&moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
-        block_on(direct.delete(KEY)).unwrap();
-        let stale = segment(&noise(100), vec![(ExtentId::new(1, 9), 0, 100)]);
-        block_on(direct.put(KEY, stale.into(), PutMode::Create)).unwrap();
-
-        let (read, asked) = read();
-        assert_eq!(read, Some(Ok(want)));
-        let moves = layout::moves(KEY, 1).unwrap();
-        assert_eq!(
-            asked,
-            [
-                format!("get {KEY} {}..{}", PART, PART + 3000),
-                format!("head {KEY}"),
-                format!("get {KEY} last {TAIL}"),
-                format!("list {}", layout::moves_of(KEY).unwrap()),
-                format!("get {moves} last {TAIL}"),
-                format!("get {moves} 0..{}", at.1),
-            ]
-        );
     }
 
     /// A read of an extent by a fetcher of its own ([`read`]) asks for its object's tail, then for
@@ -2299,62 +2112,6 @@ mod tests {
         assert_eq!(reads.result(second), Some(Ok(data[PART as usize..][..10].to_vec())));
     }
 
-    /// TASK-92.43's review: a read of a part by a tail of an object deleted since joins no GET of
-    /// the part that another read sent by the tail of the object recreated at its key: it would
-    /// take the part of the one by the CRC of the other's tail, and its bytes where the other's
-    /// footer says. Here the first read's tail lands, then the object at [`KEY`], holding
-    /// [`EXTENT`] in its second part, is compacted and recreated, holding another extent there,
-    /// and the tail it read forgotten, before the read goes on; another fetcher of the host reads
-    /// the extent the one recreated holds meanwhile, by its tail, from the same part. The first
-    /// reads the extent where it moved, its part failing its tail's CRC.
-    #[test]
-    fn reads_by_tails_of_objects_deleted_join_no_gets_of_those_recreated_at_their_keys() {
-        let data = noise(2 * PART);
-        let (at, len) = (PART, 100);
-        let bucket = holding(segment(&data, vec![(EXTENT, at, len)]));
-        let (budget, memory) = (limits(8), Memory::new());
-        let fetcher =
-            || Rc::new(Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), None));
-        let (deleted, recreated) = (fetcher(), fetcher());
-        let location = Location { key: KEY.into(), offset: at, len };
-        let mut first = Reads::new();
-        let read = first.read(&deleted, location.clone(), 0, 50, Priority::Demand);
-        assert_eq!(bucket.describe(0), format!("get {KEY} last {TAIL}"));
-        bucket.complete(0, Fault::None);
-
-        let direct = Direct(bucket.clone());
-        let to = Location { key: layout::moves(KEY, 1).unwrap(), offset: 0, len };
-        let moved = &data[at as usize..][..len as usize];
-        let moves =
-            layout::with_footer(moved, &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] });
-        block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create)).unwrap();
-        block_on(direct.delete(KEY)).unwrap();
-        let other: Vec<u8> = data.iter().map(|byte| byte ^ 0x5a).collect();
-        let other_extent = ExtentId::new(1, 9);
-        let stale = segment(&other, vec![(other_extent, at, len)]);
-        block_on(direct.put(KEY, stale.into(), PutMode::Create)).unwrap();
-        memory.tails.lock().unwrap().remove(KEY, None);
-        let mut second = Reads::new();
-        let theirs = second.read_of(&recreated, other_extent, location, 0, 50, Priority::Demand);
-        assert_eq!(bucket.describe(0), format!("get {KEY} last {TAIL}"));
-        bucket.complete(0, Fault::None);
-        second.run();
-        let part = format!("get {KEY} {at}..{}", 2 * PART);
-        assert_eq!(bucket.describe(0), part);
-
-        // A GET of the part by each tail.
-        first.run();
-        let asked: Vec<_> = (0..bucket.waiting()).map(|index| bucket.describe(index)).collect();
-        assert_eq!(asked, [part.clone(), part]);
-        while bucket.waiting() > 0 {
-            bucket.complete(0, Fault::None);
-            first.run();
-            second.run();
-        }
-        assert_eq!(second.result(theirs), Some(Ok(other[at as usize..][..50].to_vec())));
-        assert_eq!(first.result(read), Some(Ok(data[at as usize..][..50].to_vec())));
-    }
-
     /// TASK-92.21: a host's fetchers, one for each of its stores, keep no more than [`RECENT`]
     /// bytes of parts in memory in all, however many of them there are: here four, each reading
     /// 24 MiB of an object of its own.
@@ -2662,19 +2419,14 @@ mod tests {
     }
 
     impl Peer for Owner {
-        fn part(
-            &self,
-            key: &str,
-            part: u64,
-            stored: extent_frame::Stored,
-        ) -> BoxFuture<'static, Option<Vec<u8>>> {
+        fn part(&self, key: &str, part: u64) -> BoxFuture<'static, Option<Vec<u8>>> {
             self.asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let Some(fetcher) = self.fetcher.clone() else {
-                return futures::future::ready(Some(vec![0xa5; stored.len as usize])).boxed();
+                return futures::future::ready(Some(vec![0xa5; PART as usize])).boxed();
             };
             let key = key.to_owned();
             async move {
-                let served = fetcher.stored_part(&key, part, &stored).await;
+                let served = fetcher.stored_part(&key, part).await;
                 Some(served.unwrap()?.to_vec())
             }
             .boxed()
@@ -2749,33 +2501,32 @@ mod tests {
         assert_eq!(owner.counts(), (2, 2));
     }
 
-    /// TASK-406.2: a peer asks for a part as its own tail says it is stored: one stored otherwise
-    /// by this host's tail, of another object at the key, it isn't given.
+    /// TASK-406.2, TASK-407: a peer asks for a part by its object's key and its number alone, and is
+    /// given its stored bytes; none of a part the object holds not, past its end.
     #[test]
-    fn peers_are_given_only_the_part_they_ask_for() {
+    fn peers_are_given_the_parts_they_ask_for() {
         let data = noise(2 * PART);
         let bucket = bucket(&data);
         let fetcher = Arc::new(Fetcher::new(bucket.clone(), limits(8), Memory::new(), None));
         let mut pool = LocalPool::new();
         let parts = extent_frame::Parts::of(&whole(&data), &extent_frame::NoKeys).unwrap();
         let stored = parts.part(1).unwrap().stored;
-        let mut other = stored;
-        other.crc ^= 1;
         let spawner = pool.spawner();
-        let serving = |stored| {
+        let serving = |part| {
             let fetcher = fetcher.clone();
             spawner
-                .spawn_local_with_handle(async move { fetcher.stored_part(KEY, 1, &stored).await })
+                .spawn_local_with_handle(async move { fetcher.stored_part(KEY, part).await })
                 .unwrap()
         };
-        let served = serving(other);
+        let served = serving(1);
         pool.run_until_stalled();
         bucket.complete(0, Fault::None);
-        assert_eq!(pool.run_until(served), Ok(None));
-        let served = serving(stored);
         pool.run_until_stalled();
         bucket.complete(0, Fault::None);
         let served = pool.run_until(served).unwrap().expect("the part");
         assert_eq!(&*served, &whole(&data)[stored.range().start as usize..][..stored.len as usize]);
+        let past = serving(2);
+        assert_eq!(pool.run_until(past), Ok(None), "the tail kept: no GET");
     }
+
 }
