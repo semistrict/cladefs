@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 04:07'
+updated_date: '2026-11-15 05:09'
 labels: []
 dependencies: []
 documentation:
@@ -27,10 +27,10 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE, credentials from Application Default Credentials gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
-- [ ] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
-- [ ] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
-- [ ] #4 Integration tests: tests against real Cloud KMS in echophase-connectome-test, one test key ring reused (keys cannot be deleted, only versions destroyed), skipped with a message unless credentials are present; CI stays without GCP secrets unless the user says otherwise; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
-- [ ] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
+- [x] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
+- [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
+- [x] #4 Integration tests: tests against real Cloud KMS in echophase-connectome-test, one test key ring reused (keys cannot be deleted, only versions destroyed), skipped with a message unless credentials are present; CI stays without GCP secrets unless the user says otherwise; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
+- [x] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
 <!-- AC:END -->
 
 ## Definition of Done
@@ -59,4 +59,12 @@ Client choice: reqwest 0.13 (rustls, aws-lc-rs, platform verifier) + serde_json 
 Error mapping verified with curl against the service 2026-11-15 (bodies in the unit test refusals_are_mapped_as_cloud_kms_answers_them): NOT_FOUND 'CryptoKey NAME not found.' (also for a missing key ring) -> NoSuchTenant; other NOT_FOUND ('Project ... not found.', KMS_RESOURCE_NOT_FOUND_IN_LOCATION) -> Io; PERMISSION_DENIED (IAM_PERMISSION_DENIED; e.g. projects/cloud-samples-data) -> Revoked; FAILED_PRECONDITION with PreconditionFailure KEY_DISABLED -> Revoked, KEY_DESTROY_SCHEDULED -> Destroyed (KEY_DESTROYED not seen: versions reach DESTROYED a day later; mapped by the same rule, message fallback 'current state is: S.'); INVALID_ARGUMENT on decrypt ('Decryption failed.' wrong AAD, 'the ciphertext is invalid', INDECIPHERABLE_CIPHERTEXT_FOR_CRYPTOKEY) -> Unauthentic, but INVALID_CHECKSUM -> Io (retried); UNAUTHENTICATED (401) -> Io; UNAVAILABLE/INTERNAL/DEADLINE_EXCEEDED/untyped 5xx/429/network -> Io, retried twice (200 ms, 1 s). Timeouts 30 s per call, 10 s connect. State changes took seconds to ~2 min to take effect.
 GCP resources (project echophase-connectome-test): enabled cloudkms.googleapis.com; key ring projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test; keys (SOFTWARE, GOOGLE_SYMMETRIC_ENCRYPTION, destroyScheduledDuration 86400s): fxdax-probe (curl probing; versions 1, 2 destroy-scheduled, none enabled), fxdax-test-1 (1 enabled), fxdax-test-2 (rotation test: each run adds a version and destroys the old; 1 enabled), fxdax-test-3 (disable/enable test, 1 enabled), fxdax-test-4 (destroyed-primary test: each run adds one version and destroys all; 0 enabled), fxdax-test-5 (fxdax store test, 1 enabled). Billing: about 4 active software key versions ($0.06/month each, list price) plus $0.03 per 10k operations; destroyed versions are not billed. Keys and the ring can't be deleted. No IAM changes made; no other GCP resource.
 Filed: TASK-411.21 (rotated tenant KEK: old version destroyed shreds older cells; no rewrap), TASK-411.22 (misnamed key ring reads as NoSuchTenant: cells in the clear).
+
+Validation (macOS, 2026-11-15, FXDAX_KMS_GCP_TOKEN set): cargo nextest run -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))': 962 run, 961 passed, 1 killed: fxdax storage::image::tests::flipped_bytes_fail_reads hung >3200 s under load (no KMS on its path; alone 30/30 pass in 0.35 s), filed TASK-425. The 4 kms::gcp::service tests and fxdax sealed_stores_open_through_google_cloud_kms passed in it (rotation 127 s and disable 61 s under load: state changes take effect eventually), and in 2 earlier runs of their own (3-5 s). Without the token they pass, printing why they skip. clippy --all-targets on extent_keys and fxdax: nothing in touched files. Locks: Cargo.lock, vendor/firecracker.lock (scripts/firecracker-cargo.sh --lock; --check passes), guest/tests/Cargo.lock (cargo metadata --locked passes): extent_keys' dependency lists only, no new package. Not done: Linux/ubu1 (not allowed here), scripts/upstream-changes.py --check, the ADC credential path against the service (AC #1 left unchecked for that). Billing caveat: DESTROYED versions are not billed; whether DESTROY_SCHEDULED ones are (a day each here) was not confirmed from the pricing page.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Google Cloud KMS backend (kms/gcp.rs) over the REST API: gcp-kms://projects/P/locations/L/keyRings/R?key=TEMPLATE[&keys=FILE], keys named by KeyNames (ids in the ring or whole resource names for BYOK), encrypt/decrypt with AAD fxdax-tenant:<hex> and CRC32C checks both ways, wrapped bytes behind kms/real.rs's shared header (backend and key name), refusals mapped as the service answered them (curl probes plus real-service tests), bounded retries for transient failures. Credentials: object_store's ADC provider (as gs:// buckets), FXDAX_KMS_GCP_TOKEN for development; no new crate. Verified: unit tests on recorded service bodies; 4 tests against real Cloud KMS (wrap/unwrap/tenant binding, rotation, disabled -> Revoked, destroy-scheduled -> Destroyed) and an fxdax store sealed end to end with FXDAX_KMS=gcp-kms://, all passing; broad macOS suite 961/962 (one unrelated hang, TASK-425). Open: Linux run, the ADC path against the service (AC #1), DoD items. Docs: doc-16 'Real KMSes: Google Cloud KMS', README. Filed TASK-411.21, .22, TASK-425.
+<!-- SECTION:FINAL_SUMMARY:END -->
