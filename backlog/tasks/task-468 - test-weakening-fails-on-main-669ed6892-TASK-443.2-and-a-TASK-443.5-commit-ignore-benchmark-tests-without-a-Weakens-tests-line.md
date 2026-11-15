@@ -44,4 +44,12 @@ Main CI run 43758893191 (a252cb53f): job 'Commits that weaken checks say why' fa
 Cause: test-ignored flagged every added #[ignore]/#[should_panic]/skip line, even on a test the same commit adds; the check runs on each push's range, so main's push bringing 669ed6892 and c563138a6 failed. No after-the-fact reason mechanism exists, and none is needed for history: later pushes' ranges lack these commits. But every new benchmark or panic test would fail again (880a20f59, 85b163d62, f8dbd42c2, 7abc39092, 78b94e218 were flagged the same way). Moving benchmarks out (an examples/bench target) wasn't the fix: they use the crates' private test helpers, and should_panic tests are real tests that can't move.
 Fix (5f84230ea): an ignoring line on a test the commit adds isn't flagged: the function it applies to (after an attribute or decorator, else the one it is in), of a name its file didn't define before nor any removed line of the commit, in one added run with the ignoring line and its test attribute. Ignore lines moved as they are aren't flagged either, as the docstring already said of every rule.
 Evidence: scripts/tests/test_test_weakening.py, four new tests (added ignored, should_panic, Python skipTest: not flagged; existing test ignored beside an added one, renamed and ignored, moved with another reason: flagged; ignored test moved as it is: not), failed before the fix and pass after (21/21). Over main's last 400 commits the new script drops exactly the flags of those seven commits; 815409fb8 (the rename, test names renamed) is still flagged and is history. scripts/test-weakening.py a252cb53f..origin/main and over this push's commits: exit 0. Mac scripts part passes.
+
+Commit hash: the fix is 69cf424d9 (5f84230ea above was its pre-amend hash, never pushed). Pushed to main as b66fc7394..464e6e201; CI run 43762655434 queued at the time of writing: DoD #1 (workspace on macOS and Linux) left to it, as these commits change no workspace code.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+test-weakening.py no longer flags an ignore/should_panic/skip on a test the commit adds, nor an ignore line moved as it is (69cf424d9); existing tests ignored (also beside an added test, renamed, or moved with another reason) stay flagged. Four new script tests; over main's last 400 commits only the seven new-test commits' flags drop. History needs no reason: later pushes' ranges lack 669ed6892/c563138a6. DoD #1 awaits main's CI run 43762655434.
+<!-- SECTION:FINAL_SUMMARY:END -->

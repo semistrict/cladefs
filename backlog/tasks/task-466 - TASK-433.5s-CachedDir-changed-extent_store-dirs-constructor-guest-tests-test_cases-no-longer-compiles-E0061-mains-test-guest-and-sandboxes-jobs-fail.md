@@ -46,3 +46,9 @@ Evidence: ubu1 (fxjob t466-guest, own worktree and target): guest/tests builds; 
 test.sh: not changed. Its guest part, default on Linux and CI's test (guest) job, already builds guest/tests, and that job caught this. On macOS it can't build (cladefs::extentd Linux-only); cargo check --target x86_64-unknown-linux-gnu fails at zstd-sys's build script without a Linux C cross compiler, so no cheap macOS check exists. The gap was a signature change verified on macOS only.
 scripts/upstream-changes.py --check passes; nothing upstream touched (DoD #3: no deviation).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+copy_store calls HostDir::new(from), the API since 38c8470dd (50a3c9d62). Verified on ubu1: guest/tests builds, host 127/127, guest 99/99 (19 root-only skipped), runner 9/9. scripts/test.sh unchanged: its guest part (Linux default, CI's test (guest)) already builds guest/tests; macOS can't build it, and a cross check needs a Linux C toolchain. DoD #1 awaits main's CI run 43762655434.
+<!-- SECTION:FINAL_SUMMARY:END -->

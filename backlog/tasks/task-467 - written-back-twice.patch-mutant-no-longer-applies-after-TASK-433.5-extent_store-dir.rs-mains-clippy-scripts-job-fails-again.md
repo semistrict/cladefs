@@ -44,3 +44,9 @@ Cause: HostFile became CachedFile<DiskFile> in 38c8470dd, so the patch's HostFil
 Evidence: ubu1 (fxjob t467-killer): the killer remote::write_budgets::a_hosts_store_writes_what_its_design_says passes without it (8.7 s); crates/cladefs/mutants.sh written-back-twice: killed, 'the kernel wrote 2263 MiB for the store, which says 783 MiB in 5109 writes: 803 MiB at most'; tree clean afterwards. Mac: CLADEFS_TEST_PARTS=scripts scripts/test.sh passes (431 script tests; every mutant set checked, 0 broken; firecracker-cargo --check).
 scripts/upstream-changes.py --check passes; nothing upstream touched.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+written-back-twice.patch re-anchored on CachedFile::write_back (01c98e99a), the same mutation. ubu1: the killer passes without it, mutants.sh kills it (kernel wrote 2263 MiB vs the store's 783 MiB). macOS scripts part passes. DoD #1 awaits main's CI run 43762655434.
+<!-- SECTION:FINAL_SUMMARY:END -->
