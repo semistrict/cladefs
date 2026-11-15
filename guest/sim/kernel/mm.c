@@ -12,6 +12,7 @@
 #include <sim/sim.h>
 #include <sim/host.h>
 #include <sim/shadow.h>
+#include <sim/spec_trace.h>
 #include <linux/dax.h>
 
 /*
@@ -179,6 +180,7 @@ vm_fault_t vmf_insert_page_mkwrite(struct vm_fault *vmf, struct page *page, bool
 		}
 		pte->pte |= SIM_PT_WRITE | SIM_PT_DIRTY;
 		watch(addr, "made writable", pte->pte);
+		sim_spec_pte_writable(vma, addr);
 		return VM_FAULT_NOPAGE;
 	}
 	value.pte = (pfn << PAGE_SHIFT) | SIM_PT_PRESENT;
@@ -191,6 +193,8 @@ vm_fault_t vmf_insert_page_mkwrite(struct vm_fault *vmf, struct page *page, bool
 	*pte = value;
 	pmd_of(vma, addr)->pmd |= SIM_PT_TABLE;
 	watch(addr, "inserted", value.pte);
+	if (pte_write(value))
+		sim_spec_pte_writable(vma, addr);
 	return VM_FAULT_NOPAGE;
 }
 
@@ -372,25 +376,32 @@ int walk_page_mapping(struct address_space *mapping, pgoff_t first_index, pgoff_
 	return 0;
 }
 
-/* As mm/mapping_dirty_helpers.c's: a writable PMD can't be write-protected, and WARNs. */
+/*
+ * As mm/mapping_dirty_helpers.c's: a writable PMD can't be write-protected, and WARNs. A page at a
+ * time, in every mapping, which a trace of the run takes as a step each (kernel/spec_trace.c).
+ */
 unsigned long wp_shared_mapping_range(struct address_space *mapping, pgoff_t first_index,
 				      pgoff_t nr)
 {
 	struct vm_area_struct *vma;
 	unsigned long from, to, addr, total = 0;
+	pgoff_t index;
 
 	i_mmap_lock_read(mapping);
-	for_each_mapped(vma, mapping, first_index, nr, from, to) {
-		for (addr = from; addr < to; addr += PAGE_SIZE) {
-			pte_t *pte = pte_of(vma, addr);
+	for (index = first_index; index < first_index + nr; index++) {
+		for_each_mapped(vma, mapping, index, 1, from, to) {
+			for (addr = from; addr < to; addr += PAGE_SIZE) {
+				pte_t *pte = pte_of(vma, addr);
 
-			WARN_ON(pmd_write(*pmd_of(vma, addr)));
-			if (pte_write(*pte)) {
-				pte->pte &= ~SIM_PT_WRITE;
-				watch(addr, "write-protected", pte->pte);
-				total++;
+				WARN_ON(pmd_write(*pmd_of(vma, addr)));
+				if (pte_write(*pte)) {
+					pte->pte &= ~SIM_PT_WRITE;
+					watch(addr, "write-protected", pte->pte);
+					total++;
+				}
 			}
 		}
+		sim_spec_protected(mapping, index);
 	}
 	i_mmap_unlock_read(mapping);
 	return total;
@@ -413,6 +424,8 @@ int pfn_mkclean_range(unsigned long pfn, unsigned long nr_pages, pgoff_t pgoff,
 		pte = pte_of(vma, addr);
 		if (pte_present(*pte) && pte_pfn(*pte) == pfn + i &&
 		    (pte->pte & (SIM_PT_WRITE | SIM_PT_DIRTY))) {
+			if (pte_write(*pte))
+				sim_spec_cleaned(vma, at);
 			pte->pte &= ~(SIM_PT_WRITE | SIM_PT_DIRTY);
 			watch(addr, "cleaned", pte->pte);
 			cleaned++;
@@ -496,6 +509,7 @@ static vm_fault_t handle_fault(struct vm_area_struct *vma, unsigned long addr, b
 		if (ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE))
 			return ret;
 		pte->pte |= SIM_PT_WRITE | SIM_PT_DIRTY;
+		sim_spec_pte_writable(vma, addr);
 	}
 	return 0;
 }
@@ -544,6 +558,8 @@ size_t sim_copy_user(unsigned long addr, void *buf, size_t len, bool write)
 
 			if (pagefault_disabled())
 				break;
+			if (write)
+				sim_spec_user_store(vma, addr, false);
 			sim_mm_faults++;
 			/* The kernel's mmap_lock: a fault keeps its VMA, as a task unmaps it. */
 			down_read(&mm->lock);
@@ -564,9 +580,10 @@ size_t sim_copy_user(unsigned long addr, void *buf, size_t len, bool write)
 				break;
 			continue;
 		}
-		if (write)
+		if (write) {
+			sim_spec_user_store(vma, addr, true);
 			memcpy(at, buf + done, part);
-		else
+		} else
 			memcpy(buf + done, at, part);
 		addr += part;
 		done += part;

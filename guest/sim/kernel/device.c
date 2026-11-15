@@ -20,6 +20,7 @@
 
 #include <sim/sim.h>
 #include <sim/host.h>
+#include <sim/spec_trace.h>
 #include <linux/dax.h>
 #include <linux/virtio_extent.h>
 
@@ -147,6 +148,7 @@ void sim_device_wrote(u64 sequence, u64 page, u64 pages)
 		sim_panic("a write to extent %llu, which is sealed", sequence);
 	extent->held = true;
 	extent->length = max(extent->length, page + pages);
+	sim_spec_device_wrote();
 }
 
 bool sim_device_sealed(u64 sequence)
@@ -172,6 +174,7 @@ void sim_device_seal(void)
 {
 	struct extent *extent;
 
+	sim_spec_seal();
 	list_for_each_entry(extent, &device.extents, list)
 		extent->sealed |= extent->held;
 }

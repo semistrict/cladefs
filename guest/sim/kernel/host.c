@@ -314,6 +314,18 @@ _Noreturn void host_end(int status)
 	exit(status);
 }
 
+void host_write_file(const char *path, const void *buf, size_t len, bool append)
+{
+	FILE *out = fopen(path, append ? "a" : "w");
+
+	if (!out)
+		die(path);
+	if (len && fwrite(buf, 1, len, out) != len)
+		die(path);
+	if (fclose(out))
+		die(path);
+}
+
 const char *host_getenv(const char *name)
 {
 	return getenv(name);

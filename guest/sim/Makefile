@@ -10,6 +10,7 @@ KERNEL ?= $(HOME)/fxdax-guest-kernel/kernel6.18-6.18.54-121.166.amzn2023-arm64
 BUILD ?= build
 FXFS := ../linux/fs/fxfs
 CC := clang
+comma := ,
 # COV=1 has llvm-cov say what of the real sources a run reached.
 COVERAGE := $(if $(filter 1,$(COV)),-fprofile-instr-generate -fcoverage-mapping)
 
@@ -28,7 +29,14 @@ CFLAGS := -std=gnu11 -g -O1 -nostdinc -D__KERNEL__ -DKBUILD_MODNAME='"fxfs"' \
 	-Wno-frame-address -Wno-gnu-variable-sized-type-not-at-end \
 	-fno-strict-aliasing -fno-omit-frame-pointer -fsanitize=address,undefined $(COVERAGE)
 HOSTFLAGS := -std=gnu11 -g -O1 -Wall -fno-omit-frame-pointer -fsanitize=address,undefined
-LDFLAGS := -fsanitize=address,undefined -fuse-ld=lld -Wl,--no-demangle $(COVERAGE)
+# What kernel/spec_trace.c traces as a run's steps, as it is called: pages.c's transitions, and the
+# model of Fxfs's writeback and lookups of extents, wrapped, so that dax.c is as it is.
+WRAPPED := fxfs_dax_pages_new fxfs_dax_pages_free fxfs_dax_pages_fill fxfs_dax_pages_rebind \
+	fxfs_dax_pages_dirty fxfs_dax_pages_private_ahead fxfs_dax_pages_swap \
+	fxfs_dax_pages_redirty fxfs_dax_pages_cut fxfs_dax_pages_unmap fxfs_write_many \
+	fxfs_dax_extents
+LDFLAGS := -fsanitize=address,undefined -fuse-ld=lld -Wl,--no-demangle \
+	$(patsubst %,-Wl$(comma)--wrap=%,$(WRAPPED)) $(COVERAGE)
 
 ALIASES := $(shell sed -e '/^\#/d' -e 's/^[^:]*://' shim/ALIASES)
 

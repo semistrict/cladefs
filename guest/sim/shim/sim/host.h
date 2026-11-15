@@ -53,6 +53,8 @@ __noreturn void host_exit(int status);
 void host_at_exit(void (*fn)(void));
 __noreturn void host_end(int status);
 void host_write_log(const char *line, size_t len);
+/* Writes `len` bytes at `buf` to the file at `path`, after what it holds if `append`. */
+void host_write_file(const char *path, const void *buf, size_t len, bool append);
 /* The process's environment's `name`, or NULL. */
 const char *host_getenv(const char *name);
 

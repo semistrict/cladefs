@@ -10,6 +10,7 @@
 
 #include <sim/sim.h>
 #include <sim/host.h>
+#include <sim/spec_trace.h>
 
 /* A task waiting for a lock, on its stack. */
 struct waiter {
@@ -139,6 +140,7 @@ bool mutex_trylock(struct mutex *lock)
 		return false;
 	lock->owner = current;
 	sim_held_add(lock, true, lock->name);
+	sim_spec_locked(lock, lock->name, true);
 	return true;
 }
 
@@ -156,6 +158,7 @@ void mutex_lock(struct mutex *lock)
 	}
 	lock->owner = current;
 	sim_held_add(lock, true, lock->name);
+	sim_spec_locked(lock, lock->name, true);
 }
 
 void mutex_unlock(struct mutex *lock)
@@ -165,6 +168,7 @@ void mutex_unlock(struct mutex *lock)
 
 	if (lock->owner != current)
 		sim_panic("%s unlocks mutex %s it doesn't hold", current->comm, lock->name);
+	sim_spec_unlocked(lock, lock->name);
 	sim_held_del(lock);
 	lock->owner = NULL;
 	list_for_each_entry(waiter, &lock->waiters, list)
@@ -226,6 +230,7 @@ int down_read_trylock(struct rw_semaphore *sem)
 		return 0;
 	sem->readers++;
 	sim_held_add(sem, false, sem->name);
+	sim_spec_locked(sem, sem->name, false);
 	return 1;
 }
 
@@ -236,6 +241,7 @@ int down_write_trylock(struct rw_semaphore *sem)
 		return 0;
 	sem->writer = current;
 	sim_held_add(sem, true, sem->name);
+	sim_spec_locked(sem, sem->name, true);
 	return 1;
 }
 
@@ -255,6 +261,7 @@ void down_read(struct rw_semaphore *sem)
 		sem->readers++;
 	}
 	sim_held_add(sem, false, sem->name);
+	sim_spec_locked(sem, sem->name, false);
 }
 
 void down_write(struct rw_semaphore *sem)
@@ -272,10 +279,12 @@ void down_write(struct rw_semaphore *sem)
 		sem->writer = current;
 	}
 	sim_held_add(sem, true, sem->name);
+	sim_spec_locked(sem, sem->name, true);
 }
 
 void up_read(struct rw_semaphore *sem)
 {
+	sim_spec_unlocked(sem, sem->name);
 	sim_held_del(sem);
 	if (!--sem->readers)
 		rwsem_grant(sem);
@@ -285,6 +294,7 @@ void up_write(struct rw_semaphore *sem)
 {
 	if (sem->writer != current)
 		sim_panic("%s unlocks rwsem %s it doesn't hold", current->comm, sem->name);
+	sim_spec_unlocked(sem, sem->name);
 	sim_held_del(sem);
 	sem->writer = NULL;
 	rwsem_grant(sem);

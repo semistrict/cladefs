@@ -10,6 +10,7 @@
 #include <sim/sim.h>
 #include <sim/host.h>
 #include <sim/shadow.h>
+#include <sim/spec_trace.h>
 #include <linux/dax.h>
 
 #include "../../linux/fs/fxfs/vfs.h"
@@ -443,12 +444,15 @@ void fxfs_vfs_make_room(struct super_block *sb)
 int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file_inode(file);
-	int err = filemap_write_and_wait_range(inode->i_mapping, start, end);
+	int err;
 
+	sim_spec_fsync(file, false);
+	err = filemap_write_and_wait_range(inode->i_mapping, start, end);
 	if (!err)
 		err = fxfs_dax_write_back(inode);
 	if (!err)
 		err = fxfs_nofs(fxfs_fsync(fxfs_vfs_fs(inode->i_sb)));
+	sim_spec_fsync(file, true);
 	return err;
 }
 

@@ -7,7 +7,7 @@
 
 # Every test, one a file of tests/: those that take a seed, those that play out what tests/scenarios
 # names, and the rest, one run each, which a new file is unless it is listed here.
-seeded=(interleave failures)
+seeded=(interleave failures traced)
 mapfile -t sim_tests < <(basename -s .c tests/*.c)
 one_runs=()
 for test in "${sim_tests[@]}"; do
