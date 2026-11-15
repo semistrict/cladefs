@@ -13,6 +13,7 @@
 //! fxdax-gc URL --branches [--cell TENANT/CELL] [--held FILE]
 //! fxdax-gc URL --delete-branch TENANT/CELL/ID
 //! fxdax-gc URL --usage [--tenant TENANT]
+//! fxdax-gc URL --rotate-master-key
 //! ```
 //!
 //! URL names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`, `az://container/prefix`),
@@ -31,8 +32,10 @@
 //! pass tries it again. A compacted object goes, and moves no state names, a grace period after (60
 //! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
 //! A sealed cell's objects are compacted under its keys (TASK-411.6): its KEK unwrapped once a pass,
-//! by the KMS `FXDAX_KMS` names, as for every fxdax process (`local:///DIR`; one it names that
-//! can't be had stops fxdax-gc at once), and only by a pass compacting something sealed. With none,
+//! by the host's KMS, as every fxdax process chooses it (`extent_remote::bucket_kms::from_env`:
+//! the one `FXDAX_KMS` names; else, given `FXDAX_MASTER_KEY` or `FXDAX_MASTER_KEY_FILE`, the bucket
+//! KMS over URL's bucket, TASK-411.27; one that can't be had stops fxdax-gc at once), and only by
+//! a pass compacting something sealed. With none,
 //! or its tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what is
 //! sealed uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
 //! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
@@ -94,6 +97,16 @@
 //! branches; the garbage the collector has yet to reclaim among them; bytes as stored. A pass that
 //! skips a cell unchanged since the last measures it not again: its usage is as of the last pass
 //! that went over it in full, which nothing under its prefix changed since.
+//!
+//! `--rotate-master-key` rewraps every tenant's KEK object the bucket KMS keeps in the bucket
+//! (`tenants/<tenant>/kek`, TASK-411.27, doc-16 The bucket KMS) under the newest master key, the
+//! first of `FXDAX_MASTER_KEY`'s (or `FXDAX_MASTER_KEY_FILE`'s), each by a conditional update, the
+//! others given unwrapping those under them; the KEKs stay as they are. It says on standard error
+//! how many it rewrapped, how many were under the newest already, and how many tenants are
+//! shredded (tombstones, left), naming the newest key by its ID. A KEK object under none of the
+//! keys given is left as it is, said, and fails the run, which, done again with its key among
+//! them, finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it
+//! rewraps nothing.
 
 use extent_remote::bucket::Meta;
 use extent_remote::collector::{Collector, DryRun, Marking, Options, Report};
@@ -117,8 +130,8 @@ fn usage() -> String {
      fxdax-gc URL [--cell TENANT/CELL] --dry-run [--grace SECONDS] \
      [--compact-below FRACTION] | \
      fxdax-gc URL --branches [--cell TENANT/CELL] [--held FILE] | \
-     fxdax-gc URL --delete-branch TENANT/CELL/ID | fxdax-gc URL --usage [--tenant TENANT] \
-     (every cell, or the one --cell names; --mark-only deletes nothing, writing each cell's \
+     fxdax-gc URL --delete-branch TENANT/CELL/ID | fxdax-gc URL --usage [--tenant TENANT] | \
+     fxdax-gc URL --rotate-master-key (every cell, or the one --cell names; --mark-only deletes nothing, writing each cell's \
      gc/marks/EPOCH: the bucket grows; --dry-run writes nothing, and finds less than a pass deletes)"
         .into()
 }
@@ -142,6 +155,8 @@ enum Command {
     /// Says what each cell takes, and each tenant, every tenant's or one's, as recorded (TASK-394,
     /// TASK-395.8).
     Usage { tenant: Option<u64> },
+    /// Rewraps tenants' KEK objects under the newest master key (TASK-411.27).
+    RotateMasterKey,
 }
 
 /// How a sweep runs its passes, and what it writes of them (TASK-395.5).
@@ -183,6 +198,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         ["--branches", rest @ ..] => parse_branches(rest)?,
         ["--delete-branch", branch] => Command::DeleteBranch(branch.parse().map_err(|_| usage())?),
         ["--usage"] => Command::Usage { tenant: None },
+        ["--rotate-master-key"] => Command::RotateMasterKey,
         ["--usage", "--tenant", tenant] => {
             Command::Usage { tenant: Some(tenant_id(tenant).ok_or_else(usage)?) }
         }
@@ -398,7 +414,7 @@ async fn collect(
     let kms = match mode {
         // It compacts nothing, asking the KMS nothing.
         Mode::DryRun => None,
-        Mode::Delete | Mode::MarkOnly => kms()?,
+        Mode::Delete | Mode::MarkOnly => kms(bucket)?,
     };
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
@@ -440,19 +456,46 @@ async fn collect(
     }
 }
 
-/// The KMS `FXDAX_KMS` names, as every fxdax process reads it (TASK-411.3): what passes unwrap
-/// their cells' KEKs through, to compact what is sealed (TASK-411.6). None if it names none: passes
-/// compact what is in the clear alone, leaving what is sealed and saying so; and what a deletion
-/// seals its checkpoints at fork points under (TASK-411.14). One it names that can't be had stops
-/// fxdax-gc before it collects or deletes anything.
-fn kms() -> Result<Option<extent_keys::kms::Shared>, String> {
-    match std::env::var("FXDAX_KMS") {
-        Ok(url) if !url.is_empty() => {
-            let kms =
-                extent_keys::kms::from_url(&url).map_err(|why| format!("FXDAX_KMS: {why}"))?;
-            Ok(Some(kms))
-        }
-        _ => Ok(None),
+/// The host's KMS, as every fxdax process chooses it (TASK-411.3,
+/// `extent_remote::bucket_kms::from_env`): the one `FXDAX_KMS` names; else, given a master key,
+/// the bucket KMS over `bucket`, the one collected (TASK-411.27). What passes unwrap their cells'
+/// KEKs through, to compact what is sealed (TASK-411.6). None if it chooses none: passes compact
+/// what is in the clear alone, leaving what is sealed and saying so; and what a deletion seals its
+/// checkpoints at fork points under (TASK-411.14). One that can't be had stops fxdax-gc before it
+/// collects or deletes anything.
+fn kms(bucket: &Arc<Store>) -> Result<Option<extent_keys::kms::Shared>, String> {
+    let chosen = extent_remote::bucket_kms::from_env(|| Ok(bucket.clone()))?;
+    Ok(chosen.map(|chosen| chosen.shared()))
+}
+
+/// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
+/// environment gives (TASK-411.27, `extent_remote::bucket_kms::rotate`), saying what it did on
+/// standard error; failing, once it went over every tenant, if it left any under none of them.
+async fn rotate_master_key(bucket: &Store) -> Result<(), String> {
+    use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
+    let keys = MasterKeys::from_env()?.ok_or_else(|| {
+        format!(
+            "--rotate-master-key: neither {MASTER_KEY_VAR} nor {MASTER_KEY_FILE_VAR} gives a \
+             master key: the newest first, then those to rotate from"
+        )
+    })?;
+    let rotated = extent_remote::bucket_kms::rotate(bucket, &keys).await;
+    let extent_remote::bucket_kms::Rotated { rewrapped, newest, destroyed, refused } = rotated;
+    eprintln!(
+        "fxdax-gc: master key {}: rewrapped {rewrapped} tenants' KEKs, {newest} under it already, \
+         {destroyed} tenants shredded, {} refused",
+        keys.newest().id(),
+        refused.len()
+    );
+    for refusal in &refused {
+        eprintln!("fxdax-gc: left as it is: {refusal}");
+    }
+    match refused.len() {
+        0 => Ok(()),
+        left => Err(format!(
+            "{left} tenants' KEK objects left under no master key given: run again with theirs \
+             among {MASTER_KEY_VAR}'s"
+        )),
     }
 }
 
@@ -904,7 +947,8 @@ fn main() -> Result<(), String> {
                 print!("{}", listed(&live, &held));
                 Ok(())
             }
-            Command::DeleteBranch(id) => delete_branch(&bucket, id, kms()?).await,
+            Command::DeleteBranch(id) => delete_branch(&bucket, id, kms(&bucket)?).await,
+            Command::RotateMasterKey => rotate_master_key(&bucket).await,
             Command::Usage { tenant } => {
                 say_usage(&bucket, tenant, &mut std::io::stdout().lock()).await
             }
@@ -1474,7 +1518,7 @@ fxdax_gc_peak_resident_bytes 67108864
 
     #[test]
     fn other_command_lines_get_the_usage() {
-        let lines: [&[&str]; 33] = [
+        let lines: [&[&str]; 35] = [
             &[],
             &["u", "--every"],
             &["u", "--every", "soon"],
@@ -1508,6 +1552,8 @@ fxdax_gc_peak_resident_bytes 67108864
             &["u", "--metrics", "a", "--metrics", "b"],
             &["u", "--dry-run", "--at-once", "2"],
             &["u", "--dry-run", "--metrics", "a"],
+            &["u", "--rotate-master-key", "now"],
+            &["u", "--rotate-master-key", "--dry-run"],
         ];
         for args in lines {
             assert_eq!(parsed(args), Err(usage()), "{args:?}");

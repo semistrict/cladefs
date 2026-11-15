@@ -71,6 +71,10 @@ impl<K: Kms> Kms for Counted<K> {
         self.unwraps.fetch_add(1, Ordering::Relaxed);
         self.inner.unwrap(tenant, wrapped)
     }
+
+    fn forget(&self, tenant: u64) {
+        self.inner.forget(tenant)
+    }
 }
 
 /// A KMS that forgets a tenant's KEK once it is destroyed, as a real KMS forgets a deleted key: AWS
@@ -117,6 +121,10 @@ impl<K: Kms> Kms for Forgetting<K> {
     ) -> impl Future<Output = Result<Secret, Error>> + Send {
         let unwrapping = self.inner.unwrap(tenant, wrapped);
         async move { forgotten(unwrapping.await) }
+    }
+
+    fn forget(&self, tenant: u64) {
+        self.inner.forget(tenant)
     }
 }
 

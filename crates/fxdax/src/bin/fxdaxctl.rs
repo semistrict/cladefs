@@ -26,6 +26,7 @@
 //! fxdaxctl revoke TENANT
 //! fxdaxctl shred-cell TENANT/CELL
 //! fxdaxctl forget-tenant-keys TENANT
+//! fxdaxctl shred-tenant TENANT
 //! fxdaxctl --version
 //! ```
 //!
@@ -114,7 +115,15 @@
 //! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
 //! forget the keys of the tenant TENANT (hex), once its KEK is destroyed, or revoked, in the KMS:
 //! its stores there are fenced, their pages leave the cache, its fetchers' and KMS's keys of it
-//! go. Each prints what the daemon forgot, one `name value` a line.
+//! go. `shred-tenant`, through the daemon alone too, is the control API's `ShredTenant`
+//! (TASK-411.27, doc-16 The bucket KMS): under the bucket KMS (a master key, no `FXDAX_KMS`), it
+//! replaces the tenant TENANT's (hex) KEK object in the daemon's bucket by a tombstone, so that no
+//! key its KEK wrapped unwraps anywhere and none is made it again, and has the daemon forget its
+//! keys; run it against every host's daemon, the first shredding, each forgetting, and printing
+//! `shredded_now 1` or `0`. A bucket that keeps object versions keeps the KEK in the object's
+//! older versions until a lifecycle rule expires them. A daemon of another KMS refuses it: destroy
+//! the tenant's KEK there, then `forget-tenant-keys`. Each prints what the daemon forgot, one `name
+//! value` a line.
 
 use anyhow::{Context as _, bail};
 use fxdax::ExtentStore;
@@ -131,7 +140,8 @@ fn usage() -> anyhow::Error {
          fxdaxctl public-generation DIR | fxdaxctl attach DIR BASE | fxdaxctl stat DIR | \
          fxdaxctl stats [--json] | fxdaxctl grant TENANT ID DIR [UID [GID]] | \
          fxdaxctl revoke TENANT | fxdaxctl shred-cell TENANT/CELL | \
-         fxdaxctl forget-tenant-keys TENANT | fxdaxctl --version"
+         fxdaxctl forget-tenant-keys TENANT | fxdaxctl shred-tenant TENANT | \
+         fxdaxctl --version"
     )
 }
 
@@ -239,6 +249,11 @@ enum Command {
     ForgetTenantKeys {
         tenant: u64,
     },
+    /// fxdax: a tenant shredded under the bucket KMS (TASK-411.27).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ShredTenant {
+        tenant: u64,
+    },
 }
 
 impl Command {
@@ -296,6 +311,9 @@ impl Command {
                 Self::ShredCell { cell: fxdax::Cell { tenant: hex(tenant)?, id: hex(id)? } }
             }
             ["forget-tenant-keys", tenant] => Self::ForgetTenantKeys {
+                tenant: u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal")?,
+            },
+            ["shred-tenant", tenant] => Self::ShredTenant {
                 tenant: u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal")?,
             },
             _ => bail!(usage()),
@@ -367,6 +385,10 @@ impl Command {
                     format!("tenant {tenant}: its KEK is revoked or destroyed, fxdaxctl says");
                 print!("{}", forgotten_lines(&daemon.forget_tenant_keys(tenant, &why)?));
             }
+            Self::ShredTenant { tenant } => {
+                let (now, forgotten) = daemon.shred_tenant(tenant)?;
+                print!("shredded_now {}\n{}", u8::from(now), forgotten_lines(&forgotten));
+            }
         }
         Ok(())
     }
@@ -382,7 +404,7 @@ impl Command {
         let daemons = match self {
             Self::Stats { .. } => Some("stats are"),
             Self::Grant { .. } | Self::Revoke { .. } => Some("tenants' grants are"),
-            Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } => {
+            Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } | Self::ShredTenant { .. } => {
                 Some("shredding and forgetting keys are")
             }
             _ => None,
@@ -463,7 +485,8 @@ impl Command {
             | Self::Grant { .. }
             | Self::Revoke { .. }
             | Self::ShredCell { .. }
-            | Self::ForgetTenantKeys { .. } => unreachable!("refused above"),
+            | Self::ForgetTenantKeys { .. }
+            | Self::ShredTenant { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
                 let store = ExtentStore::open(&dir)?;
                 let (info, bytes) = (store.info()?, store.bytes()?);

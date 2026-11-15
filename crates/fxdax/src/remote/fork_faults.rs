@@ -443,8 +443,8 @@ impl World {
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
                 // retired or taken back (TASK-395.13), every branch's head, a deleted one's
-                // final, fencing its writers (TASK-407), and a tenant's sealed marker, for good
-                // (TASK-411.19).
+                // final, fencing its writers (TASK-407), and a tenant's sealed marker and KEK
+                // object, for good (TASK-411.19, TASK-411.27).
                 Kind::Head { .. }
                 | Kind::GcLease { .. }
                 | Kind::Marks { .. }
@@ -452,7 +452,8 @@ impl World {
                 | Kind::Retired { .. }
                 | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
-                | Kind::Sealed { .. } => false,
+                | Kind::Sealed { .. }
+                | Kind::Kek { .. } => false,
                 Kind::Moves { .. } | Kind::Unknown => true,
             })
             .collect();

@@ -1854,7 +1854,8 @@ impl Pass {
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
                 // (TASK-395.13). fxdax: a cell's object, which says who holds it, stays as its
                 // records do, and a block of object IDs taken for good (TASK-364); a tenant's
-                // sealed marker, no cell's, which no pass lists, for good too (TASK-411.19).
+                // sealed marker and its KEK object, no cell's, which no pass lists, for good too
+                // (TASK-411.19, TASK-411.27).
                 Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
@@ -1863,6 +1864,7 @@ impl Pass {
                 | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Sealed { .. }
+                | Kind::Kek { .. }
                 | Kind::Unknown => Fate::Stays,
             };
             match fate {
