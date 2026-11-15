@@ -95,7 +95,13 @@ fn views_read_frees_acknowledged_in_the_bucket() {
     store.flush().unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let keys: Vec<String> = (closed.iter())
-        .map(|closed| extent_remote::layout::segment(closed.footer.branch, closed.footer.seq, closed.footer.epoch))
+        .map(|closed| {
+            extent_remote::layout::segment(
+                closed.footer.branch,
+                closed.footer.seq,
+                closed.footer.epoch,
+            )
+        })
         .collect();
     for closed in &closed {
         store.acknowledged(closed.number).unwrap();

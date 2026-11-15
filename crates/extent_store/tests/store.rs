@@ -976,19 +976,15 @@ fn segments_close_for_the_writer_of_their_chain() {
     use extent_frame::segment::{Footer, Location, extent_key, tag};
     let dir = MemDir::new();
     let state = extent_remote::State::new(BRANCH);
-    let store =
-        created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
+    let store = created_on(dir.clone(), 1 << 20, state, Chain::new(BRANCH, 3, 5, 100));
     drop(store);
     let other = extent_remote::State::new(extent_remote::layout::test_branch(BRANCH.id + 1));
     let opening = Opening::new(extent_remote::layout::test_branch(BRANCH.id + 1));
     let refused =
         Store::recover(dir.clone()).unwrap().open(OPTIONS, Opening { state: other, ..opening });
     assert_eq!(refused.err().unwrap().to_string(), "branch 1/1/7 opened as 1/1/8");
-    let store = opened_on(
-        dir.clone(),
-        extent_remote::State::new(BRANCH),
-        Chain::new(BRANCH, 3, 5, 100),
-    );
+    let store =
+        opened_on(dir.clone(), extent_remote::State::new(BRANCH), Chain::new(BRANCH, 3, 5, 100));
     // Nothing committed since the last closing, nothing to close.
     assert!(!store.close_now().unwrap());
 

@@ -976,7 +976,6 @@ fn remove<D: Dir>(dir: &D, path: &str) -> Result<(), Error> {
     }
 }
 
-
 /// A segment of the WAL, closed, and not yet acknowledged: its number, its footer, stamped by its
 /// writer's chain, and, if its writer's chain stamped it anew after a takeover, which its framed
 /// file says not, so ([`Queue`]); the bytes of its data and of the extents stored on their own it

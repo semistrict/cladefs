@@ -1477,10 +1477,16 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
     assert_eq!(&kek.wrapped.0[..27], b"fxka\x01\x00\x14alias/fxdax-tenant-1");
-    let segment = world.object(&layout::segment(branch, 1));
-    let seal = extent_frame::Frame::of(&segment).unwrap().seal;
-    assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{seal:?}");
-    for (key, bytes) in world.objects() {
+    // Every segment of the branch sealed, whatever its number and its writer's epoch (TASK-407).
+    let objects = world.objects();
+    let segments: Vec<_> =
+        objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
+    assert!(!segments.is_empty(), "no segment of {branch}");
+    for (key, segment) in segments {
+        let seal = extent_frame::Frame::of(segment).unwrap().seal;
+        assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
+    }
+    for (key, bytes) in objects {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
     }
 
