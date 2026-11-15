@@ -184,6 +184,18 @@ class Ci(unittest.TestCase):
         self.assertIn("submodules: true", macos)
 
 
+class Concurrency(unittest.TestCase):
+    """2026-11-15: main's runs go on to their end, the latest push meanwhile waiting in their group's
+    one pending slot; with cancel-in-progress on main, many sessions' pushes cancelled five runs in a
+    row before their slow jobs (the sandboxes' short mode, the workspace part) ended."""
+
+    def test_main_runs_to_its_end_and_branches_replace_their_older_runs(self):
+        text = CI.read_text()
+        block = re.search(r"^concurrency:\n((?:  .*\n)+)", text, re.MULTILINE).group(1)
+        self.assertEqual(block, "  group: ci-${{ github.ref }}\n"
+                                "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}\n")
+
+
 class Nightly(unittest.TestCase):
     """TASK-284: the nightly's guest suites, on GitHub's runners, as production runs them, with no
     GCP: every night they failed at GCP's authentication, its secrets never set, so they never ran.
