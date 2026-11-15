@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-10 14:00'
-updated_date: '2026-11-15 13:35'
+updated_date: '2026-11-15 13:39'
 labels:
   - testing
 dependencies: []
@@ -25,14 +25,14 @@ Builds on TASK-310's fxfs-guest-shared-disk case and TASK-311's fxfs-guest-docke
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The run exists, passes on main, and fails on 6a513509a..96c7808b8's write-behind regression put back (TASK-310) as a mutant
+- [x] #1 The run exists, passes on main, and fails on 6a513509a..96c7808b8's write-behind regression put back (TASK-310) as a mutant
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -88,4 +88,6 @@ ubu1, fxjob --bench, one after the other, kernel ~/src/t400-kernel (key differs 
 - mutant framed-in-copies through mutants.sh: killed in 706 s (the tree's build, test-e2e's guest and firecracker parts, the run). Failed checks: 'framings: host-a framed 2 segments slower than 1000 ms, the slowest 1543.9 ms', host-b 1 at 1332.4 ms, 'writes: 1.91 times, past 1.5' (1.90/1.91, framed in place 0). Slow framings 44/46, summing 13.8/13.1 s.
 - main short with prebuilt artifacts: PASS. Slowest framing 568/163 ms, 0 past 1 s, writes 1.19/1.18 (1.19 overall), framed in place 60/60, commands <= 39 ms, VMs 96.6 s, durable lag max 7.1 s.
 Found and filed: TASK-448. The repo's Actions caches are past 10 GB, and the guest kernel's entry, saved at 11:38, was evicted within the hour.
+
+2026-11-15 (claude): landed c95040a89 (on main after TASK-437's rename): ci.yml's sandboxes job (uses: ./.github/workflows/sandboxes.yml) on every push to main; sandboxes.yml caches the artifacts' dependencies (actions/cache restore/save around the build, keyed by the three lock files, 1.5 GB). Measured on branch t3301-ci: cold 24.3 min (kernel built 10.3, cargo 9.8, run 3.0), warm 10.5 min (43718512917: kernel and cargo cache hits, restore 0.6, build 5.9 as cladefs's own crates rebuild twice, for the daemon and in the VMM's copy, run 3.3; all checks passed, slowest framing 246/279 ms, writes 1.20x). A slow runner adds up to ~7 min (TASK-447). The kernel cache is evicted within the hour while the repo's caches are past 10 GB (TASK-448). scripts/test_ci.py tests the job; upstream-changes.py --check passes. AC #1 checked: passes on main (GitHub 3 of 3, ubu1 once), and framed-in-copies is killed. Left: DoD #1 waits on main's CI run 43719878556 (1e74dbf41, the sandboxes job's first), in progress when checked; its guide job had failed on TASK-459 (the rename's doc titles), and the workspace part has TASK-458's race. Mark Done once that run's sandboxes and test jobs are green.
 <!-- SECTION:NOTES:END -->
