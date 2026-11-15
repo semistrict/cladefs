@@ -60,6 +60,8 @@
 //! volume of its own that holds what the volume did then, whatever it does after, across remounts
 //! and cuts, the graveyard tombstoning what it has queued meanwhile (TASK-241).
 
+mod journal_trace;
+
 use super::*;
 use fxfs::filesystem::{FlushReason, ForceMajor, FxFilesystemBuilder};
 use fxfs::fsck::{FsckOptions, fsck_with_options};
@@ -85,6 +87,7 @@ use std::sync::atomic::AtomicU32;
 use std::sync::mpsc;
 use std::time::Duration;
 use storage_device::DeviceHolder;
+use journal_trace::Traced;
 use storage_device::fake_device::{Crashes, FakeDevice, Op as DeviceOp};
 
 const PAGE: u64 = 4096;
@@ -1494,7 +1497,8 @@ impl Setting {
     /// it's kept, to what a transaction may take of the journal: its metadata reservation sees that
     /// of those that reserve, in a debug build, and nothing that of those that borrow, as a trim
     /// and an unlink do. A transaction past it took a guest's kernel with it: generic/161, 303.
-    fn builder(&self) -> (FxFilesystemBuilder, Hooks<'static>) {
+    /// Its journal records its steps in `trace`, if given (TASK-444.1).
+    fn builder(&self, traced: &Traced) -> (FxFilesystemBuilder, Hooks<'static>) {
         let (mut hooks, handle) = Hooks::new();
         hooks.set_pre_commit(|transaction| {
             let bytes = transaction.journal_bytes();
@@ -1507,15 +1511,14 @@ impl Setting {
             true => builder.graveyard_batch_delay(BATCHES_APART),
             false => builder,
         };
-        if !self.every_cut {
-            return (builder, hooks);
-        }
-        let builder = builder.journal_options(JournalOptions {
-            reclaim_size: SHORT_RECLAIM,
-            chunk_size: SHORT_RECLAIM,
-            ..Default::default()
-        });
-        (builder, hooks)
+        let journal = JournalOptions { trace: traced.journal(), ..Default::default() };
+        let journal = match self.every_cut {
+            true => {
+                JournalOptions { reclaim_size: SHORT_RECLAIM, chunk_size: SHORT_RECLAIM, ..journal }
+            }
+            false => journal,
+        };
+        (builder.journal_options(journal), hooks)
     }
 
     /// The seed of what cuts the replay of power cut `cut`, during operation `op`: of those of
@@ -1537,10 +1540,15 @@ impl Setting {
 
     /// What `ops` come to here.
     fn run(self, ops: Vec<Op>, tally: Rc<Tally>) -> Result<(), String> {
+        self.run_traced(ops, tally, Traced::Not)
+    }
+
+    /// What `ops` come to here, the sequence's journal traced as `traced` says (TASK-444.1).
+    fn run_traced(self, ops: Vec<Op>, tally: Rc<Tally>, traced: Traced) -> Result<(), String> {
         let mut executor = fasync::LocalExecutorBuilder::new().build();
         match self.keeps_directory_times {
-            true => executor.run_singlethreaded(run::<true>(self, ops, tally)),
-            false => executor.run_singlethreaded(run::<false>(self, ops, tally)),
+            true => executor.run_singlethreaded(run::<true>(self, ops, tally, traced)),
+            false => executor.run_singlethreaded(run::<false>(self, ops, tally, traced)),
         }
     }
 
@@ -1776,6 +1784,8 @@ struct World<const KEEPS: bool> {
     cut: bool,
     /// The readdirs going on (`Op::ReadOn`), until the filesystem remounts.
     cursors: Vec<Cursor>,
+    /// What its journal is traced as (TASK-444.1).
+    traced: Traced,
 }
 
 /// A readdir of a directory going on, as the kernel's goes on after the name it left off at
@@ -1905,9 +1915,10 @@ impl<const KEEPS: bool> World<KEEPS> {
         crashes: &Arc<Crashes>,
         faults: &Arc<Faults>,
         tally: Rc<Tally>,
+        traced: Traced,
     ) -> Self {
         let device = DeviceHolder::new(setting.device(crashes, faults));
-        let (builder, _hooks) = setting.builder();
+        let (builder, _hooks) = setting.builder(&traced);
         let filesystem = builder.format(true).open(device).await.expect("formatting");
         let made = clock();
         let volumes = root_volume((*filesystem).clone()).await.expect("the root volume");
@@ -1918,18 +1929,20 @@ impl<const KEEPS: bool> World<KEEPS> {
         let fs = Box::new(Fxfs::new((*filesystem).clone(), volume, false, platform));
         let model = Model::new(root, made);
         let (cut, cursors) = (false, Vec::new());
-        Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors }
+        Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors, traced }
     }
 
-    /// Mounts what `device` holds, or replays it: what `model` should say.
+    /// Mounts what `device` holds, or replays it: what `model` should say. Its journal is traced as
+    /// `traced` says.
     async fn mount(
         setting: Setting,
         device: DeviceHolder,
         root: u64,
         model: Model,
         tally: Rc<Tally>,
+        traced: Traced,
     ) -> Result<Self, String> {
-        let (builder, _hooks) = setting.builder();
+        let (builder, _hooks) = setting.builder(&traced);
         let filesystem = builder.open(device).await;
         let filesystem = filesystem.map_err(|e| format!("opening: {e:#}"))?;
         let volumes = root_volume((*filesystem).clone()).await.map_err(|e| format!("{e:#}"))?;
@@ -1939,7 +1952,7 @@ impl<const KEEPS: bool> World<KEEPS> {
         let platform = Seeded { workers: setting.workers };
         let fs = Box::new(Fxfs::new((*filesystem).clone(), volume, false, platform));
         let (cut, cursors) = (false, Vec::new());
-        Ok(Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors })
+        Ok(Self { setting, filesystem, _hooks, fs, root, model, tally, cut, cursors, traced })
     }
 
     /// Unmounts, as a guest's `umount` does, leaving the device.
@@ -2348,10 +2361,10 @@ impl<const KEEPS: bool> World<KEEPS> {
     async fn remount(mut self) -> Result<Self, String> {
         self.model.open.clone().into_iter().for_each(|ino| self.close(ino));
         let (setting, root, cut) = (self.setting, self.root, self.cut);
-        let (model, tally) = (self.model.clone(), self.tally.clone());
+        let (model, tally, traced) = (self.model.clone(), self.tally.clone(), self.traced.remounted());
         let (device, borrowed) = self.unmount_borrowing().await?;
         device.reopen(false);
-        let mut world = Self::mount(setting, device, root, model, tally).await?;
+        let mut world = Self::mount(setting, device, root, model, tally, traced).await?;
         world.cut = cut;
         // Replay finds the metadata space borrowed as the filesystem had it: a mount that found
         // more borrowed it again, and a store whose many mounts each did ran out of room to
@@ -2368,9 +2381,14 @@ impl<const KEEPS: bool> World<KEEPS> {
     /// sync, replayed, holds what the model does, and passes fsck.
     async fn crash(&self) -> Result<(), String> {
         self.fs.sync().await.map_err(|e| format!("sync: {e:#}"))?;
+        let cut = self.traced.cut();
         let device = self.filesystem.device().snapshot().map_err(|e| format!("snapshot: {e:#}"))?;
         let (model, tally) = (self.model.clone().cut(), self.tally.clone());
-        let mut replayed = Self::mount(self.setting, device, self.root, model, tally).await?;
+        let replay = cut.as_ref().map_or(Traced::Not, |cut| cut.replay());
+        let mut replayed = Self::mount(self.setting, device, self.root, model, tally, replay).await?;
+        if let Some(cut) = cut {
+            cut.replayed()?;
+        }
         replayed.cut = self.cut;
         replayed.check_all().await?;
         replayed.unmount().await.map(drop)
@@ -3115,6 +3133,8 @@ struct Past {
     /// The operation a device's failure ended the sequence at, if one did. Its state is the one
     /// before it: it may have got as far as anything, which the filesystem says.
     failed: Option<usize>,
+    /// What the sequence's journal is traced as (TASK-444.1).
+    traced: Traced,
 }
 
 impl Past {
@@ -3151,9 +3171,13 @@ impl Past {
         second_cuts.mark(0);
         let device = DeviceHolder::new(device.record_crashes(second_cuts.clone()));
         let setting = self.setting;
-        let mut world =
-            World::<KEEPS>::mount(setting, device, root, Model::new(root, 0), tally.clone())
-                .await?;
+        let traced = self.traced.recorded_cut(cut);
+        let replay = traced.as_ref().map_or(Traced::Not, |cut| cut.replay());
+        let mounted = World::<KEEPS>::mount(setting, device, root, Model::new(root, 0), tally.clone(), replay);
+        let mut world = mounted.await?;
+        if let Some(traced) = traced {
+            traced.replayed()?;
+        }
         world.cut = true;
         second_cuts.stop();
         checked(&world.filesystem).await?;
@@ -3190,7 +3214,8 @@ impl Past {
         for (_, device) in second_cuts.take() {
             tally.second_cuts.set(tally.second_cuts.get() + 1);
             let device = DeviceHolder::new(device);
-            let again = World::<KEEPS>::mount(setting, device, root, held.clone(), tally.clone());
+            let (held, counted) = (held.clone(), tally.clone());
+            let again = World::<KEEPS>::mount(setting, device, root, held, counted, Traced::Not);
             let again = again.await;
             let mut again = again.map_err(|e| format!("cut during its replay: {e}"))?;
             again.cut = true;
@@ -3217,13 +3242,15 @@ async fn run<const KEEPS: bool>(
     setting: Setting,
     ops: Vec<Op>,
     tally: Rc<Tally>,
+    traced: Traced,
 ) -> Result<(), String> {
     let crashes = setting.crashes();
+    traced.record_crashes(&crashes);
     let faults = Faults::new(setting.seed);
-    let world = World::<KEEPS>::new(setting, &crashes, &faults, tally.clone()).await;
+    let world = World::<KEEPS>::new(setting, &crashes, &faults, tally.clone(), traced.clone()).await;
     let (root, device) = (world.root, world.filesystem.device());
     let states = vec![world.model.clone()];
-    let mut past = Past { setting, states, durable: vec![0], failed: None };
+    let mut past = Past { setting, states, durable: vec![0], failed: None, traced };
     world.fs.sync().await.map_err(|e| format!("sync: {e:#}"))?;
     crashes.mark(0);
     faults.arm(setting.fails_one_in());
@@ -3414,7 +3441,8 @@ fn a_failed_fsync_is_reported_and_keeps_what_was_synced() {
         let setting = Setting::awkward(0, ROOMY);
         let crashes = Crashes::new(0, u32::MAX);
         let faults = Faults::of_every_kind(0);
-        let mut world = World::<false>::new(setting, &crashes, &faults, Rc::default()).await;
+        let world = World::<false>::new(setting, &crashes, &faults, Rc::default(), Traced::Not);
+        let mut world = world.await;
         let device = world.filesystem.device();
         let write = |byte| Op::Write { file: 0, at: 0, len: 1, byte };
         world.act(&Op::Create(0)).await.unwrap();
@@ -3435,7 +3463,8 @@ fn a_failed_fsync_is_reported_and_keeps_what_was_synced() {
         for (_, device) in crashes.take() {
             let tally = Rc::default();
             let device = DeviceHolder::new(device);
-            let world = World::<false>::mount(setting, device, root, synced.clone(), tally);
+            let model = synced.clone();
+            let world = World::<false>::mount(setting, device, root, model, tally, Traced::Not);
             let world = world.await.unwrap();
             let ino = *synced.files.keys().next().expect("a file");
             let mut read = [0];

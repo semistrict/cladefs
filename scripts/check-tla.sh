@@ -42,9 +42,11 @@
 # A deep model, its configuration tagged `\* deep`, an occasional check of hours in all, runs only
 # by name, or with any others as `deep`, its covers with it.
 #
-# Trace validation (TASK-42.1): runs of crates/follower's Shuttle tests, traced, are behaviors of
-# specs/follower (specs/follower/trace): each trace must be matched to its end. It runs with every
-# model, or alone as follower/traces.
+# Trace validation (TASK-42.1, TASK-444.1): runs of the code, traced, are behaviors of a spec
+# (specs/SPEC/trace): each trace must be matched to its end, and each of a mutant's runs, which put
+# a bug back, must not. Runs of crates/follower's Shuttle tests are specs/follower's; sequences of
+# crates/fxfs-posix's model test, power cuts and remounts included, specs/journal's. They run with
+# every model, or alone as follower/traces and journal/traces.
 #
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
 # below, is fetched once into ~/.cache/fxdax/tla and checked against its SHA-256. v1.8.0 is a
@@ -131,7 +133,8 @@ find_cfg() {
 with_part() {
     printf '%s\n' "$2" | tr ';' '\n' | sed 's/^ */    /' | sed "/^CONSTANTS\$/r /dev/stdin" "$1"
 }
-traces=0
+# The specs whose traces are checked.
+traces=()
 if [[ ${1:-} == cover ]]; then
     (( $# >= 2 )) || { echo "cover names a model" >&2; exit 2; }
     cover=$(find_cfg "$2")
@@ -141,11 +144,11 @@ elif (( $# == 0 )); then
     for cfg in "${configs[@]}"; do
         deep "$cfg" || choose "$cfg"
     done
-    traces=1
+    traces=(follower journal)
 else
     for model in "$@"; do
-        if [[ $model == follower/traces ]]; then
-            traces=1
+        if [[ $model == follower/traces || $model == journal/traces ]]; then
+            traces+=("${model%/traces}")
             continue
         fi
         if [[ $model == deep ]]; then
@@ -332,49 +335,62 @@ for cfg in ${covering[@]+"${covering[@]}"}; do
     covered "$cfg" || status=1
 done
 
-# Each traced run's trace, matched to its end by specs/follower/trace/FollowerTrace.
-if (( traces )); then
-    runs="$work/traces"
-    FOLLOWER_TRACES="$runs" cargo nextest run --manifest-path "$root/Cargo.toml" -p follower \
-        --features shuttle --test shuttle -E 'test(traces_follow_the_spec)' > "$work/traces.log" 2>&1 ||
-        { echo "FAIL follower/traces: tracing the runs failed:"; cat "$work/traces.log"; exit 1; }
-    matched=0 unmatched=0
-    start=$SECONDS
+# tlc_trace SPEC RUN: TLC on the traced run in directory RUN, against specs/SPEC/trace's spec,
+# which extends the run's trace module; its log is RUN/tlc.log.
+tlc_trace() {
+    local trace=("$specs/$1"/trace/*.tla)
+    "$java" -XX:+UseParallelGC -DTLA-Library="$2:$specs/$1" -cp "$jar" tlc2.TLC -workers 1 \
+        -noGenerateSpecTE -metadir "$2/states" -config "${trace[0]%.tla}.cfg" "${trace[0]}" \
+        > "$2/tlc.log" 2>&1 < /dev/null || true
+}
+
+# check_traces SPEC ENV CARGO_ARGS...: traces runs of the code, by the tests CARGO_ARGS name to
+# cargo nextest, which write them to the directory ENV names, each a directory: run-*, which TLC
+# must match to their ends (TraceMatched violated), and mutant-*, of a bug put back, which it must
+# not (no error found).
+check_traces() {
+    local spec=$1 env=$2 runs="$work/$1-traces" run log matched=0 unmatched=0 rejected=0
+    shift 2
+    env "$env=$runs" cargo nextest run --manifest-path "$root/Cargo.toml" "$@" \
+        > "$work/$spec-traces.log" 2>&1 ||
+        { echo "FAIL $spec/traces: tracing the runs failed:"; cat "$work/$spec-traces.log"; return 1; }
+    local start=$SECONDS
     for run in "$runs"/run-*; do
-        log="$run/tlc.log"
-        "$java" -XX:+UseParallelGC -DTLA-Library="$run:$specs/follower" -cp "$jar" tlc2.TLC \
-            -workers 1 -noGenerateSpecTE -metadir "$run/states" \
-            -config "$specs/follower/trace/FollowerTrace.cfg" \
-            "$specs/follower/trace/FollowerTrace.tla" > "$log" 2>&1 < /dev/null || true
-        if grep -q '^Error: Invariant TraceMatched is violated' "$log" < /dev/null; then
+        tlc_trace "$spec" "$run"
+        if grep -q '^Error: Invariant TraceMatched is violated' "$run/tlc.log"; then
             matched=$((matched + 1))
         else
             unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run") is no behavior of the spec:"
-            grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
+            echo "FAIL $spec/traces: $(basename "$run") is no behavior of the spec:"
+            grep -E '^Error|is violated|No error has been found' "$run/tlc.log" | sed -n 1,20p
         fi
     done
-    # The mutant's runs, which invalidate before they apply: none may be matched.
-    rejected=0
     for run in "$runs"/mutant-*; do
-        log="$run/tlc.log"
-        "$java" -XX:+UseParallelGC -DTLA-Library="$run:$specs/follower" -cp "$jar" tlc2.TLC \
-            -workers 1 -noGenerateSpecTE -metadir "$run/states" \
-            -config "$specs/follower/trace/FollowerTrace.cfg" \
-            "$specs/follower/trace/FollowerTrace.tla" > "$log" 2>&1 < /dev/null || true
-        if grep -q '^Model checking completed. No error has been found' "$log" < /dev/null; then
+        tlc_trace "$spec" "$run"
+        if grep -q '^Model checking completed. No error has been found' "$run/tlc.log"; then
             rejected=$((rejected + 1))
         else
             unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run"), which invalidates first, was matched:"
-            grep -E '^Error|is violated|No error has been found' "$log" < /dev/null | sed -n 1,20p
+            echo "FAIL $spec/traces: $(basename "$run"), a mutant's, was matched:"
+            grep -E '^Error|is violated|No error has been found' "$run/tlc.log" | sed -n 1,20p
         fi
     done
     if (( unmatched == 0 && matched > 0 && rejected > 0 )); then
-        echo "PASS follower/traces: $matched traced runs, each a behavior of the spec, and" \
+        echo "PASS $spec/traces: $matched traced runs, each a behavior of the spec, and" \
             "$rejected of a mutant's, none, $((SECONDS - start))s"
     else
-        status=1
+        return 1
     fi
-fi
+}
+
+for spec in ${traces[@]+"${traces[@]}"}; do
+    case $spec in
+        # The mutant's runs invalidate before they apply.
+        follower) check_traces follower FOLLOWER_TRACES -p follower --features shuttle \
+            --test shuttle -E 'test(traces_follow_the_spec)' || status=1 ;;
+        # The mutant's runs read the objects' offsets after write_super_block's flush.
+        journal) check_traces journal JOURNAL_TRACES -p fxfs-posix \
+            -E 'test(journal_traces_follow_the_spec)' || status=1 ;;
+    esac
+done
 exit "$status"

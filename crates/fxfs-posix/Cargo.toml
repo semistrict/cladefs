@@ -19,6 +19,8 @@ rustc-hash.workspace = true
 
 [dev-dependencies]
 fuchsia.workspace = true
+# The model test traces the journal for specs/journal's trace validation (TASK-444.1).
+fxfs = { workspace = true, features = ["journal_trace"] }
 fxfs-unicode.workspace = true
 proptest.workspace = true
 rand.workspace = true

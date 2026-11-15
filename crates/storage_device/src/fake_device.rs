@@ -166,6 +166,8 @@ struct CrashesInner {
     recorded: Vec<Crash>,
     /// fxdax: what `recording` got to.
     counts: CrashCounts,
+    /// fxdax: called as each crash is recorded (`Crashes::on_record`).
+    on_record: Option<Box<dyn Fn() + Send>>,
 }
 
 enum Recording {
@@ -246,7 +248,15 @@ impl Crashes {
             last: false,
             recorded: Vec::new(),
             counts: CrashCounts::default(),
+            on_record: None,
         })))
+    }
+
+    /// fxdax: calls `on_record` as each crash is recorded, at the barrier it is recorded at, in the
+    /// order `take` yields them: for a test that traces where crashes fell among what it traces
+    /// (the journal's trace validation, TASK-444.1).
+    pub fn on_record(&self, on_record: impl Fn() + Send + 'static) {
+        self.0.lock().on_record = Some(Box::new(on_record));
     }
 
     /// Crashes recorded at one barrier in `one_in`, chosen, as is what each crash undoes, by an RNG
@@ -337,6 +347,9 @@ impl CrashesInner {
         let awkward = (device.awkward.as_ref())
             .map(|_| (self.rng.random(), device.sequence_floor.load(Ordering::Relaxed)));
         self.counts.crashes += 1;
+        if let Some(on_record) = &self.on_record {
+            on_record();
+        }
         self.recorded.push(Crash {
             mark,
             inner,
