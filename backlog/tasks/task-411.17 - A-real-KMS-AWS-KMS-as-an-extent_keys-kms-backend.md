@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 03:35'
-updated_date: '2026-11-15 04:01'
+updated_date: '2026-11-15 04:10'
 labels: []
 dependencies: []
 documentation:
@@ -27,17 +27,17 @@ doc-16 left real KMS backends for later; the user chose OpenBao Transit, AWS KMS
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 FXDAX_KMS=aws-kms://REGION?key=TEMPLATE, credentials from the standard AWS chain (env, profile, instance role) gives a kms::Shared whose wrap and unwrap use the KMS's own encrypt/decrypt (or wrap) of the 32-byte key under the tenant's named key, any key version the KMS keeps unwrapping
-- [ ] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
-- [ ] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
+- [x] #2 The KMS's refusals map to kms::Error naming the tenant: key not found NoSuchTenant, access denied or key disabled Revoked, key destroyed or scheduled for deletion Destroyed, wrapped bytes not the key's Unauthentic, network and service errors Io
+- [x] #3 A wrapped key carries which backend and key name wrapped it, so that a key wrapped by another backend or another tenant's key is refused as not authentic rather than sent to the KMS
 - [ ] #4 Integration tests: tests against an OSI-licensed AWS KMS emulator (e.g. nsmithuk/local-kms, MIT) on the Mac and in CI, as CI holds no cloud credentials; they cover wrap, unwrap, a rotated key unwrapping old wraps, revocation and destruction mapped as above, and a store opened sealed end to end through the backend
-- [ ] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
+- [x] #5 Any new dependency is OSI-licensed (stated in the task); no secret is logged; doc-16 and the README say how to configure it
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -63,4 +63,13 @@ Wrapped format: 'fxka', format 1, key name length u16 BE, key name, CiphertextBl
 Deviation from the brief: the emulator tests are #[ignore = needs local-kms: scripts/test-local-kms.sh] and named local_kms_*, as the RustFS/Azurite ones are (the repo's pattern), and fail loudly when run without FXDAX_LOCAL_KMS or credentials, rather than passing silently with a printed skip. Each still starts its own emulator on a free port (PORT=0, port read from its log).
 Mutation checks (hand mutants, restored): Decrypt without context or KeyId -> 7/8 emulator tests fail; Decrypt without KeyId -> the another-key test failed only after it was rewritten to use a ciphertext under another key with the tenant's own context (the first version's relabelled blob was refused by context alone); constant context -> the shared-key cross-tenant test fails.
 Filed: TASK-411.19 (a tenant whose key finished deletion reads NoSuchTenant: new cells in the clear), TASK-411.20 (changing a tenant's key name leaves earlier wraps unauthentic; no rewrap path).
+
+Validation (8f59f2536, macOS): scripts/test-local-kms.sh 9/9 (8 extent_keys kms::aws local_kms_*, 1 extent_store upload::encrypted::local_kms_sealed_stores_open_through_aws_kms), also from a fresh install of local-kms; 6 non-emulator kms::aws unit tests pass; cargo nextest run -p extent_keys -p extent_remote -p extent_store -p fxdax -E 'not (package(extent_store) & test(/^sim::/))' 953/953 passed, 90 skipped; clippy --all-targets on extent_keys (testing) and extent_store: no new warnings; cargo fmt --check clean; shellcheck clean.
+Left unchecked: AC #1, as only the environment leg of the credential chain was exercised (profile, web identity, ECS, instance role are aws-config's, untested here, no AWS account); AC #4, as CI's object-stores step is added but has not run (not pushed); DoD #1, Linux (ubu1) not run per the brief.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+AWS KMS backend in extent_keys/src/kms/aws.rs (AwsKms): FXDAX_KMS=aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]; Encrypt/Decrypt via aws-sdk-kms + aws-config (Apache-2.0; hyper 1/rustls 0.23 client), encryption context fxdax-tenant=tenant hex, Decrypt naming KeyId; wrapped = 'fxka' v1 + key name + ciphertext blob, refused unasked if another backend's or key's; errors mapped NotFound->NoSuchTenant, AccessDenied/Disabled->Revoked, pending deletion->Destroyed, InvalidCiphertext/IncorrectKey->Unauthentic, rest->Io. Verified against local-kms (MIT emulator, per-test on a free port, scripts/test-local-kms.sh, CI object-stores step added): 9/9 incl. rotation (seeded emulators), revoke/destroy, context/key binding, a sealed store end to end; four-package suite 953/953 on macOS. Docs: doc-16 'Real KMSes: AWS KMS', README. Open: AC #1 (non-env credential legs untested), AC #4 (CI not yet run), Linux DoD. Filed TASK-411.19, TASK-411.20.
+<!-- SECTION:FINAL_SUMMARY:END -->
