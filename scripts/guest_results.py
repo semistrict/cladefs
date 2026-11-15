@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """The guest tests' results as data (TASK-160.31): what scripts/test-e2e.sh's runs write, and what
 the scripts that drive them read in place of grepping logs.
 
-A run's results directory (test-e2e.sh's FXDAX_E2E_RESULTS) holds:
+A run's results directory (test-e2e.sh's CLADEFS_E2E_RESULTS) holds:
 
-- run.json: the run's commit (scripts/build-commit.sh), its knobs, every FXDAX_* and PJDFSTEST_*
+- run.json: the run's commit (scripts/build-commit.sh), its knobs, every CLADEFS_* and PJDFSTEST_*
   variable it was given but those that say where it writes (WHERE), its rounds and its cases;
 - CASE/round-K.json: each round's outcome, as the runner writes it (`runner test --outcome`): pass,
   fail, timeout, skip or report, why, the checks failed, what it took of its limit, the commit, the
-  knobs, its own among them (FXDAX_SEED), and the command that replays it;
+  knobs, its own among them (CLADEFS_SEED), and the command that replays it;
 - summary.json: each case's outcome, its last round's (`unrun` before it starts, `running` between
   rounds), the cases that failed, and the run's exit status once it ended (null before), rewritten
   as each round ends; and what each extent daemon downloaded against what it read (`daemons`, a
-  case's; `daemon`, the run's), from its stats file (FXDAX_EXTENTD_STATS: the run's
+  case's; `daemon`, the run's), from its stats file (CLADEFS_EXTENTD_STATS: the run's
   extentd-stats.txt, a case's daemon's NAME-stats.txt in its directory).
 
     guest_results.py start RESULTS ROUNDS CASE...   (test-e2e.sh, before its first case)
@@ -34,17 +34,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 # The variables that say where a run writes, or where its kernel is, not how it runs: not knobs.
-# FXDAX_GUEST_KERNEL is one only where FXDAX_GUEST_KERNEL_BUILD says how to build it, as
+# CLADEFS_GUEST_KERNEL is one only where CLADEFS_GUEST_KERNEL_BUILD says how to build it, as
 # scripts/lib/test-linux-host.sh does.
-WHERE = {"FXDAX_E2E_RESULTS", "FXDAX_BENCH_RESULTS", "FXDAX_COVERAGE"}
+WHERE = {"CLADEFS_E2E_RESULTS", "CLADEFS_BENCH_RESULTS", "CLADEFS_COVERAGE"}
 FAILED = {"fail", "timeout"}
 
 
 def knobs(environment):
     """The knobs of a run given `environment`."""
-    where = WHERE | ({"FXDAX_GUEST_KERNEL"} if environment.get("FXDAX_GUEST_KERNEL_BUILD") else set())
+    where = WHERE | ({"CLADEFS_GUEST_KERNEL"} if environment.get("CLADEFS_GUEST_KERNEL_BUILD") else set())
     return {name: value for name, value in sorted(environment.items())
-            if name.startswith(("FXDAX_", "PJDFSTEST_")) and name not in where}
+            if name.startswith(("CLADEFS_", "PJDFSTEST_")) and name not in where}
 
 
 def write(path, value):

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Run clippy's rules (clippy.toml), the test suite, the simulation of the bucket's protocol, the concurrency
 # tests under Shuttle, the scripts' tests (scripts/tests) and the mutant runners' checks, the Go
 # client's (go/), and on Linux the guest tests' own tests (guest/tests, both halves) and the VMM's
-# own that fxdax adds to (vendor/firecracker, built as fxdax builds it: scripts/firecracker-cargo.sh):
+# own that cladefs adds to (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh):
 # what CI runs, a part a job.
-# Arguments are passed to the suite's and the simulation's `cargo nextest run`. FXDAX_TEST_PARTS
+# Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, shuttle,
 # scripts, go, and guest and firecracker on Linux).
 #
@@ -33,8 +33,8 @@ export LIBC_FATAL_STDERR_=1
 
 parts="clippy workspace sim shuttle scripts go"
 [[ $(uname) != Linux ]] || parts+=" guest firecracker"
-parts=${FXDAX_TEST_PARTS:-$parts}
-part() { # name: whether FXDAX_TEST_PARTS has it
+parts=${CLADEFS_TEST_PARTS:-$parts}
+part() { # name: whether CLADEFS_TEST_PARTS has it
     [[ " $parts " == *" $1 "* ]]
 }
 
@@ -45,7 +45,7 @@ part() { # name: whether FXDAX_TEST_PARTS has it
 if part clippy; then
     UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
-    cargo clippy --manifest-path "$root/Cargo.toml" -p extent_store -p physmem -p fxdax \
+    cargo clippy --manifest-path "$root/Cargo.toml" -p extent_store -p physmem -p cladefs \
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
 fi
 # The simulation of extent_remote's protocol over extent_store's stores (TASK-88): its profiles'
@@ -71,7 +71,7 @@ if part shuttle; then
         shuttle_tests::
     cargo nextest run --manifest-path "$root/Cargo.toml" -p physmem --features shuttle --lib \
         shuttle::
-    cargo nextest run --manifest-path "$root/Cargo.toml" -p fxdax --features shuttle --lib \
+    cargo nextest run --manifest-path "$root/Cargo.toml" -p cladefs --features shuttle --lib \
         shuttle_tests::
     # The followers' concurrency protocol, under Shuttle (TASK-42.5).
     cargo nextest run --manifest-path "$root/Cargo.toml" -p follower --features shuttle
@@ -89,10 +89,10 @@ if part scripts; then
     "$root/scripts/license-headers.py"
     "$root/crates/fxfs-posix/mutants.sh" --check
     "$root/crates/fxfs-sim-diff/mutants.sh" --check
-    "$root/crates/fxdax/mutants.sh" --check
+    "$root/crates/cladefs/mutants.sh" --check
     "$root/crates/extent_remote/mutants.sh" --check
     "$root/scripts/guest-mutants-host.py" --check
-    # Firecracker's lock as Cargo resolves it with fxdax's crates, which only Linux builds: a
+    # Firecracker's lock as Cargo resolves it with cladefs's crates, which only Linux builds: a
     # dependency added to them went unnoticed on macOS (TASK-395).
     git -C "$root" submodule update --init vendor/firecracker
     "$root/scripts/firecracker-cargo.sh" --check
@@ -105,8 +105,8 @@ if part go; then
     [[ -z $unformatted ]] || { echo "not gofmt'd: $unformatted" >&2; exit 1; }
     go -C "$root/go" vet -tags extentd ./...
     if [[ $(uname) == Linux ]]; then
-        cargo build --manifest-path "$root/Cargo.toml" -p fxdax --bin fxdax-extentd
-        FXDAX_EXTENTD="${CARGO_TARGET_DIR:-$root/target}/debug/fxdax-extentd" \
+        cargo build --manifest-path "$root/Cargo.toml" -p cladefs --bin cladefs-extentd
+        CLADEFS_EXTENTD="${CARGO_TARGET_DIR:-$root/target}/debug/cladefs-extentd" \
             go -C "$root/go" test -tags extentd ./...
     else
         go -C "$root/go" test ./...
@@ -131,33 +131,33 @@ if part guest; then
     "${harness[@]}" -p test_cases --features guest
     "${harness[@]}" -p runner
 fi
-# The VMM's own tests that fxdax adds to, which no other suite reaches: its extent device's
+# The VMM's own tests that cladefs adds to, which no other suite reaches: its extent device's
 # (TASK-79.102), its vCPUs' exits' (TASK-187) and the PCI transport's shared memory BAR's and device
-# IDs' (TASK-267), on Linux alone, which the VMM builds for, with no KVM. With its fxdax feature, as
-# fxdax builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
+# IDs' (TASK-267), on Linux alone, which the VMM builds for, with no KVM. With its cladefs feature, as
+# cladefs builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
 # device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its store from a daemon in its process, a host's:
 # its stores' branches in a bucket in memory, as of placement 1, which without
-# FXDAX_EXTENTD_REMOTE and FXDAX_EXTENTD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
+# CLADEFS_EXTENTD_REMOTE and CLADEFS_EXTENTD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
 # bindgen needs libclang to build it.
 if part firecracker; then
     tests='test(/extent::/) | test(/vcpu::tests::(efaults_|test_exit_code_)/)'
     tests+=' | test(/device::tests::test_features_/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
-    FXDAX_EXTENTD_REMOTE=memory:///vmm FXDAX_EXTENTD_TOKEN=1 \
-        "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features fxdax -E "$tests"
+    CLADEFS_EXTENTD_REMOTE=memory:///vmm CLADEFS_EXTENTD_TOKEN=1 \
+        "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"
     # Where KVM is, as on ubu1: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
-    # (TASK-267); with FXDAX_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration
+    # (TASK-267); with CLADEFS_FIRECRACKER_TESTS=all, the vmm crate's whole suite, its integration
     # tests too, in their place. One at a time, as Firecracker runs them (--test-threads=1): they
     # share host resources, such as the tap device the persistence tests open by one name,
     # `hostname`: root's to make, or, made persistent and owned by a user (ip tuntap add dev
     # hostname mode tap user USER), that user's to open. Where neither, they are left out, saying
     # so (TASK-307).
     if [[ -w /dev/kvm ]]; then
-        if [[ ${FXDAX_FIRECRACKER_TESTS:-} == all ]]; then
-            FXDAX_EXTENTD_REMOTE=memory:///vmm FXDAX_EXTENTD_TOKEN=1 \
-                "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --features fxdax \
+        if [[ ${CLADEFS_FIRECRACKER_TESTS:-} == all ]]; then
+            CLADEFS_EXTENTD_REMOTE=memory:///vmm CLADEFS_EXTENTD_TOKEN=1 \
+                "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --features cladefs \
                 --no-fail-fast --test-threads 1
         else
             kvm_tests='(test(/transport::pci::/) | test(/device_manager::(pci_mngr|persist)::/))'
@@ -166,7 +166,7 @@ if part firecracker; then
                 kvm_tests+=' - test(/::test_device_manager_persistence$/)'
                 echo "scripts/test.sh: the VMM's persistence tests open the tap device hostname, which needs root or one of this user's (ip tuntap add dev hostname mode tap user $(id -un)), and are left out" >&2
             fi
-            "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features fxdax \
+            "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs \
                 --no-fail-fast --test-threads 1 -E "$kvm_tests"
         fi
     fi

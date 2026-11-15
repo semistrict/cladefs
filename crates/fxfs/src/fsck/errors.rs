@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/fsck/errors.rs`. fxdax: allocations are of extents of an extent
+// Fuchsia's `src/storage/fxfs/src/fsck/errors.rs`. cladefs: allocations are of extents of an extent
 // store (backlog doc-4), whose bookkeeping in the allocator fsck checks too (ExtentMismatch).
 
 use crate::log::*;

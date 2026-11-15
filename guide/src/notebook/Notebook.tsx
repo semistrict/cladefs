@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -188,7 +188,7 @@ export function NotebookDrawer() {
     const text = notebookText(progress, from, meta.commit);
     const done = () => {
       update((p) => ({ ...p, copied: p.notebook.length }));
-      setCopied("Copied. Paste it into Claude Code in your fxdax checkout.");
+      setCopied("Copied. Paste it into Claude Code in your cladefs checkout.");
     };
     navigator.clipboard.writeText(text).then(done, () => {
       const area = document.getElementById("notebook-blob") as HTMLTextAreaElement | null;

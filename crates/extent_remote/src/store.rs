@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 //! A store counts the requests it makes, by kind, those that fail too, which object storage bills,
 //! and the bytes it uploads, by kind of object, and downloads ([`Store::stats`]).
 //!
-//! fxdax: requests that fail, which the helpers of [`crate::bucket`] retry until they answer, it
+//! cladefs: requests that fail, which the helpers of [`crate::bucket`] retry until they answer, it
 //! counts by kind ([`Stats::failures`]) and logs, a warning naming the store's error, the first of
 //! a run of failures of a kind and then every [`FAILING_EVERY`], with how many failed, and once
 //! the kind answers again (TASK-314): a bucket that keeps failing, full, out of reach or refusing
@@ -20,13 +20,13 @@
 //! which the log says why of. And once a write fails, writes of its kind take turns ([`Turns`],
 //! TASK-382): one at a time, probing the bucket, until one is answered, then more as more are.
 //!
-//! fxdax: a level of keys listed by delimiter, it lists a page a request where the store pages
+//! cladefs: a level of keys listed by delimiter, it lists a page a request where the store pages
 //! (S3, GCS and Azure, [`PaginatedListStore`]), as many prefixes and objects as the page asks, never
 //! the whole level (TASK-395.5): a tenant's millions of cells are listed a page at a time. Files
 //! and memory list a level whole, which their pages are cut out of: a directory is read whole by
 //! any listing of it, and memory has nothing cheaper.
 //!
-//! fxdax: every reader of a bucket reads it through a store, which warns of reading what the
+//! cladefs: every reader of a bucket reads it through a store, which warns of reading what the
 //! collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a marks object
 //! is, as a store reads the newest every [`crate::marks::REFRESH`] alongside a read of its own.
 
@@ -49,19 +49,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// A bucket's objects under a prefix.
 pub struct Store {
     store: Arc<dyn ObjectStore>,
-    /// fxdax: the same store, which lists a level of keys a page a request, if it does (S3, GCS,
+    /// cladefs: the same store, which lists a level of keys a page a request, if it does (S3, GCS,
     /// Azure): none for files and memory, which list it whole (TASK-395.5).
     pages: Option<Arc<dyn PaginatedListStore>>,
     prefix: String,
     counts: Counts,
     /// Whether [`Store::probed`] found it honours conditional writes: what it found holds.
     honoured: std::sync::atomic::AtomicBool,
-    /// fxdax: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
+    /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
     decoded: crate::recovery::Decoded,
-    /// fxdax: what the collector's newest mark-only pass marked, which its reads warn of reaching
+    /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
     /// (TASK-264).
     marks: crate::marks::Watch,
-    /// fxdax: what gives this process's new branches their IDs, out of blocks of the bucket's
+    /// cladefs: what gives this process's new branches their IDs, out of blocks of the bucket's
     /// (TASK-364).
     objectids: crate::objectid::Allocator,
 }
@@ -80,9 +80,9 @@ pub enum Request {
     Update,
     Overwrite,
     Delete,
-    /// fxdax: a listing of one level of keys, by delimiter (TASK-395.5).
+    /// cladefs: a listing of one level of keys, by delimiter (TASK-395.5).
     ListDelimited,
-    /// fxdax: a batch of deletes (TASK-395.5): one request where the store deletes many at once
+    /// cladefs: a batch of deletes (TASK-395.5): one request where the store deletes many at once
     /// (S3's DeleteObjects, of up to 1,000; Azure's, of 256 each), one an object behind it
     /// where it does not (GCS, files, memory), which `object_store` does not say.
     DeleteBatch,
@@ -102,7 +102,7 @@ impl Request {
         Self::DeleteBatch,
     ];
 
-    /// fxdax: the name of its span ([`crate::trace`], TASK-258).
+    /// cladefs: the name of its span ([`crate::trace`], TASK-258).
     pub fn span_name(self) -> &'static str {
         match self {
             Self::Get => "bucket.get",
@@ -181,15 +181,15 @@ struct Counts {
     request_ns: [AtomicU64; Request::ALL.len()],
     uploaded: [AtomicU64; Upload::ALL.len()],
     downloaded: AtomicU64,
-    /// fxdax: the requests of each kind that failed, unanswered (TASK-314).
+    /// cladefs: the requests of each kind that failed, unanswered (TASK-314).
     failures: [AtomicU64; Request::ALL.len()],
-    /// fxdax: the run of failures of each kind going on, if one is.
+    /// cladefs: the run of failures of each kind going on, if one is.
     failing: [Failing; Request::ALL.len()],
-    /// fxdax: the turns the writes of each kind take, since one failed (TASK-382).
+    /// cladefs: the turns the writes of each kind take, since one failed (TASK-382).
     turns: [Turns; Request::ALL.len()],
 }
 
-/// fxdax: the writes of a kind in flight at once once one failed (TASK-382): one, a probe of the
+/// cladefs: the writes of a kind in flight at once once one failed (TASK-382): one, a probe of the
 /// bucket, after [`backoff`] of the failures in a row since the last answer, until one is
 /// answered; then one more for each answered, as TCP's slow start opens its window, doubling each
 /// round trip, until [`Turns::OPEN`], when none waits for a turn any more.
@@ -222,7 +222,7 @@ struct Window {
 
 impl Turns {
     /// The window at which no write waits for its turn any more: the host's uploads' PUTs at once
-    /// (`fxdax::remote`'s `UPLOADS`).
+    /// (`cladefs::remote`'s `UPLOADS`).
     const OPEN: u64 = 64;
 
     fn window(&self) -> std::sync::MutexGuard<'_, Window> {
@@ -291,11 +291,11 @@ impl Drop for Turn<'_> {
     }
 }
 
-/// fxdax: how often a run of failures of requests of a kind is logged again, with how many failed,
+/// cladefs: how often a run of failures of requests of a kind is logged again, with how many failed,
 /// after its first (TASK-314).
 pub const FAILING_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// fxdax: the run of failures of requests of one kind going on, if one is: since its first, until
+/// cladefs: the run of failures of requests of one kind going on, if one is: since its first, until
 /// one of the kind is answered (TASK-314).
 #[derive(Default)]
 struct Failing {
@@ -363,7 +363,7 @@ impl Failing {
     }
 }
 
-/// fxdax: what `error` says, and each error it says it came from that it does not say already: a
+/// cladefs: what `error` says, and each error it says it came from that it does not say already: a
 /// file bucket's full disk is an `io::Error` behind `object_store`'s own, which may not say it.
 fn cause(error: &object_store::Error) -> String {
     let mut said = error.to_string();
@@ -379,7 +379,7 @@ fn cause(error: &object_store::Error) -> String {
 }
 
 /// What a store did so far: its requests by kind and how long they took, the bytes it uploaded by
-/// kind of object, and the bytes it downloaded; fxdax: and the requests that failed, by kind.
+/// kind of object, and the bytes it downloaded; cladefs: and the requests that failed, by kind.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
     pub requests: [u64; Request::ALL.len()],
@@ -394,7 +394,7 @@ impl Stats {
         self.requests[request as usize]
     }
 
-    /// fxdax: the requests of kind `request` that failed, unanswered, each retried (TASK-314):
+    /// cladefs: the requests of kind `request` that failed, unanswered, each retried (TASK-314):
     /// not those the protocol answers (no object, one there, another version), which are answers.
     pub fn failures(&self, request: Request) -> u64 {
         self.failures[request as usize]
@@ -412,7 +412,7 @@ impl Stats {
 
     /// The stats as one line, which `scripts/bench-report.py` reads from the extent daemon's log:
     /// `object-store:`, then `NAME=COUNT` for each kind of request, `up-NAME=BYTES` for each kind
-    /// of object, `down=BYTES`, `NAME-ns=NANOSECONDS` for each kind of request, and fxdax's
+    /// of object, `down=BYTES`, `NAME-ns=NANOSECONDS` for each kind of request, and cladefs's
     /// `failed-NAME=COUNT` for each kind of request (TASK-314).
     pub fn line(&self) -> String {
         let mut line = "object-store:".to_owned();
@@ -436,7 +436,7 @@ impl Stats {
 impl Counts {
     /// Counts a request of kind `request`, made now, for the object at `path` (or the objects
     /// under it), and, once what it returns is dropped, as the request is answered, how long it
-    /// took. fxdax: its span starts, a child of what made the request (TASK-258).
+    /// took. cladefs: its span starts, a child of what made the request (TASK-258).
     fn request<'a>(&'a self, request: Request, path: Option<&'a Path>) -> Timed<'a> {
         self.requests[request as usize].fetch_add(1, Ordering::Relaxed);
         let span = crate::trace::Span::start(request.span_name());
@@ -447,22 +447,22 @@ impl Counts {
     }
 }
 
-/// A request counted ([`Counts::request`]), whose time is counted as this drops; fxdax: and its
+/// A request counted ([`Counts::request`]), whose time is counted as this drops; cladefs: and its
 /// span ended, which [`Timed::answered`] tells how it went (TASK-258).
 struct Timed<'a> {
     counts: &'a Counts,
     request: Request,
     started: std::time::Instant,
     span: crate::trace::Span,
-    /// fxdax: its object, or the objects under it, as [`Timed::answered`] logs it.
+    /// cladefs: its object, or the objects under it, as [`Timed::answered`] logs it.
     path: Option<&'a Path>,
 }
 
 impl Timed<'_> {
     /// `answered`, the request's answer, as branches take it ([`error`]), said on its span: its
-    /// bytes, as `bytes` counts those of what it answered, or its error. fxdax: and logged, at
+    /// bytes, as `bytes` counts those of what it answered, or its error. cladefs: and logged, at
     /// debug, with its kind, object, time, and bytes or error (TASK-260): in the extent daemon,
-    /// its log gives the record the guest request the work is for, if any (`fxdax::request`). A
+    /// its log gives the record the guest request the work is for, if any (`cladefs::request`). A
     /// failure, unanswered, is counted and logged as [`Failing`] says, with the store's error
     /// (TASK-314); an answer ends a run of them.
     fn answered<T>(
@@ -522,12 +522,12 @@ impl Drop for Timed<'_> {
 }
 impl Store {
     /// The objects of `store` under `prefix`, a path of segments separated by `/`, or empty.
-    /// fxdax: it lists a level of keys whole, as files and memory do, cutting pages out of it.
+    /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
     pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
         Self::paged(store, None, prefix)
     }
 
-    /// fxdax: the objects of `store` under `prefix`, a level of which `pages`, the same store,
+    /// cladefs: the objects of `store` under `prefix`, a level of which `pages`, the same store,
     /// lists a page a request, if given (TASK-395.5): S3's, GCS's and Azure's.
     pub fn paged(
         store: Arc<dyn ObjectStore>,
@@ -540,7 +540,7 @@ impl Store {
         Self { store, pages, prefix, counts, honoured, decoded, marks, objectids }
     }
 
-    /// fxdax: a new object ID of the bucket's, which no other branch of it has, nor will
+    /// cladefs: a new object ID of the bucket's, which no other branch of it has, nor will
     /// ([`crate::objectid`], TASK-364).
     pub async fn new_objectid(&self) -> u64 {
         self.objectids.next(self).await
@@ -569,7 +569,7 @@ impl Store {
         }
     }
 
-    /// fxdax: reads the newest marks object of the collector's mark-only passes over `cell`, if it
+    /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if it
     /// is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
     /// `gc/marks/`, then a read of the newest. A store does every [`crate::marks::REFRESH`] for each
     /// cell it reads, alongside a read of it; its requests go uncounted ([`Store::stats`]), being
@@ -603,7 +603,7 @@ impl Store {
         }
     }
 
-    /// fxdax: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD, which
+    /// cladefs: reads whether a mark-only pass marks the bucket ([`layout::MARKING`]), a HEAD, which
     /// says whether readers watch the cells' marks at all (TASK-395.4's review). A request failed,
     /// it keeps what it held, until the next.
     pub async fn refresh_marking(&self) {
@@ -690,8 +690,8 @@ impl Store {
 }
 
 /// The object store at `url`, as [`Store::from_url`] reaches it, and the prefix the URL names in
-/// it: for tests that put themselves between a store and its objects. fxdax: a degraded one, if the
-/// environment says so (`FXDAX_REMOTE_LATENCY_MS`, `FXDAX_REMOTE_FAULTS`: [`crate::faults`]): an
+/// it: for tests that put themselves between a store and its objects. cladefs: a degraded one, if the
+/// environment says so (`CLADEFS_REMOTE_LATENCY_MS`, `CLADEFS_REMOTE_FAULTS`: [`crate::faults`]): an
 /// object store as far as a host's own may be, as the sandbox team's RustFS, 25 ms away, which
 /// made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while (TASK-330.3).
 pub fn object_store_at(url: &str) -> Result<(Arc<dyn ObjectStore>, String), String> {
@@ -699,7 +699,7 @@ pub fn object_store_at(url: &str) -> Result<(Arc<dyn ObjectStore>, String), Stri
 }
 
 /// The object store at `url`, configured by `options` as `object_store::parse_url_opts` would
-/// configure it, but for its HTTP client: `client`'s, fxdax's own (TASK-205).
+/// configure it, but for its HTTP client: `client`'s, cladefs's own (TASK-205).
 pub(crate) fn object_store_with(
     url: &str,
     options: impl IntoIterator<Item = (String, String)>,
@@ -709,10 +709,10 @@ pub(crate) fn object_store_with(
     Ok((objects, prefix))
 }
 
-/// fxdax: a store as it lists a level of keys a page a request, if it does ([`Store::paged`]).
+/// cladefs: a store as it lists a level of keys a page a request, if it does ([`Store::paged`]).
 type Pages = Option<Arc<dyn PaginatedListStore>>;
 
-/// fxdax: what a bucket's URL reaches ([`reach`]).
+/// cladefs: what a bucket's URL reaches ([`reach`]).
 pub(crate) struct Reached {
     pub objects: Arc<dyn ObjectStore>,
     /// The same store, which lists a level of keys a page a request, if it does: S3's, GCS's and
@@ -723,7 +723,7 @@ pub(crate) struct Reached {
     pub prefix: String,
 }
 
-/// fxdax: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a level
+/// cladefs: the object store at `url`, as [`object_store_with`] reaches it, and how it lists a level
 /// of keys a page at a time, if it does (TASK-395.5).
 pub(crate) fn reach(
     url: &str,
@@ -732,7 +732,7 @@ pub(crate) fn reach(
 ) -> Result<Reached, String> {
     let url = url::Url::parse(url).map_err(|error| format!("{url}: {error}"))?;
     let (store, pages, path): (Arc<dyn ObjectStore>, _, Path) = match url.scheme() {
-        // fxdax: `object_store`'s own refuses conditional updates (TASK-165.1).
+        // cladefs: `object_store`'s own refuses conditional updates (TASK-165.1).
         "file" => {
             let dir = url.to_file_path().map_err(|()| format!("{url}: no directory"))?;
             let local =
@@ -784,7 +784,7 @@ fn cloud(
         Scheme::MicrosoftAzure => built!(object_store::azure::MicrosoftAzureBuilder),
         other => {
             let source = format!("no buckets of {other:?}").into();
-            return Err(object_store::Error::Generic { store: "fxdax", source });
+            return Err(object_store::Error::Generic { store: "cladefs", source });
         }
     };
     Ok((store, pages, path))
@@ -906,7 +906,7 @@ impl Bucket for Store {
         }
     }
 
-    /// fxdax: a page a request where the store pages ([`Store::paged`]); else the level whole,
+    /// cladefs: a page a request where the store pages ([`Store::paged`]); else the level whole,
     /// which the page is cut out of ([`Listing::page`]).
     fn list_delimited(
         &self,
@@ -979,7 +979,7 @@ impl Bucket for Store {
         };
         let upload = Upload::of(key);
         async move {
-            // fxdax: its turn, once a write of its kind failed (TASK-382).
+            // cladefs: its turn, once a write of its kind failed (TASK-382).
             let _turn = self.counts.turns[request as usize].turn().await;
             let timed = self.counts.request(request, Some(&path));
             let len = bytes.len() as u64;
@@ -1006,9 +1006,9 @@ impl Bucket for Store {
         }
     }
 
-    /// fxdax: through `object_store`'s `delete_stream`, which deletes in batches where the store
+    /// cladefs: through `object_store`'s `delete_stream`, which deletes in batches where the store
     /// has a batch delete (S3's DeleteObjects, Azure's), and several at once where it has not
-    /// (TASK-395.5); fxdax's buckets of files take their lock once a batch ([`crate::local`]).
+    /// (TASK-395.5); cladefs's buckets of files take their lock once a batch ([`crate::local`]).
     fn delete_batch(&self, keys: &[&str]) -> impl Future<Output = Result<(), Error>> + Send {
         let store = self.store.clone();
         let paths: Vec<object_store::Result<Path>> =
@@ -1062,7 +1062,7 @@ pub async fn probe(bucket: &impl Bucket, nonce: u64) -> Result<(), String> {
     }
     // No store makes this ETag; GCS's generation 0 is no object's.
     let other =
-        Version { e_tag: Some("\"fxdax-probe\"".to_owned()), version: Some("0".to_owned()) };
+        Version { e_tag: Some("\"cladefs-probe\"".to_owned()), version: Some("0".to_owned()) };
     let stale = bucket.put(&key, bytes::Bytes::from_static(b"stale"), PutMode::Update(other)).await;
     if stale != Err(Error::Precondition) {
         return Err(refused("an update of another version", &stale));
@@ -1213,17 +1213,17 @@ pub(crate) mod tests {
     use storage_device::ExtentId;
 
     fn memory() -> Arc<Store> {
-        Arc::new(Store::new(Arc::new(InMemory::new()), "fxdax/test"))
+        Arc::new(Store::new(Arc::new(InMemory::new()), "cladefs/test"))
     }
 
-    /// FXDAX_REMOTE_LATENCY_MS adds its milliseconds to each request, as a farther object store's
+    /// CLADEFS_REMOTE_LATENCY_MS adds its milliseconds to each request, as a farther object store's
     /// would (TASK-62): a put and a get, two of them; and each request's time is counted, by its
     /// kind (TASK-165.11).
     #[test]
     fn requests_wait_the_latency_set() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("FXDAX_REMOTE_LATENCY_MS", "50") };
+        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", "50") };
         let store = Store::from_url("memory:///latency").unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let start = std::time::Instant::now();
@@ -1249,7 +1249,7 @@ pub(crate) mod tests {
     fn file_buckets_wait_the_latency_set() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("FXDAX_REMOTE_LATENCY_MS", "50") };
+        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", "50") };
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file://{}/", dir.path().canonicalize().unwrap().display());
         let store = Store::from_url(&url).unwrap();
@@ -1404,7 +1404,7 @@ pub(crate) mod tests {
         );
         assert_eq!(stats.uploaded, [150, 11, 30, 13, 9]);
         assert_eq!(stats.downloaded, 70);
-        // fxdax: what the protocol answers fails no request (TASK-314): the create where an object
+        // cladefs: what the protocol answers fails no request (TASK-314): the create where an object
         // was, the get of none.
         assert_eq!(stats.failures, [0; Request::ALL.len()]);
         // Its line, each kind of request's time after the rest, then its failures: as of times
@@ -1658,7 +1658,7 @@ pub(crate) mod tests {
         futures::executor::block_on(branch_lifecycle(memory(), 1));
     }
 
-    /// fxdax: the bucket of the directory `dir`, by its URL (TASK-165.1).
+    /// cladefs: the bucket of the directory `dir`, by its URL (TASK-165.1).
     pub(crate) fn file(dir: &std::path::Path) -> Arc<Store> {
         let url = url::Url::from_directory_path(dir).unwrap();
         Arc::new(Store::from_url(url.as_str()).unwrap())
@@ -1669,7 +1669,7 @@ pub(crate) mod tests {
         futures::executor::block_on(crate::bucket::conformance(&*memory(), "conformance"));
     }
 
-    /// fxdax: a bucket on the host's filesystem does what every bucket must (TASK-165.1).
+    /// cladefs: a bucket on the host's filesystem does what every bucket must (TASK-165.1).
     #[test]
     fn file_buckets_conform() {
         let dir = tempfile::tempdir().unwrap();
@@ -1682,8 +1682,8 @@ pub(crate) mod tests {
         futures::executor::block_on(crate::bucket::conformance(&bucket, "conformance"));
     }
 
-    /// fxdax: `object_store`'s own bucket of a directory refuses conditional updates, which the
-    /// probe finds; fxdax's honours them (TASK-165.1).
+    /// cladefs: `object_store`'s own bucket of a directory refuses conditional updates, which the
+    /// probe finds; cladefs's honours them (TASK-165.1).
     #[test]
     fn file_buckets_honour_conditional_writes() {
         let dir = tempfile::tempdir().unwrap();
@@ -1704,7 +1704,7 @@ pub(crate) mod tests {
         futures::executor::block_on(branch_lifecycle(file(dir.path()), 1));
     }
 
-    /// fxdax: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
+    /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
     fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<Store> {
         let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
         let Reached { objects, pages, prefix } = reach(&url, server.options(), client).unwrap();
@@ -1715,7 +1715,7 @@ pub(crate) mod tests {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
     }
 
-    /// fxdax: S3 over HTTP, through fxdax's client, does what every bucket must, and branches live
+    /// cladefs: S3 over HTTP, through cladefs's client, does what every bucket must, and branches live
     /// there: the server in memory the tests below slow is as S3 is to them (TASK-205).
     #[test]
     fn s3_buckets_conform() {
@@ -1727,7 +1727,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// fxdax: over S3, deletes go in DeleteObjects of 1,000 keys each, and a listing by delimiter
+    /// cladefs: over S3, deletes go in DeleteObjects of 1,000 keys each, and a listing by delimiter
     /// is one ListObjectsV2 by `delimiter=/`, listing none of the objects under the prefixes it
     /// finds (TASK-395.5): as the server serves them, and the store counts them.
     #[test]
@@ -1776,11 +1776,11 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-208: the latency every request to `bucket` waits, FXDAX_REMOTE_LATENCY_MS, set before
+    /// TASK-208: the latency every request to `bucket` waits, CLADEFS_REMOTE_LATENCY_MS, set before
     /// it was made.
     const LATE: u64 = 5;
 
-    /// TASK-208: a bucket made under FXDAX_REMOTE_LATENCY_MS, `bucket`, does what every bucket
+    /// TASK-208: a bucket made under CLADEFS_REMOTE_LATENCY_MS, `bucket`, does what every bucket
     /// must, its requests each [`LATE`] ms late, one after another.
     async fn conforms_late(bucket: &Store) {
         let started = std::time::Instant::now();
@@ -1793,14 +1793,14 @@ pub(crate) mod tests {
         );
     }
 
-    /// TASK-208: sets FXDAX_REMOTE_LATENCY_MS to [`LATE`].
+    /// TASK-208: sets CLADEFS_REMOTE_LATENCY_MS to [`LATE`].
     fn late() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("FXDAX_REMOTE_LATENCY_MS", LATE.to_string()) };
+        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", LATE.to_string()) };
     }
 
-    /// TASK-208: under FXDAX_REMOTE_LATENCY_MS, a bucket in memory conforms, late.
+    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket in memory conforms, late.
     #[test]
     fn memory_buckets_conform_late() {
         late();
@@ -1808,7 +1808,7 @@ pub(crate) mod tests {
         runtime().block_on(conforms_late(&bucket));
     }
 
-    /// TASK-208: under FXDAX_REMOTE_LATENCY_MS, a bucket of files conforms, late: its reads, which
+    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket of files conforms, late: its reads, which
     /// object_store's throttle, before TASK-330.3, panicked on (`unimplemented!`), as well as its
     /// writes.
     #[test]
@@ -1818,7 +1818,7 @@ pub(crate) mod tests {
         runtime().block_on(conforms_late(&file(dir.path())));
     }
 
-    /// TASK-208: under FXDAX_REMOTE_LATENCY_MS, a bucket over S3 conforms, late.
+    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket over S3 conforms, late.
     #[test]
     fn s3_buckets_conform_late() {
         late();
@@ -1905,7 +1905,7 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-205: what fxdax's client costs at a bandwidth nothing limits, against `object_store`'s
+    /// TASK-205: what cladefs's client costs at a bandwidth nothing limits, against `object_store`'s
     /// own: 32 objects of 16 MiB uploaded at once to the S3 server in memory, by each in turn,
     /// 25 times, then their median. Run with `--run-ignored only --no-capture`, in release.
     #[test]
@@ -1927,7 +1927,7 @@ pub(crate) mod tests {
                 Arc::new(Store::new(Arc::new(builder.build().unwrap()), prefix))
             };
             let stores = [
-                ("fxdax's", s3(&server, "ours", &Client::DEFAULT)),
+                ("cladefs's", s3(&server, "ours", &Client::DEFAULT)),
                 ("object_store's", theirs("theirs")),
             ];
             let body = noise(SIZE, 1);
@@ -1974,21 +1974,21 @@ pub(crate) mod tests {
     }
 
     /// The same over a real S3 server: `scripts/test-rustfs.sh` starts RustFS and runs this with
-    /// `FXDAX_S3_URL` naming a bucket of it, and the `AWS_*` variables to reach it.
+    /// `CLADEFS_S3_URL` naming a bucket of it, and the `AWS_*` variables to reach it.
     #[test]
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs() {
-        over_a_real_store(&std::env::var("FXDAX_S3_URL").expect("FXDAX_S3_URL names the bucket"));
+        over_a_real_store(&std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket"));
     }
 
-    /// fxdax: the same over GCS, through fxdax's client (TASK-205): `FXDAX_GCS_URL` names a bucket
+    /// cladefs: the same over GCS, through cladefs's client (TASK-205): `CLADEFS_GCS_URL` names a bucket
     /// and a prefix, under which the run leaves its branches, reached with the environment's
     /// credentials. Then 32 objects of 8 MiB uploaded at once, which a host's upstream below
     /// 9 MB/s took longer to carry than `object_store`'s 30 s: each lands at its first attempt.
     #[test]
-    #[ignore = "needs a GCS bucket and its credentials: FXDAX_GCS_URL (TASK-205)"]
+    #[ignore = "needs a GCS bucket and its credentials: CLADEFS_GCS_URL (TASK-205)"]
     fn gcs() {
-        let url = std::env::var("FXDAX_GCS_URL").expect("FXDAX_GCS_URL names the bucket");
+        let url = std::env::var("CLADEFS_GCS_URL").expect("CLADEFS_GCS_URL names the bucket");
         over_a_real_store(&url);
         const OBJECTS: u64 = 32;
         const SIZE: usize = 8 << 20;
@@ -2014,12 +2014,12 @@ pub(crate) mod tests {
     }
 
     /// The same over Azure Blob Storage, as its emulator, Azurite, serves it (TASK-46):
-    /// `scripts/test-azurite.sh` starts it and runs this with `FXDAX_AZURE_URL` naming a container
+    /// `scripts/test-azurite.sh` starts it and runs this with `CLADEFS_AZURE_URL` naming a container
     /// of it, and the `AZURE_*` variables to reach it.
     #[test]
     #[ignore = "needs Azurite: scripts/test-azurite.sh, CI's object-stores job"]
     fn azurite() {
-        let url = std::env::var("FXDAX_AZURE_URL").expect("FXDAX_AZURE_URL names the container");
+        let url = std::env::var("CLADEFS_AZURE_URL").expect("CLADEFS_AZURE_URL names the container");
         over_a_real_store(&url);
     }
 }

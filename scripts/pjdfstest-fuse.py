@@ -1,26 +1,26 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """pjdfstest (BSD-2-Clause) on FUSE mounts of new stores, as root (TASK-149.38): POSIX's
 permissions, owners, setgid and sticky directories, times and errnos, as the host's Node layer,
-fxfs-posix under it and fxdax::fuse's server over it keep them.
+fxfs-posix under it and cladefs::fuse's server over it keep them.
 
-Two runs, each on a new store fxdax-mount makes (`--new`) and mounts:
+Two runs, each on a new store cladefs-mount makes (`--new`) and mounts:
 
 - in a directory made in the mount, as the guest's pjdfstest case runs in its Fxfs;
 - from the mount's root itself, chowned and chmodded first: a new volume's root has no POSIX
   attributes of its own, and a chown of it alone once left it mode 000 (TASK-222).
 
-pjdfstest is built at the commit scripts/lib/pjdfstest.sh pins, in FXDAX_PJDFSTEST_WORK (default:
+pjdfstest is built at the commit scripts/lib/pjdfstest.sh pins, in CLADEFS_PJDFSTEST_WORK (default:
 target/pjdfstest), once. A run's failures are its failed tests, by file and number, and its files
 that failed whole (a bad plan, an exit status); scripts/pjdfstest-fuse-known lists those of open
 bugs, each with its task. The script fails if any other fails, or if one listed fails in neither
 run, so that the list stays true. The runs' logs are left in the work directory.
 
-Usage: sudo scripts/pjdfstest-fuse.py FXDAX_MOUNT [DIR...]
+Usage: sudo scripts/pjdfstest-fuse.py CLADEFS_MOUNT [DIR...]
 
-FXDAX_MOUNT is the fxdax-mount binary; DIRs name pjdfstest's directories of tests (such as chmod),
+CLADEFS_MOUNT is the cladefs-mount binary; DIRs name pjdfstest's directories of tests (such as chmod),
 all of them otherwise.
 """
 
@@ -135,32 +135,32 @@ def unexpected(found, listed, dirs):
     return unlisted, gone
 
 
-def mounted(fxdax_mount, dir):
-    """fxdax-mount of a new store in `dir`, once it says it is mounted: the process, the mount
+def mounted(cladefs_mount, dir):
+    """cladefs-mount of a new store in `dir`, once it says it is mounted: the process, the mount
     point and its log."""
     store, mountpoint = dir / "store", dir / "mnt"
     mountpoint.mkdir()
-    log = open(dir / "fxdax-mount.log", "w")
+    log = open(dir / "cladefs-mount.log", "w")
     # Other users' too, which pjdfstest's tests become (`-u`, `-g`): a FUSE mount is its mounting
     # user's alone otherwise.
-    command = [fxdax_mount, "--allow-other", "--new", str(CAPACITY), str(store), str(mountpoint)]
+    command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(store), str(mountpoint)]
     process = subprocess.Popen(command,
                                stdout=subprocess.PIPE, stderr=log, text=True)
     said = process.stdout.readline().strip()
     if said != str(mountpoint):
         process.wait()
-        sys.exit(f"fxdax-mount: not mounted, {process.returncode}: "
-                 f"{(dir / 'fxdax-mount.log').read_text()}")
+        sys.exit(f"cladefs-mount: not mounted, {process.returncode}: "
+                 f"{(dir / 'cladefs-mount.log').read_text()}")
     return process, mountpoint, log
 
 
-def run(name, fxdax_mount, tests, dirs, setup, logs):
+def run(name, cladefs_mount, tests, dirs, setup, logs):
     """One run: a new store mounted, `setup` given its mount point and saying where prove runs,
     then pjdfstest; the mount unmounted. Its failures."""
     with tempfile.TemporaryDirectory(prefix=f"pjdfstest-fuse-{name}-") as dir:
         # Searchable by the users pjdfstest's tests become, as the mount is.
         os.chmod(dir, 0o755)
-        process, mountpoint, log = mounted(fxdax_mount, Path(dir))
+        process, mountpoint, log = mounted(cladefs_mount, Path(dir))
         try:
             cwd = setup(mountpoint)
             paths = [str(tests / d) for d in dirs] or [str(tests)]
@@ -174,7 +174,7 @@ def run(name, fxdax_mount, tests, dirs, setup, logs):
         print(f"== {name}: prove exit {proved.returncode}; {logs / f'{name}.log'}")
         print("\n".join(proved.stdout.splitlines()[-4:]))
         if status != 0:
-            sys.exit(f"fxdax-mount exited {status}: {(Path(dir) / 'fxdax-mount.log').read_text()}")
+            sys.exit(f"cladefs-mount exited {status}: {(Path(dir) / 'cladefs-mount.log').read_text()}")
         found = failures(proved.stdout)
         if proved.returncode != 0 and not found:
             sys.exit(f"prove failed, {proved.returncode}, and said no test failed")
@@ -203,12 +203,12 @@ def main():
         sys.exit(__doc__.split("Usage: ")[1].split("\n")[0])
     if os.geteuid() != 0:
         sys.exit("pjdfstest-fuse.py runs as root: pjdfstest chowns, and mounts by mount(2)")
-    fxdax_mount, dirs = os.path.abspath(sys.argv[1]), sys.argv[2:]
-    work = Path(os.environ.get("FXDAX_PJDFSTEST_WORK", ROOT / "target" / "pjdfstest")).resolve()
+    cladefs_mount, dirs = os.path.abspath(sys.argv[1]), sys.argv[2:]
+    work = Path(os.environ.get("CLADEFS_PJDFSTEST_WORK", ROOT / "target" / "pjdfstest")).resolve()
     tests = build(work) / "tests"
     found = set()
     for name, setup in (("in-a-directory", in_a_directory), ("from-the-root", from_the_root)):
-        found |= run(name, fxdax_mount, tests, dirs, setup, work)
+        found |= run(name, cladefs_mount, tests, dirs, setup, work)
     listed = known(KNOWN.read_text())
     unlisted, gone = unexpected(found, listed, dirs)
     for failure in sorted(found - set(unlisted)):

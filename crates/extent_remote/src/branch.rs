@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -8,7 +8,7 @@
 //! record once the commit is acknowledged). A fork of a point is its child's record alone, which
 //! writes nothing of the point's, so that any number of hosts fork one at once ([`fork_point`]).
 //!
-//! fxdax: every change of a record or a lease is a [`transition`], one compare-and-swap loop, of
+//! cladefs: every change of a record or a lease is a [`transition`], one compare-and-swap loop, of
 //! what it found to what it writes (TASK-160.14).
 
 use crate::bucket::{self, Bucket, Created, Object, Updated};
@@ -120,7 +120,7 @@ pub async fn create_forked(bucket: &impl Bucket, child: Branch, owner: u64) -> R
     .await
 }
 
-/// fxdax: gives `branch`'s record the DEKs `deks` says it should have, its own and those it
+/// cladefs: gives `branch`'s record the DEKs `deks` says it should have, its own and those it
 /// inherits, given what it finds there, by a conditional update ([`transition`]); none, it is left
 /// as it is (TASK-411.3, TASK-411.4, [`crate::keys`]). The writer's of the branch alone, holding
 /// its cell, or its fork's host, before any store of it opens. Returns the record as it left it:
@@ -174,8 +174,8 @@ pub async fn record(bucket: &impl Bucket, branch: Branch) -> Result<Option<Recor
 }
 
 /// The branches of `cell` whose records say they are live, with their records: an operator's look,
-/// to compare with what hosts hold. A fork whose child has no record yet isn't among them. fxdax: a
-/// cell's, listing its records alone (`fxdax-gc --branches`, TASK-395.4).
+/// to compare with what hosts hold. A fork whose child has no record yet isn't among them. cladefs: a
+/// cell's, listing its records alone (`cladefs-gc --branches`, TASK-395.4).
 pub async fn live(bucket: &impl Bucket, cell: Cell) -> Result<BTreeMap<Branch, Record>, Error> {
     let mut live = BTreeMap::new();
     for meta in bucket::list(bucket, &layout::records(cell)).await {
@@ -189,7 +189,7 @@ pub async fn live(bucket: &impl Bucket, cell: Cell) -> Result<BTreeMap<Branch, R
     Ok(live)
 }
 
-/// fxdax: writes the reference of the fork of `origin` to `child`, whose owner is `owner`, under
+/// cladefs: writes the reference of the fork of `origin` to `child`, whose owner is `owner`, under
 /// the parent's cell ([`layout::reference`], TASK-395.3): create-only, its bytes the fork's alone
 /// ([`layout::Reference`]), so that every writer of it, and a write landed though its answer was
 /// lost, writes the same. One there already stands, whatever its bytes: a pass keeps by its key.
@@ -198,7 +198,7 @@ async fn refer(bucket: &impl Bucket, origin: Origin, child: Branch, owner: u64) 
     bucket::create(bucket, &key, layout::encode(&layout::Reference::of(owner))).await;
 }
 
-/// fxdax: writes the reference of the writable fork of `origin` to `child`, if the child is of
+/// cladefs: writes the reference of the writable fork of `origin` to `child`, if the child is of
 /// another cell than its parent's ([`record_fork`], TASK-395.3).
 pub(crate) async fn refer_fork(bucket: &impl Bucket, child: Child, origin: Origin) {
     if rules().references && origin.parent.cell != child.branch.cell {
@@ -206,7 +206,7 @@ pub(crate) async fn refer_fork(bucket: &impl Bucket, child: Child, origin: Origi
     }
 }
 
-/// fxdax: retires the references at `keys` ([`layout::reference`]), garbage for good, under any
+/// cladefs: retires the references at `keys` ([`layout::reference`]), garbage for good, under any
 /// cells: marks each ([`layout::retired`]), then deletes them, many at once (TASK-395.13,
 /// TASK-395.14). One a writer whose read of its child's record came before writes again after, the
 /// pass over its parent's cell deletes, by its mark. Without the rule, as a test shows it needed,
@@ -242,7 +242,7 @@ async fn retire_one(bucket: &impl Bucket, key: &str) {
     bucket::delete(bucket, key).await;
 }
 
-/// fxdax: retires the reference of the fork of `origin` to `child`, whose record, `found`, names
+/// cladefs: retires the reference of the fork of `origin` to `child`, whose record, `found`, names
 /// another origin than the fork's, or none (TASK-395.10): the fork made no branch, and no record
 /// will name it, records being kept and their origins never changed, so that no pass would retire
 /// it ([`crate::collector`] retires a reference by the origin its child's deleted record names).
@@ -262,7 +262,7 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
 /// gets it once the fork is acknowledged, from the parent's writer, or the next one, or the
 /// parent's deletion. One of another owner is another branch's ([`Error::IdTaken`]).
 ///
-/// fxdax: a child of another cell than its parent's gets its reference first, under the parent's
+/// cladefs: a child of another cell than its parent's gets its reference first, under the parent's
 /// cell, of the fork's owner (TASK-395.3): the pass over the parent's cell lists nothing of the
 /// child's, and keeps the parent's state at the fork point by the reference, which a pass reading
 /// the parent deleted lists after its deletion marked it, after this. A child of the parent's own
@@ -280,7 +280,7 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
 /// took it back, the child's ID taken (TASK-395.13): every retirement is marked, and the pass over
 /// the parent's cell, whose listing the write changes, deletes it ([`retire`]).
 ///
-/// fxdax: before both, for a child of another cell, the parent's checkpoint at the fork point
+/// cladefs: before both, for a child of another cell, the parent's checkpoint at the fork point
 /// ([`recovery::checkpoint_at`]): what the child's recovery reads of its parent by its key alone,
 /// so that a pass over the child's cell lists nothing of the parent's (TASK-395.4). A point's
 /// clones, of any cell, read the same, which its own recording wrote: a point in its origin's own
@@ -376,7 +376,7 @@ pub async fn record_fork_under(
     }
 }
 
-/// fxdax: the fork's reference, under the cell of `origin`'s branch, whatever `child`'s cell, that
+/// cladefs: the fork's reference, under the cell of `origin`'s branch, whatever `child`'s cell, that
 /// branch's own too (TASK-395.3): the pass over that cell lists nothing of `child`'s, and keeps
 /// `origin`'s state while the reference stands. Written before the point's record is read, so that
 /// a fork that found the point live wrote it before the point's deletion, which a pass reading the
@@ -449,7 +449,7 @@ pub async fn fork_point(
 }
 
 /// Makes the fork being made of `point` to `child` ([`fork_point`]), whose record is created: fails
-/// with [`Error::Deleted`] if the point was deleted, or the fork was given up on. fxdax: and with
+/// with [`Error::Deleted`] if the point was deleted, or the fork was given up on. cladefs: and with
 /// [`Error::NotShared`] if `child` is of another tenant's cell than the point, which its record,
 /// as this read finds it, doesn't say is shared (TASK-395.7): unsharing it stops the forks whose
 /// reads come after. Its host deletes `child` then, as for a point deleted.
@@ -486,7 +486,7 @@ pub async fn finish_point_fork(
     Ok(())
 }
 
-/// fxdax: shares `point`, if `shared`, or no longer: other tenants' cells than its own may have
+/// cladefs: shares `point`, if `shared`, or no longer: other tenants' cells than its own may have
 /// branches forked from it while it is shared, and no new ones once not ([`Record::shared`],
 /// TASK-395.7); forks made stay. The trusted control API's alone: no guest asks for it. Fails with
 /// [`Error::NotPoint`] for a branch that is no point, [`Error::Deleted`] for one deleted, and
@@ -599,7 +599,7 @@ pub async fn delete_under(
             Err(Error::Lost(_)) if lost_is_ok(bucket, branch, &record).await? => Vec::new(),
             Err(error) => return Err(error),
         };
-        // fxdax: under its keys, if it is sealed, for its checkpoints at the fork points of its
+        // cladefs: under its keys, if it is sealed, for its checkpoints at the fork points of its
         // forks to other cells, as they are written (TASK-411.4).
         let keys = crate::keys::Parents::Kms(kms, Some(&record));
         for fork in &forks {
@@ -636,7 +636,7 @@ async fn end_head(
     token: u64,
 ) -> Result<Head, Error> {
     let read = head::read(bucket, branch).await;
-    // fxdax: ended already, by this deletion or another, whatever placement's: deletions are
+    // cladefs: ended already, by this deletion or another, whatever placement's: deletions are
     // idempotent. Else the token is resolved by the branch's cell (TASK-364).
     if let Some(found) = read.head()?
         && found.epoch == Head::FINAL
@@ -647,7 +647,7 @@ async fn end_head(
     head::end(bucket, branch, read, holder, token).await
 }
 
-/// fxdax: the token a deletion by the placement of `token` ends `branch`'s lease with, as its
+/// cladefs: the token a deletion by the placement of `token` ends `branch`'s lease with, as its
 /// writers take it with their cell's epoch (TASK-364): the cell's epoch now, which takes the lease
 /// from its holder's writer, and from none a later taking of the cell made; refused if a later
 /// placement holds the cell ([`Error::Stale`]). The deletion takes nothing of the cell, its other
@@ -746,13 +746,13 @@ pub async fn delete_fork_under(
             (Kind::Fork(origin), true)
         }
         Kind::Fork(origin) | Kind::Claim(origin) => {
-            // fxdax: a claim of another cell than its parent's lives only with the parent's
+            // cladefs: a claim of another cell than its parent's lives only with the parent's
             // checkpoint at the fork point, which is what its recovery reads of the parent there
             // (TASK-395.4), as [`record_fork`] writes it: what is going since the parent's branch
             // was found holding the segment, as a pass takes it, reads as not held, as there.
             let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
                 true if origin.parent.cell != child.cell => {
-                    // fxdax: under the parent's keys, if it is sealed and the host has a KMS: a
+                    // cladefs: under the parent's keys, if it is sealed and the host has a KMS: a
                     // host with none writes it in the clear, as before, knowing of no sealed
                     // branch (TASK-411.4).
                     let clear = crate::keys::Ring::clear();

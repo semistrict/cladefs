@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,7 +22,7 @@
 //! budget it may share with other writers, a host's ([`Writer::uploading_within`]), and held only
 //! while they go: what a host's writers hold at once is bounded, however far behind they are.
 //!
-//! fxdax: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
+//! cladefs: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
 //! branch reading under it, and seals its fences and authenticates its checkpoints under its
 //! branch's newest DEK; the segments it is given come sealed by their store.
 
@@ -110,7 +110,7 @@ pub struct Writer<B: Bucket> {
     inner: Mutex<Inner>,
     /// What follows the collector's moves with it, if anything does ([`Writer::following`]).
     mover: std::sync::OnceLock<Mover>,
-    /// fxdax: the keys it reads and seals under (TASK-411.3).
+    /// cladefs: the keys it reads and seals under (TASK-411.3).
     keys: Arc<Ring>,
 }
 
@@ -156,7 +156,7 @@ impl<B: Bucket> Writer<B> {
         Self::open_keyed(bucket, branch, (holder, token), Ring::clear()).await
     }
 
-    /// fxdax: takes `branch` over as [`Writer::open`] does, holding `keys`, its store's ring
+    /// cladefs: takes `branch` over as [`Writer::open`] does, holding `keys`, its store's ring
     /// (TASK-411.3).
     pub async fn open_keyed(
         bucket: Arc<B>,
@@ -171,7 +171,7 @@ impl<B: Bucket> Writer<B> {
     /// Takes over the branch `before` recovered, whose record is `record`, as [`Writer::open`]
     /// does, having found both before it takes the head: its state, once it holds it, is
     /// `before`'s recovered on ([`recovery::recover_on`]), which reads only what came since.
-    /// fxdax: holding `keys` (TASK-411.3).
+    /// cladefs: holding `keys` (TASK-411.3).
     pub async fn open_recovered(
         bucket: Arc<B>,
         record: Record,
@@ -294,7 +294,7 @@ impl<B: Bucket> Writer<B> {
         self.branch
     }
 
-    /// fxdax: the keys it reads and seals under (TASK-411.3).
+    /// cladefs: the keys it reads and seals under (TASK-411.3).
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
     }
@@ -365,7 +365,7 @@ impl<B: Bucket> Writer<B> {
 
     /// Uploads segment `seq`: its extents stored on their own, a few at once, then it, its bytes
     /// ending with the footer it was taken with, each at a key naming the writer's epoch, which no
-    /// other writer writes. fxdax: in a span of its own, `upload.segment`, its bucket's requests
+    /// other writer writes. cladefs: in a span of its own, `upload.segment`, its bucket's requests
     /// children of it (`crate::trace`, TASK-258).
     pub async fn upload(&self, seq: u64) -> Result<(), Error> {
         let span = trace::Span::start("upload.segment");
@@ -441,7 +441,7 @@ impl<B: Bucket> Writer<B> {
     /// Acknowledges the segments uploaded with every one before them, by swapping the branch's
     /// head to name them, with the condition that it is the one this writer last wrote ([`head`],
     /// doc-7, The head; TASK-407): a writer taken over, or a deleted branch's, fails, and stops.
-    /// Returns the last segment acknowledged. fxdax: to the last that goes on with no commit, a
+    /// Returns the last segment acknowledged. cladefs: to the last that goes on with no commit, a
     /// commit spanning segments acknowledged with the segment it ends in, not part of it
     /// (`extent_frame::segment::Continued`, TASK-92.41): what a store lets go of, once
     /// acknowledged, the bucket has whole, and a head names no commit begun.
@@ -518,7 +518,7 @@ impl<B: Bucket> Writer<B> {
                     Err(Error::IdTaken(child)) => drop(self.inner().refused.insert(child)),
                     Err(error) => return Err(error),
                 }
-                // fxdax: without the rule that the reference comes first, as a test shows it
+                // cladefs: without the rule that the reference comes first, as a test shows it
                 // needed, after (TASK-395.3).
                 if !crate::rules().references_first {
                     branch::refer_fork(&*self.bucket, child, origin).await;
@@ -536,7 +536,7 @@ impl<B: Bucket> Writer<B> {
     /// lands, so that it never names one before where a checkpoint of its own does, which the
     /// collector, its head naming it, keeps the moves from, not from before (TASK-175). Then swaps
     /// the head to name it, the branch's newest (TASK-407).
-    /// fxdax: in a span of its own, `upload.checkpoint`, its bucket's requests children of it
+    /// cladefs: in a span of its own, `upload.checkpoint`, its bucket's requests children of it
     /// (`crate::trace`, TASK-258).
     pub async fn checkpoint(&self) -> Result<Option<u64>, Error> {
         let span = trace::Span::start("upload.checkpoint");
@@ -553,7 +553,7 @@ impl<B: Bucket> Writer<B> {
             if inner.state.through.is_none() || inner.state.through <= inner.checkpoint {
                 return Ok(inner.checkpoint);
             }
-            // fxdax: acknowledged, its last segment ends its commits (TASK-92.41).
+            // cladefs: acknowledged, its last segment ends its commits (TASK-92.41).
             debug_assert!(inner.state.begun.is_none(), "a checkpoint of a commit begun");
             inner.state.clone()
         };

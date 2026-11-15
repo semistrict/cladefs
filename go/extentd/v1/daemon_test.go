@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //go:build extentd
 
-// The client against the daemon itself, fxdax-extentd, which FXDAX_EXTENTD names, built from the
+// The client against the daemon itself, cladefs-extentd, which CLADEFS_EXTENTD names, built from the
 // same commit: Linux's alone, as the daemon is (scripts/test.sh's go part).
 //
-//	FXDAX_EXTENTD=target/debug/fxdax-extentd go test -tags extentd ./...
+//	CLADEFS_EXTENTD=target/debug/cladefs-extentd go test -tags extentd ./...
 
 package extentdv1_test
 
@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	extentdv1 "github.com/semistrict/fxdax/go/extentd/v1"
+	extentdv1 "github.com/semistrict/cladefs/go/extentd/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/codes"
@@ -29,19 +29,19 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// daemon starts fxdax-extentd, a host as the Rust tests have it (an in-memory bucket), serving its
+// daemon starts cladefs-extentd, a host as the Rust tests have it (an in-memory bucket), serving its
 // control API in dir until the test ends, and returns a client of it once it is SERVING.
 func daemon(t *testing.T, dir string) *extentdv1.Client {
-	binary := os.Getenv("FXDAX_EXTENTD")
+	binary := os.Getenv("CLADEFS_EXTENTD")
 	if binary == "" {
-		t.Fatal("FXDAX_EXTENTD names no fxdax-extentd to test against")
+		t.Fatal("CLADEFS_EXTENTD names no cladefs-extentd to test against")
 	}
 	control := filepath.Join(dir, "control.sock")
 	command := exec.Command(binary, filepath.Join(dir, "vms.sock"))
 	command.Env = append(os.Environ(),
-		"FXDAX_EXTENTD_GRPC="+control,
-		"FXDAX_EXTENTD_REMOTE=memory:///branches",
-		"FXDAX_EXTENTD_TOKEN=1",
+		"CLADEFS_EXTENTD_GRPC="+control,
+		"CLADEFS_EXTENTD_REMOTE=memory:///branches",
+		"CLADEFS_EXTENTD_TOKEN=1",
 	)
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {

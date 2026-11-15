@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -35,8 +35,8 @@ exec env -i HOME="$FAKE_VM" PATH=/usr/bin:/bin bash "$@"
 """
 # A script the VM runs, which says what it was given.
 SAYS = '#!/bin/bash\necho "$0 $*, LIBCLANG_PATH=${LIBCLANG_PATH:-}"\n'
-# A script the VM runs, which says the fxdax settings it was given.
-SETTINGS = '#!/bin/bash\nenv | grep ^FXDAX_ | sort\n'
+# A script the VM runs, which says the cladefs settings it was given.
+SETTINGS = '#!/bin/bash\nenv | grep ^CLADEFS_ | sort\n'
 
 
 def write(path, text, mtime):
@@ -148,7 +148,7 @@ class Tree(Synced, unittest.TestCase):
 
 class InPlace(unittest.TestCase):
     def test_a_runs_own_tree_builds_where_it_is(self):
-        """A host run's worktree (scripts/lib/host.sh, FXDAX_HOST_IN_PLACE=1) is its own, its
+        """A host run's worktree (scripts/lib/host.sh, CLADEFS_HOST_IN_PLACE=1) is its own, its
         target directories too: host_tree copies nothing, and repo stays, its .git with it."""
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -157,14 +157,14 @@ class InPlace(unittest.TestCase):
                 ["/bin/bash", "-c",
                  'set -euo pipefail; source "$0"; work=$1 repo=$2; host_tree t; printf %s "$repo"',
                  LIBRARY, Path(directory) / "work", source],
-                env={"PATH": "/usr/bin:/bin", "FXDAX_HOST_IN_PLACE": "1"},
+                env={"PATH": "/usr/bin:/bin", "CLADEFS_HOST_IN_PLACE": "1"},
                 capture_output=True, text=True)
             self.assertEqual((done.returncode, done.stdout, done.stderr), (0, str(source), ""))
             self.assertFalse((Path(directory) / "work").exists())
 
 
 class Lima(Synced, unittest.TestCase):
-    """The Lima VM's tree, ~/fxdax-test, which scripts/lib/lima.sh syncs before it runs a script
+    """The Lima VM's tree, ~/cladefs-test, which scripts/lib/lima.sh syncs before it runs a script
     there, from a checkout of its own."""
 
     def lima(self, script, *args, settings=None, commit=False):
@@ -172,8 +172,8 @@ class Lima(Synced, unittest.TestCase):
         checkout and the VM's tree as built() has them, the tree synced by content before, and the
         checkout a commit of Git's if `commit` (self.commit): its status, output and errors."""
         self.vm, checkout = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
-        built(self.vm / "fxdax-test", checkout)
-        (self.vm / "fxdax-test" / ".by-content").touch()
+        built(self.vm / "cladefs-test", checkout)
+        (self.vm / "cladefs-test" / ".by-content").touch()
         for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "test-linux.sh", "build-commit.sh"]:
             (checkout / "scripts" / name).parent.mkdir(parents=True, exist_ok=True)
             (checkout / "scripts" / name).symlink_to(SCRIPTS / name)
@@ -208,33 +208,33 @@ class Lima(Synced, unittest.TestCase):
 
     def test_a_script_runs_in_the_vms_tree_synced_by_content(self):
         ran = self.lima("lib/lima.sh", "bench.sh", "3", "a b")
-        script = self.vm / "fxdax-test" / "scripts" / "bench.sh"
+        script = self.vm / "cladefs-test" / "scripts" / "bench.sh"
         self.assertEqual(ran, (0, f"{script} 3 a b, LIBCLANG_PATH=/usr/lib/llvm 19/lib\n", ""))
-        self.assertSynced(self.vm / "fxdax-test", self.start)
+        self.assertSynced(self.vm / "cladefs-test", self.start)
 
     def test_the_tests_run_in_the_vms_tree_synced_by_content(self):
         ran = self.lima("test-linux.sh", "-E", "test(x)")
-        script = self.vm / "fxdax-test" / "scripts" / "test.sh"
+        script = self.vm / "cladefs-test" / "scripts" / "test.sh"
         self.assertEqual(ran, (0, f"{script} -E test(x), LIBCLANG_PATH=/usr/lib/llvm 19/lib\n", ""))
-        self.assertSynced(self.vm / "fxdax-test", self.start)
+        self.assertSynced(self.vm / "cladefs-test", self.start)
 
-    def test_the_vms_script_takes_the_fxdax_settings_given(self):
+    def test_the_vms_script_takes_the_cladefs_settings_given(self):
         # As test-e2e-linux.sh's guest kernel, a path in the VM, and its rounds.
-        settings = {"FXDAX_GUEST_KERNEL": "/home/me/a kernel/Image", "FXDAX_E2E_ROUNDS": "3"}
+        settings = {"CLADEFS_GUEST_KERNEL": "/home/me/a kernel/Image", "CLADEFS_E2E_ROUNDS": "3"}
         ran = self.lima("lib/lima.sh", "settings.sh", settings=settings)
-        said = "FXDAX_BUILD_COMMIT=unknown\nFXDAX_E2E_ROUNDS=3\n"
-        said += "FXDAX_GUEST_KERNEL=/home/me/a kernel/Image\n"
+        said = "CLADEFS_BUILD_COMMIT=unknown\nCLADEFS_E2E_ROUNDS=3\n"
+        said += "CLADEFS_GUEST_KERNEL=/home/me/a kernel/Image\n"
         self.assertEqual(ran, (0, said, ""))
 
     def test_the_vms_builds_are_of_the_checkouts_commit(self):
         # The VM's tree has no .git (host_tree), whose builds would say they are of no commit: the
         # guest kernel's /proc/fs/fxfs/build, which fxfs-guest checks.
         ran = self.lima("lib/lima.sh", "settings.sh", commit=True)
-        self.assertEqual(ran, (0, f"FXDAX_BUILD_COMMIT={self.commit}\n", ""))
+        self.assertEqual(ran, (0, f"CLADEFS_BUILD_COMMIT={self.commit}\n", ""))
 
     def test_a_build_commit_given_is_the_vms(self):
-        ran = self.lima("lib/lima.sh", "settings.sh", settings={"FXDAX_BUILD_COMMIT": "abc"})
-        self.assertEqual(ran, (0, "FXDAX_BUILD_COMMIT=abc\n", ""))
+        ran = self.lima("lib/lima.sh", "settings.sh", settings={"CLADEFS_BUILD_COMMIT": "abc"})
+        self.assertEqual(ran, (0, "CLADEFS_BUILD_COMMIT=abc\n", ""))
 
 
 class Apt(unittest.TestCase):
@@ -278,7 +278,7 @@ class Apt(unittest.TestCase):
         # scripts/test-e2e.sh, which bench.sh runs its cases through, runs scripts/test.sh's
         # firecracker part, under nextest (TASK-220): every host script reaching it needs it, or the
         # run fails there (GCE r1022, the bench host's). But for one whose runs build and run
-        # artifacts built once (FXDAX_E2E_BUILD_ONLY, FXDAX_E2E_PREBUILT), which run no tests of
+        # artifacts built once (CLADEFS_E2E_BUILD_ONLY, CLADEFS_E2E_PREBUILT), which run no tests of
         # the VMM's (bench-ab-linux-host.sh, TASK-276).
         reaching = ("scripts/test-e2e.sh", "scripts/bench.sh")
         missing = [
@@ -287,7 +287,7 @@ class Apt(unittest.TestCase):
             for text in [path.read_text()]
             if any(script in text for script in reaching)
             and "host_need cargo-nextest" not in text
-            and "FXDAX_E2E_PREBUILT" not in text
+            and "CLADEFS_E2E_PREBUILT" not in text
         ]
         self.assertEqual(missing, [])
 
@@ -374,8 +374,8 @@ class Network(unittest.TestCase):
         self.assertEqual((done.returncode, done.stdout.splitlines(), done.stderr), (0, said, ""))
 
 class Provisioned(unittest.TestCase):
-    """A host of one's own, provisioned already (ubu1): FXDAX_HOST_WORK names the work directory,
-    and with FXDAX_HOST_PROVISIONED=1 host_need takes a tool there at the version it is, where it
+    """A host of one's own, provisioned already (ubu1): CLADEFS_HOST_WORK names the work directory,
+    and with CLADEFS_HOST_PROVISIONED=1 host_need takes a tool there at the version it is, where it
     would install the pinned one (TASK-276.6). Here cargo is a fake whose nextest says a version
     other than the pin, and which fails anything else, an install among them."""
 
@@ -398,14 +398,14 @@ echo "cargo-nextest 0.0.1"
             )
 
     def test_the_work_directory_is_the_callers(self):
-        done = self.run_library('printf %s "$work"', {"FXDAX_HOST_WORK": "/scratch/work"})
+        done = self.run_library('printf %s "$work"', {"CLADEFS_HOST_WORK": "/scratch/work"})
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "/scratch/work", ""))
         done = self.run_library('printf %s "$work"', {})
         self.assertEqual((done.returncode, done.stdout), (0, "/var/lib/fxdax-test"))
 
     def test_a_provisioned_hosts_tools_are_taken_as_they_are(self):
         script = 'host_need cargo-nextest; printf "%s\\n" "${host_needed[@]}"'
-        done = self.run_library(script, {"FXDAX_HOST_PROVISIONED": "1"})
+        done = self.run_library(script, {"CLADEFS_HOST_PROVISIONED": "1"})
         self.assertEqual((done.returncode, done.stdout, done.stderr), (0, "cargo-nextest\n", ""))
 
     def test_another_hosts_tools_are_installed_at_their_pins(self):
@@ -508,7 +508,7 @@ fi
 
 class Kernels(unittest.TestCase):
     """host_kernel, a run's guest kernel: built in the run's work directory, or with a cache of
-    kernels on the host (FXDAX_HOST_KERNELS), taken from there if one was built from the same
+    kernels on the host (CLADEFS_HOST_KERNELS), taken from there if one was built from the same
     sources. Here a source tree of the kernel's inputs and one that isn't, whose
     build-guest-kernel.sh is a fake that says what it built and where, its kernel naming the
     sources' text; cargo a fake whose metadata, run in the tree's root (scripts/guest-kernel-key.sh),
@@ -516,11 +516,11 @@ class Kernels(unittest.TestCase):
     and flock fake_flock.py."""
 
     BUILD = """#!/bin/bash
-echo "built $(basename "$FXDAX_GUEST_KERNEL_WORK") debug=$FXDAX_GUEST_KERNEL_DEBUG \\
-coverage=$FXDAX_GUEST_KERNEL_COVERAGE" >> "$CALLS"
-mkdir -p "$FXDAX_GUEST_KERNEL_WORK/out/x86_64"
+echo "built $(basename "$CLADEFS_GUEST_KERNEL_WORK") debug=$CLADEFS_GUEST_KERNEL_DEBUG \\
+coverage=$CLADEFS_GUEST_KERNEL_COVERAGE" >> "$CALLS"
+mkdir -p "$CLADEFS_GUEST_KERNEL_WORK/out/x86_64"
 cat "$(dirname "$0")/../guest/linux/fs.c" "$(dirname "$0")/../crates/fxfs/lib.rs" \\
-    > "$FXDAX_GUEST_KERNEL_WORK/out/x86_64/vmlinux"
+    > "$CLADEFS_GUEST_KERNEL_WORK/out/x86_64/vmlinux"
 """
     CARGO = """#!/bin/bash
 [[ $1 == metadata ]] || { echo "cargo: $*" >&2; exit 3; }
@@ -541,7 +541,7 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-
             "crates/fxfs/Cargo.toml": "[package]\n",
             "crates/fxfs/lib.rs": "fxfs\n",
             # The VMM's, which the kernel isn't built of.
-            "crates/fxdax/lib.rs": "vmm\n",
+            "crates/cladefs/lib.rs": "vmm\n",
             "scripts/build-guest-kernel.sh": self.BUILD,
             "scripts/build-guest-sysroot.sh": "",
         }.items():
@@ -571,8 +571,8 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-
              'mkdir -p "$results"; host_kernel "$1"; printf %s "$host_kernel_image"', LIBRARY, kind,
              self.repo],
             env={"PATH": f"{self.directory / 'bin'}:/usr/bin:/bin:/sbin", "CALLS": str(self.calls),
-                 "FXDAX_HOST_WORK": str(self.directory / work),
-                 **({"FXDAX_HOST_KERNELS": str(self.cache)} if cached else {})},
+                 "CLADEFS_HOST_WORK": str(self.directory / work),
+                 **({"CLADEFS_HOST_KERNELS": str(self.cache)} if cached else {})},
             capture_output=True, text=True, cwd=self.directory,
         )
         built = self.calls.read_text()[len(built_before):].splitlines()
@@ -590,7 +590,7 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-
         self.assertEqual(first[:3], (0, "", ["built work debug=0 coverage=0"]))
         self.assertEqual(first[3:], (self.directory / "w1/guest-kernel-release/vmlinux", "fs\nfxfs\n"))
         # Another run's: the same sources, but for what the kernel isn't built of.
-        (self.repo / "crates" / "fxdax" / "lib.rs").write_text("another vmm\n")
+        (self.repo / "crates" / "cladefs" / "lib.rs").write_text("another vmm\n")
         second = self.kernel("release", "w2")
         self.assertEqual(second[:3], (0, "", []))
         self.assertEqual(second[3:], (self.directory / "w2/guest-kernel-release/vmlinux", "fs\nfxfs\n"))

@@ -1,22 +1,22 @@
 # shellcheck shell=bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Sourced by the scripts that run fxdax's tests against OpenBao (openbao.org, MPL-2.0), the real
+# Sourced by the scripts that run cladefs's tests against OpenBao (openbao.org, MPL-2.0), the real
 # KMS a test starts for itself, `bao server -dev` (extent_keys::testing::openbao::DevServer,
 # TASK-411.16): its release's binary, fetched once and checked against its digest (its
-# checksums.txt). FXDAX_BAO names a bao binary to run instead of the release's; the tests run
-# FXDAX_BAO's, else PATH's.
+# checksums.txt). CLADEFS_BAO names a bao binary to run instead of the release's; the tests run
+# CLADEFS_BAO's, else PATH's.
 
 # The release run, and each platform's archive's SHA-256.
 OPENBAO_VERSION=2.7.2
 
 # openbao_binary prints the path of the release's binary for this platform, fetching it once into
-# the cache (XDG_CACHE_HOME's, or ~/.cache's, fxdax/openbao-VERSION-PLATFORM).
+# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/openbao-VERSION-PLATFORM).
 openbao_binary() {
-    if [[ -n ${FXDAX_BAO:-} ]]; then
-        echo "$FXDAX_BAO"
+    if [[ -n ${CLADEFS_BAO:-} ]]; then
+        echo "$CLADEFS_BAO"
         return
     fi
     local platform sha256 dir archive
@@ -32,7 +32,7 @@ openbao_binary() {
             sha256=2b4fc131910f4b075b2e1c9a9de67c461489491a8f03fbdc73387294d67d9547 ;;
         *) echo "OpenBao $OPENBAO_VERSION has no release for $(uname -s) $(uname -m)" >&2; return 1 ;;
     esac
-    dir="${XDG_CACHE_HOME:-$HOME/.cache}/fxdax/openbao-$OPENBAO_VERSION-$platform"
+    dir="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/openbao-$OPENBAO_VERSION-$platform"
     if [[ ! -x $dir/bao ]]; then
         mkdir -p "$dir" || return
         archive="$dir.tar.gz"

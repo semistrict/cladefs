@@ -1,8 +1,8 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# fxdax's x86-64 guest kernel, a release build (scripts/build-guest-kernel.sh), kept between runs
+# cladefs's x86-64 guest kernel, a release build (scripts/build-guest-kernel.sh), kept between runs
 # by what it's built from (scripts/guest-kernel-key.sh), on a runner the guest-host action set up.
 # Kept as soon as it's built, not as the job ends well: a run that fails, as one may on its checks,
 # would build it again, a quarter of an hour. Its 40 MB alone, not the cargo builds' 3-4 GB, a
@@ -31,7 +31,7 @@ runs:
       if: steps.kernel-cache.outputs.cache-hit != 'true'
       shell: bash
       run: |
-        FXDAX_GUEST_KERNEL_WORK=~/guest-kernel-work scripts/build-guest-kernel.sh x86_64
+        CLADEFS_GUEST_KERNEL_WORK=~/guest-kernel-work scripts/build-guest-kernel.sh x86_64
         mkdir -p ~/guest-kernel
         cp ~/guest-kernel-work/out/x86_64/vmlinux ~/guest-kernel/
     - uses: actions/cache/save@v6

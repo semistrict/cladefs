@@ -1,4 +1,4 @@
-# fxdax's own: a local extent store, as backlog doc-4's host keeps extents (TASK-26.10).
+# cladefs's own: a local extent store, as backlog doc-4's host keeps extents (TASK-26.10).
 [package]
 name = "extent_store"
 version = "0.1.0"
@@ -11,7 +11,7 @@ anyhow.workspace = true
 bincode.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
-# fxdax: AES-256-XTS, which a sealed store's raw files are encrypted with (TASK-411.5).
+# cladefs: AES-256-XTS, which a sealed store's raw files are encrypted with (TASK-411.5).
 extent_keys.workspace = true
 extent_remote.workspace = true
 fail = "0.5.1"
@@ -47,11 +47,11 @@ workspace = true
 # interleaving of its threads, and its rules may be turned off (tests/shuttle/, TASK-44.4). Only
 # for those tests: Shuttle's primitives work only in a Shuttle test.
 shuttle = ["dep:shuttle", "audit"]
-# fxdax: the store recounts each count it keeps of its state as each critical section ends, and
+# cladefs: the store recounts each count it keeps of its state as each critical section ends, and
 # panics if one drifted (State::audit, TASK-160.16): for tests, whose stores are small, as it goes
 # through all the branch holds each time. Its own tests, the Shuttle and crash tests among them,
 # turn it on.
 audit = []
-# fxdax: tests' panics holding a lock shared beyond one store (shared::testing, TASK-149.24): fxdax's
+# cladefs: tests' panics holding a lock shared beyond one store (shared::testing, TASK-149.24): cladefs's
 # tests have it.
 testing = []

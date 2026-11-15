@@ -1851,7 +1851,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxdax"
+name = "cladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1867,7 +1867,7 @@ dependencies = [
  "flate2",
  "fuchsia-async",
  "futures",
- "fxdax",
+ "cladefs",
  "fxfs",
  "fxfs-posix",
  "humantime",
@@ -1908,7 +1908,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxdax-examples"
+name = "cladefs-examples"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1919,7 +1919,7 @@ dependencies = [
  "fidl-fuchsia-io",
  "fuchsia-async",
  "futures",
- "fxdax",
+ "cladefs",
  "fxfs",
  "libc",
  "object_store",
@@ -4204,7 +4204,7 @@ dependencies = [
  "extent_remote",
  "extent_store",
  "futures",
- "fxdax",
+ "cladefs",
  "libc",
  "log",
  "rand 0.10.3",
@@ -4847,7 +4847,7 @@ name = "virtio_extent"
 version = "0.1.0"
 dependencies = [
  "futures",
- "fxdax",
+ "cladefs",
  "libc",
  "log",
  "proptest",

@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: locks shared beyond one store, whose poison no fence contains (TASK-149.24). A store's
-//! own locks fence the store a panic holding one went through (fxdax's `fence`): it fails each
+//! cladefs: locks shared beyond one store, whose poison no fence contains (TASK-149.24). A store's
+//! own locks fence the store a panic holding one went through (cladefs's `fence`): it fails each
 //! request after with `EIO`, the others serve on. A lock shared beyond it, as the process's cache
 //! of extents, a store's state, which its followers share with its writer, or a window's, which its
 //! connection and the guest's faults share, would be found poisoned by every user after, one panic
@@ -56,11 +56,11 @@ pub fn abort_on_panics() {
             if !held.is_empty() {
                 let locks = held.join(", ");
                 log::error!(
-                    "fxdax: {ABORTING} ({locks}), shared beyond one store: aborting, as no fence \
+                    "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no fence \
                      contains it (TASK-149.24)"
                 );
                 // As the log may not reach stderr, nor be flushed before the abort.
-                eprintln!("fxdax: {ABORTING} ({locks}): aborting");
+                eprintln!("cladefs: {ABORTING} ({locks}): aborting");
                 std::process::abort();
             }
         }));

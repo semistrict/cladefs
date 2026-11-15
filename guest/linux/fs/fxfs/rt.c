@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The kernel's side of the filesystem's Rust runtime (see rt.h).
  */
@@ -294,7 +294,7 @@ u64 fxfs_rt_monotonic_ns(void)
 u64 fxfs_rt_realtime_ns(void)
 {
 	/*
-	 * fxdax: the coarse clock, an inode's own: a ctime the kernel sets after a time read from
+	 * cladefs: the coarse clock, an inode's own: a ctime the kernel sets after a time read from
 	 * a finer clock could be before it (xfstests generic/423).
 	 */
 	return ktime_get_coarse_real_ns();

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
+//! cladefs's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
 //! KMS that counts the calls made of it ([`Counted`]), so that a test can say how many a path
 //! costs: none on a fork's, one for a host taking a cell; a KMS forgetting destroyed KEKs, as real
 //! ones forget deleted keys ([`Forgetting`], TASK-411.19); AWS KMS's emulator, started for a test
@@ -130,7 +130,7 @@ impl<K: Kms> Kms for Forgetting<K> {
 
 /// local-kms (github.com/nsmithuk/local-kms, MIT), an emulator of AWS KMS, run for a test: a
 /// process of its own, listening on a port free when it started, its keys in a directory of its
-/// own, gone with it. `FXDAX_LOCAL_KMS` names its binary, as `scripts/test-local-kms.sh` installs
+/// own, gone with it. `CLADEFS_LOCAL_KMS` names its binary, as `scripts/test-local-kms.sh` installs
 /// and names it, along with the dummy credentials the SDK signs with, the environment's, for the
 /// standard chain to find, as the backend's own tests need them: the emulator checks no signature.
 /// What it differs in from AWS: it has no IAM, so never answers `AccessDeniedException` but for a
@@ -162,8 +162,8 @@ impl LocalAwsKms {
     /// (its README, Seeding file format): a key of several backing keys is one rotated.
     pub fn seeded(seed: &str) -> Self {
         use std::io::BufRead as _;
-        let binary = std::env::var_os("FXDAX_LOCAL_KMS").expect(
-            "FXDAX_LOCAL_KMS names no local-kms: scripts/test-local-kms.sh installs and names it",
+        let binary = std::env::var_os("CLADEFS_LOCAL_KMS").expect(
+            "CLADEFS_LOCAL_KMS names no local-kms: scripts/test-local-kms.sh installs and names it",
         );
         assert!(
             std::env::var_os("AWS_ACCESS_KEY_ID").is_some(),
@@ -219,7 +219,7 @@ impl LocalAwsKms {
         &self.endpoint
     }
 
-    /// The URL of a KMS over it, its keys named by `template` (`FXDAX_KMS`'s, as
+    /// The URL of a KMS over it, its keys named by `template` (`CLADEFS_KMS`'s, as
     /// `kms::from_url` reads it).
     pub fn url(&self, template: &str) -> String {
         format!("aws-kms://{LOCAL_KMS_REGION}?key={template}&endpoint={}", self.endpoint)

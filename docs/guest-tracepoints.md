@@ -12,7 +12,7 @@ sit beside two other tools:
 - the `fxfs.dax_trace` ring of a page's maps and iomaps, which tests dump to the kernel log.
 
 A tracepoint that is off costs one static branch. The guest kernel has event tracing on
-(`guest/linux/configs/fxdax.config`: `CONFIG_FTRACE`, `CONFIG_ENABLE_DEFAULT_TRACERS`, `CONFIG_BPF_EVENTS`), but no
+(`guest/linux/configs/cladefs.config`: `CONFIG_FTRACE`, `CONFIG_ENABLE_DEFAULT_TRACERS`, `CONFIG_BPF_EVENTS`), but no
 function tracer. `scripts/build-guest-kernel.sh` checks `CONFIG_FTRACE` and
 `CONFIG_BPF_EVENTS`.
 

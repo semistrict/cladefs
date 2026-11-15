@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
- * fxdax: the thread-local values of fs/fxfs's Rust, which a task's `fxfs_tls` holds
+ * cladefs: the thread-local values of fs/fxfs's Rust, which a task's `fxfs_tls` holds
  * (guest/linux/patches/0001-sched-fxfs-tls.patch), and which are dropped as the task exits.
  */
 #ifndef _LINUX_FXFS_TLS_H

@@ -1,40 +1,40 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # An A/B of the fs bench (scripts/bench.sh) on an x86-64 Linux KVM host, as root
 # (scripts/bench-ab-host.sh drives it, TASK-276): each side's tree built once, in a tree of its own
 # (host_tree), into artifacts of its own, the guest kernel among them (test-e2e.sh's
-# FXDAX_E2E_BUILD_ONLY); then ROUNDS rounds, each of both sides, A B, then B A, and so on, each a
-# run of the bench against its side's artifacts, building nothing (FXDAX_E2E_PREBUILT), so that
+# CLADEFS_E2E_BUILD_ONLY); then ROUNDS rounds, each of both sides, A B, then B A, and so on, each a
+# run of the bench against its side's artifacts, building nothing (CLADEFS_E2E_PREBUILT), so that
 # what drifts on the host moves both alike, and a round takes the workloads' time alone. Each
 # round's results go to RESULTS/NAME-rN, and scripts/bench-ab.py's comparison of the sides to
-# RESULTS/ab.md, the control FXDAX_AB_CONTROL's case (default ext4-guest-kernel; empty: none).
+# RESULTS/ab.md, the control CLADEFS_AB_CONTROL's case (default ext4-guest-kernel; empty: none).
 #
-# With FXDAX_AB_SUITE=qualify (default fs, the bench), each round is the qualification instead
+# With CLADEFS_AB_SUITE=qualify (default fs, the bench), each round is the qualification instead
 # (scripts/qualify.sh, TASK-330.4), of LangSmith's pin against a candidate: its harness, the
-# runner and the guest agent, this tree's for both sides (test-e2e.sh's FXDAX_E2E_HARNESS), as a
+# runner and the guest agent, this tree's for both sides (test-e2e.sh's CLADEFS_E2E_HARNESS), as a
 # pin from before the qualification's cases lacks them; what each side builds, its extent daemon,
 # its Firecracker and its guest kernel, what it tests. No control by default: what moves, and
 # each side's failed checks, ab.md says (scripts/bench-ab.py).
 #
 # Usage: bench-ab-linux-host.sh TOOLS RESULTS A_SOURCE B_SOURCE ROUNDS A_NAME B_NAME
 #
-# FXDAX_AB_PHASE is what of it runs: `build` builds the sides (and the qualification's harness)
+# CLADEFS_AB_PHASE is what of it runs: `build` builds the sides (and the qualification's harness)
 # into the work directory, and stops; `rounds` runs the rounds of what a build there made, and
 # compares them; unset, both. scripts/bench-ab-host.sh runs the build as work and the rounds alone
 # as a measurement (fxjob --bench), so that compiling takes no measurement's cores.
 #
 # TOOLS is the tree whose scripts run, this one's: the sides' trees may be of before them (an
-# A/B's base), and build and boot their own code (test-e2e.sh's FXDAX_E2E_ROOT). B_SOURCE `same`
-# is A's tree, built once, for an A/B of one build that FXDAX_AB_A_ENV and FXDAX_AB_B_ENV tell
+# A/B's base), and build and boot their own code (test-e2e.sh's CLADEFS_E2E_ROOT). B_SOURCE `same`
+# is A's tree, built once, for an A/B of one build that CLADEFS_AB_A_ENV and CLADEFS_AB_B_ENV tell
 # apart: NAME=VALUE words each side's rounds run with, such as
-# FXDAX_GUEST_CMDLINE=virtio_extent.affine=0. FXDAX_BENCH_CASES, FXDAX_BENCH_GROUPS,
-# FXDAX_BENCH_ITERATIONS (each round's, default 2) and the like are the same for both sides.
-# FXDAX_GUEST_KERNEL_BUILD is the guest kernels' build (default release). FXDAX_AB_BUILD_NICE is
+# CLADEFS_GUEST_CMDLINE=virtio_extent.affine=0. CLADEFS_BENCH_CASES, CLADEFS_BENCH_GROUPS,
+# CLADEFS_BENCH_ITERATIONS (each round's, default 2) and the like are the same for both sides.
+# CLADEFS_GUEST_KERNEL_BUILD is the guest kernels' build (default release). CLADEFS_AB_BUILD_NICE is
 # the niceness the sides build at (default 0), the rounds' unchanged: on a host others share, with
-# CARGO_BUILD_JOBS and FXDAX_GUEST_KERNEL_JOBS (scripts/build-guest-kernel.sh) to bound them.
+# CARGO_BUILD_JOBS and CLADEFS_GUEST_KERNEL_JOBS (scripts/build-guest-kernel.sh) to bound them.
 set -euo pipefail
 
 # Prints the sides' order of each of ROUNDS rounds, a line each: `a b`, then `b a`, and so on, so
@@ -49,9 +49,9 @@ ab_order() {
 # Sourced, as by the scripts' tests, it defines its functions and does nothing else.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 
-phase=${FXDAX_AB_PHASE:-all}
+phase=${CLADEFS_AB_PHASE:-all}
 [[ $phase == all || $phase == build || $phase == rounds ]] ||
-    { echo "FXDAX_AB_PHASE is build or rounds, or unset for both" >&2; exit 2; }
+    { echo "CLADEFS_AB_PHASE is build or rounds, or unset for both" >&2; exit 2; }
 tools=$(cd "${1:?tools required}" && pwd)
 results=${2:?results directory required}
 a_source=${3:?A source required} b_source=${4:?B source required}
@@ -60,17 +60,17 @@ rounds=${5:?rounds required} a_name=${6:?A name required} b_name=${7:?B name req
 repo=$tools
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
 host_setup
-kernel_build=${FXDAX_GUEST_KERNEL_BUILD:-release}
+kernel_build=${CLADEFS_GUEST_KERNEL_BUILD:-release}
 [[ $kernel_build == release || $kernel_build == debug ]] ||
-    { echo "FXDAX_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2; }
-unset FXDAX_GUEST_KERNEL_BUILD
-iterations=${FXDAX_BENCH_ITERATIONS:-2}
-suite=${FXDAX_AB_SUITE:-fs}
-[[ $suite == fs || $suite == qualify ]] || { echo "FXDAX_AB_SUITE is fs or qualify" >&2; exit 2; }
-read -ra a_env <<< "${FXDAX_AB_A_ENV:-}"
-read -ra b_env <<< "${FXDAX_AB_B_ENV:-}"
+    { echo "CLADEFS_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2; }
+unset CLADEFS_GUEST_KERNEL_BUILD
+iterations=${CLADEFS_BENCH_ITERATIONS:-2}
+suite=${CLADEFS_AB_SUITE:-fs}
+[[ $suite == fs || $suite == qualify ]] || { echo "CLADEFS_AB_SUITE is fs or qualify" >&2; exit 2; }
+read -ra a_env <<< "${CLADEFS_AB_A_ENV:-}"
+read -ra b_env <<< "${CLADEFS_AB_B_ENV:-}"
 # The sides' builds' niceness, their guest kernels' too (host_kernel).
-host_build_nice=${FXDAX_AB_BUILD_NICE:-0}
+host_build_nice=${CLADEFS_AB_BUILD_NICE:-0}
 
 # Each side's tree, by side, which build makes.
 declare -A trees
@@ -86,8 +86,8 @@ build() {
     host_kernel_log=$results/guest-kernel-$side.log \
         host_kernel "$kernel_build" "$work/guest-kernel-ab-$side-$kernel_build"
     rm -rf "$work/ab-artifacts-$side"
-    nice -n "$host_build_nice" env FXDAX_E2E_ROOT="$tree" \
-        FXDAX_E2E_BUILD_ONLY="$work/ab-artifacts-$side" FXDAX_E2E_RESULTS="$results/build-$side" \
+    nice -n "$host_build_nice" env CLADEFS_E2E_ROOT="$tree" \
+        CLADEFS_E2E_BUILD_ONLY="$work/ab-artifacts-$side" CLADEFS_E2E_RESULTS="$results/build-$side" \
         "$tools/scripts/test-e2e.sh" > "$results/build-$side.log" 2>&1
     cp "$host_kernel_image" "$work/ab-artifacts-$side/vmlinux"
     sha256sum "$work/ab-artifacts-$side/vmlinux" >> "$work/ab-artifacts-$side/artifacts.txt"
@@ -124,8 +124,8 @@ build_sides() {
         if [[ -z $harness ]]; then
             harness=$work/ab-harness
             echo "Building the harness from $tools" >&2
-            nice -n "$host_build_nice" env FXDAX_E2E_BUILD_ONLY="$harness" \
-                FXDAX_E2E_RESULTS="$results/build-harness" "$tools/scripts/test-e2e.sh" \
+            nice -n "$host_build_nice" env CLADEFS_E2E_BUILD_ONLY="$harness" \
+                CLADEFS_E2E_RESULTS="$results/build-harness" "$tools/scripts/test-e2e.sh" \
                 > "$results/build-harness.log" 2>&1
         fi
         cp "$harness/artifacts.txt" "$results/artifacts-harness.txt"
@@ -143,7 +143,7 @@ build_sides() {
 # Reads what a build made from $built.
 load_build() {
     local key value
-    [[ -f $built ]] || { echo "$work holds no build: FXDAX_AB_PHASE=build first" >&2; exit 2; }
+    [[ -f $built ]] || { echo "$work holds no build: CLADEFS_AB_PHASE=build first" >&2; exit 2; }
     while read -r key value; do
         case $key in
             a | b) trees[$key]=$value ;;
@@ -171,15 +171,15 @@ round() {
     set -- ${env[@]+"${env[@]}"}
     echo "Round $round: $name" >&2
     if [[ $suite == qualify ]]; then
-        env "$@" FXDAX_E2E_PREBUILT="$work/ab-artifacts-$side" FXDAX_E2E_HARNESS="$harness" \
-            FXDAX_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
+        env "$@" CLADEFS_E2E_PREBUILT="$work/ab-artifacts-$side" CLADEFS_E2E_HARNESS="$harness" \
+            CLADEFS_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
             "$tools/scripts/qualify.sh" "$results/$name-r$round" > "$results/$name-r$round.md" \
             2> "$results/$name-r$round.log"
         return
     fi
-    env "$@" FXDAX_E2E_ROOT="${trees[$side]}" FXDAX_E2E_PREBUILT="$work/ab-artifacts-$side" \
-        FXDAX_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
-        FXDAX_BENCH_RESULTS="$results/$name-r$round" \
+    env "$@" CLADEFS_E2E_ROOT="${trees[$side]}" CLADEFS_E2E_PREBUILT="$work/ab-artifacts-$side" \
+        CLADEFS_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
+        CLADEFS_BENCH_RESULTS="$results/$name-r$round" \
         "$tools/scripts/bench.sh" "$iterations" > "$results/$name-r$round.md" \
         2> "$results/$name-r$round.log"
 }
@@ -201,8 +201,8 @@ while read -r first second; do
     done
 done < <(ab_order "$rounds")
 
-control=${FXDAX_AB_CONTROL-ext4-guest-kernel}
-if [[ $suite == qualify ]]; then control=${FXDAX_AB_CONTROL-}; fi
+control=${CLADEFS_AB_CONTROL-ext4-guest-kernel}
+if [[ $suite == qualify ]]; then control=${CLADEFS_AB_CONTROL-}; fi
 sides=()
 for (( r = 1; r <= rounds; r++ )); do sides+=("$results/$a_name-r$r"); done
 sides+=(-- "$b_name")

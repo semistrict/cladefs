@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: operations on a range of however many extents,
+//! cladefs's own, a child of data_object_handle.rs: operations on a range of however many extents,
 //! a clone and a punch, in as many commits as hold them. What splits them across commits is the
 //! room their transaction says it has left (`Transaction::room`), each extent costing what its
 //! records do, holes nothing: not a count of mutations, nor of bytes.
@@ -22,7 +22,7 @@ use std::ops::Range;
 use storage_device::ExtentRange;
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: `txn_clone_range` of a range of however many extents, in either file, in as many
+    /// cladefs: `txn_clone_range` of a range of however many extents, in either file, in as many
     /// commits as hold them, from its start, `dst` growing towards `size` with them, and to it as
     /// the last commits: one that fails has cloned what it got to. `transaction` holds the caller's locks, and is left for it to
     /// commit. Each extent costs its record, which holds each of its blocks' checksums, a reference
@@ -85,7 +85,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
     }
 
-    /// fxdax: `zero` of a range of however many extents, in as many commits as hold them, from its
+    /// cladefs: `zero` of a range of however many extents, in as many commits as hold them, from its
     /// start: one that fails has zeroed what it got to. As `clone_range_in_commits`, `transaction`
     /// holds the caller's locks, and is left for it to commit. Each extent costs a record, and
     /// holes nothing: a commit a MiB of the range spun for as long as a file may be on
@@ -109,7 +109,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
     }
 
-    /// fxdax: what freeing `blocks`, which an extent of this file holds, adds to a transaction.
+    /// cladefs: what freeing `blocks`, which an extent of this file holds, adds to a transaction.
     pub(super) fn cost_of_freeing(&self, blocks: ExtentRange) -> u64 {
         let store = self.store();
         let (allocator, owner_object_id) = (store.allocator(), store.store_object_id());
@@ -117,7 +117,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         mutation_record_bytes(allocator.object_id(), &Mutation::Allocator(mutation))
     }
 
-    /// fxdax: how far this file's extents in `range` fill `room` of a transaction, each costing what
+    /// cladefs: how far this file's extents in `range` fill `room` of a transaction, each costing what
     /// `cost` says of the part of it in `range`, the blocks that part is, and the extent's value:
     /// where the last that fits ends, or `range`'s end if they all do, and how much of `room` that
     /// takes. Holes cost nothing, and the first extent fits whatever it costs, so that a caller
@@ -191,7 +191,7 @@ mod tests {
     use storage_device::DeviceHolder;
     use storage_device::fake_device::FakeDevice;
 
-    /// fxdax: a clone of thousands of fragments, one over as many more, a punch of them, and each
+    /// cladefs: a clone of thousands of fragments, one over as many more, a punch of them, and each
     /// across a hole of 2^50 bytes, each on a filesystem of its own: what they take, in commits and
     /// the bytes of their records, no more than the constants that split them took.
     #[fuchsia::test]
@@ -276,7 +276,7 @@ mod tests {
         }
     }
 
-    /// fxdax: `allocate` over thousands of fragments, whose extents it changes, and whose holes it
+    /// cladefs: `allocate` over thousands of fragments, whose extents it changes, and whose holes it
     /// fills, in as many transactions as it takes, none more than one may take of the journal.
     #[fuchsia::test]
     async fn test_allocate_fills_transactions() {
@@ -298,7 +298,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a truncate trims what it frees in transactions of its own, committed and continued,
+    /// cladefs: a truncate trims what it frees in transactions of its own, committed and continued,
     /// which its one metadata reservation must pay for, however many: a file of many extents,
     /// as PostgreSQL's relations written a page at a time are, panicked the guest's kernel with
     /// "Insufficient reservation space" (TASK-58).

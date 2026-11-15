@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Lockdep's assertions: each task keeps what it holds (kernel/locks.c), so that an assertion fails
  * the run. Not its graph of lock orders: an inversion shows up here only as a deadlock, when a

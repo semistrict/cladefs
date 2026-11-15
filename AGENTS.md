@@ -1,4 +1,4 @@
-# Working on fxdax
+# Working on cladefs
 
 ## Batch Rust changes; compile and test once per batch
 
@@ -28,15 +28,15 @@ of a batch.
 
 The user's rule (2026-11-11): every Linux run goes to ubu1, a
 physical host others' agents share, through the `scripts/*-host.sh` drivers
-(`scripts/lib/host.sh`; `FXDAX_HOST` names another host): `test-host.sh`, `bench-host.sh`,
+(`scripts/lib/host.sh`; `CLADEFS_HOST` names another host): `test-host.sh`, `bench-host.sh`,
 `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
 `mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
 `fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
-tree by default, `FXDAX_HOST_COMMIT` names another), its own target directories, its job under
+tree by default, `CLADEFS_HOST_COMMIT` names another), its own target directories, its job under
 `fxjob` (`--bench` for measurements), results copied back, worktree removed. Guest kernels come
 from a cache on the host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
-number as `FXDAX_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
+number as `CLADEFS_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
 run needs installed goes there as a step, never into a run.
 
 ## Commit in batches, only what compiled and passed its tests
@@ -62,7 +62,7 @@ Check the file before starting work: an answer may be there. As soon as the user
 
 ## No migrations, ever: formats change outright
 
-The user's rule (2026-11-05), not a phase: fxdax never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
+The user's rule (2026-11-05), not a phase: cladefs never migrates data. On-disk, bucket and wire formats change whenever that's the better design, and the new code refuses the old format (`Error::Format` and its kind) rather than reading, converting or upgrading it: no migration code, no compatibility shim, no dual-format reader, nothing kept to read old data, and no task or plan step proposing one. Don't trade a design down to avoid a format change.
 
 ## No silent fallbacks to a costlier path: fail hard
 
@@ -90,7 +90,7 @@ or don't check. The fix is half the work. For each one:
    invariant, so that it finds this bug and its kin. Put the bug back and see the test go red. A
    seed pinned as a regression test is on top of this, not instead of it.
 3. **Look around it:** find the same blind spot elsewhere. Search for code sharing the pattern, and
-   use coverage (`FXDAX_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/fxfs`)
+   use coverage (`CLADEFS_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/fxfs`)
    to list what near the bug no test runs. Each place found gets a test or a task.
 4. **Record it** in the fix's task notes: how it was found, the blind spot, the test added, and what
    step 3 turned up. Testing too large for the fix goes in a task under TASK-149, ranked by how

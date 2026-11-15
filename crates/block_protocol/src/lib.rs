@@ -15,7 +15,7 @@ bitflags! {
     pub struct WriteFlags: u32 {
         const FORCE_ACCESS = 1;
         const PRE_BARRIER = 2;
-        /// fxdax: a barrier follows the write, as a flush once it completes would: one request,
+        /// cladefs: a barrier follows the write, as a flush once it completes would: one request,
         /// where a device's requests are round trips to its host (doc-4).
         const POST_BARRIER = 4;
     }
@@ -25,7 +25,7 @@ bitflags! {
 pub struct WriteOptions<'a> {
     pub inline_crypto: InlineCryptoOptions,
     pub flags: WriteFlags,
-    /// fxdax: with `POST_BARRIER`, the root its barrier sets, as a commit of the root does
+    /// cladefs: with `POST_BARRIER`, the root its barrier sets, as a commit of the root does
     /// (`storage_device::Device::commit_root`): in the write's one request, where a device's
     /// requests are round trips to its host (doc-4). Not `repr(C)`, as upstream's is, for it.
     pub root: Option<&'a [u8]>,

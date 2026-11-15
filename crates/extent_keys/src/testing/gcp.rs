@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what tests against real Google Cloud KMS need (TASK-411.18): a key ring's keys,
+//! cladefs's own: what tests against real Google Cloud KMS need (TASK-411.18): a key ring's keys,
 //! made if missing, and what a tenant does to its key out of band: rotating it, disabling,
 //! enabling and destroying its versions ([`Admin`]). The tests run only given an access token,
 //! [`TOKEN_VAR`]'s, as the backend reads it (`gcp-kms://`): CI holds none, so they say why they
@@ -21,12 +21,12 @@ use std::time::{Duration, Instant};
 pub use crate::kms::GCP_TOKEN_VAR as TOKEN_VAR;
 
 /// The key ring the tests keep their keys in, if not [`RING`].
-pub const RING_VAR: &str = "FXDAX_KMS_GCP_TEST_RING";
+pub const RING_VAR: &str = "CLADEFS_KMS_GCP_TEST_RING";
 
 /// The key ring the tests keep their keys in, unless [`RING_VAR`] names another: the user's test
 /// project's (TASK-411.18's notes).
 pub const RING: &str =
-    "projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test";
+    "projects/echophase-connectome-test/locations/us-central1/keyRings/cladefs-test";
 
 /// How long [`eventually`] waits for the KMS to say what a test expects, and between asking.
 const PATIENCE: Duration = Duration::from_secs(240);
@@ -49,7 +49,7 @@ impl Admin {
         let Some(token) = std::env::var(TOKEN_VAR).ok().filter(|token| !token.is_empty()) else {
             eprintln!(
                 "{test}: skipped: {TOKEN_VAR} holds no access token for Google Cloud KMS \
-                 (FXDAX_KMS_GCP_TOKEN=$(gcloud auth print-access-token))"
+                 (CLADEFS_KMS_GCP_TOKEN=$(gcloud auth print-access-token))"
             );
             return None;
         };

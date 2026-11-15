@@ -4,7 +4,7 @@ index f7dd318f7..d00576ece 100644
 +++ b/crates/fxfs/src/object_store.rs
 @@ -1895,7 +1895,7 @@ impl ObjectStore {
                      deallocated += len;
-                     // Stop if the transaction is getting too big. fxdax: as it says, in what it
+                     // Stop if the transaction is getting too big. cladefs: as it says, in what it
                      // takes of the journal.
 -                    if transaction.is_full() {
 +                    if transaction.mutations().len() >= 4096 {

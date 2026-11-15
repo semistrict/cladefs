@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -30,7 +30,7 @@
 //! moves say. The footer and the table are tied to one version of an object by their CRCs, which
 //! the trailer and the table hold, and the parts by theirs, which the table holds.
 //!
-//! fxdax: what a host's fetchers keep, they keep as stored, sealed or not, as a reader holding no
+//! cladefs: what a host's fetchers keep, they keep as stored, sealed or not, as a reader holding no
 //! key reads it, and open with the keys of every store the host serves ([`Memory::keys`],
 //! `keys::HostRing`, TASK-411.3): an object's tail is opened, its MACs checked, once the host holds
 //! its key, and a part unpacked by the tail so opened; a part sealed under a key the host doesn't
@@ -100,7 +100,7 @@ pub struct Budget {
 struct Queues {
     requests: usize,
     bytes: u64,
-    /// fxdax: the most bytes in flight at once (TASK-317).
+    /// cladefs: the most bytes in flight at once (TASK-317).
     peak: u64,
     tickets: u64,
     /// By [`Priority`].
@@ -140,7 +140,7 @@ impl Budget {
         self.limits
     }
 
-    /// fxdax: the bytes its requests in flight hold now, and the most they held at once (TASK-317):
+    /// cladefs: the bytes its requests in flight hold now, and the most they held at once (TASK-317):
     /// within its limit, but for a request larger than it, which goes alone.
     pub fn held(&self) -> (u64, u64) {
         let queues = self.queues.lock().unwrap();
@@ -200,7 +200,7 @@ impl Budget {
 }
 
 /// An object's frame, where its parts are stored, and where in its data each extent it holds is,
-/// as its footer says, or, a checkpoint's, its table: its tail. fxdax: as read, by a reader
+/// as its footer says, or, a checkpoint's, its table: its tail. cladefs: as read, by a reader
 /// holding no key, which a peer's asking goes by; and opened under the host's keys once they hold
 /// its key (TASK-411.3).
 #[derive(Debug)]
@@ -218,13 +218,13 @@ impl Tail {
     /// The tail of the object at `key`, as read, `tail`: a segment's footer names the extents
     /// sealed in it, and moves' those the collector moved there; an extent stored on its own is
     /// its object's whole data, which its key names; a checkpoint's footer is its table. Other
-    /// objects hold no extents. fxdax: an extent's footer names it, and moves' the object they are
+    /// objects hold no extents. cladefs: an extent's footer names it, and moves' the object they are
     /// of: one naming another is refused, a whole object copied to another key (TASK-411.3).
     fn of(key: &str, tail: object::Tail) -> Result<Self, Error> {
         let parts = &tail.parts;
         let footer = tail.footer();
         let (extents, table) = match layout::kind(key) {
-            // fxdax: and those of the commit it goes on with, sealed in it too (TASK-92.41).
+            // cladefs: and those of the commit it goes on with, sealed in it too (TASK-92.41).
             Kind::Segment { .. } => (
                 (Footer::decode(footer)?.contents.runs())
                     .map(|&(extent, offset, len)| (extent, (offset, len)))
@@ -264,7 +264,7 @@ impl Tail {
         part_of(self.parts(), key, part)
     }
 
-    /// fxdax: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
+    /// cladefs: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
     /// table and footer checked against their MACs, under its key if `ring` holds it, and kept so;
     /// as read otherwise, a sealed one's unread. Refused if it is in the clear and `ring` holds the
     /// object's branch sealed ([`Error::Downgrade`]), or authenticated under a key it doesn't hold
@@ -287,7 +287,7 @@ impl Tail {
         use std::mem::size_of;
         // A map's entries, and a byte of control each, in a table an eighth larger than they fill.
         let extents = self.extents.capacity() * (size_of::<(ExtentId, (u64, u64))>() + 1) * 8 / 7;
-        // fxdax: as read, and opened, and its bytes as read (TASK-411.3).
+        // cladefs: as read, and opened, and its bytes as read (TASK-411.3).
         let parts = 2 * self.parts().stored.capacity() * size_of::<extent_frame::Stored>();
         let table = self.table.as_ref().map_or(0, |_| self.parts().frame.footer_len as usize);
         (size_of::<Self>() + extents + parts + table + self.raw.bytes.len()) as u64
@@ -312,7 +312,7 @@ pub struct Memory {
     tails: Mutex<Tails>,
     recent: Mutex<Recent>,
     parts: Mutex<Parts>,
-    /// fxdax: the keys of the stores the host serves, which what it keeps is opened with
+    /// cladefs: the keys of the stores the host serves, which what it keeps is opened with
     /// (TASK-411.3).
     keys: Arc<HostRing>,
 }
@@ -322,13 +322,13 @@ impl Memory {
         Arc::default()
     }
 
-    /// fxdax: the keys of the stores the host serves, which its stores hold theirs in as they open
+    /// cladefs: the keys of the stores the host serves, which its stores hold theirs in as they open
     /// (`extent_store::upload`, TASK-411.3).
     pub fn keys(&self) -> &Arc<HostRing> {
         &self.keys
     }
 
-    /// fxdax: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's KEK
+    /// cladefs: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's KEK
     /// is revoked or destroyed, or a cell shredded, does (doc-16, Shredding; TASK-411.7): their
     /// tails, opened under keys it may hold no more, and the parts fetched last, unpacked, in the
     /// clear. Read again, they are opened under the keys the host holds then: those other stores
@@ -446,7 +446,7 @@ enum Part {
 }
 
 /// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
-/// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). fxdax:
+/// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). cladefs:
 /// opened then, if sealed, in a copy: its stored bytes are what the cache keeps and peers are
 /// served (TASK-411.2); by the part as its tail is opened then, under the host's keys, a read
 /// failing so, its key not held yet, kept for none (TASK-411.3).
@@ -559,7 +559,7 @@ struct Parts {
 }
 
 /// What a part's GET fetches, by which reads find it in flight: its object's key and the part's
-/// number, which name it for good, as a key is written once (TASK-92.43, TASK-407). fxdax: and
+/// number, which name it for good, as a key is written once (TASK-92.43, TASK-407). cladefs: and
 /// whether it asks the part's owner first (TASK-406.2): a read a peer asked for asks no other, so
 /// that hosts that disagree on its owner, as peers being added and removed do for a while, never
 /// ask each other round in a ring.
@@ -620,7 +620,7 @@ struct Fetching<B: Bucket> {
     memory: Arc<Memory>,
     /// Where it keeps the parts it fetches, as stored, and their objects' tails, if it does.
     cache: Option<Arc<Cache>>,
-    /// fxdax: the hosts sharing its bucket, which it asks for the parts they own before the
+    /// cladefs: the hosts sharing its bucket, which it asks for the parts they own before the
     /// bucket, if it does (TASK-406.2).
     peers: Option<Arc<dyn Peers>>,
 }
@@ -638,7 +638,7 @@ impl<B: Bucket> Fetcher<B> {
         Self { shared, streams: Arc::default(), spawn: None }
     }
 
-    /// fxdax: asks `peers`, the hosts sharing its bucket, for the parts another of them owns
+    /// cladefs: asks `peers`, the hosts sharing its bucket, for the parts another of them owns
     /// before the bucket (TASK-406.2, [`crate::peer`]).
     pub fn asking(mut self, peers: Arc<dyn Peers>) -> Self {
         Arc::get_mut(&mut self.shared).expect("a fetcher not cloned yet").peers = Some(peers);
@@ -714,7 +714,7 @@ impl<B: Bucket> Fetcher<B> {
         if range.start > range.end || range.end > tail.parts().frame.data_len {
             return Err(Error::Corrupt(format!("{range:?} past the end of {key}")));
         }
-        // fxdax: opened under the host's keys (TASK-411.3).
+        // cladefs: opened under the host's keys (TASK-411.3).
         let opened = tail.opened(&self.shared.memory.keys, key)?;
         let numbers = tail.parts().frame.parts_of(range.clone());
         let parts = numbers.clone().map(|part| self.part(key, part, tail, priority));
@@ -797,13 +797,13 @@ impl<B: Bucket> Fetcher<B> {
             let reads = parts.map(|part| this.part(&key, part, &tail, Priority::Ahead));
             for read in futures::future::join_all(reads).await {
                 if let Err(err) = read {
-                    log::debug!("fxdax: reading {key} ahead: {err}");
+                    log::debug!("cladefs: reading {key} ahead: {err}");
                 }
             }
         }));
     }
 
-    /// fxdax: the stored bytes of part `part` of the object at `key`, which a peer asks for
+    /// cladefs: the stored bytes of part `part` of the object at `key`, which a peer asks for
     /// (TASK-406.2): kept in this host's memory or its cache, or fetched from the bucket by one
     /// GET, however many ask at once, and kept then, never asking another peer. None if the object
     /// is gone, or holds no such part. The asker checks them against the CRC its own tail gives.
@@ -959,7 +959,7 @@ impl<B: Bucket> Fetching<B> {
             if bytes.len() as u64 == stored.len && stored.check(&bytes).is_ok() {
                 return Ok(Some(bytes));
             }
-            log::warn!("fxdax: part {part} of {key}, from its owner, fails its CRC");
+            log::warn!("cladefs: part {part} of {key}, from its owner, fails its CRC");
             owner.failed();
         }
         let range = ByteRange::Bounded(stored.range());
@@ -995,7 +995,7 @@ impl<B: Bucket> Fetching<B> {
         match self.cached(|cache| cache.part(key, part))? {
             Ok(bytes) => bytes,
             Err(err) => {
-                log::warn!("fxdax: reading part {part} of {key} from the cache: {err}");
+                log::warn!("cladefs: reading part {part} of {key} from the cache: {err}");
                 None
             }
         }
@@ -1004,7 +1004,7 @@ impl<B: Bucket> Fetching<B> {
     /// Keeps `bytes`, part `part`'s stored bytes, checked, in the cache.
     fn keep(&self, key: &str, part: u64, bytes: &[u8]) {
         if let Some(Err(err)) = self.cached(|cache| cache.keep_part(key, part, bytes)) {
-            log::warn!("fxdax: keeping part {part} of {key} in the cache: {err}");
+            log::warn!("cladefs: keeping part {part} of {key} in the cache: {err}");
         }
     }
 
@@ -1057,7 +1057,7 @@ impl<B: Bucket> Fetching<B> {
         match self.cached(|cache| cache.tail(key))? {
             Ok(tail) => tail,
             Err(err) => {
-                log::warn!("fxdax: reading the tail of {key} from the cache: {err}");
+                log::warn!("cladefs: reading the tail of {key} from the cache: {err}");
                 None
             }
         }
@@ -1066,7 +1066,7 @@ impl<B: Bucket> Fetching<B> {
     /// Keeps `tail`, the tail of the object at `key`, as read, in the cache.
     fn keep_tail(&self, key: &str, tail: &object::Tail) {
         if let Some(Err(err)) = self.cached(|cache| cache.keep_tail(key, tail)) {
-            log::warn!("fxdax: keeping the tail of {key} in the cache: {err}");
+            log::warn!("cladefs: keeping the tail of {key} in the cache: {err}");
         }
     }
 }
@@ -1991,7 +1991,7 @@ mod tests {
         };
         let part = format!("get {KEY} 0..{PART}");
         assert_eq!(read(), [format!("get {KEY} last {TAIL}"), part.clone()]);
-        let path = dir.path().join("fxdax-parts").join(KEY);
+        let path = dir.path().join("cladefs-parts").join(KEY);
         let file = std::fs::File::options().write(true).open(path).unwrap();
         std::os::unix::fs::FileExt::write_all_at(&file, &[0; 4096], 8192).unwrap();
         assert_eq!(read(), [part]);
@@ -2393,7 +2393,7 @@ mod tests {
         assert_eq!(streams(), 1);
     }
 
-    /// fxdax: a host that owns every part, another's fetcher, which serves them as a peer is served
+    /// cladefs: a host that owns every part, another's fetcher, which serves them as a peer is served
     /// ([`Fetcher::stored_part`]); or one that gives wrong bytes, of the right length.
     struct Owner {
         fetcher: Option<Arc<Fetcher<SimBucket>>>,
@@ -2437,7 +2437,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a host that asks no peer, as one serving them asks none.
+    /// cladefs: a host that asks no peer, as one serving them asks none.
     struct Alone;
 
     impl Peers for Alone {

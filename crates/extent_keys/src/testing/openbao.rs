@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: an OpenBao dev server, started for a test (TASK-411.16): [`DevServer`].
+//! cladefs's own: an OpenBao dev server, started for a test (TASK-411.16): [`DevServer`].
 
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
@@ -10,11 +10,11 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// The environment variable naming the `bao` binary to run, if not the one on `PATH`.
-pub const BAO_ENV: &str = "FXDAX_BAO";
+pub const BAO_ENV: &str = "CLADEFS_BAO";
 
 /// The environment variable that, set (to anything but empty or `0`), has a test without `bao`
 /// fail rather than skip: CI's, which installs it (scripts/test-openbao.sh).
-pub const REQUIRE_ENV: &str = "FXDAX_REQUIRE_OPENBAO";
+pub const REQUIRE_ENV: &str = "CLADEFS_REQUIRE_OPENBAO";
 
 /// How long a dev server may take to start answering.
 const READY_WITHIN: Duration = Duration::from_secs(30);
@@ -200,9 +200,9 @@ impl DevServer {
         self.bao(&["token", "create", &format!("-policy={policy}"), "-field=token"])
     }
 
-    /// What fxdax's token needs, of the keys matching `keys` (a name or a glob) of the Transit
+    /// What cladefs's token needs, of the keys matching `keys` (a name or a glob) of the Transit
     /// engine at `mount`, as [`crate::kms::openbao::OpenBao`] says: and no `create`.
-    pub fn fxdax_policy(mount: &str, keys: &str) -> String {
+    pub fn cladefs_policy(mount: &str, keys: &str) -> String {
         format!(
             "path \"{mount}/encrypt/{keys}\" {{ capabilities = [\"update\"] }}\n\
              path \"{mount}/decrypt/{keys}\" {{ capabilities = [\"update\"] }}\n\

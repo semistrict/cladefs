@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -205,16 +205,16 @@ class PgbenchGate(unittest.TestCase):
         ])
 
     def test_the_static_dax_threshold_is_set_from_the_environment(self):
-        os.environ["FXDAX_GATE_STATIC_DAX"] = "0.7"
+        os.environ["CLADEFS_GATE_STATIC_DAX"] = "0.7"
         try:
             self.assertEqual(gate.thresholds()["static-dax"], 0.7)
         finally:
-            del os.environ["FXDAX_GATE_STATIC_DAX"]
+            del os.environ["CLADEFS_GATE_STATIC_DAX"]
 
     def test_the_command_writes_json_and_fails_on_a_gate(self):
         results = self.results({"fxfs-guest-pgbench-dax": log([100, 80])})
         out = Path(tempfile.mkdtemp()) / "gate.json"
-        environment = {**os.environ, "FXDAX_GATE_DECAY": "0.75"}
+        environment = {**os.environ, "CLADEFS_GATE_DECAY": "0.75"}
         passed = subprocess.run(
             [sys.executable, script.SCRIPTS / "pgbench-gate.py", "--json", out, results],
             env=environment, capture_output=True, text=True)
@@ -357,11 +357,11 @@ class PgbenchGate(unittest.TestCase):
         ])
 
     def test_a_new_threshold_is_set_from_the_environment(self):
-        os.environ["FXDAX_GATE_DENSITY_MEMORY_MIB"] = "512"
+        os.environ["CLADEFS_GATE_DENSITY_MEMORY_MIB"] = "512"
         try:
             self.assertEqual(gate.thresholds()["density-memory-mib"], 512.0)
         finally:
-            del os.environ["FXDAX_GATE_DENSITY_MEMORY_MIB"]
+            del os.environ["CLADEFS_GATE_DENSITY_MEMORY_MIB"]
 
     def test_the_command_reports_memory_and_bigmap_and_fails_over_a_ceiling(self):
         results = self.results({

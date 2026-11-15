@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -52,10 +52,10 @@ pub struct ConfigState {
     pub path_on_host: String,
     pub capacity: u64,
     pub dax_window_size: Option<u64>,
-    /// fxdax: the window's private pages at most, as configured (doc-13).
+    /// cladefs: the window's private pages at most, as configured (doc-13).
     pub dax_private_max: Option<u64>,
     pub extentd_socket: String,
-    /// fxdax: what it does with the guest's asks for durability (TASK-363).
+    /// cladefs: what it does with the guest's asks for durability (TASK-363).
     pub cache_type: CacheType,
 }
 
@@ -74,7 +74,7 @@ impl From<&Config> for ConfigState {
     }
 }
 
-// fxdax: a follower's device takes no snapshot (`SnapshotError::ReadOnly`): a snapshot's is a
+// cladefs: a follower's device takes no snapshot (`SnapshotError::ReadOnly`): a snapshot's is a
 // writer's.
 impl From<&ConfigState> for Config {
     fn from(config: &ConfigState) -> Self {
@@ -92,7 +92,7 @@ impl From<&ConfigState> for Config {
     }
 }
 
-/// A mapping of the window ([`fxdax::WindowMapping`]).
+/// A mapping of the window ([`cladefs::WindowMapping`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MappingState {
     pub window_offset: u64,
@@ -100,43 +100,43 @@ pub struct MappingState {
     pub contents: MappingContentsState,
 }
 
-/// What a mapping of the window maps ([`fxdax::MappingContents`]).
+/// What a mapping of the window maps ([`cladefs::MappingContents`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MappingContentsState {
     Extent { branch: u64, sequence: u64, offset: u64 },
     Zeros,
 }
 
-impl From<&fxdax::WindowMapping> for MappingState {
-    fn from(mapping: &fxdax::WindowMapping) -> Self {
+impl From<&cladefs::WindowMapping> for MappingState {
+    fn from(mapping: &cladefs::WindowMapping) -> Self {
         Self {
             window_offset: mapping.window_offset,
             len: mapping.len,
             contents: match mapping.contents {
-                fxdax::MappingContents::Extent { extent, offset } => MappingContentsState::Extent {
+                cladefs::MappingContents::Extent { extent, offset } => MappingContentsState::Extent {
                     branch: extent.branch,
                     sequence: extent.sequence,
                     offset,
                 },
-                fxdax::MappingContents::Zeros => MappingContentsState::Zeros,
+                cladefs::MappingContents::Zeros => MappingContentsState::Zeros,
             },
         }
     }
 }
 
-impl From<&MappingState> for fxdax::WindowMapping {
+impl From<&MappingState> for cladefs::WindowMapping {
     fn from(mapping: &MappingState) -> Self {
         Self {
             window_offset: mapping.window_offset,
             len: mapping.len,
             contents: match mapping.contents {
                 MappingContentsState::Extent { branch, sequence, offset } => {
-                    fxdax::MappingContents::Extent {
-                        extent: fxdax::ExtentId { branch, sequence },
+                    cladefs::MappingContents::Extent {
+                        extent: cladefs::ExtentId { branch, sequence },
                         offset,
                     }
                 }
-                MappingContentsState::Zeros => fxdax::MappingContents::Zeros,
+                MappingContentsState::Zeros => cladefs::MappingContents::Zeros,
             },
         }
     }
@@ -150,7 +150,7 @@ pub struct Snapshot {
     pub point: PathBuf,
     /// The point's branch: a restore on another host takes it from the extent daemon's bucket.
     pub point_branch: u64,
-    pub mappings: Vec<fxdax::WindowMapping>,
+    pub mappings: Vec<cladefs::WindowMapping>,
 }
 
 impl From<&State> for Snapshot {
@@ -158,7 +158,7 @@ impl From<&State> for Snapshot {
         Self {
             point: state.point.clone(),
             point_branch: state.point_branch,
-            mappings: state.mappings.iter().map(fxdax::WindowMapping::from).collect(),
+            mappings: state.mappings.iter().map(cladefs::WindowMapping::from).collect(),
         }
     }
 }
@@ -174,9 +174,9 @@ pub enum SnapshotError {
     #[error("Extent device {0}: it follows a store read-only, which a snapshot doesn't hold")]
     ReadOnly(String),
     #[error("Extent device {0}: cannot fork its store to {1}: {2}")]
-    Fork(String, String, fxdax::Errno),
+    Fork(String, String, cladefs::Errno),
     #[error("Extent device {0}: cannot list its DAX window's mappings: {1}")]
-    Mappings(String, fxdax::Errno),
+    Mappings(String, cladefs::Errno),
 }
 
 #[cfg(test)]
@@ -187,18 +187,18 @@ mod tests {
     #[test]
     fn mappings_come_back_as_saved() {
         let mappings = [
-            fxdax::WindowMapping {
+            cladefs::WindowMapping {
                 window_offset: 4096,
                 len: 8192,
-                contents: fxdax::MappingContents::Extent {
-                    extent: fxdax::ExtentId { branch: 3, sequence: 9 },
+                contents: cladefs::MappingContents::Extent {
+                    extent: cladefs::ExtentId { branch: 3, sequence: 9 },
                     offset: 12288,
                 },
             },
-            fxdax::WindowMapping {
+            cladefs::WindowMapping {
                 window_offset: 1 << 21,
                 len: 4096,
-                contents: fxdax::MappingContents::Zeros,
+                contents: cladefs::MappingContents::Zeros,
             },
         ];
         let saved: Vec<MappingState> = mappings.iter().map(MappingState::from).collect();
@@ -206,8 +206,8 @@ mod tests {
             saved[0].contents,
             MappingContentsState::Extent { branch: 3, sequence: 9, offset: 12288 }
         );
-        let restored: Vec<fxdax::WindowMapping> =
-            saved.iter().map(fxdax::WindowMapping::from).collect();
+        let restored: Vec<cladefs::WindowMapping> =
+            saved.iter().map(cladefs::WindowMapping::from).collect();
         assert_eq!(restored, mappings);
     }
 

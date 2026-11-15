@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: an S3 server in memory, for tests of the bucket client over HTTP (TASK-205), whose
+//! cladefs: an S3 server in memory, for tests of the bucket client over HTTP (TASK-205), whose
 //! upstream may be a link of so many bytes a second: what it reads of its connections, a host's
 //! uploads, it reads no faster, all its connections sharing it.
 //!
@@ -28,7 +28,7 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 
 /// The bucket it serves.
-pub(crate) const BUCKET: &str = "fxdax";
+pub(crate) const BUCKET: &str = "cladefs";
 
 /// An S3 server, on 127.0.0.1, for as long as the runtime it started on runs.
 pub(crate) struct S3Server {
@@ -105,7 +105,7 @@ impl S3Server {
         objects.lock().unwrap().requests.clone()
     }
 
-    /// The options of an S3 store of its bucket, `s3://fxdax/...`.
+    /// The options of an S3 store of its bucket, `s3://cladefs/...`.
     pub(crate) fn options(&self) -> Vec<(String, String)> {
         [
             ("aws_endpoint", format!("http://{}", self.address)),
@@ -224,7 +224,7 @@ async fn serve(objects: &Mutex<Objects>, request: Request<hyper::body::Incoming>
     let (parts, body) = request.into_parts();
     let header =
         |name: &str| parts.headers.get(name).map(|value| value.to_str().unwrap().to_owned());
-    // Keys of no characters an S3 path escapes, as fxdax's are.
+    // Keys of no characters an S3 path escapes, as cladefs's are.
     let path = parts.uri.path();
     assert!(!path.contains('%'), "an escaped key: {path}");
     let Some(path) = path.strip_prefix(&format!("/{BUCKET}")) else {

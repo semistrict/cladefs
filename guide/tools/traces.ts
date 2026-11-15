@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Records TLC's counterexamples of the specs' mutations as fixtures/traces/SPEC/NAME.json, the
 // traces the guide replays. TLC runs as scripts/check-tla.sh runs it: its pinned jar (which that
-// script fetches into ~/.cache/fxdax/tla), checked against its SHA-256, on $JAVA, java, or
+// script fetches into ~/.cache/cladefs/tla), checked against its SHA-256, on $JAVA, java, or
 // Homebrew's openjdk. Each mutation must violate the invariant its configuration expects.
 //
 // Usage: node tools/traces.ts [SPEC/NAME...]   (by default every mutation of specs/dax-cow)
@@ -22,7 +22,7 @@ const script = readFileSync(join(REPO, "scripts", "check-tla.sh"), "utf8");
 const version = /^tla_version=(\S+)/m.exec(script)?.[1];
 const sha256 = /^tla_sha256=(\S+)/m.exec(script)?.[1];
 if (!version || !sha256) throw new Error("scripts/check-tla.sh pins no TLA+ release");
-const jar = join(homedir(), ".cache", "fxdax", "tla", `tla2tools-${version}.jar`);
+const jar = join(homedir(), ".cache", "cladefs", "tla", `tla2tools-${version}.jar`);
 if (!existsSync(jar)) {
   throw new Error(`${jar} is missing: run scripts/check-tla.sh once, which fetches it`);
 }
@@ -47,7 +47,7 @@ const chosen =
 
 const jvm = java();
 const commit = git(["rev-parse", "--short", "HEAD"]);
-const work = mkdtempSync(join(tmpdir(), "fxdax-traces-"));
+const work = mkdtempSync(join(tmpdir(), "cladefs-traces-"));
 let failed = 0;
 try {
   for (const model of chosen) {

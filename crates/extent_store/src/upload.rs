@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a store's branch kept in object storage, and its uploader (backlog doc-7, Uploads;
+//! cladefs: a store's branch kept in object storage, and its uploader (backlog doc-7, Uploads;
 //! doc-14; TASK-28.5, TASK-165.9), which runs on the host's runtime, its uploads within the host's
-//! budget ([`Runtime`]). fxdax's `remote` keeps the host's configuration, budgets, runtime and
+//! budget ([`Runtime`]). cladefs's `remote` keeps the host's configuration, budgets, runtime and
 //! errno mapping.
 //!
 //! **Opening a store** ([`open`]) is the same whether its branch was here, elsewhere or never
@@ -13,7 +13,7 @@
 //! (`extent_remote::Writer`); the store opens as the bucket holds the branch, its write-ahead log
 //! put after the branch's end by its commits, what of it landed acknowledged and the rest stamped
 //! anew on the writer's chain ([`Recovering::open`]). A log another writer's commits moved past
-//! refuses to open (`extent_remote::Error::Diverged`, `ESTALE`) until `fxdaxctl take` drops it;
+//! refuses to open (`extent_remote::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
 //! one that plainly diverged before the lease is taken refuses before, fencing no writer. A branch
 //! with no record is made, a root (`extent_remote::branch::create`).
 //!
@@ -92,7 +92,7 @@ macro_rules! failing {
 /// bytes, [`UPLOAD_BYTES`], so that a host whose stores are far behind holds no more than these
 /// at once, whatever their number (TASK-79.19), and in number.
 ///
-/// fxdax: and the keys it seals and reads under (TASK-411.3): its KMS, if it has one, and the keys
+/// cladefs: and the keys it seals and reads under (TASK-411.3): its KMS, if it has one, and the keys
 /// its fetchers share, which each store's are held in while it is open.
 #[derive(Clone)]
 pub struct Runtime {
@@ -107,7 +107,7 @@ static UPLOADERS: std::sync::LazyLock<tokio::sync::watch::Sender<usize>> =
     std::sync::LazyLock::new(|| tokio::sync::watch::channel(0).0);
 
 /// How many stores' uploaders run in this process, as it changes: what an extent daemon's drain
-/// waits to see none of (fxdax TASK-141.4).
+/// waits to see none of (cladefs TASK-141.4).
 pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     UPLOADERS.subscribe()
 }
@@ -128,7 +128,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// (TASK-39.4). Deleting it again does nothing. A later placement's branch, whose token is higher,
 /// is not deleted (`extent_remote::Error::Stale`, TASK-45.1).
 ///
-/// fxdax: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
+/// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
 /// taken out of the cell (`extent_remote::cell::forget`, TASK-364). A sealed branch's forks to
 /// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
@@ -146,7 +146,7 @@ pub fn delete_branch(
 }
 
 /// Why uploading stopped, or a branch could not be uploaded to, or opened: the error as it was,
-/// typed, which fxdax's `remote` maps to its errno, in the one place.
+/// typed, which cladefs's `remote` maps to its errno, in the one place.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Failure {
     /// What object storage's protocol found of the branch, as `extent_remote` says it: another
@@ -220,15 +220,15 @@ pub struct Options {
     /// The host's cache of the bucket's objects, which its stores share: what the bucket
     /// acknowledged of a store's goes into it (TASK-165.8).
     pub cache: Option<Arc<Cache>>,
-    /// fxdax: what holds the parts of segments packed as they fill, which its stores share, if
+    /// cladefs: what holds the parts of segments packed as they fill, which its stores share, if
     /// the host has it ([`crate::Opening::held`], TASK-400): else each its own.
     pub held: Option<Arc<HeldParts>>,
     /// The fencing token of a store never placed: its host's placement's.
     pub token: u64,
-    /// fxdax: how many segments go between checkpoints, which recoveries start from: the segments
+    /// cladefs: how many segments go between checkpoints, which recoveries start from: the segments
     /// a checkpoint covers are no longer read by them, and the collector may compact them.
     pub checkpoint_every: u64,
-    /// fxdax: how long the commits in a segment the guest is filling wait past the interval for
+    /// cladefs: how long the commits in a segment the guest is filling wait past the interval for
     /// its next commit, which seals what it writes in it in place, before the interval closes it
     /// anyway (`Store::close_now_unless_filling`, TASK-92.41): a commit waiting for its upload
     /// closes it at once. 30 s: eight VMs writing 768 MiB each on one disk with their bucket took
@@ -338,9 +338,9 @@ pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = Bucket> {
     /// The holders of its takings after the first, and the owners of what it makes: from the
     /// first taking's holder on ([`Shared::holder`]).
     holders: Mutex<Holders>,
-    /// fxdax: the host's keys ([`Runtime::keys`], TASK-411.3).
+    /// cladefs: the host's keys ([`Runtime::keys`], TASK-411.3).
     keys: keys::Host,
-    /// fxdax: the store's keys, held among the host's for as long as the uploader lives.
+    /// cladefs: the store's keys, held among the host's for as long as the uploader lives.
     held: Mutex<Option<RingHold>>,
 }
 
@@ -380,7 +380,7 @@ struct Point {
     origin: Origin,
 }
 
-/// fxdax: what a commit stalled behind object storage waits for, said as it stalls: the bytes not
+/// cladefs: what a commit stalled behind object storage waits for, said as it stalls: the bytes not
 /// uploaded, and of them those past the lag bound, which a stall over the bound waits on alone,
 /// the commits not uploaded and the oldest's age, which a slow upload shows (TASK-92.52).
 fn stalled(pending: u64, max: u64, commits: u64, oldest: Option<Duration>) -> String {
@@ -388,7 +388,7 @@ fn stalled(pending: u64, max: u64, commits: u64, oldest: Option<Duration>) -> St
         format!("the oldest seen {} ms ago", age.as_millis())
     });
     format!(
-        "fxdax: commits wait for object storage: {pending} bytes not uploaded, {} past the lag \
+        "cladefs: commits wait for object storage: {pending} bytes not uploaded, {} past the lag \
          bound of {max}; {commits} commits not uploaded, {oldest}",
         pending.saturating_sub(max)
     )
@@ -545,7 +545,7 @@ impl<D: Dir> Remote<D> {
     /// A fork of a point commits nothing: the child's record is the fork, and fails if the point
     /// was deleted ([`Failure::PointDeleted`]; `branch::fork_point`).
     ///
-    /// fxdax: a fork into another cell, `inheriting` given ([`Remote::inheriting`]), then gives its
+    /// cladefs: a fork into another cell, `inheriting` given ([`Remote::inheriting`]), then gives its
     /// child its keys, once its record is made: its cell made with the KEK from the host's pool, its
     /// record given its DEK and those it inherits, rewrapped under that KEK
     /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
@@ -591,7 +591,7 @@ impl<D: Dir> Remote<D> {
         }
     }
 
-    /// fxdax: what a fork of the store to `child` gives its child, asked for before anything of the
+    /// cladefs: what a fork of the store to `child` gives its child, asked for before anything of the
     /// fork is made, its commit or its record, so that a fork refused makes nothing (TASK-411.4):
     /// if `child` is of another cell, no point, and the store's keys, which it inherits, are of
     /// branches of other cells than its own, those keys and a KEK for the child's cell from the
@@ -615,7 +615,7 @@ impl<D: Dir> Remote<D> {
     /// the fork's segment gave the child its origin, if the uploader took it; or of no parent, if
     /// it never did. It is deleted as the host's placement (`Options::token`).
     ///
-    /// fxdax: a fork of a point, this store a copy of it, as a fork of the point, naming the point's
+    /// cladefs: a fork of a point, this store a copy of it, as a fork of the point, naming the point's
     /// origin: its record deleted then names it, so that its cell's pass of the collector retires
     /// the reference the fork wrote under the origin's cell (TASK-395.3). As a branch of its own,
     /// naming none, the reference would stay for ever.
@@ -638,7 +638,7 @@ impl<D: Dir> Remote<D> {
         );
         if !block_on(deleting)?? {
             log::warn!(
-                "fxdax: leaving branch {} in object storage, another's: a fork to its ID failed \
+                "cladefs: leaving branch {} in object storage, another's: a fork to its ID failed \
                  here",
                 child.branch
             );
@@ -737,7 +737,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         })
     }
 
-    /// fxdax: the uploader, sealing and reading under `keys`, the host's (TASK-411.3). Before it
+    /// cladefs: the uploader, sealing and reading under `keys`, the host's (TASK-411.3). Before it
     /// starts.
     pub(crate) fn keyed(self: Arc<Self>, keys: keys::Host) -> Arc<Self> {
         let mut shared = Arc::into_inner(self).expect("an uploader not started");
@@ -745,13 +745,13 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         Arc::new(shared)
     }
 
-    /// fxdax: holds `ring`, the store's keys, among the host's, which its fetchers read under,
+    /// cladefs: holds `ring`, the store's keys, among the host's, which its fetchers read under,
     /// from now on.
     fn hold_ring(&self, ring: &Arc<Ring>) {
         *self.held.lock().unwrap() = Some(self.keys.ring.hold(ring.clone()));
     }
 
-    /// fxdax: the keys of `cell` as read now, to be held by `placement` next
+    /// cladefs: the keys of `cell` as read now, to be held by `placement` next
     /// ([`CellKeys::to_hold`]), if the host has a KMS: none read otherwise, no request made.
     async fn cell_keys(
         &self,
@@ -926,7 +926,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         // upload, or a fork, or as the interval is up, or the uploader stops; and whether the last
         // took segments, after which the store may hold more closed, which the next takes,
         // closing none for them (TASK-92.15).
-        // fxdax: and whether a commit waits for it, or a fork, or the uploader stops: closing
+        // cladefs: and whether a commit waits for it, or a fork, or the uploader stops: closing
         // whatever it holds, not only once the guest is filling it no more (TASK-92.41).
         let (mut close, mut more, mut urgent) = (false, false, false);
         loop {
@@ -962,7 +962,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 if stop && in_flight.is_empty() {
                     // A checkpoint on clean shutdown (doc-7, Checkpoints).
                     if let Err(err) = writer.checkpoint().await {
-                        log::warn!("fxdax: checkpointing branch {}: {err}", writer.branch());
+                        log::warn!("cladefs: checkpointing branch {}: {err}", writer.branch());
                     }
                     return self.fail(&writer, Failure::msg("the uploader stopped"));
                 }
@@ -993,7 +993,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 // a loaded host, which a collector's pass then runs beside (TASK-339).
                 fail::fail_point!("remote::checkpointing");
                 if let Err(err) = writer.checkpoint().await {
-                    log::warn!("fxdax: checkpointing branch {}: {err}", writer.branch());
+                    log::warn!("cladefs: checkpointing branch {}: {err}", writer.branch());
                 }
             }
         }
@@ -1003,7 +1003,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     fn fail(&self, writer: &Writer<B>, err: Failure) {
         let mut progress = self.progress.lock().unwrap();
         if !progress.stop {
-            log::error!("fxdax: uploading branch {}: {err}", writer.branch());
+            log::error!("cladefs: uploading branch {}: {err}", writer.branch());
         }
         progress.failed = Some(err);
         self.changed.notify(usize::MAX);
@@ -1034,7 +1034,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None if recovering.base().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
-            // fxdax: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
+            // cladefs: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
             None => None,
             Some(record) if record.is_point() => {
                 let (state, keys) = self.point(bucket, branch, record).await?;
@@ -1049,7 +1049,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 return Ok(None);
             }
             Some(record) => {
-                // fxdax: recovered under its keys, if its record says it is sealed: its cell's,
+                // cladefs: recovered under its keys, if its record says it is sealed: its cell's,
                 // as this placement holds it next, unwrapped once for that taking (TASK-411.3).
                 let before = match record.deks.is_empty() {
                     true => Ring::clear(),
@@ -1075,19 +1075,19 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 Some((record, recovered, before))
             }
         };
-        // fxdax: a branch deleted takes no writer, whatever placement holds its cell.
+        // cladefs: a branch deleted takes no writer, whatever placement holds its cell.
         if let Some((record, ..)) = &found
             && record.deleted
         {
             return Err(extent_remote::Error::Deleted.into());
         }
-        // fxdax: its cell, held by this placement, whose epoch is the token the branch's lease is
+        // cladefs: its cell, held by this placement, whose epoch is the token the branch's lease is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
         // branch whose cell has no object yet, new or a fork's child, makes it; one deleted takes
         // no writer (`Deleted`). The store, a volume of its cell, is one of its volumes from now
         // on, under the name its description gives it unless the cell names its branch already:
         // all in one compare-and-swap of the cell's object, a read alone when nothing changes. Not
-        // a point's, which no writer takes, and any number of hosts open at once. fxdax: a cell
+        // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
         // made gets a KEK, wrapped by its tenant's ahead, if the host has a KMS and the tenant a
         // KEK there; one of a branch with DEKs is there already (TASK-411.3).
         let volume = recovering.volume().map(|volume| {
@@ -1110,7 +1110,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
         };
         let cell_keys = keys::held(kms, branch.cell, object, kek);
-        // fxdax: the host serves a sealed cell of the tenant's: its pool of new cell KEKs, which
+        // cladefs: the host serves a sealed cell of the tenant's: its pool of new cell KEKs, which
         // forks of its stores into new cells take, filled off this path (TASK-411.4).
         if let Some(kms) = kms
             && cell_keys.sealed()
@@ -1118,7 +1118,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             kms.refill(branch.cell.tenant);
         }
         let token = held.epoch;
-        // Its state, once it holds the lease, recovered on from what was found before. fxdax:
+        // Its state, once it holds the lease, recovered on from what was found before. cladefs:
         // under its keys, its DEK given it first if its cell is sealed and it has none: a new
         // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
         // under them (TASK-411.3).
@@ -1157,7 +1157,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         Ok(Some(writer))
     }
 
-    /// fxdax: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's: its
+    /// cladefs: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's: its
     /// record's DEKs, given it its first if its cell is sealed and it has none, and its
     /// ancestors' (`keys::with_dek`, `keys::ring`, TASK-411.3). Its record is `record`, if read,
     /// or read now if its cell is sealed.
@@ -1190,7 +1190,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         writer.following(move |moved| {
             let Some(store) = following.upgrade() else { return };
             if let Err(err) = store.moved(moved) {
-                log::warn!("fxdax: following the collector's moves: {err:#}");
+                log::warn!("cladefs: following the collector's moves: {err:#}");
             }
         });
         *self.writer.lock().unwrap() = Some(writer.clone());
@@ -1207,7 +1207,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
     /// changes. No lease: nothing the store does goes to the bucket but its forks' records.
-    /// fxdax: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
+    /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
     /// (TASK-411.3).
     async fn point(
         &self,
@@ -1236,7 +1236,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     /// store closes its open segment first if fewer wait: for a commit waiting for its upload, a
     /// fork, the interval up, or the uploader stopping; for no other, as the commits no one waits
     /// for wait in it for those, rather than each go in a segment of its own (TASK-92.15).
-    /// fxdax: if not `urgent`, the interval's, the open segment the guest is filling stays open
+    /// cladefs: if not `urgent`, the interval's, the open segment the guest is filling stays open
     /// for its next commit, up to `Options::filling_wait` (TASK-92.41).
     fn gather(
         &self,
@@ -1258,7 +1258,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 let oldest = progress.seen.front().and_then(|(_, seen)| seen.elapsed().ok());
                 oldest.is_some_and(|waited| waited >= self.options.filling_wait)
             };
-            // fxdax: until its framed file is written, not durable, which its upload waits for no
+            // cladefs: until its framed file is written, not durable, which its upload waits for no
             // more (TASK-384). Asked again at the next interval, if the guest still hasn't
             // committed.
             match urgent || waited {
@@ -1448,13 +1448,13 @@ mod tests {
         let over = stalled(5 << 20, 4 << 20, 3, Some(Duration::from_millis(250)));
         assert_eq!(
             over,
-            "fxdax: commits wait for object storage: 5242880 bytes not uploaded, 1048576 past the \
+            "cladefs: commits wait for object storage: 5242880 bytes not uploaded, 1048576 past the \
              lag bound of 4194304; 3 commits not uploaded, the oldest seen 250 ms ago"
         );
         let slow = stalled(1 << 20, 4 << 20, 1, None);
         assert_eq!(
             slow,
-            "fxdax: commits wait for object storage: 1048576 bytes not uploaded, 0 past the lag \
+            "cladefs: commits wait for object storage: 1048576 bytes not uploaded, 0 past the lag \
              bound of 4194304; 1 commits not uploaded, none seen yet"
         );
     }
@@ -1564,7 +1564,7 @@ mod tests {
     }
 }
 
-/// fxdax: a store committing, sealing and forking, its uploader uploading what it commits, and
+/// cladefs: a store committing, sealing and forking, its uploader uploading what it commits, and
 /// passes of the collector running over the bucket all along (TASK-291.1), under Shuttle, whose
 /// scheduler chooses every interleaving of their threads at each of the store's locks and at each
 /// request to the bucket, and replays a failing one from its seed.

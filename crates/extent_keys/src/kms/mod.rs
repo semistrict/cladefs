@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what fxdax needs of a KMS, where each tenant's KEK is kept and never leaves
+//! cladefs's own: what cladefs needs of a KMS, where each tenant's KEK is kept and never leaves
 //! (backlog doc-16, Goals): to wrap a key under a tenant's KEK, and to unwrap what it wrapped.
 //! Nothing else: creating, rotating, revoking and destroying a KEK are the tenant's, done out of
 //! band in its KMS, so they are not in [`Kms`]. Backends, each a module of its own, named by
@@ -12,7 +12,7 @@
 //! 2026-11-14), each naming a tenant's KEK as [`KeyNames`] says. The bucket KMS (TASK-411.27), its
 //! tenants' KEKs kept in the bucket wrapped by a master key, has its keys and formats here
 //! ([`bucket`], [`master`]) and its objects in `extent_remote::bucket_kms`, where buckets are
-//! known: it is named by no URL, but chosen where `FXDAX_KMS` names none and a master key is given.
+//! known: it is named by no URL, but chosen where `CLADEFS_KMS` names none and a master key is given.
 
 use crate::{Secret, Unauthentic, Wrapped};
 use std::future::Future;
@@ -47,7 +47,7 @@ pub trait Kms: Send + Sync + 'static {
         wrapped: &Wrapped,
     ) -> impl Future<Output = Result<Secret, Error>> + Send;
 
-    /// fxdax: drops what it keeps of `tenant`'s KEK, if it keeps any: the bucket KMS's unwrapped
+    /// cladefs: drops what it keeps of `tenant`'s KEK, if it keeps any: the bucket KMS's unwrapped
     /// KEKs (TASK-411.27), as a host told the tenant's keys are revoked or destroyed forgets them.
     /// A KMS keeping none does nothing, as here.
     fn forget(&self, tenant: u64) {
@@ -55,7 +55,7 @@ pub trait Kms: Send + Sync + 'static {
     }
 }
 
-/// fxdax: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
+/// cladefs: a KMS a host holds whatever it is, as a trait object ([`Shared`], TASK-411.3): every
 /// [`Kms`] is one.
 pub trait Dyn: Send + Sync + 'static {
     /// [`Kms::wrap`].
@@ -85,10 +85,10 @@ impl<K: Kms> Dyn for K {
     }
 }
 
-/// fxdax: the KMS a host's processes are configured with, shared (TASK-411.3).
+/// cladefs: the KMS a host's processes are configured with, shared (TASK-411.3).
 pub type Shared = std::sync::Arc<dyn Dyn>;
 
-/// fxdax: the KMS `url` names (TASK-411.3), by its scheme:
+/// cladefs: the KMS `url` names (TASK-411.3), by its scheme:
 ///
 /// - `local:///DIR`: a [`LocalKms`] keeping its tenants' KEKs under the directory `DIR`;
 /// - `openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE]` (`openbaos://` over TLS): OpenBao's
@@ -121,7 +121,7 @@ pub enum Error {
     /// [`LocalKms::create`] of a tenant that has a KEK, or had one.
     #[error("tenant {tenant}: a KEK exists already")]
     Exists { tenant: u64 },
-    /// The tenant took fxdax's rights to its KEK away, for now: it may give them back.
+    /// The tenant took cladefs's rights to its KEK away, for now: it may give them back.
     #[error("tenant {tenant}: its KEK is revoked")]
     Revoked { tenant: u64 },
     /// The tenant's KEK is gone for good, and with it everything wrapped under it: the tenant is
@@ -132,12 +132,12 @@ pub enum Error {
     /// tampered with or corrupt.
     #[error("tenant {tenant}: {source}")]
     Unauthentic { tenant: u64, source: Unauthentic },
-    /// fxdax: the bucket KMS's (TASK-411.27): the tenant's KEK object is wrapped by a master key,
+    /// cladefs: the bucket KMS's (TASK-411.27): the tenant's KEK object is wrapped by a master key,
     /// of ID `id`, that is none of this host's (`held`, their IDs): a host given the wrong keys, or
     /// a rotation's newest before this host has it. Never taken for a tenant with no KEK.
     #[error(
         "tenant {tenant}: its KEK is wrapped by master key {id}, which this host has not (it has \
-         {held}): FXDAX_MASTER_KEY"
+         {held}): CLADEFS_MASTER_KEY"
     )]
     UnknownMasterKey { tenant: u64, id: String, held: String },
     /// The KMS failed. What was asked may or may not have taken effect.

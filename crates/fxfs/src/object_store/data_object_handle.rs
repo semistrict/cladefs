@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/data_object_handle.rs`. fxdax's additions are
+// Fuchsia's `src/storage/fxfs/src/object_store/data_object_handle.rs`. cladefs's additions are
 // in child modules, impl blocks of their own, so that this file keeps upstream's shape
 // (TASK-160.24): `dax` (the extents a DAX window maps, backlog doc-13), `write_many` (the guest's
 // writeback), `reflink` and `in_commits` (clones and punches of however many extents), `tail`
@@ -13,7 +13,7 @@
 // to a length (`preallocate_range_in_extents_of`). Files in overwrite mode are written
 // copy-on-write (see `StoreObjectHandle::multi_overwrite`), so preallocating doesn't guarantee
 // space; and a write replacing a file's last overwrite extent leaves its attribute's
-// `has_overwrite_extents` set, which fsck refuses (MissingOverwriteExtents), so nothing of fxdax's
+// `has_overwrite_extents` set, which fsck refuses (MissingOverwriteExtents), so nothing of cladefs's
 // preallocates a file's data with `allocate`: fallocate grows the file alone (TASK-149.39). What splits an operation across commits is the room its transaction says it has left
 // (`Transaction::room`), not a count of mutations: `allocate`, `preallocate_range`.
 
@@ -65,7 +65,7 @@ use zerocopy::FromBytes;
 mod allocated_ranges;
 pub use allocated_ranges::{AllocatedRanges, RangeType};
 
-// fxdax: its additions (TASK-160.24).
+// cladefs: its additions (TASK-160.24).
 mod dax;
 mod in_commits;
 mod reflink;
@@ -158,9 +158,9 @@ pub struct OverwriteOptions<'a> {
     // preallocate_range or from existing writes.
     pub allow_allocations: bool,
     pub barrier_on_first_write: bool,
-    /// fxdax: a barrier follows the last write, once the others are done (`POST_BARRIER`).
+    /// cladefs: a barrier follows the last write, once the others are done (`POST_BARRIER`).
     pub barrier_after_last_write: bool,
-    /// fxdax: the root that barrier sets, if any (`WriteOptions::root`).
+    /// cladefs: the root that barrier sets, if any (`WriteOptions::root`).
     pub root: Option<&'a [u8]>,
 }
 
@@ -791,7 +791,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                 ),
             }
         }
-        // fxdax: growing, what the last block holds past the end is zeroed first: allocated, the
+        // cladefs: growing, what the last block holds past the end is zeroed first: allocated, the
         // block would be switched to an overwrite extent keeping it (TASK-153.4).
         self.zero_tail_before_growth(&mut transaction, range.end, None).await?;
         let mut to_allocate = Vec::new();
@@ -915,7 +915,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             AssocObj::Borrowed(self),
         );
 
-        // fxdax: as many mutations as the transaction has room for, rather than upstream's 256,
+        // cladefs: as many mutations as the transaction has room for, rather than upstream's 256,
         // which it said was probably quite a bit lower than the limit.
         for (switch_range, (extent, extent_offset)) in to_switch {
             transaction.add_with_object(
@@ -1151,7 +1151,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         // We build up a list of writes to perform later
         let mut writes = FuturesOrdered::new();
         let mut first_write = options.barrier_on_first_write;
-        // fxdax: the last write, if a barrier follows it, which waits for the others.
+        // cladefs: the last write, if a barrier follows it, which waits for the others.
         let mut last_write = None;
 
         // We create a new scope here, so that the merger iterator will get dropped before we try to
@@ -1223,7 +1223,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                                     as usize;
                                 let bytes_to_write = min(buf.len(), remaining_length_of_extent);
                                 let device_offset = device_offset + offset_within_extent;
-                                // fxdax: the blocks are written in place as `in_place` says: none
+                                // cladefs: the blocks are written in place as `in_place` says: none
                                 // a snapshot shares.
                                 let blocks = ExtentRange::new(
                                     *store_extent,
@@ -1520,7 +1520,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.preallocate_range_in_extents_of(transaction, file_range, u64::MAX).await
     }
 
-    /// fxdax: like `preallocate_range`, with extents of at most `max_extent_len` bytes each: a
+    /// cladefs: like `preallocate_range`, with extents of at most `max_extent_len` bytes each: a
     /// file written in place, a block at a time, such as the journal, writes each extent once,
     /// before it is sealed (backlog doc-4), if its extents are its blocks.
     pub async fn preallocate_range_in_extents_of<'a>(
@@ -1644,7 +1644,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             ranges.push(device_range);
             // If we didn't allocate all that we requested, we'll loop around and try again.
             // ... unless we have filled the transaction. The caller should check file_range.
-            // fxdax: as the transaction says, not upstream's 200 mutations.
+            // cladefs: as the transaction says, not upstream's 200 mutations.
             if transaction.is_full() {
                 break;
             }
@@ -2911,7 +2911,7 @@ mod tests {
         }
 
         // Check that the overwrites haven't messed up the filesystem state
-        // fxdax: with the filesystem's lock, which nothing here holds, so that a compaction the
+        // cladefs: with the filesystem's lock, which nothing here holds, so that a compaction the
         // flush task starts doesn't commit midway through the check (TASK-176).
         let fsck_options = FsckOptions {
             fail_on_warning: true,
@@ -3067,7 +3067,7 @@ mod tests {
         }
 
         // Check that the overwrites haven't messed up the filesystem state
-        // fxdax: with the filesystem's lock, which nothing here holds, so that a compaction the
+        // cladefs: with the filesystem's lock, which nothing here holds, so that a compaction the
         // flush task starts doesn't commit midway through the check (TASK-176).
         let fsck_options = FsckOptions {
             fail_on_warning: true,
@@ -3143,7 +3143,7 @@ mod tests {
         }
 
         // Check that the overwrites haven't messed up the filesystem state
-        // fxdax: with the filesystem's lock, which nothing here holds, so that a compaction the
+        // cladefs: with the filesystem's lock, which nothing here holds, so that a compaction the
         // flush task starts doesn't commit midway through the check (TASK-176).
         let fsck_options = FsckOptions {
             fail_on_warning: true,
@@ -3227,7 +3227,7 @@ mod tests {
         assert_eq!(object.get_size(), 12288);
 
         // Check that the overwrites haven't messed up the filesystem state
-        // fxdax: with the filesystem's lock, which nothing here holds, so that a compaction the
+        // cladefs: with the filesystem's lock, which nothing here holds, so that a compaction the
         // flush task starts doesn't commit midway through the check (TASK-176).
         let fsck_options = FsckOptions {
             fail_on_warning: true,
@@ -3713,7 +3713,7 @@ mod tests {
                 .await
                 .expect("create_object failed");
 
-        // fxdax: an extent no allocator mints, which upstream's 'magic' starting point on the
+        // cladefs: an extent no allocator mints, which upstream's 'magic' starting point on the
         // device was the equivalent of.
         handle
             .extend(&mut transaction, ExtentRange::new(TEST_EXTENT, 0..5 * fs.block_size()))
@@ -3775,7 +3775,7 @@ mod tests {
 
     #[fuchsia::test]
     async fn test_trim() {
-        // Format a new filesystem. fxdax: of 16 MiB, not 8: the object below, of more extents than
+        // Format a new filesystem. cladefs: of 16 MiB, not 8: the object below, of more extents than
         // a transaction can free, left the second pass's truncate, which reserves room for its
         // transaction, as upstream's does, less of 8 MiB than that, now and then, as compactions
         // went (TASK-181).
@@ -3803,13 +3803,13 @@ mod tests {
         }
         let shared_context = Arc::new(Mutex::new(Context::default()));
 
-        // fxdax: more extents than a transaction has room to free, each more than 16 bytes of it.
+        // cladefs: more extents than a transaction has room to free, each more than 16 bytes of it.
         let object_size = (TRANSACTION_ROOM / 16) * 2 * block_size;
 
         // Wait for an object to get tombstoned by the graveyard.
         async fn expect_tombstoned(store: &Arc<ObjectStore>, object_id: u64) {
             loop {
-                // fxdax: its record, not `open_object`: that looks up its size, whose record a
+                // cladefs: its record, not `open_object`: that looks up its size, whose record a
                 // tombstone in a later layer doesn't hide, once a flush has moved it to an earlier.
                 if store.tree().find(&ObjectKey::object(object_id)).await.expect("find").is_none() {
                     break;
@@ -3845,7 +3845,7 @@ mod tests {
             let store = shared_context_clone.lock().store.as_ref().cloned().unwrap();
             let shared_context = shared_context_clone.clone();
             async move {
-                // First run fsck on the current filesystem. fxdax: without its lock, which the
+                // First run fsck on the current filesystem. cladefs: without its lock, which the
                 // commit this follows holds. The filesystems mounted below are checked with
                 // theirs, as their own work goes on meanwhile (compactions, the graveyard's reap
                 // and trims): a commit of it that overtook a check without the lock had the check
@@ -5020,7 +5020,7 @@ mod tests {
 
     #[fuchsia::test(threads = 10)]
     async fn test_multi_overwrite_mode_updates() {
-        // fxdax: overwrites go to new blocks, as extents are write-once (backlog doc-4), so each
+        // cladefs: overwrites go to new blocks, as extents are write-once (backlog doc-4), so each
         // range written becomes an `Overwrite` extent of its own, and what is left of the
         // preallocated extent stays `OverwritePartial`, with none of its blocks written. A range
         // that spans extents is written to one new extent per extent it overwrites.

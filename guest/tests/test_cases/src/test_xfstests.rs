@@ -1,12 +1,12 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! xfstests (GPL-2.0) on fxdax's guest kernel's Fxfs, with a DAX window or without (TASK-44.15): the
-//! kernel's own filesystem suite, its `generic/quick` group unless FXDAX_XFSTESTS names others.
+//! xfstests (GPL-2.0) on cladefs's guest kernel's Fxfs, with a DAX window or without (TASK-44.15): the
+//! kernel's own filesystem suite, its `generic/quick` group unless CLADEFS_XFSTESTS names others.
 //! Fxfs has no block device for it: its devices are extent stores, named by tags, as virtiofs's
 //! are, which xfstests knows, so its image takes fxfs for virtiofs, and a test's scratch filesystem
-//! is emptied rather than made anew. fxdax: but one of a size (`_scratch_mkfs_sized`, the enospc
+//! is emptied rather than made anew. cladefs: but one of a size (`_scratch_mkfs_sized`, the enospc
 //! group's), which is a device of its own, its store as large ([`SIZED`]), empty till its first
 //! mount formats it, as the image's common/rc has it (TASK-149.25).
 //!
@@ -25,7 +25,7 @@ pub struct TestXfstests {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::ffi::CString;
@@ -47,13 +47,13 @@ mod host {
         "RUN make -j8 && useradd -m fsgqa && useradd -m 123456-fsgqa && useradd -m fsgqa2\n",
     );
 
-    /// fxdax: what the image's common/rc adds for Fxfs (TASK-149.25), after xfstests' own, which
+    /// cladefs: what the image's common/rc adds for Fxfs (TASK-149.25), after xfstests' own, which
     /// it overrides: a scratch filesystem of a size (`_try_scratch_mkfs_sized`) is the device of
     /// that size ([`SIZED`]), the test's from then on (SCRATCH_DEV), emptied as virtiofs's is; one
     /// of no device's size isn't run. Its first mount formats it. A scratch filesystem is
     /// unmounted by its mount point, as check unmounts whichever device a test left mounted.
     pub(super) const COMMON_RC: &str = r#"
-# fxdax: Fxfs: a scratch filesystem of a size, a device as large (TASK-149.25).
+# cladefs: Fxfs: a scratch filesystem of a size, a device as large (TASK-149.25).
 eval "_upstream$(declare -f _try_scratch_mkfs_sized)"
 eval "_upstream$(declare -f _scratch_unmount)"
 _try_scratch_mkfs_sized()
@@ -80,7 +80,7 @@ _scratch_unmount()
     });
 
     /// Tests that fail for what Fxfs here doesn't do, which any other failure isn't.
-    /// fxdax: no longer generic/225 (DAX appends' reserved blocks, in FIEMAP), 564 (past a DAX
+    /// cladefs: no longer generic/225 (DAX appends' reserved blocks, in FIEMAP), 564 (past a DAX
     /// mount's s_maxbytes) and 798 (cachestat, DAX's no page cache), which passed with DAX and
     /// without once DAX copied on write, the files a mount makes in the page cache till read in
     /// again (GCE r695, r696, TASK-44.15); nor generic/303 and 525 (offsets past a DAX mount's
@@ -101,7 +101,7 @@ _scratch_unmount()
         "generic/568",
         "generic/796",
         "generic/797",
-        // fxdax: reached once scratch filesystems had sizes (TASK-149.25), first run by the
+        // cladefs: reached once scratch filesystems had sizes (TASK-149.25), first run by the
         // nightly on GitHub's runners (TASK-349).
         "generic/679",
         // Nor room: a write to what fallocate covered finds none on a full filesystem, as 274's
@@ -131,7 +131,7 @@ _scratch_unmount()
     /// The bytes of each filesystem, and of its DAX window if it has one.
     const SIZE: u64 = 4 << 30;
 
-    /// fxdax: the sizes of scratch filesystem the tests ask `_scratch_mkfs_sized` for, a device of
+    /// cladefs: the sizes of scratch filesystem the tests ask `_scratch_mkfs_sized` for, a device of
     /// each, tagged `scratch-<bytes>`, its DAX window as large: generic/416's, 619's, 015's (and
     /// 027, 077, 083, 226, 449), 371's, 269's (and 546), 558's, 274's (and 275) and 312's.
     pub(super) const SIZED: [u64; 8] =
@@ -140,7 +140,7 @@ _scratch_unmount()
 
     impl Test for TestXfstests {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -164,7 +164,7 @@ _scratch_unmount()
                 vm.extent_store(&tag, &path, size, window)?;
             }
             // Check's arguments, separated by commas: a kernel's command line carries them.
-            let tests = std::env::var("FXDAX_XFSTESTS").unwrap_or("-g,generic/quick".to_owned());
+            let tests = std::env::var("CLADEFS_XFSTESTS").unwrap_or("-g,generic/quick".to_owned());
             vm.env(&CString::new(format!("XFSTESTS={tests}"))?);
             vm.enter(&setup_rootfs(&test_setup)?, &test_setup.test_case)
         }

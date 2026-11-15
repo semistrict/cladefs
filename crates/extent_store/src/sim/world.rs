@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -102,10 +102,10 @@ pub struct Profile {
     /// it had, as extentd opens its stores at boot: while the creates its writers had in flight
     /// land.
     pub restarts: bool,
-    /// fxdax: the chance that a collector's pass is over one branch's cell alone, not a sweep over
+    /// cladefs: the chance that a collector's pass is over one branch's cell alone, not a sweep over
     /// every cell (TASK-395.4): none draws nothing of the seed's.
     pub one_cell: f64,
-    /// fxdax: the chance that a fork of a point a crash stopped is forgotten, not finished nor
+    /// cladefs: the chance that a fork of a point a crash stopped is forgotten, not finished nor
     /// deleted: its host's directory, left unmade, names no child, and deleting it touches nothing
     /// in the bucket (TASK-395.10). None draws nothing of the seed's.
     pub forget: f64,
@@ -155,7 +155,7 @@ impl Default for Profile {
     }
 }
 
-/// fxdax: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
+/// cladefs: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
 /// or a fork, is (TASK-364).
 fn sim_branch(id: u64) -> extent_remote::layout::Branch {
     let cell = extent_remote::layout::Cell { tenant: 1, id };
@@ -163,7 +163,7 @@ fn sim_branch(id: u64) -> extent_remote::layout::Branch {
 }
 
 /// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
-/// of a few extents close, full, between commits. fxdax: a sector of an open segment, the least
+/// of a few extents close, full, between commits. cladefs: a sector of an open segment, the least
 /// it takes (`segments::SECTOR`, TASK-411.8); 512 bytes before.
 const BLOCK: u64 = crate::segments::SECTOR;
 
@@ -971,8 +971,8 @@ impl World {
     }
 
     /// `branch`'s store on `host` did not open, for `failure`: its log diverged, another writer's
-    /// commits past it, which `fxdaxctl take` drops, and it opens again with none; else its guest
-    /// goes. fxdax: a log diverged must have: the branch's last commit is neither one of its
+    /// commits past it, which `cladefsctl take` drops, and it opens again with none; else its guest
+    /// goes. cladefs: a log diverged must have: the branch's last commit is neither one of its
     /// commits nor its base. Before, every divergence was taken as one, which hid a log whose
     /// segment ending one commit and going on with the next landed alone, its next commit, durable,
     /// dropped (TASK-345).
@@ -1910,7 +1910,7 @@ impl World {
 
     /// Checks that a sweep of the collector that ran alone, the bucket holding `before` as it
     /// started, the objects' sizes by their keys, reports what it did (TASK-44.1): the objects it
-    /// deleted, and the moves it wrote. fxdax: and no more references gone than it retired, whether
+    /// deleted, and the moves it wrote. cladefs: and no more references gone than it retired, whether
     /// or not they were there (TASK-395.4), and deleted marked (TASK-395.13); and the bytes of what
     /// it deleted, and of what it compacted, as they were (TASK-395.5).
     fn check_report(
@@ -2160,7 +2160,7 @@ impl World {
             if record.forking().is_some() {
                 violations.push(format!("branch {id:x}, told made, is being made still"));
             }
-            // No placement took it back from a later one. fxdax: a placement takes the branch's cell,
+            // No placement took it back from a later one. cladefs: a placement takes the branch's cell,
             // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
             let cell = block_on(extent_remote::cell::read(&*direct, sim_branch(id).cell));
@@ -2445,7 +2445,7 @@ impl World {
             self.settle();
             self.sweep_alone();
         }
-        // fxdax: then sweeps until two in a row delete and compact nothing: a dead cell's pass
+        // cladefs: then sweeps until two in a row delete and compact nothing: a dead cell's pass
         // retires the references its parents' cells keep fork points for, which their next passes
         // reclaim, a sweep a generation of a chain (TASK-395.4).
         let mut quiet = 0;

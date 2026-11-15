@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -8,11 +8,11 @@ budgets a run of guest tests fails on, as scripts/test-e2e.sh runs this over its
 scripts/bench.sh's runs with it, so that a change that trades one cost for another fails here,
 not at a customer (LangSmith's sandboxes found TASK-310's doubled writes and TASK-317's memory).
 
-Of each daemon's stats file (FXDAX_EXTENTD_STATS: the run's extentd-stats.txt, a case's daemon's
+Of each daemon's stats file (CLADEFS_EXTENTD_STATS: the run's extentd-stats.txt, a case's daemon's
 NAME-stats.txt), its last lines:
 
 - **memory**: no sample of the daemon's anonymous memory past its budget, which the daemon weighs
-  each against as it takes it (`process:`'s `over-budget`, fxdax::extentd::process): the sum of
+  each against as it takes it (`process:`'s `over-budget`, cladefs::extentd::process): the sum of
   what its design bounds, its uploads' memory, a framing for each store written at once, its
   fetches', its tenants' rooms' and its own;
 - **uploads**: what they held at once within their budget, the host's upload memory
@@ -28,7 +28,7 @@ NAME-stats.txt), its last lines:
 
 And says, of each, what it wrote by kind for each byte its guests wrote (`written_raw_bytes`, every
 guest byte once), and its CPU time a request, which a workload's own case holds to its design
-(`fxdax::remote::write_budgets`, of a host's store; the guest cases' own).
+(`cladefs::remote::write_budgets`, of a host's store; the guest cases' own).
 
     budgets.py [--bucket-in-memory STATS]... RESULTS    each daemon's under RESULTS; exits 1 past one
 

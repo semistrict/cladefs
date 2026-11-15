@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The driver's self-test (selftest.h). It mints extents past the device's next sequence number,
  * so it can run on a store holding a filesystem, though it leaves its extents and root there.
@@ -20,7 +20,7 @@
 /* How many extents the test writes at once, and their blocks. */
 #define EXTENTS 32
 #define EXTENT_BLOCKS 2
-#define ROOT "fxdax extent store self-test"
+#define ROOT "cladefs extent store self-test"
 
 struct vext_selftest {
 	struct virtio_extent *vext;
@@ -90,7 +90,7 @@ static bool matches(const u8 *buf, size_t len, int extent)
 }
 
 /*
- * fxdax: whether the DAX window, read in place through its dax_device, as Fxfs reads it, holds
+ * cladefs: whether the DAX window, read in place through its dax_device, as Fxfs reads it, holds
  * extent 1's `len` bytes at its start, and zeros after them, to `mapped`.
  */
 static bool window_holds(struct dax_device *dax, size_t len, size_t mapped)
@@ -211,7 +211,7 @@ static void run(struct vext_selftest *st)
 		   .id = EXTENT(EXTENTS), .data_len = len, .data = bufs[0]);
 	if (err)
 		FAIL("WRITE with a barrier: %d", err);
-	/* fxdax: a WRITE's commit sets the root after its data. */
+	/* cladefs: a WRITE's commit sets the root after its data. */
 	if (virtio_extent_write_commit(vext)) {
 		root[0] = 'F';
 		err = CALL(.type = VIRTIO_EXTENT_T_WRITE,

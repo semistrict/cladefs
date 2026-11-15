@@ -1,8 +1,8 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/mutants.sh, the mutation testing of fxdax's own crates, its passes run by
+"""Tests of scripts/mutants.sh, the mutation testing of cladefs's own crates, its passes run by
 fake_cargo_mutants.py: a sweep, then, for a crate with Shuttle tests, the sweep's missed again under
 Shuttle."""
 
@@ -51,7 +51,7 @@ class Mutants(unittest.TestCase):
             env={
                 "PATH": f"{self.directory / 'bin'}:/usr/bin:/bin",
                 "HOME": str(self.directory),
-                "FXDAX_MUTANTS": str(self.out),
+                "CLADEFS_MUTANTS": str(self.out),
                 "FAKE_CARGO_MUTANTS": str(self.directory),
             },
             capture_output=True,

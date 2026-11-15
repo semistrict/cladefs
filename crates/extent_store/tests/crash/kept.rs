@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
+//! cladefs: the kept rounds (TASK-165.9's AC #4): a store keeping its branch in a bucket, its
 //! uploader uploading and acknowledging on a runtime's threads as the workload goes, crashes at a
 //! random point; then the branch is taken from the bucket alone, its disk lost, and the store is
 //! opened again from what the crash left. Taken from the bucket, it holds a prefix of the commits
@@ -11,7 +11,7 @@
 //! taking it fenced. Not a function of its seed alone, as the rounds of `rounds` are: the
 //! uploader's threads interleave with the workload as they will.
 //!
-//! fxdax: passes of the collector run over the bucket all along the workload, compacting, each
+//! cladefs: passes of the collector run over the bucket all along the workload, compacting, each
 //! after the last, on the host's runtime, as its collector would; one is cut at a random request
 //! of its, as the host dies under it ([`Cut`]); and a full pass runs after the crash, before the
 //! branch is taken and the store opened again (TASK-291.2). Once it was, passes run alone, and

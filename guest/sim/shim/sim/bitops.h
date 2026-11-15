@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* Bit operations, bitmaps and bit searches, on arrays of longs. See sim/atomic.h for atomicity. */
 #ifndef _SIM_BITOPS_H
 #define _SIM_BITOPS_H

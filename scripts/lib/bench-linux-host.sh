@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Benchmark fxdax against ext4 on virtio-blk (scripts/bench.sh) on an x86-64
+# Benchmark cladefs against ext4 on virtio-blk (scripts/bench.sh) on an x86-64
 # Linux KVM host, as root (scripts/bench-host.sh drives it), writing the
 # measurements, the guests' logs and the comparison to RESULTS.
 #
 # Usage: bench-linux-host.sh SOURCE RESULTS [ITERATIONS]
 #
-# FXDAX_BENCH_CASES and FXDAX_BENCH_GROUPS choose what runs (scripts/bench.sh).
-# FXDAX_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from SOURCE.
+# CLADEFS_BENCH_CASES and CLADEFS_BENCH_GROUPS choose what runs (scripts/bench.sh).
+# CLADEFS_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from SOURCE.
 set -euo pipefail
 repo=$(cd "${1:?source required}" && pwd)
 results=${2:?results directory required}
@@ -22,22 +22,22 @@ host_tree bench-tree
 # nextest first (TASK-220): without it, every run failed there, "no such command: nextest" (GCE r1022).
 host_need cargo-nextest
 # Build the guest kernel from this source when asked, as test-linux-host.sh does.
-case ${FXDAX_GUEST_KERNEL_BUILD:-} in
+case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
     '') ;;
     release | debug)
-        host_kernel "$FXDAX_GUEST_KERNEL_BUILD"
-        export FXDAX_GUEST_KERNEL=$host_kernel_image
-        sha256sum "$FXDAX_GUEST_KERNEL" > "$results/guest-kernel.txt"
+        host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"
+        export CLADEFS_GUEST_KERNEL=$host_kernel_image
+        sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
         ;;
-    *) echo "FXDAX_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2 ;;
+    *) echo "CLADEFS_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2 ;;
 esac
-# With FXDAX_BENCH_PERF=record, perf samples each case's VMM, its threads'
+# With CLADEFS_BENCH_PERF=record, perf samples each case's VMM, its threads'
 # stacks (record-all: the whole host's, the extent daemon's too), and
 # perf-CASE.txt says where their time went, and perf-CASE-THREAD.txt each busy
 # thread's (scripts/lib/perf-report.sh), or with record:EVENTS
 # where the events happened; with stat:EVENTS, it counts the events into the
 # cases' logs (test_fs_bench.rs).
-if [[ -n ${FXDAX_BENCH_PERF:-} ]]; then
+if [[ -n ${CLADEFS_BENCH_PERF:-} ]]; then
     host_need perf
 fi
 
@@ -48,7 +48,7 @@ fi
 } > "$results/host.txt"
 
 status=0
-FXDAX_BENCH_RESULTS="$results" "$repo/scripts/bench.sh" "$iterations" > "$results/comparison.md" 2> "$results/bench.log" ||
+CLADEFS_BENCH_RESULTS="$results" "$repo/scripts/bench.sh" "$iterations" > "$results/comparison.md" 2> "$results/bench.log" ||
     status=$?
 source "$(dirname "${BASH_SOURCE[0]}")/perf-report.sh"
 for data in "$results"/logs/*/*/perf.data; do

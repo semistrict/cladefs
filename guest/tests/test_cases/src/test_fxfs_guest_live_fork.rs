@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Live forks (fxdax's TASK-39.3): a running VM's store forks at a point its guest's Fxfs agrees
+//! Live forks (cladefs's TASK-39.3): a running VM's store forks at a point its guest's Fxfs agrees
 //! to, frozen, while the VM goes on. The guest writes a file, freezes, and tells the host over
 //! vsock; the host forks the store through the extent daemon, live, and tells the guest, which
 //! thaws, writes another, and remounts, finding both. A second VM boots on the fork and finds the
@@ -24,7 +24,7 @@ const AFTER: &[u8] = b"written after the fork\n";
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -52,7 +52,7 @@ mod host {
             CAPACITY,
             crate::common::dax_window(crate::common::Window::Large)?,
         )?;
-        vm.env(&CString::new(format!("FXDAX_LIVE_FORK={role}"))?);
+        vm.env(&CString::new(format!("CLADEFS_LIVE_FORK={role}"))?);
         if let Some(uds) = uds {
             vm.vsock(uds);
         }
@@ -72,10 +72,10 @@ mod host {
             let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
             let extentd: PathBuf =
-                std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?.into();
+                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
             let (store, fork) = (dir.join("store"), dir.join("fork"));
             // Short, as Unix sockets' paths must be.
-            let uds = std::env::temp_dir().join(format!("fxdax-fork-{}.vsock", std::process::id()));
+            let uds = std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
 
             let mut source = run(test_setup, &root, "source", &store, Some(&uds))?;
@@ -94,7 +94,7 @@ mod host {
 
     impl Test for TestFxfsGuestLiveFork {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -179,7 +179,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             fs::create_dir_all(MNT).unwrap();
             mount();
-            match std::env::var("FXDAX_LIVE_FORK").unwrap().as_str() {
+            match std::env::var("CLADEFS_LIVE_FORK").unwrap().as_str() {
                 "source" => {
                     fs::write(format!("{MNT}/before"), BEFORE).unwrap();
                     freeze(FIFREEZE);

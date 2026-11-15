@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a store's write-ahead log of its branch (doc-14, TASK-165.9): what the bucket doesn't
+//! cladefs: a store's write-ahead log of its branch (doc-14, TASK-165.9): what the bucket doesn't
 //! have yet of the branch, on local disk, and what recovering it from there takes.
 //!
 //! - **Its segments**, closed and not yet acknowledged in the bucket: each framed with its footer,
@@ -16,7 +16,7 @@
 //!   `open-segments/<branch>/<n>`: a record of each commit's contents, as its footer will fold
 //!   them (`extent_frame::segment::Contents`), each hashed, appended and synced by the flush that
 //!   makes the commit durable, whether the segment is open, or closed since and being framed: a
-//!   flush waits for no framing. fxdax: a flush that seals little puts the runs its commits
+//!   flush waits for no framing. cladefs: a flush that seals little puts the runs its commits
 //!   sealed in their records, and syncs its logs alone, one sync, as a database's write-ahead log
 //!   holds its pages; recovery writes them into the raw data again. Others put the CRC32C of each
 //!   run in the records, and sync the data and append the records at once: recovery stops at the
@@ -33,7 +33,7 @@
 //! Recovering it ([`recover`]) keeps each segment whose framed file is whole, and closes again
 //! each whose framed file is not, left open, or its framing or its entry's sync stopped by a
 //! crash, from its raw data and the records of its log that are whole, which are the commits made
-//! durable, at least; fxdax: and, after the first segment not whole, each whose raw data and log
+//! durable, at least; cladefs: and, after the first segment not whole, each whose raw data and log
 //! are still there, whole or not, as segments are made durable several at once (TASK-310), what
 //! it keeps ending at a log refusing a record's runs, at a segment holding no durable commit, or at
 //! a log not following the last commit kept (TASK-334); framed files left being made durable,
@@ -42,7 +42,7 @@
 //! durable commit, and goes. A log may lack its segment's last
 //! commits, those not durable, as flushes append records in their commits' order: the next segment
 //! holding commits then follows commits it lacks, which no later segment holds durable, and those
-//! after it go, durably, before it is closed again. fxdax: closed again, it is framed once the
+//! after it go, durably, before it is closed again. cladefs: closed again, it is framed once the
 //! store's keys are known, not by recovery, which holds none yet ([`Recovered::close`],
 //! TASK-411.9). The store's commits are numbered one after
 //! another, and the segments a crash left torn are all of the last opening's, which numbered them
@@ -130,7 +130,7 @@ impl BaseFile {
     }
 }
 
-/// fxdax: a commit's record in its segment's log: its contents, and what makes the runs its
+/// cladefs: a commit's record in its segment's log: its contents, and what makes the runs its
 /// extents were sealed in durable with it (TASK-301): the runs themselves, for a flush that seals
 /// little, which then syncs its log alone, as a database's write-ahead log holds its pages; or the
 /// CRC32C of each, which recovery checks against the segment's raw data, for one whose data it
@@ -143,7 +143,7 @@ pub(crate) struct LogRecord {
 }
 
 /// What a [`LogRecord`] holds of the runs its commit sealed, in the order its contents name them
-/// (`Contents::runs`: fxdax: those of the commit it goes on with too, TASK-92.41).
+/// (`Contents::runs`: cladefs: those of the commit it goes on with too, TASK-92.41).
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Runs {
     /// Nothing: its data was synced before it.
@@ -154,7 +154,7 @@ pub(crate) enum Runs {
     Held(Bytes),
 }
 
-/// fxdax: bytes, which bincode writes as a length and the bytes, not a sequence of each byte's
+/// cladefs: bytes, which bincode writes as a length and the bytes, not a sequence of each byte's
 /// value, as it would a `Vec<u8>`: a record holding a commit's runs encodes as fast as it copies.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Bytes(pub Vec<u8>);
@@ -239,7 +239,7 @@ impl LogRecord {
 
     /// The records of `bytes`, `segment`'s log, that are whole: those of any kind, after its
     /// header, salted as it says ([`LOG_MAGIC`]), as a log reused does, whose records from before
-    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). fxdax: a sealed log's
+    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: a sealed log's
     /// each followed by its MAC ([`SEALED_LOG_MAGIC`]), which is checked if `sealer`, its sealer,
     /// is given: one not authentic fails it, naming it; read holding no key, as recovery reads, it
     /// is not checked (TASK-411.5).
@@ -280,13 +280,13 @@ impl LogRecord {
     }
 }
 
-/// fxdax: what a segment's log starts with: its header, a block, its salt after this, then its
+/// cladefs: what a segment's log starts with: its header, a block, its salt after this, then its
 /// records, each salted with it, so that a log reused, a spare, holding records of another
 /// segment's after them, reads as holding its own alone (TASK-301): a log made ahead of its
 /// records is overwritten as it is appended to, a sync then syncing the records alone, not the
 /// log's size and blocks too, a third of the time on a cloud disk. The header is synced before any
 /// record is appended: a log whose new header a crash lost would read its old one's records.
-/// fxdax: after the salt, the segment the log is of, the branch's then the number: a spare is
+/// cladefs: after the salt, the segment the log is of, the branch's then the number: a spare is
 /// renamed a log, and was renamed a spare, neither rename durable until a flush syncs the
 /// directory of logs, so a crash may keep it under its last segment's name, holding the new
 /// one's header and records, which an opening took for the last one's commits (TASK-341, found by
@@ -294,7 +294,7 @@ impl LogRecord {
 /// its own.
 pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 
-/// fxdax: what a sealed store's segment's log starts with, in place of [`LOG_MAGIC`]: after the
+/// cladefs: what a sealed store's segment's log starts with, in place of [`LOG_MAGIC`]: after the
 /// same fields, the DEK its segment's raw file is encrypted under and its log authenticated with,
 /// its branch's and its generation, and the salt of their subkeys (`raw::Sealer`), then the
 /// header's MAC; each record of it is followed by its MAC, of its offset in the log and its bytes
@@ -302,17 +302,17 @@ pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 /// A log in the clear is as it was.
 pub(crate) const SEALED_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x03";
 
-/// fxdax: where a segment's log's records start, after its header.
+/// cladefs: where a segment's log's records start, after its header.
 pub(crate) const LOG_RECORDS: u64 = 4096;
 
-/// fxdax: the bytes of a clear log's header ([`LOG_MAGIC`]) that say anything.
+/// cladefs: the bytes of a clear log's header ([`LOG_MAGIC`]) that say anything.
 const LOG_FIELDS: usize = LOG_MAGIC.len() + 3 * 8;
 
-/// fxdax: the bytes of a log's header that say anything, a sealed one's ([`SEALED_LOG_MAGIC`]),
+/// cladefs: the bytes of a log's header that say anything, a sealed one's ([`SEALED_LOG_MAGIC`]),
 /// which a clear one's are fewer than: what a reader of its header reads.
 pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
 
-/// fxdax: the header of `segment`'s log, its records salted with `salt` ([`LOG_MAGIC`]); a sealed
+/// cladefs: the header of `segment`'s log, its records salted with `salt` ([`LOG_MAGIC`]); a sealed
 /// one's, MACed, if `sealer` seals its raw file and log ([`SEALED_LOG_MAGIC`]).
 pub(crate) fn log_header(salt: u64, segment: SegmentId, sealer: Option<&Sealer>) -> Vec<u8> {
     let mut header = vec![0; LOG_RECORDS as usize];
@@ -333,7 +333,7 @@ pub(crate) fn log_header(salt: u64, segment: SegmentId, sealer: Option<&Sealer>)
     header
 }
 
-/// fxdax: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its records,
+/// cladefs: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its records,
 /// and, if sealed, the DEK and salt of its sealer, with the bytes its MAC is of, and the MAC.
 pub(crate) struct LogHeader {
     pub salt: u64,
@@ -391,13 +391,13 @@ impl LogHeader {
     }
 }
 
-/// fxdax: the salt of the records of `log`, `segment`'s log's bytes, as its header says, if it
+/// cladefs: the salt of the records of `log`, `segment`'s log's bytes, as its header says, if it
 /// has one, and it is `segment`'s.
 pub(crate) fn log_salt(log: &[u8], segment: SegmentId) -> Option<u64> {
     LogHeader::of(log, segment).map(|header| header.salt)
 }
 
-/// fxdax: a salt for the records of a log of `segment`'s made in `lifetime`, a value of the
+/// cladefs: a salt for the records of a log of `segment`'s made in `lifetime`, a value of the
 /// opening of the branch that made it ([`crate::segments::Segments::open`]): none another log
 /// had, as a branch whose segments all left numbers its next from 0 again, its epoch past theirs;
 /// and none 0, the salt of logs before they had headers.
@@ -415,21 +415,21 @@ pub(crate) struct SegmentLog<F> {
     file: Arc<F>,
     end: u64,
     salt: u64,
-    /// fxdax: what MACs its records, if it is sealed (TASK-411.5).
+    /// cladefs: what MACs its records, if it is sealed (TASK-411.5).
     sealer: Option<Arc<Sealer>>,
 }
 
 impl<F: File> SegmentLog<F> {
     /// A segment's log, `file`, holding no records yet, after its header ([`log_header`]), made or
-    /// reused with it, its records salted with `salt`; fxdax: and MACed by `sealer`, if sealed.
+    /// reused with it, its records salted with `salt`; cladefs: and MACed by `sealer`, if sealed.
     pub fn new(file: Arc<F>, salt: u64, sealer: Option<Arc<Sealer>>) -> Self {
         Self { file, end: LOG_RECORDS, salt, sealer }
     }
 
     /// Appends `records` after those before, encoded, salted ([`crate::layout::encode_salted`]),
-    /// and syncs them. fxdax: keeping the log's pages in the host's page cache, as the open
+    /// and syncs them. cladefs: keeping the log's pages in the host's page cache, as the open
     /// segment's raw file keeps its (TASK-301): a log is appended to and synced again and again,
-    /// and its next record's append would read its last page back from the disk first. fxdax:
+    /// and its next record's append would read its last page back from the disk first. cladefs:
     /// each followed by its MAC, if sealed ([`SEALED_LOG_MAGIC`]).
     pub fn append<'a>(
         &mut self,
@@ -456,7 +456,7 @@ impl<F: File> SegmentLog<F> {
 
 /// A store's WAL as its directory holds it, recovered ([`recover`]): its base; its segments,
 /// footers by their numbers, in order; and the number of the next segment, past every one the
-/// directory held. fxdax: of those, the ones closed again, not yet framed, by their numbers, with
+/// directory held. cladefs: of those, the ones closed again, not yet framed, by their numbers, with
 /// the records of their logs their footers fold, their raw files and logs still there: framed once
 /// the store's keys are known ([`Recovered::close`], TASK-411.9).
 pub(crate) struct Recovered {
@@ -468,7 +468,7 @@ pub(crate) struct Recovered {
 }
 
 impl Recovered {
-    /// fxdax: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
+    /// cladefs: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
     /// `branch`, holding `keys`, the store's: sealed under its branch's newest DEK if they seal, else
     /// in the clear; each from its raw data and its log's records read again, which must still be
     /// those recovery kept, with the footer recovery folded them into, and synced; then the
@@ -477,7 +477,7 @@ impl Recovered {
     /// yet, and a sealed branch's segment framed in the clear and resealed later left its data on
     /// the host's disk in the clear meanwhile, and for good if the host died between (TASK-411.9).
     /// A crash before leaves the raw files and logs, which the next recovery closes again alike.
-    /// fxdax: a sealed store's raw data is decrypted first, under the DEK and salt its log's header
+    /// cladefs: a sealed store's raw data is decrypted first, under the DEK and salt its log's header
     /// names, which the header's MAC and each record's must be authentic under, as recovery read
     /// them holding no key (TASK-411.5).
     pub fn close<D: Dir>(
@@ -498,11 +498,11 @@ impl Recovered {
                 records.get(..kept.len()) == Some(&kept[..]),
                 "{segment:?}'s log changed since its recovery"
             );
-            // fxdax: to the end of its last run: past it, nothing the records name, as a framing
+            // cladefs: to the end of its last run: past it, nothing the records name, as a framing
             // in place cut short leaves the raw file with its tail, torn (TASK-310).
             let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
             data.truncate((end.unwrap_or(0) as usize).min(data.len()));
-            // fxdax: decrypted, if sealed: its runs are whole sectors (TASK-411.5, TASK-411.8).
+            // cladefs: decrypted, if sealed: its runs are whole sectors (TASK-411.5, TASK-411.8).
             if let Some(sealer) = &sealer {
                 ensure!(
                     (data.len() as u64).is_multiple_of(SECTOR),
@@ -529,7 +529,7 @@ impl Recovered {
         Ok(())
     }
 
-    /// fxdax: drops what it holds of the segments closed again, not yet framed: their raw files
+    /// cladefs: drops what it holds of the segments closed again, not yet framed: their raw files
     /// and logs, durably, so that no recovery closes them again (`Recovering::drop_wal`).
     pub fn drop_closing<D: Dir>(&mut self, dir: &D, branch: Branch) -> Result<(), Error> {
         if self.closing.is_empty() {
@@ -556,7 +556,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     let listed = |kind| -> Result<BTreeSet<u64>, Error> {
         Ok(list_numbers(dir, &branch_dir(kind, branch.id))?.into_iter().collect())
     };
-    // fxdax: framed files a crash stopped being made durable, named their own: their segments are
+    // cladefs: framed files a crash stopped being made durable, named their own: their segments are
     // closed again from their raw files and logs, which stay until they are (TASK-310).
     for name in dir.list(&branch_dir(SEGMENTS, branch.id))? {
         if name.starts_with(FRAMING) {
@@ -566,7 +566,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     let (framed, raw, logs) = (listed(SEGMENTS)?, listed(OPEN_SEGMENTS)?, listed(LOGS)?);
     let numbers: BTreeSet<u64> = framed.iter().chain(&raw).chain(&logs).copied().collect();
     let left = |number| raw.contains(&number) || logs.contains(&number);
-    // fxdax: the logs that are their segments' own, their headers naming them: one renamed a spare
+    // cladefs: the logs that are their segments' own, their headers naming them: one renamed a spare
     // and taken as another segment's log, which a crash brought back under its old name, holds none
     // of its segment's records, and says nothing of whether its segment was made durable: a
     // segment the base acknowledged, its files' removal undone, its log a spare taken since, read as
@@ -593,7 +593,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         Ok(())
     };
     // A log's commits the base acknowledged are the bucket's: its framed file left, its raw data
-    // and log a crash brought back, it holds nothing of the log's. fxdax: a commit's record going
+    // and log a crash brought back, it holds nothing of the log's. cladefs: a commit's record going
     // on with it past the segment, the commit's (TASK-92.41).
     let after_base = |records: &[Contents]| {
         let last = records.iter().rev().find_map(last_commit);
@@ -612,7 +612,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         remove(dir, &open_segment_path(segment))?;
         remove(dir, &log_path(segment))
     };
-    // What each segment holds, in order. fxdax: its framed file, whole, only while every segment
+    // What each segment holds, in order. cladefs: its framed file, whole, only while every segment
     // before it is framed whole, or holds only commits the base acknowledged; after the first that
     // isn't, each whose raw file and log are both still there is closed again from them, as a
     // torn one is (TASK-310). Segments are made durable several at once, a later one's framed file
@@ -625,7 +625,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     // (`Segments::unsynced_entries`).
     let mut found = Vec::new();
     let mut broken = false;
-    // fxdax: the segments whose logs hold a record whose runs their raw data doesn't hold: its
+    // cladefs: the segments whose logs hold a record whose runs their raw data doesn't hold: its
     // commit's data not durable, the commit isn't, nor those after it (`log_records`); and those
     // which end what is durable so, holding nothing durable, their framed file not whole, nor any
     // record: one whose raw file or log is there, past the segments the base acknowledged, made
@@ -670,10 +670,10 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             None => (number, Found::Nothing),
         });
     }
-    // fxdax: whether the base acknowledged a segment's commits, its whole.
+    // cladefs: whether the base acknowledged a segment's commits, its whole.
     let acknowledged =
         |footer: &Footer| base.is_some_and(|base| footer_last(footer) <= epoch_of(base));
-    // fxdax: whether the commit the segment found at `at` goes on with past it, `commit`, ends:
+    // cladefs: whether the commit the segment found at `at` goes on with past it, `commit`, ends:
     // the segments after it, one after another, each going on with it, to one ending it
     // (TASK-92.41). A flush appends a commit's records to its segments' logs in their order, the
     // one ending it last, but checks of their runs against the raw data may stop at any of them.
@@ -696,7 +696,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     // log, which holds the records of the commits made in it that a flush made durable, at least;
     // or holding no durable commit, its files going. One closed again whose log lacks its last
     // commits, the next segment holding commits not following its last, is the last: those after
-    // it go, durably, first (see the module's docs). fxdax: and one going on with a commit that no
+    // it go, durably, first (see the module's docs). cladefs: and one going on with a commit that no
     // segment after it ends is the last, closed again without it, from its raw data and log, which
     // stay until the commit is durable: the commit is not.
     let mut segments: Vec<(Footer, u64)> = Vec::new();
@@ -705,7 +705,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         let number = *number;
         let segment = SegmentId { branch: branch.id, number };
         let continues = |record: &Contents| record.continued.is_some();
-        // fxdax: those from `from` on go, durably, before any is closed again: those after it
+        // cladefs: those from `from` on go, durably, before any is closed again: those after it
         // first, then it, whose files say why they go, a log refusing a record or a commit past
         // the last kept, which a crash between its files' removals and theirs would leave gone,
         // and theirs kept (TASK-334's opening rounds).
@@ -736,7 +736,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                     continue;
                 }
             },
-            // fxdax: one whose log refused a record, or holds none, its raw file and log there,
+            // cladefs: one whose log refused a record, or holds none, its raw file and log there,
             // holds the first commit not durable, if any: it and those after go (TASK-334): a
             // commit spanning it and the next, its record in the next's log whole, its runs there
             // durable, its record here lost or refused, read whole, would be read without them.
@@ -749,7 +749,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                 continue;
             }
             Found::Torn(records) => {
-                // fxdax: its log goes on from the last commit kept, the base's or a segment's, or
+                // cladefs: its log goes on from the last commit kept, the base's or a segment's, or
                 // it and those after go, durably: a flush appends its commits' records to the logs
                 // of their segments at once, and a crash may keep a later commit's record, in this
                 // one's log, and lose an earlier one's, in the log of a segment before, which went,
@@ -774,7 +774,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         let last = records.iter().rev().find_map(|record| record.commits.last()).copied();
         let next = found[at + 1..].iter().find_map(|(_, found)| found.first_commit());
         let follows = next.is_some_and(|next| last.is_some_and(|last| next == epoch_of(last) + 1));
-        // fxdax: and not if its log refused a record, its commit not durable (TASK-334).
+        // cladefs: and not if its log refused a record, its commit not durable (TASK-334).
         let whole = !refusing.contains(&number) && (goes_on || (!unended && follows));
         if !whole && at + 1 < found.len() {
             cut(at + 1)?;
@@ -786,7 +786,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         if framed.contains(&number) {
             remove(dir, &segment_path(segment))?;
         }
-        // fxdax: framed once the store's keys are known, its raw file and log kept until then
+        // cladefs: framed once the store's keys are known, its raw file and log kept until then
         // (`Recovered::close`, TASK-411.9).
         let previous = segments.last().map(|(footer, _)| footer);
         segments.push((closed_again(branch, previous, &records)?, number));
@@ -824,7 +824,7 @@ fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Optio
     if !left {
         return Ok(footer);
     }
-    // fxdax: whole by the keyless check, its parts' stored bytes against their CRCs, sealed or
+    // cladefs: whole by the keyless check, its parts' stored bytes against their CRCs, sealed or
     // not: what a recovery holding no key yet tells of a sealed one, never taken for torn and
     // closed again from its raw file (TASK-411.3).
     let whole = footer.is_some() && extent_frame::check(&read_whole(&file)?).is_ok();
@@ -834,7 +834,7 @@ fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Optio
     Ok(footer.filter(|_| whole))
 }
 
-/// fxdax: whether `segment`'s log is its own: there, its header naming it (`LOG_MAGIC`).
+/// cladefs: whether `segment`'s log is its own: there, its header naming it (`LOG_MAGIC`).
 fn own_log<D: Dir>(dir: &D, segment: SegmentId) -> Result<bool, Error> {
     let log = match dir.open(&log_path(segment), false) {
         Ok(log) => log,
@@ -849,7 +849,7 @@ fn own_log<D: Dir>(dir: &D, segment: SegmentId) -> Result<bool, Error> {
     Ok(log_salt(&header, segment).is_some())
 }
 
-/// fxdax: the store's epoch of the first commit `records`, a segment's log's, hold: the first a
+/// cladefs: the store's epoch of the first commit `records`, a segment's log's, hold: the first a
 /// record ends, or goes on with (TASK-92.41).
 fn first_epoch(records: &[Contents]) -> Option<u64> {
     let first = records.first()?;
@@ -868,7 +868,7 @@ enum Found {
 }
 
 impl Found {
-    /// fxdax: whether it ends `commit`, which the segment before it went on with, or goes on with
+    /// cladefs: whether it ends `commit`, which the segment before it went on with, or goes on with
     /// it, ending none: `Some(true)` or `Some(false)`; none if neither (TASK-92.41). Its first
     /// record, of a log, ends it, or goes on with it.
     fn goes_on(&self, commit: u64) -> Option<bool> {
@@ -902,18 +902,18 @@ struct Logged {
     records: Vec<Contents>,
     /// Its raw data, as stored, with the runs the records hold written into it.
     data: Vec<u8>,
-    /// fxdax: whether there is such a record, whose commit is then not durable, nor those after
+    /// cladefs: whether there is such a record, whose commit is then not durable, nor those after
     /// it: a flush makes a commit durable only once its record and its runs' data both are
     /// (TASK-334).
     refused: bool,
-    /// fxdax: what its raw data is encrypted under and its log authenticated with, if sealed, read
+    /// cladefs: what its raw data is encrypted under and its log authenticated with, if sealed, read
     /// holding the store's keys (TASK-411.5).
     sealer: Option<Arc<Sealer>>,
 }
 
 /// What the log of `segment` and its raw file hold ([`Logged`]); none if it has no log. Read
 /// holding no key, as recovery reads, its records' MACs unchecked if it is sealed, its data as
-/// stored; fxdax: or holding `keys`, the store's, which give its sealer, and which its header and
+/// stored; cladefs: or holding `keys`, the store's, which give its sealer, and which its header and
 /// records must be authentic under (TASK-411.5).
 fn log_records<D: Dir>(
     dir: &D,
@@ -945,7 +945,7 @@ fn log_records<D: Dir>(
 
 /// The footer of a segment closed again, left open, or framed part way, from the records of its
 /// log that are whole, which hold a commit at least: their contents folded, stamped provisionally
-/// as `branch`'s, after `last`, the footer before it, if any. fxdax: framed with it once the store's
+/// as `branch`'s, after `last`, the footer before it, if any. cladefs: framed with it once the store's
 /// keys are known ([`Recovered::close`], TASK-411.9).
 fn closed_again(
     branch: Branch,
@@ -961,7 +961,7 @@ fn closed_again(
     Ok(chain.close(fold(branch.id, records)))
 }
 
-/// fxdax: the last commit `record`, a log's record, holds of: the one it goes on with past its
+/// cladefs: the last commit `record`, a log's record, holds of: the one it goes on with past its
 /// segment, if any, or its last (TASK-92.41).
 fn last_commit(record: &Contents) -> Option<u64> {
     let continued = record.continued.as_ref().map(|continued| continued.commit);
@@ -994,7 +994,7 @@ pub(crate) struct Queued {
 pub(crate) struct Queue {
     segments: VecDeque<Queued>,
     base: Option<u64>,
-    /// fxdax: those acknowledged that go on with a commit the next end, held until the one ending
+    /// cladefs: those acknowledged that go on with a commit the next end, held until the one ending
     /// it is acknowledged too ([`Queue::acknowledge`], TASK-338).
     held: Vec<Queued>,
 }
@@ -1118,7 +1118,7 @@ mod tests {
         log.append(&records).unwrap();
     }
 
-    /// fxdax: the WAL in `dir` recovered, and the segments it closed again framed, in the clear, as
+    /// cladefs: the WAL in `dir` recovered, and the segments it closed again framed, in the clear, as
     /// a store of no keys opens it (TASK-411.9).
     fn recover_closing(dir: &MemDir) -> Result<Recovered, Error> {
         let mut recovered = recover(dir, BRANCH)?;
@@ -1299,7 +1299,7 @@ mod tests {
         }
     }
 
-    /// fxdax: the record of commit `epoch` going on past its segment, sealing `extent` there at
+    /// cladefs: the record of commit `epoch` going on past its segment, sealing `extent` there at
     /// `offset`, of a block: a commit spanning segments (TASK-92.41).
     fn continuing(epoch: u64, extent: u64, offset: u64) -> Contents {
         let extents = vec![(ExtentId::new(BRANCH.id, extent), offset, 4096)];
@@ -1307,7 +1307,7 @@ mod tests {
         Contents { continued, ..Contents::default() }
     }
 
-    /// fxdax: a commit spanning segments whose records, each segment's part of it, are whole, the
+    /// cladefs: a commit spanning segments whose records, each segment's part of it, are whole, the
     /// last ending it, is kept, each segment closed again with its part, going on with it, but the
     /// last; one whose last segment's log lacks its record, ending it, is not: the first closes
     /// again with the commits before it alone, and those after go (TASK-92.41).
@@ -1356,7 +1356,7 @@ mod tests {
         assert_eq!(recovered.iter().map(place).collect::<Vec<_>>(), [(0, vec![tag(2, 1)], None)]);
     }
 
-    /// fxdax: a segment going on with a commit the base acknowledged, its raw data gone, its framed
+    /// cladefs: a segment going on with a commit the base acknowledged, its raw data gone, its framed
     /// file's removal, as it left for the host's cache, and its log's undone by a crash, the segment
     /// ending the commit gone: it goes, its commit the bucket's, whole, not taken for one going on
     /// with a commit no segment ends, whose raw data it would close it again from (found by the
@@ -1416,7 +1416,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: after a segment that holds nothing durable, its framed file lost, a segment framed
+    /// cladefs: after a segment that holds nothing durable, its framed file lost, a segment framed
     /// whole whose raw data and log are still there is closed again from them, not read from its
     /// framed file: segments are made durable several at once, and a crash may keep a later one's
     /// framed file and lose an earlier one's, its commits not durable, its log lacking them, the
@@ -1437,7 +1437,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: a segment left open whose log's first commit isn't the next after the last kept goes,
+    /// cladefs: a segment left open whose log's first commit isn't the next after the last kept goes,
     /// and those after it: a flush appends its commits' records to their segments' logs at once,
     /// and a crash may keep a later commit's record and lose an earlier one's in the log before,
     /// whose segment then holds nothing durable, and goes (TASK-310's Shuttle crash rounds, round
@@ -1456,7 +1456,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: a commit spanning two segments left open, its record in the second's log whole and
+    /// cladefs: a commit spanning two segments left open, its record in the second's log whole and
     /// its runs there durable, but its record in the first's checking runs the first's raw data
     /// doesn't hold, isn't durable: both go, the commit with them, though the second's log alone
     /// reads it whole (TASK-334, found by TASK-310's bucket crash rounds: a flush syncs a commit's
@@ -1495,7 +1495,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: so too after a recovery stopped after each of its operations, as by a crash, which
+    /// cladefs: so too after a recovery stopped after each of its operations, as by a crash, which
     /// may keep any of what it removed: segment 4 goes, durably, before segment 3, whose log says
     /// why both go; removed first, a crash kept segment 3's raw file without its log, which then
     /// read as gone durable, and segment 4's commit was kept, past the lost one (TASK-334, found by
@@ -1520,7 +1520,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a segment the base acknowledged, its raw file brought back by a crash without its log
+    /// cladefs: a segment the base acknowledged, its raw file brought back by a crash without its log
     /// or framed file, breaks no run of whole framed files: the segments after it are read from
     /// theirs, though their raw files and logs are still there, their commits durable (TASK-310).
     #[test]
@@ -1537,7 +1537,7 @@ mod tests {
         assert_eq!(recovered.segments, framed[1..]);
     }
 
-    /// fxdax: a log whose header is another segment's holds none of its segment's commits: a spare,
+    /// cladefs: a log whose header is another segment's holds none of its segment's commits: a spare,
     /// renamed from segment 3's log, then renamed segment 6's, neither rename durable, its header
     /// and records then 6's, which a crash kept under 3's name. Read as 3's, its commits were kept
     /// with segment 3's raw data, which holds none of their runs (TASK-341, TASK-310's crash
@@ -1557,7 +1557,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: a segment the base acknowledged, its framed file gone, its raw file and log back, a
+    /// cladefs: a segment the base acknowledged, its framed file gone, its raw file and log back, a
     /// crash undoing their removal, its log a spare taken since as another segment's, breaks no run
     /// of segments framed whole: those after it are read framed, though their raw files and logs are
     /// back too, their logs spares taken since. Its log taken for its own, holding no record, it
@@ -1584,7 +1584,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// fxdax: a segment left open whose log goes on from the base's commit is kept, though the
+    /// cladefs: a segment left open whose log goes on from the base's commit is kept, though the
     /// segments the base acknowledged that a crash brought back end before it: the segment of the
     /// base's commit left for the host's cache, those before it its files' removal undone
     /// (TASK-334).
@@ -1663,7 +1663,7 @@ mod tests {
         assert_eq!((queue.base(), queue.bytes()), (Some(tag(2, 5)), 200));
     }
 
-    /// fxdax: acknowledged, the segments going on with a commit are held until the one ending it
+    /// cladefs: acknowledged, the segments going on with a commit are held until the one ending it
     /// is acknowledged too, then given together, the base past the commit: let go one at a time, a
     /// crash between left a hole in the commit's segments here, which recovery read as the commit
     /// unended (TASK-338, TASK-310's crash rounds, round 65).

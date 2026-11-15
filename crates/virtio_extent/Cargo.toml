@@ -1,6 +1,6 @@
 # The virtio extent-store device's VMM-independent half (backlog doc-4): its protocol, the handling
 # of its requests, its notices, its DAX window and its snapshots, which a VMM's adapter serves over
-# its own virtio transport: fxdax's Firecracker (vendor/firecracker) and libmachine. README.md says
+# its own virtio transport: cladefs's Firecracker (vendor/firecracker) and libmachine. README.md says
 # what the adapter does.
 [package]
 name = "virtio_extent"
@@ -11,7 +11,7 @@ publish = false
 
 [dependencies]
 futures.workspace = true
-fxdax = { path = "../fxdax" }
+cladefs = { path = "../cladefs" }
 libc.workspace = true
 log.workspace = true
 serde.workspace = true

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -85,7 +85,7 @@ pub(crate) mod thread {
 /// Runs `run` of `work` on a thread of its own, named `name`, as `thread::spawn` does; or gives
 /// `work` back, if the host refuses one, where `thread::spawn` panics, through whatever locks the
 /// caller holds, poisoning them: for work that must be done, which the caller then does itself
-/// (TASK-79.80). fxdax: named, so that a trace of the host's syncs tells its thread's from the
+/// (TASK-79.80). cladefs: named, so that a trace of the host's syncs tells its thread's from the
 /// thread that started it, whose name it had (TASK-369).
 pub(crate) fn spawn_or_return<T: Send + 'static>(
     name: &str,

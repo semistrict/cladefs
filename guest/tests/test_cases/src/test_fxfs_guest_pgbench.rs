@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The sandbox team's load (fxdax's TASK-57, TASK-62): PostgreSQL's pgbench makes its database, at
+//! The sandbox team's load (cladefs's TASK-57, TASK-62): PostgreSQL's pgbench makes its database, at
 //! scale 50, on a fork of a base store, through a DAX window, its branches in a bucket 25 ms away,
 //! as theirs was. It broke Fxfs twice: a kernel panic in a truncate (TASK-58), then the primary
 //! key's parallel build reading back other data than its workers wrote (TASK-59). A base VM makes
@@ -16,20 +16,20 @@
 //! spinlock on the console (fxfs-guest-pgbench-profile; with DAX, fxfs-guest-pgbench-dax-profile,
 //! TASK-91.16); or, as the sandbox team's CPU-bound run,
 //! with synchronous_commit off, its locks' contention, on a kernel that counts it
-//! (fxfs-guest-pgbench-locks, scripts/build-guest-kernel.sh's FXDAX_GUEST_KERNEL_LOCK_STAT). Or,
+//! (fxfs-guest-pgbench-locks, scripts/build-guest-kernel.sh's CLADEFS_GUEST_KERNEL_LOCK_STAT). Or,
 //! without DAX, with PostgreSQL's fsync off (fxfs-guest-pgbench-nofsync): the load as fast as it
 //! goes when nothing waits for the store's commits, which the load with fsync on is measured
 //! against on the same host (TASK-91.17). And on ext4 with DAX on writable virtio-pmem
 //! (pgbench-ext4-dax-pmem), a copy of a base image of its own: a static DAX device, storage as
 //! memory, which the sandbox team measure the DAX window against (TASK-131.5).
 //!
-//! fxdax: and for copy-on-write DAX (doc-13, TASK-164.5), on a database the base's VM makes, which
+//! cladefs: and for copy-on-write DAX (doc-13, TASK-164.5), on a database the base's VM makes, which
 //! each VM runs pgbench on a fork of, its files read in, not created, which DAX maps, every first
 //! store to a page a copy on the host (fxfs-guest-pgbench-forked, -dax-forked); and so, each VM
 //! kept running once its runs are done, the host's memory measured as each is added
 //! (`crate::measure`): what a VM more costs the host (fxfs-guest-pgbench-density, -dax-density).
-//! FXDAX_PGBENCH_RUNS and FXDAX_PGBENCH_RUN_SECS set the runs, FXDAX_PGBENCH_SCALE its scale, and
-//! FXDAX_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024). With FXDAX_PGBENCH_COLD
+//! CLADEFS_PGBENCH_RUNS and CLADEFS_PGBENCH_RUN_SECS set the runs, CLADEFS_PGBENCH_SCALE its scale, and
+//! CLADEFS_PGBENCH_DENSITY_MEMORY_MIB the density cases' VMs' memory (1024). With CLADEFS_PGBENCH_COLD
 //! set, the forks' VMs are served by a daemon started once the base's has drained and stopped,
 //! with a part cache of its own, empty, and nothing in memory: a host forking another host's base,
 //! which holds none of its data (TASK-225).
@@ -65,7 +65,7 @@ impl TestFxfsGuestPgbench {
         Self { fsync: false, ..self }
     }
 
-    /// fxdax: the case with its VMs' databases from `database` (TASK-164.5).
+    /// cladefs: the case with its VMs' databases from `database` (TASK-164.5).
     pub fn with_database(self, database: Database) -> Self {
         Self { database, ..self }
     }
@@ -78,18 +78,18 @@ pub enum Storage {
     Fxfs,
     /// The same, through a DAX window.
     FxfsDax,
-    /// fxdax: ext4 with DAX on writable virtio-pmem, on a copy of a base image (TASK-131.5).
+    /// cladefs: ext4 with DAX on writable virtio-pmem, on a copy of a base image (TASK-131.5).
     Ext4DaxPmem,
-    /// fxdax: ext4 on a virtio-blk disk whose flushes the host drops (Firecracker's cache_type
+    /// cladefs: ext4 on a virtio-blk disk whose flushes the host drops (Firecracker's cache_type
     /// Unsafe), on a copy of a base image: the sandbox team's runtime (TASK-91.8).
     Ext4BlkUnsafe,
-    /// fxdax: as `Ext4BlkUnsafe`, each flush a host fsync (cache_type Writeback): its durable
+    /// cladefs: as `Ext4BlkUnsafe`, each flush a host fsync (cache_type Writeback): its durable
     /// counterpart (TASK-91.8).
     Ext4BlkWriteback,
-    /// fxdax: as `Ext4BlkWriteback`, the copy on a loop device, as a VM host's local disk images
+    /// cladefs: as `Ext4BlkWriteback`, the copy on a loop device, as a VM host's local disk images
     /// are (TASK-350.1).
     Ext4LoopWriteback,
-    /// fxdax: as `Ext4LoopWriteback`, its flushes dropped (cache_type Unsafe).
+    /// cladefs: as `Ext4LoopWriteback`, its flushes dropped (cache_type Unsafe).
     Ext4LoopUnsafe,
 }
 
@@ -103,7 +103,7 @@ pub enum Probe {
     Locks,
 }
 
-/// fxdax: where each VM's database comes from, and how the VMs run (TASK-164.5).
+/// cladefs: where each VM's database comes from, and how the VMs run (TASK-164.5).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Database {
     /// Each VM makes its own, on a fork of an empty base, one VM after another.
@@ -117,20 +117,20 @@ pub enum Database {
     Density,
 }
 
-/// pgbench's scale, 100,000 accounts a unit: FXDAX_PGBENCH_SCALE, or the sandbox team's 50.
+/// pgbench's scale, 100,000 accounts a unit: CLADEFS_PGBENCH_SCALE, or the sandbox team's 50.
 /// fxfs-guest-sandboxes' short run loads less (TASK-330.1).
 fn scale() -> u64 {
-    count("FXDAX_PGBENCH_SCALE", 50).max(1)
+    count("CLADEFS_PGBENCH_SCALE", 50).max(1)
 }
 
-/// The pgbench runs a VM makes, FXDAX_PGBENCH_RUNS, or the sandbox team's five.
+/// The pgbench runs a VM makes, CLADEFS_PGBENCH_RUNS, or the sandbox team's five.
 fn runs() -> usize {
-    count("FXDAX_PGBENCH_RUNS", 5).max(1) as usize
+    count("CLADEFS_PGBENCH_RUNS", 5).max(1) as usize
 }
 
-/// Each run's seconds: FXDAX_PGBENCH_RUN_SECS, or the sandbox team's 60.
+/// Each run's seconds: CLADEFS_PGBENCH_RUN_SECS, or the sandbox team's 60.
 fn run_secs() -> u64 {
-    count("FXDAX_PGBENCH_RUN_SECS", 60).max(1)
+    count("CLADEFS_PGBENCH_RUN_SECS", 60).max(1)
 }
 
 /// The environment's `name`, a count, or `default`, unset or empty.
@@ -146,7 +146,7 @@ fn count(name: &str, default: u64) -> u64 {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::loop_device::LoopIo;
     use crate::vm::{DiskCache, Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
@@ -163,45 +163,45 @@ mod host {
     /// The ext4 images' size: the database's, its WAL's and the runs' history's, with room.
     const PMEM_SIZE: u64 = 8 << 30;
 
-    /// The fork's VM's DAX window: FXDAX_PGBENCH_WINDOW_MIB's, or a large one, the host's memory
+    /// The fork's VM's DAX window: CLADEFS_PGBENCH_WINDOW_MIB's, or a large one, the host's memory
     /// (`crate::common::dax_window`, TASK-227); 2 GiB before, the sandbox team's, whose runs
     /// decayed more in 8 GiB than in 2.
     fn window() -> anyhow::Result<u64> {
-        match std::env::var("FXDAX_PGBENCH_WINDOW_MIB") {
+        match std::env::var("CLADEFS_PGBENCH_WINDOW_MIB") {
             Ok(mib) => Ok(mib.parse::<u64>()? << 20),
             Err(_) => crate::common::dax_window(crate::common::Window::Large),
         }
     }
 
-    /// The VMs' vCPUs: FXDAX_PGBENCH_VCPUS, or 2.
+    /// The VMs' vCPUs: CLADEFS_PGBENCH_VCPUS, or 2.
     fn vcpus() -> anyhow::Result<u8> {
-        Ok(u8::try_from(setting("FXDAX_PGBENCH_VCPUS", 2)?)?)
+        Ok(u8::try_from(setting("CLADEFS_PGBENCH_VCPUS", 2)?)?)
     }
 
-    /// The loading VM's memory, in MiB: FXDAX_PGBENCH_MEMORY_MIB, or 4096. Less of it makes the
+    /// The loading VM's memory, in MiB: CLADEFS_PGBENCH_MEMORY_MIB, or 4096. Less of it makes the
     /// guest short of memory as the database loads, where the sandbox team's 2 GiB DAX VM failed
     /// (TASK-99).
     fn load_memory() -> anyhow::Result<u32> {
-        Ok(u32::try_from(setting("FXDAX_PGBENCH_MEMORY_MIB", 4096)?)?)
+        Ok(u32::try_from(setting("CLADEFS_PGBENCH_MEMORY_MIB", 4096)?)?)
     }
 
-    /// fxdax: the memory of a density case's VMs, in MiB: FXDAX_PGBENCH_DENSITY_MEMORY_MIB, or
+    /// cladefs: the memory of a density case's VMs, in MiB: CLADEFS_PGBENCH_DENSITY_MEMORY_MIB, or
     /// 1024, as many of them as a host of 4 vCPUs and 16 GB holds at once (TASK-164.5).
     fn density_memory() -> anyhow::Result<u32> {
-        Ok(u32::try_from(setting("FXDAX_PGBENCH_DENSITY_MEMORY_MIB", 1024)?)?)
+        Ok(u32::try_from(setting("CLADEFS_PGBENCH_DENSITY_MEMORY_MIB", 1024)?)?)
     }
 
     /// How many VMs run pgbench, one after another, each on a fork of the base of its own, all
-    /// served by the one daemon: FXDAX_PGBENCH_VMS, or 1. The sandbox team's runs had one daemon
+    /// served by the one daemon: CLADEFS_PGBENCH_VMS, or 1. The sandbox team's runs had one daemon
     /// serve many, whose memory reached its cap from the third on, where most of their crashes
     /// came (TASK-102, TASK-103).
     fn vms() -> usize {
-        setting("FXDAX_PGBENCH_VMS", 1).map_or(1, |vms| vms.max(1) as usize)
+        setting("CLADEFS_PGBENCH_VMS", 1).map_or(1, |vms| vms.max(1) as usize)
     }
 
-    /// fxdax: whether the forks' VMs run on a cold host, FXDAX_PGBENCH_COLD set (TASK-225).
+    /// cladefs: whether the forks' VMs run on a cold host, CLADEFS_PGBENCH_COLD set (TASK-225).
     fn cold() -> bool {
-        std::env::var_os("FXDAX_PGBENCH_COLD").is_some_and(|cold| !cold.is_empty())
+        std::env::var_os("CLADEFS_PGBENCH_COLD").is_some_and(|cold| !cold.is_empty())
     }
 
     /// The environment's `name`, a count, or `default`.
@@ -224,21 +224,21 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         Store { store: &'a Path, extentd: &'a Path, window: u64 },
         /// The image at `image`, on writable virtio-pmem, which the guest mounts ext4 on, with DAX.
         Pmem(&'a Path),
-        /// fxdax: the image at `image`, on a writable virtio-blk disk whose flushes go as `cache`
+        /// cladefs: the image at `image`, on a writable virtio-blk disk whose flushes go as `cache`
         /// has them, which the guest mounts ext4 on (TASK-91.8).
         Blk(&'a Path, DiskCache),
-        /// fxdax: as `Blk`, the disk on a loop device over the image (TASK-350.1).
+        /// cladefs: as `Blk`, the disk on a loop device over the image (TASK-350.1).
         Loop(&'a Path, DiskCache),
     }
 
-    /// fxdax: the device a case's ext4 images are on (TASK-91.8).
+    /// cladefs: the device a case's ext4 images are on (TASK-91.8).
     #[derive(Clone, Copy)]
     enum Image {
         /// Writable virtio-pmem, with DAX.
         Pmem,
         /// A writable virtio-blk disk, its flushes as the cache has them.
         Blk(DiskCache),
-        /// fxdax: the same on a loop device (TASK-350.1).
+        /// cladefs: the same on a loop device (TASK-350.1).
         Loop(DiskCache),
     }
 
@@ -254,7 +254,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     }
 
     /// A VM of `memory` MiB on `device`, its guest in role `role`: `base`, which makes the base's
-    /// filesystem, and its database too with FXDAX_PGBENCH_BASE_DATABASE; `load`, which makes the
+    /// filesystem, and its database too with CLADEFS_PGBENCH_BASE_DATABASE; `load`, which makes the
     /// database and runs pgbench on it; or `run`, which runs pgbench on the base's.
     fn machine(role: &str, device: Device, memory: u32) -> anyhow::Result<Vm> {
         let mut vm = Vm::new(vcpus()?, memory)?;
@@ -265,24 +265,24 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             }
             Device::Pmem(image) => {
                 let device = vm.pmem("pgbench", image)?;
-                vm.env(&CString::new(format!("FXDAX_PGBENCH_PMEM={device}"))?);
+                vm.env(&CString::new(format!("CLADEFS_PGBENCH_PMEM={device}"))?);
             }
             Device::Blk(image, cache) => {
                 let device = vm.disk_cached("pgbench", image, cache)?;
-                vm.env(&CString::new(format!("FXDAX_PGBENCH_BLK={device}"))?);
+                vm.env(&CString::new(format!("CLADEFS_PGBENCH_BLK={device}"))?);
             }
             Device::Loop(image, cache) => {
                 let device = vm.loop_disk("pgbench", image, cache, LoopIo::Buffered)?;
-                vm.env(&CString::new(format!("FXDAX_PGBENCH_BLK={device}"))?);
+                vm.env(&CString::new(format!("CLADEFS_PGBENCH_BLK={device}"))?);
             }
         }
-        vm.env(&CString::new(format!("FXDAX_PGBENCH_ROLE={role}"))?);
+        vm.env(&CString::new(format!("CLADEFS_PGBENCH_ROLE={role}"))?);
         // Every run's commits not waiting for the journal: what's left is writes' own cost.
-        if std::env::var_os("FXDAX_PGBENCH_ASYNC").is_some() {
-            vm.env(c"FXDAX_PGBENCH_ASYNC=1");
+        if std::env::var_os("CLADEFS_PGBENCH_ASYNC").is_some() {
+            vm.env(c"CLADEFS_PGBENCH_ASYNC=1");
         }
-        // fxdax: the runs, as the host has them (TASK-164.5).
-        for var in ["FXDAX_PGBENCH_RUNS", "FXDAX_PGBENCH_RUN_SECS", "FXDAX_PGBENCH_SCALE"] {
+        // cladefs: the runs, as the host has them (TASK-164.5).
+        for var in ["CLADEFS_PGBENCH_RUNS", "CLADEFS_PGBENCH_RUN_SECS", "CLADEFS_PGBENCH_SCALE"] {
             if let Ok(value) = std::env::var(var) {
                 vm.env(&CString::new(format!("{var}={value}"))?);
             }
@@ -291,7 +291,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     }
 
     /// Boots `vm`, named `name`, in Firecracker: its API socket and files named after it, each
-    /// VM's its own, as one's socket outlives it. fxdax: its root image too: a density case's VMs
+    /// VM's its own, as one's socket outlives it. cladefs: its root image too: a density case's VMs
     /// run at once, and each VM's boot made the one image anew under those running on it, whose
     /// guests' ext4 then failed its checksums (r632, TASK-164.5).
     fn boot(
@@ -346,18 +346,18 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         })
     }
 
-    /// fxdax: with FXDAX_HOST_GUEST_PROFILE=DELAY:SECONDS, profiles the guest from the host, as
+    /// cladefs: with CLADEFS_HOST_GUEST_PROFILE=DELAY:SECONDS, profiles the guest from the host, as
     /// `perf kvm --guest` does, for SECONDS from DELAY seconds on, its symbols the guest kernel's
-    /// vmlinux's (FXDAX_GUEST_KERNEL), where its text is as linked (KASLR off, TASK-131.6); the
+    /// vmlinux's (CLADEFS_GUEST_KERNEL), where its text is as linked (KASLR off, TASK-131.6); the
     /// report, the guest's time by symbol, in `report`, which `check` fails unless it names
     /// Fxfs's own. perf records every guest until stopped with SIGINT, by `timeout`: given a
     /// command to run, it would pass that command its own options too.
     fn profile_guest(report: PathBuf) -> Option<std::thread::JoinHandle<anyhow::Result<()>>> {
-        let asked = std::env::var("FXDAX_HOST_GUEST_PROFILE").ok()?;
+        let asked = std::env::var("CLADEFS_HOST_GUEST_PROFILE").ok()?;
         Some(std::thread::spawn(move || {
             let (delay, seconds) = asked.split_once(':').context("DELAY:SECONDS")?;
             let (delay, seconds): (u64, u64) = (delay.parse()?, seconds.parse()?);
-            let vmlinux = std::env::var("FXDAX_GUEST_KERNEL").context("FXDAX_GUEST_KERNEL")?;
+            let vmlinux = std::env::var("CLADEFS_GUEST_KERNEL").context("CLADEFS_GUEST_KERNEL")?;
             let guest = format!("--guestvmlinux={vmlinux}");
             let data = report.with_extension("data");
             std::thread::sleep(Duration::from_secs(delay));
@@ -500,7 +500,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         root: &'a Path,
         /// The daemon's VM socket.
         socket: PathBuf,
-        /// Its stats file (FXDAX_EXTENTD_STATS).
+        /// Its stats file (CLADEFS_EXTENTD_STATS).
         stats: PathBuf,
         base: PathBuf,
         /// The DAX window of the VMs on forks of the base, if not 0.
@@ -578,21 +578,21 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         fn run_stores(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             // A daemon of its own, whose bucket answers 25 ms late, as the sandbox team's RustFS
-            // did, or as FXDAX_REMOTE_LATENCY_MS says; its socket's path short, as Unix sockets'
+            // did, or as CLADEFS_REMOTE_LATENCY_MS says; its socket's path short, as Unix sockets'
             // must be.
-            let sockets = tempdir::TempDir::new("fxdax-pgbench")?;
+            let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
             let socket = sockets.path().join("extentd.sock");
-            let given = std::env::var_os("FXDAX_REMOTE_LATENCY_MS");
-            let bucket = std::env::var_os("FXDAX_EXTENTD_REMOTE");
+            let given = std::env::var_os("CLADEFS_REMOTE_LATENCY_MS");
+            let bucket = std::env::var_os("CLADEFS_EXTENTD_REMOTE");
             let latency = added_latency(given.as_deref(), bucket.as_deref());
             let stats = dir.join("extentd-stats.txt");
-            // fxdax: its metrics, which say what its memory holds (`crate::measure`).
+            // cladefs: its metrics, which say what its memory holds (`crate::measure`).
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
             let env = [
-                ("FXDAX_REMOTE_LATENCY_MS", latency),
-                ("FXDAX_EXTENTD_STATS", stats.as_os_str()),
-                ("FXDAX_EXTENTD_METRICS", OsStr::new(&metrics_at)),
+                ("CLADEFS_REMOTE_LATENCY_MS", latency),
+                ("CLADEFS_EXTENTD_STATS", stats.as_os_str()),
+                ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
             ];
             // Its memory a page cache of the host's free memory, as production's (TASK-358): with a
             // fixed 1 GiB, the guest's working set, a 2 GiB window's, didn't fit, and faults paged
@@ -602,16 +602,16 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, daemon_memory)?;
             let base = dir.join("base");
             let forked = self.database != Database::Made;
-            // fxdax: the base's VM, making the database, as much memory as a VM loading it needs.
+            // cladefs: the base's VM, making the database, as much memory as a VM loading it needs.
             let memory = if forked { load_memory()? } else { 512 };
             let device = Device::Store { store: &base, extentd: &socket, window: 0 };
             let mut machine = machine("base", device, memory)?;
             if forked {
-                machine.env(c"FXDAX_PGBENCH_BASE_DATABASE=1");
+                machine.env(c"CLADEFS_PGBENCH_BASE_DATABASE=1");
             }
             wait(boot(test_setup, root, "base", machine)?)?;
             if cold() {
-                // fxdax: a host that holds none of the base's data, as one forking another host's
+                // cladefs: a host that holds none of the base's data, as one forking another host's
                 // base: the base's daemon drains, its uploads done, and stops (SIGTERM, doc-11);
                 // another serves the forks, with a part cache of its own, empty, and nothing in
                 // memory. Its log and stats are the case's `extentd`'s, the base's daemon's log
@@ -634,7 +634,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 let cache = dir.join("extentd-cold-cache");
                 std::fs::create_dir_all(&cache)?;
                 let mut env = env.to_vec();
-                env.push(("FXDAX_EXTENTD_CACHE", cache.as_os_str()));
+                env.push(("CLADEFS_EXTENTD_CACHE", cache.as_os_str()));
                 daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,
@@ -658,7 +658,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             crate::common::check_durable_median(test_setup, "extentd")
         }
 
-        /// fxdax: the VMs of a density case (TASK-164.5), each on a fork of the base, booted one
+        /// cladefs: the VMs of a density case (TASK-164.5), each on a fork of the base, booted one
         /// after another, and kept running once its runs are done, its guest waiting for the
         /// host's word, until the last's are: the host's memory said before the first VM boots
         /// and as each is done, by `host`, what each VM more costs it; then let go, in order.
@@ -703,7 +703,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let mut machine = machine(role, device, memory)?;
             if let Some(requests) = requests {
                 machine.vsock(requests.uds());
-                machine.env(c"FXDAX_PGBENCH_MEASURE=1");
+                machine.env(c"CLADEFS_PGBENCH_MEASURE=1");
             }
             let firecracker = boot(served.test_setup, served.root, &nth(role, vm), machine)?;
             let stop = Arc::new(AtomicBool::new(false));
@@ -722,7 +722,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
 
     impl Test for TestFxfsGuestPgbench {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -730,7 +730,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         }
 
         fn timeout_secs(&self) -> u64 {
-            // fxdax: a base's VM making the database, as each VM does otherwise.
+            // cladefs: a base's VM making the database, as each VM does otherwise.
             let base = if self.database == Database::Made { 0 } else { 600 };
             base + (runs() as u64 * run_secs() + 900) * vms() as u64
         }
@@ -757,7 +757,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 return TestOutcome::Fail(format!("expected {expected:?}, got {output:?}"));
             }
             // The guest's profile from the host, if asked for, symbolized (TASK-131.6).
-            if std::env::var_os("FXDAX_HOST_GUEST_PROFILE").is_some() {
+            if std::env::var_os("CLADEFS_HOST_GUEST_PROFILE").is_some() {
                 let report = test_setup.tmp_dir.join("perf-kvm.txt");
                 let text = std::fs::read_to_string(&report).unwrap_or_default();
                 if !text.contains("fxfs_") {
@@ -771,8 +771,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         }
     }
 
-    /// fxdax: the milliseconds the case's daemon adds to each of its bucket's requests:
-    /// FXDAX_REMOTE_LATENCY_MS's, `given`, if set; otherwise 25, the sandbox team's RustFS's, to a
+    /// cladefs: the milliseconds the case's daemon adds to each of its bucket's requests:
+    /// CLADEFS_REMOTE_LATENCY_MS's, `given`, if set; otherwise 25, the sandbox team's RustFS's, to a
     /// bucket here, `bucket` naming one in files or none (the daemon's is then in its memory,
     /// `crate::common::spawn_daemon`), and none to a real one, which is as far as it is. Added to
     /// GCS's, the forked case's restart after its crash, its reads of what the fork inherited
@@ -820,9 +820,9 @@ mod guest {
     const MNT: &str = "/mnt/fxfs";
 
     /// Mounts the database's filesystem at MNT: the guest's Fxfs on the store tagged `extents`,
-    /// made as it mounts; or, on the virtio-pmem device FXDAX_PGBENCH_PMEM names, ext4 with DAX,
+    /// made as it mounts; or, on the virtio-pmem device CLADEFS_PGBENCH_PMEM names, ext4 with DAX,
     /// which must map its files' data in place (TASK-131.5); or on the virtio-blk disk
-    /// FXDAX_PGBENCH_BLK names, ext4 (TASK-91.8). The base (`role`) makes the ext4.
+    /// CLADEFS_PGBENCH_BLK names, ext4 (TASK-91.8). The base (`role`) makes the ext4.
     fn mount(role: &str) {
         fs::create_dir_all(MNT).unwrap();
         let ext4 = |device: String, data| {
@@ -833,7 +833,7 @@ mod guest {
             (device, "ext4", data)
         };
         let (source, fstype, data) =
-            match (std::env::var("FXDAX_PGBENCH_PMEM"), std::env::var("FXDAX_PGBENCH_BLK")) {
+            match (std::env::var("CLADEFS_PGBENCH_PMEM"), std::env::var("CLADEFS_PGBENCH_BLK")) {
                 (Ok(device), _) => ext4(device, "dax=always"),
                 (_, Ok(device)) => ext4(device, ""),
                 _ => ("extents".to_owned(), "fxfs", ""),
@@ -907,7 +907,7 @@ mod guest {
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
-    /// fxdax: the database is whole (TASK-119.4), after a run that began with each table's
+    /// cladefs: the database is whole (TASK-119.4), after a run that began with each table's
     /// balances summing to `before`: each of pgbench's transactions adds a delta to an account,
     /// its teller and its branch, and logs it in the history, which pgbench empties as a run begins:
     /// each table's balances sum to `before` and the history's deltas. And, with amcheck, every
@@ -1031,7 +1031,7 @@ mod guest {
 
         /// Makes the database in [`DATA`], with its server, and loads it, every account once.
         fn load(&self) {
-            // fxdax: every page checksummed, which reading it checks (TASK-119.4).
+            // cladefs: every page checksummed, which reading it checks (TASK-119.4).
             as_postgres(&format!("initdb -D {DATA} -A trust --data-checksums"));
             self.start();
             as_postgres(&format!("createdb -h {SOCKET} bench"));
@@ -1049,7 +1049,7 @@ mod guest {
 
         /// Runs pgbench on the database, its server running, as the sandbox team's runs, each of
         /// which must end well, checking it after each; then has it recover from a crash, and
-        /// checks it again. fxdax: with FXDAX_PGBENCH_MEASURE, asks the host to measure it once its
+        /// checks it again. cladefs: with CLADEFS_PGBENCH_MEASURE, asks the host to measure it once its
         /// runs are done, and waits for the host's word (`crate::measure`, TASK-164.5).
         fn run(&self) {
             // pgbench says each run's tps, on the console, to compare, and PostgreSQL what it wrote
@@ -1065,7 +1065,7 @@ mod guest {
                 if probe == Probe::Locks {
                     count_locks(true);
                 }
-                let asynchronous = std::env::var_os("FXDAX_PGBENCH_ASYNC").is_some();
+                let asynchronous = std::env::var_os("CLADEFS_PGBENCH_ASYNC").is_some();
                 let options = if probe == Probe::Locks || asynchronous {
                     "PGOPTIONS='-c synchronous_commit=off' "
                 } else {
@@ -1087,11 +1087,11 @@ mod guest {
                 after = check_data(SOCKET, before);
             }
             println!("OK runs {}", runs());
-            // fxdax: what this VM costs the host, its server running still (TASK-164.5).
-            if std::env::var_os("FXDAX_PGBENCH_MEASURE").is_some() {
+            // cladefs: what this VM costs the host, its server running still (TASK-164.5).
+            if std::env::var_os("CLADEFS_PGBENCH_MEASURE").is_some() {
                 crate::measure::measure("ran");
             }
-            // fxdax: stopped as if it had crashed, with no checkpoint, it recovers from its WAL,
+            // cladefs: stopped as if it had crashed, with no checkpoint, it recovers from its WAL,
             // as the filesystem kept it, to a whole database (TASK-119.4).
             as_postgres(&format!("pg_ctl -D {DATA} -w -m immediate stop"));
             self.start();
@@ -1114,15 +1114,15 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             // Every message on the console: a task hung says where, its stack logged at KERN_INFO.
             fs::write("/proc/sys/kernel/printk", "7").unwrap();
-            let role = std::env::var("FXDAX_PGBENCH_ROLE").unwrap();
+            let role = std::env::var("CLADEFS_PGBENCH_ROLE").unwrap();
             mount(&role);
             match role.as_str() {
                 // The base's filesystem, made as it mounts, with a directory for the database;
-                // fxdax: or with the database, made, loaded and stopped cleanly, which each VM
+                // cladefs: or with the database, made, loaded and stopped cleanly, which each VM
                 // runs pgbench on a fork of (TASK-164.5).
                 "base" => {
                     fs::create_dir_all(DATA).unwrap();
-                    if std::env::var_os("FXDAX_PGBENCH_BASE_DATABASE").is_some() {
+                    if std::env::var_os("CLADEFS_PGBENCH_BASE_DATABASE").is_some() {
                         prepare();
                         self.load();
                         as_postgres(&format!("pg_ctl -D {DATA} -w -m fast stop"));
@@ -1139,7 +1139,7 @@ mod guest {
                     self.run();
                     unmount();
                 }
-                // fxdax: runs pgbench on the base's database.
+                // cladefs: runs pgbench on the base's database.
                 "run" => {
                     prepare();
                     self.start();

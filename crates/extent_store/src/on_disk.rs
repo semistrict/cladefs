@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what of a store's directory is in the clear, as a reader holding no key tells
+//! cladefs: what of a store's directory is in the clear, as a reader holding no key tells
 //! (TASK-411.15): for tests that a sealed store leaves none of its files so, the guest tests'
 //! harness's among them, which knows nothing of a store's directory but this.
 //!

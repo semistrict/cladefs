@@ -51,7 +51,7 @@ use types::{
 
 pub use merge::Query;
 
-// fxdax: the mutable layer holds what the journal has since the last compaction, which a journal
+// cladefs: the mutable layer holds what the journal has since the last compaction, which a journal
 // of megabytes (the guest's) makes tens of thousands of items: a skip list with levels for 512
 // walked long chains at its top level on every seek. Levels for 2^20 cost a pointer each.
 const SKIP_LIST_LAYER_ITEMS: usize = 1 << 20;
@@ -91,7 +91,7 @@ struct Inner<K, V> {
 
 pub const LOG2_HISTOGRAM_BUCKETS: usize = 32;
 
-/// Metrics related to LSM tree churn, layer depths, and compaction performance. fxdax: cloned for
+/// Metrics related to LSM tree churn, layer depths, and compaction performance. cladefs: cloned for
 /// benchmarks to read (`LSMTree::compaction_counters`).
 #[derive(Clone)]
 pub struct CompactionCounters {
@@ -293,7 +293,7 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         self.cache.as_ref().map_or(0, |c| c.len())
     }
 
-    /// fxdax: removes up to `count` of the object cache's entries, those used least recently
+    /// cladefs: removes up to `count` of the object cache's entries, those used least recently
     /// first, and returns how many it removed (`ObjectCache::shrink`).
     pub fn shrink_cache(&self, count: usize) -> usize {
         self.cache.as_ref().map_or(0, |c| c.shrink(count))
@@ -324,7 +324,7 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
         self.counters.compaction.lock().unwrap().compaction_bytes_written
     }
 
-    /// fxdax: the tree's compaction counters as they are now, which Inspect reads on Fuchsia.
+    /// cladefs: the tree's compaction counters as they are now, which Inspect reads on Fuchsia.
     pub fn compaction_counters(&self) -> CompactionCounters {
         self.counters.compaction.lock().unwrap().clone()
     }
@@ -489,7 +489,7 @@ impl<'tree, K: MergeableKey, V: Value> LSMTree<K, V> {
                 f(item_ref)
             })
             .await?;
-        // fxdax: there is none, which the cache may keep too: the name a create looks for first,
+        // cladefs: there is none, which the cache may keep too: the name a create looks for first,
         // say.
         if let Some(token) = token {
             token.complete(Some(&V::DELETED_MARKER));
@@ -1331,7 +1331,7 @@ mod tests {
         // Zero counters.
         assert_eq!(inner.lock().stats(), (0, 0, 0, 0));
 
-        // Look for an item, but don't find it. fxdax: that there is none completes the
+        // Look for an item, but don't find it. cladefs: that there is none completes the
         // placeholder, with the deleted marker.
         assert!(!a.exists(&item.key).await.expect("Failed find"));
         assert_eq!(inner.lock().stats(), (1, 1, 0, 0));
@@ -1662,7 +1662,7 @@ mod tests {
     }
 }
 
-// fxdax: a plain function, which crates/fxfs/fuzz calls, in place of Fuchsia's `fuzz` macro.
+// cladefs: a plain function, which crates/fxfs/fuzz calls, in place of Fuchsia's `fuzz` macro.
 #[cfg(fuzz)]
 pub mod fuzz {
     use crate::lsm_tree::types::{Item, Value};

@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: OpenBao's Transit engine as a [`Kms`] (TASK-411.16): [`OpenBao`]. OpenBao
-//! (MPL-2.0) is self-hosted, so the one real KMS fxdax's tests run anywhere, `bao server -dev`
+//! cladefs's own: OpenBao's Transit engine as a [`Kms`] (TASK-411.16): [`OpenBao`]. OpenBao
+//! (MPL-2.0) is self-hosted, so the one real KMS cladefs's tests run anywhere, `bao server -dev`
 //! ([`crate::testing::openbao::DevServer`]).
 
 use super::{Error, KeyNames, Kms};
@@ -21,18 +21,18 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use zeroize::{Zeroize as _, Zeroizing};
 
-/// The environment variable holding the token fxdax's processes call OpenBao with.
-pub const TOKEN_ENV: &str = "FXDAX_KMS_OPENBAO_TOKEN";
+/// The environment variable holding the token cladefs's processes call OpenBao with.
+pub const TOKEN_ENV: &str = "CLADEFS_KMS_OPENBAO_TOKEN";
 
 /// The environment variable naming a file holding the token, in place of [`TOKEN_ENV`]: read when
 /// the KMS is made, and again whenever OpenBao refuses a call (403), so that a token renewed in it
 /// (OpenBao Agent's file sink) is taken up.
-pub const TOKEN_FILE_ENV: &str = "FXDAX_KMS_OPENBAO_TOKEN_FILE";
+pub const TOKEN_FILE_ENV: &str = "CLADEFS_KMS_OPENBAO_TOKEN_FILE";
 
 /// OpenBao's port, if a URL names none.
 const DEFAULT_PORT: u16 = 8200;
 
-/// The start of what a real KMS of fxdax's wraps: its own, then the format of the rest.
+/// The start of what a real KMS of cladefs's wraps: its own, then the format of the rest.
 const MAGIC: &[u8; 4] = b"fxkm";
 
 /// The format of what [`OpenBao`] wraps.
@@ -210,7 +210,7 @@ impl OpenBao {
             .map_err(|_| at(&"the namespace is no HTTP header's value"))?;
 
         let mut client = reqwest::Client::builder()
-            .user_agent(concat!("fxdax/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("cladefs/", env!("CARGO_PKG_VERSION")))
             .connect_timeout(CONNECT_TIMEOUT)
             .timeout(REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
@@ -451,7 +451,7 @@ impl Inner {
             StatusCode::FORBIDDEN => io(
                 tenant,
                 &format!(
-                    "{}: OpenBao refuses fxdax's token: invalid, expired or revoked \
+                    "{}: OpenBao refuses cladefs's token: invalid, expired or revoked \
                      ({TOKEN_ENV}, {TOKEN_FILE_ENV})",
                     self.at(what)
                 ),
@@ -813,7 +813,7 @@ impl Background {
     fn new() -> io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
-            .thread_name("fxdax-openbao")
+            .thread_name("cladefs-openbao")
             .enable_all()
             .build()?;
         Ok(Self(Some(runtime)))
@@ -849,10 +849,10 @@ mod tests {
     use futures::executor::block_on;
 
     const MOUNT: &str = "transit";
-    const QUERY: &str = "key=fxdax-tenant-{tenant}";
+    const QUERY: &str = "key=cladefs-tenant-{tenant}";
 
     /// A dev server, its Transit engine at [`MOUNT`] holding keys for `tenants`, and a token of
-    /// fxdax's policy, the least it needs.
+    /// cladefs's policy, the least it needs.
     struct Bao {
         server: DevServer,
         token: String,
@@ -867,14 +867,14 @@ mod tests {
         for &tenant in tenants {
             server.bao(&["write", "-f", &key_path(tenant)]);
         }
-        server.policy("fxdax", &DevServer::fxdax_policy(MOUNT, "fxdax-tenant-*"));
-        let token = server.token("fxdax");
+        server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "cladefs-tenant-*"));
+        let token = server.token("cladefs");
         Some(Bao { server, token })
     }
 
     /// The path of `tenant`'s key in the Transit engine.
     fn key_path(tenant: u64) -> String {
-        format!("{MOUNT}/keys/fxdax-tenant-{tenant:x}")
+        format!("{MOUNT}/keys/cladefs-tenant-{tenant:x}")
     }
 
     impl Bao {
@@ -962,7 +962,7 @@ mod tests {
         assert_eq!(
             refused("openbao://root:secret@h/t?key={tenant}"),
             "\"openbao://root:secret@h/t?key={tenant}\": holds credentials: OpenBao's token is \
-             FXDAX_KMS_OPENBAO_TOKEN's"
+             CLADEFS_KMS_OPENBAO_TOKEN's"
         );
         assert_eq!(
             refused("openbao://h/t?key={tenant}&token=x"),
@@ -1002,11 +1002,11 @@ mod tests {
         assert_matches!(env(Some(""), Some("/run/token")), Ok(Token::File(path)) if path == std::path::Path::new("/run/token"));
         assert_eq!(
             env(Some("s.abc"), Some("/run/token")).unwrap_err(),
-            "both FXDAX_KMS_OPENBAO_TOKEN and FXDAX_KMS_OPENBAO_TOKEN_FILE are set: one"
+            "both CLADEFS_KMS_OPENBAO_TOKEN and CLADEFS_KMS_OPENBAO_TOKEN_FILE are set: one"
         );
         assert_eq!(
             env(None, None).unwrap_err(),
-            "OpenBao's token is in neither FXDAX_KMS_OPENBAO_TOKEN nor FXDAX_KMS_OPENBAO_TOKEN_FILE"
+            "OpenBao's token is in neither CLADEFS_KMS_OPENBAO_TOKEN nor CLADEFS_KMS_OPENBAO_TOKEN_FILE"
         );
         // Neither says its token.
         assert_eq!(format!("{:?}", token("s.abc")), "Token::Value(..)");
@@ -1078,41 +1078,41 @@ mod tests {
             refused(7, Secret::random().wrap(&Secret::random()).0),
             "tenant 7: not authentic: a wrapped key, by its header"
         );
-        let mut other_backend = header(7, "fxdax-tenant-7");
+        let mut other_backend = header(7, "cladefs-tenant-7");
         other_backend[MAGIC.len() + 2..MAGIC.len() + 2 + BACKEND.len()].copy_from_slice(b"gcp-kms");
         assert_eq!(
             refused(7, [&other_backend[..], ciphertext].concat()),
             "tenant 7: not authentic: a wrapped key, wrapped by another KMS"
         );
-        let mut other_format = header(7, "fxdax-tenant-7");
+        let mut other_format = header(7, "cladefs-tenant-7");
         other_format[MAGIC.len()] = 2;
         assert_eq!(
             refused(7, [&other_format[..], ciphertext].concat()),
             "tenant 7: not authentic: a wrapped key, of another format"
         );
-        let for_7 = [&header(7, "fxdax-tenant-7")[..], ciphertext].concat();
+        let for_7 = [&header(7, "cladefs-tenant-7")[..], ciphertext].concat();
         assert_eq!(
             refused(9, for_7.clone()),
             "tenant 9: not authentic: a wrapped key, wrapped for another tenant"
         );
         // Tenant 8's key is its own, by the overrides: one named by the template is not its.
         assert_eq!(
-            refused(8, [&header(8, "fxdax-tenant-8")[..], ciphertext].concat()),
+            refused(8, [&header(8, "cladefs-tenant-8")[..], ciphertext].concat()),
             "tenant 8: not authentic: a wrapped key, wrapped under another key"
         );
         assert_eq!(
-            refused(7, [&header(7, "fxdax-tenant-7")[..], b"vault:c2VhbGVk"].concat()),
+            refused(7, [&header(7, "cladefs-tenant-7")[..], b"vault:c2VhbGVk"].concat()),
             "tenant 7: not authentic: a wrapped key, not Transit's ciphertext"
         );
         assert_eq!(
-            refused(7, header(7, "fxdax-tenant-7")[..10].to_vec()),
+            refused(7, header(7, "cladefs-tenant-7")[..10].to_vec()),
             "tenant 7: not authentic: a wrapped key, by its header"
         );
         // A key it would ask of OpenBao fails as I/O, saying what failed, and not its token.
         let failed = refused(7, for_7);
         let start = format!(
             "tenant 7: the KMS failed: openbao://127.0.0.1:{}/{MOUNT}: \
-             transit/decrypt/fxdax-tenant-7: error sending request for url",
+             transit/decrypt/cladefs-tenant-7: error sending request for url",
             url::Url::parse(&url).unwrap().port().unwrap()
         );
         assert!(failed.starts_with(&start), "{failed}");
@@ -1128,7 +1128,7 @@ mod tests {
         let kms = bao.kms();
         let key = Secret::random();
         let wrapped = wrap(&kms, 7, &key).unwrap();
-        let header_7 = header(7, "fxdax-tenant-7");
+        let header_7 = header(7, "cladefs-tenant-7");
         assert_eq!(&wrapped.0[..header_7.len()], &header_7[..]);
         assert!(wrapped.0[header_7.len()..].starts_with(b"vault:v1:"), "{wrapped:?}");
         assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
@@ -1139,7 +1139,7 @@ mod tests {
             assert_eq!(again.unwrap(7, &wrapped).await.unwrap().expose(), key.expose());
         });
         // Tenant 8's key, relabelled as its, fails Transit's check.
-        let relabelled = [&header(8, "fxdax-tenant-8")[..], &wrapped.0[header_7.len()..]].concat();
+        let relabelled = [&header(8, "cladefs-tenant-8")[..], &wrapped.0[header_7.len()..]].concat();
         assert_eq!(
             refusal(unwrap(&kms, 8, &Wrapped(relabelled))),
             "tenant 8: not authentic: a wrapped key, by the KMS's integrity check"
@@ -1157,8 +1157,8 @@ mod tests {
         let key = Secret::random();
         let wrapped = wrap(&kms, 7, &key).unwrap();
         assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
-        let header_len = header(7, "fxdax-tenant-7").len();
-        let as_8 = [&header(8, "fxdax-tenant-8")[..], &wrapped.0[header_len..]].concat();
+        let header_len = header(7, "cladefs-tenant-7").len();
+        let as_8 = [&header(8, "cladefs-tenant-8")[..], &wrapped.0[header_len..]].concat();
         assert_eq!(
             refusal(unwrap(&kms, 8, &Wrapped(as_8))),
             "tenant 8: not authentic: a wrapped key, by the KMS's integrity check"
@@ -1181,7 +1181,7 @@ mod tests {
         assert_eq!(unwrap(&kms, 7, &new).unwrap().expose(), new_key.expose());
     }
 
-    /// AC #2: a tenant's key whose use fxdax's token lost, soft-deleted, or with its older
+    /// AC #2: a tenant's key whose use cladefs's token lost, soft-deleted, or with its older
     /// versions kept from decrypting, is revoked: until given back.
     #[test]
     fn revoked_keys_wrap_and_unwrap_nothing_until_given_back() {
@@ -1197,17 +1197,17 @@ mod tests {
         };
 
         // The policy keeps tenant 8's key alone: 7's is neither usable nor readable.
-        bao.server.policy("fxdax", &DevServer::fxdax_policy(MOUNT, "fxdax-tenant-8"));
+        bao.server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "cladefs-tenant-8"));
         revoked("its policy");
         assert_eq!(unwrap(&kms, 8, &others).unwrap().expose(), key.expose());
         // Readable, but neither encrypting nor decrypting.
         let readable = format!(
-            "{}path \"{MOUNT}/keys/fxdax-tenant-7\" {{ capabilities = [\"read\"] }}\n",
-            DevServer::fxdax_policy(MOUNT, "fxdax-tenant-8")
+            "{}path \"{MOUNT}/keys/cladefs-tenant-7\" {{ capabilities = [\"read\"] }}\n",
+            DevServer::cladefs_policy(MOUNT, "cladefs-tenant-8")
         );
-        bao.server.policy("fxdax", &readable);
+        bao.server.policy("cladefs", &readable);
         revoked("its policy, readable");
-        bao.server.policy("fxdax", &DevServer::fxdax_policy(MOUNT, "fxdax-tenant-*"));
+        bao.server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "cladefs-tenant-*"));
         works();
 
         bao.bao(&["delete", &format!("{}/soft-delete", key_path(7))]);
@@ -1249,7 +1249,7 @@ mod tests {
         assert_matches!(wrap(&kms, 8, &key), Err(Error::NoSuchTenant { tenant: 8 }));
     }
 
-    /// AC #2: a tenant with no key is said to have none, if fxdax's token may read keys' names;
+    /// AC #2: a tenant with no key is said to have none, if cladefs's token may read keys' names;
     /// else revoked, its cells made neither sealed nor in the clear. A token that may make keys
     /// (`create`, as root's) makes one for each tenant it wraps for (Transit's upsert).
     #[test]
@@ -1261,13 +1261,13 @@ mod tests {
         assert_eq!(refusal(wrap(&kms, 9, &key)), "tenant 9: no KEK in the KMS");
         let unreadable = "path \"transit/encrypt/*\" { capabilities = [\"update\"] }\n\
                           path \"transit/decrypt/*\" { capabilities = [\"update\"] }\n";
-        bao.server.policy("fxdax", unreadable);
+        bao.server.policy("cladefs", unreadable);
         assert_matches!(wrap(&kms, 9, &key), Err(Error::Revoked { tenant: 9 }));
 
         let root = bao.kms_with(QUERY, token(bao.server.root()));
         let wrapped = wrap(&root, 9, &key).unwrap();
         assert_eq!(unwrap(&root, 9, &wrapped).unwrap().expose(), key.expose());
-        assert_eq!(bao.bao(&["read", "-field=name", &key_path(9)]), "fxdax-tenant-9");
+        assert_eq!(bao.bao(&["read", "-field=name", &key_path(9)]), "cladefs-tenant-9");
     }
 
     /// Two tenants sharing a key (each naming it, as overrides may) unwrap only their own wraps:
@@ -1277,7 +1277,7 @@ mod tests {
     fn shared_keys_unwrap_only_their_tenants_wraps() {
         let Some(bao) = bao(&[]) else { return };
         bao.bao(&["write", "-f", &format!("{MOUNT}/keys/shared")]);
-        bao.server.policy("fxdax", &DevServer::fxdax_policy(MOUNT, "*"));
+        bao.server.policy("cladefs", &DevServer::cladefs_policy(MOUNT, "*"));
         let overrides = bao.server.dir().join("keys");
         std::fs::write(&overrides, "1 shared\n2 shared\n").unwrap();
         let query = format!("{QUERY}&keys={}", overrides.display());
@@ -1307,7 +1307,7 @@ mod tests {
         assert_eq!(unwrap(&kms, 1, &wrapped).unwrap().expose(), key.expose());
     }
 
-    /// A token OpenBao refuses altogether is fxdax's failing, not the tenant's revoking: I/O,
+    /// A token OpenBao refuses altogether is cladefs's failing, not the tenant's revoking: I/O,
     /// saying so, and not the token. One in a file is read again, and a new one taken up.
     #[test]
     fn tokens_refused_fail_and_files_give_new_ones() {
@@ -1322,20 +1322,20 @@ mod tests {
         assert_eq!(
             refused,
             format!(
-                "{}: reading key \"fxdax-tenant-7\", refused decrypt: OpenBao refuses fxdax's \
-                 token: invalid, expired or revoked (FXDAX_KMS_OPENBAO_TOKEN, \
-                 FXDAX_KMS_OPENBAO_TOKEN_FILE)",
+                "{}: reading key \"cladefs-tenant-7\", refused decrypt: OpenBao refuses cladefs's \
+                 token: invalid, expired or revoked (CLADEFS_KMS_OPENBAO_TOKEN, \
+                 CLADEFS_KMS_OPENBAO_TOKEN_FILE)",
                 bao.failed(7, "").trim_end_matches(": ")
             )
         );
         assert!(!refused.contains(&bao.token));
-        std::fs::write(&file, bao.server.token("fxdax")).unwrap();
+        std::fs::write(&file, bao.server.token("cladefs")).unwrap();
         assert_eq!(unwrap(&kms, 7, &wrapped).unwrap().expose(), key.expose());
         assert_matches!(wrap(&kms, 7, &key), Ok(_));
     }
 
     /// AC #2: the server failing, sealed, or without the mount named, fails as I/O, saying what
-    /// failed, after its tries. A mount fxdax's token has no rights to, there or not, is one whose
+    /// failed, after its tries. A mount cladefs's token has no rights to, there or not, is one whose
     /// keys it may not use: revoked, as OpenBao refuses the token before it looks for the mount.
     #[test]
     fn servers_failing_fail_as_io() {
@@ -1347,8 +1347,8 @@ mod tests {
             refusal(wrap(&elsewhere, 7, &Secret::random())),
             format!(
                 "tenant 7: the KMS failed: openbao://127.0.0.1:{}/elsewhere: encrypt with key \
-                 \"fxdax-tenant-7\": 404 Not Found: no handler for route \
-                 \"elsewhere/encrypt/fxdax-tenant-7\". route entry not found.",
+                 \"cladefs-tenant-7\": 404 Not Found: no handler for route \
+                 \"elsewhere/encrypt/cladefs-tenant-7\". route entry not found.",
                 bao.server.port()
             )
         );
@@ -1363,7 +1363,7 @@ mod tests {
             refusal(unwrap(&kms, 7, &wrapped)),
             format!(
                 "{}: 503 Service Unavailable: Vault is sealed (3 tries)",
-                bao.failed(7, "transit/decrypt/fxdax-tenant-7")
+                bao.failed(7, "transit/decrypt/cladefs-tenant-7")
             )
         );
     }
@@ -1388,8 +1388,8 @@ mod tests {
             refusal(unwrap(&in_root, 7, &wrapped)),
             format!(
                 "tenant 7: the KMS failed: openbao://127.0.0.1:{}/{MOUNT}: decrypt with key \
-                 \"fxdax-tenant-7\": 404 Not Found: no handler for route \
-                 \"transit/decrypt/fxdax-tenant-7\". route entry not found.",
+                 \"cladefs-tenant-7\": 404 Not Found: no handler for route \
+                 \"transit/decrypt/cladefs-tenant-7\". route entry not found.",
                 server.port()
             )
         );
@@ -1411,15 +1411,15 @@ mod tests {
             refusal(unwrap(&untrusting, 7, &wrapped)),
             format!(
                 "tenant 7: the KMS failed: openbaos://127.0.0.1:{port}/{MOUNT}: \
-                 transit/decrypt/fxdax-tenant-7: error sending request for url \
-                 (https://127.0.0.1:{port}/v1/transit/decrypt/fxdax-tenant-7): client error \
+                 transit/decrypt/cladefs-tenant-7: error sending request for url \
+                 (https://127.0.0.1:{port}/v1/transit/decrypt/cladefs-tenant-7): client error \
                  (Connect): invalid peer certificate: UnknownIssuer (3 tries)",
                 port = bao.server.port()
             )
         );
     }
 
-    /// TASK-411.3's `FXDAX_KMS` names it, its token in the environment: `kms::from_url`.
+    /// TASK-411.3's `CLADEFS_KMS` names it, its token in the environment: `kms::from_url`.
     #[test]
     fn kms_urls_name_openbao_its_token_in_the_environment() {
         let Some(bao) = bao(&[7]) else { return };
@@ -1430,8 +1430,8 @@ mod tests {
         assert_eq!(
             crate::kms::from_url(&url).map(|_| ()).unwrap_err(),
             format!(
-                "{url:?}: OpenBao's token is in neither FXDAX_KMS_OPENBAO_TOKEN nor \
-                 FXDAX_KMS_OPENBAO_TOKEN_FILE"
+                "{url:?}: OpenBao's token is in neither CLADEFS_KMS_OPENBAO_TOKEN nor \
+                 CLADEFS_KMS_OPENBAO_TOKEN_FILE"
             )
         );
         unsafe { std::env::set_var(TOKEN_ENV, &bao.token) };

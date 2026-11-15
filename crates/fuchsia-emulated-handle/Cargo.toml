@@ -14,7 +14,7 @@ zx-status.workspace = true
 zx-status-ext.workspace = true
 zx-types.workspace = true
 
-# Sockets' tokio I/O traits, which the guest kernel (fxdax's TASK-26.6) has no tokio for.
+# Sockets' tokio I/O traits, which the guest kernel (cladefs's TASK-26.6) has no tokio for.
 [target.'cfg(not(target_os = "none"))'.dependencies]
 tokio.workspace = true
 

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: object IDs, unique in their bucket (TASK-364): a branch's ID is one. An extent's ID names
+//! cladefs: object IDs, unique in their bucket (TASK-364): a branch's ID is one. An extent's ID names
 //! its branch by the branch's ID alone, as forks share their parents' extents by it, and a host's
 //! cache of extents keys them by it; so no two branches of a bucket may have one ID, whatever their
 //! cells. Records were once keyed by IDs alone, a second branch of an ID refused by its record's

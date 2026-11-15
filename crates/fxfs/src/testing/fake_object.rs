@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/testing/fake_object.rs`. fxdax: JournalHandle gains
+// Fuchsia's `src/storage/fxfs/src/testing/fake_object.rs`. cladefs: JournalHandle gains
 // `truncate_extents` (see the journal's `renew_tail`), which a fake object, holding no extents,
 // ignores.
 
@@ -27,7 +27,7 @@ impl FakeObject {
         FakeObject { buf: Mutex::new(Vec::new()) }
     }
 
-    /// fxdax: changes what it holds, as no write could: for a test of what reads it.
+    /// cladefs: changes what it holds, as no write could: for a test of what reads it.
     #[cfg(any(test, fuzz))]
     pub fn change(&self, change: impl FnOnce(&mut Vec<u8>)) {
         change(&mut self.buf.lock());

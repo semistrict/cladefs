@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal.rs`. fxdax snapshots (volume snapshots that
+// Fuchsia's `src/storage/fxfs/src/object_store/journal.rs`. cladefs snapshots (volume snapshots that
 // share their source's layers and extents) deviate from upstream here: replay validates Snapshot
-// mutations. Data is located in extents of fxdax's extent store (backlog doc-4), not at device
+// mutations. Data is located in extents of cladefs's extent store (backlog doc-4), not at device
 // offsets: journal records hold extent ranges, and replay checks extents' offsets, not a device
 // size. Flushing the device frees the extents that died before it (`did_flush_device`), in the
 // background, which the next flush waits for, and which can fail; when some of them need it, the
@@ -104,12 +104,12 @@ pub const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
 // The journal file is extended by this amount when necessary.
 const CHUNK_SIZE: u64 = 131_072;
 
-// fxdax: the size of the journal file's extents, BLOCK_SIZE's. Each block is an extent of its own,
+// cladefs: the size of the journal file's extents, BLOCK_SIZE's. Each block is an extent of its own,
 // which the journal writes once, before it is sealed (backlog doc-4): a journal block is written
 // once. The filesystem's blocks must be no larger (see `check_block_size`).
 const EXTENT_SIZE: u64 = 4096;
 
-// fxdax: how much of the journal's old space a commit zeroes, and how much a transaction extends the
+// cladefs: how much of the journal's old space a commit zeroes, and how much a transaction extends the
 // file by, at most: the records of a transaction that does both fit in a chunk, which `pre_commit`
 // counts on.
 const MAX_ZEROED_PER_COMMIT: u64 = 512 * EXTENT_SIZE;
@@ -123,7 +123,7 @@ pub const DEFAULT_RECLAIM_SIZE: u64 = 524_288;
 // used in the journal file but cannot be deallocated yet because we are flushing.
 pub const RESERVED_SPACE: u64 = 1_048_576;
 
-/// fxdax: how much room the metadata reservation keeps over what compacting the largest store
+/// cladefs: how much room the metadata reservation keeps over what compacting the largest store
 /// needs, below which the journal compacts however little of `reclaim_size` it holds (but at least
 /// `MIN_COMPACTION_BYTES`). Transactions that borrow metadata space, such as unlinks, can drain
 /// the reservation faster than the journal fills: each is charged its share of the journal four
@@ -137,7 +137,7 @@ const MIN_COMPACTION_BYTES: u64 = RESERVED_SPACE / 8;
 // Whenever the journal is replayed (i.e. the system is unmounted and remounted), we reset the
 // journal stream, at which point any half-complete transactions are discarded.  We indicate a
 // journal reset by XORing the previous block's checksum with this mask, and using that value as a
-// seed for the next journal block. fxdax: public for the test of corrupt images, which reseals what
+// seed for the next journal block. cladefs: public for the test of corrupt images, which reseals what
 // it flips (crates/fxfs-posix/src/corrupt_tests.rs).
 pub const RESET_XOR: u64 = 0xffffffffffffffff;
 
@@ -196,7 +196,7 @@ pub enum JournalRecordV63 {
     DataChecksums(ExtentRange, crate::checksum::ChecksumsV38, bool),
 }
 
-/// fxdax: `JournalRecord::Mutation`, borrowing its mutation, which serializes as the record does:
+/// cladefs: `JournalRecord::Mutation`, borrowing its mutation, which serializes as the record does:
 /// its variants are the record's, in order, as far as `Mutation`.
 #[derive(Serialize)]
 enum JournalRecordRef<'a> {
@@ -208,7 +208,7 @@ enum JournalRecordRef<'a> {
     },
 }
 
-/// fxdax: a transaction's records, serialized before the journal's writer's lock
+/// cladefs: a transaction's records, serialized before the journal's writer's lock
 /// (`Journal::serialize_records`).
 #[derive(Default)]
 struct SerializedRecords {
@@ -217,7 +217,7 @@ struct SerializedRecords {
     ends: Vec<usize>,
 }
 
-/// fxdax: the bytes of the journal `JournalRecord::Mutation { object_id, mutation }` takes.
+/// cladefs: the bytes of the journal `JournalRecord::Mutation { object_id, mutation }` takes.
 pub(super) fn mutation_record_bytes(object_id: u64, mutation: &Mutation) -> u64 {
     use bincode::Options;
     let record = JournalRecordRef::Mutation { object_id, mutation };
@@ -225,7 +225,7 @@ pub(super) fn mutation_record_bytes(object_id: u64, mutation: &Mutation) -> u64 
     options.serialized_size(&record).unwrap() // Measuring has no limit to reach.
 }
 
-/// fxdax: the bytes of the journal `JournalRecord::DataChecksums` takes, of `checksums` of `range`.
+/// cladefs: the bytes of the journal `JournalRecord::DataChecksums` takes, of `checksums` of `range`.
 pub(super) fn checksums_record_bytes(
     range: &ExtentRange,
     checksums: &[Checksum],
@@ -276,22 +276,22 @@ pub struct Journal {
     writer_mutex: Mutex<()>,
     sync_mutex: futures::lock::Mutex<()>,
     trace: AtomicBool,
-    // fxdax: what the journal's file is extended by (`JournalOptions::chunk_size`).
+    // cladefs: what the journal's file is extended by (`JournalOptions::chunk_size`).
     chunk_size: u64,
 
     // This event is used when we are waiting for a compaction to free up journal space.
     reclaim_event: Event,
 
-    // fxdax: a read-only mount's reader, at the end of the last whole transaction it applied, from
+    // cladefs: a read-only mount's reader, at the end of the last whole transaction it applied, from
     // which a follower reads on (`read_on`, backlog doc-8). None if replay stopped short of the
     // journal's end, or once reading on failed: the follower remounts.
     follower: Mutex<Option<JournalReader>>,
 
-    // fxdax: what it waited for and did, as `stats` says.
+    // cladefs: what it waited for and did, as `stats` says.
     stats: JournalStats,
 }
 
-/// fxdax: how often, and how long, transactions waited for the journal's space, which compactions
+/// cladefs: how often, and how long, transactions waited for the journal's space, which compactions
 /// free, and how many compactions there were, and how long they took: what a guest's Fxfs waits on
 /// that it can't otherwise tell from idle (TASK-91.7).
 #[derive(Default)]
@@ -305,13 +305,13 @@ pub struct JournalStats {
 struct Inner {
     super_block_header: SuperBlockHeader,
 
-    // fxdax: how far the journal has got, as written, flushed, synced, zeroed: upstream's
+    // cladefs: how far the journal has got, as written, flushed, synced, zeroed: upstream's
     // `zero_offset`, `device_flushed_offset`, `needs_did_flush_device`, `flushed_offset`,
-    // `valid_to` and `discard_offset`, and fxdax's own, which a method each changes, checking
+    // `valid_to` and `discard_offset`, and cladefs's own, which a method each changes, checking
     // their orders (`JournalPosition`, TASK-160.25).
     position: JournalPosition,
 
-    // fxdax: the journal goes on in extents only a super-block not yet written records
+    // cladefs: the journal goes on in extents only a super-block not yet written records
     // (`renew_tail`), so that a replay, from the last, finds nothing of what's written there.
     tail_unrecorded: bool,
 
@@ -362,10 +362,10 @@ struct Inner {
     // True if a compaction is being forced for reasons other than the journal being full.
     forced_compaction: bool,
 
-    // fxdax: see `JournalOptions::lazy_flush`.
+    // cladefs: see `JournalOptions::lazy_flush`.
     lazy_flush: Option<LazyFlush>,
 
-    // fxdax: whether a lazy flush task's timer runs for the bytes buffered, so that a transaction
+    // cladefs: whether a lazy flush task's timer runs for the bytes buffered, so that a transaction
     // needn't wake it, which costs scheduling it each time, unless it has more to do.
     lazy_flush_armed: bool,
 }
@@ -404,16 +404,16 @@ pub struct JournalOptions {
     // to disk before the journal gets written to.
     pub barriers_enabled: bool,
 
-    /// fxdax: when the flush task writes the journal: as each block fills, as upstream, unless
+    /// cladefs: when the flush task writes the journal: as each block fills, as upstream, unless
     /// set.
     pub lazy_flush: Option<LazyFlush>,
 
-    /// fxdax: how much the journal's file is extended by at a time: a test's sequence too short
+    /// cladefs: how much the journal's file is extended by at a time: a test's sequence too short
     /// to write 128 KiB of it extends it all the same.
     pub chunk_size: u64,
 }
 
-/// fxdax: the flush task writes the journal once this much of it is buffered, or once the oldest
+/// cladefs: the flush task writes the journal once this much of it is buffered, or once the oldest
 /// buffered block has waited `delay`, rather than as each block fills, so that metadata operations
 /// whose transactions fit in memory issue no device requests (the guest kernel's Fxfs, TASK-26.6).
 /// Whatever waits for the journal (syncs, super-blocks) has it written at once.
@@ -437,7 +437,7 @@ impl Default for JournalOptions {
 struct JournaledTransactions {
     transactions: Vec<JournaledTransaction>,
     device_flushed_offset: u64,
-    // fxdax: the end of the last whole transaction (or discard) read, from which a follower reads
+    // cladefs: the end of the last whole transaction (or discard) read, from which a follower reads
     // on, and the lowest offset a discard discarded from, if any.
     committed: JournalCheckpoint,
     discarded: Option<u64>,
@@ -476,13 +476,13 @@ pub struct JournaledChecksums {
     pub first_write: bool,
 }
 
-/// fxdax: whether what a journal record says is allocated could be: not empty, and on blocks, as an
+/// cladefs: whether what a journal record says is allocated could be: not empty, and on blocks, as an
 /// allocator's key, which what it says becomes, must be for a layer to hold it.
 fn valid_device_range(device_range: &ExtentRange, block_size: BlockSize) -> bool {
     !device_range.is_empty() && block_size.is_aligned(&device_range.range)
 }
 
-/// fxdax: the part of an extent of the store that `extent` of the journal is, `device_offset` on:
+/// cladefs: the part of an extent of the store that `extent` of the journal is, `device_offset` on:
 /// what an image says, which may be anything.
 fn journal_extent(
     extent: &Extent,
@@ -507,7 +507,7 @@ pub trait JournalHandle: ReadObjectHandle {
     fn push_extent(&mut self, added_offset: u64, device_range: ExtentRange);
     /// Discards all extents which were added in a transaction at offset >= |discard_offset|.
     fn discard_extents(&mut self, discard_offset: u64);
-    /// fxdax: drops the extents from `offset` on, which extents pushed next replace (see
+    /// cladefs: drops the extents from `offset` on, which extents pushed next replace (see
     /// `Journal::renew_tail`).
     fn truncate_extents(&mut self, offset: u64) -> Result<(), Error>;
 }
@@ -614,7 +614,7 @@ impl Journal {
     /// Used during replay to validate a mutation.  This should return false if the mutation is not
     /// valid and should not be applied.  This could be for benign reasons: e.g. the device flushed
     /// data out-of-order, or because of a malicious actor.
-    /// fxdax: an object store's item is what its value says it may be, as of a layer's
+    /// cladefs: an object store's item is what its value says it may be, as of a layer's
     /// (`ObjectValue::is_valid_for`).
     pub(super) fn validate_mutation(mutation: &Mutation, block_size: BlockSize) -> bool {
         match mutation {
@@ -675,7 +675,7 @@ impl Journal {
         true
     }
 
-    /// fxdax: the extents whose blocks a replay of `transactions` may read to verify checksums:
+    /// cladefs: the extents whose blocks a replay of `transactions` may read to verify checksums:
     /// those they write, and those whose blocks they change the references to, which may make a
     /// block deallocated before alive again (`update_checksum_list`).
     fn extents_verified_by<'a>(
@@ -864,10 +864,10 @@ impl Journal {
             .verify(device.as_ref(), valid_to)
             .await
             .context("Failed to validate checksums")?;
-        // fxdax: a read-only mount that applies every transaction it read can follow its writer.
+        // cladefs: a read-only mount that applies every transaction it read can follow its writer.
         let followable = filesystem.options().read_only
             && valid_to == reader.journal_file_checkpoint().file_offset;
-        // fxdax: what a replay after this one may read again, until the journal records the
+        // cladefs: what a replay after this one may read again, until the journal records the
         // discard: an extent this replay finds dead mustn't be freed until then (see the
         // allocator's `on_replay_complete`).
         let discarded = Self::extents_verified_by(
@@ -994,10 +994,10 @@ impl Journal {
                     last_checkpoint.file_offset, super_block.super_block_journal_file_offset
                 )));
             }
-            // fxdax: which fails if the block the journal ends in wasn't read: one it started in
+            // cladefs: which fails if the block the journal ends in wasn't read: one it started in
             // that didn't verify (TASK-149.23).
             reader.skip_to_end_of_block()?;
-            // fxdax: nor may it end before where a barrier last found it written: damage, not a
+            // cladefs: nor may it end before where a barrier last found it written: damage, not a
             // crash, ended it there, and what a sync acknowledged after would be lost unsaid
             // (TASK-153.13). It ends where replay discarded a transaction, if it did, or else at
             // the end of the block it read last: a barrier follows a write of whole blocks, whose
@@ -1032,7 +1032,7 @@ impl Journal {
             let mut inner = self.inner.lock();
             let mut writer_checkpoint = reader.journal_file_checkpoint();
 
-            // Make sure we don't accidentally use the reader from now onwards. fxdax: but for a
+            // Make sure we don't accidentally use the reader from now onwards. cladefs: but for a
             // follower's, which reads on from the end of the last whole transaction.
             if followable {
                 reader.rewind(&committed);
@@ -1044,7 +1044,7 @@ impl Journal {
             // Reset the stream to indicate that we've remounted the journal.
             writer_checkpoint.checksum ^= RESET_XOR;
             writer_checkpoint.version = LATEST_VERSION;
-            // When we open the filesystem as writable, we flush the device. fxdax: what's past the
+            // When we open the filesystem as writable, we flush the device. cladefs: what's past the
             // last valid transaction is discarded by the next (`JournalPosition::replayed`).
             inner.position.replayed(writer_checkpoint.file_offset, last_checkpoint.file_offset);
 
@@ -1267,7 +1267,7 @@ impl Journal {
                                                     )
                                                 ));
                                             }
-                                            // fxdax: renewed extents replace those from where
+                                            // cladefs: renewed extents replace those from where
                                             // the journal continued after a replay (see
                                             // `Journal::renew_tail`).
                                             if extent.start < end_offset {
@@ -1328,7 +1328,7 @@ impl Journal {
         Ok(JournaledTransactions { transactions, device_flushed_offset, committed, discarded })
     }
 
-    /// fxdax: a read-only mount's follower (backlog doc-8): the whole transactions the journal
+    /// cladefs: a read-only mount's follower (backlog doc-8): the whole transactions the journal
     /// holds past those it applied, at mount or on the last call, which the device, advanced to a
     /// later commit of its writer, may now hold. They are to be applied, in order, before the next
     /// call. Mutations that don't validate, or a discard of transactions it applied, fail it, and
@@ -1452,7 +1452,7 @@ impl Journal {
 
         allocator.create(&mut transaction).await?;
 
-        // Create the super-block objects, which are empty until written (fxdax: to extents the
+        // Create the super-block objects, which are empty until written (cladefs: to extents the
         // store's root names)...
         ObjectStore::create_object_with_id(
             &root_store,
@@ -1544,7 +1544,7 @@ impl Journal {
         Ok(())
     }
 
-    /// fxdax: fails unless the filesystem's blocks are the journal's, so that each journal block can
+    /// cladefs: fails unless the filesystem's blocks are the journal's, so that each journal block can
     /// be an extent of its own.
     fn check_block_size(filesystem: &FxFilesystem) -> Result<(), Error> {
         debug_assert_eq!(EXTENT_SIZE, BLOCK_SIZE.get());
@@ -1556,7 +1556,7 @@ impl Journal {
         Ok(())
     }
 
-    /// fxdax: after replay, before anything else writes to the journal, gives the journal file new
+    /// cladefs: after replay, before anything else writes to the journal, gives the journal file new
     /// extents past where the journal continues, if it can't write those it has there, and returns
     /// whether it did. Extents are written once, and only by their branch (backlog doc-4): a crash
     /// may have left some of them written, and a fork, which mounts with a branch of its own, can
@@ -1681,7 +1681,7 @@ impl Journal {
     // Before we commit, we might need to extend the journal or write pending records to the
     // journal.
     async fn pre_commit(&self, transaction: &Transaction<'_>) -> Result<(), Error> {
-        // fxdax: room for what `transaction` writes, with the file extended past it if it needs
+        // cladefs: room for what `transaction` writes, with the file extended past it if it needs
         // more than a chunk's: its records past the journal's end, a reflink's or a truncate's of
         // thousands of extents, the next commit found itself writing beyond it, and panicked
         // (xfstests generic/161, TASK-139). A chunk each too for the journal's own transaction,
@@ -1693,7 +1693,7 @@ impl Journal {
         Ok(())
     }
 
-    /// fxdax: extends the file towards `room` past the journal's end, zeroes a slice of the old
+    /// cladefs: extends the file towards `room` past the journal's end, zeroes a slice of the old
     /// space, and accounts for padding, in a transaction of the journal's own. Returns whether the
     /// file has further to go: a transaction extends it by `MAX_EXTENDED_PER_COMMIT` at most, so
     /// that it fits in the chunk the last commit left, however much a large one wants.
@@ -1718,7 +1718,7 @@ impl Journal {
             let extended = wanted.min(MAX_EXTENDED_PER_COMMIT);
             let extension = (extended > 0).then_some(size..size + extended);
 
-            // fxdax: a slice of what's left to zero: the journal's file has an extent a block
+            // cladefs: a slice of what's left to zero: the journal's file has an extent a block
             // (EXTENT_SIZE), and zeroing a journal of 16 MiB in one transaction, with a small
             // commit that happened on it, ran past the journal's end (xfstests generic/161,
             // TASK-139).
@@ -1741,7 +1741,7 @@ impl Journal {
             allocator_reservation: Some(self.objects.metadata_reservation()),
             ..Default::default()
         };
-        // fxdax: a transaction only accounting for the padding since the last
+        // cladefs: a transaction only accounting for the padding since the last
         // (`needs_borrow_for_journal`), which every sync leaves, reserves it with the allocator, as
         // other transactions pay for theirs, and borrows it only if the filesystem is too full.
         // Borrowed, the padding of a sync in each of PostgreSQL's initdb's fsyncs drained the
@@ -1760,7 +1760,7 @@ impl Journal {
         } else {
             handle.new_transaction_with_options(borrowing).await?
         };
-        // fxdax: made as the commit it makes room for holds the commit lock: an allocation short of
+        // cladefs: made as the commit it makes room for holds the commit lock: an allocation short of
         // room syncs, which commits nothing then (TASK-233).
         transaction.holding_commits = true;
         if let Some(extension) = &extension {
@@ -1786,7 +1786,7 @@ impl Journal {
 
         let file_offset = inner.writer.journal_file_checkpoint().file_offset;
         // Make sure the transaction to extend the journal made it to the journal within the old
-        // size, since otherwise, it won't be possible to replay. fxdax: neither this nor the
+        // size, since otherwise, it won't be possible to replay. cladefs: neither this nor the
         // transaction's size, past what `pre_commit` keeps for it, is a reason for a guest's kernel
         // to panic, as upstream's asserts did (TASK-60). The journal stops, as on a transaction
         // that fails to apply: replay ends before this one, which has no Commit record within the
@@ -1843,7 +1843,7 @@ impl Journal {
         journal_file_checkpoint.file_offset >= offset
     }
 
-    /// fxdax: how far the journal is written, between commits, which each move it, and whose
+    /// cladefs: how far the journal is written, between commits, which each move it, and whose
     /// changes are all applied: what was read since hasn't changed if it is where it was.
     pub fn file_offset(&self) -> u64 {
         let _guard = self.writer_mutex.lock();
@@ -1873,7 +1873,7 @@ impl Journal {
                 let _write_guard = self.writer_mutex.lock();
                 (checkpoint, borrowed) = self.pad_to_block()?;
                 old_layers = super_block::compact_root_parent(&*root_parent_store)?;
-                // fxdax: as of `checkpoint`, which is flushed below. Read after that flush, they
+                // cladefs: as of `checkpoint`, which is flushed below. Read after that flush, they
                 // said objects were flushed to where the journal wasn't yet, as commits go on
                 // while it runs: a crash then lost what they had given up replaying, a replay
                 // finding nothing where they said, and allocations the journal alone held
@@ -1954,7 +1954,7 @@ impl Journal {
         Ok(Some((checkpoint, borrowed)))
     }
 
-    /// fxdax: flushes the device, though the journal has nothing more for it, for the extents
+    /// cladefs: flushes the device, though the journal has nothing more for it, for the extents
     /// that wait for a flush, frees them, and flushes it again, which seals their frees: a mount's
     /// orphans, the super-block it wrote having flushed the journal, stayed on the device until
     /// something else was written, in room Fxfs doesn't count, and a compaction before the seal
@@ -1994,12 +1994,12 @@ impl Journal {
             "flush_device called in image builder mode"
         );
         self.wait_for_flush(checkpoint_offset).await?;
-        // fxdax: the frees the last flush let die are sealed by this one, as they would be if it
+        // cladefs: the frees the last flush let die are sealed by this one, as they would be if it
         // had waited for them; and a sync for room to allocate in waits for them here.
         self.objects.allocator().freed().await.context("flush: freeing dead extents failed")?;
 
         // What has been written is durable once the device is flushed: the padding of a sync since
-        // the last flush included, which needs no flush of its own. fxdax: a barrier that followed
+        // the last flush included, which needs no flush of its own. cladefs: a barrier that followed
         // the journal's write as far is this sync's flush (`JournalPosition::begin_sync`).
         let flush = self.inner.lock().position.flushing(checkpoint_offset);
         if !flush.durable || always {
@@ -2026,12 +2026,12 @@ impl Journal {
 
             let allocator = self.objects.allocator();
             if self.inner.lock().tail_unrecorded {
-                // fxdax: no frees until the super-block that records the journal's tail is
+                // cladefs: no frees until the super-block that records the journal's tail is
                 // written: until then a replay finds neither what discarded an orphan, a write to
                 // which it then verifies, nor the deaths of extents it would refer to.
                 allocator.sealed();
             } else {
-                // fxdax: the allocator frees some of the extents that died before the flush only
+                // cladefs: the allocator frees some of the extents that died before the flush only
                 // once the record of it is on the device too: replay doesn't verify the checksums
                 // of writes before it, which may be to extents freed, which can't be read.
                 let recorded = allocator.needs_recorded_flush(checkpoint_offset);
@@ -2051,7 +2051,7 @@ impl Journal {
         Ok(())
     }
 
-    /// fxdax: flushes the device, recording in the root it sets how far the journal is written,
+    /// cladefs: flushes the device, recording in the root it sets how far the journal is written,
     /// valid, before it (`Root::journal_end`), unless a super-block yet to be written records the
     /// journal's tail, which a replay from the last can't read: one request, as a flush. Valid, not
     /// written: after a replay, the journal goes on at a block past where it ended, which a replay
@@ -2071,7 +2071,7 @@ impl Journal {
         self.super_block_manager.set_root(journal_end, barrier).await.map(drop)
     }
 
-    /// fxdax: writes the pending DidFlushDevice record now, and flushes the device again, so that
+    /// cladefs: writes the pending DidFlushDevice record now, and flushes the device again, so that
     /// the record is on it.
     async fn record_device_flush(&self) -> Result<(), Error> {
         let checkpoint = {
@@ -2098,7 +2098,7 @@ impl Journal {
                 Poll::Ready(Err(anyhow!(FxfsError::JournalFlushError).context(context)))
             } else {
                 inner.sync_waker = Some(ctx.waker().clone());
-                // fxdax: a lazy flush task writes what is waited for at once.
+                // cladefs: a lazy flush task writes what is waited for at once.
                 let end = inner.writer.journal_file_checkpoint().file_offset;
                 if inner.position.want_flushed(offset, end)
                     && let Some(waker) = inner.flush_waker.take()
@@ -2117,7 +2117,7 @@ impl Journal {
 
     /// Waits for there to be sufficient space in the journal.
     pub async fn check_journal_space(&self) -> Result<(), Error> {
-        // fxdax: when it began waiting, if it did (`stats`).
+        // cladefs: when it began waiting, if it did (`stats`).
         let mut waited: Option<std::time::Instant> = None;
         let result = loop {
             let listener = {
@@ -2164,7 +2164,7 @@ impl Journal {
         self.chunk_size
     }
 
-    /// fxdax: how much of the journal to have ahead for `transaction`, a chunk's or the chunks that
+    /// cladefs: how much of the journal to have ahead for `transaction`, a chunk's or the chunks that
     /// hold its records.
     fn room_for(&self, transaction: &Transaction<'_>) -> u64 {
         let bytes = transaction.journal_bytes();
@@ -2172,7 +2172,7 @@ impl Journal {
         (bytes + bytes / 8).next_multiple_of(self.chunk_size()).max(self.chunk_size())
     }
 
-    /// fxdax: serializes `transaction`'s records, if each object it changes writes its mutations as
+    /// cladefs: serializes `transaction`'s records, if each object it changes writes its mutations as
     /// they are (`JournalingObject::writes_mutations_as_they_are`), before the writer's lock, which
     /// then only orders them: the critical section of every commit, which commits running at once
     /// wait for.
@@ -2224,7 +2224,7 @@ impl Journal {
                 }
                 checkpoint
             };
-            // fxdax: this fails on what memory holds of a corrupt image, such as a transaction
+            // cladefs: this fails on what memory holds of a corrupt image, such as a transaction
             // that frees what the allocator says isn't allocated, which is no reason for a guest's
             // kernel to panic, as upstream does. Nothing can go on: the filesystem is left as this
             // left it, so the journal stops. What was written of this transaction has no Commit
@@ -2267,7 +2267,7 @@ impl Journal {
 
         {
             let mut inner = self.inner.lock();
-            // fxdax: a lazy flush task is woken only when it has to flush, arm its timer, or
+            // cladefs: a lazy flush task is woken only when it has to flush, arm its timer, or
             // start compacting (see `flush_task`): not for each commit while it compacts.
             let wake = match inner.lazy_flush {
                 None => true,
@@ -2295,7 +2295,7 @@ impl Journal {
         let mut flush_fut = None;
         let mut compact_fut = None;
         let mut flush_error = false;
-        // fxdax: when a lazy flush task writes what is buffered regardless.
+        // cladefs: when a lazy flush task writes what is buffered regardless.
         let mut flush_timer: Option<std::pin::Pin<Box<fuchsia_async::Timer>>> = None;
         poll_fn(|ctx| {
             loop {
@@ -2405,7 +2405,7 @@ impl Journal {
             // Reset `needs_barrier` before instead of after the overwrite in case a txn commit
             // that contains data happens during the overwrite.
             inner.needs_barrier = false;
-            // fxdax: as far as a sync flushing the device wants a barrier after.
+            // cladefs: as far as a sync flushing the device wants a barrier after.
             let range = offset..offset + buf.len() as u64;
             let barrier_after = inner.position.wants_barrier_after(&range);
             (range, barrier_on_first_write, barrier_after)
@@ -2414,7 +2414,7 @@ impl Journal {
         if barrier_after_last_write {
             // The frees issued before the barrier, which it seals (`flush_device`).
             self.objects.allocator().will_flush_device();
-            // fxdax: the barrier records how far the journal is written, in the root it sets
+            // cladefs: the barrier records how far the journal is written, in the root it sets
             // (`Root::journal_end`), unless a super-block yet to be written records the journal's
             // tail, which a replay from the last can't read.
             let mut barrier = async |root: Option<&[u8]>| {
@@ -2427,7 +2427,7 @@ impl Journal {
                 let Err(error) = handle.overwrite(range.start, buf.as_mut(), options).await else {
                     return Ok(true);
                 };
-                // fxdax: the barrier failing, as a full store's commit does, fails the sync that
+                // cladefs: the barrier failing, as a full store's commit does, fails the sync that
                 // wanted it (its flush of the device, which fails too), not the journal: written
                 // again without it. The blocks are still open: a commit that fails seals nothing.
                 warn!(error:?; "The barrier after a journal write failed");
@@ -2458,7 +2458,7 @@ impl Journal {
     }
 
     /// Whether the journal, holding `journal_bytes` not yet flushed to layer files, should compact:
-    /// once half of `reclaim_size`, or, fxdax, sooner if the metadata reservation runs low.
+    /// once half of `reclaim_size`, or, cladefs, sooner if the metadata reservation runs low.
     fn should_compact(&self, inner: &Inner, journal_bytes: u64) -> bool {
         journal_bytes > inner.reclaim_size / 2
             || (journal_bytes >= MIN_COMPACTION_BYTES
@@ -2557,7 +2557,7 @@ impl Journal {
         Ok(())
     }
 
-    /// fxdax: the number the next sync flushing the device takes as it begins: one done with a
+    /// cladefs: the number the next sync flushing the device takes as it begins: one done with a
     /// number at least as high began after this was asked, and its flush of the device covers all
     /// that was written, and stored through a DAX window, before (`synced`). Group commit, as
     /// ext4's jbd2 has it: an fsync waiting for another's covered by it needs none of its own.
@@ -2565,12 +2565,12 @@ impl Journal {
         self.inner.lock().position.next_sync()
     }
 
-    /// fxdax: the number of the latest sync flushing the device that is done (`next_sync`).
+    /// cladefs: the number of the latest sync flushing the device that is done (`next_sync`).
     pub fn synced(&self) -> u64 {
         self.inner.lock().position.synced()
     }
 
-    /// fxdax: what it waited for and did ([`JournalStats`]).
+    /// cladefs: what it waited for and did ([`JournalStats`]).
     pub fn stats(&self) -> &JournalStats {
         &self.stats
     }
@@ -2578,7 +2578,7 @@ impl Journal {
     /// This should generally NOT be called externally. It is public to allow use by FIDL service
     /// fxfs.Debug.
     pub async fn force_compact(&self) -> Result<(), Error> {
-        // fxdax: after the flush task's, if one runs, and in its way: two at once wrote super-blocks
+        // cladefs: after the flush task's, if one runs, and in its way: two at once wrote super-blocks
         // at once (see `write_super_block`), recording each other's work unfinished: two of them
         // left a crash no super-block to mount from.
         loop {
@@ -2627,7 +2627,7 @@ impl Journal {
         }
     }
 
-    /// fxdax: whether compactions wait (`pause_compactions`).
+    /// cladefs: whether compactions wait (`pause_compactions`).
     pub(crate) fn compactions_paused(&self) -> bool {
         self.inner.lock().compactions_paused
     }
@@ -2800,7 +2800,7 @@ mod tests {
 
     const TEST_DEVICE_BLOCK_SIZE: u32 = 512;
 
-    /// fxdax: a mutation's record serialized before the writer's lock is the record
+    /// cladefs: a mutation's record serialized before the writer's lock is the record
     /// `write_record` writes.
     #[test]
     fn test_serialized_records_are_journal_records() {
@@ -2842,7 +2842,7 @@ mod tests {
         assert_eq!(checksums_record_bytes(&range, &[1, 2], true), record.len() as u64);
     }
 
-    // fxdax: a file for `commit_records` to change, with no compaction: what they borrow is more
+    // cladefs: a file for `commit_records` to change, with no compaction: what they borrow is more
     // than flushing them could find.
     async fn filesystem_for_records(device: DeviceHolder) -> (OpenFxFilesystem, u64) {
         filesystem_for_records_with(device, journal_for_records()).await
@@ -2935,7 +2935,7 @@ mod tests {
         std::mem::forget((fs, replayed));
     }
 
-    // fxdax: transactions of more records than a chunk of the journal holds, as a reflink's or a
+    // cladefs: transactions of more records than a chunk of the journal holds, as a reflink's or a
     // truncate's of thousands of extents are: the journal is extended past each, which the next
     // commit found itself writing beyond, and panicked, and replays them (TASK-139).
     #[fuchsia::test]
@@ -2951,7 +2951,7 @@ mod tests {
         check_replay(fs).await;
     }
 
-    // fxdax: commits that nearly fill the room they ask for, with slices of the journal's old
+    // cladefs: commits that nearly fill the room they ask for, with slices of the journal's old
     // space to zero: those came on top of that room, which left the next commit less of the file
     // than its own records, and the journal past its size (xfstests generic/161, TASK-139).
     #[fuchsia::test]
@@ -2973,7 +2973,7 @@ mod tests {
         check_replay(fs).await;
     }
 
-    // fxdax: the journal's own transaction, extending its file and zeroing a slice of the old
+    // cladefs: the journal's own transaction, extending its file and zeroing a slice of the old
     // space, past the file's old size, as TASK-139's were: the journal stops on the error, which
     // the commit returns, and what it holds replays, rather than a guest's kernel panicking
     // (TASK-60). A chunk of a block, less than the records of a slice zeroed, makes it so.
@@ -3009,7 +3009,7 @@ mod tests {
         std::mem::forget((fs, replayed));
     }
 
-    /// fxdax: a mutation of an extent says as much as a record can of what writes it to a layer.
+    /// cladefs: a mutation of an extent says as much as a record can of what writes it to a layer.
     #[test]
     fn test_mutations_of_extents_are_validated() {
         use super::Journal;
@@ -3047,7 +3047,7 @@ mod tests {
         assert!(!allocates(4096..4097));
     }
 
-    /// fxdax: where a journal's extent ends is what an image says.
+    /// cladefs: where a journal's extent ends is what an image says.
     #[test]
     fn test_journal_extents_are_checked() {
         use crate::object_store::Extent;
@@ -3062,7 +3062,7 @@ mod tests {
         super::journal_extent(&extent, store_extent, u64::MAX).expect_err("past any offset");
     }
 
-    /// fxdax: a live transaction that can't be applied, as one freeing what a corrupt allocator
+    /// cladefs: a live transaction that can't be applied, as one freeing what a corrupt allocator
     /// doesn't have, stops the journal rather than panic, and commits nothing after it, or it.
     #[fuchsia::test]
     async fn test_transaction_that_cannot_be_applied_stops_the_journal() {
@@ -3912,7 +3912,7 @@ mod tests {
         assert!(executor.run_until_stalled(&mut fut).is_ready());
     }
 
-    // fxdax: transactions that borrow metadata space, such as unlinks, each followed by a sync,
+    // cladefs: transactions that borrow metadata space, such as unlinks, each followed by a sync,
     // whose padding the next transaction's journal usage includes, borrow faster than the journal
     // grows. With a journal larger than upstream's, they drained the metadata reservation before
     // the journal filled enough to compact (PostgreSQL's initdb failed with ENOSPC in the guest):
@@ -3964,7 +3964,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    // fxdax: a sync pads the journal to its block, which the next commit's transaction pays for,
+    // cladefs: a sync pads the journal to its block, which the next commit's transaction pays for,
     // borrowing it if it is more than a little. The guest's Fxfs without DAX failed PostgreSQL's
     // initdb, whose last step fsyncs each of its files in turn: each sync's padding, borrowed four
     // times over, drained the metadata reservation, and its large journal compacted too late for
@@ -4027,7 +4027,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    // fxdax: a mount's replay finds the metadata space borrowed as the filesystem had it when it
+    // cladefs: a mount's replay finds the metadata space borrowed as the filesystem had it when it
     // stopped. A transaction that may borrow but reserves what it can (`Borrowing`), such as an
     // unlink or a tombstone, borrowed nothing live, but replay took it as having borrowed all its
     // journal usage: each mount whose replay ended past one borrowed it again, which the next
@@ -4091,7 +4091,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    // fxdax: a transaction that may borrow metadata space, such as an unlink, or the graveyard's
+    // cladefs: a transaction that may borrow metadata space, such as an unlink, or the graveyard's
     // tombstone of what it unlinked, reserves it with the allocator while the filesystem has room:
     // borrowed, it drains the metadata reservation until the journal compacts.
     #[fuchsia::test]
@@ -4125,7 +4125,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a mount reads the journal it replays ahead, in windows of blocks it reads at once,
+    /// cladefs: a mount reads the journal it replays ahead, in windows of blocks it reads at once,
     /// each an extent of its own: replaying a journal of hundreds of blocks waits for a round trip
     /// to the device per window of them, not per block (TASK-92.18).
     #[fuchsia::test]
@@ -4199,7 +4199,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: after replay, a mount reads the first block of each extent of the journal's tail,
+    /// cladefs: after replay, a mount reads the first block of each extent of the journal's tail,
     /// to see whether a crash left it written: all at once, in one round trip to the device
     /// (TASK-92.18).
     #[fuchsia::test]
@@ -4230,7 +4230,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    // fxdax: a lazy flush task leaves transactions in memory until something waits for them, or
+    // cladefs: a lazy flush task leaves transactions in memory until something waits for them, or
     // its delay passes.
     #[fuchsia::test]
     async fn test_lazy_flush() {
@@ -4308,7 +4308,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a sync flushes the device once: the padding it writes to finish the journal's
+    /// cladefs: a sync flushes the device once: the padding it writes to finish the journal's
     /// block needs no flush of its own, for the next sync with nothing new.
     #[fuchsia::test]
     async fn test_sync_with_nothing_new_flushes_nothing() {
@@ -4352,7 +4352,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a sync's flush of the device is the barrier after its journal's last write, one
+    /// cladefs: a sync's flush of the device is the barrier after its journal's last write, one
     /// request, where each is a round trip to the guest's host.
     #[fuchsia::test]
     async fn test_sync_barrier_follows_the_journal_write() {
@@ -4402,7 +4402,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a barrier after the journal's write that fails, as a full store's commit does,
+    /// cladefs: a barrier after the journal's write that fails, as a full store's commit does,
     /// fails the sync that wanted it, not the journal: the next sync succeeds.
     #[fuchsia::test]
     async fn test_failed_sync_barrier_leaves_the_journal_open() {
@@ -4453,7 +4453,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: damage ending the journal before where a barrier last found it written is refused,
+    /// cladefs: damage ending the journal before where a barrier last found it written is refused,
     /// as it would lose what syncs acknowledged unsaid; past there, the journal ends where it ends,
     /// as a crash may tear it anywhere (TASK-153.13).
     #[fuchsia::test]
@@ -4546,7 +4546,7 @@ mod tests {
     }
 }
 
-// fxdax: plain functions, which the targets of crates/fxfs/fuzz call, in place of Fuchsia's `fuzz`
+// cladefs: plain functions, which the targets of crates/fxfs/fuzz call, in place of Fuchsia's `fuzz`
 // macro, on the image of `crate::testing::fuzz`: Fxfs's blocks are 4 KiB here. What mounts is
 // checked and read too.
 #[cfg(fuzz)]

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -18,7 +18,7 @@ hljs.registerLanguage("c", c);
 hljs.registerLanguage("markdown", markdown);
 
 export const ORIGIN_LABEL: Record<Origin, string> = {
-  fxdax: "fxdax",
+  cladefs: "cladefs",
   ported: "ported from Fuchsia",
   "fuchsia-changed": "Fuchsia, changed",
   fuchsia: "Fuchsia",
@@ -223,5 +223,5 @@ export function Ref({ id, open = false }: { id: AnchorId; open?: boolean }) {
 
 /** An anchor's origin before the index has loaded, from where its file is. */
 function originGuess(path: string): Origin {
-  return /^crates\/(fxfs|storage_device|fuchsia|zx|fidl)/.test(path) ? "fuchsia" : "fxdax";
+  return /^crates\/(fxfs|storage_device|fuchsia|zx|fidl)/.test(path) ? "fuchsia" : "cladefs";
 }

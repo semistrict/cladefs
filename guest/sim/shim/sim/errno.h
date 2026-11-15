@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* The kernel's errnos dax.c and fs/dax.c name, with Linux's values. */
 #ifndef _SIM_ERRNO_H
 #define _SIM_ERRNO_H

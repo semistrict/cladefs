@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the checks made to fail, which the overrun suite runs before the page cache's checks
+//! cladefs: the checks made to fail, which the overrun suite runs before the page cache's checks
 //! ([`Suites::Failing`]): one crashes, one hangs in the kernel. Each fails alone, by name, what it
 //! left of the guest put back, and the checks after it pass, as they would after a check that
 //! crashed or hung by mistake (TASK-160.30).

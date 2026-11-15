@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! Builds guest/sim's model of Fxfs over the shim of guest/sim's kernel (shim/): the model as it
-//! is in the tree, or, with FXDAX_SIM_MODEL, a copy of it at that path, as mutants.sh puts a past
+//! is in the tree, or, with CLADEFS_SIM_MODEL, a copy of it at that path, as mutants.sh puts a past
 //! bug back in. The model's includes relative to its directory find the tree's either way.
 
 use std::path::PathBuf;
@@ -12,8 +12,8 @@ fn main() {
     let crate_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let root = crate_dir.join("../..");
     let in_tree = root.join("guest/sim/fxfs/fxfs.c");
-    println!("cargo:rerun-if-env-changed=FXDAX_SIM_MODEL");
-    let model = std::env::var_os("FXDAX_SIM_MODEL").map_or(in_tree, PathBuf::from);
+    println!("cargo:rerun-if-env-changed=CLADEFS_SIM_MODEL");
+    let model = std::env::var_os("CLADEFS_SIM_MODEL").map_or(in_tree, PathBuf::from);
     for path in [&model, &crate_dir.join("shim")] {
         println!("cargo:rerun-if-changed={}", path.display());
     }

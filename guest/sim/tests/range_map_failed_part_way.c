@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * A range's MAPs failing part way leave the window mapping what the guest doesn't know of, which
  * its UNMAP must take all the same: one task, no seals.

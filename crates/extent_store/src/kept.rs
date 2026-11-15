@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the extents freed whose data stays ([`Kept`]), for the uploader and for views, indexed so
+//! cladefs: the extents freed whose data stays ([`Kept`]), for the uploader and for views, indexed so
 //! that what a commit does with them takes the time of what it lets go of, not of all of them: the
 //! uploader keeps every free until it has uploaded the commit, thousands of them behind object
 //! storage (TASK-41); nor of what views keep, which a view lagging behind keeps of every commit
@@ -175,19 +175,19 @@ impl KeptExtents {
         }
     }
 
-    /// fxdax: those kept, in no order, to change where their data is, which is all of them a
+    /// cladefs: those kept, in no order, to change where their data is, which is all of them a
     /// change may change (TASK-165.8).
     pub fn entries_mut(&mut self) -> impl Iterator<Item = (&ExtentId, &mut Kept)> {
         self.kept.iter_mut()
     }
 
-    /// fxdax: those kept, in no order, for [`State::audit`](crate::state::State::audit).
+    /// cladefs: those kept, in no order, for [`State::audit`](crate::state::State::audit).
     #[cfg(any(test, feature = "audit"))]
     pub fn iter(&self) -> impl Iterator<Item = (&ExtentId, &Kept)> {
         self.kept.iter()
     }
 
-    /// fxdax: panics unless its indexes, and what it counts of them, are what it keeps, recounted
+    /// cladefs: panics unless its indexes, and what it counts of them, are what it keeps, recounted
     /// (TASK-160.16): all of them by the commits that freed them, those the uploader doesn't need,
     /// which are all the commits it released freed, and their bytes, of those freed after the
     /// count of what views keep began. What views keep it counts as of the last trim, as views

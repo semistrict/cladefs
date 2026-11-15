@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The scheduler: tasks are coroutines, one running at a time, and each scheduling point asks a
  * generator seeded at the start which task runs next. Nothing else decides, not the host's clock

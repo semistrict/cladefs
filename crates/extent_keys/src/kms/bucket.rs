@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: the bucket KMS's keys and formats (TASK-411.27, doc-16, The bucket KMS). Each
+//! cladefs's own: the bucket KMS's keys and formats (TASK-411.27, doc-16, The bucket KMS). Each
 //! tenant's KEK is a random key ([`TenantKek`]) kept in the bucket itself, in an object of its own
 //! ([`KekObject`]), wrapped by a master key ([`super::master`]); it wraps the keys asked of it
 //! ([`wrap`]) as [`super::LocalKms`] does. Where the objects are kept, and how hosts racing to make
@@ -59,10 +59,10 @@ const WRAPPED_HEADER_LEN: usize = WRAPPED_MAGIC.len() + 1 + 8 + KEK_ID_LEN;
 pub const WRAPPED_LEN: usize = WRAPPED_HEADER_LEN + crate::WRAPPED_LEN;
 
 /// What HKDF derives the key a KEK object's KEK is wrapped under with, before its header.
-const OBJECT_INFO: &[u8] = b"fxdax bucket kms kek";
+const OBJECT_INFO: &[u8] = b"cladefs bucket kms kek";
 
 /// What HKDF derives the key a wrapped key is wrapped under with, before its header.
-const WRAP_INFO: &[u8] = b"fxdax bucket kms wrap";
+const WRAP_INFO: &[u8] = b"cladefs bucket kms wrap";
 
 /// Which of a tenant's KEKs: random, drawn with it.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -304,7 +304,7 @@ mod tests {
         let refused = object.unwrap().open(&ours);
         let expected = format!(
             "tenant 7: its KEK is wrapped by master key {}, which this host has not (it has {}): \
-             FXDAX_MASTER_KEY",
+             CLADEFS_MASTER_KEY",
             theirs.newest().id(),
             ours.named_ids()
         );

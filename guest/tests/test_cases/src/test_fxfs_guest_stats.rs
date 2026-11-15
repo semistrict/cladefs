@@ -1,14 +1,14 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax TASK-111.4: `fxdaxctl stats --json` takes one snapshot of what the extent daemon, a live
+//! cladefs TASK-111.4: `cladefsctl stats --json` takes one snapshot of what the extent daemon, a live
 //! VM's process and its guest counted, each with the commit it was built of.
 //!
 //! The host boots the guest kernel with an extent-store device with a DAX window, on a new store,
 //! which the guest formats as it mounts it. The guest writes a file, durably, and reads it through
 //! the window; then, twice, it reads what its Fxfs counted (/proc/fs/fxfs/extents), asks the host
-//! over vsock for a snapshot, and reads it again. The host runs fxdaxctl (FXDAXCTL_BIN) against the
+//! over vsock for a snapshot, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against the
 //! daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks it:
 //! the daemon's build and the VM process's, one commit; the VM's store, answered, its window's
 //! mappings and its host mappings within their budget; its guest's build, a commit, and its
@@ -39,7 +39,7 @@ const COUNTERS: [&str; 2] = ["device_writes", "window_map_requests"];
 mod host {
     use super::*;
 
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, bail, ensure};
@@ -48,18 +48,18 @@ mod host {
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
 
-    /// The daemon's snapshot, as `fxdaxctl stats --json` prints it through the control socket of
+    /// The daemon's snapshot, as `cladefsctl stats --json` prints it through the control socket of
     /// the daemon at `extentd`.
     fn stats(extentd: &Path) -> anyhow::Result<(String, Value)> {
-        let fxdaxctl = std::env::var_os("FXDAXCTL_BIN").context("FXDAXCTL_BIN")?;
-        let output = std::process::Command::new(fxdaxctl)
+        let cladefsctl = std::env::var_os("CLADEFSCTL_BIN").context("CLADEFSCTL_BIN")?;
+        let output = std::process::Command::new(cladefsctl)
             .args(["stats", "--json"])
-            .env("FXDAX_EXTENTD_GRPC", extentd.with_extension("control"))
+            .env("CLADEFS_EXTENTD_GRPC", extentd.with_extension("control"))
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
         ensure!(
             output.status.success(),
-            "fxdaxctl stats --json: {}",
+            "cladefsctl stats --json: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         let json = serde_json::from_str(&stdout).with_context(|| format!("{stdout:?}"))?;
@@ -128,7 +128,7 @@ mod host {
                 .collect::<anyhow::Result<_>>()?;
             let checked = stats(extentd).and_then(|(text, json)| {
                 std::fs::write(dir.join(format!("stats-{}.json", round + 1)), &text)?;
-                eprintln!("fxdaxctl stats --json, snapshot {}:\n{text}", round + 1);
+                eprintln!("cladefsctl stats --json, snapshot {}:\n{text}", round + 1);
                 let names: Vec<&str> = read.iter().map(|(name, _)| *name).collect();
                 let (counters, taken) = check(&json, &store, &names)?;
                 ensure!(taken > taken_before, "taken at {taken}, before {taken_before}");
@@ -156,10 +156,10 @@ mod host {
 
     impl Test for TestFxfsGuestStats {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("FXDAXCTL_BIN").is_none() {
-                return ShouldRun::No("FXDAXCTL_BIN does not name fxdaxctl");
+            if std::env::var_os("CLADEFSCTL_BIN").is_none() {
+                return ShouldRun::No("CLADEFSCTL_BIN does not name cladefsctl");
             }
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -170,14 +170,14 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let extentd = PathBuf::from(
-                std::env::var_os("FXDAX_EXTENTD").expect("FXDAX_EXTENTD names the daemon"),
+                std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             vm.extent_store("extents", &store, CAPACITY, crate::common::dax_window(WINDOW)?)?;
             // Short, as Unix sockets' paths must be: the test's directory may be deep.
             let uds =
-                std::env::temp_dir().join(format!("fxdax-stats-{}.vsock", std::process::id()));
+                std::env::temp_dir().join(format!("cladefs-stats-{}.vsock", std::process::id()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds.display()))?;
             vm.vsock(&uds);
             let dir = test_setup.tmp_dir.clone();

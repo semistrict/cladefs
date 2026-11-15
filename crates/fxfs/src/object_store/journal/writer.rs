@@ -31,7 +31,7 @@ pub struct JournalWriter {
     // The buffered data for the current block.
     buf: Vec<u8>,
 
-    // fxdax: where a record is serialized before it is written to `buf` whole: serializing
+    // cladefs: where a record is serialized before it is written to `buf` whole: serializing
     // writes each of its fields on its own, which `write` would checksum blocks around one by one.
     record: Vec<u8>,
 
@@ -81,7 +81,7 @@ impl JournalWriter {
         }
     }
 
-    /// fxdax: writes a record `JournalRecord::serialize_into` serialized (`serialize_mutation`),
+    /// cladefs: writes a record `JournalRecord::serialize_into` serialized (`serialize_mutation`),
     /// as `write_record` would write the record.
     pub fn write_serialized(&mut self, record: &[u8]) -> Result<(), Error> {
         let buf_len = self.buf.len();

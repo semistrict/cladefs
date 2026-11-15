@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@ import { type Sym, useIndex } from "../data/load.ts";
 import type { Kind, Origin } from "../data/types.ts";
 import { CodeRef, ORIGIN_LABEL } from "../ui/code.tsx";
 
-const ORIGINS: Origin[] = ["fxdax", "ported", "fuchsia-changed", "fuchsia", "stand-in"];
+const ORIGINS: Origin[] = ["cladefs", "ported", "fuchsia-changed", "fuchsia", "stand-in"];
 const KINDS: Kind[] = ["fn", "struct", "enum", "trait", "mod", "const", "static", "type"];
 const SHOWN = 40;
 

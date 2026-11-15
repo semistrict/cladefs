@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -37,16 +37,16 @@ jobs:
       # What the run boots and serves it with, built once: the guest tests' own tests are CI's
       # guest part's, which scripts/test-e2e.sh runs first unless its artifacts are prebuilt.
       - name: Build the run's artifacts
-        run: FXDAX_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts" scripts/test-e2e.sh
+        run: CLADEFS_E2E_BUILD_ONLY="$HOME/sandboxes-artifacts" scripts/test-e2e.sh
       # As root, as the guest part's tests run: podman makes the guests' root images. What the
       # runner spends, every 30 s, goes in the results (resources.log, scripts/lib/resources.sh).
       - name: scripts/sandboxes.sh short
         run: |
           mkdir -p ~/sandboxes
           sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" \
-            "FXDAX_E2E_PREBUILT=$HOME/sandboxes-artifacts" \
-            "FXDAX_GUEST_KERNEL=$VMLINUX" "FXDAX_SANDBOX_DISK=$HOME/sandboxes" \
-            "FXDAX_E2E_RESULTS=$HOME/sandboxes/results" scripts/sandboxes.sh short
+            "CLADEFS_E2E_PREBUILT=$HOME/sandboxes-artifacts" \
+            "CLADEFS_GUEST_KERNEL=$VMLINUX" "CLADEFS_SANDBOX_DISK=$HOME/sandboxes" \
+            "CLADEFS_E2E_RESULTS=$HOME/sandboxes/results" scripts/sandboxes.sh short
         env:
           VMLINUX: ${{ steps.kernel.outputs.vmlinux }}
       # What it said, but for its stores, images and caches, which a failed run keeps: the

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -11,11 +11,11 @@ times slower than its baseline the others are: their median time over the baseli
 baseline's median rate over theirs. The guest kernel's Fxfs compares with ext4 with DAX on pmem,
 or ext4 on virtio-blk, booted on the same kernel; a warm fork with a cold one; a writer with
 followers with one alone (scripts/bench_results.py, which scripts/bench-history.py shares). Ratios
-over 2 are in bold. Runs before fxdax left libkrun (TASK-40) measured the default kernel's ext4 on
+over 2 are in bold. Runs before cladefs left libkrun (TASK-40) measured the default kernel's ext4 on
 virtio-blk and libkrun's virtio-fs device too, which the others compared with: the report still
 reads them.
 
-When the extent daemon kept stores in a bucket (FXDAX_EXTENTD_REMOTE), a section after the table
+When the extent daemon kept stores in a bucket (CLADEFS_EXTENTD_REMOTE), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
 from the stats it kept in logs/extentd-stats.txt (extent_remote::store::Stats::line). Another
 says what the VM processes' requests took the daemon, by kind, and its commits, by phase.
@@ -60,7 +60,7 @@ UPLOADS = ["segments", "extents", "checkpoints", "moves", "other"]
 
 def daemon_stats(directory, kind):
     """The extent daemon's stats of `kind`, by name, if it kept them: its stats file
-    (FXDAX_EXTENTD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
+    (CLADEFS_EXTENTD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
     for each kind: object-store (what it did with object storage, if it kept stores there),
     followers (what the stores' followers were), daemon (what serving the stores cost it) and
     requests (the VM processes' requests it served, by kind)."""
@@ -108,7 +108,7 @@ def object_storage(stats):
     uploaded = sum(stats.get(f"up-{kind}", 0) for kind in UPLOADS)
     by_kind = ", ".join(f"{kind} {size(stats.get(f'up-{kind}', 0))}" for kind in UPLOADS)
     lines.append(f"Uploaded {size(uploaded)} ({by_kind}); downloaded {size(stats.get('down', 0))}.")
-    # fxdax: the requests that failed, unanswered, each retried, which extentd.log says why of
+    # cladefs: the requests that failed, unanswered, each retried, which extentd.log says why of
     # (TASK-314); none from a daemon before it counted them.
     failed = {request: stats.get(f"failed-{request}", 0) for request in CLASSES}
     if any(failed.values()):
@@ -135,7 +135,7 @@ def followers(stats):
 
 def served(requests, daemon):
     """The section of the report on the requests the extent daemon served, of `requests` (a count
-    and nanoseconds by kind) and `daemon` (what serving them cost, `fxdax::stats::Stats`), as
+    and nanoseconds by kind) and `daemon` (what serving them cost, `cladefs::stats::Stats`), as
     lines: if it served any."""
     kinds = [name for name in requests if not name.endswith("-ns")]
     if not kinds:

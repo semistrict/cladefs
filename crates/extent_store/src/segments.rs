@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! A branch's segments (see the crate's docs): those it tracks, each where it is in its life
 //! ([`Phase`]), with the bytes of extents' data it holds; the open segment's closing, its footer
-//! of what the commits since it opened changed, each footer following the one before; fxdax: a
+//! of what the commits since it opened changed, each footer following the one before; cladefs: a
 //! closed segment's data framed, with its footer, off the commit that closed it, its log of the
 //! commits in it going with its raw data (TASK-165.9).
 
@@ -33,13 +33,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage_device::ExtentId;
 
-/// fxdax: the bytes of a sector of an open segment, whose raw file a sealed store encrypts a
+/// cladefs: the bytes of a sector of an open segment, whose raw file a sealed store encrypts a
 /// sector at a time, AES-256-XTS, the sector its tweak (doc-16, TASK-411.5, [`crate::raw`]):
 /// which takes no reading, modifying and writing again only if what reaches the segment is whole
 /// sectors, at offsets in it and of lengths that are multiples of this (TASK-411.8).
 pub(crate) use crate::raw::SECTOR;
 
-/// fxdax: the error of `len` bytes at `offset` that are not whole sectors ([`SECTOR`]), going to
+/// cladefs: the error of `len` bytes at `offset` that are not whole sectors ([`SECTOR`]), going to
 /// the open segment: a write of an extent stored in segments, `offset` in the extent, as its seal
 /// copies it whole, from its start; or what a write, or a seal, takes of the segment, `offset` in
 /// it. Refused before anything is written (TASK-411.8).
@@ -63,30 +63,30 @@ impl Unsectored {
 
 /// Where a segment the branch tracks is in its life.
 enum Phase<F> {
-    /// Taking writes, in its raw file; fxdax: its commits recorded in its log, which the flushes
+    /// Taking writes, in its raw file; cladefs: its commits recorded in its log, which the flushes
     /// append to (TASK-165.9).
     Open { raw: Arc<RawFile<F>>, log: Log<F> },
-    /// fxdax: filled between commits, taking no more writes, which go to the next: the next commit
+    /// cladefs: filled between commits, taking no more writes, which go to the next: the next commit
     /// seals in place what is one run in it, and closes it, its footer naming those runs as the
     /// commit's, which the segments after it go on with, after what the commits before made in it,
     /// as `window` folds them (TASK-92.41). Read from its raw file until then.
     Full { raw: Arc<RawFile<F>>, log: Log<F>, window: Window },
-    /// fxdax: closed by commit `last`, its data being framed off the commit, on a thread of its
+    /// cladefs: closed by commit `last`, its data being framed off the commit, on a thread of its
     /// own, which ends the framing itself ([`Segments::framed`], TASK-153.8): read from its raw
     /// file, which stays open, until then; its commits' records still appended to its log by the
-    /// flushes that make them durable, which wait for no framing (TASK-165.9). fxdax: its framed
+    /// flushes that make them durable, which wait for no framing (TASK-165.9). cladefs: its framed
     /// file `written`, whole, once the framing wrote it, being made durable then, which the
     /// uploader waits for no more (TASK-384): the bucket's object is what makes its commits
     /// durable, its raw file and log holding them here until it is.
     Framing { raw: Arc<RawFile<F>>, log: Log<F>, last: u64, written: Option<Arc<Framed<F>>> },
-    /// fxdax: its framing failed, which failed the store: read from its raw file, which stays.
+    /// cladefs: its framing failed, which failed the store: read from its raw file, which stays.
     Failed { raw: Arc<RawFile<F>>, log: Log<F>, error: String },
     /// Closed, a segment of the write-ahead log until acknowledged in the bucket. Its framed file,
     /// if open, is among those kept open (`Segments::files`).
     Closed,
 }
 
-/// fxdax: a segment's log, and the salt of its records, its header's (`wal::log_header`); fxdax:
+/// cladefs: a segment's log, and the salt of its records, its header's (`wal::log_header`); cladefs:
 /// and what MACs them, its raw file's sealer, if sealed (TASK-411.5).
 pub(crate) struct Log<F> {
     pub file: Arc<F>,
@@ -112,19 +112,19 @@ struct Segment<F> {
     /// The writes to it in progress, and the bytes they reserved: neither live nor dead yet.
     writers: u64,
     pending: u64,
-    /// fxdax: the sealed extents the branch holds whose data is in it: what is read in the bucket
+    /// cladefs: the sealed extents the branch holds whose data is in it: what is read in the bucket
     /// once it is acknowledged there, found without going through every extent the branch holds
     /// (TASK-165.8).
     sealed: HashSet<ExtentId>,
-    /// fxdax: the bytes of its raw file, from its start, whose writing back has begun, as the
+    /// cladefs: the bytes of its raw file, from its start, whose writing back has begun, as the
     /// writes to it while open end, and of those, the bytes waited for ([`Segments::write_behind`],
     /// TASK-221).
     written_behind: u64,
     written_back: u64,
-    /// fxdax: what its parts' looks ahead saw, for its framing, until it takes them
+    /// cladefs: what its parts' looks ahead saw, for its framing, until it takes them
     /// ([`Segments::see`], TASK-400).
     ahead: Option<Ahead>,
-    /// fxdax: its key in the bucket, once its uploader's writer acknowledged it there: it leaves
+    /// cladefs: its key in the bucket, once its uploader's writer acknowledged it there: it leaves
     /// the store for the host's cache of objects once no extent's data is in it here (TASK-165.8),
     /// if the object there is its framed file, not stamped anew after a takeover (TASK-165.9).
     acknowledged: Option<Option<String>>,
@@ -133,7 +133,7 @@ struct Segment<F> {
 impl<F> Segment<F> {
     fn new(phase: Phase<F>, live: u64) -> Self {
         let (len, size, writers, pending) = (0, 0, 0, 0);
-        // fxdax: looked at ahead, sealed or not (TASK-411.23, TASK-421).
+        // cladefs: looked at ahead, sealed or not (TASK-411.23, TASK-421).
         let ahead = Some(Ahead::default());
         Self {
             phase,
@@ -151,7 +151,7 @@ impl<F> Segment<F> {
     }
 
     /// A write of `len` bytes at `at` in it is done, `live` of them holding extents' data: returns
-    /// whether none is in progress in it any more. fxdax: its parts it made whole wait for a look
+    /// whether none is in progress in it any more. cladefs: its parts it made whole wait for a look
     /// ahead, in `seeing` ([`Segments::see`]).
     fn done(&mut self, (at, len): (u64, u64), live: u64, seeing: &mut Vec<u64>) -> bool {
         self.writers -= 1;
@@ -161,7 +161,7 @@ impl<F> Segment<F> {
         self.writers == 0
     }
 
-    /// fxdax: the `len` bytes at `at` in it are written, by a write that ended or an append: the
+    /// cladefs: the `len` bytes at `at` in it are written, by a write that ended or an append: the
     /// parts this made whole, all their bytes written, which change no more, wait for a look ahead,
     /// in `seeing`, if its framing is yet to take its looks (TASK-400).
     fn ended(&mut self, at: u64, len: u64, seeing: &mut Vec<u64>) {
@@ -177,7 +177,7 @@ impl<F> Segment<F> {
         done && self.live == 0 && self.writers == 0
     }
 
-    /// fxdax: panics unless what it counts of itself, segment `number`, is what it holds
+    /// cladefs: panics unless what it counts of itself, segment `number`, is what it holds
     /// (TASK-160.16): `pieces` of extents' data, and the sealed extents `sealed`.
     #[cfg(any(test, feature = "audit"))]
     fn audit(&self, number: SegmentId, pieces: &[Piece], sealed: &BTreeSet<ExtentId>) {
@@ -204,21 +204,21 @@ impl<F> Segment<F> {
 ///
 /// One segment is open, which writes go to. It closes at a commit, or between commits, its footer
 /// what the commits since it opened changed ([`Window`]); and another opens. Its footer follows
-/// the one closed before it, as the chain of the footers' writer stamps it. fxdax: filled between
+/// the one closed before it, as the chain of the footers' writer stamps it. cladefs: filled between
 /// commits, it waits, full, for the next commit, which closes it, sealing in place what is one run
 /// in it (TASK-92.41).
 pub(crate) struct Segments<F> {
     tracked: BTreeMap<SegmentId, Segment<F>>,
-    /// fxdax: those reaping lets go of ([`Segment::is_empty`]), but for those kept: so that a commit
+    /// cladefs: those reaping lets go of ([`Segment::is_empty`]), but for those kept: so that a commit
     /// looks over them alone, not every segment the branch tracks, thousands as it grows
     /// (TASK-92.16).
     empty: BTreeSet<SegmentId>,
     /// The segment taking writes.
     open: SegmentId,
-    /// fxdax: the bytes of its data as of the last commit: those after, the writes since
+    /// cladefs: the bytes of its data as of the last commit: those after, the writes since
     /// ([`Segments::filling`]).
     committed_len: u64,
-    /// fxdax: those filled since the last commit, oldest first, which the next closes
+    /// cladefs: those filled since the last commit, oldest first, which the next closes
     /// ([`Phase::Full`]): the first alone may hold commits, those made before it filled.
     full: Vec<SegmentId>,
     /// When it opened.
@@ -229,7 +229,7 @@ pub(crate) struct Segments<F> {
     forking: Vec<Child>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
-    /// fxdax: the chain of the footers' writer, the writer of the branch in object storage, as the
+    /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
     /// store opened, which stamps each footer with its place: its number, its writer's lease epoch
     /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
     /// numbered on from the segment open as the branch was opened, one for each segment closed.
@@ -238,44 +238,44 @@ pub(crate) struct Segments<F> {
     files: Files<SegmentId, F>,
     /// Whether the open segment was written since the last commit, which syncs it.
     written: bool,
-    /// fxdax: the raw files of the segments closed since the last commit, written since the one
+    /// cladefs: the raw files of the segments closed since the last commit, written since the one
     /// before, which the next commit's flush syncs (TASK-165.9); and those filled since, which the
     /// commit closing them seals extents in (TASK-92.41).
     closed_unsynced: Vec<Arc<F>>,
     /// Whether a segment closed since the last commit, which syncs the directories of open
-    /// segments and of logs, the next's raw file's and log's entries. fxdax: its framed file's,
+    /// segments and of logs, the next's raw file's and log's entries. cladefs: its framed file's,
     /// its framing makes durable (`make_durable`, TASK-310).
     closed_since: bool,
-    /// fxdax: the segments whose framings are running, each of which ends itself (TASK-153.8).
+    /// cladefs: the segments whose framings are running, each of which ends itself (TASK-153.8).
     framing: BTreeSet<SegmentId>,
-    /// fxdax: the segments opened whose raw files' and logs' entries no sync has made durable
+    /// cladefs: the segments opened whose raw files' and logs' entries no sync has made durable
     /// since ([`Segments::unsynced_entries`], TASK-310).
     unsynced_entries: BTreeSet<SegmentId>,
-    /// fxdax: the segments framed whose raw files and logs are still there, each with the last
+    /// cladefs: the segments framed whose raw files and logs are still there, each with the last
     /// commit its footer names: they go once that commit is durable, so that an opening finding it
     /// not durable closes the segment again from them (`wal::recover`, TASK-92.16, TASK-165.9).
     raw: Vec<(u64, SegmentId)>,
-    /// fxdax: the spare logs, by the segments they were the logs of ([`spare_path`]), which the
+    /// cladefs: the spare logs, by the segments they were the logs of ([`spare_path`]), which the
     /// next segments' logs are, rather than files made anew (TASK-301).
     spares: Vec<SegmentId>,
-    /// fxdax: the next segment's raw file and log, prepared off the store's state lock, if they
+    /// cladefs: the next segment's raw file and log, prepared off the store's state lock, if they
     /// are, there under their names, and whether a preparation runs ([`Segments::to_prepare`],
     /// TASK-333, TASK-384).
     prepared: Option<Placed<F>>,
     preparing: bool,
-    /// fxdax: what the salts of the logs this opening of the branch makes are of ([`new_salt`]).
+    /// cladefs: what the salts of the logs this opening of the branch makes are of ([`new_salt`]).
     lifetime: u64,
-    /// fxdax: the store's keys, which its segments are framed and read under (TASK-411.3).
+    /// cladefs: the store's keys, which its segments are framed and read under (TASK-411.3).
     keys: Arc<Ring>,
-    /// fxdax: the parts of segments written whole since the store last took them, to look at
+    /// cladefs: the parts of segments written whole since the store last took them, to look at
     /// ahead of their framings ([`Segments::take_seeing`], TASK-400).
     seeing: Vec<(SegmentId, u64)>,
 }
 
-/// fxdax: how many spare logs a branch keeps ([`Segments::spare`]).
+/// cladefs: how many spare logs a branch keeps ([`Segments::spare`]).
 const SPARES: usize = 2;
 
-/// fxdax: a segment the branch let go of, no extent being in it any more, acknowledged in the
+/// cladefs: a segment the branch let go of, no extent being in it any more, acknowledged in the
 /// bucket, with its key there if its file is the object there, which goes into the host's cache
 /// (TASK-165.8).
 pub(crate) type Reaped = (SegmentId, Option<String>);
@@ -285,7 +285,7 @@ impl<F: File> Segments<F> {
     /// `tracked`, each with the bytes of extents' data it holds, whose files must be there; and
     /// another, open, `next`, past them, whose raw file and log are made, their entries durable.
     /// Its footer, and those after it, `chain` stamps. At most `open_files` of their files stay
-    /// open between reads. fxdax: framed and read under `keys`, the store's (TASK-411.3).
+    /// open between reads. cladefs: framed and read under `keys`, the store's (TASK-411.3).
     pub fn open<D: Dir<File = F>>(
         dir: &D,
         (branch, tracked): (u64, BTreeMap<SegmentId, u64>),
@@ -297,7 +297,7 @@ impl<F: File> Segments<F> {
             ensure!(id.branch == branch, "{id:?} is another branch's");
             let path = segment_path(id);
             let file = dir.open(&path, true).with_context(|| format!("segment {path}"))?;
-            // fxdax: its trailer and table, a block, not its footer (TASK-92.16).
+            // cladefs: its trailer and table, a block, not its footer (TASK-92.16).
             let parts = read_parts(&file, &keys.of(branch))?
                 .ok_or_else(|| anyhow!("{path} is not a whole framed file"))?;
             let segment = Segment {
@@ -381,7 +381,7 @@ impl<F: File> Segments<F> {
 
     /// Reserves `len` bytes of the open segment for a write: the segment, its raw file, and where
     /// in it the write goes. The write is in progress until it is done: held
-    /// ([`Segments::held`]), or dropped ([`Segments::dropped`]). fxdax: refused, nothing reserved,
+    /// ([`Segments::held`]), or dropped ([`Segments::dropped`]). cladefs: refused, nothing reserved,
     /// unless they are whole sectors ([`Unsectored`], TASK-411.8).
     pub fn reserve(&mut self, len: u64) -> Result<(SegmentId, Arc<RawFile<F>>, u64), Unsectored> {
         let open = self.open;
@@ -427,7 +427,7 @@ impl<F: File> Segments<F> {
     }
 
     /// Appends `len` bytes of an extent's data, sealed in one run, to the open segment, which
-    /// holds them: returns its raw file, and where in it they go. fxdax: written once its caller
+    /// holds them: returns its raw file, and where in it they go. cladefs: written once its caller
     /// says so ([`Segments::appended`]); refused, nothing appended, unless they are whole sectors
     /// ([`Unsectored`], TASK-411.8).
     pub fn append(&mut self, len: u64) -> Result<(Arc<RawFile<F>>, u64), Unsectored> {
@@ -445,7 +445,7 @@ impl<F: File> Segments<F> {
         }))
     }
 
-    /// fxdax: the `len` bytes appended at `at` to segment `number` ([`Segments::append`]) are
+    /// cladefs: the `len` bytes appended at `at` to segment `number` ([`Segments::append`]) are
     /// written: the parts this made whole wait for a look ahead (TASK-400).
     pub fn appended(&mut self, number: SegmentId, at: u64, len: u64) {
         let mut seeing = Vec::new();
@@ -453,7 +453,7 @@ impl<F: File> Segments<F> {
         self.seeing.extend(seeing.into_iter().map(|part| (number, part)));
     }
 
-    /// fxdax: what of segment `number`'s raw file to write back, a write to which, while it is open,
+    /// cladefs: what of segment `number`'s raw file to write back, a write to which, while it is open,
     /// ended at `end` in it (TASK-221): what was written since the writing back last began, to
     /// begin writing back, if [`WRITE_BEHIND`] bytes or more; and what was begun more than
     /// [`WRITTEN_BEHIND_MOST`] bytes before `end`, to wait for. Writes end out of order: what one of
@@ -474,14 +474,14 @@ impl<F: File> Segments<F> {
         Some(Behind { raw: raw.file().clone(), begin: (from, end - from), wait })
     }
 
-    /// fxdax: the parts of segments written whole since this was last asked, to look at ahead of
+    /// cladefs: the parts of segments written whole since this was last asked, to look at ahead of
     /// their framings, which read them no more if they frame them in place ([`Segments::see`],
     /// TASK-400).
     pub fn take_seeing(&mut self) -> Vec<(SegmentId, u64)> {
         std::mem::take(&mut self.seeing)
     }
 
-    /// fxdax: segment `number`'s raw file, to look at a part of ahead of its framing, if its
+    /// cladefs: segment `number`'s raw file, to look at a part of ahead of its framing, if its
     /// framing is yet to take its parts' looks (TASK-400); and the look at its parts seen so far,
     /// which says whether to pack the next ahead too ([`framing::see`]).
     pub fn see(&self, number: SegmentId) -> Option<(Arc<RawFile<F>>, Look)> {
@@ -495,7 +495,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, and packed it, `held`, if
+    /// cladefs: a look ahead at part `part` of segment `number` saw `seen`, and packed it, `held`, if
     /// it did: for its framing, which takes them ([`Segments::take_seen`]), if it is yet to.
     pub fn saw(&mut self, number: SegmentId, part: u64, seen: Seen, held: Option<Hold>) {
         let ahead = self.tracked.get_mut(&number).and_then(|segment| segment.ahead.as_mut());
@@ -504,14 +504,14 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: what the looks ahead at segment `number`'s parts took, by part, which its framing
+    /// cladefs: what the looks ahead at segment `number`'s parts took, by part, which its framing
     /// takes as it begins: none are taken after (TASK-400).
     pub fn take_seen(&mut self, number: SegmentId) -> Vec<Option<Looked>> {
         let segment = self.tracked.get_mut(&number);
         segment.and_then(|segment| segment.ahead.take()).map_or_else(Vec::new, |ahead| ahead.looked)
     }
 
-    /// fxdax: segment `number`, closed, is acknowledged in the bucket, its object there at `key`
+    /// cladefs: segment `number`, closed, is acknowledged in the bucket, its object there at `key`
     /// if its framed file is that object (TASK-165.8): the extents sealed in it, which it returns,
     /// are read there from now on, and it leaves the store once no extent's data is in it here,
     /// the next reaping letting it go as such ([`Reaped`]).
@@ -525,13 +525,13 @@ impl<F: File> Segments<F> {
         })
     }
 
-    /// fxdax: `extent`, sealed, holds `data` from now on: in the segments, if in any, which say so
+    /// cladefs: `extent`, sealed, holds `data` from now on: in the segments, if in any, which say so
     /// once acknowledged in the bucket (TASK-165.8).
     pub fn place(&mut self, extent: ExtentId, data: &Data) {
         self.seat(extent, data, true);
     }
 
-    /// fxdax: `extent`, sealed, holds `data` no more: it was freed, or moved.
+    /// cladefs: `extent`, sealed, holds `data` no more: it was freed, or moved.
     pub fn displace(&mut self, extent: ExtentId, data: &Data) {
         self.seat(extent, data, false);
     }
@@ -549,18 +549,18 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: the writes in progress to the segment a closing between commits closes: the first
+    /// cladefs: the writes in progress to the segment a closing between commits closes: the first
     /// filled since the last commit, if any, else the open one (`Store::close_now`).
     pub fn closing_writers(&self) -> u64 {
         self.tracked[self.full.first().unwrap_or(&self.open)].writers
     }
 
-    /// fxdax: whether a segment filled since the last commit waits for the next ([`Phase::Full`]).
+    /// cladefs: whether a segment filled since the last commit waits for the next ([`Phase::Full`]).
     pub fn has_full(&self) -> bool {
         !self.full.is_empty()
     }
 
-    /// fxdax: whether the guest is filling the segment a closing between commits would close
+    /// cladefs: whether the guest is filling the segment a closing between commits would close
     /// (TASK-92.41): one filled since the last commit, or the open one, past [`FILLING`] written
     /// since. Its next commit seals in place what is one run in it; closed first, the commit
     /// copies out all of it, up to a segment and an extent (the shared-disk case's VMs copied a
@@ -584,7 +584,7 @@ impl<F: File> Segments<F> {
     }
 
     /// Whether the open segment holds commits up to `epoch`, the last, which closing it records.
-    /// fxdax: or the first full one, which holds those made before it filled, the open segment
+    /// cladefs: or the first full one, which holds those made before it filled, the open segment
     /// none since (TASK-92.41).
     pub fn has_commits(&self, epoch: u64) -> bool {
         match self.full.first() {
@@ -593,7 +593,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: what the commits made in segment `number`, full, folded ([`Phase::Full`]).
+    /// cladefs: what the commits made in segment `number`, full, folded ([`Phase::Full`]).
     fn full_window(&self, number: SegmentId) -> &Window {
         match &self.tracked[&number].phase {
             Phase::Full { window, .. } => window,
@@ -601,13 +601,13 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: whether a commit seals an extent in one run of segment `number` where it is: in the
+    /// cladefs: whether a commit seals an extent in one run of segment `number` where it is: in the
     /// open segment, or in one filled since the last commit (TASK-92.41).
     pub fn seals_in(&self, number: SegmentId) -> bool {
         number == self.open || self.full.contains(&number)
     }
 
-    /// fxdax: the log of the open segment's commits (TASK-165.9).
+    /// cladefs: the log of the open segment's commits (TASK-165.9).
     pub fn open_log(&self) -> Log<F> {
         let Phase::Open { log, .. } = &self.tracked[&self.open].phase else {
             unreachable!("the open segment is open")
@@ -615,7 +615,7 @@ impl<F: File> Segments<F> {
         log.clone()
     }
 
-    /// fxdax: the log of segment `number`'s commits, open or closed since, which a flush appends
+    /// cladefs: the log of segment `number`'s commits, open or closed since, which a flush appends
     /// their records to: there until its raw file goes, once it is framed and they are durable
     /// ([`Segments::raw`]).
     pub fn log_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Log<F>, Error> {
@@ -638,9 +638,9 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: segment `number`'s raw file, as stored, whose data a commit's record checks
+    /// cladefs: segment `number`'s raw file, as stored, whose data a commit's record checks
     /// (`wal::LogRecord`): there until it goes, once the segment is framed and its commits durable.
-    /// fxdax: encrypted, if sealed, as its records hold its runs (TASK-411.5).
+    /// cladefs: encrypted, if sealed, as its records hold its runs (TASK-411.5).
     pub fn raw_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Arc<F>, Error> {
         match self.tracked.get(&number).map(|segment| &segment.phase) {
             Some(
@@ -653,12 +653,12 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: the bytes of segment `number`'s data.
+    /// cladefs: the bytes of segment `number`'s data.
     pub fn len(&self, number: SegmentId) -> u64 {
         self.tracked.get(&number).map_or(0, |segment| segment.len)
     }
 
-    /// fxdax: the bytes of the extents the open segment's commits sealed, in its data and in
+    /// cladefs: the bytes of the extents the open segment's commits sealed, in its data and in
     /// files of their own: what of the write-ahead log it holds, which closing it uploads, and not
     /// the writes no commit sealed yet, which no upload takes (TASK-165.9); and the first full
     /// one's (TASK-92.41).
@@ -672,7 +672,7 @@ impl<F: File> Segments<F> {
     /// capacity, if it set them, `extents` the branch's extents as of it, its extents sealed in
     /// the open segment or in files of their own, `next_sequence` the branch's next sequence
     /// number: its contents, as the chain tags it, fold into the open segment's footer to be
-    /// ([`Window`]), with the forks it makes ([`Segments::close_for_fork`]). fxdax: and those it
+    /// ([`Window`]), with the forks it makes ([`Segments::close_for_fork`]). cladefs: and those it
     /// sealed in one run of a segment filled since the last commit, the runs it goes on with, into
     /// that one's, its continuation ([`Continued`], TASK-92.41). Returns the record of each, by its
     /// segment, in the order of the segments, the open one's last: what each segment's log holds
@@ -756,7 +756,7 @@ impl<F: File> Segments<F> {
         Ok(unframed)
     }
 
-    /// fxdax: closes the first segment filled since the last commit, holding commits, after commit
+    /// cladefs: closes the first segment filled since the last commit, holding commits, after commit
     /// `epoch`, the last, between commits, as [`Segments::close`] closes the open one: for an
     /// uploader to take the commits in it without waiting for the next (`Store::close_now`). What
     /// was written to it since, the next commit copies out (TASK-92.41).
@@ -767,7 +767,7 @@ impl<F: File> Segments<F> {
         self.seal_off(number, (window, last), epoch, next_sequence, true)
     }
 
-    /// fxdax: closes the segments filled since the last commit, commit `epoch`, which sealed in
+    /// cladefs: closes the segments filled since the last commit, commit `epoch`, which sealed in
     /// them what was one run in each ([`Segments::record`]), in the order they filled: their
     /// footers name the runs the commit goes on with past them, which the open segment ends, after
     /// what the commits before made in them (TASK-92.41).
@@ -785,7 +785,7 @@ impl<F: File> Segments<F> {
             .collect()
     }
 
-    /// fxdax: what the commits made in segment `number`, full, folded, which it holds no more,
+    /// cladefs: what the commits made in segment `number`, full, folded, which it holds no more,
     /// closing.
     fn take_full(&mut self, number: SegmentId) -> Window {
         let phase = &mut self.tracked.get_mut(&number).unwrap().phase;
@@ -795,7 +795,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: segment `number`, open or full, closes after commit `epoch`, the last whose data is
+    /// cladefs: segment `number`, open or full, closes after commit `epoch`, the last whose data is
     /// in it ([`Phase::Framing`]): its footer, of what `window` folds, naming `last`, its last
     /// commit, if any, stamped by the chain, the branch's next sequence number `next_sequence`;
     /// its raw file synced by the next flush, if `written` since the last commit. Its data, unless no extent's
@@ -831,7 +831,7 @@ impl<F: File> Segments<F> {
         Unframed { number, raw, len, footer, quiet, keys: self.keys.clone() }
     }
 
-    /// fxdax: the open segment, full, takes no more writes, which go to the next, opened in `dir`
+    /// cladefs: the open segment, full, takes no more writes, which go to the next, opened in `dir`
     /// after commit `epoch`, the last: it waits for the next commit, which seals what is one run in
     /// it there, and closes it ([`Phase::Full`], TASK-92.41). Writes in progress in it go on, and
     /// reads read it from its raw file. A guest writing more than a segment between commits had
@@ -867,7 +867,7 @@ impl<F: File> Segments<F> {
         Ok(())
     }
 
-    /// fxdax: segment `number`, closed and being framed, is in `framed` from now on, durable, its
+    /// cladefs: segment `number`, closed and being framed, is in `framed` from now on, durable, its
     /// raw file no more, which goes once the commits its footer names are ([`Segments::raw`]).
     pub fn framed(&mut self, number: SegmentId, framed: Arc<Framed<F>>) {
         let mut closed = 0;
@@ -884,7 +884,7 @@ impl<F: File> Segments<F> {
         self.framing.remove(&number);
     }
 
-    /// fxdax: segment `number`, being framed, has its framed file `framed` written, whole, being
+    /// cladefs: segment `number`, being framed, has its framed file `framed` written, whole, being
     /// made durable from now on, which the uploader takes it without waiting for (TASK-384): read
     /// from its raw file still, as its framed file is not yet named its own.
     pub fn written(&mut self, number: SegmentId, framed: Arc<Framed<F>>) {
@@ -895,7 +895,7 @@ impl<F: File> Segments<F> {
         *written = Some(framed);
     }
 
-    /// fxdax: whether segment `number`'s framing is writing its framed file still: the uploader
+    /// cladefs: whether segment `number`'s framing is writing its framed file still: the uploader
     /// takes it once it wrote it, not waiting for it to be made durable (TASK-384).
     pub fn is_writing(&self, number: SegmentId) -> bool {
         matches!(
@@ -904,7 +904,7 @@ impl<F: File> Segments<F> {
         )
     }
 
-    /// fxdax: segment `number`'s framed file, which the uploader uploads: one written, being made
+    /// cladefs: segment `number`'s framed file, which the uploader uploads: one written, being made
     /// durable (TASK-384), or a closed one's.
     pub fn framed_file<D: Dir<File = F>>(
         &mut self,
@@ -922,7 +922,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: segment `number`'s framing failed, for `error`, which failed the store: it is read
+    /// cladefs: segment `number`'s framing failed, for `error`, which failed the store: it is read
     /// from its raw file, which stays.
     pub fn framing_failed(&mut self, number: SegmentId, error: String) {
         let segment = self.tracked.get_mut(&number).expect("a segment being framed is tracked");
@@ -933,14 +933,14 @@ impl<F: File> Segments<F> {
         self.framing.remove(&number);
     }
 
-    /// fxdax: segment `number`, closed, is being framed from now on, by a framing that ends itself
+    /// cladefs: segment `number`, closed, is being framed from now on, by a framing that ends itself
     /// ([`Segments::framed`], [`Segments::framing_failed`]).
     pub fn framing_begun(&mut self, number: SegmentId) {
         debug_assert!(self.is_framing(number), "{number:?}, being framed, was closed");
         self.framing.insert(number);
     }
 
-    /// fxdax: those of `framed`, segments being made durable, whose raw files' and logs' entries no
+    /// cladefs: those of `framed`, segments being made durable, whose raw files' and logs' entries no
     /// sync has made durable yet, which the making syncs first, before their framed files' entries
     /// ([`make_durable`]): theirs alone, as a segment opened after them, the next's, needs none of
     /// its own durable for theirs (TASK-369); and the flush syncing the directories after a
@@ -961,12 +961,12 @@ impl<F: File> Segments<F> {
         framed.into_iter().filter(|number| self.unsynced_entries.contains(number)).collect()
     }
 
-    /// fxdax: the entries of `synced`, segments opened, are durable now.
+    /// cladefs: the entries of `synced`, segments opened, are durable now.
     pub fn entries_synced(&mut self, synced: &BTreeSet<SegmentId>) {
         self.unsynced_entries.retain(|number| !synced.contains(number));
     }
 
-    /// fxdax: where segment `number` is in its life, for why a commit's sealing copies the extents
+    /// cladefs: where segment `number` is in its life, for why a commit's sealing copies the extents
     /// in it ([`crate::seals`], TASK-92.41).
     pub fn stage(&self, number: SegmentId) -> crate::seals::Stage {
         use crate::seals::Stage;
@@ -978,12 +978,12 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: whether segment `number` is being framed.
+    /// cladefs: whether segment `number` is being framed.
     pub fn is_framing(&self, number: SegmentId) -> bool {
         matches!(self.tracked.get(&number), Some(Segment { phase: Phase::Framing { .. }, .. }))
     }
 
-    /// fxdax: why segment `number`'s framing failed, if it did.
+    /// cladefs: why segment `number`'s framing failed, if it did.
     pub fn framing_failure(&self, number: SegmentId) -> Option<&str> {
         match self.tracked.get(&number) {
             Some(Segment { phase: Phase::Failed { error, .. }, .. }) => Some(error),
@@ -991,12 +991,12 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: the segments whose framings are running.
+    /// cladefs: the segments whose framings are running.
     pub fn framings(&self) -> &BTreeSet<SegmentId> {
         &self.framing
     }
 
-    /// fxdax: the paths of the raw files, and logs, of the segments framed whose footers name no
+    /// cladefs: the paths of the raw files, and logs, of the segments framed whose footers name no
     /// commit past `durable`, the last durable, which may go: an opening reads their framed files
     /// (TASK-153.8, TASK-165.9).
     pub fn raw(&mut self, durable: u64) -> Vec<SegmentId> {
@@ -1007,7 +1007,7 @@ impl<F: File> Segments<F> {
         going.into_iter().map(|(_, number)| number).collect()
     }
 
-    /// fxdax: whether `segment` has its log still: open, being framed, or framed and its raw file
+    /// cladefs: whether `segment` has its log still: open, being framed, or framed and its raw file
     /// and log not gone yet, as its commits aren't durable.
     pub fn has_log(&self, segment: SegmentId) -> bool {
         let framed = self.raw.iter().any(|(_, number)| *number == segment);
@@ -1024,7 +1024,7 @@ impl<F: File> Segments<F> {
             )
     }
 
-    /// fxdax: what to prepare of the next segment's log, if anything: none if it is prepared, or
+    /// cladefs: what to prepare of the next segment's log, if anything: none if it is prepared, or
     /// being, that segment's; a spare to prepare it from, if any (TASK-333).
     pub fn to_prepare(&mut self) -> Option<Preparation> {
         let next = SegmentId { number: self.open.number + 1, ..self.open };
@@ -1039,7 +1039,7 @@ impl<F: File> Segments<F> {
         Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), sealer })
     }
 
-    /// fxdax: a preparation's log is made, as `prepared` says: if it is still the next segment's,
+    /// cladefs: a preparation's log is made, as `prepared` says: if it is still the next segment's,
     /// placed in `dir`, there under its name, beside the next segment's raw file, the spare raw
     /// file renamed, or a file made anew: changes to directories, which sync nothing, here,
     /// holding the state, so that no opening of the segment makes them meanwhile (TASK-384).
@@ -1068,11 +1068,11 @@ impl<F: File> Segments<F> {
                     }
                 }
             }
-            // fxdax: its log the next's, the preparation going on: the opening began none, this one
+            // cladefs: its log the next's, the preparation going on: the opening began none, this one
             // running, and ended here, it left the next segment nothing prepared until another
             // flush or closing, the last flush's having found it running (TASK-404).
             Ok(stale) => {
-                // fxdax: the next's raw file sealed under a salt of its own, drawn anew (TASK-411.5).
+                // cladefs: the next's raw file sealed under a salt of its own, drawn anew (TASK-411.5).
                 let (salt, sealer) =
                     (new_salt(self.lifetime, next), new_sealer(self.keys.sealing()));
                 let spare = Some(stale.spare);
@@ -1093,7 +1093,7 @@ impl<F: File> Segments<F> {
         Preparing::Ended(Some(spare))
     }
 
-    /// fxdax: places `prepared`, the next segment's log, prepared, there under its name in `dir`,
+    /// cladefs: places `prepared`, the next segment's log, prepared, there under its name in `dir`,
     /// beside the segment's raw file, made anew. Fails leaving the log a spare, under its spare's
     /// name, and no raw file of the segment's.
     fn place_prepared<D: Dir<File = F>>(
@@ -1114,7 +1114,7 @@ impl<F: File> Segments<F> {
         Ok(Placed { segment, raw, log: file, salt, sealer, synced: false })
     }
 
-    /// fxdax: the entries of segment `segment`, placed ([`Segments::prepared`]), were made durable,
+    /// cladefs: the entries of segment `segment`, placed ([`Segments::prepared`]), were made durable,
     /// or not, as `synced` says, which ends the preparation: the segment, opened meanwhile, needs
     /// no flush to sync them, nor, opening later, does it (TASK-384). Returns the next's
     /// preparation, if the segment opened meanwhile, the preparation going on with it: the opening
@@ -1132,22 +1132,22 @@ impl<F: File> Segments<F> {
         self.to_prepare()
     }
 
-    /// fxdax: the next segment, if its raw file and log are placed ahead of it (TASK-384).
+    /// cladefs: the next segment, if its raw file and log are placed ahead of it (TASK-384).
     pub fn placed(&self) -> Option<SegmentId> {
         self.prepared.as_ref().map(|placed| placed.segment)
     }
 
-    /// fxdax: whether the next segment's log is being prepared ([`Segments::to_prepare`]).
+    /// cladefs: whether the next segment's log is being prepared ([`Segments::to_prepare`]).
     pub fn preparing(&self) -> bool {
         self.preparing
     }
 
-    /// fxdax: whether the branch keeps another spare log ([`SPARES`]).
+    /// cladefs: whether the branch keeps another spare log ([`SPARES`]).
     pub fn wants_spare(&self) -> bool {
         self.spares.len() < SPARES
     }
 
-    /// fxdax: the log of `segment`, gone, is a spare now, at [`spare_path`].
+    /// cladefs: the log of `segment`, gone, is a spare now, at [`spare_path`].
     pub fn spare(&mut self, segment: SegmentId) {
         self.spares.push(segment);
     }
@@ -1181,7 +1181,7 @@ impl<F: File> Segments<F> {
     /// Adds to `syncs` what the next commit's flush syncs of the segments': the open segment's
     /// file, if it was written since the last commit, keeping its pages in the host's page cache,
     /// as they go with it once it is framed and removed (TASK-92.23); and if one closed since, the
-    /// directories of open segments and of their logs. fxdax: not that of framed ones, whose
+    /// directories of open segments and of their logs. cladefs: not that of framed ones, whose
     /// framings make their entries durable (`make_durable`): the commit needs none of them, and
     /// each directory's sync was a journal commit of the host's file system's and a flush of its
     /// disk's cache more for the commits' durability to wait for (TASK-310). Returns the segments
@@ -1199,7 +1199,7 @@ impl<F: File> Segments<F> {
         for raw in self.closed_unsynced.drain(..) {
             syncs.cached(raw);
         }
-        // fxdax: none if the segments opened since had theirs made durable as they were placed
+        // cladefs: none if the segments opened since had theirs made durable as they were placed
         // (TASK-384).
         if !std::mem::take(&mut self.closed_since) || self.unsynced_entries.is_empty() {
             return BTreeSet::new();
@@ -1240,7 +1240,7 @@ impl<F: File> Segments<F> {
         }
     }
 
-    /// fxdax: panics unless what it counts of the segments it tracks is what `recount` says they
+    /// cladefs: panics unless what it counts of the segments it tracks is what `recount` says they
     /// hold, as the branch holds them; and it tracks every segment the branch holds extents in
     /// (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
@@ -1258,7 +1258,7 @@ impl<F: File> Segments<F> {
     }
 }
 
-/// fxdax: what each segment holds, recounted from what the branch holds, for [`Segments::audit`]
+/// cladefs: what each segment holds, recounted from what the branch holds, for [`Segments::audit`]
 /// (TASK-160.16): the pieces of extents' data in it, of the extents the branch holds, open or
 /// sealed, and of those it keeps, freed; and the extents sealed in it.
 #[cfg(any(test, feature = "audit"))]
@@ -1293,7 +1293,7 @@ impl Recount {
     }
 }
 
-/// fxdax: a segment just closed, whose data is yet to be framed, with `footer`
+/// cladefs: a segment just closed, whose data is yet to be framed, with `footer`
 /// ([`Unframed::frame`]): off the commit that closed it, on a thread of its own, whose framing
 /// ends itself (TASK-153.8).
 pub(crate) struct Unframed<F> {
@@ -1301,10 +1301,10 @@ pub(crate) struct Unframed<F> {
     raw: Arc<RawFile<F>>,
     len: u64,
     pub footer: Footer,
-    /// fxdax: whether no write was in progress in it as it closed, none to come: what framing it
+    /// cladefs: whether no write was in progress in it as it closed, none to come: what framing it
     /// in place needs, which leaves its data where it is (TASK-310).
     quiet: bool,
-    /// fxdax: the store's keys, whose newest DEK of its branch it is sealed under, if any
+    /// cladefs: the store's keys, whose newest DEK of its branch it is sealed under, if any
     /// (TASK-411.3).
     keys: Arc<Ring>,
 }
@@ -1315,7 +1315,7 @@ impl<F: File> Unframed<F> {
         self.number
     }
 
-    /// fxdax: the bytes of its data, framed.
+    /// cladefs: the bytes of its data, framed.
     pub fn len(&self) -> u64 {
         self.len
     }
@@ -1323,7 +1323,7 @@ impl<F: File> Unframed<F> {
     /// Frames it in its framed file in `dir`, and returns that, written, not yet durable, under a
     /// name of its own until it is ([`framing_path`]): what [`make_durable`] makes durable, with
     /// its entry, together with others framed meanwhile, syncing nothing itself (TASK-310). Its raw
-    /// file may go once it is, and the commits its footer names are too. fxdax: the files of the
+    /// file may go once it is, and the commits its footer names are too. cladefs: the files of the
     /// extents stored on their own its footer names are durable first, so that a framed file a
     /// crash leaves whole names none torn (TASK-165.9). `ahead`, what looks ahead at its parts
     /// took, by part, as it filled ([`Segments::take_seen`], TASK-400).
@@ -1332,7 +1332,7 @@ impl<F: File> Unframed<F> {
         dir: &D,
         ahead: Vec<Option<Looked>>,
     ) -> Result<Arc<Framed<F>>, Error> {
-        // fxdax: timed, phase by phase (TASK-165.9), with its waits to run (TASK-336).
+        // cladefs: timed, phase by phase (TASK-165.9), with its waits to run (TASK-336).
         let mut timing = Timing::since(Instant::now());
         // The extents stored on their own it names, durable before it is, as a flush syncs them,
         // several at once: one at a time, each a journal commit of the host's file system's, they
@@ -1356,7 +1356,7 @@ impl<F: File> Unframed<F> {
     }
 }
 
-/// fxdax: makes `framed`, segments of `branch` framed since the last such call, whose framings
+/// cladefs: makes `framed`, segments of `branch` framed since the last such call, whose framings
 /// wrote them, the oldest written at `since`, durable together: each framed file synced, several
 /// at once, then renamed its segment's ([`framing_path`]), and the directory of framed files, their
 /// entries, synced once for them all (TASK-310); first, if `entries`, the directories of raw files
@@ -1390,7 +1390,7 @@ pub(crate) fn make_durable<D: Dir>(
         opened.sync_dirs(dir)?;
     }
     timing.took(durable::ENTRIES);
-    // fxdax: each written back a piece at a time, waiting for each, then synced: so that its
+    // cladefs: each written back a piece at a time, waiting for each, then synced: so that its
     // sync, and the syncs of the daemon's turns, which the host's journal makes wait for what was
     // begun before them, find little of it to write at once, as a framed segment's 32 MiB synced
     // at once kept them waiting up to a second (GCE r728, TASK-165.9). Its framing waited for
@@ -1416,7 +1416,7 @@ pub(crate) fn make_durable<D: Dir>(
     Ok(())
 }
 
-/// fxdax: writes `file`, a framed file, back to the host's disk a piece of [`WRITTEN_BACK`] bytes
+/// cladefs: writes `file`, a framed file, back to the host's disk a piece of [`WRITTEN_BACK`] bytes
 /// at a time, waiting for each ([`make_durable`]): what of it is written back already, an in-place
 /// framing's raw data, the guest's writes wrote back, it waits for no more.
 fn write_back_by_pieces<F: File>(file: &F) -> io::Result<()> {
@@ -1427,16 +1427,16 @@ fn write_back_by_pieces<F: File>(file: &F) -> io::Result<()> {
     Ok(())
 }
 
-/// fxdax: the bytes written to the open segment since the last commit from which the guest is
+/// cladefs: the bytes written to the open segment since the last commit from which the guest is
 /// filling it ([`Segments::filling`]): more than the flush of a daemon's turn writes at once
 /// ([`WRITTEN_BEHIND_MOST`]), a bulk write's, not a journal's or a database's between its commits.
 pub(crate) const FILLING: u64 = 8 << 20;
 
-/// fxdax: the bytes of the open segment's raw file whose writing back begins at once, written
+/// cladefs: the bytes of the open segment's raw file whose writing back begins at once, written
 /// ([`Segments::write_behind`], TASK-221).
 pub(crate) const WRITE_BEHIND: u64 = 1 << 20;
 
-/// fxdax: the most bytes of the open segment's raw file whose writing back began that its writes
+/// cladefs: the most bytes of the open segment's raw file whose writing back began that its writes
 /// go on past, not waiting for it ([`Segments::write_behind`]): what the sync of a daemon's turn
 /// writes of what its guest wrote, at most, but for the writes in progress then. A guest's burst
 /// outran the host's disk, up to 300 MB a second under pgbench against some 200, and its writing
@@ -1445,7 +1445,7 @@ pub(crate) const WRITE_BEHIND: u64 = 1 << 20;
 /// writes go on as fast as the disk takes them.
 pub(crate) const WRITTEN_BEHIND_MOST: u64 = 8 << 20;
 
-/// fxdax: what of the open segment's raw file to write back, a write to it done
+/// cladefs: what of the open segment's raw file to write back, a write to it done
 /// ([`Segments::write_behind`]): a range to begin writing back, and one to wait for, if any.
 pub(crate) struct Behind<F> {
     pub raw: Arc<F>,
@@ -1453,12 +1453,12 @@ pub(crate) struct Behind<F> {
     pub wait: Option<(u64, u64)>,
 }
 
-/// fxdax: the bytes of a framed file [`make_durable`] writes back at a time, waiting for each,
+/// cladefs: the bytes of a framed file [`make_durable`] writes back at a time, waiting for each,
 /// before it syncs it ([`File::write_back`]): what a sync behind it, a daemon's turn's, waits for at
 /// most, as the host's disk writes them.
 pub(crate) const WRITTEN_BACK: u64 = 1 << 20;
 
-/// fxdax: what a segment's looks ahead at its parts took as it filled, for its framing, which reads
+/// cladefs: what a segment's looks ahead at its parts took as it filled, for its framing, which reads
 /// them no more if it frames the segment in place, or holds them packed (TASK-400): of each part,
 /// the bytes of it written, each by a write ended or an append, and once all are, what a look at it
 /// took, if one did; and the look at all of those seen, which says whether the segment will be
@@ -1511,7 +1511,7 @@ impl Ahead {
     }
 }
 
-/// fxdax: frames the `len` bytes of a closed segment's data, which its raw file `raw`, at
+/// cladefs: frames the `len` bytes of a closed segment's data, which its raw file `raw`, at
 /// `raw_path`, holds, with `footer`, into the framed file at `path` in `dir`: counted in
 /// [`segment_closes`], and timed in `timing`, reading, compressing and writing (TASK-336); and
 /// returns how ([`How`]). In place, if `quiet`, no write in progress in it, and compressing its
@@ -1522,7 +1522,7 @@ impl Ahead {
 /// back as the guest wrote it, and framed: as much again as its guest wrote, the disk's other
 /// writers waiting behind it, on a disk VMs share. Or else in a file of its own, as before. Its
 /// parts looked at `ahead`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a
-/// copy, and not those packed then, held still (TASK-400). fxdax: sealed, if `sealing` gives a
+/// copy, and not those packed then, held still (TASK-400). cladefs: sealed, if `sealing` gives a
 /// DEK, its branch's newest: in a copy, its parts compressed and sealed with AES-GCM (TASK-411.3);
 /// in place as in the clear, its raw file, sealed, AES-256-XTS by sector, the object of its
 /// sectors as they are, each part tagged ([`extent_frame::Seal::Sectors`], TASK-411.23). Framed in
@@ -1538,13 +1538,13 @@ fn frame_segment<D: Dir>(
     timing: &mut Timing<4>,
 ) -> Result<(Arc<Framed<D::File>>, How), Error> {
     let started = Instant::now();
-    // fxdax: its parts read, each in a buffer kept for the framings after; checksummed and looked
+    // cladefs: its parts read, each in a buffer kept for the framings after; checksummed and looked
     // at if it may be framed in place (TASK-336), but for those seen ahead, and those packed then
     // (TASK-400).
-    // fxdax: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
+    // cladefs: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
     // data (TASK-411.2, TASK-411.3).
     let mut packer = extent_frame::Packer::new(sealing);
-    // fxdax: in place, its raw file sealed as its object would be in a copy: in the clear, or
+    // cladefs: in place, its raw file sealed as its object would be in a copy: in the clear, or
     // sealed, whole sectors (TASK-411.23).
     let sectors = raw.sectors();
     let in_place_maybe = quiet
@@ -1552,7 +1552,7 @@ fn frame_segment<D: Dir>(
         && sectors.is_some() == packer.key().is_some()
         && (sectors.is_none() || len.is_multiple_of(SECTOR));
     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
-    // fxdax: in place at once if a look at its parts says compressing them saves too little,
+    // cladefs: in place at once if a look at its parts says compressing them saves too little,
     // compressing no more of them: compressing every part to tell was most of what framings took
     // with eight VMs framing at once, up to 0.9 s each; else by them all (TASK-310). The parts
     // packed ahead, held, held no more either way.
@@ -1605,7 +1605,7 @@ fn frame_segment<D: Dir>(
             // framing ends, which its store says ([`Store::framing`](crate::Store::framing),
             // TASK-189).
             fail::fail_point!("segments::framing");
-            // fxdax: written, its writing back left to the making durable after, which writes
+            // cladefs: written, its writing back left to the making durable after, which writes
             // it back a piece at a time before it syncs it ([`make_durable`], TASK-401).
             write_framed(&file, &packed, 0)?;
             write_framed(&file, &tail, end)?;
@@ -1619,7 +1619,7 @@ fn frame_segment<D: Dir>(
     Ok((Arc::new(framed), how))
 }
 
-/// fxdax: how a segment was framed, as its framing's warning says it (TASK-400): in place or in a
+/// cladefs: how a segment was framed, as its framing's warning says it (TASK-400): in place or in a
 /// copy, of how many bytes of data, and how many of them it read, those a look ahead saw not; and
 /// how many it took packed ahead, held.
 pub(crate) struct How {
@@ -1638,7 +1638,7 @@ impl std::fmt::Display for How {
     }
 }
 
-/// fxdax: writes `bytes` at `offset` in `file`, a segment's framed file, or its tail: counted, as
+/// cladefs: writes `bytes` at `offset` in `file`, a segment's framed file, or its tail: counted, as
 /// framed ([`crate::written`]).
 fn write_framed<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> {
     file.write_at(bytes, offset)?;
@@ -1646,7 +1646,7 @@ fn write_framed<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> 
     Ok(())
 }
 
-/// fxdax: frames a segment's data, `raw`, its raw file at `raw_path`, its parts stored raw, in
+/// cladefs: frames a segment's data, `raw`, its raw file at `raw_path`, its parts stored raw, in
 /// place ([`frame_segment`]), the file as it stores them, sealed or not: `tail` appended at `end`,
 /// the end of its data, in the clear as any object's tail is (TASK-411.23), which the making
 /// durable after writes back (TASK-401: written back here, a tail of a few KiB waited 1.5 s
@@ -1679,7 +1679,7 @@ fn frame_in_place<D: Dir>(
 /// extents a commit held, which the store spent, if its own: so that the footer's readers spend
 /// all it frees, as the store did (TASK-160.15). Those of extents written in it, open, it frees
 /// not: no commit held them, nor names them, and the store writes them again. Those held
-/// elsewhere, in the bucket, it names not. The rest of its contents are its caller's. fxdax: and
+/// elsewhere, in the bucket, it names not. The rest of its contents are its caller's. cladefs: and
 /// apart, by their segments, the runs of those it sealed in one run of a segment of `full`, filled
 /// since the last commit, which it goes on with past them (TASK-92.41).
 fn commit_contents(
@@ -1733,19 +1733,19 @@ fn commit_contents(
     Ok((contents, continued))
 }
 
-/// fxdax: a run of a segment's data an extent is sealed in: the extent, the run's offset and its
+/// cladefs: a run of a segment's data an extent is sealed in: the extent, the run's offset and its
 /// length, as footers name them.
 type Run = (ExtentId, u64, u64);
 
 /// What the commits since a segment opened made, as its footer says: their contents
 /// ([`commit_contents`]) folded, each over those before, so that applying it to the branch's state
-/// as of any of those commits gives its state as of the last. fxdax: one fold, of the commits as
+/// as of any of those commits gives its state as of the last. cladefs: one fold, of the commits as
 /// they are made and of the records of a segment's log of them alike (TASK-165.9).
 #[derive(Default)]
 struct Window {
     /// Its first commit's epoch.
     first: u64,
-    /// fxdax: its last commit's, if it has one: the commit its footer names (TASK-92.41).
+    /// cladefs: its last commit's, if it has one: the commit its footer names (TASK-92.41).
     last: Option<u64>,
     /// The branch whose extents are stored on their own.
     branch: u64,
@@ -1759,7 +1759,7 @@ struct Window {
     root: Option<Vec<u8>>,
     capacity: Option<u64>,
     forks: Vec<Child>,
-    /// fxdax: the runs of the commit its segment's footer goes on with, which the segments after
+    /// cladefs: the runs of the commit its segment's footer goes on with, which the segments after
     /// it end, if any: the last thing it folds (TASK-92.41).
     continued: Option<Continued>,
 }
@@ -1826,7 +1826,7 @@ impl Window {
     }
 }
 
-/// fxdax: the contents of a segment of `branch`'s whose commits' contents are `commits`, in order,
+/// cladefs: the contents of a segment of `branch`'s whose commits' contents are `commits`, in order,
 /// as its footer names them: their last commit, and the largest next sequence number they name
 /// (TASK-165.9). The one fold of a segment's commits ([`Window`]), of a log of them as of the
 /// commits as they are made.
@@ -1835,7 +1835,7 @@ pub(crate) fn fold(branch: u64, commits: &[Contents]) -> Contents {
     for commit in commits {
         window.fold(commit);
     }
-    // fxdax: the last a commit's record names: a segment's last record may go on with a commit,
+    // cladefs: the last a commit's record names: a segment's last record may go on with a commit,
     // naming none (TASK-92.41).
     let last = commits.iter().rev().find(|commit| !commit.commits.is_empty());
     let last = last.map_or(Vec::new(), |last| last.commits.clone());
@@ -1843,7 +1843,7 @@ pub(crate) fn fold(branch: u64, commits: &[Contents]) -> Contents {
     window.contents(last, next_sequence)
 }
 
-/// fxdax: a segment's log made ahead of the segment, off the store's state lock: a spare log,
+/// cladefs: a segment's log made ahead of the segment, off the store's state lock: a spare log,
 /// `spare`'s by its name, or a file made anew under `spare`'s name, its header `segment`'s, its
 /// records salted `salt`, synced ([`Preparation::prepare`], TASK-333). Placed, if the segment is
 /// still the next, renamed its log, beside its raw file ([`Segments::prepared`]).
@@ -1855,7 +1855,7 @@ pub(crate) struct Prepared<F> {
     sealer: Option<Arc<Sealer>>,
 }
 
-/// fxdax: the next segment's raw file and log, made ahead of it, there under their names, which
+/// cladefs: the next segment's raw file and log, made ahead of it, there under their names, which
 /// its opening takes, changing no directory ([`create_open`]); their entries made durable off the
 /// store's state lock, `synced` once they are, as no commit then waits for (TASK-384). An opening
 /// that renamed them, or made them, there, left their entries to the commits' next flush to sync,
@@ -1869,7 +1869,7 @@ pub(crate) struct Placed<F> {
     synced: bool,
 }
 
-/// fxdax: what of a preparation is left once its log is made ([`Segments::prepared`]).
+/// cladefs: what of a preparation is left once its log is made ([`Segments::prepared`]).
 pub(crate) enum Preparing {
     /// The segment's raw file and log placed, their entries to make durable, the preparation
     /// running until then ([`Segments::placed_synced`]).
@@ -1881,13 +1881,13 @@ pub(crate) enum Preparing {
     Ended(Option<SegmentId>),
 }
 
-/// fxdax: the bit set in the number naming a log a preparation made anew ([`Preparation::prepare`]),
+/// cladefs: the bit set in the number naming a log a preparation made anew ([`Preparation::prepare`]),
 /// past every segment's number.
 const MADE: u64 = 1 << 63;
 
-/// fxdax: what to prepare of segment `segment`'s log ([`Segments::to_prepare`]): from `spare`'s
+/// cladefs: what to prepare of segment `segment`'s log ([`Segments::to_prepare`]): from `spare`'s
 /// spare log, if any, else a file made anew under a spare's name of its own ([`MADE`]), salted
-/// `salt`; fxdax: sealed by `sealer`, with its raw file, if the store is sealed (TASK-411.5).
+/// `salt`; cladefs: sealed by `sealer`, with its raw file, if the store is sealed (TASK-411.5).
 pub(crate) struct Preparation {
     segment: SegmentId,
     spare: Option<SegmentId>,
@@ -1926,7 +1926,7 @@ impl Preparation {
     }
 }
 
-/// fxdax: writes the header of `segment`'s log, its records salted `salt`, to `log`, and syncs it
+/// cladefs: writes the header of `segment`'s log, its records salted `salt`, to `log`, and syncs it
 /// (`wal::log_header`); a sealed log's, if `sealer` seals it.
 fn write_header<F: File>(
     log: &F,
@@ -1940,7 +1940,7 @@ fn write_header<F: File>(
     log.sync_cached()
 }
 
-/// fxdax: the phase of a new open segment, `segment`, whose raw file and log it makes in `dir`,
+/// cladefs: the phase of a new open segment, `segment`, whose raw file and log it makes in `dir`,
 /// and whether their entries are durable: the raw file and log placed for it, if any, its log's
 /// header durable, their entries too once their preparation synced them (TASK-333, TASK-384);
 /// else a raw file made anew, and its log a spare, or a file made anew, its header written and
@@ -1957,11 +1957,11 @@ fn create_open<D: Dir>(
         let log = Log { file: Arc::new(ready.log), salt, sealer: ready.sealer };
         return Ok((Phase::Open { raw, log }, ready.synced));
     }
-    // fxdax: sealed if the store is, under its branch's newest DEK (TASK-411.5).
+    // cladefs: sealed if the store is, under its branch's newest DEK (TASK-411.5).
     let sealer = new_sealer(sealing);
     let raw =
         Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, sealer.clone()));
-    // fxdax: its log a spare, if there is one, its header written over the one there (TASK-301):
+    // cladefs: its log a spare, if there is one, its header written over the one there (TASK-301):
     // durable before any record is appended, and before the spare is renamed its log: renamed
     // first, a crash, or a failure, before the header was durable left the spare's header, and the
     // records it salts, its last segment's, under this segment's name, which an opening took for
@@ -1988,13 +1988,13 @@ fn create_open<D: Dir>(
     Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, sealer } }, false))
 }
 
-/// fxdax: the sealer of a new segment's raw file and log, if `sealing` gives a DEK, its branch's
+/// cladefs: the sealer of a new segment's raw file and log, if `sealing` gives a DEK, its branch's
 /// newest, which they are sealed under then, from a salt of their own (TASK-411.5).
 fn new_sealer(sealing: Option<(&Secret, KeyId)>) -> Option<Arc<Sealer>> {
     sealing.map(|(dek, key)| Arc::new(Sealer::new(dek, key)))
 }
 
-/// The store's epoch of the last commit of the segment whose footer is `footer`. fxdax: the one it
+/// The store's epoch of the last commit of the segment whose footer is `footer`. cladefs: the one it
 /// goes on with, if any, past those it ends, its data that commit's too: it uploads once that
 /// commit is durable, and is acknowledged once it is (TASK-92.41).
 pub(crate) fn footer_last(footer: &Footer) -> u64 {
@@ -2012,15 +2012,15 @@ pub(crate) fn segment_footer(bytes: &[u8]) -> Result<Option<Footer>, Error> {
     Ok(Some(Footer::decode(bytes).context("a segment's footer")?))
 }
 
-/// fxdax: the segments this process's stores closed, and the nanoseconds closing them took.
+/// cladefs: the segments this process's stores closed, and the nanoseconds closing them took.
 static SEGMENT_CLOSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static SEGMENT_CLOSE_NS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// fxdax: of those, the segments framed in place ([`frame_in_place`], TASK-310).
+/// cladefs: of those, the segments framed in place ([`frame_in_place`], TASK-310).
 static IN_PLACE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-/// fxdax: the bytes of segments' data their framings read (TASK-400).
+/// cladefs: the bytes of segments' data their framings read (TASK-400).
 static FRAMING_READ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// fxdax: the bytes of segments' data this process's stores' framings read since it started, and
+/// cladefs: the bytes of segments' data this process's stores' framings read since it started, and
 /// the bytes looks ahead at their parts read as they filled, which framings in place read no more
 /// (TASK-400).
 pub fn framing_reads() -> (u64, u64) {
@@ -2028,23 +2028,23 @@ pub fn framing_reads() -> (u64, u64) {
     (read, framing::seen_ahead())
 }
 
-/// fxdax: how many segments this process's stores framed in place since it started, none of their
+/// cladefs: how many segments this process's stores framed in place since it started, none of their
 /// parts compressing, their data written once (TASK-310).
 pub fn segments_framed_in_place() -> u64 {
     IN_PLACE.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// fxdax: the commits this process's stores made that spanned segments, closing segments filled
+/// cladefs: the commits this process's stores made that spanned segments, closing segments filled
 /// since the commit before ([`Segments::close_full`], TASK-92.41).
 static SPANNING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// fxdax: how many commits this process's stores made since it started that spanned segments
+/// cladefs: how many commits this process's stores made since it started that spanned segments
 /// (TASK-92.41): what tests of random workloads count, to see that they make such commits.
 pub fn commits_spanning_segments() -> u64 {
     SPANNING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// fxdax: how many segments this process's stores closed since it started, and the nanoseconds
+/// cladefs: how many segments this process's stores closed since it started, and the nanoseconds
 /// framing them took: their data read, framed and written, off the commits that closed them, and
 /// off the store's locks for those closed between commits
 /// ([`Store::close_now`](crate::Store::close_now)'s).
@@ -2175,7 +2175,7 @@ mod tests {
         drop(unframed);
     }
 
-    /// fxdax: the open segment takes whole sectors only: what is not is refused, the segment
+    /// cladefs: the open segment takes whole sectors only: what is not is refused, the segment
     /// unchanged, the next write going where it would have (TASK-411.8).
     #[test]
     fn open_segments_take_whole_sectors() {
@@ -2190,7 +2190,7 @@ mod tests {
         assert_eq!(segments.reserve(SECTOR).unwrap().2, 2 * SECTOR);
     }
 
-    /// fxdax: TASK-400: a segment's parts packed ahead are held while the parts seen say it will be
+    /// cladefs: TASK-400: a segment's parts packed ahead are held while the parts seen say it will be
     /// framed in a copy, and let go of all at once when they say it will be framed in place: a part
     /// of text held, then, noise outweighing it, none, nor any after; its framing takes no hold.
     #[test]
@@ -2226,7 +2226,7 @@ mod tests {
         assert!(ahead.iter().flatten().all(|looked| looked.held.is_none()));
     }
 
-    /// fxdax: TASK-400: each part of a segment is looked at ahead once its last write ended, the
+    /// cladefs: TASK-400: each part of a segment is looked at ahead once its last write ended, the
     /// writes to it ending in any order, or appended; its framing takes what was seen, after which
     /// nothing is, and frames it in place reading only the parts not seen, its last, part written,
     /// its data the same as framed from its raw file alone. Before, a framing read its whole raw
@@ -2322,7 +2322,7 @@ mod tests {
             .collect()
     }
 
-    /// fxdax: TASK-400 in a sealed store (TASK-411.23, TASK-421): a sealed segment's parts that
+    /// cladefs: TASK-400 in a sealed store (TASK-411.23, TASK-421): a sealed segment's parts that
     /// compress, written whole or appended, are looked at ahead, packed and held, in the clear, in
     /// memory; its framing in a copy reads none of them back, and seals them under its object's
     /// key, the bytes it framed opening to its data under the branch's key. No file holds its
@@ -2366,7 +2366,7 @@ mod tests {
         assert_eq!(in_the_clear(&dir, &text), Vec::<String>::new());
     }
 
-    /// fxdax: TASK-411.23: a sealed segment of noise is framed in place as a clear one is (TASK-310,
+    /// cladefs: TASK-411.23: a sealed segment of noise is framed in place as a clear one is (TASK-310,
     /// TASK-400): its parts seen ahead as stored, the last alone read, its raw file its framed file,
     /// nothing of its data written again but its tail; the object of its raw file's XTS sectors,
     /// under the raw file's DEK and salt, which opens to its data under the branch's key, to none
@@ -2480,7 +2480,7 @@ mod tests {
         assert!(segments.tracked.contains_key(&segments.open_segment()));
     }
 
-    /// fxdax: a segment filled between commits takes no more writes, which go to the next, reads
+    /// cladefs: a segment filled between commits takes no more writes, which go to the next, reads
     /// from its raw file, and is never reaped while it waits; the next commit seals in place what is
     /// one run in it, and closes it, its footer naming those runs as the commit's, which the open
     /// segment ends, after the commits made in it before it filled; its raw file synced by the
@@ -2548,7 +2548,7 @@ mod tests {
         assert_eq!(data(&mut segments, &dir, segment(0))[BLOCK as usize], 2);
     }
 
-    /// fxdax: the next segment's log prepared off the state lock, a filling opens the next with
+    /// cladefs: the next segment's log prepared off the state lock, a filling opens the next with
     /// it, syncing nothing; one prepared for a segment opened meanwhile, the opening having made
     /// its own, goes on as the next's, as does one whose segment opened before its entries were
     /// durable, no opening beginning another while it runs (TASK-404); and every log's header is
@@ -2616,7 +2616,7 @@ mod tests {
         assert_eq!(segments.placed(), Some(segment(5)));
     }
 
-    /// fxdax: a segment opened has its entries unsynced until a sync that began after it opened
+    /// cladefs: a segment opened has its entries unsynced until a sync that began after it opened
     /// syncs them, a commit's flush's after it opened, or a making of it durable; one opened since
     /// stays so; and a making of segments durable syncs those of theirs alone (TASK-310,
     /// TASK-369).
@@ -2645,7 +2645,7 @@ mod tests {
 
     /// A commit syncs the open segment's file if it was written since the last commit, keeping
     /// its pages cached (TASK-92.23), and the directories of open segments and of logs if one
-    /// closed, but not of framed ones, which framings sync (TASK-310); fxdax: and the raw file of
+    /// closed, but not of framed ones, which framings sync (TASK-310); cladefs: and the raw file of
     /// one closed, if written since, which its commits' records name the data of (TASK-165.9).
     #[test]
     fn only_written_open_segments_are_synced() {

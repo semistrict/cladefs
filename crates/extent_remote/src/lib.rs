@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
+//! cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
 //!
 //! A branch is a VM's filesystem: extents its guest wrote, in segments whose footers say what
 //! each commit did, with checkpoints of its index. A writer holds the branch's lease; its segments,
@@ -13,12 +13,12 @@
 //! collector, alone, deletes: what no live branch can reach, and objects it compacts.
 //!
 //! The object store is anything with conditional writes ([`Bucket`]): S3 and GCS through the
-//! `object_store` crate ([`store::Store`]) over fxdax's HTTP client ([`client`]), a directory of
+//! `object_store` crate ([`store::Store`]) over cladefs's HTTP client ([`client`]), a directory of
 //! the host's ([`local`]), and in tests a simulation that delays, reorders and fails requests.
 
-/// fxdax: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
+/// cladefs: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
-/// to do happens. Nothing without the crate's `failpoints` feature, which `fxdax/failpoints` turns
+/// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
 /// on.
 macro_rules! failpoint {
     ($name:literal) => {
@@ -26,19 +26,19 @@ macro_rules! failpoint {
     };
 }
 
-// fxdax: tests' features, which a measurement must not have: the fail crate's failpoints, whoever
-// turned them on (`fxdax/failpoints`, or a dev-dependency's), each `fail_point!` of this crate's,
-// extent_store's and fxdax's then looking its name up in the fail crate's registry, under its lock;
+// cladefs: tests' features, which a measurement must not have: the fail crate's failpoints, whoever
+// turned them on (`cladefs/failpoints`, or a dev-dependency's), each `fail_point!` of this crate's,
+// extent_store's and cladefs's then looking its name up in the fail crate's registry, under its lock;
 // and this crate's `testing`, whose protocol rules are a thread's, looked up at each step. A build
 // without debug assertions is the release profile's, which measurements are made with; tests'
 // are not (the dev and sim profiles have them). Here, as this is the lowest of the crates with
 // failpoints, which every other with them depends on. A package's examples build with its
-// dev-dependencies, and fxdax's own turn its failpoints on: fxdax's examples were measured with
-// them, until they were fxdax-examples' (TASK-320; extent_store's audit is TASK-303).
+// dev-dependencies, and cladefs's own turn its failpoints on: cladefs's examples were measured with
+// them, until they were cladefs-examples' (TASK-320; extent_store's audit is TASK-303).
 const _: () = assert!(
     cfg!(debug_assertions) || !fail::has_failpoints(),
-    "the fail crate's failpoints in a release build, which measures with them: build fxdax's \
-     examples as fxdax-examples' (`-p fxdax-examples`), a package alone (`-p PACKAGE`), not across \
+    "the fail crate's failpoints in a release build, which measures with them: build cladefs's \
+     examples as cladefs-examples' (`-p cladefs-examples`), a package alone (`-p PACKAGE`), not across \
      the workspace, and a daemon with failpoints in the sim profile (`--profile sim`) (TASK-320)"
 );
 #[cfg(all(feature = "testing", not(debug_assertions)))]
@@ -124,21 +124,21 @@ pub enum Error {
     Lost(String),
     #[error("corrupt: {0}")]
     Corrupt(String),
-    /// fxdax: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
+    /// cladefs: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
     /// unwrapped by none, or revoked; or the collector's marking, which reads none of the data of
     /// objects sealed, its compaction reading them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
-    /// fxdax: an object in the clear, of a branch whose record has a DEK, its objects sealed: a
+    /// cladefs: an object in the clear, of a branch whose record has a DEK, its objects sealed: a
     /// downgrade, its seal, MACs and tags zeroed by one who can write the bucket, or another's
     /// object put there (TASK-411.3). It names the object.
     #[error("{0}: in the clear, of a branch whose objects are sealed")]
     Downgrade(String),
-    /// fxdax: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
+    /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
-    /// fxdax: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
+    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
     /// record holds not `from`'s keys (TASK-411.4): it was given its own without them, or its cell
     /// is in the clear, which keeps no key, as no sealed data goes into the clear. A fork so is
     /// refused before anything of it is made (`keys::inheriting`).
@@ -160,37 +160,37 @@ pub enum Error {
     /// Another writer's commits moved the branch on from the host's write-ahead log's: the branch's
     /// last commit is neither one of the log's nor the one the log started from. Its commits were
     /// never acknowledged, and no writer puts them after another's: the store opens only once
-    /// `fxdaxctl take` drops the log (doc-14, Opening a store).
+    /// `cladefsctl take` drops the log (doc-14, Opening a store).
     #[error("another writer's commits moved the branch on from the write-ahead log's")]
     Diverged,
-    /// fxdax: the cell has no object: no such cell (TASK-364).
+    /// cladefs: the cell has no object: no such cell (TASK-364).
     #[error("no such cell")]
     NoCell,
-    /// fxdax: the cell has a volume of that name already.
+    /// cladefs: the cell has a volume of that name already.
     #[error("the cell has a volume {0} already")]
     VolumeExists(String),
-    /// fxdax: no volume may have that name ([`cell::valid_name`]).
+    /// cladefs: no volume may have that name ([`cell::valid_name`]).
     #[error(
         "{0:?} names no volume: 1 to 64 letters, digits, '.', '_' or '-', not starting with '.'"
     )]
     VolumeName(String),
-    /// fxdax: the cell has no volume of that name.
+    /// cladefs: the cell has no volume of that name.
     #[error("the cell has no volume {0}")]
     NoVolume(String),
-    /// fxdax: a fork of the point to a branch of another tenant's cell than the point's, which the
+    /// cladefs: a fork of the point to a branch of another tenant's cell than the point's, which the
     /// point's record doesn't say is shared ([`record::Record::shared`], TASK-395.7).
     #[error("branch {0} is a point of another tenant's, not shared")]
     NotShared(layout::Branch),
-    /// fxdax: what only a point is, shared, asked of a branch that is none ([`branch::share`]).
+    /// cladefs: what only a point is, shared, asked of a branch that is none ([`branch::share`]).
     #[error("branch {0} is no point")]
     NotPoint(layout::Branch),
-    /// fxdax: a pass of the collector over a cell left it to another pass, as the cell's lease
+    /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
     /// said ([`passed::GcLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]
     Left(Left),
 }
 
-/// fxdax: why a pass of the collector left its cell to another ([`Error::Left`]).
+/// cladefs: why a pass of the collector left its cell to another ([`Error::Left`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Left {
     /// Another pass holds the cell's lease, unexpired.
@@ -218,7 +218,7 @@ impl From<extent_frame::Error> for Error {
 }
 
 impl Error {
-    /// fxdax: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
+    /// cladefs: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
     pub fn reading(self, key: &str) -> Self {
         match self {
             Self::Downgrade(_) => Self::Downgrade(key.to_owned()),
@@ -346,7 +346,7 @@ pub struct Rules {
     /// what the log holds, and it diverged (doc-14, Opening a store).
     /// TLA+: `specs/bucket/mutations/NoWalFollows.cfg`.
     pub wal_follows: bool,
-    /// fxdax: a fork of a branch to a child in another cell, a writable fork or a point's clone,
+    /// cladefs: a fork of a branch to a child in another cell, a writable fork or a point's clone,
     /// has a reference under the parent's cell ([`layout::reference`]), for which that cell's passes
     /// keep the parent's state at the fork point: a pass lists nothing of the child's cell, and,
     /// the parent deleted, would delete what the child inherits (TASK-395.3).

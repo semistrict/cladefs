@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: whether a run's stores are sealed (TASK-411.15, doc-16), as the guest tests run
+//! cladefs: whether a run's stores are sealed (TASK-411.15, doc-16), as the guest tests run
 //! encrypted only: scripts/test-e2e.sh gives every process of the run a KMS holding a KEK for every
-//! tenant the cases use (`FXDAX_KMS`, `FXDAX_E2E_SEALED`), and this checks, holding no key, what
+//! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_SEALED`), and this checks, holding no key, what
 //! their stores left:
 //!
 //! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a branch
@@ -18,7 +18,7 @@
 //!   into their guests' filesystems.
 //!
 //! The runner checks each case's directory once it passes (`runner test`, with
-//! `FXDAX_E2E_SEALED`), and test-e2e.sh the run's own bucket and part cache at its end
+//! `CLADEFS_E2E_SEALED`), and test-e2e.sh the run's own bucket and part cache at its end
 //! (`runner sealed`).
 
 use anyhow::Context as _;
@@ -30,14 +30,14 @@ use std::path::{Path, PathBuf};
 
 /// The variable scripts/test-e2e.sh sets when the run's stores are to be sealed, which the runner
 /// checks each case's are.
-pub const SEALED: &str = "FXDAX_E2E_SEALED";
+pub const SEALED: &str = "CLADEFS_E2E_SEALED";
 
 /// The tenants a run's KMS holds a KEK for ([`kms`]): the default tenant, 0, whose stores are the
-/// daemon's own socket's and those the cases make in processes of their own (fxdax's `Storage`,
-/// fxdaxctl's `create`), and granted ones, of IDs up to 15 (fxfs-guest-migrate-tenant-dax's 1-4).
+/// daemon's own socket's and those the cases make in processes of their own (cladefs's `Storage`,
+/// cladefsctl's `create`), and granted ones, of IDs up to 15 (fxfs-guest-migrate-tenant-dax's 1-4).
 pub const TENANTS: std::ops::RangeInclusive<u64> = 0..=15;
 
-/// Makes a local KMS in `dir` (`FXDAX_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK for
+/// Makes a local KMS in `dir` (`CLADEFS_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK for
 /// each of [`TENANTS`]: those it holds already are kept.
 pub fn kms(dir: &Path) -> anyhow::Result<()> {
     let kms = extent_keys::kms::LocalKms::open(dir).with_context(|| dir.display().to_string())?;

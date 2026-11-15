@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: why a commit's sealing copies the extents it copies, a debug stat (TASK-92.41): with
-//! FXDAX_SEAL_STATS set in its environment, each commit that copies anything says, by why, how
+//! cladefs: why a commit's sealing copies the extents it copies, a debug stat (TASK-92.41): with
+//! CLADEFS_SEAL_STATS set in its environment, each commit that copies anything says, by why, how
 //! many extents it copied and how many bytes, logged; otherwise nothing is counted. A commit seals
 //! each extent open in one run in the open segment, or one filled since the last commit, or a file
 //! of its own; one whose data is not one run there already, it copies whole (see `Store::seal`),
@@ -135,10 +135,10 @@ impl Why {
     }
 }
 
-/// Whether FXDAX_SEAL_STATS is set: read once.
+/// Whether CLADEFS_SEAL_STATS is set: read once.
 pub(crate) fn enabled() -> bool {
     static ENABLED: std::sync::LazyLock<bool> =
-        std::sync::LazyLock::new(|| std::env::var_os("FXDAX_SEAL_STATS").is_some());
+        std::sync::LazyLock::new(|| std::env::var_os("CLADEFS_SEAL_STATS").is_some());
     *ENABLED
 }
 

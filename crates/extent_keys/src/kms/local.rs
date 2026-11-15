@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: [`LocalKms`], a KMS on the host's filesystem, a fake for tests and development
+//! cladefs's own: [`LocalKms`], a KMS on the host's filesystem, a fake for tests and development
 //! (TASK-411.1), with what a real KMS does out of band too: creating, rotating, revoking and
 //! destroying tenants' KEKs.
 
@@ -46,7 +46,7 @@ const HEADER_LEN: usize = MAGIC.len() + 1 + 8 + 4;
 pub const LOCAL_WRAPPED_LEN: usize = HEADER_LEN + WRAPPED_LEN;
 
 /// What HKDF derives a KEK version's wrapping key with, before the header.
-const WRAP_INFO: &[u8] = b"fxdax local kms wrap";
+const WRAP_INFO: &[u8] = b"cladefs local kms wrap";
 
 /// The suffix of a KEK version's file, after its version in decimal.
 const KEK_SUFFIX: &str = ".kek";

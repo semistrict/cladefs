@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Tracepoints: each an empty function, and off, so that the kernel's own trace headers compile, and
  * fs/fxfs's (fxfs_trace.h).

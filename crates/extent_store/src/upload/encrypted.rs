@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: stores of sealed cells, opened as a host opens them (TASK-411.3, doc-16): their cell's
+//! cladefs: stores of sealed cells, opened as a host opens them (TASK-411.3, doc-16): their cell's
 //! KEK and their DEKs kept wrapped, unwrapped once a taking of the cell; their objects sealed, and
 //! refused in the clear, or copied to another's key; a host's fetchers reading them under the keys
 //! of the stores it serves.
@@ -1704,7 +1704,7 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
 }
 
 /// A host of placement `token` as [`World::host`] makes one, but its KMS the one `url` names, as
-/// `FXDAX_KMS` names a host's: made anew, as another process's would be.
+/// `CLADEFS_KMS` names a host's: made anew, as another process's would be.
 fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
     host_over(world, extent_keys::kms::from_url(url).unwrap(), token)
 }
@@ -1723,7 +1723,7 @@ fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
 
 /// TASK-411.27 AC #5: a sealed store end to end through the bucket KMS on two hosts, each with a
 /// bucket KMS of its own over the world's bucket, given the one master key, as two processes
-/// with `FXDAX_MASTER_KEY` and no `FXDAX_KMS` have. The first host's opening makes the tenant's KEK
+/// with `CLADEFS_MASTER_KEY` and no `CLADEFS_KMS` have. The first host's opening makes the tenant's KEK
 /// (`tenants/<tenant>/kek`, the tenant given nothing before) and the cell sealed under it, its
 /// segments sealed; the second takes the cell, its KEK unwrapped by its own bucket KMS from the
 /// object, and reads what the first wrote. No object holds the master key, the cell's KEK or the
@@ -1807,7 +1807,7 @@ fn sealed_stores_open_through_the_bucket_kms_on_two_hosts() {
 }
 
 /// TASK-411.17 AC #4: a store of a sealed cell opened end to end through AWS KMS, as
-/// `FXDAX_KMS=aws-kms://REGION?key=alias/fxdax-tenant-{tenant}&endpoint=...` names it, over
+/// `CLADEFS_KMS=aws-kms://REGION?key=alias/cladefs-tenant-{tenant}&endpoint=...` names it, over
 /// local-kms, its emulator (scripts/test-local-kms.sh): the cell's KEK wrapped under the tenant's
 /// KMS key, its header naming the backend and the key; its segments sealed; another host taking
 /// the cell unwraps it there and reads; the key disabled, no host opens it (revoked) until it is
@@ -1818,8 +1818,8 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
     let world = World::new();
     let emulator = extent_keys::testing::LocalAwsKms::start();
     let key_id = emulator.create_key();
-    emulator.create_alias("alias/fxdax-tenant-1", &key_id);
-    let url = emulator.url("alias/fxdax-tenant-{tenant}");
+    emulator.create_alias("alias/cladefs-tenant-1", &key_id);
+    let url = emulator.url("alias/cladefs-tenant-{tenant}");
     let branch = test_branch(7);
     let extent = ExtentId::new(branch.id, 1);
     let dir = made(branch, "a");
@@ -1832,7 +1832,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
 
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    assert_eq!(&kek.wrapped.0[..27], b"fxka\x01\x00\x14alias/fxdax-tenant-1");
+    assert_eq!(&kek.wrapped.0[..27], b"fxka\x01\x00\x14alias/cladefs-tenant-1");
     // Every segment of the branch sealed, whatever its number and its writer's epoch (TASK-407).
     let objects = world.objects();
     let segments: Vec<_> =
@@ -1877,7 +1877,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
 /// engine, a real KMS (`bao server -dev`; the test is skipped, saying so, without `bao`), as
 /// through [`LocalKms`]: the cell's KEK wrapped under its tenant's Transit key, the header naming
 /// OpenBao, the tenant and the key; one unwrap for a host taking the cell, which reads what was
-/// written; a host taking it once fxdax's token may use the key no more refused, naming the
+/// written; a host taking it once cladefs's token may use the key no more refused, naming the
 /// tenant, and opening once it may again; a tenant with no Transit key's cell in the clear.
 #[test]
 fn sealed_stores_open_through_openbao() {
@@ -1885,11 +1885,11 @@ fn sealed_stores_open_through_openbao() {
     use extent_keys::testing::openbao::DevServer;
     let Some(bao) = DevServer::start() else { return };
     bao.transit("transit");
-    bao.bao(&["write", "-f", &format!("transit/keys/fxdax-tenant-{TENANT:x}")]);
-    let policy = DevServer::fxdax_policy("transit", "fxdax-tenant-*");
-    bao.policy("fxdax", &policy);
-    let url = bao.url("transit", "key=fxdax-tenant-{tenant}");
-    let world = World::with_kms(OpenBao::new(&url, Token::Value(bao.token("fxdax"))).unwrap());
+    bao.bao(&["write", "-f", &format!("transit/keys/cladefs-tenant-{TENANT:x}")]);
+    let policy = DevServer::cladefs_policy("transit", "cladefs-tenant-*");
+    bao.policy("cladefs", &policy);
+    let url = bao.url("transit", "key=cladefs-tenant-{tenant}");
+    let world = World::with_kms(OpenBao::new(&url, Token::Value(bao.token("cladefs"))).unwrap());
 
     let dir = made(test_branch(7), "a");
     let (store, remote) = open_on(&world, &world.host(5), &dir).unwrap();
@@ -1900,7 +1900,7 @@ fn sealed_stores_open_through_openbao() {
     drop((store, remote));
     let object = world.cell();
     let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
-    let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x0efxdax-tenant-1"];
+    let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x0ecladefs-tenant-1"];
     assert!(kek.wrapped.0.starts_with(&header.concat()), "{:?}", kek.wrapped);
     assert!(kek.wrapped.0[header.concat().len()..].starts_with(b"vault:v1:"));
 
@@ -1911,10 +1911,10 @@ fn sealed_stores_open_through_openbao() {
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data.clone()));
     drop(store);
 
-    bao.policy("fxdax", &DevServer::fxdax_policy("transit", "others-*"));
+    bao.policy("cladefs", &DevServer::cladefs_policy("transit", "others-*"));
     let refused = open_on(&world, &world.host(7), &dir.crash(0)).map(drop).unwrap_err();
     assert_eq!(refused.to_string(), "tenant 1: its KEK is revoked");
-    bao.policy("fxdax", &policy);
+    bao.policy("cladefs", &policy);
     let host = world.host(8);
     let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data));

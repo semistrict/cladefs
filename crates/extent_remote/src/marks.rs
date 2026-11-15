@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what a bucket's readers know of the collector's newest mark-only passes (doc-7, Garbage
+//! cladefs: what a bucket's readers know of the collector's newest mark-only passes (doc-7, Garbage
 //! collection; TASK-264), which warn of reaching what they marked: a pass's over each cell they
 //! read (TASK-395.2).
 //!
@@ -14,7 +14,7 @@
 //! or a reader within the grace period of an object compacted. Each such read is logged, at `warn`,
 //! with the key, its kind (which names its branch), the request, the marks' epoch, and the IDs of
 //! the span current if spans are on; in the extent daemon, its log names the guest request it is
-//! for too (`request_id`, `fxdax::request::current`).
+//! for too (`request_id`, `cladefs::request::current`).
 //!
 //! A read asks one load first, whether any marks held name a key, and only then one lookup in the
 //! set of its cell's: a bucket no mark-only pass marked costs a load a read. Whether a mark-only

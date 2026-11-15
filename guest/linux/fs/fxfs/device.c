@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The extent-store device, as the filesystem uses it (see device.h): requests of the driver's,
  * each allocated as it is submitted and freed as it completes, and the count of seals.
@@ -33,18 +33,18 @@ struct fxfs_device {
 	wait_queue_head_t wait;
 	fxfs_device_sealed_t sealed;
 	void *sealed_arg;
-	/* fxdax: what the window's requests took (TASK-91.7). */
+	/* cladefs: what the window's requests took (TASK-91.7). */
 	atomic64_t maps, map_ns, unmaps, unmap_ns;
-	/* fxdax: what MAP requests took, and UNMAPs, each (TASK-111.6). */
+	/* cladefs: what MAP requests took, and UNMAPs, each (TASK-111.6). */
 	struct fxfs_hist map_hist, unmap_hist;
-	/* fxdax: the requests the maps took, fewer than the maps with MAP_MANY (TASK-91.4). */
+	/* cladefs: the requests the maps took, fewer than the maps with MAP_MANY (TASK-91.4). */
 	atomic64_t map_requests;
-	/* fxdax: the PRIVATE requests, and the bytes they made private (doc-13). */
+	/* cladefs: the PRIVATE requests, and the bytes they made private (doc-13). */
 	atomic64_t privates, private_bytes;
-	/* fxdax: what they took, and each (TASK-164.10). */
+	/* cladefs: what they took, and each (TASK-164.10). */
 	atomic64_t private_ns;
 	struct fxfs_hist private_hist;
-	/* fxdax: the bytes written since a seal last ended, which the next seals (fxfs_seal_end). */
+	/* cladefs: the bytes written since a seal last ended, which the next seals (fxfs_seal_end). */
 	atomic64_t unsealed_bytes;
 };
 
@@ -52,12 +52,12 @@ struct fxfs_device_request {
 	struct vext_request req;
 	fxfs_device_done_t done;
 	void *arg;
-	/* fxdax: the id its events share (fxfs_device_submit, fxfs_device_done). */
+	/* cladefs: the id its events share (fxfs_device_submit, fxfs_device_done). */
 	u64 trace_id;
 };
 
 /*
- * fxdax: the id of a request's events (fxfs_trace.h), if its first event, `on`, is: the guest's
+ * cladefs: the id of a request's events (fxfs_trace.h), if its first event, `on`, is: the guest's
  * own count, as the device's requests carry no id. 0 if it is off.
  */
 static atomic64_t fxfs_device_trace_ids = ATOMIC64_INIT(0);
@@ -220,7 +220,7 @@ void fxfs_device_seal_end(struct fxfs_device *dev)
 	sealed = dev->sealed;
 	arg = dev->sealed_arg;
 	spin_unlock(&dev->lock);
-	/* fxdax: writes are kept out through a seal (fxfs-linux's Seal): its request's are its. */
+	/* cladefs: writes are kept out through a seal (fxfs-linux's Seal): its request's are its. */
 	trace_fxfs_seal_end(seals, atomic64_xchg(&dev->unsealed_bytes, 0));
 	wake_up_all(&dev->wait);
 	if (sealed)
@@ -237,14 +237,14 @@ struct dax_device *fxfs_device_dax(struct fxfs_device *dev, u64 *window_len)
 }
 
 /*
- * fxdax: diagnostic (TASK-121): whether maps carry MAP_AHEAD, which has the VM process map the
+ * cladefs: diagnostic (TASK-121): whether maps carry MAP_AHEAD, which has the VM process map the
  * pages for the guest ahead of its accesses, after the MAP, not waited for.
  */
 static bool fxfs_device_maps_ahead = true;
 module_param_named(map_ahead, fxfs_device_maps_ahead, bool, 0644);
 MODULE_PARM_DESC(map_ahead, "Ask the device to map pages ahead of the guest's accesses (diagnostic)");
 
-/* fxdax: the flags of `map`, accessed next if `ahead`, or zeros, that the device takes. */
+/* cladefs: the flags of `map`, accessed next if `ahead`, or zeros, that the device takes. */
 static u32 fxfs_device_map_flags(struct fxfs_device *dev, const struct fxfs_device_map *map)
 {
 	u32 flags = 0;
@@ -256,7 +256,7 @@ static u32 fxfs_device_map_flags(struct fxfs_device *dev, const struct fxfs_devi
 	return flags;
 }
 
-/* fxdax: `map`, alone, in a MAP request of its own. */
+/* cladefs: `map`, alone, in a MAP request of its own. */
 static int fxfs_device_map_one(struct fxfs_device *dev, const struct fxfs_device_map *map)
 {
 	struct vext_request *req = kzalloc(sizeof(*req), GFP_NOFS);
@@ -331,7 +331,7 @@ int fxfs_device_private(struct fxfs_device *dev, u64 window_offset, u64 len)
 		atomic64_add(len, &dev->private_bytes);
 	kfree(req);
 	/*
-	 * fxdax: the host's ENOMEM, past private_max, is the guest's count and the host's apart,
+	 * cladefs: the host's ENOMEM, past private_max, is the guest's count and the host's apart,
 	 * which the guest keeps from by sending PRIVATE only within it (doc-13): EIO, not a want of
 	 * memory to wait out (TASK-170). The guest's own, above, ENOMEM (TASK-44.15).
 	 */
@@ -353,10 +353,10 @@ bool fxfs_device_read_only(struct fxfs_device *dev)
 	return virtio_extent_read_only(dev->vext);
 }
 
-/* fxdax: the most maps one MAP_MANY request holds: its further ones a page's worth. */
+/* cladefs: the most maps one MAP_MANY request holds: its further ones a page's worth. */
 #define FXFS_DEVICE_MAP_MANY (PAGE_SIZE / sizeof(struct virtio_extent_map_entry) + 1)
 
-/* fxdax: `count` maps, from `maps`, in one MAP_MANY request; `count` at most FXFS_DEVICE_MAP_MANY. */
+/* cladefs: `count` maps, from `maps`, in one MAP_MANY request; `count` at most FXFS_DEVICE_MAP_MANY. */
 static int fxfs_device_map_one_request(struct fxfs_device *dev, const struct fxfs_device_map *maps,
 				       size_t count, struct virtio_extent_map_entry *entries)
 {
@@ -367,7 +367,7 @@ static int fxfs_device_map_one_request(struct fxfs_device *dev, const struct fxf
 
 	if (!req)
 		return -ENOMEM;
-	/* fxdax: zeros name no extent. */
+	/* cladefs: zeros name no extent. */
 	for (i = 1; i < count; i++)
 		entries[i - 1] = (struct virtio_extent_map_entry) {
 			.map = {
@@ -432,7 +432,7 @@ int fxfs_device_map_many(struct fxfs_device *dev, const struct fxfs_device_map *
 }
 
 /*
- * fxdax: an UNMAP's request is allocated without failing: the window space it unmaps goes to other
+ * cladefs: an UNMAP's request is allocated without failing: the window space it unmaps goes to other
  * extents once it is unmapped, and is lost to the window if it can't be (TASK-44.22). A request is
  * a few hundred bytes, which the allocator makes room for. It can't be on the stack, whose memory
  * the device can't be given if it is vmalloc's (VMAP_STACK).

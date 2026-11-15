@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # What OpenZFS's zloop.sh is to ztest: every test here, then the seeds of each that takes them
 # (interleave, failures) at once, all of them whatever fails, each failure's log kept with how to

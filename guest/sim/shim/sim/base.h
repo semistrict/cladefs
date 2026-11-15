@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * What the kernel's C rests on: its types, compiler attributes and arithmetic. Marked accesses
  * (READ_ONCE, WRITE_ONCE) are plain here: one simulated task runs at a time.

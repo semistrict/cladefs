@@ -1,4 +1,4 @@
-# fxdax's own: the keys a tenant's data is encrypted under at rest, and the primitives that use them
+# cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use them
 # (backlog doc-16).
 [package]
 name = "extent_keys"
@@ -8,14 +8,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
-# fxdax: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
+# cladefs: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
 aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
-# fxdax: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
+# cladefs: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
-# fxdax: OpenBao's Transit engine as a KMS (TASK-411.16), over HTTP(S): reqwest (MIT OR
+# cladefs: OpenBao's Transit engine as a KMS (TASK-411.16), over HTTP(S): reqwest (MIT OR
 # Apache-2.0) with rustls (Apache-2.0 OR ISC OR MIT) over aws-lc-rs, the system's roots verified by
 # rustls-platform-verifier (MIT OR Apache-2.0); on a Tokio runtime of its own (tokio, MIT); its
 # requests and replies JSON (serde_json, MIT OR Apache-2.0) holding base64 (MIT OR Apache-2.0),
@@ -23,11 +23,11 @@ aws-sdk-kms.workspace = true
 # the build already, through object_store and extent_remote.
 base64.workspace = true
 bytes = "1.12.1"
-# fxdax: Google Cloud KMS's REST API (TASK-411.18), each in the build already through object_store
+# cladefs: Google Cloud KMS's REST API (TASK-411.18), each in the build already through object_store
 # and extent_remote: reqwest (MIT OR Apache-2.0) over rustls, serde_json (MIT OR Apache-2.0),
 # base64 (MIT OR Apache-2.0), crc-fast's CRC32C (MIT OR Apache-2.0) for its integrity fields,
 # tokio's timer (MIT) between retries, url's query parsing (MIT OR Apache-2.0); and object_store's
-# (MIT OR Apache-2.0) GCP credentials, Application Default Credentials as fxdax's gs:// buckets
+# (MIT OR Apache-2.0) GCP credentials, Application Default Credentials as cladefs's gs:// buckets
 # have them.
 crc-fast.workspace = true
 object_store.workspace = true
@@ -54,7 +54,7 @@ tempfile.workspace = true
 workspace = true
 
 [features]
-# fxdax: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
+# cladefs: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
 # counts the calls made of it (`testing::Counted`); AWS KMS's emulator (`testing::LocalAwsKms`,
 # TASK-411.17) and an OpenBao dev server (`testing::openbao::DevServer`, TASK-411.16), started for a
 # test.

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 //! call's, the inner one the method's own error, a raw `zx.Status`. A one-way call, such as
 //! `Directory.Open`, is delivered once the connection is served, after those made before it, as a
 //! message would be read from a channel. The server traits have a method for each protocol method
-//! fxdax's tests call.
+//! cladefs's tests call.
 //!
 //! A synchronous proxy blocks on its server's futures on the executor that created it, and ignores
 //! deadlines. `fuchsia.unknown/Cloneable` and `Queryable`, which the protocols compose, are here
@@ -311,7 +311,7 @@ impl FileProxy {
 }
 
 /// A synchronous client of `fuchsia.io/File`, which blocks on tokio, which the guest kernel has
-/// none of (fxdax's TASK-26.6).
+/// none of (cladefs's TASK-26.6).
 #[cfg(not(target_os = "none"))]
 pub struct FileSynchronousProxy {
     connection: Connection<FileMarker>,

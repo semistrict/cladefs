@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Tests of physical memory in arenas (`physmap`, TASK-43), lifted from fxdax's port of the Zircon
+//! Tests of physical memory in arenas (`physmap`, TASK-43), lifted from cladefs's port of the Zircon
 //! kernel (`vm::unittests::arena_unittest`): those of the arenas themselves, which allocate pages
 //! now rather than VMOs, and starved arenas relieved by relief's evictor rather than the kernel's.
 
@@ -665,7 +665,7 @@ fn pages_after_others_are_free_and_of_their_chunk() {
     assert_eq!(alloc_after(last).map(|page| page.frame()), None, "past the chunk");
 }
 
-/// fxdax TASK-149.17: an arena's object, which the extent daemon hands its tenant's VM processes
+/// cladefs TASK-149.17: an arena's object, which the extent daemon hands its tenant's VM processes
 /// to write, and the default's, which it hands them all to read, is sealed against shrinking,
 /// which would have the pages past its new end fault this process's own accesses (`SIGBUS`); and
 /// is its owner's alone to open anew, so that a process of another user, handed it read-only,

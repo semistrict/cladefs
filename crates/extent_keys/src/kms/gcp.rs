@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: Google Cloud KMS as a [`Kms`] (TASK-411.18), over its REST API: a tenant's KEK is
-//! a symmetric `cryptoKey` (purpose `ENCRYPT_DECRYPT`) the tenant grants fxdax's service account
+//! cladefs's own: Google Cloud KMS as a [`Kms`] (TASK-411.18), over its REST API: a tenant's KEK is
+//! a symmetric `cryptoKey` (purpose `ENCRYPT_DECRYPT`) the tenant grants cladefs's service account
 //! `roles/cloudkms.cryptoKeyEncrypterDecrypter` on; a wrap is its `:encrypt` of the key's 32
 //! bytes, an unwrap its `:decrypt`, under whichever of the key's versions encrypted them while
 //! the KMS keeps it.
@@ -13,7 +13,7 @@
 //! override, an id there too or a key's whole resource name, `projects/../cryptoKeys/K`, in a
 //! project of the tenant's own (BYOK). Each name is checked as the URL is read.
 //!
-//! Its credentials are Application Default Credentials, as `object_store` has them for fxdax's
+//! Its credentials are Application Default Credentials, as `object_store` has them for cladefs's
 //! `gs://` buckets: a service account's key file or a user's credentials at
 //! `GOOGLE_APPLICATION_CREDENTIALS`, gcloud's well-known file, or else the metadata server
 //! (GCE, GKE's workload identity); or, for development alone, the access token
@@ -50,7 +50,7 @@ const ENDPOINT: &str = "https://cloudkms.googleapis.com/v1/";
 
 /// For development: an OAuth access token to call the KMS with, in place of Application Default
 /// Credentials (`gcloud auth print-access-token`).
-pub const TOKEN_VAR: &str = "FXDAX_KMS_GCP_TOKEN";
+pub const TOKEN_VAR: &str = "CLADEFS_KMS_GCP_TOKEN";
 
 /// The project billed for its calls, if not the one each key is in: Google's own client libraries'
 /// variable.
@@ -157,14 +157,14 @@ fn credentials() -> Result<GcpCredentialProvider, String> {
         return Ok(Arc::new(StaticCredentialProvider::new(GcpCredential { bearer })));
     }
     // A client of a bucket it never calls: its credentials are what it is built for.
-    let gcs = GoogleCloudStorageBuilder::from_env().with_bucket_name("fxdax-kms-credentials");
+    let gcs = GoogleCloudStorageBuilder::from_env().with_bucket_name("cladefs-kms-credentials");
     let gcs = gcs.build().map_err(|err| format!("Application Default Credentials: {err}"))?;
     Ok(gcs.credentials().clone())
 }
 
-/// What its calls bind the tenant with: `fxdax-tenant:` and the tenant in hexadecimal.
+/// What its calls bind the tenant with: `cladefs-tenant:` and the tenant in hexadecimal.
 fn aad(tenant: u64) -> Vec<u8> {
-    format!("fxdax-tenant:{tenant:x}").into_bytes()
+    format!("cladefs-tenant:{tenant:x}").into_bytes()
 }
 
 /// The CRC32C of `bytes`, as the KMS has its integrity fields.
@@ -327,7 +327,7 @@ impl GcpKms {
         if response.plaintext_crc32c.as_ref().and_then(Int64::value) != Some(crc32c(&plaintext)) {
             return Err(corrupt("holds a plaintext not of its CRC32C"));
         }
-        // Only fxdax encrypts with its tenants' associated data, and only keys.
+        // Only cladefs encrypts with its tenants' associated data, and only keys.
         let key = <&[u8; KEY_LEN]>::try_from(&plaintext[..])
             .map_err(|_| unauthentic(Unauthentic("a wrapped key, of the wrong length")))?;
         Ok(Secret::from_bytes(key))
@@ -439,14 +439,14 @@ struct Violation {
 /// - `NOT_FOUND`, the key named not found ("CryptoKey NAME not found.", a key ring missing
 ///   too): the tenant has no KEK, [`Error::NoSuchTenant`]. Any other thing not found (a
 ///   project, a location) is the URL's, not the tenant's: [`Error::Io`];
-/// - `PERMISSION_DENIED`, the tenant took fxdax's role on its key away, or the key is in a
-///   project fxdax may not see: [`Error::Revoked`];
+/// - `PERMISSION_DENIED`, the tenant took cladefs's role on its key away, or the key is in a
+///   project cladefs may not see: [`Error::Revoked`];
 /// - `FAILED_PRECONDITION`, a version not enabled ("NAME/cryptoKeyVersions/N is not enabled,
 ///   current state is: S.", [`version_state`]): `DISABLED` [`Error::Revoked`], `DESTROYED` and
 ///   `DESTROY_SCHEDULED` [`Error::Destroyed`];
 /// - `INVALID_ARGUMENT` of a decrypt, not of a checksum ("Decryption failed."): a ciphertext
 ///   not the key's, or not of this tenant's associated data, [`Error::Unauthentic`];
-/// - anything else, `UNAUTHENTICATED` (fxdax's credentials) and the service's failures among
+/// - anything else, `UNAUTHENTICATED` (cladefs's credentials) and the service's failures among
 ///   them: [`Error::Io`], transient if the service may answer it next time.
 fn refusal(tenant: u64, name: &str, op: Op, code: u16, body: &[u8]) -> Failure {
     let rpc = serde_json::from_slice::<serde_json::Value>(body)
@@ -522,14 +522,14 @@ mod service;
 mod tests {
     use super::*;
 
-    const RING: &str = "projects/p-1/locations/us-central1/keyRings/fxdax";
+    const RING: &str = "projects/p-1/locations/us-central1/keyRings/cladefs";
 
     #[test]
     fn urls_name_a_key_ring_and_its_tenants_keys() {
         let (ring, names) =
-            parse(&format!("gcp-kms://{RING}?key=fxdax-tenant-{{tenant}}")).unwrap();
+            parse(&format!("gcp-kms://{RING}?key=cladefs-tenant-{{tenant}}")).unwrap();
         assert_eq!(ring, RING);
-        assert_eq!(qualified(&ring, &names.of(0x2a)), format!("{RING}/cryptoKeys/fxdax-tenant-2a"));
+        assert_eq!(qualified(&ring, &names.of(0x2a)), format!("{RING}/cryptoKeys/cladefs-tenant-2a"));
         let (_, percent) = parse(&format!("gcp-kms://{RING}?key=t-%7Btenant%7D")).unwrap();
         assert_eq!(percent.of(1), "t-1");
     }
@@ -596,13 +596,13 @@ mod tests {
 
     #[test]
     fn tenants_are_bound_as_associated_data() {
-        assert_eq!(aad(0x2a), b"fxdax-tenant:2a");
+        assert_eq!(aad(0x2a), b"cladefs-tenant:2a");
         // RFC 3720's check value of CRC32C.
         assert_eq!(crc32c(b"123456789"), 0xe306_9283);
     }
 
     /// The key the bodies Cloud KMS answered with name (TASK-411.18's notes).
-    const KEY: &str = "projects/echophase-connectome-test/locations/us-central1/keyRings/fxdax-test/cryptoKeys/fxdax-probe";
+    const KEY: &str = "projects/echophase-connectome-test/locations/us-central1/keyRings/cladefs-test/cryptoKeys/cladefs-probe";
 
     fn mapped(op: Op, code: u16, body: &str) -> (String, bool) {
         let Failure { error, transient } = refusal(9, KEY, op, code, body.as_bytes());
@@ -623,13 +623,13 @@ mod tests {
             mapped(Op::Decrypt, 404, &not_found),
             ("tenant 9: no KEK in the KMS".into(), false)
         );
-        let project = r#"{"error": {"code": 404, "message": "Project 'projects/fxdax-no-such-project-0' not found.", "status": "NOT_FOUND"}}"#;
+        let project = r#"{"error": {"code": 404, "message": "Project 'projects/cladefs-no-such-project-0' not found.", "status": "NOT_FOUND"}}"#;
         assert_eq!(
             mapped(Op::Encrypt, 404, project),
             (
                 format!(
                     "tenant 9: the KMS failed: Google Cloud KMS, encrypt with {KEY}: HTTP 404, \
-                     NOT_FOUND: Project 'projects/fxdax-no-such-project-0' not found."
+                     NOT_FOUND: Project 'projects/cladefs-no-such-project-0' not found."
                 ),
                 false
             )

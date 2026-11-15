@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the guest tests' known plaintext (TASK-411.15): bytes that don't compress, the same in
+//! cladefs: the guest tests' known plaintext (TASK-411.15): bytes that don't compress, the same in
 //! every build of the host's half and the guest's, which cases write into their guests'
 //! filesystems (fxfs-guest's file, fxfs-guest-checks' mapped file), and the harness looks for where
 //! stores keep data, their directories, their buckets and part caches (`crate::sealed`): in a run
@@ -18,7 +18,7 @@ pub const LEN: usize = 1 << 20;
 /// The stream's first `len` bytes: xorshift64*'s, from a seed of its own. No 4 KiB block of it
 /// repeats another.
 pub fn stream(len: usize) -> Vec<u8> {
-    let mut state: u64 = 0x6678_6461_7863_616e; // "fxdaxcan"
+    let mut state: u64 = 0x6678_6461_7863_616e; // "cladefscan"
     let mut bytes = Vec::with_capacity(len.next_multiple_of(8));
     while bytes.len() < len {
         state ^= state >> 12;

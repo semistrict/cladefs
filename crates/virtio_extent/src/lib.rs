@@ -1,16 +1,16 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! The virtio extent-store device (backlog doc-4, device type `0x4658`), but its virtio
-//! transport: one copy of it, which every VMM hosting it serves, fxdax's Firecracker
+//! transport: one copy of it, which every VMM hosting it serves, cladefs's Firecracker
 //! (vendor/firecracker) and libmachine, so that its versioned protocol, which never migrates,
 //! can't drift between them.
 //!
 //! A guest that runs Fxfs itself stores its filesystem through this device, as extents its Fxfs
 //! names: immutable pieces of data, written once and sealed by the next commit, freed whole, and
-//! a root naming where the filesystem starts. fxdax's extent daemon, which the device connects
-//! to, keeps them in an fxdax extent store on local disk, and maps sealed extents into the
+//! a root naming where the filesystem starts. cladefs's extent daemon, which the device connects
+//! to, keeps them in an cladefs extent store on local disk, and maps sealed extents into the
 //! device's DAX window, its shared memory region 0, from its cache of their pages, which the
 //! host's VMs share.
 //!

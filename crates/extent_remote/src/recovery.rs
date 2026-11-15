@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 //! with none, its parent's state where it was forked, then the footers of the segments the head
 //! names after it, in order: read by their objects' tails, which hold them, many at once, every
 //! key known. Each key is written once, so that what a reader reads at it is the one object it
-//! names, ever. fxdax: a commit may span segments, each naming its runs of it, which a reader holds
+//! names, ever. cladefs: a commit may span segments, each naming its runs of it, which a reader holds
 //! until the segment ending it ([`Begun`], TASK-92.41): a head names whole commits alone. A state
 //! recovered is recovered on by the segments the head names since ([`recover_on`]): a writer's,
 //! once it holds the head, from what it found before.
@@ -19,7 +19,7 @@
 //! once its checkpoint covers them. A reader that finds something the head named gone reads the
 //! head again: if it changed, a newer checkpoint may cover what went, and the reader starts again.
 //!
-//! fxdax: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
+//! cladefs: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
 //! checkpoints are checked against their MACs under the keys it holds, and those of a branch it
 //! holds sealed refused in the clear. The collector's holds none, reading them as it did.
 
@@ -58,13 +58,13 @@ pub struct State<P = Extents> {
     /// The most bytes its extents may hold, as its last commit to set it set it, if one did: its
     /// own, or, before its first, its parent's at the fork (TASK-165.3).
     pub capacity: Option<u64>,
-    /// fxdax: the runs of the commit the segments applied last went on with, which a later segment
+    /// cladefs: the runs of the commit the segments applied last went on with, which a later segment
     /// ends, if they did ([`Begun`], TASK-92.41): none in a state a head names, nor in any
     /// checkpoint, as writers acknowledge only segments ending their commits.
     pub begun: Option<Begun>,
 }
 
-/// fxdax: the runs a commit sealed in segments applied that a later segment ends
+/// cladefs: the runs a commit sealed in segments applied that a later segment ends
 /// (`extent_frame::segment::Continued`, TASK-92.41): sealed with it, where they are, once it does;
 /// or never, if the next segment applied neither goes on with it nor ends it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +180,7 @@ impl<P: Places> State<P> {
     /// its end, and the capacity they set. Every free of the branch's own extents spends it, as
     /// the store that freed it spent it: a footer frees only what a commit held, not what was
     /// freed while open (TASK-160.15), and one sealed and freed within the segment is a free and no
-    /// seal (TASK-165.3). fxdax: first, the runs of a commit the segments before began ([`Begun`]),
+    /// seal (TASK-165.3). cladefs: first, the runs of a commit the segments before began ([`Begun`]),
     /// if this one ends it, or holding them on if it goes on with it; then, after its own, holding
     /// those of the commit it goes on with, if any (TASK-92.41).
     pub fn apply_contents(&mut self, seq: u64, epoch: u64, contents: &Contents) {
@@ -369,7 +369,7 @@ pub async fn recover(
     recover_under(bucket, branch, origin, &Ring::clear()).await
 }
 
-/// fxdax: the state of `branch`, forked from `origin`, read holding `ring` (TASK-411.3).
+/// cladefs: the state of `branch`, forked from `origin`, read holding `ring` (TASK-411.3).
 pub async fn recover_under(
     bucket: &impl Bucket,
     branch: Branch,
@@ -384,7 +384,7 @@ pub async fn recover_under(
 /// writer that took it does, or a deletion that ended it: nothing it names goes while it holds it,
 /// but for a takeover since, which fails the writer at its next swap ([`Error::Fenced`]). What it
 /// inherited may go meanwhile, a fork point's state its parent's checkpoint covers: it starts
-/// again. fxdax: read holding `ring` (TASK-411.3).
+/// again. cladefs: read holding `ring` (TASK-411.3).
 pub async fn recover_from(
     bucket: &impl Bucket,
     branch: Branch,
@@ -424,7 +424,7 @@ pub(crate) async fn recover_layers<B: Bucket>(
     Err(Error::Lost(format!("branch {branch}: what its recovery starts from keeps going")))
 }
 
-/// fxdax: the state of `branch` as of the end of its segment `at`, which its head names: a fork
+/// cladefs: the state of `branch` as of the end of its segment `at`, which its head names: a fork
 /// point's, as a fork made there inherits it; and what reading it read, which the collector keeps
 /// for the forks referring to it (doc-7, A pass over a cell; TASK-395.4). Its newest checkpoint up
 /// to there, or its origin's state, then its segments to there, starting again where it finds one
@@ -457,12 +457,12 @@ pub(crate) struct Checkpoints<'a, B: Bucket> {
     /// How many of those read it keeps, the last read.
     keep: usize,
     read: Mutex<Read<'a>>,
-    /// fxdax: a listing of the cell, taken before the recoveries began, and those it gave a
+    /// cladefs: a listing of the cell, taken before the recoveries began, and those it gave a
     /// listing of checkpoints once: each branch's, and each fork point's a pass keeps (TASK-395.16,
     /// TASK-395.19, [`Checkpoints::listed`]).
     listed: Option<&'a BTreeMap<String, Meta>>,
     served: Mutex<BTreeSet<(Branch, Option<u64>)>>,
-    /// fxdax: the keys it reads under ([`Checkpoints::holding`], TASK-411.3).
+    /// cladefs: the keys it reads under ([`Checkpoints::holding`], TASK-411.3).
     keys: &'a Ring,
 }
 
@@ -484,13 +484,13 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
         Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default(), keys }
     }
 
-    /// fxdax: these, reading their checkpoints and the footers of their segments holding `keys`
+    /// cladefs: these, reading their checkpoints and the footers of their segments holding `keys`
     /// (TASK-411.3).
     pub(crate) fn holding(self, keys: &'a Ring) -> Self {
         Self { keys, ..self }
     }
 
-    /// fxdax: these, the first listing of each branch's checkpoints served by `listed`, a listing
+    /// cladefs: these, the first listing of each branch's checkpoints served by `listed`, a listing
     /// of the cell the collector's pass took before it read anything (TASK-395.16), if it has one:
     /// a LIST less a branch. A fork point's state ([`state_at`]) is as right from the newest
     /// checkpoint up to it listed then as from one listed now: it reads its segments after it, and,
@@ -513,7 +513,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
         Self { listed, ..self }
     }
 
-    /// fxdax: the checkpoints of `branch`, in the order of their keys, for a recovery of it, or of
+    /// cladefs: the checkpoints of `branch`, in the order of their keys, for a recovery of it, or of
     /// the state of it as of its segment `at` a pass keeps: as the listing of its cell shows them,
     /// the first time one of that is asked, if it has one; listed now otherwise.
     async fn list(&self, branch: Branch, at: Option<u64>) -> Vec<Meta> {
@@ -580,7 +580,7 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
     }
 }
 
-/// fxdax: the states checkpoints hold, decoded, which the recoveries reading through a bucket
+/// cladefs: the states checkpoints hold, decoded, which the recoveries reading through a bucket
 /// share ([`Bucket::decoded`]), by their checkpoints' keys, each written once (TASK-407). A
 /// state's extents are a persistent map, which a recovery starting from it takes for nothing; the
 /// last [`Decoded::KEEP`] decoded are kept: those the forks being opened start from (TASK-92.55).
@@ -623,7 +623,7 @@ impl Decoded {
 /// applied to its state, rather than its state read anew. As recovering anew would find; but if
 /// the head names a checkpoint as of `before`'s end or later, which may cover segments gone, it
 /// recovers anew.
-/// fxdax: read holding `ring` (TASK-411.3).
+/// cladefs: read holding `ring` (TASK-411.3).
 pub async fn recover_on(
     bucket: &impl Bucket,
     origin: Option<Origin>,
@@ -737,7 +737,7 @@ async fn moved(bucket: &impl Bucket, branch: Branch, head: Option<&Head>) -> Att
 
 /// The footer of segment `seq` of `branch` by the writer of `epoch`, if it is there: read by its
 /// object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
-/// segment whole. fxdax: checked against its MAC if `keys` hold its key, and refused in the clear
+/// segment whole. cladefs: checked against its MAC if `keys` hold its key, and refused in the clear
 /// if they hold its branch sealed (TASK-411.3).
 async fn segment_footer(
     (bucket, keys): (&impl Bucket, &Ring),
@@ -765,7 +765,7 @@ fn placed(key: &str, footer: Footer, branch: Branch, seq: u64, epoch: u64) -> Re
     Ok(footer)
 }
 
-/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds: fxdax: read holding
+/// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds: cladefs: read holding
 /// `keys` (TASK-411.3).
 fn checkpoint(key: &str, bytes: &[u8], branch: Branch, keys: &Ring) -> Result<State, Error> {
     let state = crate::checkpoint::decode_under(bytes, &keys.of(branch.id))
@@ -793,13 +793,13 @@ fn newest_to(listed: &[Meta], at: u64) -> Option<&Meta> {
 /// checkpoint up to there, or its origin's state, then the segments its head names up to there. A
 /// checkpoint at `at` itself is the state, as read, which the forks made there share.
 ///
-/// fxdax: for a fork in `from`, a cell of its own, of `branch` in another, its checkpoint at `at`
+/// cladefs: for a fork in `from`, a cell of its own, of `branch` in another, its checkpoint at `at`
 /// alone, of the epoch of the segment there, read by its key, listing nothing of the other cell's
 /// (TASK-395.4): whoever records a fork across cells writes it first ([`checkpoint_at`]), and the
 /// parent's cell keeps it, the fork point's state, while the fork's reference stands. Gone, what
 /// the fork inherited is.
 ///
-/// fxdax: `kept`, a fork point's state a pass keeps ([`recover_at`]), its own first listing of the
+/// cladefs: `kept`, a fork point's state a pass keeps ([`recover_at`]), its own first listing of the
 /// checkpoints served by the pass's listing of the cell ([`Checkpoints::listed`]); else, an
 /// origin's state a recovery of a branch starts from, the branch's listing.
 fn state_at<'a, B: Bucket>(
@@ -816,7 +816,7 @@ fn state_at<'a, B: Bucket>(
         let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
             return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
         };
-        // fxdax: a fork point's a pass keeps for the forks to other cells is read as they read
+        // cladefs: a fork point's a pass keeps for the forks to other cells is read as they read
         // it, by the key of its checkpoint alone, if there is one: a later writer's checkpoint at
         // the segment, at its own key, may name the extents along other moves, of other passes,
         // than the forks follow from it (TASK-407, TASK-407.1). None yet, no fork read it: the
@@ -900,7 +900,7 @@ fn state_at<'a, B: Bucket>(
     })
 }
 
-/// fxdax: makes sure `branch` has a checkpoint as of its segment `at`, which its head names: the
+/// cladefs: makes sure `branch` has a checkpoint as of its segment `at`, which its head names: the
 /// state a fork made there to another cell inherits, which the fork's recovery reads by its key
 /// alone, so that a pass over the fork's cell lists nothing of `branch`'s ([`state_at`],
 /// TASK-395.4). Written, create-only, at the key of the epoch of that segment's writer, by
@@ -910,7 +910,7 @@ fn state_at<'a, B: Bucket>(
 /// further along their moves than a reader names them. One there stands, any writer's (TASK-407.6).
 /// [`Error::Lost`] if the state there is gone: no reader recovers a fork from there either.
 ///
-/// fxdax: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
+/// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
 /// writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in the
 /// clear (TASK-411.4). Asked for only if it is to be written.
 pub(crate) async fn checkpoint_at(
@@ -1090,7 +1090,7 @@ mod tests {
         assert_eq!(rounds, [checkpoint, vec![tail(3)]]);
     }
 
-    /// fxdax: a commit spanning segments (TASK-92.41): the runs each segment going on with it names
+    /// cladefs: a commit spanning segments (TASK-92.41): the runs each segment going on with it names
     /// are sealed, where they are, once the segment ending it is applied, and not before; its
     /// writer acknowledges none of its segments until then, and no head names them. A writer taking
     /// the branch with a commit begun, its segments landed, finds none of it: the head names whole

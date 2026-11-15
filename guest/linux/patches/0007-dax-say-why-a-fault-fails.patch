@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 dax: say why a fault fails
 
 A DAX fault that fails returns VM_FAULT_SIGBUS, which says nothing of
@@ -7,7 +7,7 @@ why: the filesystem's iomap may have succeeded, and the fault then
 failed accessing the device, copying around a shared page, or
 inserting the page, which a page's DAX entry naming another page makes
 fail (validate_page_before_insert). Each says so, rate-limited, with
-the pages involved (fxdax TASK-124).
+the pages involved (cladefs TASK-124).
 
 diff --git a/fs/dax.c b/fs/dax.c
 --- a/fs/dax.c

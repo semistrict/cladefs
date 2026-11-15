@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -65,7 +65,7 @@ pub(super) fn test_large_folios() {
     fs::remove_file(&file).unwrap();
 }
 
-/// fxdax: pages scattered across a file, written back together: every other page of a file
+/// cladefs: pages scattered across a file, written back together: every other page of a file
 /// of 8 MiB, each written by a write(2) of its own once the file is out of the page cache, so
 /// that each is a folio of its own, and then part of a page past the file's end. Writeback writes
 /// many such folios with one call to Fxfs (fxfs_write_many, TASK-92.10). Read again from the
@@ -96,7 +96,7 @@ pub(super) fn test_scattered_writeback() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: of a large folio, writeback writes the pages written alone (TASK-91.12): a database's
+/// cladefs: of a large folio, writeback writes the pages written alone (TASK-91.12): a database's
 /// pages, 8 KiB each, written into a file read into large folios, which writeback wrote whole,
 /// a megabyte each. Then a store through a mapping into the same folios, which dirties them
 /// whole. Read again from the device, the file holds what each wrote.
@@ -144,7 +144,7 @@ pub(super) fn test_partial_writeback() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a page cache writeback that finds no memory keeps what it was to write (TASK-212): of a
+/// cladefs: a page cache writeback that finds no memory keeps what it was to write (TASK-212): of a
 /// file's 16 pages written, its fsync with each of its first 64 allocations that may fail failing in
 /// turn (the debug kernel's fault injection, /proc/thread-self/fail-nth), the fsync failing ENOMEM
 /// or not at all; then the file's clean pages dropped (POSIX_FADV_DONTNEED, drop_caches), which a
@@ -157,7 +157,7 @@ pub(super) fn test_writeback_out_of_memory() {
     const NTH: u64 = 64;
     if !script_run::Faults::available() {
         eprintln!(
-            "writeback_out_of_memory: no fault injection here (FXDAX_GUEST_KERNEL_BUILD=debug)"
+            "writeback_out_of_memory: no fault injection here (CLADEFS_GUEST_KERNEL_BUILD=debug)"
         );
         return;
     }

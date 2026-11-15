@@ -1,5 +1,5 @@
 // Copyright 2026 The Fuchsia Authors.
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
@@ -7,8 +7,8 @@
 
 //! The physical memory manager.
 //!
-//! Lifted from fxdax's port of the Zircon kernel's PMM (`zircon/kernel/vm/pmm_node.rs`), its arenas
-//! alone: what is fxdax's own of it, without the kernel's pages' structures, page queues, evictor,
+//! Lifted from cladefs's port of the Zircon kernel's PMM (`zircon/kernel/vm/pmm_node.rs`), its arenas
+//! alone: what is cladefs's own of it, without the kernel's pages' structures, page queues, evictor,
 //! memory watchdog and its gate, or loaned pages.
 //!
 //! The PMM owns every page of physical memory (see `physmap`) and hands them out one at a time,
@@ -78,7 +78,7 @@ enum Failed {
     ShouldWait,
 }
 
-/// fxdax: the node's lock, held (TASK-92.35). As it is dropped, the host takes back the chunks the
+/// cladefs: the node's lock, held (TASK-92.35). As it is dropped, the host takes back the chunks the
 /// arenas gave back under it, each without the lock, which it takes again to record what the host
 /// did ([`Arenas::returned`]), and to tell allocations waiting for room: reserving a chunk's
 /// addresses again and freeing its memory are system calls, which every allocation, of any arena's,
@@ -124,7 +124,7 @@ pub(crate) struct PmmNode {
     free_count: AtomicU64,
     /// Indicates whether an allocation has ever failed as memory is out.
     alloc_failed_no_mem: AtomicBool,
-    /// fxdax: pulsed as an allocation of a starved arena may find room, or must fail now: a page or
+    /// cladefs: pulsed as an allocation of a starved arena may find room, or must fail now: a page or
     /// a chunk freed, a cap changed, relief's pass for an arena done, relief gone (TASK-50.3).
     /// Every waiter wakes, as the waiters of one arena's may not be those of the next's.
     room: Pulse,
@@ -164,7 +164,7 @@ impl PmmNode {
         NodeGuard { node: self, locked: self.lock.lock() }
     }
 
-    /// fxdax: drops `locked`, under which an allocation found chunks going back that would make it
+    /// cladefs: drops `locked`, under which an allocation found chunks going back that would make it
     /// room (`Refused::GoingBack`), and waits for one to go back, or for other room, before it
     /// tries again (TASK-92.35): as it waited for the lock while the host took them back under it.
     fn wait_for_chunks_going_back(&self, locked: NodeGuard<'_>) {
@@ -179,7 +179,7 @@ impl PmmNode {
         Ok(self.alloc_run(arena, 1, wait)?[0])
     }
 
-    /// fxdax: allocates `count` pages of `arena`, their frames, as [`PmmNode::alloc`] does one:
+    /// cladefs: allocates `count` pages of `arena`, their frames, as [`PmmNode::alloc`] does one:
     /// those after each consecutive where they can be, each run taken under one hold of the lock,
     /// so that allocations at once take runs of their own rather than pages turn about
     /// (TASK-108.1). One that fails frees what it took.
@@ -246,7 +246,7 @@ impl PmmNode {
         }
     }
 
-    /// fxdax: allocates the page physically after `frame`'s, if it is free, of the same chunk and
+    /// cladefs: allocates the page physically after `frame`'s, if it is free, of the same chunk and
     /// arena (`Arenas::take_after`, TASK-108.1), its frame: so that the pages an allocation takes
     /// together are consecutive where they can be.
     pub(crate) fn alloc_after(&self, frame: u32) -> Option<u32> {
@@ -258,14 +258,14 @@ impl PmmNode {
         Some(next)
     }
 
-    /// fxdax: whether `arena` is what an allocation of it told to wait waits for: it is starved
+    /// cladefs: whether `arena` is what an allocation of it told to wait waits for: it is starved
     /// (`Arenas::starved`), with no free page of its own and no chunk to take, even with other
     /// arenas' spares gone back for one.
     fn starves(&self, arena: ArenaId) -> bool {
         self.locked().starved(arena).is_some()
     }
 
-    /// fxdax: caps the memory `arena` may take, in bytes, rounded down to chunks (2 MiB), or lifts
+    /// cladefs: caps the memory `arena` may take, in bytes, rounded down to chunks (2 MiB), or lifts
     /// its cap. Lowered under what it has, it takes no more until it has less (TASK-50.3).
     pub(crate) fn set_arena_cap(&self, arena: ArenaId, bytes: Option<u64>) {
         self.locked().set_cap(arena, bytes.map(chunks_in));
@@ -273,60 +273,60 @@ impl PmmNode {
         self.room.pulse();
     }
 
-    /// fxdax: caps the memory the arenas may take together, in bytes, rounded down to chunks, or
+    /// cladefs: caps the memory the arenas may take together, in bytes, rounded down to chunks, or
     /// lifts the cap.
     pub(crate) fn set_total_cap(&self, bytes: Option<u64>) {
         self.locked().set_total_cap(bytes.map(chunks_in));
         self.room.pulse();
     }
 
-    /// fxdax: the cap of the memory the arenas may take together, in bytes, if any.
+    /// cladefs: the cap of the memory the arenas may take together, in bytes, if any.
     pub(crate) fn total_cap(&self) -> Option<u64> {
         self.locked().total_cap().map(chunk_bytes)
     }
 
-    /// fxdax: the memory `arena` has, in bytes: its chunks', free pages and spares included.
+    /// cladefs: the memory `arena` has, in bytes: its chunks', free pages and spares included.
     pub(crate) fn arena_bytes(&self, arena: ArenaId) -> u64 {
         chunk_bytes(self.locked().chunks(arena))
     }
 
-    /// fxdax: the memory the arenas have together, in bytes.
+    /// cladefs: the memory the arenas have together, in bytes.
     pub(crate) fn arenas_bytes(&self) -> u64 {
         chunk_bytes(self.locked().given())
     }
 
-    /// fxdax: pins `count` pages against `arena` (`Arenas::pin`).
+    /// cladefs: pins `count` pages against `arena` (`Arenas::pin`).
     pub(crate) fn pin(&self, arena: ArenaId, count: usize) -> bool {
         self.locked().pin(arena, count)
     }
 
-    /// fxdax: lets go of `count` pages pinned against `arena`.
+    /// cladefs: lets go of `count` pages pinned against `arena`.
     pub(crate) fn unpin(&self, arena: ArenaId, count: usize) {
         self.locked().unpin(arena, count);
     }
 
-    /// fxdax: the bytes pinned against `arena`.
+    /// cladefs: the bytes pinned against `arena`.
     pub(crate) fn pinned_bytes(&self, arena: ArenaId) -> u64 {
         (self.locked().pinned(arena) * page_bytes()) as u64
     }
 
-    /// fxdax: gives the spare chunks of `arena`, or of every arena, wholly free, back to the node:
+    /// cladefs: gives the spare chunks of `arena`, or of every arena, wholly free, back to the node:
     /// memory they hold that nothing uses (TASK-50.3).
     pub(crate) fn release_spares(&self, arena: Option<ArenaId>) {
         self.locked().release_spares(&self.pages, arena);
     }
 
-    /// fxdax: sets whether arenas keep spare chunks; those they have go back if not.
+    /// cladefs: sets whether arenas keep spare chunks; those they have go back if not.
     pub(crate) fn keep_spare_chunks(&self, keep: bool) {
         self.locked().keep_spares(&self.pages, keep);
     }
 
-    /// fxdax: a new arena of physical memory (see `physmap`), which holds no page.
+    /// cladefs: a new arena of physical memory (see `physmap`), which holds no page.
     pub(crate) fn create_arena(&self) -> ArenaId {
         self.locked().create(&self.pages)
     }
 
-    /// fxdax: removes `arena`, not the default: now, if none of its pages is allocated; or once the
+    /// cladefs: removes `arena`, not the default: now, if none of its pages is allocated; or once the
     /// last of them is freed, and its chunk goes back. Its allocations fail from now on, whether or
     /// not they may wait (TASK-79.36).
     pub(crate) fn remove_arena(&self, arena: ArenaId) {
@@ -337,7 +337,7 @@ impl PmmNode {
         self.room.pulse();
     }
 
-    /// Frees `frame`'s page, which its holder gave up, back to this node: fxdax: unless
+    /// Frees `frame`'s page, which its holder gave up, back to this node: cladefs: unless
     /// quarantined, as a second stage may map it still.
     pub(crate) fn free(&self, frame: u32) {
         if quarantine::sift(&self.pages.frames, frame) {
@@ -346,7 +346,7 @@ impl PmmNode {
         self.free_locked(self.locked(), &[frame]);
     }
 
-    /// fxdax: counts `frames`' pages, freed, quarantined in their arenas, as relief finds them
+    /// cladefs: counts `frames`' pages, freed, quarantined in their arenas, as relief finds them
     /// (`Arenas::relieved`, TASK-106); and owed to the arena `relieving`, if relief evicted them
     /// for it (`Arenas::owe`, TASK-161).
     pub(crate) fn quarantining(&self, frames: &[u32], relieving: Option<ArenaId>) {
@@ -359,7 +359,7 @@ impl PmmNode {
         }
     }
 
-    /// fxdax: frees the pages of `frames`, quarantined, now that every second stage has made the
+    /// cladefs: frees the pages of `frames`, quarantined, now that every second stage has made the
     /// changes taking them away: as `free` does, as their arenas count them back, and the arena
     /// relief evicted them for, `relieving`, is owed them no more, under the lock relief finds them
     /// under. They were quarantined, counted (`quarantining`). The arena owed none now, its
@@ -390,7 +390,7 @@ impl PmmNode {
         }
     }
 
-    /// fxdax: the number of chunks no arena has.
+    /// cladefs: the number of chunks no arena has.
     pub(crate) fn count_free_chunks(&self) -> usize {
         self.locked().free_chunk_count()
     }
@@ -410,7 +410,7 @@ impl PmmNode {
         self.alloc_failed_no_mem.load(Ordering::Relaxed)
     }
 
-    /// fxdax: what an allocation fails with that the host mapped no chunk for
+    /// cladefs: what an allocation fails with that the host mapped no chunk for
     /// (`Refused::Unmapped`, TASK-79.37): `NoMemory` at once, whether or not it may wait, as
     /// nothing waits for the host; reported as the node's failure, as its memory is out as far as
     /// the host goes.
@@ -437,12 +437,12 @@ pub(crate) fn node() -> &'static PmmNode {
     NODE.get_or_init(|| PmmNode::new(crate::memory_bytes() as usize))
 }
 
-/// fxdax: `bytes` of memory, in whole chunks.
+/// cladefs: `bytes` of memory, in whole chunks.
 fn chunks_in(bytes: u64) -> usize {
     (bytes / CHUNK_SIZE as u64) as usize
 }
 
-/// fxdax: the bytes of `chunks` chunks.
+/// cladefs: the bytes of `chunks` chunks.
 fn chunk_bytes(chunks: usize) -> u64 {
     chunks as u64 * CHUNK_SIZE as u64
 }

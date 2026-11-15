@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
+//! cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
 //! each of which wraps its volumes' DEKs ([`Secret::wrap`]); an object's data is sealed
 //! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
@@ -113,7 +113,7 @@ impl Secret {
         hmac::verify(&key, bytes, mac).map_err(|_| Unauthentic("bytes, by their MAC"))
     }
 
-    /// fxdax: the HMAC-SHA256 under it of `pieces`, one after another, truncated to its first
+    /// cladefs: the HMAC-SHA256 under it of `pieces`, one after another, truncated to its first
     /// [`TAG_LEN`] bytes (RFC 2104, 5; NIST SP 800-107, 5.3.3): a tag as long as an AES-256-GCM
     /// tag, to authenticate what is encrypted otherwise, as a raw file's XTS sectors are
     /// (TASK-411.23). A MAC needing no nonce: tagging the same bytes twice gives the same tag, and
@@ -125,7 +125,7 @@ impl Secret {
         mac.as_ref()[..TAG_LEN].try_into().expect("HMAC-SHA256 is longer than a tag")
     }
 
-    /// fxdax: checks `tag` is the tag of `pieces` under it ([`Secret::tag`]), in constant time.
+    /// cladefs: checks `tag` is the tag of `pieces` under it ([`Secret::tag`]), in constant time.
     pub fn verify_tag(&self, pieces: &[&[u8]], tag: &[u8; TAG_LEN]) -> Result<(), Unauthentic> {
         aws_lc_rs::constant_time::verify_slices_are_equal(&self.tag(pieces), tag)
             .map_err(|_| Unauthentic("bytes, by their tag"))

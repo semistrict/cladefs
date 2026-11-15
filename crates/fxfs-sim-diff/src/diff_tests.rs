@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@
 //! (TASK-149.14.2), and an extent a seal minted and the device sealed which the model called open
 //! until the seal's end (seed 32826).
 //!
-//! FXDAX_SIM_DIFF_CASES asks for more sequences, FXDAX_SIM_DIFF_OPS for longer ones.
+//! CLADEFS_SIM_DIFF_CASES asks for more sequences, CLADEFS_SIM_DIFF_OPS for longer ones.
 
 use crate::model::{self, Errno, Model};
 use fuchsia_async as fasync;
@@ -769,8 +769,8 @@ fn op() -> impl Strategy<Value = Op> {
 
 #[test]
 fn the_sims_model_does_as_fxfs_does() {
-    let cases = std::env::var("FXDAX_SIM_DIFF_CASES").map_or(64, |cases| cases.parse().unwrap());
-    let most: usize = std::env::var("FXDAX_SIM_DIFF_OPS").map_or(48, |most| most.parse().unwrap());
+    let cases = std::env::var("CLADEFS_SIM_DIFF_CASES").map_or(64, |cases| cases.parse().unwrap());
+    let most: usize = std::env::var("CLADEFS_SIM_DIFF_OPS").map_or(48, |most| most.parse().unwrap());
     let config = Config { cases, failure_persistence: None, ..Config::default() };
     let sequences = (any::<u64>(), prop::collection::vec(op(), 1..most));
     let tally = Tally::default();

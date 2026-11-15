@@ -1,5 +1,5 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Context;
@@ -21,19 +21,19 @@ struct TestResult {
     name: String,
     outcome: TestOutcome,
     log_path: Option<PathBuf>,
-    /// fxdax: what the test ran, its outcome as data: what it took, the checks it failed, and
+    /// cladefs: what the test ran, its outcome as data: what it took, the checks it failed, and
     /// what it chose that replays it (TASK-160.31). None if it didn't run.
     ran: Option<Ran>,
 }
 
-/// fxdax: what a test that ran says of itself besides its outcome.
+/// cladefs: what a test that ran says of itself besides its outcome.
 struct Ran {
     /// How long it took, and its limit.
     took: std::time::Duration,
     limit: std::time::Duration,
     /// The checks its guest said failed (`failed_checks`).
     failed_checks: Vec<String>,
-    /// What it chose that a replay needs, as the knobs that choose it: FXDAX_SEED, of a test that
+    /// What it chose that a replay needs, as the knobs that choose it: CLADEFS_SEED, of a test that
     /// keeps its seed in its directory's file `seed` (fxfs-guest-checks', fxfs-guest-script's).
     chosen: BTreeMap<String, String>,
     /// What a test that ran out of time had to add (`Test::timed_out`).
@@ -43,7 +43,7 @@ struct Ran {
     kernel_reports: Vec<KernelReport>,
 }
 
-/// fxdax: the first report of a VM's kernel, on its console, the file `console` of the test's
+/// cladefs: the first report of a VM's kernel, on its console, the file `console` of the test's
 /// directory.
 #[derive(Clone, Debug, PartialEq)]
 struct KernelReport {
@@ -51,7 +51,7 @@ struct KernelReport {
     report: String,
 }
 
-/// fxdax: the first report of each kernel of a test's VMs that complained, on their consoles in its
+/// cladefs: the first report of each kernel of a test's VMs that complained, on their consoles in its
 /// directory `dir`, saying each to standard error: what went wrong first, which the soft lockups
 /// after an oops push out of a console's tail and a log's (TASK-311).
 fn first_kernel_reports(dir: &Path) -> Vec<KernelReport> {
@@ -75,7 +75,7 @@ fn first_kernel_reports(dir: &Path) -> Vec<KernelReport> {
     reports
 }
 
-/// fxdax: the checks a test's guest said failed, as the checks suites' guest says them as it ends,
+/// cladefs: the checks a test's guest said failed, as the checks suites' guest says them as it ends,
 /// a line `FAILED: a, b`, or as one outruns its budget, `FAILED: a, still running after …`: the
 /// names of checks, identifiers, the rest of such a line left out.
 fn failed_checks(stdout: &str) -> Vec<String> {
@@ -87,10 +87,10 @@ fn failed_checks(stdout: &str) -> Vec<String> {
     lines.flat_map(|names| names.split(", ").filter(identifier)).map(str::to_owned).collect()
 }
 
-/// fxdax: what a test chose that a replay needs, from what it left in its directory `dir`.
+/// cladefs: what a test chose that a replay needs, from what it left in its directory `dir`.
 fn chosen(dir: &Path) -> BTreeMap<String, String> {
     let seed = fs::read_to_string(dir.join("seed")).ok();
-    seed.map(|seed| ("FXDAX_SEED".to_owned(), seed.trim().to_owned())).into_iter().collect()
+    seed.map(|seed| ("CLADEFS_SEED".to_owned(), seed.trim().to_owned())).into_iter().collect()
 }
 
 fn get_test(name: &str) -> anyhow::Result<Box<dyn Test>> {
@@ -153,7 +153,7 @@ fn kill_cleanup_pids(test_dir: &Path) {
     }
 }
 
-/// fxdax: how the runner isolates a case: in a network namespace of its own, its loopback alone,
+/// cladefs: how the runner isolates a case: in a network namespace of its own, its loopback alone,
 /// so that cases on one host share no ports (TASK-149.20.6).
 #[derive(Debug, PartialEq, Eq)]
 enum Isolation {
@@ -165,13 +165,13 @@ enum Isolation {
     None(&'static str),
 }
 
-/// fxdax: what [`isolation`] goes by.
+/// cladefs: what [`isolation`] goes by.
 struct Host {
     linux: bool,
     root: bool,
-    /// FXDAX_NO_UNSHARE: set, the cases run as they are.
+    /// CLADEFS_NO_UNSHARE: set, the cases run as they are.
     no_unshare: bool,
-    /// FXDAX_EXTENTD_REMOTE, the bucket cases' own extent daemons keep their stores in.
+    /// CLADEFS_EXTENTD_REMOTE, the bucket cases' own extent daemons keep their stores in.
     remote: Option<String>,
     has: fn(&str) -> bool,
 }
@@ -181,14 +181,14 @@ impl Host {
         Self {
             linux: cfg!(target_os = "linux"),
             root: nix::unistd::geteuid().is_root(),
-            no_unshare: std::env::var_os("FXDAX_NO_UNSHARE").is_some(),
-            remote: std::env::var("FXDAX_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty()),
+            no_unshare: std::env::var_os("CLADEFS_NO_UNSHARE").is_some(),
+            remote: std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty()),
             has: on_path,
         }
     }
 }
 
-/// fxdax: whether `command` is an executable file in a directory of PATH. Not whether it runs with
+/// cladefs: whether `command` is an executable file in a directory of PATH. Not whether it runs with
 /// `--version`, which `ip` refuses: the hosts ran every case unisolated, `ip` taken for missing
 /// (GCE r961).
 fn on_path(command: &str) -> bool {
@@ -200,10 +200,10 @@ fn on_path(command: &str) -> bool {
     })
 }
 
-/// fxdax: how a case runs on `host`. Root, as on ubu1, unshares its network itself:
+/// cladefs: how a case runs on `host`. Root, as on ubu1, unshares its network itself:
 /// `buildah unshare` as root, with no subordinate IDs, entered user namespace after user namespace
 /// till its memfd's name, which grows with each, was past the kernel's 249 bytes (`memfd_create:
-/// invalid argument`), which once had the hosts run every case unisolated (FXDAX_NO_UNSHARE). A case
+/// invalid argument`), which once had the hosts run every case unisolated (CLADEFS_NO_UNSHARE). A case
 /// whose own extent daemons keep their stores in a bucket over the network, as a GCS run's do,
 /// runs in the host's network.
 fn isolation(host: &Host) -> Isolation {
@@ -211,9 +211,9 @@ fn isolation(host: &Host) -> Isolation {
     if !host.linux {
         Isolation::None("network namespaces are Linux's")
     } else if host.no_unshare {
-        Isolation::None("FXDAX_NO_UNSHARE is set")
+        Isolation::None("CLADEFS_NO_UNSHARE is set")
     } else if host.remote.as_deref().is_some_and(networked) {
-        Isolation::None("FXDAX_EXTENTD_REMOTE names a bucket over the network")
+        Isolation::None("CLADEFS_EXTENTD_REMOTE names a bucket over the network")
     } else if !(host.has)("unshare") || !(host.has)("ip") {
         Isolation::None("unshare or ip is missing")
     } else if host.root {
@@ -279,7 +279,7 @@ fn run_single_test(
     // Enforce a per-test timeout. If the child doesn't exit within the
     // deadline, kill it so we don't hang the entire suite.
     let timeout = std::time::Duration::from_secs(test_case.timeout_secs());
-    // fxdax: the deadline, for the test's VMs, whose guests say where they are stuck before it.
+    // cladefs: the deadline, for the test's VMs, whose guests say where they are stuck before it.
     let killed_at = (std::time::SystemTime::now() + timeout)
         .duration_since(std::time::UNIX_EPOCH)
         .context("the clock is before the epoch")?
@@ -365,7 +365,7 @@ fn run_single_test(
         std::thread::sleep(std::time::Duration::from_millis(100));
     };
 
-    // fxdax: how long it took of its limit, which the verdict says: a test near its limit shows
+    // cladefs: how long it took of its limit, which the verdict says: a test near its limit shows
     // before it times out (TASK-168).
     let elapsed = began.elapsed();
     let took = format!("{} s of {} s", elapsed.as_secs(), timeout.as_secs());
@@ -383,7 +383,7 @@ fn run_single_test(
         Ok(outcome) => outcome,
         Err(_) => TestOutcome::Fail("test.check() panicked".to_string()),
     };
-    // fxdax: a test whose host side failed, its error in the log, or died, fails, though its
+    // cladefs: a test whose host side failed, its error in the log, or died, fails, though its
     // guests said what they should: start_vm's errors went unseen, as did its process's aborting.
     let outcome = match outcome {
         TestOutcome::Pass if !exited.success() => {
@@ -391,7 +391,7 @@ fn run_single_test(
         }
         outcome => outcome,
     };
-    // fxdax: a test that passed fails if a kernel of its VMs complained (TASK-44.8).
+    // cladefs: a test that passed fails if a kernel of its VMs complained (TASK-44.8).
     let outcome = match outcome {
         TestOutcome::Pass if checks_console => match consoles_complaints(&test_dir) {
             Ok(()) => TestOutcome::Pass,
@@ -404,7 +404,7 @@ fn run_single_test(
     // Runs after check() regardless of outcome, so leaked processes are
     // cleaned up even if the test crashed.
     kill_cleanup_pids(&test_dir);
-    // fxdax: a test that passed fails if the run's stores are to be sealed and its are not
+    // cladefs: a test that passed fails if the run's stores are to be sealed and its are not
     // (TASK-411.15): checked once its processes are gone, before its directory is.
     let outcome = match outcome {
         TestOutcome::Pass | TestOutcome::Report(_) if env::var_os(sealed::SEALED).is_some() => {
@@ -421,7 +421,7 @@ fn run_single_test(
         }
         outcome => outcome,
     };
-    // fxdax: before a test that passed has its directory removed. The checks it failed only if it
+    // cladefs: before a test that passed has its directory removed. The checks it failed only if it
     // failed: an overrun run passes on its check's failing (TASK-168).
     let failed = if matches!(outcome, TestOutcome::Fail(_)) { said_failed } else { Vec::new() };
     let mut ran = Ran {
@@ -468,7 +468,7 @@ fn run_single_test(
     })
 }
 
-/// fxdax: saves, before a test that hung is killed, the stacks of every thread of its processes,
+/// cladefs: saves, before a test that hung is killed, the stacks of every thread of its processes,
 /// `pid`'s and its descendants', and those it registered for cleanup, to `stacks-<pid>.txt` in its
 /// directory `dir`: what waits for what, which a timeout alone kept nothing of (TASK-44.13). With
 /// elfutils' eu-stack; without it, a note says so.
@@ -508,7 +508,7 @@ fn save_stacks(dir: &Path, pid: u32) {
     eprintln!("the hung test's stacks: {}/stacks-*.txt", dir.display());
 }
 
-/// fxdax: fails with what the kernels of a test's VMs complained of on their consoles, the files
+/// cladefs: fails with what the kernels of a test's VMs complained of on their consoles, the files
 /// `console.txt` and `<name>.console.txt` in its directory `dir` (`vm::complaints`).
 fn consoles_complaints(dir: &Path) -> anyhow::Result<()> {
     for path in consoles(dir)? {
@@ -517,7 +517,7 @@ fn consoles_complaints(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// fxdax: the consoles of a test's VMs, the files `console.txt` and `<name>.console.txt` in its
+/// cladefs: the consoles of a test's VMs, the files `console.txt` and `<name>.console.txt` in its
 /// directory `dir`, by name.
 fn consoles(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     let mut consoles = Vec::new();
@@ -576,7 +576,7 @@ fn write_github_summary(
         if let TestOutcome::Fail(reason) = &result.outcome {
             writeln!(file, "**Error:**\n```\n{reason}\n```\n---\n")?;
         }
-        // fxdax: what a VM's kernel said first, which the log's tail below may have lost
+        // cladefs: what a VM's kernel said first, which the log's tail below may have lost
         // (TASK-311).
         for KernelReport { console, report } in
             result.ran.iter().flat_map(|ran| &ran.kernel_reports)
@@ -599,11 +599,11 @@ fn write_github_summary(
     Ok(())
 }
 
-/// fxdax: the most of a log a GitHub summary shows, its last bytes: half of the 1 MiB GitHub keeps
+/// cladefs: the most of a log a GitHub summary shows, its last bytes: half of the 1 MiB GitHub keeps
 /// of a step's summary, the rest for the error and the kernels' first reports above it.
 const MAX_LOG_SIZE: usize = 512 * 1024;
 
-/// fxdax: the last MAX_LOG_SIZE bytes of `log` at most, from a character's start, saying so if
+/// cladefs: the last MAX_LOG_SIZE bytes of `log` at most, from a character's start, saying so if
 /// that isn't all of it: a log's tail at a byte offset in a character panicked.
 fn log_tail(log: &str) -> std::borrow::Cow<'_, str> {
     if log.len() <= MAX_LOG_SIZE {
@@ -617,7 +617,7 @@ fn log_tail(log: &str) -> std::borrow::Cow<'_, str> {
         .into()
 }
 
-/// fxdax: where `runner test` writes its case's outcome as data, and of which round of which run
+/// cladefs: where `runner test` writes its case's outcome as data, and of which round of which run
 /// (TASK-160.31).
 struct Record {
     outcome: PathBuf,
@@ -626,7 +626,7 @@ struct Record {
     round: u32,
 }
 
-/// fxdax: `result`'s outcome as data, in round `round` of the run `run` says (`Record::run`), with
+/// cladefs: `result`'s outcome as data, in round `round` of the run `run` says (`Record::run`), with
 /// the knobs that replay it, those of the run and those the case chose, and the command that does.
 fn outcome_json(result: &TestResult, run: &serde_json::Value, round: u32) -> serde_json::Value {
     let ran = result.ran.as_ref();
@@ -662,19 +662,19 @@ fn outcome_json(result: &TestResult, run: &serde_json::Value, round: u32) -> ser
     })
 }
 
-/// fxdax: the command that runs `case` again on a host as it ran (scripts/test-host.sh), its knobs
+/// cladefs: the command that runs `case` again on a host as it ran (scripts/test-host.sh), its knobs
 /// `knobs`.
 fn replay(case: &str, knobs: &BTreeMap<String, String>) -> String {
-    let mut words = vec!["FXDAX_WORKSPACE_TESTS=0".to_owned(), format!("FXDAX_E2E_TEST={case}")];
+    let mut words = vec!["CLADEFS_WORKSPACE_TESTS=0".to_owned(), format!("CLADEFS_E2E_TEST={case}")];
     let others = knobs
         .iter()
-        .filter(|(name, _)| !["FXDAX_WORKSPACE_TESTS", "FXDAX_E2E_TEST"].contains(&name.as_str()));
+        .filter(|(name, _)| !["CLADEFS_WORKSPACE_TESTS", "CLADEFS_E2E_TEST"].contains(&name.as_str()));
     words.extend(others.map(|(name, value)| format!("{name}={}", shell_word(value))));
     words.push("scripts/test-host.sh".to_owned());
     words.join(" ")
 }
 
-/// fxdax: `value` as a shell reads it back: as it is if it holds nothing a shell treats specially,
+/// cladefs: `value` as a shell reads it back: as it is if it holds nothing a shell treats specially,
 /// in single quotes otherwise.
 fn shell_word(value: &str) -> String {
     let plain = |b: u8| b.is_ascii_alphanumeric() || b"_./:=,@%+-".contains(&b);
@@ -698,7 +698,7 @@ fn run_tests(
             fs::create_dir_all(&path).context("Failed to create base directory")?;
             path
         }
-        None => TempDir::new_in("/tmp", "fxdax-guest-tests")
+        None => TempDir::new_in("/tmp", "cladefs-guest-tests")
             .context("Failed to create temp base directory")?
             .into_path(),
     };
@@ -763,7 +763,7 @@ fn run_tests(
     let extra_msg =
         if extra.is_empty() { String::new() } else { format!(" ({})", extra.join(", ")) };
 
-    // fxdax: a case asked for by name that skips fails: it was to run. Fresh hosts without a
+    // cladefs: a case asked for by name that skips fails: it was to run. Fresh hosts without a
     // guest kernel skipped every guest case asked for, and the run passed, round after round.
     let skipped_asked = test_case != "all" && num_skip > 0;
     if num_fail > 0 || skipped_asked {
@@ -798,14 +798,14 @@ enum CliCommand {
         /// Write test results to GitHub Actions job summary ($GITHUB_STEP_SUMMARY)
         #[arg(long)]
         github_summary: bool,
-        /// fxdax: write the case's outcome, as JSON, to this file
+        /// cladefs: write the case's outcome, as JSON, to this file
         #[arg(long)]
         outcome: Option<PathBuf>,
-        /// fxdax: the run the case is of, its commit, knobs and rounds (a run.json of
+        /// cladefs: the run the case is of, its commit, knobs and rounds (a run.json of
         /// scripts/guest_results.py's), which its outcome records
         #[arg(long, requires = "outcome")]
         run: Option<PathBuf>,
-        /// fxdax: the round of the run it is, which its outcome records
+        /// cladefs: the round of the run it is, which its outcome records
         #[arg(long, default_value_t = 1, requires = "outcome")]
         round: u32,
     },
@@ -815,10 +815,10 @@ enum CliCommand {
         #[arg(long)]
         tmp_dir: PathBuf,
     },
-    /// fxdax: makes a local KMS in DIR holding a KEK for each tenant the cases use, for a run's
-    /// stores to be sealed under (FXDAX_KMS=local://DIR, TASK-411.15)
+    /// cladefs: makes a local KMS in DIR holding a KEK for each tenant the cases use, for a run's
+    /// stores to be sealed under (CLADEFS_KMS=local://DIR, TASK-411.15)
     Kms { dir: PathBuf },
-    /// fxdax: checks, holding no key, that the stores under DIRS and the buckets BUCKETS, whole,
+    /// cladefs: checks, holding no key, that the stores under DIRS and the buckets BUCKETS, whole,
     /// are sealed: the run's own bucket and part cache, at its end (TASK-411.15)
     Sealed {
         /// A bucket, by its URL, checked whole
@@ -826,7 +826,7 @@ enum CliCommand {
         buckets: Vec<String>,
         dirs: Vec<PathBuf>,
     },
-    /// fxdax: prints the names of the cases selected, a line each, as registered: what the
+    /// cladefs: prints the names of the cases selected, a line each, as registered: what the
     /// scripts run, by tag, keeping no lists of names (TASK-160.29).
     List {
         /// Every case of the suite TAG
@@ -841,14 +841,14 @@ enum CliCommand {
     },
 }
 
-/// fxdax: a [`Tag`] by its name, the tags and what each selects in `--help`.
+/// cladefs: a [`Tag`] by its name, the tags and what each selects in `--help`.
 fn tag_parser() -> impl clap::builder::TypedValueParser<Value = Tag> {
     use clap::builder::{PossibleValue, PossibleValuesParser, TypedValueParser};
     let tags = Tag::ALL.iter().map(|tag| PossibleValue::new(tag.name()).help(tag.about()));
     PossibleValuesParser::new(tags).map(|name| Tag::named(&name).expect("a tag clap took"))
 }
 
-/// fxdax: `runner list`'s, which fails if it selects nothing: a run of no cases passes.
+/// cladefs: `runner list`'s, which fails if it selects nothing: a run of no cases passes.
 fn list(names: &[String], tags: &[Tag], shard: Option<Shard>) -> anyhow::Result<()> {
     let mut cases = test_cases::select(test_cases(), names, tags).map_err(anyhow::Error::msg)?;
     if let Some(shard) = shard {
@@ -881,13 +881,13 @@ struct Cli {
     command: Option<CliCommand>,
 }
 
-/// fxdax: the longest temporary directory the cases' sockets may be in. They put their sockets
+/// cladefs: the longest temporary directory the cases' sockets may be in. They put their sockets
 /// there, Firecracker's APIs, vsocks, their daemons' control sockets and tenants', as its path is
 /// short, which a socket's must be (107 bytes, SUN_LEN): names of up to 60 bytes, such as
-/// `fxdax-PID-sandbox-15-writer.api` and a vsock's `_PORT`, under a directory of this many.
+/// `cladefs-PID-sandbox-15-writer.api` and a vsock's `_PORT`, under a directory of this many.
 const MAX_TMPDIR: usize = 40;
 
-/// fxdax: refuses a temporary directory, `dir`, too long for the cases' sockets ([`MAX_TMPDIR`]):
+/// cladefs: refuses a temporary directory, `dir`, too long for the cases' sockets ([`MAX_TMPDIR`]):
 /// every case then fails, each as its own sockets do, or not at all where it has none, and a run
 /// whose TMPDIR was a host run's results' (scripts/sandboxes.sh's) compared nothing for hours,
 /// its sandboxes' daemons unable to listen (TASK-330.4).
@@ -945,7 +945,7 @@ mod tests {
         );
     }
 
-    /// A Linux host as root with every command, FXDAX_EXTENTD_REMOTE `remote`.
+    /// A Linux host as root with every command, CLADEFS_EXTENTD_REMOTE `remote`.
     fn host(remote: Option<&str>) -> Host {
         let remote = remote.map(str::to_owned);
         Host { linux: true, root: true, no_unshare: false, remote, has: |_| true }
@@ -968,7 +968,7 @@ mod tests {
         assert_eq!(isolation(&host(Some("memory:///vmm"))), Isolation::Net);
         assert_eq!(
             isolation(&host(Some("gs://bucket/run"))),
-            Isolation::None("FXDAX_EXTENTD_REMOTE names a bucket over the network")
+            Isolation::None("CLADEFS_EXTENTD_REMOTE names a bucket over the network")
         );
         assert_eq!(isolation(&Host { root: false, ..host(None) }), Isolation::MappedNet);
         assert_eq!(
@@ -981,7 +981,7 @@ mod tests {
         );
         assert_eq!(
             isolation(&Host { no_unshare: true, ..host(None) }),
-            Isolation::None("FXDAX_NO_UNSHARE is set")
+            Isolation::None("CLADEFS_NO_UNSHARE is set")
         );
         assert_eq!(
             isolation(&Host { linux: false, ..host(None) }),
@@ -991,7 +991,7 @@ mod tests {
 
     use super::*;
 
-    /// fxdax: a checks suite's guest's failures as it says them, and nothing else on its lines.
+    /// cladefs: a checks suite's guest's failures as it says them, and nothing else on its lines.
     #[test]
     fn failed_checks_are_those_the_guest_names() {
         let stdout = "OK base\nFAILED: sparse, acls\nFAILED: random_ops, still running after its \
@@ -1008,7 +1008,7 @@ mod tests {
         assert_eq!(shell_word(""), "''");
     }
 
-    /// fxdax: a round's outcome as data: the run's knobs and those the case chose, which its
+    /// cladefs: a round's outcome as data: the run's knobs and those the case chose, which its
     /// replay runs it with, alone, on ubu1.
     #[test]
     fn an_outcome_says_how_to_replay_it() {
@@ -1016,7 +1016,7 @@ mod tests {
             took: std::time::Duration::from_millis(41_500),
             limit: std::time::Duration::from_secs(180),
             failed_checks: vec!["sparse".to_owned()],
-            chosen: [("FXDAX_SEED".to_owned(), "77".to_owned())].into(),
+            chosen: [("CLADEFS_SEED".to_owned(), "77".to_owned())].into(),
             said: None,
             kernel_reports: vec![KernelReport {
                 console: "console.txt".to_owned(),
@@ -1033,10 +1033,10 @@ mod tests {
             "commit": "abc123",
             "rounds": 5,
             "knobs": {
-                "FXDAX_E2E_TEST": "--tag dax-gate",
-                "FXDAX_E2E_ROUNDS": "5",
-                "FXDAX_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
-                "FXDAX_WORKSPACE_TESTS": "0",
+                "CLADEFS_E2E_TEST": "--tag dax-gate",
+                "CLADEFS_E2E_ROUNDS": "5",
+                "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
+                "CLADEFS_WORKSPACE_TESTS": "0",
             },
         });
         assert_eq!(
@@ -1055,21 +1055,21 @@ mod tests {
                 "took_secs": 41.5,
                 "limit_secs": 180,
                 "commit": "abc123",
-                "replay": "FXDAX_WORKSPACE_TESTS=0 FXDAX_E2E_TEST=fxfs-guest-checks-dax \
-                    FXDAX_E2E_ROUNDS=5 FXDAX_GUEST_CMDLINE='fxfs.follow_apply_delay_us=200 quiet' \
-                    FXDAX_SEED=77 scripts/test-host.sh",
+                "replay": "CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=fxfs-guest-checks-dax \
+                    CLADEFS_E2E_ROUNDS=5 CLADEFS_GUEST_CMDLINE='fxfs.follow_apply_delay_us=200 quiet' \
+                    CLADEFS_SEED=77 scripts/test-host.sh",
                 "knobs": {
-                    "FXDAX_E2E_ROUNDS": "5",
-                    "FXDAX_E2E_TEST": "--tag dax-gate",
-                    "FXDAX_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
-                    "FXDAX_SEED": "77",
-                    "FXDAX_WORKSPACE_TESTS": "0",
+                    "CLADEFS_E2E_ROUNDS": "5",
+                    "CLADEFS_E2E_TEST": "--tag dax-gate",
+                    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
+                    "CLADEFS_SEED": "77",
+                    "CLADEFS_WORKSPACE_TESTS": "0",
                 },
             })
         );
     }
 
-    /// fxdax: a failed test's first kernel reports are its consoles', each with its file's name,
+    /// cladefs: a failed test's first kernel reports are its consoles', each with its file's name,
     /// those whose kernels complained, in their names' order (TASK-311).
     #[test]
     fn a_failed_tests_kernel_reports_are_its_consoles_first() {
@@ -1094,7 +1094,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a log's tail starts at a character, however its bytes fall.
+    /// cladefs: a log's tail starts at a character, however its bytes fall.
     #[test]
     fn a_logs_tail_starts_at_a_character() {
         assert_eq!(log_tail("short"), "short");
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(kept, format!("{}x", "é".repeat(MAX_LOG_SIZE / 2 - 1)));
     }
 
-    /// fxdax: a case run without a run's record, by hand, and skipped.
+    /// cladefs: a case run without a run's record, by hand, and skipped.
     #[test]
     fn an_outcome_of_no_run() {
         let result = TestResult {
@@ -1125,7 +1125,7 @@ mod tests {
         );
         assert_eq!(
             outcome["replay"],
-            "FXDAX_WORKSPACE_TESTS=0 FXDAX_E2E_TEST=runner-deadlock scripts/test-host.sh"
+            "CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=runner-deadlock scripts/test-host.sh"
         );
     }
 }

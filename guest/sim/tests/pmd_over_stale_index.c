@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * A read fault of a PMD that says its pages are shared must find their folio's fields clean:
  * guest/tests' pmd_over_stale_index, step for step.

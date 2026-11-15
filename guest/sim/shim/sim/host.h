@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * What the fake kernel asks of the process it runs in (kernel/host.c, the only file that sees
  * libc's headers): memory, coroutines, and the window, which is real memory protection.

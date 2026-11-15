@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Tasks and what they wait on. Simulated tasks are coroutines, of which one runs at a time; what
  * follows from that (locks taken and sleeps) are the scheduling points, where a seed picks the next

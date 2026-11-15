@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: AWS KMS as a [`super::Kms`] (TASK-411.17, backlog doc-16, Real KMSes: AWS KMS):
+//! cladefs's own: AWS KMS as a [`super::Kms`] (TASK-411.17, backlog doc-16, Real KMSes: AWS KMS):
 //! [`AwsKms`], `aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`.
 
 use super::{Error, KeyNames, Kms};
@@ -20,7 +20,7 @@ pub(super) fn from_url(url: &str) -> Result<super::Shared, String> {
     Ok(Arc::new(AwsKms::from_url(url)?))
 }
 
-/// The start of what [`AwsKms`] wraps: fxdax's key, AWS's; [`LocalKms`](super::LocalKms)'s is
+/// The start of what [`AwsKms`] wraps: cladefs's key, AWS's; [`LocalKms`](super::LocalKms)'s is
 /// `fxkw`, so that neither's is sent to the other.
 const MAGIC: &[u8; 4] = b"fxka";
 
@@ -33,8 +33,8 @@ const FIXED_LEN: usize = MAGIC.len() + 1 + 2;
 
 /// The encryption context's key whose value is the tenant, in hexadecimal: what binds a wrapped
 /// key to its tenant, in the KMS, and what a key policy's condition names
-/// (`kms:EncryptionContext:fxdax-tenant`).
-const CONTEXT_TENANT: &str = "fxdax-tenant";
+/// (`kms:EncryptionContext:cladefs-tenant`).
+const CONTEXT_TENANT: &str = "cladefs-tenant";
 
 /// What the query of an `aws-kms://` URL may name.
 const QUERY: [&str; 3] = ["key", "keys", "endpoint"];
@@ -54,9 +54,9 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// (EKS), the container's (ECS) or the instance's (IMDSv2). It never logs them, nor a key.
 ///
 /// A wrap is KMS's `Encrypt` of the key's 32 bytes under the tenant's key, with the encryption
-/// context `{"fxdax-tenant": TENANT}` (the tenant in hexadecimal, as [`KeyNames`] names it): so
+/// context `{"cladefs-tenant": TENANT}` (the tenant in hexadecimal, as [`KeyNames`] names it): so
 /// that the ciphertext decrypts for no other tenant even under the same key, and a key policy can
-/// let fxdax use a key for its tenant alone. What it wraps is a header, [`MAGIC`], [`FORMAT`] (1),
+/// let cladefs use a key for its tenant alone. What it wraps is a header, [`MAGIC`], [`FORMAT`] (1),
 /// the key's name's length (2 bytes, big-endian) and name, then KMS's ciphertext blob, which names
 /// the key's version itself: so a rotated key unwraps what any of its versions wrapped. An unwrap
 /// refuses, as [`Error::Unauthentic`] and asking the KMS nothing, a wrapped key whose header is not
@@ -157,7 +157,7 @@ impl AwsKms {
     pub fn new(region: &str, endpoint: Option<String>, names: KeyNames) -> Self {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
-            .thread_name("fxdax-aws-kms")
+            .thread_name("cladefs-aws-kms")
             .enable_all()
             .build()
             .expect("a runtime for AWS KMS's calls");
@@ -376,13 +376,13 @@ mod tests {
         let keys = dir.path().join("keys");
         std::fs::write(&keys, "2a arn:aws:kms:us-east-1:444455556666:key/abc\n").unwrap();
         let url = format!(
-            "aws-kms://eu-west-2?key=alias/fxdax-{{tenant}}&keys={}&endpoint=http://127.0.0.1:4599",
+            "aws-kms://eu-west-2?key=alias/cladefs-{{tenant}}&keys={}&endpoint=http://127.0.0.1:4599",
             keys.display()
         );
         let kms = AwsKms::from_url(&url).unwrap();
         assert_eq!(kms.client.region, "eu-west-2");
         assert_eq!(kms.client.endpoint.as_deref(), Some("http://127.0.0.1:4599"));
-        assert_eq!(kms.names.of(0x1f), "alias/fxdax-1f");
+        assert_eq!(kms.names.of(0x1f), "alias/cladefs-1f");
         assert_eq!(kms.names.of(0x2a), "arn:aws:kms:us-east-1:444455556666:key/abc");
         // Percent-encoded, as a URL's query may be.
         let kms = AwsKms::from_url("aws-kms://us-east-1/?key=alias%2Ft-%7Btenant%7D").unwrap();
@@ -528,14 +528,14 @@ mod tests {
     const TENANT: u64 = 0x1f;
 
     /// The template the tests name tenants' keys by.
-    const TEMPLATE: &str = "alias/fxdax-tenant-{tenant}";
+    const TEMPLATE: &str = "alias/cladefs-tenant-{tenant}";
 
     /// The emulator, with a key for [`TENANT`] named by [`TEMPLATE`], its ID; and the KMS over it,
-    /// as `FXDAX_KMS` names one.
+    /// as `CLADEFS_KMS` names one.
     fn emulated() -> (LocalAwsKms, String, crate::kms::Shared) {
         let emulator = LocalAwsKms::start();
         let key_id = emulator.create_key();
-        emulator.create_alias("alias/fxdax-tenant-1f", &key_id);
+        emulator.create_alias("alias/cladefs-tenant-1f", &key_id);
         let kms = crate::kms::from_url(&emulator.url(TEMPLATE)).unwrap();
         (emulator, key_id, kms)
     }
@@ -559,7 +559,7 @@ mod tests {
         let key = Secret::random();
         let wrapped = wrap_dyn(&kms, TENANT, &key).unwrap();
         let (name, blob) = key_name_of(&wrapped).unwrap();
-        assert_eq!(name, "alias/fxdax-tenant-1f");
+        assert_eq!(name, "alias/cladefs-tenant-1f");
         assert!(!blob.windows(KEY_LEN).any(|w| w == key.expose()), "the blob holds the key");
         assert_eq!(unwrap_dyn(&kms, TENANT, &wrapped).unwrap().expose(), key.expose());
         // Another wrap of the same key differs: KMS's own IV.
@@ -628,7 +628,7 @@ mod tests {
         let others = wrap_dyn(&elsewhere, TENANT, &Secret::random()).unwrap();
         assert_eq!(key_name_of(&others).unwrap().0, other);
         let blob = key_name_of(&others).unwrap().1;
-        let header = header(TENANT, "alias/fxdax-tenant-1f").unwrap();
+        let header = header(TENANT, "alias/cladefs-tenant-1f").unwrap();
         let relabelled = Wrapped([&header[..], blob].concat());
         assert_eq!(
             refusal_text(unwrap_dyn(&kms, TENANT, &relabelled)),
@@ -659,7 +659,7 @@ mod tests {
                 backing.iter().map(|key| format!("\n          - {key}")).collect();
             format!(
                 "Keys:\n  Symmetric:\n    Aes:\n      - Metadata:\n          KeyId: {id}\n        \
-                 BackingKeys:{backing}\nAliases:\n  - AliasName: alias/fxdax-tenant-1f\n    \
+                 BackingKeys:{backing}\nAliases:\n  - AliasName: alias/cladefs-tenant-1f\n    \
                  TargetKeyId: {id}\n"
             )
         };
@@ -740,7 +740,7 @@ mod tests {
         // Tenant 0x2a's own name on the wrapped key, as its header would say.
         let blob = key_name_of(&wrapped).unwrap().1;
         let relabelled =
-            Wrapped([&header(0x2a, "alias/fxdax-tenant-2a").unwrap()[..], blob].concat());
+            Wrapped([&header(0x2a, "alias/cladefs-tenant-2a").unwrap()[..], blob].concat());
         assert_eq!(
             refusal_text(unwrap_dyn(&kms, 0x2a, &relabelled)),
             "tenant 42: no KEK in the KMS"
@@ -766,13 +766,13 @@ mod tests {
         assert_eq!(
             refused(refusal_text(unwrap_dyn(&kms, TENANT, &wrapped))),
             format!(
-                "tenant 31: the KMS failed: AWS KMS's Decrypt under alias/fxdax-tenant-1f: {why}"
+                "tenant 31: the KMS failed: AWS KMS's Decrypt under alias/cladefs-tenant-1f: {why}"
             )
         );
         assert_eq!(
             refused(refusal_text(wrap_dyn(&kms, TENANT, &Secret::random()))),
             format!(
-                "tenant 31: the KMS failed: AWS KMS's Encrypt under alias/fxdax-tenant-1f: {why}"
+                "tenant 31: the KMS failed: AWS KMS's Encrypt under alias/cladefs-tenant-1f: {why}"
             )
         );
     }

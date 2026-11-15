@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# fxjob: run one fxdax job in a cgroup of its own, once the host has room for it.
+# fxjob: run one cladefs job in a cgroup of its own, once the host has room for it.
 #
 #   fxjob [--name NAME] [--mem SIZE] [--cpus N] [--] COMMAND...
 #                                  a build, test or VM run (default 8G, 4 CPUs): best effort
@@ -30,7 +30,7 @@
 # it and the loop devices on its files. sudo never passes TMPDIR on: a root run gets it with
 # `sudo env TMPDIR="$TMPDIR" ...`, expanded inside the job.
 #
-# The source is the fxdax repo's scripts/fxjob; the host's setup (~/docs/system-setup.d/
+# The source is the cladefs repo's scripts/fxjob; the host's setup (~/docs/system-setup.d/
 # 146-fxdax_cgroups.sh on ubu1) installs it as /usr/local/bin/fxjob, and its slices, and
 # fxjob-isolate, and gives the reasons for them. scripts/fxjob-check.sh tests it on such a host.
 set -euo pipefail
@@ -67,7 +67,7 @@ user() { systemctl --user "$@"; }
 now() { local t=$EPOCHREALTIME; echo "${t/,/.}"; }
 
 # What a job reserves when it doesn't say: memory as before the budget; CPUs as a host run's
-# builds and tests take them, 4 at once (scripts/lib/host.sh's FXDAX_HOST_JOBS).
+# builds and tests take them, 4 at once (scripts/lib/host.sh's CLADEFS_HOST_JOBS).
 default_mem=8G
 default_cpus=4
 
@@ -117,7 +117,7 @@ mem_budget_bytes=$(bytes "$mem_budget") ||
 # command was killed holds none. Its memory is its MemoryMax; its CPUs those its description
 # names (`cpus=N`), not a CPUQuota or CPUWeight, which would enable the cpu controller in
 # fxdax.slice and so share CPU time among jobs by cgroup rather than by the niceness host runs'
-# builds take (scripts/lib/host.sh's FXDAX_HOST_NICE). A scope started by fxjob of before the
+# builds take (scripts/lib/host.sh's CLADEFS_HOST_NICE). A scope started by fxjob of before the
 # queue names no CPUs: work's counts as the default, a measurement's as its share.
 reserved() {
   local units
@@ -454,7 +454,7 @@ admitted=$(now)
 isolate
 
 # The job's temporary directory, made while the lock is held, as sweep runs: anyone's to write in,
-# as /tmp is, a jailed VM's user too (scripts/test-e2e.sh's FXDAX_FIRECRACKER_JAIL).
+# as /tmp is, a jailed VM's user too (scripts/test-e2e.sh's CLADEFS_FIRECRACKER_JAIL).
 mkdir -m 1777 "$tmp_root/$$"
 tmp=$tmp_root/$$
 printf 'started=%s\nscope=%s\n' "$started" "$cgroups/$slice/$unit" > "$tmp_root/job-$$"

@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -11,7 +11,7 @@ name: CI
 on:
   push:
     branches: [main]
-    # fxdax: a push of backlog notes alone tests nothing new: what reaches main has passed its
+    # cladefs: a push of backlog notes alone tests nothing new: what reaches main has passed its
     # land-X branch's run first. Their runs queued ahead of land-X branches' for half an hour.
     paths-ignore: ['backlog/**', 'OPEN_QUESTIONS.md']
   pull_request:
@@ -23,7 +23,7 @@ on:
         options: [auto, full, smoke]
         default: auto
 
-# fxdax: a newer run of a ref replaces an older one still going: a push to main, or a land-X branch
+# cladefs: a newer run of a ref replaces an older one still going: a push to main, or a land-X branch
 # pushed again, makes the older run's result moot.
 concurrency:
   group: ci-${{ github.ref }}
@@ -43,7 +43,7 @@ jobs:
         # its own (TASK-188); the Shuttle suites, each built with its crate's feature, a build of
         # their own; the guest tests' own, a workspace of their own; the Go client, its generated
         # code checked against the .proto, and its tests against the daemon, which it builds
-        # (TASK-219); the VMM's own that fxdax adds to, vendor/firecracker's workspace, which ran
+        # (TASK-219); the VMM's own that cladefs adds to, vendor/firecracker's workspace, which ran
         # on hosts of guests alone and broke unseen there (TASK-220); the rest, minutes.
         parts: [workspace, sim, shuttle, clippy scripts, guest, go, firecracker]
         # What a part's tests run beyond what every part builds with: Coccinelle, whose rules the
@@ -59,9 +59,9 @@ jobs:
           - parts: firecracker
             packages: libclang-dev
     env:
-      FXDAX_TEST_PARTS: ${{ matrix.parts }}
+      CLADEFS_TEST_PARTS: ${{ matrix.parts }}
     steps:
-      # With vendor/firecracker, whose seccompiler fxdax's tests compile Firecracker's seccomp
+      # With vendor/firecracker, whose seccompiler cladefs's tests compile Firecracker's seccomp
       # filters with, to run the VMM's side of DAX windows under them (TASK-149.28).
       - uses: actions/checkout@v7
         with:
@@ -69,9 +69,9 @@ jobs:
       - name: Install the build's tools
         # elfutils' eu-stack and sqlite3, which tests run, as on hosts of guests
         # (scripts/lib/linux-host-setup.sh); fuse3's fusermount3, which mounts the FUSE tests'
-        # stores for the runner's user (crates/fxdax/tests/fuse_mount.rs); libseccomp, which
+        # stores for the runner's user (crates/cladefs/tests/fuse_mount.rs); libseccomp, which
         # Firecracker's seccompiler links; and the part's own (matrix.packages). No protoc, which protox stands in for
-        # (crates/fxdax/build.rs), nor libclang, which no bindgen of fxdax's workspace or the guest
+        # (crates/cladefs/build.rs), nor libclang, which no bindgen of cladefs's workspace or the guest
         # tests' needs: the VMM's alone, its part's own.
         uses: ./.github/actions/apt-install
         with:
@@ -121,21 +121,21 @@ jobs:
       # of guests: some mount a loop device, to hold a script's model to a kernel's filesystem.
       - name: scripts/test.sh
         run: |
-          if [[ $FXDAX_TEST_PARTS == guest ]]; then
+          if [[ $CLADEFS_TEST_PARTS == guest ]]; then
             sudo --preserve-env env "PATH=$PATH" "HOME=$HOME" scripts/test.sh --no-fail-fast
           else
             scripts/test.sh --no-fail-fast
           fi
 
   # pjdfstest (BSD-2-Clause) on FUSE mounts of new stores, as root, in a directory of the mount
-  # and from its root: the host's Node layer, fxfs-posix under it and fxdax::fuse's server held to
+  # and from its root: the host's Node layer, fxfs-posix under it and cladefs::fuse's server held to
   # POSIX's permissions, owners, times and errnos, which the guest's pjdfstest case checks only in
   # the nightly (TASK-149.38). Failures but scripts/pjdfstest-fuse-known's fail it. A debug build, its
   # assertions and overflow checks on.
   # The workspace's suite and the Shuttle suites on macOS, scripts/test.sh's parts as a Mac runs
-  # them: what fxdax compiles for macOS alone, and its tests, ran on laptops alone, so a regression
+  # them: what cladefs compiles for macOS alone, and its tests, ran on laptops alone, so a regression
   # there landed green (TASK-149.20.2): physmem's physical map, extent_store's syncs (F_FULLFSYNC),
-  # extent_remote's cache, fxdax's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
+  # extent_remote's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     runs-on: macos-15
@@ -145,7 +145,7 @@ jobs:
       matrix:
         parts: [workspace, shuttle]
     env:
-      FXDAX_TEST_PARTS: ${{ matrix.parts }}
+      CLADEFS_TEST_PARTS: ${{ matrix.parts }}
     steps:
       # With vendor/firecracker, a path dependency of the workspace's, which Cargo reads.
       - uses: actions/checkout@v7
@@ -191,10 +191,10 @@ jobs:
             target
           key: cargo-${{ runner.os }}-pjdfstest-fuse-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-pjdfstest-fuse-
-      - name: Build fxdax-mount
-        run: cargo build --locked -p fxdax --bin fxdax-mount
+      - name: Build cladefs-mount
+        run: cargo build --locked -p cladefs --bin cladefs-mount
       - name: pjdfstest on FUSE mounts of new stores, as root
-        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/debug/fxdax-mount
+        run: sudo --preserve-env env "PATH=$PATH" scripts/pjdfstest-fuse.py target/debug/cladefs-mount
       - uses: actions/upload-artifact@v7
         if: failure()
         with:
@@ -207,8 +207,8 @@ jobs:
   # RustFS's S3 (Apache-2.0), a process of its release's binary, and Azurite's Azure Blob Storage
   # (MIT), in a container, as
   # scripts/test-rustfs.sh and scripts/test-azurite.sh start them. Nothing ran them until
-  # TASK-149.20, which found `fxdaxctl take` of a new copy at a later placement refused there.
-  # fxdax: and the AWS KMS backend's, against local-kms (MIT), its emulator, which
+  # TASK-149.20, which found `cladefsctl take` of a new copy at a later placement refused there.
+  # cladefs: and the AWS KMS backend's, against local-kms (MIT), its emulator, which
   # scripts/test-local-kms.sh installs with Go and each test starts (TASK-411.17): no AWS account,
   # nor credentials but dummy ones; and the OpenBao Transit backend's, against OpenBao's release
   # binary (MPL-2.0), which scripts/test-openbao.sh fetches, checked by its digest, each test
@@ -221,7 +221,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: true
-      # libseccomp, which Firecracker's seccompiler links, a dependency of fxdax's tests.
+      # libseccomp, which Firecracker's seccompiler links, a dependency of cladefs's tests.
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
         with:
@@ -261,9 +261,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      FXDAX_SOAK_SECS: 300
+      CLADEFS_SOAK_SECS: 300
     steps:
-      # With vendor/firecracker, whose seccompiler fxdax's tests build with (TASK-149.28).
+      # With vendor/firecracker, whose seccompiler cladefs's tests build with (TASK-149.28).
       - uses: actions/checkout@v7
         with:
           submodules: true
@@ -290,10 +290,10 @@ jobs:
           echo TMPDIR=/mnt/tmp >> "$GITHUB_ENV"
           df -h /mnt
       - name: Build
-        run: cargo nextest run -p fxdax --lib --no-run
+        run: cargo nextest run -p cladefs --lib --no-run
       - name: The daemon against a degraded bucket, five minutes
         run: >-
-          cargo nextest run -p fxdax --lib --run-ignored all --no-capture
+          cargo nextest run -p cladefs --lib --run-ignored all --no-capture
           -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)'
 
   # guide/: the codebase guide, which cites code by exact snippets. Its build fails when a snippet
@@ -339,7 +339,7 @@ jobs:
           scripts/firecracker-forward.sh "$BASE" HEAD
 
   # Every commit of the Firecracker series builds both ways, as it promises those who take it onto
-  # forks of their own (TASK-269): without its fxdax feature outside this checkout, with it as fxdax
+  # forks of their own (TASK-269): without its cladefs feature outside this checkout, with it as cladefs
   # builds it (scripts/firecracker-series-check.sh), from its upstream release up; when
   # vendor/firecracker moved, or the run was asked for by hand, a build of each commit.
   firecracker-series:
@@ -399,7 +399,7 @@ jobs:
         id: scope
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          FXDAX_GUEST_SIM: ${{ inputs.guest-sim }}
+          CLADEFS_GUEST_SIM: ${{ inputs.guest-sim }}
         run: echo "scope=$(scripts/guest-sim-scope.py "$BASE")" | tee -a "$GITHUB_OUTPUT"
       - name: Install the build's tools
         uses: ./.github/actions/apt-install
@@ -442,7 +442,7 @@ jobs:
         id: scope
         env:
           BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
-          FXDAX_GUEST_SIM: ${{ inputs.guest-sim }}
+          CLADEFS_GUEST_SIM: ${{ inputs.guest-sim }}
         run: echo "scope=$(scripts/guest-sim-scope.py "$BASE")" | tee -a "$GITHUB_OUTPUT"
       - name: Install the build's tools
         uses: ./.github/actions/apt-install

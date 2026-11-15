@@ -1,11 +1,11 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: spans of the expensive operations of extent stores, their uploads and their daemon, for
+//! cladefs: spans of the expensive operations of extent stores, their uploads and their daemon, for
 //! OpenTelemetry (TASK-258), shared by the crates that make them: extent_remote's bucket requests,
-//! uploads and checkpoints, extent_store's commits and flushes, and fxdax's daemon
-//! (`fxdax::extentd`), which enables them from the environment (`fxdax::extentd::otel`;
+//! uploads and checkpoints, extent_store's commits and flushes, and cladefs's daemon
+//! (`cladefs::extentd`), which enables them from the environment (`cladefs::extentd::otel`;
 //! `docs/tracing.md`).
 //!
 //! Off unless enabled, a [`Span`] is nothing: made at the cost of one relaxed load, with no tracer,
@@ -25,35 +25,35 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The attribute of the bytes an operation read, wrote or moved.
-pub const BYTES: &str = "fxdax.bytes";
+pub const BYTES: &str = "cladefs.bytes";
 /// The attribute of the branch an operation is of (`doc-7`), in hexadecimal as paths name it.
-pub const BRANCH: &str = "fxdax.branch";
+pub const BRANCH: &str = "cladefs.branch";
 /// The attribute of an extent's sequence number in its branch ([`BRANCH`]).
-pub const EXTENT: &str = "fxdax.extent";
+pub const EXTENT: &str = "cladefs.extent";
 /// The attribute of the extents an operation took.
-pub const EXTENTS: &str = "fxdax.extents";
+pub const EXTENTS: &str = "cladefs.extents";
 /// The attribute of the commits an operation took, or the epoch of the one it made.
-pub const COMMITS: &str = "fxdax.commits";
+pub const COMMITS: &str = "cladefs.commits";
 /// The attribute of the epoch of a commit.
-pub const EPOCH: &str = "fxdax.epoch";
+pub const EPOCH: &str = "cladefs.epoch";
 /// The attribute of whether a commit is durable, or ordered alone.
-pub const DURABLE: &str = "fxdax.durable";
+pub const DURABLE: &str = "cladefs.durable";
 /// The attribute of the branch a fork makes.
-pub const CHILD: &str = "fxdax.child";
+pub const CHILD: &str = "cladefs.child";
 /// The attribute of whether a fork makes a point (`doc-7`, Points).
-pub const POINT: &str = "fxdax.point";
+pub const POINT: &str = "cladefs.point";
 /// The attribute of a store's path.
-pub const STORE: &str = "fxdax.store";
+pub const STORE: &str = "cladefs.store";
 /// The attribute of the arena of physical memory an operation is of.
-pub const ARENA: &str = "fxdax.arena";
+pub const ARENA: &str = "cladefs.arena";
 /// The attribute of an object's key in the bucket, without the bucket's prefix.
-pub const OBJECT_KEY: &str = "fxdax.object_key";
+pub const OBJECT_KEY: &str = "cladefs.object_key";
 /// The attribute of the objects a bucket's listing found, or a batch of deletes deleted.
-pub const OBJECTS: &str = "fxdax.objects";
+pub const OBJECTS: &str = "cladefs.objects";
 /// The attribute of the prefixes a bucket's listing by delimiter found (TASK-395.5).
-pub const PREFIXES: &str = "fxdax.prefixes";
+pub const PREFIXES: &str = "cladefs.prefixes";
 /// The attribute of a segment's sequence number in its branch.
-pub const SEGMENT: &str = "fxdax.segment";
+pub const SEGMENT: &str = "cladefs.segment";
 
 /// Whether spans are made, which [`enable`] says.
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -62,7 +62,7 @@ static ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACER: OnceLock<global::BoxedTracer> = OnceLock::new();
 
 /// The name of the tracer, the instrumentation's scope.
-const SCOPE: &str = "fxdax";
+const SCOPE: &str = "cladefs";
 
 /// Makes spans from now on, with the global tracer provider, which the caller set
 /// (`opentelemetry::global::set_tracer_provider`) before; or, `on` false, no more.

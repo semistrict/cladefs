@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Module parameters: a table of them, by name, which tests set as a kernel's command line does
  * (sim_param_set): so that dax.c's fault injection, pause points and diagnostics work unchanged.

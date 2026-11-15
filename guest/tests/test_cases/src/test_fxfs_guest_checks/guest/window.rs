@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the checks of the DAX window: what it maps, PMDs, a full window, MAPs failing, and
+//! cladefs: the checks of the DAX window: what it maps, PMDs, a full window, MAPs failing, and
 //! writers killed.
 
 use super::*;
@@ -37,7 +37,7 @@ pub(super) fn test_pmd_write_unlink() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: the checks before, on a 32 MiB window, filled its ranges' space, which other ranges
+/// cladefs: the checks before, on a 32 MiB window, filled its ranges' space, which other ranges
 /// were reclaimed for: the paths a full window takes, as the sandbox team runs it, which a large
 /// window never reaches (TASK-119.12, TASK-101). Since the filesystem was mounted last
 /// (file_attributes remounts it).
@@ -46,7 +46,7 @@ pub(super) fn test_window_filled() {
     assert!(stats["window_reclaims"] > 0, "the window's ranges never filled: {stats:?}");
 }
 
-/// fxdax: a vmsplice holding more of a file's pages than the window has room for, which a pipe
+/// cladefs: a vmsplice holding more of a file's pages than the window has room for, which a pipe
 /// takes page by page: no chunk it holds a page of can go, so each of its faults finds no room,
 /// and waits for some: SIGKILL ends it, whose fault looped on for ever without looking
 /// (TASK-79.49). Its pages go with it, and the file reads back.
@@ -106,7 +106,7 @@ pub(super) fn test_window_held_killed() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: two mappings of a slice's page, of a sealed extent's region, loading it in turn, as
+/// cladefs: two mappings of a slice's page, of a sealed extent's region, loading it in turn, as
 /// processes running one binary do: a fault
 /// each, as the read of a page its entry names replaces nothing. A read that replaced the entry
 /// took the other mapping's page away, for a fault for each load, as a build's processes queued
@@ -202,7 +202,7 @@ pub(super) fn test_reads_stay_mapped() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: write(2)s of pages scattered over a file read in from sealed extents take no MAP
+/// cladefs: write(2)s of pages scattered over a file read in from sealed extents take no MAP
 /// each: a write makes its page private where the window maps it, a page more each, by one
 /// PRIVATE each, its iomap's, before its store (doc-13, TASK-164.9). A MAP of its own took
 /// 200 us of a write's 230 on writable DAX: rand-write fell from 18,151 to 3,534 IOPS. Fails if
@@ -248,7 +248,7 @@ pub(super) fn test_writes_private() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a mapped file's page stored to, its DAX entry dirty; another file's fsync seals; then
+/// cladefs: a mapped file's page stored to, its DAX entry dirty; another file's fsync seals; then
 /// msync writes the entry back, and the page holds what was stored, through the mapping and the
 /// file (TASK-128). Of a file read in from sealed extents, DAX (doc-13).
 pub(super) fn test_stale_entry_flushed() {
@@ -285,7 +285,7 @@ pub(super) fn test_stale_entry_flushed() {
     fs::remove_file(&other).unwrap();
 }
 
-/// fxdax: a write whose range's MAP fails after its first piece (the fxfs.dax_fail_maps fault
+/// cladefs: a write whose range's MAP fails after its first piece (the fxfs.dax_fail_maps fault
 /// injection, as a device's MAP error): the chunk in pieces, written back as the page cache's
 /// (created here, a page-cache inode until read in again, doc-13, TASK-164.3) whole, then pages
 /// 0 and 2 again, and read in again, no range mapping it yet. The write fails (EIO), and leaves
@@ -327,7 +327,7 @@ pub(super) fn test_map_failed() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a writer killed before its copy, its pages made private and dirty, of a file read in
+/// cladefs: a writer killed before its copy, its pages made private and dirty, of a file read in
 /// again from sealed extents (created here, it is a page-cache inode until then, doc-13,
 /// TASK-164.3): the kernel's copy stops at the signal, and the pages hold what they held,
 /// written back as it was. Played out with a pause point. On writable DAX, a writer killed
@@ -364,7 +364,7 @@ pub(super) fn test_write_killed() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a chunk of a file in pieces, which its range's own space maps in one request: that
+/// cladefs: a chunk of a file in pieces, which its range's own space maps in one request: that
 /// request fails having mapped the first (fxfs.dax_fail_map_many), and the pieces are mapped
 /// one by one; and that fails too at the second (fxfs.dax_fail_fallbacks), the range left with
 /// the first alone: a read fails, and the next maps it all; so does a write, leaving the file
@@ -518,7 +518,7 @@ pub(super) fn test_pmd_over_stale_index() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a file larger than a chunk, written whole by one write(2) and fsynced, then read
+/// cladefs: a file larger than a chunk, written whole by one write(2) and fsynced, then read
 /// through a mapping: each byte as written. The first load of such a file died of SIGBUS, its
 /// fault failing with no error (TASK-121's pause check). The read maps the first chunk with a
 /// PMD, which the store after breaks up (TASK-123). The file is read in again from sealed
@@ -568,7 +568,7 @@ pub(super) fn test_mapped_after_write() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: stores through a mapping of a file, write(2)s to its pages, holes or not, and other
+/// cladefs: stores through a mapping of a file, write(2)s to its pages, holes or not, and other
 /// files made, written and removed meanwhile, which make the journal compact, for a few
 /// seconds: on writable DAX, a write in the gate waited for a fault's DAX entry, the fault for
 /// Fxfs, Fxfs for compaction, and compaction's seal for the write, and the filesystem hung

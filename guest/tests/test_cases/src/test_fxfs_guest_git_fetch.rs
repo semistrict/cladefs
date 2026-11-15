@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! `git fetch` moved onto a newer generation of a shared volume (fxdax's TASK-136.7, backlog
+//! `git fetch` moved onto a newer generation of a shared volume (cladefs's TASK-136.7, backlog
 //! doc-10, Moving to a newer generation). A publisher VM keeps a clone of an upstream repo in a
 //! volume and publishes it twice, at upstream's first commit (A) and its second (B); upstream then
 //! makes a third (C), and its own volume is published too, as the remote. A consumer VM, on a
@@ -32,7 +32,7 @@ pub struct TestFxfsGuestGitFetch;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{control, cladefs_guest_should_run, setup_rootfs};
     use crate::shared_volumes::host::{Manager, Vms, format_with, next_generation};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -47,7 +47,7 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let extentd: PathBuf =
-                std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?.into();
+                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
             let control = control(&extentd)?;
             let root = setup_rootfs(test_setup)?;
             let vms = Vms::new(test_setup, root, extentd.clone(), CAPACITY, 0);
@@ -99,7 +99,7 @@ mod host {
 
     impl Test for TestFxfsGuestGitFetch {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -442,7 +442,7 @@ mod guest {
             fs::create_dir_all(MNT).unwrap();
             mount(None, MNT);
             give(HOME);
-            let role = std::env::var("FXDAX_SHARED_VOLUMES").unwrap();
+            let role = std::env::var("CLADEFS_SHARED_VOLUMES").unwrap();
             match role.as_str() {
                 "publisher" => publisher(),
                 "consumer" => consumer(),

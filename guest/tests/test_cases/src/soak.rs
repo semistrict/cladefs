@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what fxfs-guest-soak's host and guests share (TASK-67): a round's plan, a pure function
+//! cladefs: what fxfs-guest-soak's host and guests share (TASK-67): a round's plan, a pure function
 //! of the run's seed and the round's number; the bytes its writers write, which the guest that
 //! checks them makes again from their names; and the arithmetic of its verdicts, what of the
 //! writers' acknowledgements a round may lose (doc-12) and when a quantity measured round after
@@ -51,7 +51,7 @@ impl Load {
     }
 }
 
-/// The faults a run's rounds may have, each of which FXDAX_SOAK_FAULTS may leave out.
+/// The faults a run's rounds may have, each of which CLADEFS_SOAK_FAULTS may leave out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Fault {
     /// A VM's process killed (SIGKILL) mid-write.

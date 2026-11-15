@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the bucket KMS (doc-16, The bucket KMS; TASK-411.27): each tenant's KEK kept in the
+//! cladefs: the bucket KMS (doc-16, The bucket KMS; TASK-411.27): each tenant's KEK kept in the
 //! bucket itself, at `tenants/<tenant>/kek` ([`layout::kek`]), wrapped by a master key the host is
-//! given in its environment (`FXDAX_MASTER_KEY`, `FXDAX_MASTER_KEY_FILE`;
+//! given in its environment (`CLADEFS_MASTER_KEY`, `CLADEFS_MASTER_KEY_FILE`;
 //! `extent_keys::kms::master`). What the objects and keys hold is `extent_keys::kms::bucket`'s;
 //! here is where they are kept, and how hosts agree on them.
 //!
@@ -25,7 +25,7 @@
 //!   again once [`FRESH_FOR`] old, so that a tenant shredded on another host is refused here within
 //!   that time even if this host is not told; dropped at once by `Kms::forget`, which a host told
 //!   the tenant's keys are revoked or destroyed calls (`keys::Kms::revoked`).
-//! - **Which KMS a host uses** ([`from_env`]): `FXDAX_KMS`'s if it names one; else, given a master
+//! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
 //!   key, this one, over the host's bucket; else none, as before (TASK-411.28 makes that refused).
 
 use crate::bucket::{self, Bucket, Created, Updated};
@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 /// The variable naming a host's KMS by its URL (`extent_keys::kms::from_url`), which [`from_env`]
 /// takes over a master key.
-pub const KMS_VAR: &str = "FXDAX_KMS";
+pub const KMS_VAR: &str = "CLADEFS_KMS";
 
 /// How long a host uses a tenant's KEK as it last read it before reading its object again: so
 /// that a tenant shredded elsewhere is refused here within it, told or not, and the bucket is
@@ -132,7 +132,7 @@ impl<B: Bucket> BucketKms<B> {
         match bucket::create(&*self.bucket, &key, KekObject::seal(newest, tenant, &kek)).await {
             Created::Created => {
                 log::info!(
-                    "fxdax: tenant {tenant}: its KEK made, {key}, under master key {}",
+                    "cladefs: tenant {tenant}: its KEK made, {key}, under master key {}",
                     newest.id()
                 );
                 Ok(Arc::new(kek))
@@ -226,7 +226,7 @@ pub struct Rotated {
 /// Rewraps every tenant's KEK object in `bucket` under the newest of `keys` (doc-16, The bucket
 /// KMS): each one under an older key, one of `keys`, by a conditional update, read again and done
 /// again if another changed it meanwhile. The KEKs stay as they are. Once done, refusing none,
-/// hosts need the newest key alone: the others may be dropped from `FXDAX_MASTER_KEY`. Tenants
+/// hosts need the newest key alone: the others may be dropped from `CLADEFS_MASTER_KEY`. Tenants
 /// are listed a page at a time; done again, it rewraps nothing more.
 pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
     let mut rotated = Rotated::default();
@@ -257,7 +257,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
 
 /// A host's KMS, as [`from_env`] chose it.
 pub enum HostKms<B> {
-    /// The one `FXDAX_KMS` names.
+    /// The one `CLADEFS_KMS` names.
     Named(kms::Shared),
     /// The bucket KMS, over the host's bucket.
     Bucket(Arc<BucketKms<B>>),
@@ -282,9 +282,9 @@ impl<B: Bucket> HostKms<B> {
 }
 
 /// The KMS a host's environment chooses, the one place every process that opens stores asks
-/// (extentd, fxdaxctl, the fxdax CLI's mounts through `fxdax::remote::kms`; `fxdax-gc`): the KMS
-/// [`KMS_VAR`] names, if it names one; else, given master keys (`FXDAX_MASTER_KEY` or
-/// `FXDAX_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else none, cells
+/// (extentd, cladefsctl, the cladefs CLI's mounts through `cladefs::remote::kms`; `cladefs-gc`): the KMS
+/// [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
+/// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else none, cells
 /// made in the clear (TASK-411.28 will refuse that, naming both variables). A KMS named, or master
 /// keys given, that can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
@@ -297,7 +297,7 @@ pub fn from_env<B: Bucket>(
         .collect::<Vec<_>>();
     if let Some(url) = named {
         if let Some(name) = given.first() {
-            log::warn!("fxdax: {name} is set, and unused: {KMS_VAR} names the host's KMS");
+            log::warn!("cladefs: {name} is set, and unused: {KMS_VAR} names the host's KMS");
         }
         let kms = kms::from_url(&url).map_err(|why| format!("{KMS_VAR}: {why}"))?;
         return Ok(Some(HostKms::Named(kms)));
@@ -492,7 +492,7 @@ mod tests {
         assert_eq!(&object(&*bucket, 8).unwrap()[22..30], &new_id.0);
         let refused = format!(
             "tenant 7: its KEK is wrapped by master key {old_id}, which this host has not (it has \
-             {new_id}): FXDAX_MASTER_KEY"
+             {new_id}): CLADEFS_MASTER_KEY"
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&new]), 7, &wrapped)), refused);
 
@@ -507,7 +507,7 @@ mod tests {
         assert_eq!(refusal(unwrap(&after, 9, &shredded)), "tenant 9: its KEK is destroyed");
         let refused = format!(
             "tenant 7: its KEK is wrapped by master key {new_id}, which this host has not (it has \
-             {old_id}): FXDAX_MASTER_KEY"
+             {old_id}): CLADEFS_MASTER_KEY"
         );
         assert_eq!(refusal(unwrap(&host(&bucket, &[&old]), 7, &wrapped)), refused);
         let again = block_on(rotate(&*bucket, &keys_of(&[&new, &old])));
@@ -609,7 +609,7 @@ mod tests {
             (keys_of(&[&right]).newest().id(), keys_of(&[&wrong]).newest().id());
         let refused = format!(
             "tenant 7: its KEK is wrapped by master key {right_id}, which this host has not (it \
-             has {wrong_id}): FXDAX_MASTER_KEY"
+             has {wrong_id}): CLADEFS_MASTER_KEY"
         );
         assert_eq!(refusal(wrap(&kms, 7, &key)), refused);
         assert_eq!(refusal(unwrap(&kms, 7, &wrapped)), refused);
@@ -694,12 +694,12 @@ mod tests {
         }
     }
 
-    /// The KMS a host's environment chooses: `FXDAX_KMS`'s if it names one, a master key or not;
+    /// The KMS a host's environment chooses: `CLADEFS_KMS`'s if it names one, a master key or not;
     /// else the bucket KMS over the host's bucket, given a master key; else none. A master key
     /// with no bucket, or two ways of giving it, is refused naming why. Each nextest test is a
     /// process of its own: this one's variables are its own.
     #[test]
-    fn hosts_choose_fxdax_kms_then_the_bucket_kms_then_none() {
+    fn hosts_choose_cladefs_kms_then_the_bucket_kms_then_none() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: this test's process is its own (nextest), no other thread reading it.
         let set = |name: &str, value: Option<&str>| unsafe {
@@ -713,7 +713,7 @@ mod tests {
         }
         let bucket = bucket();
         let chosen = |bucket: Option<&Arc<Direct>>| {
-            from_env(|| bucket.cloned().ok_or_else(|| "FXDAX_EXTENTD_REMOTE names none".to_owned()))
+            from_env(|| bucket.cloned().ok_or_else(|| "CLADEFS_EXTENTD_REMOTE names none".to_owned()))
         };
         let kind = |chosen: &Result<Option<HostKms<Direct>>, String>| match chosen {
             Ok(None) => "none".to_owned(),
@@ -734,13 +734,13 @@ mod tests {
         assert_eq!(keys(&*bucket), [layout::kek(7)]);
         assert_eq!(
             kind(&chosen(None)),
-            "FXDAX_MASTER_KEY: the bucket KMS keeps tenants' KEKs in the host's bucket: \
-             FXDAX_EXTENTD_REMOTE names none"
+            "CLADEFS_MASTER_KEY: the bucket KMS keeps tenants' KEKs in the host's bucket: \
+             CLADEFS_EXTENTD_REMOTE names none"
         );
         set(MASTER_KEY_FILE_VAR, Some("/nonexistent"));
         assert_eq!(
             kind(&chosen(Some(&bucket))),
-            "both FXDAX_MASTER_KEY and FXDAX_MASTER_KEY_FILE are set: give the master keys one way"
+            "both CLADEFS_MASTER_KEY and CLADEFS_MASTER_KEY_FILE are set: give the master keys one way"
         );
         set(MASTER_KEY_FILE_VAR, None);
         set(KMS_VAR, Some(&format!("local://{}", dir.path().display())));
@@ -748,7 +748,7 @@ mod tests {
         set(KMS_VAR, Some("vault://key"));
         assert_eq!(
             kind(&chosen(None)),
-            "FXDAX_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or \
+            "CLADEFS_KMS: \"vault://key\" names no KMS: local:///DIR, openbao://, aws-kms:// or \
              gcp-kms:// (doc-16)"
         );
     }

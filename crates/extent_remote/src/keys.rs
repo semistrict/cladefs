@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the keys a cell's branches are kept under in the bucket (doc-16, Keys; TASK-411.3). A
+//! cladefs: the keys a cell's branches are kept under in the bucket (doc-16, Keys; TASK-411.3). A
 //! tenant's KEK, in a KMS, wraps each of its cells' KEKs, which the cell's object keeps
 //! ([`Kek`], [`crate::cell::Object::keks`]); a cell's KEK wraps each of its branches' DEKs, which
 //! the branch's record keeps ([`Dek`], [`crate::record::Record::deks`]). A cell whose object keeps
@@ -102,7 +102,7 @@ pub struct Dek {
 pub const FIRST: u32 = 1;
 
 /// What HKDF derives the key a DEK is wrapped under with, before its place.
-const DEK_INFO: &[u8] = b"fxdax dek wrap";
+const DEK_INFO: &[u8] = b"cladefs dek wrap";
 
 /// The key `kek`, a generation of `branch`'s cell's KEK, wraps `branch`'s DEK of `generation`
 /// under: bound to its place.
@@ -147,7 +147,7 @@ pub struct Inherited {
 }
 
 /// What HKDF derives the key an inherited DEK is wrapped under with, before its places.
-const INHERITED_INFO: &[u8] = b"fxdax inherited dek wrap";
+const INHERITED_INFO: &[u8] = b"cladefs inherited dek wrap";
 
 /// The key `kek`, a generation of `holder`'s cell's KEK, wraps the DEK of `of`, of `generation`,
 /// that `holder`'s record keeps under: bound to both places, so that it is copied to no other
@@ -817,7 +817,7 @@ impl Kms {
         match failed {
             Some(error) if revokes(&error) => self.revoked(tenant, error.to_string()),
             Some(kms::Error::NoSuchTenant { .. }) => self.has_no_kek(tenant),
-            Some(error) => log::warn!("fxdax: refilling tenant {tenant}'s pool of KEKs: {error}"),
+            Some(error) => log::warn!("cladefs: refilling tenant {tenant}'s pool of KEKs: {error}"),
             None => self.answered(tenant),
         }
         let mut pools = self.pools.lock().unwrap();

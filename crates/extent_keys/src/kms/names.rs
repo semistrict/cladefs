@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: how a real KMS's URL names each tenant's KEK ([`KeyNames`]): what every real
+//! cladefs's own: how a real KMS's URL names each tenant's KEK ([`KeyNames`]): what every real
 //! backend shares (TASK-411.16, .17, .18).
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::path::Path;
 const TENANT: &str = "{tenant}";
 
 /// The name a real KMS knows each tenant's KEK by: a template, in which `{tenant}` stands for the
-/// tenant's ID in hexadecimal, as fxdax displays tenants (`TENANT/CELL`); and overrides, for
+/// tenant's ID in hexadecimal, as cladefs displays tenants (`TENANT/CELL`); and overrides, for
 /// tenants that bring their own key (BYOK) under a name of their choosing, perhaps in an account
 /// of their own (an AWS key ARN, a GCP key's resource name). A KMS URL gives the template as its
 /// `key` and the file of overrides as its `keys`: lines of a tenant in hexadecimal and its key's
@@ -98,15 +98,15 @@ mod tests {
     #[test]
     fn tenants_are_named_by_the_template_unless_overridden() {
         let overrides = "# tenants with keys of their own\n2a arn:aws:kms:us-east-1:1:key/abc\n\n";
-        let names = KeyNames::new("fxdax-tenant-{tenant}", Some(overrides)).unwrap();
-        assert_eq!(names.of(0x1f), "fxdax-tenant-1f");
+        let names = KeyNames::new("cladefs-tenant-{tenant}", Some(overrides)).unwrap();
+        assert_eq!(names.of(0x1f), "cladefs-tenant-1f");
         assert_eq!(names.of(0x2a), "arn:aws:kms:us-east-1:1:key/abc");
     }
 
     #[test]
     fn templates_name_every_tenant_apart() {
-        let refused = KeyNames::new("fxdax", None);
-        let why = "the key template \"fxdax\" holds no {tenant}: every tenant would share one KEK";
+        let refused = KeyNames::new("cladefs", None);
+        let why = "the key template \"cladefs\" holds no {tenant}: every tenant would share one KEK";
         assert_eq!(refused, Err(why.to_owned()));
     }
 

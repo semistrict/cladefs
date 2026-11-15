@@ -1,11 +1,11 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // What the extent daemons of hosts sharing a bucket serve each other (TASK-406.2): parts of the
 // bucket's objects, each owned by one of them, which a host asks its owner for before the bucket,
 // so that a part many hosts read comes from the bucket about once for them all. Served over TCP at
-// each daemon's FXDAX_EXTENTD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
+// each daemon's CLADEFS_EXTENTD_PEER_ADDRESS, unauthenticated, on a network only the hosts reach:
 // every host can read the whole bucket already. A part is asked for by its object's key and its
 // number alone, which name it for good, as the bucket's keys are written once (TASK-407). The
 // asker checks each part against the CRC its own tail of the object gives it, and fetches it from
@@ -15,7 +15,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: fxdax/peer/v1/peer.proto
+// source: cladefs/peer/v1/peer.proto
 
 package peerv1
 
@@ -37,7 +37,7 @@ const (
 // A part asked for.
 type GetPartRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The URL of the bucket, as the asker names it (FXDAX_EXTENTD_REMOTE): this host's.
+	// The URL of the bucket, as the asker names it (CLADEFS_EXTENTD_REMOTE): this host's.
 	Bucket string `protobuf:"bytes,1,opt,name=bucket,proto3" json:"bucket,omitempty"`
 	// The object's key.
 	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
@@ -49,7 +49,7 @@ type GetPartRequest struct {
 
 func (x *GetPartRequest) Reset() {
 	*x = GetPartRequest{}
-	mi := &file_fxdax_peer_v1_peer_proto_msgTypes[0]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -61,7 +61,7 @@ func (x *GetPartRequest) String() string {
 func (*GetPartRequest) ProtoMessage() {}
 
 func (x *GetPartRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_peer_v1_peer_proto_msgTypes[0]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -74,7 +74,7 @@ func (x *GetPartRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartRequest.ProtoReflect.Descriptor instead.
 func (*GetPartRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_peer_v1_peer_proto_rawDescGZIP(), []int{0}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *GetPartRequest) GetBucket() string {
@@ -109,7 +109,7 @@ type GetPartResponse struct {
 
 func (x *GetPartResponse) Reset() {
 	*x = GetPartResponse{}
-	mi := &file_fxdax_peer_v1_peer_proto_msgTypes[1]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -121,7 +121,7 @@ func (x *GetPartResponse) String() string {
 func (*GetPartResponse) ProtoMessage() {}
 
 func (x *GetPartResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_peer_v1_peer_proto_msgTypes[1]
+	mi := &file_cladefs_peer_v1_peer_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -134,7 +134,7 @@ func (x *GetPartResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GetPartResponse.ProtoReflect.Descriptor instead.
 func (*GetPartResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_peer_v1_peer_proto_rawDescGZIP(), []int{1}
+	return file_cladefs_peer_v1_peer_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *GetPartResponse) GetBytes() []byte {
@@ -144,40 +144,40 @@ func (x *GetPartResponse) GetBytes() []byte {
 	return nil
 }
 
-var File_fxdax_peer_v1_peer_proto protoreflect.FileDescriptor
+var File_cladefs_peer_v1_peer_proto protoreflect.FileDescriptor
 
-const file_fxdax_peer_v1_peer_proto_rawDesc = "" +
+const file_cladefs_peer_v1_peer_proto_rawDesc = "" +
 	"\n" +
-	"\x18fxdax/peer/v1/peer.proto\x12\rfxdax.peer.v1\"\x82\x01\n" +
+	"\x1acladefs/peer/v1/peer.proto\x12\x0fcladefs.peer.v1\"\x82\x01\n" +
 	"\x0eGetPartRequest\x12\x16\n" +
 	"\x06bucket\x18\x01 \x01(\tR\x06bucket\x12\x10\n" +
 	"\x03key\x18\x02 \x01(\tR\x03key\x12\x12\n" +
 	"\x04part\x18\x03 \x01(\x04R\x04partJ\x04\b\x04\x10\x05J\x04\b\x05\x10\x06J\x04\b\x06\x10\aJ\x04\b\a\x10\bR\x06offsetR\x03lenR\x03crcR\bencoding\"'\n" +
 	"\x0fGetPartResponse\x12\x14\n" +
-	"\x05bytes\x18\x01 \x01(\fR\x05bytes2P\n" +
-	"\x04Peer\x12H\n" +
-	"\aGetPart\x12\x1d.fxdax.peer.v1.GetPartRequest\x1a\x1e.fxdax.peer.v1.GetPartResponseB/Z-github.com/semistrict/fxdax/go/peer/v1;peerv1b\x06proto3"
+	"\x05bytes\x18\x01 \x01(\fR\x05bytes2T\n" +
+	"\x04Peer\x12L\n" +
+	"\aGetPart\x12\x1f.cladefs.peer.v1.GetPartRequest\x1a .cladefs.peer.v1.GetPartResponseB1Z/github.com/semistrict/cladefs/go/peer/v1;peerv1b\x06proto3"
 
 var (
-	file_fxdax_peer_v1_peer_proto_rawDescOnce sync.Once
-	file_fxdax_peer_v1_peer_proto_rawDescData []byte
+	file_cladefs_peer_v1_peer_proto_rawDescOnce sync.Once
+	file_cladefs_peer_v1_peer_proto_rawDescData []byte
 )
 
-func file_fxdax_peer_v1_peer_proto_rawDescGZIP() []byte {
-	file_fxdax_peer_v1_peer_proto_rawDescOnce.Do(func() {
-		file_fxdax_peer_v1_peer_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fxdax_peer_v1_peer_proto_rawDesc), len(file_fxdax_peer_v1_peer_proto_rawDesc)))
+func file_cladefs_peer_v1_peer_proto_rawDescGZIP() []byte {
+	file_cladefs_peer_v1_peer_proto_rawDescOnce.Do(func() {
+		file_cladefs_peer_v1_peer_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_cladefs_peer_v1_peer_proto_rawDesc), len(file_cladefs_peer_v1_peer_proto_rawDesc)))
 	})
-	return file_fxdax_peer_v1_peer_proto_rawDescData
+	return file_cladefs_peer_v1_peer_proto_rawDescData
 }
 
-var file_fxdax_peer_v1_peer_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
-var file_fxdax_peer_v1_peer_proto_goTypes = []any{
-	(*GetPartRequest)(nil),  // 0: fxdax.peer.v1.GetPartRequest
-	(*GetPartResponse)(nil), // 1: fxdax.peer.v1.GetPartResponse
+var file_cladefs_peer_v1_peer_proto_msgTypes = make([]protoimpl.MessageInfo, 2)
+var file_cladefs_peer_v1_peer_proto_goTypes = []any{
+	(*GetPartRequest)(nil),  // 0: cladefs.peer.v1.GetPartRequest
+	(*GetPartResponse)(nil), // 1: cladefs.peer.v1.GetPartResponse
 }
-var file_fxdax_peer_v1_peer_proto_depIdxs = []int32{
-	0, // 0: fxdax.peer.v1.Peer.GetPart:input_type -> fxdax.peer.v1.GetPartRequest
-	1, // 1: fxdax.peer.v1.Peer.GetPart:output_type -> fxdax.peer.v1.GetPartResponse
+var file_cladefs_peer_v1_peer_proto_depIdxs = []int32{
+	0, // 0: cladefs.peer.v1.Peer.GetPart:input_type -> cladefs.peer.v1.GetPartRequest
+	1, // 1: cladefs.peer.v1.Peer.GetPart:output_type -> cladefs.peer.v1.GetPartResponse
 	1, // [1:2] is the sub-list for method output_type
 	0, // [0:1] is the sub-list for method input_type
 	0, // [0:0] is the sub-list for extension type_name
@@ -185,26 +185,26 @@ var file_fxdax_peer_v1_peer_proto_depIdxs = []int32{
 	0, // [0:0] is the sub-list for field type_name
 }
 
-func init() { file_fxdax_peer_v1_peer_proto_init() }
-func file_fxdax_peer_v1_peer_proto_init() {
-	if File_fxdax_peer_v1_peer_proto != nil {
+func init() { file_cladefs_peer_v1_peer_proto_init() }
+func file_cladefs_peer_v1_peer_proto_init() {
+	if File_cladefs_peer_v1_peer_proto != nil {
 		return
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fxdax_peer_v1_peer_proto_rawDesc), len(file_fxdax_peer_v1_peer_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_peer_v1_peer_proto_rawDesc), len(file_cladefs_peer_v1_peer_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   2,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_fxdax_peer_v1_peer_proto_goTypes,
-		DependencyIndexes: file_fxdax_peer_v1_peer_proto_depIdxs,
-		MessageInfos:      file_fxdax_peer_v1_peer_proto_msgTypes,
+		GoTypes:           file_cladefs_peer_v1_peer_proto_goTypes,
+		DependencyIndexes: file_cladefs_peer_v1_peer_proto_depIdxs,
+		MessageInfos:      file_cladefs_peer_v1_peer_proto_msgTypes,
 	}.Build()
-	File_fxdax_peer_v1_peer_proto = out.File
-	file_fxdax_peer_v1_peer_proto_goTypes = nil
-	file_fxdax_peer_v1_peer_proto_depIdxs = nil
+	File_cladefs_peer_v1_peer_proto = out.File
+	file_cladefs_peer_v1_peer_proto_goTypes = nil
+	file_cladefs_peer_v1_peer_proto_depIdxs = nil
 }

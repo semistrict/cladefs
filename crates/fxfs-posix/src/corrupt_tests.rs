@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -16,7 +16,7 @@
 //! the first block read. So half of the cases that aim at them seal what they changed, as anyone
 //! who wrote the image would, and what reads them meets it: a `sealed` case.
 //!
-//! Each case is what a seed makes it (FXDAX_CORRUPT_SEED, the first). FXDAX_CORRUPT_CASES asks for
+//! Each case is what a seed makes it (CLADEFS_CORRUPT_SEED, the first). CLADEFS_CORRUPT_CASES asks for
 //! more of them, to hunt. Every panic is counted by where it was, and the test fails saying each,
 //! with a seed that gets there, so that one run shows them all: a seed replays what was flipped,
 //! not the bytes of what a new image holds, which is why what fixes one pins it by what it hit.
@@ -71,7 +71,7 @@ const LAYER_BLOCK: BlockSize = BlockSize::SIZE_4KIB;
 /// The journal's and the super-blocks' blocks, each sealed by a checksum in its last bytes.
 const SEALED_BLOCK: usize = PAGE as usize;
 const SEAL: usize = std::mem::size_of::<u64>();
-/// Cases an image gets, unless FXDAX_CORRUPT_CASES says otherwise.
+/// Cases an image gets, unless CLADEFS_CORRUPT_CASES says otherwise.
 const CASES: u64 = 120;
 /// How long a case may take: one that takes longer hangs.
 const CASE_LIMIT: Duration = Duration::from_secs(120);
@@ -307,7 +307,7 @@ impl Outcome {
 static PANICS: Mutex<BTreeMap<String, (u64, String)>> = Mutex::new(BTreeMap::new());
 
 /// Open bugs' panics, which a run counts apart rather than failing for, so that a hunt of many
-/// cases (FXDAX_CORRUPT_CASES) fails only for what is new: a line each, the task, then where it
+/// cases (CLADEFS_CORRUPT_CASES) fails only for what is new: a line each, the task, then where it
 /// panics, as a panic's location begins. The line goes with the task's fix.
 const KNOWN_PANICS: &str = include_str!("../known-panics");
 
@@ -1098,12 +1098,12 @@ async fn try_case(image: &Image, case: Case) -> Outcome {
     outcome
 }
 
-/// Flips an image of each kind of `barriers` and `ending`, as FXDAX_CORRUPT_CASES and
-/// FXDAX_CORRUPT_SEED say.
+/// Flips an image of each kind of `barriers` and `ending`, as CLADEFS_CORRUPT_CASES and
+/// CLADEFS_CORRUPT_SEED say.
 fn flips_never_panic(barriers: bool, ending: Ending) {
     let number =
         |name, default| std::env::var(name).map_or(default, |n: String| n.parse().unwrap());
-    let (cases, first) = (number("FXDAX_CORRUPT_CASES", CASES), number("FXDAX_CORRUPT_SEED", 0));
+    let (cases, first) = (number("CLADEFS_CORRUPT_CASES", CASES), number("CLADEFS_CORRUPT_SEED", 0));
     let image = run_case(Image::new(barriers, ending)).expect("an image");
     count_panics();
     let watched = watch_sequences(CASE_LIMIT);

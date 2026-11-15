@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what a real KMS's backend keeps of a key it wrapped, the same for each (TASK-411.16,
+//! cladefs's own: what a real KMS's backend keeps of a key it wrapped, the same for each (TASK-411.16,
 //! .17, .18): a header naming the backend and the key that wrapped it, then what the KMS gave
 //! back. The header lets an unwrap refuse a key another backend wrapped, or another key, as not
 //! authentic, before asking the KMS anything (TASK-411.18 AC #3); the KMS's own ciphertext, bound

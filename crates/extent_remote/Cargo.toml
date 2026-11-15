@@ -1,4 +1,4 @@
-# fxdax's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
+# cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
 [package]
 name = "extent_remote"
 version = "0.1.0"
@@ -46,7 +46,7 @@ extent_keys = { workspace = true, features = ["testing"] }
 workspace = true
 
 [features]
-# fxdax: what tests of the protocol outside this crate need, as its own have it: a bucket whose
+# cladefs: what tests of the protocol outside this crate need, as its own have it: a bucket whose
 # requests take effect when the test says (`testing::SimBucket`), the collector's moves
 # (`testing::MovesMaps`), and the protocol's rules, which they may turn off (`set_rules`), as
 # extent_store's simulation does (TASK-88).

@@ -1,9 +1,9 @@
 # shellcheck shell=bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# What the scripts that run fxdax on an x86-64 Linux KVM host, as
+# What the scripts that run cladefs on an x86-64 Linux KVM host, as
 # root (scripts/lib/*-linux-host.sh), share, sourced by them: provisioning the
 # host (host_setup), the tree each builds in (host_tree), the tools it needs,
 # at the versions pinned here (host_need), the guest kernel it builds
@@ -13,15 +13,15 @@
 # too, in the VM's home (scripts/lib/lima.sh).
 #
 # A host of one's own, provisioned already (ubu1, by its system-setup.d steps),
-# sets FXDAX_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the
+# sets CLADEFS_HOST_PROVISIONED=1: host_setup checks it and installs nothing, the
 # caller's Rust (PATH, CARGO_HOME, RUSTUP_HOME) is what builds, and host_need
-# takes a tool there at whatever version it is. FXDAX_HOST_WORK names the work
+# takes a tool there at whatever version it is. CLADEFS_HOST_WORK names the work
 # directory, where the trees, guest kernels and artifacts go (default
-# /var/lib/fxdax-test), FXDAX_HOST_KERNELS a cache of guest kernels that
-# outlasts it (host_kernel), and FXDAX_HOST_IN_PLACE=1 has each tree build where
+# /var/lib/fxdax-test), CLADEFS_HOST_KERNELS a cache of guest kernels that
+# outlasts it (host_kernel), and CLADEFS_HOST_IN_PLACE=1 has each tree build where
 # it is (host_tree): scripts/lib/host.sh's runs set all four.
 
-work=${FXDAX_HOST_WORK:-/var/lib/fxdax-test}
+work=${CLADEFS_HOST_WORK:-/var/lib/fxdax-test}
 # The tools host_need installed, which host_record records.
 host_needed=()
 
@@ -35,9 +35,9 @@ host_setup() {
     test -c /dev/kvm
 
     host_network
-    if [[ ${FXDAX_HOST_PROVISIONED:-} == 1 ]]; then
+    if [[ ${CLADEFS_HOST_PROVISIONED:-} == 1 ]]; then
         command -v cargo > /dev/null ||
-            { echo "FXDAX_HOST_PROVISIONED: no cargo on PATH" >&2; return 1; }
+            { echo "CLADEFS_HOST_PROVISIONED: no cargo on PATH" >&2; return 1; }
         return 0
     fi
     export DEBIAN_FRONTEND=noninteractive
@@ -45,10 +45,10 @@ host_setup() {
     # podman the root filesystems of guests that need one, and busybox-static the
     # image of fxfs-guest-docker-dax's containers; flex, bison, bc, cpio and
     # libelf's and OpenSSL's headers build the guest kernel (test-linux-host.sh's
-    # FXDAX_GUEST_KERNEL_BUILD); elfutils' eu-stack saves a hung test's stacks
+    # CLADEFS_GUEST_KERNEL_BUILD); elfutils' eu-stack saves a hung test's stacks
     # (the guest tests' runner, TASK-44.13); coccinelle's spatch checks the guest's C
     # (scripts/cocci-guest.py, TASK-44.17); fuse3's fusermount3 mounts FUSE
-    # filesystems for users other than root, as fxdax-mount does (TASK-222). The
+    # filesystems for users other than root, as cladefs-mount does (TASK-222). The
     # marker names the list, so a host that installed a different one installs again.
     local packages packages_ready
     packages=(build-essential clang libclang-dev llvm pkg-config musl-tools python3
@@ -160,7 +160,7 @@ host_need() {
                 ;;
             *)
                 pin=$(host_pin "$tool")
-                if [[ ${FXDAX_HOST_PROVISIONED:-} == 1 ]] &&
+                if [[ ${CLADEFS_HOST_PROVISIONED:-} == 1 ]] &&
                     host_version "$tool" > /dev/null 2>&1; then
                     :
                 elif [[ "$(host_version "$tool" 2> /dev/null)" != "$tool $pin" ]]; then
@@ -188,12 +188,12 @@ host_need() {
 # deletes what the source lacks, as the scripts' own before (rsync -a --delete),
 # deletes it.
 #
-# With FXDAX_HOST_IN_PLACE=1, the source is a tree of the run's own, a worktree
+# With CLADEFS_HOST_IN_PLACE=1, the source is a tree of the run's own, a worktree
 # whose target directories are its own and go with it (scripts/lib/host.sh's
 # runs): it builds in place, keeping its .git, which the scripts' tests read
 # (git ls-files), and repo stays.
 host_tree() {
-    if [[ ${FXDAX_HOST_IN_PLACE:-} == 1 ]]; then return 0; fi
+    if [[ ${CLADEFS_HOST_IN_PLACE:-} == 1 ]]; then return 0; fi
     local tree="$work/$1" compare=--checksum
     mkdir -p "$tree"
     if [[ ! -e $tree/.by-content ]]; then compare=--ignore-times; fi
@@ -203,7 +203,7 @@ host_tree() {
     repo=$tree
 }
 
-# host_kernel KIND [WORK] builds fxdax's x86-64 guest kernel of KIND from the source
+# host_kernel KIND [WORK] builds cladefs's x86-64 guest kernel of KIND from the source
 # (scripts/build-guest-kernel.sh): release; debug (lockdep, KCSAN, DEBUG_ATOMIC_SLEEP); kasan
 # (KASAN, KFENCE, lockdep); coverage (gcov of fs/fxfs); or rust-checks (its Rust's debug
 # assertions and overflow checks). It builds in the work directory WORK (default
@@ -212,7 +212,7 @@ host_tree() {
 # kernel and host_kernel_work at where it was built. The kernel's Rust builds on guest/rust's own
 # toolchain, not the host's.
 #
-# With FXDAX_HOST_KERNELS naming a cache of kernels, as on a host whose runs' work directories
+# With CLADEFS_HOST_KERNELS naming a cache of kernels, as on a host whose runs' work directories
 # come and go (scripts/lib/host.sh), it takes the kernel of KIND built from the same sources
 # (host_kernel_key) from there, if one was, a copy in WORK; else it builds it in the cache's work
 # directory of KIND, which keeps the last kernel's build, so that only what changed since builds,
@@ -232,14 +232,14 @@ host_kernel() {
     esac
     channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$repo/guest/rust/rust-toolchain.toml")
     rustup toolchain install "$channel" --component rust-src --profile minimal > /dev/null || return
-    if [[ -z ${FXDAX_HOST_KERNELS:-} || $kind == coverage ]]; then
+    if [[ -z ${CLADEFS_HOST_KERNELS:-} || $kind == coverage ]]; then
         host_kernel_build "$kernel_work" || return
         # shellcheck disable=SC2034 # The sourcing scripts read them.
         host_kernel_work=$kernel_work host_kernel_image=$kernel_work/out/x86_64/vmlinux
         return 0
     fi
     key=$(host_kernel_key "$kind") || return
-    cache=$FXDAX_HOST_KERNELS/$kind
+    cache=$CLADEFS_HOST_KERNELS/$kind
     built=$cache/built/$key/vmlinux
     mkdir -p "$cache/built" "$kernel_work" || return
     exec 7> "$cache.lock"
@@ -263,9 +263,9 @@ host_kernel() {
 
 # host_kernel_build WORK builds host_kernel's kernel in the work directory WORK.
 host_kernel_build() {
-    nice -n "${host_build_nice:-0}" env -u RUSTUP_TOOLCHAIN FXDAX_GUEST_KERNEL_WORK="$1" \
-        FXDAX_GUEST_KERNEL_DEBUG="$debug" FXDAX_GUEST_KERNEL_KASAN="$kasan" \
-        FXDAX_GUEST_KERNEL_COVERAGE="$coverage" FXDAX_GUEST_KERNEL_RUST_CHECKS="$rust_checks" \
+    nice -n "${host_build_nice:-0}" env -u RUSTUP_TOOLCHAIN CLADEFS_GUEST_KERNEL_WORK="$1" \
+        CLADEFS_GUEST_KERNEL_DEBUG="$debug" CLADEFS_GUEST_KERNEL_KASAN="$kasan" \
+        CLADEFS_GUEST_KERNEL_COVERAGE="$coverage" CLADEFS_GUEST_KERNEL_RUST_CHECKS="$rust_checks" \
         "$repo/scripts/build-guest-kernel.sh" x86_64 > "$log" 2>&1
 }
 

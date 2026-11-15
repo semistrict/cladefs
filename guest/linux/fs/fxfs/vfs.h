@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * What Fxfs's VFS glue (super.c), its changes of files' data (data.c) and its DAX (dax.c) share:
  * the superblock's and inodes' state, and calls into Rust.
@@ -47,14 +47,14 @@ struct fxfs_vfs_filesystem {
 	struct fxfs_filesystem *filesystem;
 	/* Its DAX, if it has one: one window, which all its volumes share. */
 	struct fxfs_dax *dax;
-	/* fxdax: /proc/fs/fxfs/<its device's tag>, what it waited on (fxfs_vfs_stats_show). */
+	/* cladefs: /proc/fs/fxfs/<its device's tag>, what it waited on (fxfs_vfs_stats_show). */
 	struct proc_dir_entry *stats;
-	/* fxdax: readahead's reads, off their readers (fxfs_vfs_readahead); a follower has none. */
+	/* cladefs: readahead's reads, off their readers (fxfs_vfs_readahead); a follower has none. */
 	struct workqueue_struct *readahead;
-	/* fxdax: takes the size the host resizes the store to (fxfs_resize), off the interrupt. */
+	/* cladefs: takes the size the host resizes the store to (fxfs_resize), off the interrupt. */
 	struct work_struct resize;
 	/*
-	 * fxdax: the writes that found the filesystem full and asked for room (fxfs_vfs_make_room),
+	 * cladefs: the writes that found the filesystem full and asked for room (fxfs_vfs_make_room),
 	 * and the syncs that made it, begun and done, which `room_lock` serializes (TASK-149.25).
 	 */
 	atomic64_t room_asked;
@@ -68,7 +68,7 @@ struct fxfs_vfs_filesystem {
 	unsigned int volumes;
 	unsigned int volumes_frozen;
 	/*
-	 * fxdax: whether the filesystem is frozen, which takes all its volumes frozen: nothing is
+	 * cladefs: whether the filesystem is frozen, which takes all its volumes frozen: nothing is
 	 * open on the device, so no volume mounts until it thaws, with the first to thaw. A thaw that
 	 * failed leaves it frozen, as the VFS leaves the superblock, for the next to go on from where
 	 * it stopped (fxfs_thaw, TASK-200).
@@ -89,27 +89,27 @@ struct fxfs_vfs_info {
 	struct fxfs_dax *dax;
 	struct fxfs_dax_volume *dax_volume;
 	/*
-	 * fxdax: whether its filesystem counts it frozen (`volumes_frozen`), which its filesystem's
+	 * cladefs: whether its filesystem counts it frozen (`volumes_frozen`), which its filesystem's
 	 * lock guards: a writable superblock as the VFS freezes it (freeze_fs) and thaws it
 	 * (unfreeze_fs); a read-only one, which the VFS freezes without a call to its filesystem, as
 	 * fxfs_vfs_freeze_super and fxfs_vfs_thaw_super find it frozen or not (TASK-202).
 	 */
 	bool frozen;
 	/*
-	 * fxdax: a follower's (fxfs_follows, backlog doc-8): applies its writer's commits, as its
+	 * cladefs: a follower's (fxfs_follows, backlog doc-8): applies its writer's commits, as its
 	 * device tells of them, off the interrupt (fxfs_follow).
 	 */
 	bool follows;
 	struct work_struct follow;
 	/*
-	 * fxdax: the commits a follower's state is as of, as its readers may find it: every batch up
+	 * cladefs: the commits a follower's state is as of, as its readers may find it: every batch up
 	 * to `follow_settled`'s commit settled, none past `follow_applied`'s applied
 	 * (FXFS_IOC_FOLLOW_EPOCHS). Written by its batches alone.
 	 */
 	u64 follow_settled;
 	u64 follow_applied;
 	/*
-	 * fxdax: a follower's fill barrier (TASK-42.10, doc-8): what readers hold shared as they
+	 * cladefs: a follower's fill barrier (TASK-42.10, doc-8): what readers hold shared as they
 	 * read its trees and fill the kernel's caches from them (fxfs_vfs_fill_begin), and a batch
 	 * exclusively, from before it drops what the kernel keeps of what it changes until it has
 	 * applied the change and set what the kernel keeps anew: no reader finds, or caches, part of
@@ -125,7 +125,7 @@ struct fxfs_vfs_info {
 };
 
 /*
- * fxdax: FXFS_IOC_FOLLOW_EPOCHS, on a follower's directory: the commits its state is as of. A read
+ * cladefs: FXFS_IOC_FOLLOW_EPOCHS, on a follower's directory: the commits its state is as of. A read
  * between two calls was of a state as of a commit from the first's `settled` to the second's
  * `applied` (the followers' history checker, TASK-42.7).
  */
@@ -136,7 +136,7 @@ struct fxfs_follow_epochs {
 #define FXFS_IOC_FOLLOW_EPOCHS _IOR('x', 0x42, struct fxfs_follow_epochs)
 
 /*
- * fxdax: FXFS_IOC_FOLLOW_STATS, on a follower's directory: its batches, and how long they waited
+ * cladefs: FXFS_IOC_FOLLOW_STATS, on a follower's directory: its batches, and how long they waited
  * for its fill barrier, all told and at most, in nanoseconds.
  */
 struct fxfs_follow_stats {
@@ -147,13 +147,13 @@ struct fxfs_follow_stats {
 #define FXFS_IOC_FOLLOW_STATS _IOR('x', 0x43, struct fxfs_follow_stats)
 
 /*
- * fxdax: FXFS_IOC_CACHED_OBJECTS, on any directory: how many records Fxfs caches, which the
+ * cladefs: FXFS_IOC_CACHED_OBJECTS, on any directory: how many records Fxfs caches, which the
  * superblock's shrinker frees under memory pressure (fxfs_cached_objects).
  */
 #define FXFS_IOC_CACHED_OBJECTS _IOR('x', 0x44, __u64)
 
 /*
- * fxdax: what publishes a shared volume, and makes one over it (backlog doc-10, Publishing). All
+ * cladefs: what publishes a shared volume, and makes one over it (backlog doc-10, Publishing). All
  * take CAP_SYS_ADMIN, on a directory, and none a follower (-EROFS).
  *
  * FXFS_IOC_FLUSH, on the volume's: puts all it holds in one layer, with its writers stopped by
@@ -194,13 +194,13 @@ static inline struct fxfs *fxfs_vfs_fs(struct super_block *sb)
 }
 
 /*
- * fxdax: whether any filesystem follows its writer: a static key, so that a writer's mounts, with
+ * cladefs: whether any filesystem follows its writer: a static key, so that a writer's mounts, with
  * no follower mounted, take no branch for the follower's paths.
  */
 DECLARE_STATIC_KEY_FALSE(fxfs_vfs_followers);
 
 /*
- * fxdax: the followers' torture test's knobs (TASK-42.7, doc-8 testing 6), module parameters
+ * cladefs: the followers' torture test's knobs (TASK-42.7, doc-8 testing 6), module parameters
  * (fxfs.NAME=VALUE on the kernel's command line): delays, in microseconds, that widen the windows
  * the protocol closes; and mutations, each switching off the rule that closes one, which the test
  * must catch: a follower's batches dropping and settling nothing; its readers' fill barrier not
@@ -214,14 +214,14 @@ extern bool fxfs_follow_skip_barrier;
 extern bool fxfs_follow_read_faults;
 extern bool fxfs_follow_fail_batch;
 
-/* fxdax: whether `sb`'s filesystem follows its writer. */
+/* cladefs: whether `sb`'s filesystem follows its writer. */
 static inline bool fxfs_vfs_follows(struct super_block *sb)
 {
 	return static_branch_unlikely(&fxfs_vfs_followers) && fxfs_vfs_info(sb)->follows;
 }
 
 /*
- * fxdax: a reader of a follower's `sb` holds its fill barrier shared from before it reads the
+ * cladefs: a reader of a follower's `sb` holds its fill barrier shared from before it reads the
  * trees until what it read is in the kernel's caches, or copied out (vfs.h's fxfs_vfs_info); on a
  * writer, nothing.
  */
@@ -245,7 +245,7 @@ static inline void fxfs_vfs_fill_end(struct super_block *sb)
 }
 
 /*
- * fxdax: a follower's read(2) of `iocb`'s file into `to` by `read`, a read_iter, its fill barrier
+ * cladefs: a follower's read(2) of `iocb`'s file into `to` by `read`, a read_iter, its fill barrier
  * held a chunk at a time (super.c). A copy to the reader's memory that would fault, which may be a
  * mapping of a follower's file whose fault takes the barrier, stops short instead; the barrier let
  * go, the reader's pages are faulted in, and the read goes on.
@@ -254,7 +254,7 @@ ssize_t fxfs_vfs_follower_read(struct kiocb *iocb, struct iov_iter *to,
 			       ssize_t (*read)(struct kiocb *iocb, struct iov_iter *to));
 
 /*
- * fxdax: a regular file's open and release, which hold it on a follower (fxfs_hold), for DAX or
+ * cladefs: a regular file's open and release, which hold it on a follower (fxfs_hold), for DAX or
  * not (super.c).
  */
 int fxfs_vfs_file_open(struct inode *inode, struct file *file);
@@ -263,7 +263,7 @@ int fxfs_vfs_file_release(struct inode *inode, struct file *file);
 /* llseek(2), with SEEK_DATA and SEEK_HOLE, for regular files, DAX or not (super.c). */
 loff_t fxfs_vfs_llseek(struct file *file, loff_t offset, int whence);
 /*
- * fxdax: makes room in a filesystem a write found full, by writing back what is dirty, which frees
+ * cladefs: makes room in a filesystem a write found full, by writing back what is dirty, which frees
  * what was reserved for it beyond what its writeback takes (super.c): a DAX write's too (dax.c).
  */
 void fxfs_vfs_make_room(struct super_block *sb);
@@ -276,7 +276,7 @@ int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 int fxfs_vfs_write_attr(struct inode *inode, u32 valid);
 
 /*
- * fxdax: what holds a regular file's data, the page cache (super.c) or the DAX window (dax.c): what
+ * cladefs: what holds a regular file's data, the page cache (super.c) or the DAX window (dax.c): what
  * each does around data.c's changes of the file as a whole, which are the same for both, and which
  * guest/sim builds as they are (TASK-160.2). An inode's, as its i_fop and a_ops are, set with them.
  * With the inode's lock held for writing.
@@ -334,19 +334,19 @@ struct fxfs_dax_inode {
 };
 
 struct fxfs_vfs_inode {
-	/* fxdax: what holds its data, if it is a regular file. */
+	/* cladefs: what holds its data, if it is a regular file. */
 	const struct fxfs_data_ops *data;
 	struct fxfs_dax_inode dax;
 	/*
-	 * fxdax: a follower's directory's generation: how many batches changed its entries, which
+	 * cladefs: a follower's directory's generation: how many batches changed its entries, which
 	 * its dentries were looked up at (d_time) and revalidate against.
 	 */
 	atomic64_t gen;
-	/* fxdax: a directory's entries, kept while it is cached, under i_lock (super.c). */
+	/* cladefs: a directory's entries, kept while it is cached, under i_lock (super.c). */
 	struct fxfs_vfs_dir_listing *listing;
 	/* Its attribute flags (FS_*_FL), which Fxfs keeps in its mode (FXFS_MODE_*). */
 	u32 fsflags;
-	/* fxdax: how far the journal was written as i_blocks was read (fxfs_vfs_getattr). */
+	/* cladefs: how far the journal was written as i_blocks was read (fxfs_vfs_getattr). */
 	u64 blocks_as_of;
 	struct inode vfs;
 };
@@ -378,13 +378,13 @@ void fxfs_dax_remove_volume(struct fxfs_dax *dax, struct fxfs_dax_volume *volume
 /* Writes back every DAX file's dirty pages, before a sync: 0, or the first error. */
 int fxfs_dax_settle(struct fxfs_dax *dax);
 /*
- * fxdax: stops the budget's worker (dax.c), and waits for it, before a volume unmounts;
+ * cladefs: stops the budget's worker (dax.c), and waits for it, before a volume unmounts;
  * fxfs_dax_start starts it again, unless the filesystem is frozen.
  */
 void fxfs_dax_stop(struct fxfs_dax *dax);
 void fxfs_dax_start(struct fxfs_dax *dax);
 /*
- * fxdax: the filesystem is frozen, durably, nothing dirty: every private page is mapped back to
+ * cladefs: the filesystem is frozen, durably, nothing dirty: every private page is mapped back to
  * its extent's, for a snapshot to take the window (doc-13). fxfs_dax_thaw ends it.
  */
 void fxfs_dax_frozen(struct fxfs_dax *dax);
@@ -396,12 +396,12 @@ void fxfs_dax_quiesce(struct fxfs_dax *dax);
 void fxfs_dax_thaw(struct fxfs_dax *dax);
 /* Frees `dax` once the filesystem is unmounted. */
 void fxfs_dax_destroy(struct fxfs_dax *dax);
-/* fxdax: shows how the window is used, as lines of a name and a number (TASK-91.7). */
+/* cladefs: shows how the window is used, as lines of a name and a number (TASK-91.7). */
 void fxfs_dax_show_stats(struct fxfs_dax *dax, struct seq_file *m);
 void fxfs_dax_inode_init(struct fxfs_dax_inode *di);
 /*
  * Makes the regular file `inode` a DAX inode, as it is read in, or `created`, and returns whether
- * it did. fxdax: one created in this mount isn't, nor one read in again before the barrier sealing
+ * it did. cladefs: one created in this mount isn't, nor one read in again before the barrier sealing
  * its page-cache writes (doc-13, TASK-164.3).
  */
 bool fxfs_dax_set_inode(struct inode *inode, bool created);
@@ -412,17 +412,17 @@ bool fxfs_dax_set_inode(struct inode *inode, bool created);
  */
 void fxfs_dax_evict(struct inode *inode);
 /*
- * fxdax: the page-cache file `inode`'s writeback wrote its data to extents, open until the barrier
+ * cladefs: the page-cache file `inode`'s writeback wrote its data to extents, open until the barrier
  * after: read in again before it, it is a page-cache inode still (fxfs_dax_set_inode, doc-13).
  */
 void fxfs_dax_written(struct inode *inode);
 /*
- * fxdax: writes back a DAX file's dirty pages, which Fxfs takes its size from, for fsync, seeks,
+ * cladefs: writes back a DAX file's dirty pages, which Fxfs takes its size from, for fsync, seeks,
  * fiemap and the like (doc-13): 0, or a -errno. Nothing for another file.
  */
 int fxfs_dax_write_back(struct inode *inode);
 /*
- * fxdax: a follower's writer changed file `ino`'s data from byte `start` to `end`, inclusive,
+ * cladefs: a follower's writer changed file `ino`'s data from byte `start` to `end`, inclusive,
  * which the window's ranges of its chunks there may map as it was: drops them, to be mapped again
  * as needed. Through `inode`, the file's, if one is read in, whose invalidate_lock the caller
  * holds for writing: it breaks the inode's mappings of them first.
@@ -430,7 +430,7 @@ int fxfs_dax_write_back(struct inode *inode);
 int fxfs_dax_changed(struct fxfs_dax *dax, struct fxfs_dax_volume *volume, struct inode *inode,
 		     u64 ino, loff_t start, loff_t end);
 /*
- * fxdax: a follower's DAX file, shrunk by its writer to `size`, its new size set: the guest's
+ * cladefs: a follower's DAX file, shrunk by its writer to `size`, its new size set: the guest's
  * mappings of its pages past it go, as a truncate's do. With its inode's invalidate_lock held for
  * writing.
  */

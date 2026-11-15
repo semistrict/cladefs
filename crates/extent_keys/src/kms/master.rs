@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: the master keys the bucket KMS wraps tenants' KEKs under (TASK-411.27, doc-16, The
+//! cladefs's own: the master keys the bucket KMS wraps tenants' KEKs under (TASK-411.27, doc-16, The
 //! bucket KMS), given a host in its environment: [`MASTER_KEY_VAR`], or the file
 //! [`MASTER_KEY_FILE_VAR`] names. Several keys rotate them: the first wraps, any unwraps. Each is
 //! known by its ID ([`MasterKeyId`]), a short hash of it, which is all that is ever written or
@@ -14,17 +14,17 @@ use zeroize::Zeroize as _;
 
 /// The variable holding the master keys: each 64 hexadecimal digits, separated by commas or white
 /// space (newlines among it), the newest first.
-pub const MASTER_KEY_VAR: &str = "FXDAX_MASTER_KEY";
+pub const MASTER_KEY_VAR: &str = "CLADEFS_MASTER_KEY";
 
 /// The variable naming a file of the master keys instead: exactly [`KEY_LEN`] raw bytes, one key;
 /// or text, as [`MASTER_KEY_VAR`] holds it.
-pub const MASTER_KEY_FILE_VAR: &str = "FXDAX_MASTER_KEY_FILE";
+pub const MASTER_KEY_FILE_VAR: &str = "CLADEFS_MASTER_KEY_FILE";
 
 /// The bytes of a [`MasterKeyId`].
 pub const MASTER_ID_LEN: usize = 8;
 
 /// What a master key's ID hashes before it: so that the hash is of no other use.
-const ID_LABEL: &[u8] = b"fxdax master key id\0";
+const ID_LABEL: &[u8] = b"cladefs master key id\0";
 
 /// A master key's ID: the first [`MASTER_ID_LEN`] bytes of SHA-256 over [`ID_LABEL`] and the key.
 /// Said in hexadecimal. It tells which key wrapped a tenant's KEK, and nothing of the key: a key of
@@ -237,7 +237,7 @@ mod tests {
     }
 
     /// An ID is a hash of the key, under its label: the value pinned was checked with Python's
-    /// hashlib on 2026-11-15 (`sha256(b"fxdax master key id\0" + bytes(range(32)))[:8]`).
+    /// hashlib on 2026-11-15 (`sha256(b"cladefs master key id\0" + bytes(range(32)))[:8]`).
     #[test]
     fn ids_are_short_hashes_of_their_keys() {
         let keys = MasterKeys::parse(ONE, "test").unwrap();
@@ -266,19 +266,19 @@ mod tests {
     /// Refusals say which key, never what it holds.
     #[test]
     fn keys_not_of_64_hex_digits_are_refused_by_place() {
-        let refused = |text: &str| MasterKeys::parse(text, "FXDAX_MASTER_KEY").unwrap_err();
-        assert_eq!(refused(""), "FXDAX_MASTER_KEY: no key");
-        assert_eq!(refused(" ,\n"), "FXDAX_MASTER_KEY: no key");
+        let refused = |text: &str| MasterKeys::parse(text, "CLADEFS_MASTER_KEY").unwrap_err();
+        assert_eq!(refused(""), "CLADEFS_MASTER_KEY: no key");
+        assert_eq!(refused(" ,\n"), "CLADEFS_MASTER_KEY: no key");
         let short = &ONE[..63];
-        assert_eq!(refused(short), "FXDAX_MASTER_KEY: key 1 of 1: not 64 hexadecimal digits");
+        assert_eq!(refused(short), "CLADEFS_MASTER_KEY: key 1 of 1: not 64 hexadecimal digits");
         let bad = format!("{}g", &ONE[..63]);
         assert_eq!(
             refused(&format!("{TWO},{bad}")),
-            "FXDAX_MASTER_KEY: key 2 of 2: not 64 hexadecimal digits"
+            "CLADEFS_MASTER_KEY: key 2 of 2: not 64 hexadecimal digits"
         );
         assert_eq!(
             refused(&format!("{ONE},{TWO},{ONE}")),
-            "FXDAX_MASTER_KEY: key 3 is key 1 again (2bb56b8197c604e4)"
+            "CLADEFS_MASTER_KEY: key 3 is key 1 again (2bb56b8197c604e4)"
         );
         for refusal in [refused(short), refused(&bad)] {
             assert!(!refusal.contains(&ONE[..16]), "{refusal}");
@@ -325,14 +325,14 @@ mod tests {
         set(MASTER_KEY_FILE_VAR, Some(file.as_os_str()));
         assert_eq!(
             MasterKeys::from_env().unwrap_err(),
-            "both FXDAX_MASTER_KEY and FXDAX_MASTER_KEY_FILE are set: give the master keys one way"
+            "both CLADEFS_MASTER_KEY and CLADEFS_MASTER_KEY_FILE are set: give the master keys one way"
         );
         set(MASTER_KEY_VAR, None);
         let keys = MasterKeys::from_env().unwrap().unwrap();
         assert_eq!(ids(&keys), ["2bb56b8197c604e4"]);
         set(MASTER_KEY_FILE_VAR, Some(dir.path().join("missing").as_os_str()));
         let refused = MasterKeys::from_env().unwrap_err();
-        let expected = format!("FXDAX_MASTER_KEY_FILE {}: ", dir.path().join("missing").display());
+        let expected = format!("CLADEFS_MASTER_KEY_FILE {}: ", dir.path().join("missing").display());
         assert!(refused.starts_with(&expected), "{refused}");
     }
 }

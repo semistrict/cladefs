@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * Atomics, plain: one simulated task runs at a time, and none is switched out within one of these,
  * so each is atomic, in the sequentially consistent order the scheduler picks. Weaker orders the

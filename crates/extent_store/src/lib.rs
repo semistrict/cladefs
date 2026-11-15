@@ -1,15 +1,15 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: an extent store on local disk, as backlog doc-4's host keeps extents
-//! (TASK-26.10), behind the device Fxfs writes its filesystem to: fxdax's images, and the
+//! cladefs's own: an extent store on local disk, as backlog doc-4's host keeps extents
+//! (TASK-26.10), behind the device Fxfs writes its filesystem to: cladefs's images, and the
 //! extent-store device of a VM's host.
 //!
 //! Extents are written once: from their first write until the next commit, which seals them. They
 //! are freed whole. A store holds one branch, a filesystem, which mints its extents' IDs under its
 //! branch; it may hold extents of other branches' too, whose data is in the bucket, as a fork's
-//! inherited ones are (doc-7). fxdax: forks, points and deletion are the bucket's (doc-14,
+//! inherited ones are (doc-7). cladefs: forks, points and deletion are the bucket's (doc-14,
 //! TASK-165.7): the store makes nothing of them but the commit that names a fork
 //! ([`Store::commit_fork`]). A store's directory holds:
 //!
@@ -21,14 +21,14 @@
 //!   commit once no write is in progress in it, when it holds about `Options::segment_size`, when
 //!   it is `Options::segment_age` old, when asked to ([`Store::close_segment`]), and at a fork; then
 //!   it is framed as objects in object storage are (`extent_frame`), its data in parts compressed
-//!   with zstd, with its footer: what the commits since it opened changed. fxdax: framed on a
+//!   with zstd, with its footer: what the commits since it opened changed. cladefs: framed on a
 //!   thread of its own, which the commit's flush waits for, not the commit, nor the writes behind
-//!   it; read from its raw file until then. Its raw file goes once that commit is durable. fxdax:
+//!   it; read from its raw file until then. Its raw file goes once that commit is durable. cladefs:
 //!   one compressing would save less than an eighth of is framed in place, its parts stored raw,
 //!   its raw file, its tail appended, linked as its framed file: its data written once
 //!   (TASK-310). Between commits, full, holding a segment
 //!   and an extent (`Options::max_extent`), it takes no more writes, which go to the next, so that
-//!   no segment holds more, however much is written between commits (TASK-79.2); fxdax: and it
+//!   no segment holds more, however much is written between commits (TASK-79.2); cladefs: and it
 //!   waits for the next commit, which seals in place each extent one run in it, as in the open
 //!   segment, and closes it, its footer naming those runs as the commit's, which the segments
 //!   after it go on with, the open one ending it: a commit spanning segments (TASK-92.41). The
@@ -38,7 +38,7 @@
 //!   segment's room;
 //! - `extents/<branch>/<sequence>`: the branch's extents sealed at `Options::large_extent` or more,
 //!   in files of their own, framed so; written raw in `open-extents/<branch>/<sequence>` until
-//!   sealed, if large from their first write. fxdax: one none of whose parts compresses is framed
+//!   sealed, if large from their first write. cladefs: one none of whose parts compresses is framed
 //!   in place, its raw file renamed its framed file, its tail appended: its data written once
 //!   (TASK-310);
 //! - `index/<branch>/<n>`: the branch's index, which maps its extents to their data, with its
@@ -52,7 +52,7 @@
 //! bucket does, deleted it.
 //!
 //! **Commits.** A commit is a barrier: it seals the extents written before it, copying each whose
-//! pieces are not one run in the open segment, fxdax: or in a segment filled since the last commit,
+//! pieces are not one run in the open segment, cladefs: or in a segment filled since the last commit,
 //! into one there, or into a file of its own if it is large, and orders what came before it before
 //! what comes after. Its durability follows ([`Store::flush`], or
 //! [`Store::commit`], which waits for it): commits become durable in order, several at once,
@@ -60,7 +60,7 @@
 //! then writes the commits' deltas to the index and syncs that. Only then does it remove the files
 //! they made unreferenced: extents' own files freed, segments whose extents were all freed or
 //! moved, and index files replaced by a checkpoint, which a commit writes in a new file once its
-//! file holds `Options::checkpoint_after` of deltas. fxdax: the commit, holding the branch's state,
+//! file holds `Options::checkpoint_after` of deltas. cladefs: the commit, holding the branch's state,
 //! takes what the checkpoint holds; its flush makes its file and encodes it there, holding none of
 //! the store's locks but its own, so that writes do not wait for that (TASK-92.56).
 //!
@@ -69,7 +69,7 @@
 //! durable leave at most a torn delta, which ends the index, and data and files no extent is in,
 //! which opening the store removes. A segment left open, or closed by a commit not
 //! durable, is closed again with no footer, from its raw file, which goes once that is durable.
-//! fxdax: a closed segment's raw file goes only once the commits its footer names are durable, so
+//! cladefs: a closed segment's raw file goes only once the commits its footer names are durable, so
 //! that one closed by a commit not durable has it still, holding what the commits durable wrote,
 //! whatever its framed file holds (TASK-79.33), and opening a branch reads none whose raw file is
 //! gone (TASK-92.16). So a crash at any point leaves each branch as of a prefix of its commits, one
@@ -87,10 +87,10 @@
 //! chain is, each following the one before, their commits tagged with the writer's lease epoch,
 //! their extents of their own at the writer's keys; and it keeps each closed segment for the
 //! uploader until it is acknowledged in the bucket ([`Store::closed`], [`Store::acknowledged`]). The uploader may have
-//! it close its open segment between commits ([`Store::close_now`]): fxdax: framed holding none of
+//! it close its open segment between commits ([`Store::close_now`]): cladefs: framed holding none of
 //! the store's locks, as a commit's closing is, which the branch's closing and forks wait for.
 //!
-//! **The bucket.** fxdax: once its writer acknowledges a segment in the bucket
+//! **The bucket.** cladefs: once its writer acknowledges a segment in the bucket
 //! ([`Store::acknowledged`], TASK-165.8), the extents sealed in it, and those stored on their own
 //! its footer names, held or kept, are the bucket's: read there ([`RemoteData`]), and their files
 //! leave the store, into the host's cache of the bucket's objects if the uploader gave one, the
@@ -124,9 +124,9 @@
 //! rules its concurrency relies on ([`Rules`]) can be turned off to see the tests fail
 //! (tests/shuttle/).
 
-/// fxdax: a step of a protocol, which the failpoint of its name fails (the `fail` crate's,
+/// cladefs: a step of a protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
-/// to do happens. Nothing without the crate's `failpoints` feature, which `fxdax/failpoints` turns
+/// to do happens. Nothing without the crate's `failpoints` feature, which `cladefs/failpoints` turns
 /// on.
 macro_rules! failpoint {
     ($name:literal) => {
@@ -134,7 +134,7 @@ macro_rules! failpoint {
     };
 }
 
-// fxdax: the audit, a test's, recounts the store's state after each of its critical sections:
+// cladefs: the audit, a test's, recounts the store's state after each of its critical sections:
 // ~8% of a one-row SQLite commit's CPU (TASK-301). A build without debug assertions is the release
 // profile's, an optimized build's, which measurements are made with, and tests are not (the dev
 // and sim profiles have them): so none has it. Built across the workspace, a binary or an example
@@ -146,14 +146,14 @@ compile_error!(
     "extent_store's `audit` in a release build, which measures with it: build the package alone \
      (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn it on (TASK-303)"
 );
-// fxdax: and its `testing`, tests' panics holding a lock shared beyond one store: each such lock,
+// cladefs: and its `testing`, tests' panics holding a lock shared beyond one store: each such lock,
 // as it is taken, then takes one process-wide lock to see whether a test asked
-// (shared::testing::panic_if_asked). fxdax's tests' dev-dependency turns it on, and so, in its
-// package, fxdax's examples had it, until they were fxdax-examples' (TASK-320).
+// (shared::testing::panic_if_asked). cladefs's tests' dev-dependency turns it on, and so, in its
+// package, cladefs's examples had it, until they were cladefs-examples' (TASK-320).
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
-    "extent_store's `testing` in a release build, which measures with it: build fxdax's examples \
-     as fxdax-examples' (`-p fxdax-examples`), a package alone (`-p PACKAGE`), not across the \
+    "extent_store's `testing` in a release build, which measures with it: build cladefs's examples \
+     as cladefs-examples' (`-p cladefs-examples`), a package alone (`-p PACKAGE`), not across the \
      workspace, whose dev-dependencies turn it on (TASK-320)"
 );
 
@@ -188,7 +188,7 @@ mod written;
 pub use written::{Written, written};
 
 pub use dir::{Dir, File, HostDir, HostFile, bypass_page_cache};
-/// fxdax: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
+/// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::{Branch, Cell};
 pub use framed::{Aligned, Packed, Part, read_object, read_whole, unpacks};
 pub use host::{

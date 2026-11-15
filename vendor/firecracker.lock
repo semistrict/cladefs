@@ -1843,7 +1843,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "fxdax"
+name = "cladefs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4878,7 +4878,7 @@ name = "virtio_extent"
 version = "0.1.0"
 dependencies = [
  "futures",
- "fxdax",
+ "cladefs",
  "libc",
  "log",
  "serde",
@@ -4939,7 +4939,7 @@ dependencies = [
  "displaydoc",
  "event-manager",
  "futures",
- "fxdax",
+ "cladefs",
  "gdbstub",
  "gdbstub_arch",
  "itertools 0.14.0",

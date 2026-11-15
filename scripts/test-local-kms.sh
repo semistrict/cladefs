@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -24,8 +24,8 @@ if [[ ! -x $bin/local-kms ]]; then
     GOBIN=$bin go install "github.com/nsmithuk/local-kms@$version"
 fi
 
-export FXDAX_LOCAL_KMS=$bin/local-kms
-export AWS_ACCESS_KEY_ID=fxdax-local-kms AWS_SECRET_ACCESS_KEY=fxdax-local-kms
+export CLADEFS_LOCAL_KMS=$bin/local-kms
+export AWS_ACCESS_KEY_ID=cladefs-local-kms AWS_SECRET_ACCESS_KEY=cladefs-local-kms
 # Nothing else of the chain is asked: no profile's, nor the instance's.
 unset AWS_SESSION_TOKEN AWS_PROFILE
 export AWS_EC2_METADATA_DISABLED=true

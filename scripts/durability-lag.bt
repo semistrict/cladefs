@@ -1,5 +1,5 @@
 #!/usr/bin/env bpftrace
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -9,7 +9,7 @@
 // with how long each of its phases took (jbd2_run_stats: waiting to start, running, locked,
 // flushing the ordered data, logging); the discards ext4 issues, which a mount with `discard`
 // makes as a commit's blocks are freed; and the block layer's requests (below). Run
-// alongside guest tests with FXDAX_HOST_TRACE=scripts/durability-lag.bt
+// alongside guest tests with CLADEFS_HOST_TRACE=scripts/durability-lag.bt
 // (scripts/lib/test-linux-host.sh), which keeps what it prints in RESULTS/host-trace.txt.
 
 config = {
@@ -54,7 +54,7 @@ tracepoint:block:block_bio_queue
 tracepoint:syscalls:sys_exit_pwrite64,
 tracepoint:syscalls:sys_exit_pwritev,
 tracepoint:syscalls:sys_exit_write
-/args.ret > 0 && (strncmp(comm, "extentd", 7) == 0 || strncmp(comm, "fxdax", 5) == 0)/
+/args.ret > 0 && (strncmp(comm, "extentd", 7) == 0 || strncmp(comm, "cladefs", 5) == 0)/
 {
 	@written_by_second[(nsecs - @start) / 1000000000, comm] = sum(args.ret);
 }

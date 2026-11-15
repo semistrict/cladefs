@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 //! with a CRC32C; after them, a footer of the rest of the state, the keys of the objects the
 //! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]). A reader
 //! after every extent reads the table whole; one after a single extent reads the footer, and one
-//! block. fxdax: under its branch's DEK, if it has one, authenticated, not sealed
+//! block. cladefs: under its branch's DEK, if it has one, authenticated, not sealed
 //! ([`crate::Seal::Authenticated`], TASK-411.3): metadata, which the collector reads holding no
 //! key (doc-16, What is encrypted).
 
@@ -55,7 +55,7 @@ pub struct Block {
     pub crc: u32,
 }
 
-/// The table of `entries`, which are in their IDs' order, and `rest`: fxdax: authenticated, if
+/// The table of `entries`, which are in their IDs' order, and `rest`: cladefs: authenticated, if
 /// `key` gives a DEK and which it is ([`crate::Packer::keyed`], TASK-411.3).
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (Id, &'a str, u64, u64)>,
@@ -95,7 +95,7 @@ pub fn encode<'a>(
     crate::framed_keyed(&data, &footer, key.map(|(dek, id)| (dek, id, Keyed::Authenticated)))
 }
 
-/// fxdax: keys stored front-coded: each as the length of what it shares with the one before it, and
+/// cladefs: keys stored front-coded: each as the length of what it shares with the one before it, and
 /// the rest of it.
 mod front_coded {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -223,7 +223,7 @@ mod tests {
         }
     }
 
-    /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; fxdax:
+    /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; cladefs:
     /// in the clear, and under a key, authenticated, read alike by readers holding it or none, and
     /// refused, changed, by one holding it; one in the clear refused by a reader holding its
     /// objects sealed (TASK-411.3).
@@ -267,7 +267,7 @@ mod tests {
         assert_eq!(decode(&bytes, &Holding(&keys)).map(|(_, entries)| entries), Ok(entries(10)));
     }
 
-    /// fxdax: a footer's keys read back as they were, whatever they share, a character split or
+    /// cladefs: a footer's keys read back as they were, whatever they share, a character split or
     /// not; stored each as the rest of what the one before it has, they cost little more than what
     /// sets them apart (TASK-364). A footer naming a key sharing more than the one before it has
     /// is refused.

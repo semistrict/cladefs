@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,7 @@
 //! client: it holds every lookup of a name on one wait while this mounts it, so that concurrent
 //! lookups of a repo attach it once, lets this process's group alone through the directory
 //! unmounted, and finds the mounts idle for the timeout, which this unmounts as it asks. No kernel
-//! code of fxdax's is involved.
+//! code of cladefs's is involved.
 //!
 //! The sandbox manager is asked through [`upcall`]'s protocol, over any stream: the binary,
 //! `fxfs-automount`, connects to the host over vsock for each ask, as the guest agent does, and

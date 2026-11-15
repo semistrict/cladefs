@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/journal/bootstrap_handle.rs`. fxdax: extents are
+// Fuchsia's `src/storage/fxfs/src/object_store/journal/bootstrap_handle.rs`. cladefs: extents are
 // ranges of extents in the extent store (backlog doc-4), not of the device. An extent never written,
 // which the super-block and journal preallocate ahead of what they write, reads as zeros, as the
 // store doesn't hold it. Replay drops the extents of the journal's tail that a mount moved to new
@@ -112,7 +112,7 @@ impl ReadObjectHandle for BootstrapObjectHandle {
         let block_size = self.block_size();
         ensure!(block_size.is_aligned(offset), FxfsError::InvalidArgs);
         ensure!(block_size.is_aligned(buf.len() as u64), FxfsError::InvalidArgs);
-        // fxdax: not an assertion: the offset is a super-block's, and may be anything.
+        // cladefs: not an assertion: the offset is a super-block's, and may be anything.
         ensure!(offset >= self.start_offset, FxfsError::Inconsistent);
         let trace = self.trace.load(Ordering::Relaxed);
         if trace {
@@ -126,7 +126,7 @@ impl ReadObjectHandle for BootstrapObjectHandle {
         } else {
             &self.extents
         };
-        // fxdax: the extents' parts of the read are read at once: the journal's blocks are each an
+        // cladefs: the extents' parts of the read are read at once: the journal's blocks are each an
         // extent of their own, and each read of one a round trip to the device.
         let mut reads = Vec::new();
         for extent in extents {
@@ -185,7 +185,7 @@ impl JournalHandle for BootstrapObjectHandle {
     }
 
     fn truncate_extents(&mut self, offset: u64) -> Result<(), Error> {
-        // fxdax: not an assertion: the offset is a journal record's, and may be anything.
+        // cladefs: not an assertion: the offset is a journal record's, and may be anything.
         ensure!(offset >= self.start_offset && offset <= self.end_offset, FxfsError::Inconsistent);
         let mut extent_start = self.start_offset;
         let mut kept = 0;
@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(buffer.to_vec(), vec![1u8; 1024]);
     }
 
-    /// fxdax: where a read starts is a super-block's, and where extents are truncated a journal
+    /// cladefs: where a read starts is a super-block's, and where extents are truncated a journal
     /// record's: which an image says, and which fail rather than assert.
     #[fuchsia::test]
     async fn test_offsets_outside_a_handle() {

@@ -1,41 +1,41 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! fxfs-guest-docker-dax (TASK-50.6): a guest boots on an Fxfs root, a store the host imports from
-//! an image holding Docker's static binaries (FXDAX_DOCKER_STATIC names their directory) and an
-//! image of a container, a static BusyBox (FXDAX_BUSYBOX), as an OCI archive; its files map from
+//! an image holding Docker's static binaries (CLADEFS_DOCKER_STATIC names their directory) and an
+//! image of a container, a static BusyBox (CLADEFS_BUSYBOX), as an OCI archive; its files map from
 //! the DAX window. containerd imports the image and runs a container of it, its snapshots overlayfs
 //! over Fxfs; then Docker, through that containerd, loads it and runs one, its overlay2 layers on
 //! Fxfs too.
 //!
 //! fxfs-guest-docker-build-dax (TASK-311) builds, as LangSmith's CI builders do: on 8 vCPUs, with
-//! BuildKit (Docker's buildx plugin, FXDAX_DOCKER_BUILDX names it), stages in parallel writing
-//! FXDAX_DOCKER_BUILD_MIB MiB of files between them (default 256), more than the guest's memory
+//! BuildKit (Docker's buildx plugin, CLADEFS_DOCKER_BUILDX names it), stages in parallel writing
+//! CLADEFS_DOCKER_BUILD_MIB MiB of files between them (default 256), more than the guest's memory
 //! keeps as it builds and exports: the image loaded into Docker's store, saved, and exported as
-//! a tar of its files, FXDAX_DOCKER_BUILDS times (default 3), each round's stages anew. Two of 17 such
-//! builds oopsed there, then locked up. FXDAX_DOCKER_BUILD_CPUS, a host CPU list such as `0-3`,
+//! a tar of its files, CLADEFS_DOCKER_BUILDS times (default 3), each round's stages anew. Two of 17 such
+//! builds oopsed there, then locked up. CLADEFS_DOCKER_BUILD_CPUS, a host CPU list such as `0-3`,
 //! runs the VM on those CPUs alone: its vCPUs then preempt each other, as on a host with no CPU
 //! to spare. Its uploads are some ten times its builds' data (44 GB for ~3.8 GB built, on ubu1):
-//! past the default, put the bucket on disk (FXDAX_EXTENTD_REMOTE=file://DIR/), as the default
+//! past the default, put the bucket on disk (CLADEFS_EXTENTD_REMOTE=file://DIR/), as the default
 //! bucket, on /dev/shm, fills at 1024 MiB a build (TASK-314).
 
 use macros::{guest, host};
 
 pub struct TestFxfsGuestDocker {
-    /// fxdax: whether the guest builds an image and exports it, rather than runs containers of
+    /// cladefs: whether the guest builds an image and exports it, rather than runs containers of
     /// one it loads (TASK-311).
     pub build: bool,
 }
 
-/// fxdax: the build's VM's vCPUs, as LangSmith's builders have, and its stages, one a vCPU.
+/// cladefs: the build's VM's vCPUs, as LangSmith's builders have, and its stages, one a vCPU.
 const BUILD_VCPUS: u8 = 8;
-/// fxdax: the build's settings, from the host's environment, in the guest's.
-const BUILDS: &str = "FXDAX_DOCKER_BUILDS";
-const BUILD_MIB: &str = "FXDAX_DOCKER_BUILD_MIB";
+/// cladefs: the build's settings, from the host's environment, in the guest's.
+const BUILDS: &str = "CLADEFS_DOCKER_BUILDS";
+const BUILD_MIB: &str = "CLADEFS_DOCKER_BUILD_MIB";
 
 /// The container image's name, as containerd and Docker name it.
-const IMAGE: &str = "docker.io/fxdax/busybox:1";
+const IMAGE: &str = "docker.io/cladefs/busybox:1";
 /// Where the guest finds the image's OCI archive.
 const ARCHIVE: &str = "/images/busybox.tar";
 /// What the containers say.
@@ -48,11 +48,11 @@ const BUILDX: &str = "/usr/libexec/docker/cli-plugins/docker-buildx";
 #[host]
 pub(crate) mod host {
     use super::*;
-    use crate::common::{control, fxdax_guest_should_run};
+    use crate::common::{control, cladefs_guest_should_run};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
-    use fxdax::import::testing::{Entry, Kind, layer, oci_layout};
+    use cladefs::import::testing::{Entry, Kind, layer, oci_layout};
     use std::path::Path;
 
     const CAPACITY: u64 = 4 << 30;
@@ -79,7 +79,7 @@ pub(crate) mod host {
     /// The container's image, BusyBox, as an OCI archive: a tar of its layout, naming it
     /// [`IMAGE`] as containerd and Docker read names.
     fn container_archive(dir: &Path) -> anyhow::Result<Vec<u8>> {
-        let busybox = std::env::var_os("FXDAX_BUSYBOX").context("FXDAX_BUSYBOX not set")?;
+        let busybox = std::env::var_os("CLADEFS_BUSYBOX").context("CLADEFS_BUSYBOX not set")?;
         let busybox = std::fs::read(busybox)?;
         let rootfs = layer(&[
             Entry::new("bin", Kind::Dir),
@@ -125,7 +125,7 @@ pub(crate) mod host {
         Ok(layer(&entries)?)
     }
 
-    /// fxdax: what a root needs of Docker's, each file's path in the root, its contents and its
+    /// cladefs: what a root needs of Docker's, each file's path in the root, its contents and its
     /// permissions, and the directories they are in: Docker's static binaries, in /usr/bin; the
     /// container's archive, at [`ARCHIVE`]; and with `buildx`, Docker's plugin's binary, where
     /// Docker's CLI finds its plugins. fxfs-guest-sandboxes' image has them too, over its own
@@ -140,7 +140,7 @@ pub(crate) mod host {
             let mut dirs = vec!["usr", "usr/bin", "images"];
             let mut files: Vec<(String, Vec<u8>, u32)> = (DOCKER.iter())
                 .map(|name| {
-                    Ok((format!("usr/bin/{name}"), read("FXDAX_DOCKER_STATIC", name)?, 0o755))
+                    Ok((format!("usr/bin/{name}"), read("CLADEFS_DOCKER_STATIC", name)?, 0o755))
                 })
                 .collect::<anyhow::Result<_>>()?;
             if let Some(buildx) = buildx {
@@ -164,17 +164,17 @@ pub(crate) mod host {
         }
     }
 
-    /// fxdax: Docker's buildx plugin's binary, FXDAX_DOCKER_BUILDX's (TASK-311).
+    /// cladefs: Docker's buildx plugin's binary, CLADEFS_DOCKER_BUILDX's (TASK-311).
     pub(crate) fn buildx() -> anyhow::Result<Vec<u8>> {
         let path =
-            std::env::var_os("FXDAX_DOCKER_BUILDX").context("FXDAX_DOCKER_BUILDX not set")?;
+            std::env::var_os("CLADEFS_DOCKER_BUILDX").context("CLADEFS_DOCKER_BUILDX not set")?;
         std::fs::read(&path).with_context(|| format!("reading {path:?}"))
     }
 
     /// The root's image: the guest agent, Docker's files, and what init and the daemons mount on
     /// and keep their state in; with `buildx`, Docker's plugin's binary.
     fn root_layer(dir: &Path, buildx: Option<Vec<u8>>) -> anyhow::Result<Vec<u8>> {
-        let agent = std::env::var_os("FXDAX_GUEST_AGENT").context("FXDAX_GUEST_AGENT not set")?;
+        let agent = std::env::var_os("CLADEFS_GUEST_AGENT").context("CLADEFS_GUEST_AGENT not set")?;
         let agent = std::fs::read(agent)?;
         let docker = DockerFiles::new(dir, buildx)?;
         let mut entries = vec![Entry::new("guest-agent", Kind::File(&agent)).perm(0o755)];
@@ -203,7 +203,7 @@ pub(crate) mod host {
 
     impl Test for TestFxfsGuestDocker {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         /// The import of Docker's binaries, and the daemons' starting, take minutes; a build's
@@ -216,12 +216,12 @@ pub(crate) mod host {
             let dir = &test_setup.tmp_dir;
             let layout = dir.join("root-layout");
             let buildx = if self.build { Some(buildx()?) } else { None };
-            oci_layout(&layout, "fxdax/root:docker", &[root_layer(dir, buildx)?])?;
-            // By the daemon, built for release, as fxdaxctl imports: this harness's debug build
+            oci_layout(&layout, "cladefs/root:docker", &[root_layer(dir, buildx)?])?;
+            // By the daemon, built for release, as cladefsctl imports: this harness's debug build
             // takes minutes over Docker's binaries.
             let store = dir.join("root");
             let capacity = if self.build { BUILD_CAPACITY } else { CAPACITY };
-            let extentd = std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?;
+            let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?;
             control(Path::new(&extentd))?.import_image(&store, capacity, &layout, None)?;
 
             let mut vm = if self.build { Vm::new(BUILD_VCPUS, 2048)? } else { Vm::new(2, 2048)? };
@@ -234,8 +234,8 @@ pub(crate) mod host {
                         vm.env(&std::ffi::CString::new(format!("{name}={value}"))?);
                     }
                 }
-                if let Ok(cpus) = std::env::var("FXDAX_DOCKER_BUILD_CPUS") {
-                    vm.cpus(&cpu_list(&cpus).context("FXDAX_DOCKER_BUILD_CPUS is a CPU list")?);
+                if let Ok(cpus) = std::env::var("CLADEFS_DOCKER_BUILD_CPUS") {
+                    vm.cpus(&cpu_list(&cpus).context("CLADEFS_DOCKER_BUILD_CPUS is a CPU list")?);
                 }
             }
             vm.enter(&dir.join("rootfs"), &test_setup.test_case)
@@ -343,7 +343,7 @@ mod guest {
         dockerfile
     }
 
-    /// Builds the image FXDAX_DOCKER_BUILDS times, through dockerd's BuildKit, and exports it each
+    /// Builds the image CLADEFS_DOCKER_BUILDS times, through dockerd's BuildKit, and exports it each
     /// time: loaded into Docker's store, saved, and as a tar of its files; then runs it, which
     /// says the round it was built in, and lets go of the round's images, archives and cache.
     fn build(logs: &[&str]) {
@@ -355,7 +355,7 @@ mod guest {
         std::fs::write("/build/Dockerfile", dockerfile).unwrap();
         for round in 1..=setting(BUILDS, 3) {
             let began = Instant::now();
-            let tag = format!("fxdax/built:{round}");
+            let tag = format!("cladefs/built:{round}");
             let arg = format!("ROUND={round}");
             let build = ["buildx", "build", "--progress=plain", "--build-arg", &arg];
             let mut load = build.to_vec();

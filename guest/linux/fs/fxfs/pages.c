@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
- * fxdax: the state of a range's pages (pages.h), as four bitmaps that nothing else sees: so that
+ * cladefs: the state of a range's pages (pages.h), as four bitmaps that nothing else sees: so that
  * whatever dax.c does to a page goes through a transition named for it, which keeps the rules of
  * doc-13 the bitmaps stand for. They were fields of a range that a dozen places read and wrote,
  * the rules holding by each one's care (TASK-160.4).
