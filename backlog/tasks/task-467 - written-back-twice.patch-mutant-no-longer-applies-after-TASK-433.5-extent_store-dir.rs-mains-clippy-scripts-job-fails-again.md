@@ -3,11 +3,11 @@ id: TASK-467
 title: >-
   written-back-twice.patch mutant no longer applies after TASK-433.5
   (extent_store dir.rs): main's clippy scripts job fails again
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 20:58'
-updated_date: '2026-11-15 21:15'
+updated_date: '2026-11-15 22:12'
 labels:
   - bug
   - testing
@@ -24,7 +24,7 @@ Main CI run 43758893191 (a252cb53f): test (clippy scripts) fails: crates/cladefs
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -43,6 +43,8 @@ Main CI run 43758893191 (a252cb53f): test (clippy scripts) fails: crates/cladefs
 Cause: HostFile became CachedFile<DiskFile> in 38c8470dd, so the patch's HostFile::write_back hunk in dir.rs had nothing left to apply to. Fix (01c98e99a): the same mutation on CachedFile::write_back in crates/extent_store/src/cached.rs: after the write-back, read_cached what was written back and write it again to the file under the cache. It now reaches MemDir's files too (CachedFile is generic); the killer is a host store's.
 Evidence: ubu1 (fxjob t467-killer): the killer remote::write_budgets::a_hosts_store_writes_what_its_design_says passes without it (8.7 s); crates/cladefs/mutants.sh written-back-twice: killed, 'the kernel wrote 2263 MiB for the store, which says 783 MiB in 5109 writes: 803 MiB at most'; tree clean afterwards. Mac: CLADEFS_TEST_PARTS=scripts scripts/test.sh passes (431 script tests; every mutant set checked, 0 broken; firecracker-cargo --check).
 scripts/upstream-changes.py --check passes; nothing upstream touched.
+
+2026-11-15, coordinator: main's CI run 43765433746 on cd8d9a286 green on every job (test (workspace), macos (workspace), guest, clippy scripts, test-weakening, sandboxes among them).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

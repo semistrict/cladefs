@@ -4,11 +4,11 @@ title: >-
   TASK-433.5's CachedDir changed extent_store::dir's constructor; guest/tests
   test_cases no longer compiles (E0061): main's test (guest) and sandboxes jobs
   fail
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 20:58'
-updated_date: '2026-11-15 21:15'
+updated_date: '2026-11-15 22:12'
 labels:
   - bug
   - ci
@@ -25,7 +25,7 @@ Main CI run 43758893191 (a252cb53f): test (guest) and sandboxes (short) fail to 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -45,6 +45,8 @@ Cause: 38c8470dd (TASK-433.5) dropped HostDir::new's direct flag; guest/tests (o
 Evidence: ubu1 (fxjob t466-guest, own worktree and target): guest/tests builds; nextest test_cases --features host 127/127, --features guest 99/99 (19 skipped: loop mounts need root), runner 9/9.
 test.sh: not changed. Its guest part, default on Linux and CI's test (guest) job, already builds guest/tests, and that job caught this. On macOS it can't build (cladefs::extentd Linux-only); cargo check --target x86_64-unknown-linux-gnu fails at zstd-sys's build script without a Linux C cross compiler, so no cheap macOS check exists. The gap was a signature change verified on macOS only.
 scripts/upstream-changes.py --check passes; nothing upstream touched (DoD #3: no deviation).
+
+2026-11-15, coordinator: main's CI run 43765433746 on cd8d9a286 green on every job (test (workspace), macos (workspace), guest, clippy scripts, test-weakening, sandboxes among them).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

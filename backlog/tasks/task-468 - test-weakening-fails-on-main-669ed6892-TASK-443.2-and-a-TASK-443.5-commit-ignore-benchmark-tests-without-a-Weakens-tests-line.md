@@ -3,11 +3,11 @@ id: TASK-468
 title: >-
   test-weakening fails on main: 669ed6892 (TASK-443.2) and a TASK-443.5 commit
   #[ignore] benchmark tests without a Weakens-tests: line
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 20:58'
-updated_date: '2026-11-15 21:15'
+updated_date: '2026-11-15 22:12'
 labels:
   - bug
   - ci
@@ -24,7 +24,7 @@ Main CI run 43758893191 (a252cb53f): job 'Commits that weaken checks say why' fa
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -46,6 +46,8 @@ Fix (5f84230ea): an ignoring line on a test the commit adds isn't flagged: the f
 Evidence: scripts/tests/test_test_weakening.py, four new tests (added ignored, should_panic, Python skipTest: not flagged; existing test ignored beside an added one, renamed and ignored, moved with another reason: flagged; ignored test moved as it is: not), failed before the fix and pass after (21/21). Over main's last 400 commits the new script drops exactly the flags of those seven commits; 815409fb8 (the rename, test names renamed) is still flagged and is history. scripts/test-weakening.py a252cb53f..origin/main and over this push's commits: exit 0. Mac scripts part passes.
 
 Commit hash: the fix is 69cf424d9 (5f84230ea above was its pre-amend hash, never pushed). Pushed to main as b66fc7394..464e6e201; CI run 43762655434 queued at the time of writing: DoD #1 (workspace on macOS and Linux) left to it, as these commits change no workspace code.
+
+2026-11-15, coordinator: main's CI run 43765433746 on cd8d9a286 green on every job (test (workspace), macos (workspace), guest, clippy scripts, test-weakening, sandboxes among them).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
