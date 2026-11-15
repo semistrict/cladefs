@@ -174,21 +174,18 @@ export const invariants: Invariant[] = [
     id: "one-writer",
     layer: "bucket",
     claim:
-      "A branch has one writer, holding its lease. Its segments are numbered without gaps, each " +
-      "naming the one it follows; once a new writer's first segment (its fence) is in the bucket, " +
-      "the old writer can add nothing.",
-    why: "A host that lost its lease but still runs can't corrupt the branch: object storage's conditional writes do the fencing.",
-    enforcedBy: ["upload", "acknowledge", "bucket"],
+      "A branch has one writer, holding its head. A commit is the branch's once the writer swaps " +
+      "the head to name its segment, on the condition that the head is still the one it wrote; " +
+      "a new writer swaps the head to the next epoch, after which the old writer's swaps fail, " +
+      "and what it writes, at keys naming its own epoch, no head names.",
+    why: "A host that lost the branch but still runs can't corrupt it: its writes land at keys no reader goes by, and object storage's conditional write of the head does the fencing.",
+    enforcedBy: ["upload", "acknowledge", "head_swap", "bucket"],
     evidence: [
       { kind: "doc", id: "doc-7" },
-      { kind: "mutation", spec: "bucket", name: "NoFence" },
-      { kind: "mutation", spec: "bucket", name: "NoPinsFences" },
-      { kind: "mutation", spec: "bucket", name: "NoPinsOldFences" },
-      { kind: "mutation", spec: "bucket", name: "NoPinsVoidStrays" },
-      { kind: "mutation", spec: "bucket", name: "NoPinsLateStrays" },
-      { kind: "mutation", spec: "bucket", name: "NoPinsTakings" },
-      { kind: "mutation", spec: "bucket", name: "NoForksAfterLease" },
-      { kind: "mutation", spec: "bucket", name: "NoContinuity" },
+      { kind: "mutation", spec: "bucket", name: "NoHeadSwap" },
+      { kind: "mutation", spec: "bucket", name: "NoEpochKeys" },
+      { kind: "mutation", spec: "bucket", name: "NoTokens" },
+      { kind: "mutation", spec: "bucket", name: "NoCollectorEpochs" },
     ],
     standing: "checked",
   },
