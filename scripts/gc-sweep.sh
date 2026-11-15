@@ -9,8 +9,17 @@
 # tenants (100) of CLADEFS_GC_CELLS cells (100) of a branch of CLADEFS_GC_SEGMENTS segments (95), the
 # largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
 # files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
-# (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2, or 1): the first deleting and
-# compacting half of every branch, the second deleting what the first compacted, and little else.
+# (hard links on Linux, clones on macOS) CLADEFS_GC_SWEEPS times (2): the first deleting and
+# compacting half of every branch, the second deleting what the first compacted, and little else,
+# those after skipping every cell unchanged since.
+#
+# CLADEFS_GC_FILL is what else the filling is told, the cells' kind (cladefs-gc-fill: `--deleted`,
+# cells whose branches are all deleted; `--clones EXTENTS`, sandboxes made and deleted, clones of a
+# point of their tenant's base, the tenant's first cell; TASK-443.4). With CLADEFS_GC_CELL, a cell
+# as cladefs-gc names it (`1/1`, a base's), each bucket swept is then passed over at that cell
+# alone, twice, each pass a process of its own: with the sweeps' options, which skips the cell if
+# nothing changed it since its last pass; and with another grace period, which no pass before
+# decided by, so that it goes in full, as it does once a clone was made or retired since.
 #
 # Each SIDE=TREE is a tree whose cladefs-gc and cladefs-gc-fill are built (in WORK/target-SIDE) and
 # measured, each with a bucket its own fill made, for an A/B of commits (TASK-395.17); with none,
@@ -19,7 +28,13 @@
 # alike. Each sweep's metrics (cladefs-gc --metrics) and log go to
 # RESULTS/sweep-SIDE-COUNT-rROUND-SWEEP.{prom,log}, the buckets' shapes to RESULTS/fill-SIDE.txt,
 # a table of the sweeps to RESULTS/gc-sweep.md, and, with more than a round, each side's and
-# count's median, least and most seconds a sweep. On ubu1, scripts/gc-sweep-host.sh runs it, as a
+# count's median, least and most seconds a sweep; each sweep's requests by kind, the cells it
+# skipped and the objects the bucket holds after it to RESULTS/gc-sweep-requests.md; and the
+# passes over CLADEFS_GC_CELL to RESULTS/cell-SIDE-COUNT-rROUND-{unchanged,full}.{prom,log}, the
+# cell's objects by kind as they found it to RESULTS/cell-SIDE-COUNT-rROUND-objects.txt, and a
+# table of them to RESULTS/gc-sweep-cell.md: the cell's objects, the pages a store of 1,000 keys a
+# page lists them in (cladefs-gc counts a listing as one request, however many pages), the requests,
+# the seconds and the most memory of each. On ubu1, scripts/gc-sweep-host.sh runs it, as a
 # measurement.
 #
 #   scripts/gc-sweep.sh WORK RESULTS [SIDE=TREE...]
@@ -37,10 +52,18 @@ largest=${CLADEFS_GC_LARGEST:-950}
 at_once=${CLADEFS_GC_AT_ONCE:-1 4 16 64}
 sweeps=${CLADEFS_GC_SWEEPS:-2}
 rounds=${CLADEFS_GC_ROUNDS:-1}
-for count in "$tenants" "$cells" "$segments" "$largest" "$rounds" $at_once; do
+read -r -a kind <<< "${CLADEFS_GC_FILL:-}"
+cell=${CLADEFS_GC_CELL:-}
+for count in "$tenants" "$cells" "$segments" "$largest" "$rounds" "$sweeps" $at_once; do
     [[ $count =~ ^[1-9][0-9]*$ ]] || { echo "$count: not a count" >&2; exit 2; }
 done
-[[ $sweeps == 1 || $sweeps == 2 ]] || { echo "CLADEFS_GC_SWEEPS is 1 or 2" >&2; exit 2; }
+[[ -z $cell || $cell =~ ^[0-9a-f]+/[0-9a-f]+$ ]] ||
+    { echo "CLADEFS_GC_CELL: $cell: TENANT/CELL, in hexadecimal" >&2; exit 2; }
+# Where a bucket of files keeps the cell's objects, under its directory.
+cell_dir=
+if [[ -n $cell ]]; then
+    printf -v cell_dir 'tenants/%016x/cells/%016x' "0x${cell%/*}" "0x${cell#*/}"
+fi
 case $(uname) in
     Linux) copy=(cp -al) ;;
     Darwin) copy=(cp -Rc) ;;
@@ -71,16 +94,17 @@ for pair in "$@"; do
 done
 
 # Each side's bucket, once for its shape.
-shape="$tenants $cells $segments $largest"
+shape="$tenants $cells $segments $largest${kind[*]:+ ${kind[*]}}"
 for i in "${!sides[@]}"; do
     side=${sides[i]} bucket=$work/bucket-${sides[i]}
     if [[ ! -f $bucket.shape || $(cat "$bucket.shape") != "$shape" ]]; then
         rm -f "$bucket.shape"
         if [[ -e $bucket ]]; then rm -r -- "$bucket"; fi
-        echo "== $side: filling $bucket: $tenants tenants of $cells cells of $segments segments" >&2
+        echo "== $side: filling $bucket: $tenants tenants of $cells cells of $segments segments" \
+            "${kind[*]}" >&2
         started=$SECONDS
         "${bins[i]}/cladefs-gc-fill" "$bucket" "$tenants" "$cells" "$segments" "$largest" \
-            > "$bucket.fill"
+            ${kind[@]+"${kind[@]}"} > "$bucket.fill"
         sync
         echo "filled in $((SECONDS - started)) s" >&2
         echo "$shape" > "$bucket.shape"
@@ -93,8 +117,71 @@ metric() {
     awk -v name="$2" '$1 == name { print $2 }' "$1"
 }
 
+# The kinds of requests a sweep's passes make of a bucket, as cladefs-gc's metrics name them.
+kinds=(get get-range list list-delimited create update delete-batch)
+
+# requests FILE prints the sweep's requests of each of the kinds in FILE, as a table's cells.
+requests() {
+    local kind
+    for kind in "${kinds[@]}"; do
+        printf ' %s |' "$(metric "$1" "cladefs_gc_sweep_requests{request=\"$kind\"}")"
+    done
+}
+
+# peak FILE prints the most memory the process that wrote FILE held, in MiB.
+peak() {
+    awk '$1 == "cladefs_gc_peak_resident_bytes" { printf "%.0f", $2 / 1048576 }' "$1"
+}
+
+# objects DIR prints how many objects the bucket of files, or the part of one, at DIR holds: its
+# files, but its locks.
+objects() {
+    find "$1" -type f ! -name '.cladefs-lock.*' | wc -l | tr -d ' '
+}
+
+# pass_cell SWEPT BIN NAME SIDE COUNT ROUND passes over the cell of the bucket at SWEPT alone,
+# unchanged since its last pass and then in full, each a process of BIN's cladefs-gc, into NAME's
+# files and the cell's table.
+pass_cell() {
+    local swept=$1 bin=$2 name=$3 listed pass grace
+    (cd "$swept/$cell_dir" && find . -type f | awk -F/ '{ print (NF > 2 ? $2 : "(the cell)") }' |
+        sort | uniq -c) > "$name-objects.txt"
+    listed=$(objects "$swept/$cell_dir")
+    for pass in unchanged full; do
+        # Another grace period than the sweeps' is another decision: no pass skips by it.
+        grace=0
+        if [[ $pass == full ]]; then grace=1; fi
+        echo "== $4, $5 at once, round $6, cell $cell $pass" >&2
+        "$bin/cladefs-gc" "file://$swept/" --cell "$cell" --grace "$grace" \
+            --metrics "$name-$pass.prom" 2> "$name-$pass.log"
+        {
+            printf '| %s | %s | %s | %s | %s | %s | %s |' "$4" "$5" "$6" "$pass" \
+                "$(metric "$name-$pass.prom" 'cladefs_gc_sweep_cells{outcome="skipped"}')" \
+                "$listed" "$(( (listed + 999) / 1000 ))"
+            requests "$name-$pass.prom"
+            printf ' %.3f | %s |\n' "$(metric "$name-$pass.prom" cladefs_gc_sweep_seconds)" \
+                "$(peak "$name-$pass.prom")"
+        } >> "$cell_table"
+    done
+}
+
 table=$results/gc-sweep.md
 times=$results/times.tsv
+by_kind=$results/gc-sweep-requests.md
+cell_table=$results/gc-sweep-cell.md
+heads=$(printf ' %s |' "${kinds[@]}")
+{
+    echo "| side | at once | round | sweep | seconds | passed | skipped |$heads objects left | peak MiB |"
+    echo "|---|---|---|---|---|---|---|$(printf -- '---|%.0s' "${kinds[@]}")---|---|"
+} > "$by_kind"
+if [[ -n $cell ]]; then
+    {
+        echo "Passes over cell $cell alone, after the sweeps: unchanged since its last pass, and in full."
+        echo
+        echo "| side | at once | round | pass | skipped | objects | LIST pages |$heads seconds | peak MiB |"
+        echo "|---|---|---|---|---|---|---|$(printf -- '---|%.0s' "${kinds[@]}")---|---|"
+    } > "$cell_table"
+fi
 {
     echo "Bucket: $(cat "$work/bucket-${sides[0]}.fill") (tenants $tenants, cells $cells, segments $segments, largest $largest)."
     echo
@@ -129,12 +216,21 @@ for (( round = 1; round <= rounds; round++ )); do
                     "$(metric "$name.prom" 'cladefs_gc_sweep_cells{outcome="passed"}')" \
                     "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="deleted"}')" \
                     "$(metric "$name.prom" 'cladefs_gc_sweep_objects{action="compacted"}')" \
-                    "$requests" \
-                    "$(awk '$1 == "cladefs_gc_peak_resident_bytes" { print $2 / 1048576 }' \
-                        "$name.prom")" \
-                    >> "$table"
+                    "$requests" "$(peak "$name.prom")" >> "$table"
+                {
+                    printf '| %s | %s | %s | %s | %.1f | %s | %s |' \
+                        "$side" "$n" "$round" "$sweep" "$seconds" \
+                        "$(metric "$name.prom" 'cladefs_gc_sweep_cells{outcome="passed"}')" \
+                        "$(metric "$name.prom" 'cladefs_gc_sweep_cells{outcome="skipped"}')"
+                    requests "$name.prom"
+                    printf ' %s | %s |\n' "$(objects "$swept")" "$(peak "$name.prom")"
+                } >> "$by_kind"
                 printf '%s\t%s\t%s\t%s\n' "$side" "$n" "$sweep" "$seconds" >> "$times"
             done
+            if [[ -n $cell ]]; then
+                pass_cell "$swept" "${bins[i]}" "$results/cell-$side-$n-r$round" \
+                    "$side" "$n" "$round"
+            fi
             rm -r -- "$swept"
         done
     done
@@ -164,4 +260,5 @@ if (( rounds > 1 )); then
         done
     } >> "$table"
 fi
-cat "$table" >&2
+cat "$table" "$by_kind" >&2
+if [[ -n $cell ]]; then cat "$cell_table" >&2; fi

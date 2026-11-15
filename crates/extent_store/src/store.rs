@@ -2570,6 +2570,27 @@ impl<D: Dir> Store<D> {
         }
     }
 
+    /// cladefs: waits, holding no lock, until the store does nothing to its directory off its
+    /// callers' threads: no segment is being framed, nor made durable, its framed file renamed its
+    /// own (`segments::make_durable`); no log of the next segment's is being
+    /// prepared, its spare renamed the segment's ([`Store::prepare_next`]); and no look ahead is
+    /// queued or reading ([`Store::wait_looked_ahead`]). What reads the directory beside the store,
+    /// as a test does, finds then every file it lists still there under the name listed, as after
+    /// [`Store::close`], until its callers, or its uploader, do something more (TASK-463). Fails if
+    /// the store failed.
+    pub fn wait_idle(&self) -> Result<(), Error> {
+        let mut state = self.lock();
+        while !state.segments.framings().is_empty()
+            || state.framing.syncing
+            || state.segments.preparing()
+            || state.framing.looks_ahead()
+        {
+            state = state.wait(&self.idle);
+        }
+        drop(state);
+        self.state().map(drop)
+    }
+
     /// cladefs: `state`, once no segment is being framed ([`Store::frame_behind`]), which it let go
     /// of meanwhile.
     fn framed<'a>(&self, mut state: Locked<'a, D::File>) -> Locked<'a, D::File> {
@@ -3173,6 +3194,13 @@ impl<D: Dir> Store<D> {
     /// cladefs: whether an extent is open: written since the last commit, which seals it.
     pub fn has_open(&self) -> Result<bool, Error> {
         Ok(self.state()?.uncommitted.has_open())
+    }
+
+    /// cladefs: a copy of the map the store holds its branch's extents in, with the keys its entries
+    /// own, which a benchmark weighs alone of what an open store holds (TASK-443.2).
+    #[cfg(feature = "testing")]
+    pub fn extents_copy(&self) -> Result<impl Sized + use<D>, Error> {
+        Ok(self.state()?.extents.clone())
     }
 
     /// The extents the store holds, with their lengths, in order.

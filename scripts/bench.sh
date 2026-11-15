@@ -22,7 +22,9 @@
 # Needs what scripts/test-e2e.sh needs, and podman to build the guests' Alpine
 # root filesystem. The measurements and the guests' logs are kept under
 # $CLADEFS_BENCH_RESULTS (default: a new temporary directory), which holds no
-# earlier run's.
+# earlier run's. What others wrote to its disk meanwhile is its caller's to
+# record, as scripts/lib/bench-linux-host.sh and the A/B's rounds do
+# (scripts/contamination.py, TASK-375).
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 iterations=${1:-3}

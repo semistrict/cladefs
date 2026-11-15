@@ -35,7 +35,7 @@ fn timed(calls: u64, mut call: impl FnMut()) -> f64 {
 fn hot_paths() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let description = Description { block_size: BLOCK as u32, capacity: 4 << 30, branch: BRANCH };
-    let dir = HostDir::new(temp.path(), true).unwrap();
+    let dir = HostDir::new(temp.path()).unwrap();
     let store = Store::create(dir, description, Options::default()).unwrap();
     let data = vec![7u8; BLOCK];
     // Held: 1..=EXTENTS; kept, freed: EXTENTS+1..=2*EXTENTS, their numbers spent.

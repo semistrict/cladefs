@@ -5,7 +5,10 @@
 
 # Benchmark cladefs against ext4 on virtio-blk (scripts/bench.sh) on an x86-64
 # Linux KVM host, as root (scripts/bench-host.sh drives it), writing the
-# measurements, the guests' logs and the comparison to RESULTS.
+# measurements, the guests' logs and the comparison to RESULTS, and what others
+# wrote to its disk meanwhile (RESULTS/contamination.json,
+# scripts/contamination.py, TASK-375): a run others wrote beside says so, in
+# bench.log's last lines and host.txt.
 #
 # Usage: bench-linux-host.sh SOURCE RESULTS [ITERATIONS]
 #
@@ -48,8 +51,11 @@ fi
 } > "$results/host.txt"
 
 status=0
-CLADEFS_BENCH_RESULTS="$results" "$repo/scripts/bench.sh" "$iterations" > "$results/comparison.md" 2> "$results/bench.log" ||
+CLADEFS_BENCH_RESULTS="$results" "$repo/scripts/contamination.py" run "$results" -- \
+    "$repo/scripts/bench.sh" "$iterations" > "$results/comparison.md" 2> "$results/bench.log" ||
     status=$?
+echo "Others' I/O beside it: $("$repo/scripts/contamination.py" said "$results")" |
+    tee -a "$results/host.txt"
 source "$(dirname "${BASH_SOURCE[0]}")/perf-report.sh"
 for data in "$results"/logs/*/*/perf.data; do
     [[ -f $data ]] || continue

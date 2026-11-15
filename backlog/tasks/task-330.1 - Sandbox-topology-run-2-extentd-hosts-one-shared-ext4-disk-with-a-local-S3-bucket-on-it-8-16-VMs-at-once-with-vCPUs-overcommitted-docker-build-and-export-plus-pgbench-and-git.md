@@ -4,11 +4,11 @@ title: >-
   Sandbox topology run: 2 extentd hosts, one shared ext4 disk with a local S3
   bucket on it, 8-16 VMs at once with vCPUs overcommitted, docker build and
   export plus pgbench and git
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-10 14:00'
-updated_date: '2026-11-15 19:03'
+updated_date: '2026-11-15 19:30'
 labels:
   - testing
 dependencies: []
@@ -30,7 +30,7 @@ Builds on TASK-310's fxfs-guest-shared-disk case and TASK-311's fxfs-guest-docke
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -92,4 +92,12 @@ Found and filed: TASK-448. The repo's Actions caches are past 10 GB, and the gue
 2026-11-15 (claude): landed c95040a89 (on main after TASK-437's rename): ci.yml's sandboxes job (uses: ./.github/workflows/sandboxes.yml) on every push to main; sandboxes.yml caches the artifacts' dependencies (actions/cache restore/save around the build, keyed by the three lock files, 1.5 GB). Measured on branch t3301-ci: cold 24.3 min (kernel built 10.3, cargo 9.8, run 3.0), warm 10.5 min (43718512917: kernel and cargo cache hits, restore 0.6, build 5.9 as cladefs's own crates rebuild twice, for the daemon and in the VMM's copy, run 3.3; all checks passed, slowest framing 246/279 ms, writes 1.20x). A slow runner adds up to ~7 min (TASK-447). The kernel cache is evicted within the hour while the repo's caches are past 10 GB (TASK-448). scripts/test_ci.py tests the job; upstream-changes.py --check passes. AC #1 checked: passes on main (GitHub 3 of 3, ubu1 once), and framed-in-copies is killed. Left: DoD #1 waits on main's CI run 43719878556 (1e74dbf41, the sandboxes job's first), in progress when checked; its guide job had failed on TASK-459 (the rename's doc titles), and the workspace part has TASK-458's race. Mark Done once that run's sandboxes and test jobs are green.
 
 2026-11-15, coordinator: main's CI ran the sandboxes' short mode to the end and green on 9da162ff0 (run 43725423025, job 14:38-14:52 UTC, 13.5 min); test (workspace) and every other Linux job green there, macos (workspace) cancelled by a later push. ci.yml no longer cancels main's runs (6357932df), so its runs now end.
+
+2026-11-15, coordinator: main's CI run 43750159090 on 6357932df, the first under ci.yml's no-cancel rule for main, green on every job: sandboxes (short), test (workspace) and macos (workspace) among them.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+The sandboxes run (guest case fxfs-guest-sandboxes: 2 extentd hosts sharing a RustFS bucket on one ext4 disk, 16 VMs 8 at a time with vCPUs overcommitted, builder/pgbench/git/writer roles) runs its short mode on every push to main (ci.yml's sandboxes job, c95040a89; 10.5 min warm, ~24 cold) and its long mode by hand on ubu1 before each pin (TASK-330.5). It passes on main since TASK-336/400/401 (GitHub 3 of 3, then main's CI 43725423025 and 43750159090) and kills TASK-310's write-behind regression put back (framed-in-copies.patch: framings 1,544 ms and writes 1.91x on ubu1). main's CI no longer cancels runs on main (6357932df), so the job ends.
+<!-- SECTION:FINAL_SUMMARY:END -->

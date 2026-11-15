@@ -157,6 +157,7 @@ compile_error!(
      workspace, whose dev-dependencies turn it on (TASK-320)"
 );
 
+mod cached;
 mod dir;
 mod durability;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
@@ -187,7 +188,8 @@ mod wal;
 mod written;
 pub use written::{Written, written};
 
-pub use dir::{Dir, File, HostDir, HostFile, bypass_page_cache};
+pub use cached::{CachedDir, CachedFile};
+pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile, bypass_page_cache};
 /// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::{Branch, Cell};
 pub use framed::{Aligned, Packed, Part, read_object, read_whole, unpacks};
@@ -196,7 +198,7 @@ pub use host::{
     unmade_host,
 };
 pub use layout::{Description, Format, Place, Volume};
-pub use mem::{Io, MemDir, MemFile};
+pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use raw::{RawFile, SECTOR};
 pub use segments::{
     Unsectored, commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,

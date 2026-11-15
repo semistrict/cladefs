@@ -29,6 +29,26 @@ Decided without you:
 - **Orderings stronger than needed stay as written** (14 groups, docs/memory-ordering.md). Weakening them would rest on an argument no model checks, for no measurable gain. *Instead:* weaken them to Relaxed now. *Undo:* TASK-444.2.3, once its models exist.
 - **`RemoteExtentStore::on_committed` returns the latest commit heard as it began listening** (TASK-444.2.2), and a second call panics. That closes the gap that two calls (listen, then `committed()`) left. *Undo:* none needed; `committed()` stays.
 
+## A round others wrote beside: what counts, and what the comparison does with it (TASK-375, 2026-11-15)
+
+Decided without you:
+- **Bounds: the task's**, others' writes past 10 MB/s over the round or 50 MB/s in any minute (`CLADEFS_CONTAMINATION_*` set others). ubu1's notes fit them: 0.5-6.3 MB/s of the scratch zvol's writes weren't the measurement's in clean rounds (ext4's journal among them), capped work beside one writes 25-27 MB/s, the loader 186. So ordinary fxjob work writing at its cap to the scratch disk marks a round. *Instead:* 32 MB/s, to let capped work pass. *Undo:* the two defaults.
+- **Reads and pressure are recorded, not judged** (`CLADEFS_CONTAMINATION_STALL_PCT` names stall bounds): nothing measured says what others' reads cost, and a round's own tasks stall on each other (overcommitted vCPUs).
+- **Under the scratch zvol, others are also the pool's other datasets**, by ZFS's per-dataset counts (`/proc/spl/kstat/zfs/POOL/objset-*`): a loader in /home never passes zd0. These are bytes as written to files, not what reached the NVMe, and miss mapped files' pages and `zfs receive`; the NVMe's totals are recorded beside them, unjudged, as ZFS writes for no cgroup.
+- **Not checked is its own verdict**, never clean: no cgroup v2 cgroup with I/O accounting to the round's alone, a ZFS dataset or an overlay as the round's disk, no record. bench-ab.py lists such rounds and keeps their timings. *Instead:* leave them out too, which would empty every comparison made off ubu1 or from results of before today.
+- **A metric with no clean round on a side fails the comparison** (NO RESULT, exit 1), as a part that didn't run does. A contaminated round's failed checks still show in the failures table.
+- **Which metrics a load skews is by unit**: all but MiB, GiB, bytes, x, count. A new unit is taken as a timing until named there.
+- **bench-rounds.sh's record is of its job's scratch directory, where its stores are since TASK-397**, not of its results' directory, ubu1's ZFS home, which can't be checked: only the job can name that directory, so `scripts/test-e2e-job.sh` runs the cases under contamination.py, DISK its work directory, the record beside the bench's report (`CLADEFS_BENCH_RESULTS`, the round's directory). The run's log and report, written to ZFS home as it runs, count among the pool's other datasets' writes (small). *Instead:* bench-rounds.sh wrapping the job, the disk expanded by the job's shell, the copy of the results back inside the round.
+
+## bench-rounds.sh's runs keep their stores on ext4 and their bucket on tmpfs (TASK-397, 2026-11-15)
+
+Its results' directory, ubu1's home, is ZFS, and held each run's stores and file bucket: a durable sync measured ZFS's syncs. Decided without you:
+- **Each run writes in its job's temporary directory** (fxjob's TMPDIR, on the scratch disk), through a new `scripts/test-e2e-job.sh`, which copies the results back without stores, caches and root filesystems: RESULTS holds what it did but for those (some 500 MB a run less). Nothing names /mnt/fxdax-scratch. *Instead:* a work directory bench-rounds.sh names itself, which would have to name the scratch disk. *Undo:* revert the commit.
+- **Another filesystem than ext4 is refused** (exit 2, before the run; the rounds stop there), as sandboxes.sh refuses its disk: no fallback to wherever TMPDIR is, and no knob to measure on ZFS or XFS on purpose. *Instead:* record the filesystem beside the numbers and go on.
+- **The bucket is test-e2e.sh's default again, on tmpfs**, where TASK-350 had moved it to disk as it overran the run's memory: it counts against `CLADEFS_ROUNDS_MEM` (16G) again, and a case of a working set of gigabytes needs more of that, or `CLADEFS_EXTENTD_REMOTE=file://DIR` on a disk. *Instead:* a file bucket on the scratch disk, whose own syncs and writes the numbers would then hold.
+- **TASK-397's AC #1: decided by you, 2026-11-15, its 30/s stale.** bench-rounds.sh with no overrides on ubu1, 25 ms: main reads sync-loop 17.5/s, as a durable commit is two bucket requests since TASK-407 by design (create, then the head's swap: 52.4 of a sync's 57.0 ms; TASK-407.5); the tree before TASK-407, same scripts, 33.1 and 33.2/s warm (24.3 the first iteration). AC #1 now reads within 10% of 17.5/s, naming TASK-407, and is checked on that run. The task stays In Progress for its DoD #1 alone, the workspace's tests on Linux (ubu1), not run for it.
+- **ab-guest-cases.sh not changed** (TASK-445): it keeps stores in OUT by its own code and has `CLADEFS_AB_KEEP_DATA`. bench.sh, the A/B, the qualification and gc-sweep run under host.sh's run directory, on the scratch disk, and needed nothing.
+
 ## Kani excluded: its backend CBMC is BSD-4-Clause (doc-17, 2026-11-15)
 
 Kani (Apache-2.0) runs on CBMC, whose LICENSE has the 4-clause BSD advertising clause, not

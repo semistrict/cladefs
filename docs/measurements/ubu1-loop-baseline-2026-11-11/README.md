@@ -1,5 +1,13 @@
 # fxdax against JuiceFS's best case, stood in for by a local loop device (TASK-350)
 
+> **Note (2026-11-15, TASK-397).** scripts/bench-rounds.sh then kept each run's stores, and its
+> file bucket, in the results' directory, in ubu1's home, on ZFS: the fxdax side's syncs here are
+> ZFS's as much as fxdax's. bench-fs-fxfs-guest-dax's sync-loop at 25 ms of bucket latency ran
+> 10.8/s so and 30.1/s with the store on the ext4 scratch disk and the bucket on tmpfs, the same
+> tree (TASK-371). Read sync, syncfs, freeze and the fsync workloads below as of that layout, not
+> as fxdax's on a host's disk; bench-rounds.sh keeps a run's stores on ext4 and its bucket on
+> tmpfs since.
+
 ubu1, 2026-11-11, 14:25–14:42Z. Three rounds, the cases' order alternating (scripts/bench-rounds.sh),
 each run `fxjob --bench` (cores 4-7), host page cache dropped before each; 1-min load 2.9–3.8
 throughout (runs.tsv). Tree 5dd0015d (main), guest kernel built from it (~/src/t350-kernel).

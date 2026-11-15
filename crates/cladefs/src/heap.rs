@@ -29,8 +29,7 @@ pub(crate) static CASE: Mutex<String> = Mutex::new(String::new());
 #[global_allocator]
 static ALLOCATOR: Bounded = Bounded;
 
-/// What the process holds of its heap now: the daemon's tests', Linux's alone.
-#[cfg(target_os = "linux")]
+/// What the process holds of its heap now.
 pub(crate) fn held() -> usize {
     HELD.load(Ordering::Relaxed)
 }

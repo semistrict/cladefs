@@ -1,9 +1,10 @@
 ---
 id: TASK-433.5
 title: 'Store crash rounds run over the store''s page cache: a CachedDir over any Dir'
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-15 12:14'
+updated_date: '2026-11-15 20:32'
 labels:
   - memory
   - test
@@ -21,7 +22,19 @@ TASK-433's page cache (extent_store::pages) is wired into HostDir alone: its reg
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Widened with the user (2026-11-15: 'all e2e tests should use this new cache'): no store runs around the cache. extent_store::CachedDir<D> wraps any Dir (HostDir = CachedDir<DiskDir>, MemDir = CachedDir<MemDisk> with a small flusherless cache); DiskDir refuses file systems that can't bypass (no fallback); direct flag removed. Bugs found by running crash rounds/Shuttle through it: a write-back unwound by a panic left pages in flight forever (InFlight guard); Shuttle's scoped threads wake the scope thread on a Condvar (TASK-465), avoided by per-file write-back on a mutex (I_SYNC); MemDisk reads past EOF panicked. Blind spot: the cache lived in one Dir impl, so fakes composed beside it, not under it; class closed by the wrapper every Dir is. Tests changed: commits_failing_part_way_fail_the_store (seal case fails at flush), writes_are_written_back_as_they_go (cache peak dirty). Verified: macOS clippy, workspace 2497/2497, Shuttle 37/37, extent_store 291/291 incl. sims; ubu1 workspace 2803/2803. Pushed 744df100e.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every store's directory holds its data files in the page cache (CachedDir over any Dir); tests, crash rounds and Shuttle run through it; macOS and ubu1 green; pushed 744df100e.
+<!-- SECTION:FINAL_SUMMARY:END -->
