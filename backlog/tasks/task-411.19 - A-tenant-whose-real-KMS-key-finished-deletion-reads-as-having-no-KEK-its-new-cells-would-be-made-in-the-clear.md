@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 03:58'
+updated_date: '2026-11-15 04:22'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
@@ -32,3 +33,9 @@ Found in TASK-411.17 (AWS KMS backend). A real KMS forgets a deleted key: AWS KM
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-411.16 found the same with OpenBao: a deleted Transit key is forgotten, so wrap says NoSuchTenant and new cells of a shredded tenant would be made in the clear (OpenBao has no scheduled-deletion state). GCP Cloud KMS likely similar once a key's versions are all destroyed. The fix belongs above the backends, in how a cell chooses encryption (doc-16).
+<!-- SECTION:NOTES:END -->
