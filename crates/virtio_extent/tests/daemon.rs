@@ -806,9 +806,12 @@ fn workers_take_serve_and_return_requests() {
     let response = Response::read_from_bytes(&info_written[size_of::<Info>()..]).unwrap();
     assert_eq!(response.status, 0);
     assert_eq!(u64::from_le(read::<Info>(info_written).capacity), 1 << 20);
-    assert_eq!(interrupt.0.load(Ordering::Relaxed), 2);
 
     let mut back = workers.stop();
+    // A request is returned, then its interrupt raised, as virtio has it (the used element
+    // before the interrupt), so a driver may see it returned first, as the test does above
+    // (TASK-458); the workers stopped, every request they took is returned and interrupted.
+    assert_eq!(interrupt.0.load(Ordering::Relaxed), 2);
     assert_eq!(back.len(), 1);
     let (index, mut queue) = back.pop().unwrap();
     assert_eq!((index, queue.used.len()), (0, 2));
@@ -819,10 +822,11 @@ fn workers_take_serve_and_return_requests() {
         index: 0,
         queue,
         event: event.try_clone().unwrap(),
-        interrupt,
+        interrupt: interrupt.clone(),
     }];
     let workers = device.start_workers(queues, "test_extent_q").unwrap();
     kick();
     assert_eq!(returns.recv().unwrap(), (5, (size_of::<Info>() + RESPONSE) as u32));
     assert_eq!(workers.stop()[0].1.used.len(), 3);
+    assert_eq!(interrupt.0.load(Ordering::Relaxed), 3);
 }
