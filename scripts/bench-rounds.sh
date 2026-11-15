@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,16 +19,16 @@
 #
 #   scripts/bench-rounds.sh RESULTS ROUNDS CASE...
 #
-# The cases' artifacts are built once, first, into RESULTS/artifacts (FXDAX_E2E_BUILD_ONLY), and
-# every run boots those (FXDAX_E2E_PREBUILT): no run builds, nor runs the harness's own tests.
-# Each run may hold FXDAX_ROUNDS_MEM (16G) of memory, page cache and the extent daemon's together.
+# The cases' artifacts are built once, first, into RESULTS/artifacts (CLADEFS_E2E_BUILD_ONLY), and
+# every run boots those (CLADEFS_E2E_PREBUILT): no run builds, nor runs the harness's own tests.
+# Each run may hold CLADEFS_ROUNDS_MEM (16G) of memory, page cache and the extent daemon's together.
 # Each run's extent daemon keeps its bucket on disk, in RESULTS/CASE/round-K/bucket, removed once
-# it is done, unless FXDAX_EXTENTD_REMOTE names one: test-e2e.sh's default, on tmpfs, counts
+# it is done, unless CLADEFS_EXTENTD_REMOTE names one: test-e2e.sh's default, on tmpfs, counts
 # against the run's memory limit, and a working set of gigabytes overran it (TASK-350).
 # Each run's results go to RESULTS/CASE/round-K: test-e2e.sh's logs, and the fs bench's report as
-# JSON (FXDAX_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
-# round directories. The environment's FXDAX_* variables pass to every run (sudo drops them
-# otherwise): FXDAX_GUEST_KERNEL, FXDAX_BENCH_ITERATIONS, FXDAX_BENCH_GROUPS, FXDAX_PGBENCH_RUNS
+# JSON (CLADEFS_BENCH_RESULTS), which scripts/bench-ab.py compares, a side's directories its cases'
+# round directories. The environment's CLADEFS_* variables pass to every run (sudo drops them
+# otherwise): CLADEFS_GUEST_KERNEL, CLADEFS_BENCH_ITERATIONS, CLADEFS_BENCH_GROUPS, CLADEFS_PGBENCH_RUNS
 # and such.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -53,11 +53,11 @@ stalled() {
     sed -n 's/^some .*total=//p' "$bench/$1.pressure"
 }
 
-# The FXDAX_* variables of this environment, as env's NAME=VALUE words.
+# The CLADEFS_* variables of this environment, as env's NAME=VALUE words.
 passed=()
 while IFS= read -r name; do
     passed+=("$name=${!name}")
-done < <(compgen -e | grep '^FXDAX_' || true)
+done < <(compgen -e | grep '^CLADEFS_' || true)
 
 # as_root COMMAND...: COMMAND as root, inside a job, with the job's TMPDIR, fxjob's, which it
 # removes with the job: sudo, set-user-ID, never passes it on (glibc drops it), so env sets it,
@@ -68,7 +68,7 @@ as_root=(bash -c 'exec sudo env TMPDIR="${TMPDIR:-/tmp}" "$@"' as-root)
 # Built as root, as the runs boot it, then given back.
 artifacts=$results/artifacts
 fxjob --name rounds-build --mem 8G -- nice -n 19 \
-    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" "FXDAX_E2E_BUILD_ONLY=$artifacts" \
+    "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" "CLADEFS_E2E_BUILD_ONLY=$artifacts" \
     "$repo/scripts/test-e2e.sh" "${cases[@]}" > "$results/build.log" 2>&1 ||
     { echo "building failed: $results/build.log" >&2; exit 1; }
 sudo chown -R "$(id -u):$(id -g)" "$repo" "$HOME/.cargo" "$HOME/.rustup" "$results"
@@ -93,10 +93,10 @@ for ((round = 1; round <= rounds; round++)); do
         stalls_before=()
         for resource in cpu memory io; do stalls_before+=("$(stalled "$resource")"); done
         outcome=ok
-        fxjob --bench --mem "${FXDAX_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
+        fxjob --bench --mem "${CLADEFS_ROUNDS_MEM:-16G}" --name "rounds-$case-$round" -- \
             "${as_root[@]}" "PATH=$PATH" "HOME=$HOME" "${passed[@]}" \
-            "FXDAX_E2E_PREBUILT=$artifacts" "FXDAX_E2E_RESULTS=$out/e2e" "FXDAX_BENCH_RESULTS=$out" \
-            "FXDAX_EXTENTD_REMOTE=${FXDAX_EXTENTD_REMOTE:-file://$out/bucket}" \
+            "CLADEFS_E2E_PREBUILT=$artifacts" "CLADEFS_E2E_RESULTS=$out/e2e" "CLADEFS_BENCH_RESULTS=$out" \
+            "CLADEFS_EXTENTD_REMOTE=${CLADEFS_EXTENTD_REMOTE:-file://$out/bucket}" \
             "$repo/scripts/test-e2e.sh" "$case" > "$out/run.log" 2>&1 || outcome=failed
         load_after=$(load)
         stalls=()

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * The extent-store device the filesystem lives on (drivers/virtio_extent, backlog doc-4), as the
  * filesystem's Rust uses it: its requests, with plain arguments, completed through a callback.
@@ -20,11 +20,11 @@ struct fxfs_device;
 /* The device takes FREEZE, and INFO says the branch (VIRTIO_EXTENT_F_FREEZE). */
 #define FXFS_DEVICE_FREEZE (1 << 1)
 /*
- * fxdax: the device follows a store another VM writes, read-only (VIRTIO_EXTENT_F_READ_ONLY):
+ * cladefs: the device follows a store another VM writes, read-only (VIRTIO_EXTENT_F_READ_ONLY):
  * ADVANCE, LET_GO, PIN and UNPIN work, and nothing that writes.
  */
 #define FXFS_DEVICE_READ_ONLY (1 << 2)
-/* fxdax: a FREE may carry VIRTIO_EXTENT_FREE_MANY, more extents in its data. */
+/* cladefs: a FREE may carry VIRTIO_EXTENT_FREE_MANY, more extents in its data. */
 #define FXFS_DEVICE_FREE_MANY (1 << 3)
 
 /* What the filesystem needs to know of a device. */
@@ -101,7 +101,7 @@ int fxfs_device_capacity(struct fxfs_device *dev, u64 *capacity, u64 *asked);
  */
 typedef void (*fxfs_device_changed_t)(void *arg);
 void fxfs_device_set_changed(struct fxfs_device *dev, fxfs_device_changed_t changed, void *arg);
-/* fxdax: a follower's device's writer's latest commit, as its configuration says now. */
+/* cladefs: a follower's device's writer's latest commit, as its configuration says now. */
 u64 fxfs_device_committed(struct fxfs_device *dev);
 /* Waits for a seal in progress, if any, to end. */
 void fxfs_device_wait_unsealed(struct fxfs_device *dev);
@@ -117,13 +117,13 @@ struct dax_device;
 
 /*
  * The DAX window's dax_device, if files' data can be mapped from it, at the page size, which is a
- * block: fxdax: the window copies on write (doc-13), mapping sealed extents and zeros alone,
+ * block: cladefs: the window copies on write (doc-13), mapping sealed extents and zeros alone,
  * read-only, a store to a page making it the VM's own, private, until a MAP or UNMAP over it; or,
  * a follower's, takes no store. Sets `window_len`.
  */
 struct dax_device *fxfs_device_dax(struct fxfs_device *dev, u64 *window_len);
 /*
- * fxdax: the most private pages the device holds at once, past which a store stops the VM; and
+ * cladefs: the most private pages the device holds at once, past which a store stops the VM; and
  * whether it follows a store another VM writes, read-only (FXFS_DEVICE_READ_ONLY): its window
  * takes no store, nor maps zeros.
  */
@@ -131,7 +131,7 @@ u64 fxfs_device_private_max(struct fxfs_device *dev);
 bool fxfs_device_read_only(struct fxfs_device *dev);
 /*
  * Maps `len` bytes at `offset` in the extent {branch, sequence} at `window_offset` in the window,
- * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. fxdax: `ahead`
+ * read-only (MAP), or unmaps `len` bytes there (UNMAP), and waits for the device. cladefs: `ahead`
  * if the guest accesses the pages next, as a read does, which the device then maps for it ahead of
  * its accesses, if it can (MAP_AHEAD, TASK-112.1).
  */
@@ -139,7 +139,7 @@ int fxfs_device_map(struct fxfs_device *dev, u64 branch, u64 sequence, u64 offse
 		    u64 window_offset, bool ahead);
 
 /*
- * fxdax: one of fxfs_device_map_many's maps, as fxfs_device_map's arguments say it; or, with
+ * cladefs: one of fxfs_device_map_many's maps, as fxfs_device_map's arguments say it; or, with
  * `zeros`, fxfs_device_map_zeros's, its extent ignored.
  */
 struct fxfs_device_map {
@@ -153,21 +153,21 @@ struct fxfs_device_map {
 };
 
 /*
- * fxdax: the `count` maps `maps`, in as few requests as the device takes (MAP_MANY), or one each:
+ * cladefs: the `count` maps `maps`, in as few requests as the device takes (MAP_MANY), or one each:
  * a chunk's pieces (TASK-91.4). The first error fails them, whichever others the device mapped.
  */
 int fxfs_device_map_many(struct fxfs_device *dev, const struct fxfs_device_map *maps,
 			 size_t count);
 int fxfs_device_unmap(struct fxfs_device *dev, u64 window_offset, u64 len);
 /*
- * fxdax: maps zeros at `len` bytes of the window at `window_offset` (MAP_ZEROS), read-
+ * cladefs: maps zeros at `len` bytes of the window at `window_offset` (MAP_ZEROS), read-
  * only, as holes and pages past a file's end are; and makes `len` bytes there private now, as
  * stores would, mapped for the guest ahead of its accesses (PRIVATE): -ENOMEM past private_max.
  * Each waits for the device.
  */
 int fxfs_device_map_zeros(struct fxfs_device *dev, u64 window_offset, u64 len);
 int fxfs_device_private(struct fxfs_device *dev, u64 window_offset, u64 len);
-/* fxdax: shows what the window's requests took, as lines of a name and a number (TASK-91.7). */
+/* cladefs: shows what the window's requests took, as lines of a name and a number (TASK-91.7). */
 void fxfs_device_show_stats(struct fxfs_device *dev, struct seq_file *m);
 
 #endif

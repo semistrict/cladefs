@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # An interleaved A/B of guest cases on this Linux host (ubu1), two sides' prebuilt artifacts
-# (scripts/test-e2e.sh's FXDAX_E2E_BUILD_ONLY) booting one guest kernel: ROUNDS rounds, each
+# (scripts/test-e2e.sh's CLADEFS_E2E_BUILD_ONLY) booting one guest kernel: ROUNDS rounds, each
 # running every case on both sides, A then B in odd rounds and B then A in even ones, so that what
 # drifts on the shared host over the hours moves both sides alike (TASK-310). Each run is a
-# measurement of its own under `fxjob --bench` (cores 4-7 its own, FXDAX_AB_MEM of memory, 20G by
+# measurement of its own under `fxjob --bench` (cores 4-7 its own, CLADEFS_AB_MEM of memory, 20G by
 # default), its results in OUT/<case>/<side>-<round>; scripts/ab-guest-summary.py compares them.
 # What a run leaves of its stores, bucket, part cache and VMs' root filesystems goes once it ends
-# (a shared-disk run leaves some 25 GB), but with FXDAX_AB_KEEP_DATA=1: its logs and stats stay.
+# (a shared-disk run leaves some 25 GB), but with CLADEFS_AB_KEEP_DATA=1: its logs and stats stay.
 #
 #   scripts/ab-guest-cases.sh OUT A_NAME=A_ARTIFACTS B_NAME=B_ARTIFACTS ROUNDS CASE...
 #
 # A case may name the environment its runs take, CASE@VAR=VALUE[,VAR=VALUE...] (its results then
-# under CASE@VAR=VALUE...), as fxfs-guest-shared-disk@FXDAX_SHARED_DISK_FSYNC=1; OUT short enough
-# for the daemon's control socket in each run's directory (checked first). FXDAX_GUEST_KERNEL
+# under CASE@VAR=VALUE...), as fxfs-guest-shared-disk@CLADEFS_SHARED_DISK_FSYNC=1; OUT short enough
+# for the daemon's control socket in each run's directory (checked first). CLADEFS_GUEST_KERNEL
 # names the guest kernel. A run that fails is kept, said, and the rounds go on.
 #
-# FXDAX_AB_LOADER, a shell command, runs beside each run, inside its `fxjob --bench` job, killed
+# CLADEFS_AB_LOADER, a shell command, runs beside each run, inside its `fxjob --bench` job, killed
 # with its process group as the run ends: load the rounds bear, as other VMs' writes on the host's disk
 # (TASK-369). Inside the job, as the bench holds no disk for itself: a loader run as other work
 # loads whatever measurement holds the bench meanwhile.
@@ -29,7 +29,7 @@ repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 out=$1 a=$2 b=$3 rounds=$4
 shift 4
 [[ $rounds =~ ^[1-9][0-9]*$ ]] || { echo "ROUNDS is a count: $rounds" >&2; exit 2; }
-: "${FXDAX_GUEST_KERNEL:?FXDAX_GUEST_KERNEL names the guest kernel}"
+: "${CLADEFS_GUEST_KERNEL:?CLADEFS_GUEST_KERNEL names the guest kernel}"
 for side in "$a" "$b"; do
     [[ $side =~ ^[a-z0-9][a-z0-9-]*=.+$ ]] || { echo "a side is NAME=ARTIFACTS: $side" >&2; exit 2; }
     [[ -f ${side#*=}/artifacts.txt ]] || { echo "${side#*=} holds no artifacts" >&2; exit 2; }
@@ -53,19 +53,19 @@ run() {
     mkdir -p "$results"
     echo "ab: round $round, $spec, $name" >&2
     local command=("$repo/scripts/test-e2e.sh" "$case")
-    if [[ -n ${FXDAX_AB_LOADER:-} ]]; then
+    if [[ -n ${CLADEFS_AB_LOADER:-} ]]; then
         # shellcheck disable=SC2016 # expanded by the job's shell
-        command=(bash -c 'setsid bash -c "$FXDAX_AB_LOADER" & loader=$!
+        command=(bash -c 'setsid bash -c "$CLADEFS_AB_LOADER" & loader=$!
             "$@"; status=$?
             kill -- -"$loader" 2> /dev/null; wait "$loader" 2> /dev/null
             exit "$status"' loaded "${command[@]}")
     fi
-    if ! env "${env[@]}" FXDAX_E2E_PREBUILT="$artifacts" FXDAX_E2E_RESULTS="$results" \
-        fxjob --bench --name "ab-$name-$round" --mem "${FXDAX_AB_MEM:-20G}" -- \
+    if ! env "${env[@]}" CLADEFS_E2E_PREBUILT="$artifacts" CLADEFS_E2E_RESULTS="$results" \
+        fxjob --bench --name "ab-$name-$round" --mem "${CLADEFS_AB_MEM:-20G}" -- \
         "${command[@]}" > "$results/run.log" 2>&1; then
         echo "ab: round $round, $spec, $name failed: $results/run.log" >&2
     fi
-    if [[ -z ${FXDAX_AB_KEEP_DATA:-} ]]; then
+    if [[ -z ${CLADEFS_AB_KEEP_DATA:-} ]]; then
         find "$results" -type d \( -name 'store-*' -o -name extentd.bucket -o -name extentd-cache \
             -o -name rootfs \) -prune -exec rm -r {} +
         find "$results" -name '*.rootfs.ext4' -delete

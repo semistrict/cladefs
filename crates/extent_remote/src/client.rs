@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the HTTP client of buckets in the cloud (TASK-205), which [`crate::store`] gives
+//! cladefs: the HTTP client of buckets in the cloud (TASK-205), which [`crate::store`] gives
 //! `object_store`'s S3, GCS and Azure stores. It is `object_store`'s own, reqwest, built from the
 //! same options as `object_store` builds it, but for how a request times out.
 //!
@@ -65,16 +65,16 @@ impl HttpConnector for Client {
 }
 
 /// The user agent of a client whose options name none.
-const USER_AGENT: &str = concat!("fxdax/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("cladefs/", env!("CARGO_PKG_VERSION"));
 
 /// A reqwest client built from `options` as `object_store` builds its own (0.14.2,
 /// `ClientOptions::client`, which is its crate's alone), from what the options say of each key.
-/// Root certificates, which only `object_store`'s API adds, fxdax adds none of.
+/// Root certificates, which only `object_store`'s API adds, cladefs adds none of.
 fn reqwest_client(options: &ClientOptions) -> object_store::Result<reqwest::Client> {
     use ClientConfigKey as Key;
     let value = |key: Key| options.get_config_value(&key);
     let invalid = |key: Key, error: &dyn std::fmt::Display| object_store::Error::Generic {
-        store: "fxdax",
+        store: "cladefs",
         source: format!("{}: {error}", key.as_ref()).into(),
     };
     let duration = |key: Key| {
@@ -157,7 +157,7 @@ fn reqwest_client(options: &ClientOptions) -> object_store::Result<reqwest::Clie
     }
     builder
         .build()
-        .map_err(|error| object_store::Error::Generic { store: "fxdax", source: Box::new(error) })
+        .map_err(|error| object_store::Error::Generic { store: "cladefs", source: Box::new(error) })
 }
 
 /// Resolves names to their addresses in a random order, as `object_store` does unless told not
@@ -461,7 +461,7 @@ mod tests {
         });
     }
 
-    /// The options a client is built from are fxdax's: its connect timeout and no other.
+    /// The options a client is built from are cladefs's: its connect timeout and no other.
     #[test]
     fn clients_time_out_by_progress_alone() {
         let options = Client::DEFAULT.options();
@@ -472,6 +472,6 @@ mod tests {
         reqwest_client(&options).unwrap();
         let invalid = options.with_config(ClientConfigKey::AllowHttp, "maybe");
         let refused = reqwest_client(&invalid).unwrap_err().to_string();
-        assert_eq!(refused, "Generic fxdax error: allow_http: maybe is no boolean");
+        assert_eq!(refused, "Generic cladefs error: allow_http: maybe is no boolean");
     }
 }

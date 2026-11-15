@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/fsck.rs`. fxdax snapshots (volume snapshots that share their
+// Fuchsia's `src/storage/fxfs/src/fsck.rs`. cladefs snapshots (volume snapshots that share their
 // source's layers and extents) deviate from upstream here: allocations may be a store's current
 // data owner's or a frozen owner's, whose extents any number of stores may reference, or none.
 // Allocations are of extents of an extent store (backlog doc-4): there is no free space to report
@@ -325,10 +325,10 @@ struct Fsck<'a> {
     options: &'a FsckOptions<'a>,
     // A list of allocations generated based on all extents found across all scanned object stores.
     allocations: Arc<SkipListLayer<AllocatorKey, AllocatorValue>>,
-    // fxdax: the extents frozen owners hold, which any number of stores (snapshots) may share, or
+    // cladefs: the extents frozen owners hold, which any number of stores (snapshots) may share, or
     // none; they are left out of `allocations`.
     shared_extents: HashSet<ExtentId>,
-    // fxdax: how many of the extents scanned reference each range of each extent, by its owner:
+    // cladefs: how many of the extents scanned reference each range of each extent, by its owner:
     // the counts `allocations` gets, which reflinks make more than one (the allocator's
     // "References").
     references: Mutex<HashMap<(ExtentId, u64), RangeCounts>>,
@@ -349,7 +349,7 @@ impl<'a> Fsck<'a> {
         }
     }
 
-    /// fxdax: finds the extents frozen owners hold.
+    /// cladefs: finds the extents frozen owners hold.
     fn find_shared_extents(&mut self, filesystem: &FxFilesystem) {
         let allocator = filesystem.allocator();
         let frozen_owners = allocator.frozen_owners();
@@ -361,18 +361,18 @@ impl<'a> Fsck<'a> {
             .collect();
     }
 
-    /// fxdax: whether a frozen owner holds `extent`.
+    /// cladefs: whether a frozen owner holds `extent`.
     fn is_shared(&self, extent: &ExtentId) -> bool {
         self.shared_extents.contains(extent)
     }
 
-    /// fxdax: counts a reference to `range` of `extent`, which `owner_object_id` allocated, by an
+    /// cladefs: counts a reference to `range` of `extent`, which `owner_object_id` allocated, by an
     /// extent scanned.
     fn reference(&self, extent: ExtentId, range: std::ops::Range<u64>, owner_object_id: u64) {
         self.references.lock().unwrap().entry((extent, owner_object_id)).or_default().add(range);
     }
 
-    /// fxdax: the allocations the extents scanned make, with as many references as they make.
+    /// cladefs: the allocations the extents scanned make, with as many references as they make.
     fn add_references(&self) {
         let references = std::mem::take(&mut *self.references.lock().unwrap());
         for ((extent, owner_object_id), counts) in references {
@@ -519,7 +519,7 @@ impl<'a> Fsck<'a> {
         Ok(())
     }
 
-    /// fxdax: checks the allocator's bookkeeping of extents, each extent's owner and the bytes of
+    /// cladefs: checks the allocator's bookkeeping of extents, each extent's owner and the bytes of
     /// it allocated, against its tree.
     async fn verify_extents(&self, allocator: &Allocator) -> Result<(), Error> {
         let layer_set = allocator.tree().layer_set();
@@ -578,7 +578,7 @@ impl<'a> Fsck<'a> {
             CoalescingIterator::new(self.allocations.seek(Bound::Unbounded)).await?;
         let mut observed_owner_allocated_bytes = BTreeMap::new();
         let mut extra_allocations: Vec<errors::Allocation> = vec![];
-        // fxdax: stores allocate under their current data owners, and share the extents of frozen
+        // cladefs: stores allocate under their current data owners, and share the extents of frozen
         // owners, which any number of stores may reference, or none.
         let frozen_owners = allocator.frozen_owners();
         let data_owners = allocator.data_owners();

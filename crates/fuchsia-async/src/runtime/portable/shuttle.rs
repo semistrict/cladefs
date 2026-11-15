@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax's own: the portable runtime's tasks, executors and timers on Shuttle (awslabs/shuttle,
+// cladefs's own: the portable runtime's tasks, executors and timers on Shuttle (awslabs/shuttle,
 // Apache-2.0), with the `shuttle` feature, in place of tokio's, so that Shuttle's scheduler
 // chooses every interleaving of a test's tasks, such as Fxfs's in the follower simulation
 // (TASK-42.1). Their API is the portable runtime's (`portable.rs`).

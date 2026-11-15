@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax: the loop-device baseline's disk keeps what a guest fsyncs (TASK-350.1).
+// cladefs: the loop-device baseline's disk keeps what a guest fsyncs (TASK-350.1).
 //
 // The host attaches a loop device to a raw image file in the test's directory, and boots a VM on
 // it, as a virtio-blk disk whose flushes are host fsyncs (cache_type Writeback). Its guest makes
@@ -16,9 +16,9 @@ use macros::{guest, host};
 pub struct TestExt4LoopPersists;
 
 /// What the guest is: `write`, the first VM, or `read`, the second.
-const ROLE: &str = "FXDAX_LOOP_ROLE";
+const ROLE: &str = "CLADEFS_LOOP_ROLE";
 /// The disk's device in the guest.
-const DEVICE: &str = "FXDAX_LOOP_DEVICE";
+const DEVICE: &str = "CLADEFS_LOOP_DEVICE";
 /// The file's size, and the byte at each offset: a pattern a lost or torn write would break.
 #[cfg_attr(feature = "host", allow(dead_code))]
 const FILE_SIZE: usize = 4 << 20;
@@ -88,11 +88,11 @@ RUN apk add --no-cache e2fsprogs
 
     impl Test for TestExt4LoopPersists {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("FXDAX_GUEST_KERNEL").is_none() {
-                return ShouldRun::No("FXDAX_GUEST_KERNEL does not name a guest kernel");
+            if std::env::var_os("CLADEFS_GUEST_KERNEL").is_none() {
+                return ShouldRun::No("CLADEFS_GUEST_KERNEL does not name a guest kernel");
             }
             if !crate::vm::has_vmm() {
-                return ShouldRun::No("FXDAX_FIRECRACKER does not name fxdax's Firecracker");
+                return ShouldRun::No("CLADEFS_FIRECRACKER does not name cladefs's Firecracker");
             }
             // SAFETY: a plain system call, which cannot fail.
             if unsafe { nix::libc::geteuid() } != 0 {

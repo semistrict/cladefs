@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 fs/fxfs: Fxfs, on the extent-store device
 
-Fuchsia's Fxfs in the guest's kernel (fxdax's backlog doc-2): fs/fxfs,
+Fuchsia's Fxfs in the guest's kernel (cladefs's backlog doc-2): fs/fxfs,
 which this adds, and the lines that build it. Its Rust is built outside
-Kbuild, by fxdax's scripts/build-guest-kernel.sh, and linked in from the
+Kbuild, by cladefs's scripts/build-guest-kernel.sh, and linked in from the
 archive it leaves at fs/fxfs/libfxfs_linux.a.
 
 diff --git a/fs/Kconfig b/fs/Kconfig

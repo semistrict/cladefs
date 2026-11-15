@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * A mounted file, as fs/fxfs/super.c makes one, in the order super.c calls dax.c: the VFS's system
  * calls for tests. super.c itself isn't built: its fsync, and its writing of an inode's attributes,

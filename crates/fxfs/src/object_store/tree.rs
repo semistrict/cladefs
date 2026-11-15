@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/tree.rs`. fxdax: `flush` picks the layers it merges
+// Fuchsia's `src/storage/fxfs/src/object_store/tree.rs`. cladefs: `flush` picks the layers it merges
 // with `layers_to_merge`, which the allocator's compactions pick theirs with too (the allocator's
 // "Compactions"), and which leaves a store's base layers out (backlog doc-10).
 
@@ -62,7 +62,7 @@ where
     Ok((layers_to_keep, layer_set.layers))
 }
 
-/// fxdax: picks the layers of `tree` that a flush merges: all its immutable layers for a full
+/// cladefs: picks the layers of `tree` that a flush merges: all its immutable layers for a full
 /// compaction, and otherwise the newest, as far as their sizes make merging them worth it. Returns
 /// them, and the older layers the flush keeps, which always include the `base_layers` at the
 /// bottom: what no compaction rewrites. As then some layers are kept, tombstones over them stay.

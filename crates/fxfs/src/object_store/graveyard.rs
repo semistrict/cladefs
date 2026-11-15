@@ -42,9 +42,9 @@ pub struct Graveyard {
     object_manager: Arc<ObjectManager>,
     reaper_task: Mutex<ReaperTask>,
     channel: UnboundedSender<Message>,
-    /// fxdax: `Options::graveyard_batch_delay`.
+    /// cladefs: `Options::graveyard_batch_delay`.
     batch_delay: Option<Duration>,
-    /// fxdax: ends the reaper's wait between batches, for something that waits for it.
+    /// cladefs: ends the reaper's wait between batches, for something that waits for it.
     kick: Event,
     kicked: AtomicBool,
 }
@@ -78,13 +78,13 @@ impl Graveyard {
         })
     }
 
-    /// fxdax: ends the reaper's wait between batches, if it waits.
+    /// cladefs: ends the reaper's wait between batches, if it waits.
     fn kick(&self) {
         self.kicked.store(true, Ordering::SeqCst);
         self.kick.notify(usize::MAX);
     }
 
-    /// fxdax: waits `batch_delay` between batches, unless kicked: messages queued meanwhile don't
+    /// cladefs: waits `batch_delay` between batches, unless kicked: messages queued meanwhile don't
     /// wake the reaper, which isn't polling the channel.
     async fn wait_between_batches(&self) {
         let Some(delay) = self.batch_delay else { return };
@@ -160,7 +160,7 @@ impl Graveyard {
                 self.process(message).await;
                 continue;
             }
-            // fxdax: the rest of the batch, its objects tombstoned many to a transaction, then a
+            // cladefs: the rest of the batch, its objects tombstoned many to a transaction, then a
             // wait before the next.
             let mut batch = vec![message];
             let closed = loop {
@@ -178,7 +178,7 @@ impl Graveyard {
         }
     }
 
-    /// fxdax: processes `batch` in order, tombstoning each run of objects of one store together
+    /// cladefs: processes `batch` in order, tombstoning each run of objects of one store together
     /// (`ObjectStore::tombstone_objects`).
     async fn process_batch(&self, batch: Vec<Message>) {
         let mut objects: Option<(u64, Vec<u64>)> = None;
@@ -205,7 +205,7 @@ impl Graveyard {
         }
     }
 
-    /// fxdax: tombstones the objects `object_ids` of the store `store_id`, logging what fails.
+    /// cladefs: tombstones the objects `object_ids` of the store `store_id`, logging what fails.
     async fn tombstone_objects(&self, store_id: u64, object_ids: &[u64]) {
         let result = match self.object_manager.store(store_id) {
             Some(store) => store.tombstone_objects(object_ids, self.txn_options(store_id)).await,
@@ -273,7 +273,7 @@ impl Graveyard {
         if store.filesystem().options().skip_initial_reap {
             return Ok(0);
         }
-        // fxdax: a compaction's new layer files are in the root store's graveyard until it commits,
+        // cladefs: a compaction's new layer files are in the root store's graveyard until it commits,
         // so that a compaction running now would have them tombstoned, and a store lost. That took
         // a real guest and a narrow window to see: this fails however the timing falls.
         let fs = store.filesystem();
@@ -631,7 +631,7 @@ mod tests {
         assert_eq!(iter.get(), None);
     }
 
-    /// fxdax: tombstoning in batches, the graveyard takes what is queued while it waits between
+    /// cladefs: tombstoning in batches, the graveyard takes what is queued while it waits between
     /// them once something waits for it.
     #[fuchsia::test]
     async fn test_batches() {
@@ -677,7 +677,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: in batches, the graveyard tombstones many small files to a transaction, and
+    /// cladefs: in batches, the graveyard tombstones many small files to a transaction, and
     /// finishes a file with another attribute on its own.
     #[fuchsia::test]
     async fn test_batches_tombstone_objects_together() {

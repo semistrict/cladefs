@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Model-check fxdax's TLA+ specs with TLC (tlaplus/tlaplus, MIT): each directory of specs/ holds
+# Model-check cladefs's TLA+ specs with TLC (tlaplus/tlaplus, MIT): each directory of specs/ holds
 # one spec (its .tla) and its models (backlog doc-8 testing 0; TASK-42.8, TASK-44):
 #
 # - specs/follower: live read-only followers' protocol (doc-8);
@@ -49,7 +49,7 @@
 # every model, or alone as follower/traces and journal/traces.
 #
 # TLC runs on Java: $JAVA, or java if it runs, or Homebrew's openjdk. Its jar, the release pinned
-# below, is fetched once into ~/.cache/fxdax/tla and checked against its SHA-256. v1.8.0 is a
+# below, is fetched once into ~/.cache/cladefs/tla and checked against its SHA-256. v1.8.0 is a
 # pre-release TLA+ re-cuts in place (2026-10-30's, pinned 2026-11-02), and 1.7.4, the last that
 # stays put, lacks -noGenerateSpecTE: a jar re-cut since fails the check until the pin follows it.
 set -euo pipefail
@@ -57,7 +57,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 specs="$root/specs"
 tla_version=1.8.0
 tla_sha256=011267fca25d0752cf18894dd585cd28b96960c112ea8a20b823ea770e7e10cd
-cache="$HOME/.cache/fxdax/tla"
+cache="$HOME/.cache/cladefs/tla"
 jar="$cache/tla2tools-$tla_version.jar"
 
 if [[ ! -f $jar ]]; then
@@ -169,7 +169,7 @@ else
     done
 fi
 
-work=$(mktemp -d "${TMPDIR:-/tmp}/fxdax-tla.XXXXXX")
+work=$(mktemp -d "${TMPDIR:-/tmp}/cladefs-tla.XXXXXX")
 trap 'rm -r "$work"' EXIT
 
 # reached NAME CFG TLA: the states CFG's model reaches, each a digest of its variables' values

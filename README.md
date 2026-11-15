@@ -1,4 +1,4 @@
-# fxdax
+# cladefs
 
 Fuchsia's Fxfs filesystem, running in a virtual machine's own Linux kernel,
 on extents its host keeps for it, so that the guest's file data is mapped
@@ -7,7 +7,7 @@ it.
 
 The guest's kernel runs Fxfs (`guest/`), which keeps its filesystem as
 extents: immutable pieces of data, written once and sealed by the next
-commit (backlog doc-4). On the host, fxdax's extent daemon, `fxdax-extentd`,
+commit (backlog doc-4). On the host, cladefs's extent daemon, `cladefs-extentd`,
 keeps each VM's extents in an extent store on local disk, caches their pages
 in physical memory of its own, and maps them into the VMs' DAX windows. Its
 cache is shared by the host's VMs: two VMs mapping one extent, such as two
@@ -24,7 +24,7 @@ guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX loads and stores
 Firecracker (one VM     vendor/firecracker: the extent device, a client of the
   process)               daemon
   │  Unix socket; the daemon's memory (a memfd), mapped into the DAX window
-fxdax-extentd            crates/fxdax: extentd, the stores, the extent cache,
+cladefs-extentd            crates/cladefs: extentd, the stores, the extent cache,
   │                      the DAX windows
 physical memory          crates/physmem: arenas of shared memory (memfds),
   │                      their caps, relief and quarantine
@@ -69,7 +69,7 @@ Code falls into three kinds:
 
 - Fuchsia sources, copied;
 - stand-ins for what exists only inside Fuchsia's build;
-- fxdax's own code.
+- cladefs's own code.
 
 All of it lives under `crates/`. Code copied, ported or excerpted from Fuchsia
 follows the revision in the root `Cargo.toml`'s
@@ -83,7 +83,7 @@ their tests:
 - Fxfs;
 - its libraries (`storage_device`, `fscrypt`, `fsverity-merkle` and others);
 - the Rust runtime crates (`fuchsia-async`, `fuchsia-sync` and others);
-- the SDK's `zx` crates, for their types: fxdax defines none of Zircon's
+- the SDK's `zx` crates, for their types: cladefs defines none of Zircon's
   syscalls, and neither Fxfs in the guest nor Fxfs on the host calls any.
 
 Each crate's `Cargo.toml` cites the Fuchsia directory it is copied from. Most
@@ -93,11 +93,11 @@ their leading comment:
 - The runtime crates are built for the host only, without Fuchsia's runtime
   and handles.
 - Code that needs Zircon, such as VMO-backed buffers, builds only when
-  `target_os = "fuchsia"`: fxdax's buffers are plain memory. What can't build
+  `target_os = "fuchsia"`: cladefs's buffers are plain memory. What can't build
   at all, such as FIDL protocols over channels or tests that need Fuchsia's
   component framework, is removed from those files.
-- `storage_device` has no `FileBackedDevice`: fxdax has its own image device
-  (see `crates/fxdax`).
+- `storage_device` has no `FileBackedDevice`: cladefs has its own image device
+  (see `crates/cladefs`).
 - Fxfs can snapshot a volume (`RootVolume::snapshot_volume`), which upstream
   can't. The snapshot shares the source's layer files, by reference count,
   and its data extents. The allocator records a store's allocations under a
@@ -118,14 +118,14 @@ time, and gives a chunk back once its pages are all free; arenas may be capped,
 each and together (TASK-50.3); an arena starved at a cap asks for relief, which
 evicts cached extents' pages; and a page a VM process's window may still map,
 freed, waits in quarantine until the VM process has unmapped it (TASK-79.9).
-It was the Zircon kernel port's PMM, fxdax's own code there, lifted out with
+It was the Zircon kernel port's PMM, cladefs's own code there, lifted out with
 its tests when the port was deleted (TASK-96.1).
 
 ### `crates/fxfs-posix`: Fxfs's files and directories
 
 One POSIX layer over Fxfs's object stores, which the guest kernel's VFS calls
 (`guest/rust/fxfs-linux`) and the host's filesystem calls as a library
-(`crates/fxdax`), generic over what differs between them (`Platform`): the
+(`crates/cladefs`), generic over what differs between them (`Platform`): the
 guest's, Fxfs in the kernel, the host's, images being built.
 
 ### `crates/`: stand-ins for Fuchsia-only pieces
@@ -141,17 +141,17 @@ of these stands in with the items the code copied from Fuchsia uses:
 | `bssl-crypto`, `mundane` | BoringSSL bindings | SHA-256/512 on the `sha2` crate. |
 | `fxfs-unicode-gen` | build-time generated tables | Tables generated once from UCD 12.1.0 by Fxfs's own generator (`scripts/generate-unicode-tables.sh`). |
 
-### `crates/fxdax`: fxdax's own code
+### `crates/cladefs`: cladefs's own code
 
-`fxdax` holds the extent daemon and the host's side of Fxfs. Its crate docs
-(`cargo doc -p fxdax --open`) are the guide.
+`cladefs` holds the extent daemon and the host's side of Fxfs. Its crate docs
+(`cargo doc -p cladefs --open`) are the guide.
 
 - `extents.rs` holds `ExtentStore`, an extent store as a VM's device serves
   it: its I/O, and `MAP` and `UNMAP` into its DAX window.
 - `cache.rs` holds the cache of sealed extents' pages, shared by every store
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
-- `extentd/` holds the daemon (`bin/fxdax-extentd.rs`) and its client,
+- `extentd/` holds the daemon (`bin/cladefs-extentd.rs`) and its client,
   `RemoteExtentStore`, which a VMM's device is; see the extent daemon below.
 - `dax.rs` holds DAX windows, their mappings and the pages they have mapped,
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
@@ -167,30 +167,30 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `import.rs` makes filesystems of container images (TASK-39.5): an OCI image
   layout's layers, or a `docker export` tarball, applied as the OCI image spec
   applies changesets (whiteouts, opaque directories), files keeping their
-  owners, permissions, times and extended attributes. `fxdaxctl import` makes
+  owners, permissions, times and extended attributes. `cladefsctl import` makes
   a base store of one, for VMs to boot forks of.
 - `fuse/` mounts a `Filesystem` on the host with FUSE (TASK-222): a server of
   the protocol, a request's bytes in and its reply's out, on every host, and on
   Linux a mount through `/dev/fuse`, by mount(2) as root or `fusermount3`
-  otherwise. `fxdax-mount STORE MOUNTPOINT` mounts a store nothing else has
+  otherwise. `cladefs-mount STORE MOUNTPOINT` mounts a store nothing else has
   open, read-write, until it is unmounted or sent SIGINT or SIGTERM; with
-  `--new CAPACITY`, a new store it makes. `fxdax-mount --control SOCKET --stores
+  `--new CAPACITY`, a new store it makes. `cladefs-mount --control SOCKET --stores
   DIR MOUNTPOINT` is one mount for any number of stores (TASK-302): its control
-  API (`proto/fxdax/mount/v1/mount.proto`; `fxdax-mount attach`,
+  API (`proto/cladefs/mount/v1/mount.proto`; `cladefs-mount attach`,
   `create-volume`, `detach`, `list`) takes a tenant's cell of the bucket
   (TASK-364), its volumes' leases with it, each Fxfs volume into
   `DIR/TENANT/CELL/VOLUME` and shown at `MOUNTPOINT/TENANT/CELL/VOLUME`, and
   detaches the cell once the kernel lets go of it, written back. macOS has no
   open-source FUSE, so no mounts there.
-- `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory fxdax only
+- `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory cladefs only
   copies into and out of, as a guest may change it concurrently.
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
   (fsck), and clones images: a clone is a fork of the image's branch in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
-  beside its directory, or on a host of fxdax's system the host's
-  (`FXDAX_EXTENTD_REMOTE`); the clone's directory is a store of its own, which
+  beside its directory, or on a host of cladefs's system the host's
+  (`CLADEFS_EXTENTD_REMOTE`); the clone's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
   deletes clones and images alike: the branch in its bucket, whose collector
   reclaims what no other branch inherited, and the directory; clones live on.
@@ -210,7 +210,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   extents' pages come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
 
-`crates/extent_store` is fxdax's too: backlog doc-4's extent store on local
+`crates/extent_store` is cladefs's too: backlog doc-4's extent store on local
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
 store's directory holds one branch; forks, points and deletion are the
@@ -261,7 +261,7 @@ mode 0600; a jail made otherwise needs the same (`mknod dev/userfaultfd c 10
 MINOR`, its minor as the host's `/dev/userfaultfd` has it).
 
 **The extent daemon.** The VMM runs one VM per process, so extents cached in a
-VM process would be shared by that VM alone. `fxdax-extentd` (the `extentd`
+VM process would be shared by that VM alone. `cladefs-extentd` (the `extentd`
 module) is one process on a host that owns the physical memory, the extent
 cache and the stores, and serves them to VM processes over a Unix socket: the
 only way the VMM's extent device has a store, at the socket its configuration
@@ -285,9 +285,9 @@ private DAX pages, those its guest wrote, are its VM process's own memory,
 laid out as its window is, at most `private_max` of them, which the daemon
 reserves against the tenant's memory as the window is made.
 The host's VM manager drives the daemon
-through a gRPC control API on a Unix socket of its own (`FXDAX_EXTENTD_GRPC`;
-`crates/fxdax/proto/fxdax/extentd/v1/extentd.proto`, TASK-43.3; in Go,
-`github.com/semistrict/fxdax/go/extentd/v1`, TASK-219): it makes,
+through a gRPC control API on a Unix socket of its own (`CLADEFS_EXTENTD_GRPC`;
+`crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
+`github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 (TASK-43.4). Grant returns a tenant's own VM socket, for the VM manager to
 bind-mount into the tenant's jails; a connection's tenant is the socket it came
@@ -297,7 +297,7 @@ of its own cells, and its VM processes open no store of another tenant's cell,
 but restore from the points of others' its VM manager gives it. Revoked, a
 tenant's socket goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's: its connections name
-stores in the daemon's roots alone (`FXDAX_EXTENTD_ROOTS`), or anywhere without
+stores in the daemon's roots alone (`CLADEFS_EXTENTD_ROOTS`), or anywhere without
 any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
@@ -336,7 +336,7 @@ and writes pages before mapping them to a VM. So the daemon's cgroup is charged
 for every VM's cached file pages, and the VMs' cgroups are not: give the
 daemon a cgroup of its own whose `memory.max` holds `MEMORY_BYTES` and its heap
 (the stores' metadata, the connections' buffers, the uploads in flight), and limit tenants through the control API, as cgroups cannot see them apart.
-A bucket behind costs the heap no more than its upload memory, `FXDAX_EXTENTD_UPLOAD_MEMORY`
+A bucket behind costs the heap no more than its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY`
 (512 MiB by default): what waits is on the host's disk (backlog doc-7, Uploads, Memory); on ubu1
 a docker build's backlog held the daemon's anonymous memory to 718 MB, against 5.9 GB before (TASK-317). A
 memory.max under that is met by the cgroup's OOM killer, not by eviction:
@@ -349,7 +349,7 @@ extents, each file's blocks once, as `du -sx` counts them (TASK-94). One rule
 for what is shared: a file is the tenant's whose directory holds it, and one in
 no tenant's directory is no tenant's. A fork's directory holds what the fork
 wrote, its base's data being in the bucket, read through the host's part cache
-(`FXDAX_EXTENTD_CACHE`), which is no tenant's: copies of objects any tenant
+(`CLADEFS_EXTENTD_CACHE`), which is no tenant's: copies of objects any tenant
 reads, bounded by its own capacity and floor, evicting to keep within them. The
 daemon walks a tenant's directory as it is granted, every 10 s, soon after a
 write of it is refused, and as `GetTenantDisk` asks, and counts each write it
@@ -372,25 +372,25 @@ and its open segment.
 copies of it, whose placements fence each other with their tokens: a placement
 cut off neither takes a branch back nor deletes it from under a later one
 (TASK-39.7, TASK-45). The daemon runs as a host of that system, with the bucket
-(`FXDAX_EXTENTD_REMOTE`) and its placement's token from the control plane
-(`FXDAX_EXTENTD_TOKEN`, not 0), and refuses to start without them: there is no
+(`CLADEFS_EXTENTD_REMOTE`) and its placement's token from the control plane
+(`CLADEFS_EXTENTD_TOKEN`, not 0), and refuses to start without them: there is no
 single-node mode. Tests and development use an in-memory bucket
 (`memory:///NAME`), or one in a directory of the host's (`file:///DIR`), which
-outlives the daemon and is shared with fxdaxctl and fxdax-gc. What a bucket has
+outlives the daemon and is shared with cladefsctl and cladefs-gc. What a bucket has
 acknowledged leaves the store's directory (TASK-165.8): an in-memory bucket is
 its process's, and what left for it is gone once that process exits, so a store
 used by more than one process, or across a daemon's restarts, needs a file or
-cloud bucket. fxdaxctl, without the daemon, changes existing stores'
+cloud bucket. cladefsctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
-**Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
+**Encryption and shredding** (backlog doc-16). With `CLADEFS_KMS` naming the
 host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
 are sealed: the bucket, the stores' directories and the part cache hold their
 data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
-every host (`fxdaxctl forget-tenant-keys TENANT`, the control API's
+every host (`cladefsctl forget-tenant-keys TENANT`, the control API's
 `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
 version of every object, was wrapped by it. To shred a **cell**, run
-`fxdaxctl shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon:
+`cladefsctl shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon:
 it takes the cell's wrapped KEKs out of its object `<C>cell` and has each host
 forget them. That is only as strong as the bucket keeps no older version of
 that object, so a bucket with versioning on needs a lifecycle rule expiring
@@ -407,41 +407,41 @@ a fenced store's own keys stay in memory until its VM process closes it.
 
 The VMM is a submodule: branch `fxdax-v1.16.1-pci` of
 [semistrict/firecracker](https://github.com/semistrict/firecracker), Firecracker's
-v1.16.1 release, the sandboxes' pin, plus fxdax's changes as one linear series,
+v1.16.1 release, the sandboxes' pin, plus cladefs's changes as one linear series,
 each release of it tagged `fxdax-v1.16.1-rN` (TASK-269; r2, TASK-273, the one
 with the extent device over virtio-PCI alone). Its first commits are general
 fixes, each standing alone, among them the PCI transport's shared memory
-regions; everything else is behind its `fxdax` feature, so that a build without
-it is upstream's. Every fxdax VM, on x86-64 and aarch64 alike, runs its devices
+regions; everything else is behind its `cladefs` feature, so that a build without
+it is upstream's. Every cladefs VM, on x86-64 and aarch64 alike, runs its devices
 on virtio-PCI (`--enable-pci`): the extent device's DAX window is a BAR of its
 own, which upstream's MMIO transport has no way to describe, so a VM with the
 device on MMIO does not start (TASK-267, TASK-273). Every commit builds both
 ways (`scripts/firecracker-series-check.sh`, CI's firecracker-series job). The
-series names no fxdax dependency and holds none of fxdax's in its Cargo.lock,
+series names no cladefs dependency and holds none of cladefs's in its Cargo.lock,
 so that it builds outside this checkout, as those who take it onto forks of
-their own build it: fxdax's build supplies them, in a copy of the tree,
+their own build it: cladefs's build supplies them, in a copy of the tree,
 `target/firecracker` (`scripts/firecracker-cargo.sh`, which every script that
 builds Firecracker goes through): the vmm crate's dependency on
-`crates/fxdax`, fxdax's lock (`vendor/firecracker.lock`, which
+`crates/cladefs`, cladefs's lock (`vendor/firecracker.lock`, which
 `scripts/firecracker-cargo.sh --lock` updates), and frame pointers, from this
-repo's `.cargo/config.toml`. The series' own `resources/fxdax/README.md` says
+repo's `.cargo/config.toml`. The series' own `resources/cladefs/README.md` says
 the same for its users. Branch `fxdax-v1.16.1`, the series before, a commit a
 change, `fxdax`, on Firecracker's main branch, where they began, r1's
 `fxdax-v1.16.1-optin` and its PCI stack, `fxdax-pci-r1`, are superseded by it
-(`vendor/firecracker.rewrites`). fxdax ran on libkrun before;
+(`vendor/firecracker.rewrites`). cladefs ran on libkrun before;
 it left it for Firecracker, which the sandboxes it serves run (TASK-40).
 
 The workspace builds with it checked out (`git submodule update --init`): on
-Linux, fxdax's tests compile its production seccomp filters, upstream's
-(`resources/seccomp`) with the rules the `fxdax` feature adds before each
-thread's own (`resources/fxdax/seccomp`), with its seccompiler, which links
+Linux, cladefs's tests compile its production seccomp filters, upstream's
+(`resources/seccomp`) with the rules the `cladefs` feature adds before each
+thread's own (`resources/cladefs/seccomp`), with its seccompiler, which links
 libseccomp, and run the VM process's side of a DAX window under them, so that a
-system call fxdax makes and the filters refuse fails CI rather than a jailed VM
-(`crates/fxdax/tests/seccomp.rs`, TASK-149.28).
+system call cladefs makes and the filters refuse fails CI rather than a jailed VM
+(`crates/cladefs/tests/seccomp.rs`, TASK-149.28).
 
 | Change | Why |
 |---|---|
-| The extent-store device (`devices/virtio/extent`), behind the `fxdax` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`fxdax::RemoteExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No fxdax code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
+| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::RemoteExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
 | Virtio shared memory regions on the PCI transport, a BAR with `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities (a general fix), and `KvmMemSlot`, a KVM memory slot any device may map host memory with. | The device's DAX window is a shared memory region, the daemon's memory mapped in; KVM follows it. |
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see DAX on Linux above (TASK-25.4). |
@@ -489,12 +489,12 @@ virtio extent store. Its first pieces, from TASK-26.1's spike:
   release it pins), configured as Firecracker's CI configures the 6.18 guests
   it supports, with fs/fxfs built in, the Rust linked into it as one object of
   what the kernel calls (link-time optimized). The kernel itself has no Rust
-  support enabled: Kbuild never sees the Rust. fxdax's changes to the kernel
+  support enabled: Kbuild never sees the Rust. cladefs's changes to the kernel
   are a series of commits on the release (`guest/linux/patches`, each
   with the files of `guest/linux` it adds), which the script makes in the
   kernel's tree and builds. Its `out/<arch>` has what builds the same kernel
   elsewhere: `patches/` (`git am` them on the release), `libfxfs_linux.a`
-  (copy it to `fs/fxfs/`) and `fxdax.config` (fxdax's options, over
+  (copy it to `fs/fxfs/`) and `cladefs.config` (cladefs's options, over
   Firecracker's configuration).
 - `scripts/probe-guest-std.sh` builds Fxfs's third-party dependencies
   (`guest/std-probe`) for the kernel's targets, against a sysroot whose `std`
@@ -549,9 +549,9 @@ scripts/test-host.sh     # x86-64 Linux with KVM, on a host of one's own over ss
 `scripts/lima-setup.sh` creates the Lima VM the Linux scripts use on macOS, and
 installs what they need in it; run again, it installs only what is missing.
 
-The guest tests (`guest/tests`) boot fxdax's guest kernel in fxdax's
+The guest tests (`guest/tests`) boot cladefs's guest kernel in cladefs's
 Firecracker, on Linux with KVM, and mount its Fxfs from an extent-store device,
-whose store fxdax's extent daemon serves (`scripts/test-e2e.sh` starts one):
+whose store cladefs's extent daemon serves (`scripts/test-e2e.sh` starts one):
 `extent-guest` (the driver), `fxfs-guest`, `fxfs-guest-dax`, `fxfs-guest-checks`
 and `fxfs-guest-checks-dax` (file workloads, including `mmap`, after which the
 host remounts the store, fscks it, and checks what the guest wrote), the crash
@@ -559,7 +559,7 @@ tests, resizing a mounted store, and pjdfstest. The harness (runner, guest agent
 and test cases) came from libkrun's tests, Apache-2.0 (`guest/tests/LICENSE.libkrun`).
 
 ```sh
-scripts/test-e2e.sh        # Linux (KVM): FXDAX_GUEST_KERNEL names the kernel
+scripts/test-e2e.sh        # Linux (KVM): CLADEFS_GUEST_KERNEL names the kernel
 scripts/test-e2e-linux.sh  # Linux, in a Lima VM
 ```
 
@@ -573,19 +573,19 @@ runs so every night on GitHub's runners, whose nested KVM boots the guests
 (`.github/workflows/nightly.yml`), Firecracker in its jailer under its seccomp filter: built once,
 then a matrix of jobs, each a part of the suite (`runner list --tag nightly --shard K/N`).
 
-FUSE mounts (`crates/fxdax/src/fuse`) have their server fuzzed with random and
+FUSE mounts (`crates/cladefs/src/fuse`) have their server fuzzed with random and
 malformed requests (`fuse/server/fuzz_tests.rs`), and on Linux random file
 system calls on a mount compared with the same on tmpfs, as the user and as
-root (`crates/fxdax/tests/fuse_differential.rs`, what may differ in its
+root (`crates/cladefs/tests/fuse_differential.rs`, what may differ in its
 `ALLOWED`). CI also runs pjdfstest on mounts, as root:
 
 ```sh
-sudo scripts/pjdfstest-fuse.py target/debug/fxdax-mount   # Linux
+sudo scripts/pjdfstest-fuse.py target/debug/cladefs-mount   # Linux
 ```
 
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its
 anonymous memory, sampled as its stats are, against the sum of what its design bounds
-(`fxdax::extentd::process`: its upload memory, a framing for each store written, its fetches,
+(`cladefs::extentd::process`: its upload memory, a framing for each store written, its fetches,
 its tenants' rooms, its own), which its stats' `process:` line and its metrics say; and what it
 writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a run whose daemons
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
@@ -594,15 +594,15 @@ byte raw once and framed once, a commit's copies a segment's worth at most
 (`remote::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
 then answering again, VM processes writing all the while (`extentd::tests::soak`, five minutes in
 CI, half an hour each night in Hunt; with guests, `fxfs-guest-bucket-soak`, by name). Each has a
-past bug put back that it fails (`crates/fxdax/mutants`).
+past bug put back that it fails (`crates/cladefs/mutants`).
 
-And fxdax runs as LangSmith's sandboxes' CI does, whose runs found bugs ours didn't (TASK-330.1):
+And cladefs runs as LangSmith's sandboxes' CI does, whose runs found bugs ours didn't (TASK-330.1):
 two extent daemons and their S3 bucket (RustFS, a process of its release's binary) on one ext4
 disk, many VMs at once on fewer CPUs than they have vCPUs, building and exporting Docker images,
 running pgbench, working git repositories and writing large and small files, each guest timing a
 sandbox's commands all the while. It fails on a guest kernel's report, a VM let go, a framing past
 a second, a command past its budget, or a daemon past its own; LangSmith's pin's double writes,
-put back, fail it (`crates/fxdax/mutants/framed-in-copies.patch`). The short mode, eight VMs,
+put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short mode, eight VMs,
 minutes, runs on GitHub's runners' nested KVM (`.github/workflows/sandboxes.yml`), by hand until
 main's framings pass it (TASK-310, TASK-336), then on every push. The long mode is LangSmith's
 controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by hand, in the
@@ -610,18 +610,18 @@ qualification before each pin (below), as no CI runner has its memory (TASK-330.
 what the host and the run spent every 30 s (`resources.log`):
 
 ```sh
-scripts/sandboxes.sh [short|long]   # Linux (KVM); FXDAX_SANDBOX_DISK, ext4, holds it all
+scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all
 ```
 
 ### Before a pin goes to LangSmith
 
-LangSmith runs fxdax at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
+LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
 bump it now and then. Before a candidate is offered, it is qualified against their pin on ubu1,
 alone there (`fxjob --bench`), the two interleaved, A B then B A (TASK-330.4):
 
 ```sh
-FXDAX_AB_SUITE=qualify FXDAX_AB_ROUNDS=2 FXDAX_AB_A=pin=96c7808b8 \
-    FXDAX_AB_B=candidate=origin/main scripts/bench-ab-host.sh
+CLADEFS_AB_SUITE=qualify CLADEFS_AB_ROUNDS=2 CLADEFS_AB_A=pin=96c7808b8 \
+    CLADEFS_AB_B=candidate=origin/main scripts/bench-ab-host.sh
 ```
 
 Each round of each side is the qualification (`scripts/qualify.sh`): the sandboxes' long mode,
@@ -632,7 +632,7 @@ CPU time for each MiB their guests wrote (`scripts/qualify-budgets.py`'s `CPU_BU
 main's soak daemon once spent 1.55 times the pin's, its uploads all sending their objects again
 and again to the failing bucket, and nothing said so). One harness, the tree's that runs it,
 drives both sides' builds, their extent daemons, Firecrackers and guest kernels
-(`scripts/test-e2e.sh`'s `FXDAX_E2E_HARNESS`), so that a pin from before the qualification's cases
+(`scripts/test-e2e.sh`'s `CLADEFS_E2E_HARNESS`), so that a pin from before the qualification's cases
 meets the same cases, bucket and faults as the candidate; and what it measures of each daemon is
 its kernel's count (disk written, peak memory, CPU), whatever the daemon says of itself.
 `docs/measurements/ubu1-qualify-ab-*/ab.md` says every metric, those that moved (their rounds'
@@ -643,7 +643,7 @@ every check and nothing moved the wrong way that the change didn't mean to move.
 the guest tests on it, in Lima on macOS.
 
 `scripts/test-host.sh` runs them too, on a Linux host of one's own over ssh
-(`FXDAX_HOST`, ubu1 by default): in a worktree there of a commit origin has,
+(`CLADEFS_HOST`, ubu1 by default): in a worktree there of a commit origin has,
 under `fxjob`, copying the results back and removing the worktree
 (`scripts/lib/host.sh`).
 
@@ -669,7 +669,7 @@ the extent daemon serves, with a DAX window and without, with ext4 on the same
 kernel, over a virtio-blk disk backed by an image file on the same host
 filesystem and with DAX on writable virtio-pmem. The workloads are fio's sequential and random reads and
 writes (cold and warm), fsync-heavy appends and I/O through `mmap`, creating,
-stating, listing and removing 2,000 files (`FXDAX_BENCH_FILES`), and untarring
+stating, listing and removing 2,000 files (`CLADEFS_BENCH_FILES`), and untarring
 and building Lua (`guest/tests/test_cases/src/test_fs_bench.rs`).
 `scripts/bench-report.py` turns the measurements into a table of medians,
 spreads and ratios to ext4. The guests' root filesystem is an Alpine image
@@ -684,10 +684,10 @@ scripts/bench-linux.sh     # Linux, in a Lima VM
 `scripts/bench-host.sh` keeps its results in `docs/measurements`, with the host
 and the source it measured.
 
-For SQLite, set `FXDAX_BENCH_GROUPS=sqlite`. This compares cold and warm scans
+For SQLite, set `CLADEFS_BENCH_GROUPS=sqlite`. This compares cold and warm scans
 through pread and mmap, single-update commits and batches of 100 updates in
 DELETE/FULL, WAL/FULL and WAL/NORMAL modes, and explicit WAL checkpoints.
-`FXDAX_BENCH_SQLITE_TXNS` sets the commits per workload (default 200).
+`CLADEFS_BENCH_SQLITE_TXNS` sets the commits per workload (default 200).
 The group also checks database integrity after reopening, recovery from a
 killed writer, and a WAL reader's snapshot during a concurrent writer's commit.
 Process recovery does not test power-loss durability. WAL/NORMAL commit rates
@@ -719,7 +719,7 @@ reformat the files copied from Fuchsia, which keep upstream's formatting.
 
 - **The workspace:** BSD-3-Clause, as is Fuchsia (`LICENSE`, `PATENTS`,
   `AUTHORS`). What was copied or adapted from Fuchsia keeps The Fuchsia
-  Authors' copyright; fxdax's own code, and its changes, are The fxdax
+  Authors' copyright; cladefs's own code, and its changes, are The cladefs
   Authors'.
 - **`physmem`:** MIT (its `LICENSE`), as the Zircon kernel port it was lifted
   from was (deleted, TASK-96.1), keeping the copyrights of the sources it
@@ -735,7 +735,7 @@ reformat the files copied from Fuchsia, which keep upstream's formatting.
 - **Firecracker (`vendor/firecracker`):** Apache-2.0.
 - **The guest tests' harness (`guest/tests`):** libkrun's test framework,
   Apache-2.0 (`guest/tests/LICENSE.libkrun`), its files keeping libkrun's
-  license; the test cases fxdax wrote are its own, BSD-3-Clause.
+  license; the test cases cladefs wrote are its own, BSD-3-Clause.
 - **Amazon Linux's kernel:** whose sources `scripts/build-guest-kernel.sh`
   builds the guest kernel from, GPL-2.0, with Firecracker's configuration of
   them (`guest/linux/configs`, from Firecracker's main branch: Apache-2.0).

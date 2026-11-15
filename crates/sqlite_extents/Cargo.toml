@@ -1,4 +1,4 @@
-# fxdax's own: SQLite databases kept straight on an extent device, as pages in write-once
+# cladefs's own: SQLite databases kept straight on an extent device, as pages in write-once
 # extents, each transaction one commit of the device (TASK-296).
 [package]
 name = "sqlite_extents"
@@ -23,11 +23,11 @@ async-trait.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
 rand.workspace = true
-fxdax = { path = "../fxdax" }
+cladefs = { path = "../cladefs" }
 tempfile.workspace = true
 extent_remote.workspace = true
 tokio.workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fxdax = { path = "../fxdax" }
+cladefs = { path = "../cladefs" }
 libc.workspace = true

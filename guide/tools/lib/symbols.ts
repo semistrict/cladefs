@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax's symbols, and those of the Fuchsia code it copies, with tree-sitter: each function, type,
+// cladefs's symbols, and those of the Fuchsia code it copies, with tree-sitter: each function, type,
 // trait, module, const and static, its file, its signature line (an exact text anchor), the first
 // sentence of its doc comment, what it is in (an impl, trait or module), and its file's origin.
 
@@ -28,7 +28,7 @@ export interface Symbol {
   origin: Origin;
 }
 
-/** fxdax's code outside crates/, every file of it fxdax's own. */
+/** cladefs's code outside crates/, every file of it cladefs's own. */
 export const EXTRA_ROOTS = [
   "guest/rust/fxfs-linux/src",
   "guest/rust/linux-rt/src",
@@ -182,7 +182,7 @@ export async function indexRepo(repo = REPO): Promise<Symbol[]> {
   const crates = crateOrigins(repo);
   const roots: [string, Origin][] = [
     ...[...crates].map(([name, origin]): [string, Origin] => [`crates/${name}`, origin]),
-    ...EXTRA_ROOTS.map((root): [string, Origin] => [root, "fxdax"]),
+    ...EXTRA_ROOTS.map((root): [string, Origin] => [root, "cladefs"]),
   ];
   const symbols: Symbol[] = [];
   for (const [root, crateOrigin] of roots) {

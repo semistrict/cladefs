@@ -10,7 +10,7 @@ use fuchsia_sync::Mutex;
 use futures::future::BoxFuture;
 use std::sync::LazyLock;
 
-/// Holds a histogram of latencies and a counter for the cumulative time. fxdax: elsewhere than on
+/// Holds a histogram of latencies and a counter for the cumulative time. cladefs: elsewhere than on
 /// Fuchsia, nothing records into them (`DurationMeasureScope`), but they are in the Inspect tree
 /// for as long as they are held.
 #[cfg_attr(not(target_os = "fuchsia"), allow(dead_code))]
@@ -43,7 +43,7 @@ impl DurationMeasure {
 /// When the scope is dropped, the duration is added to the histogram and the cumulative time is
 /// incremented.
 ///
-/// fxdax: only on Fuchsia, whose Inspect reads them: elsewhere, measuring costs two reads of the
+/// cladefs: only on Fuchsia, whose Inspect reads them: elsewhere, measuring costs two reads of the
 /// clock, and recording the histogram's insertion, for each lookup and change in Fxfs's trees.
 #[cfg(target_os = "fuchsia")]
 pub struct DurationMeasureScope<'a> {

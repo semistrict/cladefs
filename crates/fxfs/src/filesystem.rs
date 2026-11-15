@@ -5,7 +5,7 @@
 // Fuchsia's `src/storage/fxfs/src/filesystem.rs`, without trimming (the trim task, its options and
 // the power manager it waited for a charger with): the device is an extent store (backlog doc-4),
 // whose extents Fxfs frees whole once nothing refers to them. A read-only mount can follow its
-// writer (crate::follower, backlog doc-8), whose state it holds. fxdax: a commit holds back a
+// writer (crate::follower, backlog doc-8), whose state it holds. cladefs: a commit holds back a
 // snapshot of a store it changes, and waits for one (`LockKey::Commits`, TASK-241).
 
 use crate::errors::FxfsError;
@@ -47,7 +47,7 @@ pub const MIN_BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
 pub const MAX_BLOCK_SIZE: BlockSize = BlockSize::SIZE_64KIB;
 
 // Whilst Fxfs could support up to u64::MAX, off_t is i64 so allowing files larger than that becomes
-// difficult to deal with via the POSIX APIs. fxdax: the last page's too, as Linux's MAX_LFS_FILESIZE
+// difficult to deal with via the POSIX APIs. cladefs: the last page's too, as Linux's MAX_LFS_FILESIZE
 // has it, which only Fuchsia's PagedObjectHandle couldn't write: nothing bounded a write by the
 // limit, and a file that reached it couldn't be opened once it was closed (xfstests generic/525).
 pub const MAX_FILE_SIZE: u64 = i64::MAX as u64;
@@ -114,17 +114,17 @@ pub struct Options {
     /// NOTE: Type 3 delivery blobs are currently UNSTABLE / EXPERIMENTAL and subject to change.
     pub allow_type3_blobs: bool,
 
-    /// fxdax: how many records of objects (and their extended attributes and keys) the stores
+    /// cladefs: how many records of objects (and their extended attributes and keys) the stores
     /// cache, all told, whatever their number: each saves a lookup in its store's tree for each use
     /// of a cached object's attributes.
     pub object_cache_items: usize,
 
-    /// fxdax: if set, the graveyard tombstones the objects queued in batches, waiting this long
+    /// cladefs: if set, the graveyard tombstones the objects queued in batches, waiting this long
     /// once it has none left before taking more, rather than being woken for each: unless
     /// something waits for it (`Graveyard::flush`).
     pub graveyard_batch_delay: Option<std::time::Duration>,
 
-    /// fxdax: if set, mounting opens only the volumes replay needs: the others stay closed, costing
+    /// cladefs: if set, mounting opens only the volumes replay needs: the others stay closed, costing
     /// nothing, until they are asked for by name (`RootVolume::volume`). What walks every volume
     /// (fsck, say) doesn't find those. A volume closed holds nothing in the journal.
     pub lazy_volumes: bool,
@@ -225,7 +225,7 @@ pub trait JournalingObject: Send + Sync {
     async fn flush(&self, reason: FlushReason) -> Result<Version, Error>;
 
     /// Writes mutations to the journal.  This allows objects to encrypt or otherwise modify what
-    /// gets written to the journal. fxdax: an object that writes them as they are, as this does,
+    /// gets written to the journal. cladefs: an object that writes them as they are, as this does,
     /// says so (`writes_mutations_as_they_are`).
     fn write_mutations(
         &self,
@@ -237,7 +237,7 @@ pub trait JournalingObject: Send + Sync {
         }
     }
 
-    /// fxdax: whether `write_mutations` writes each mutation as it is, whatever was written before
+    /// cladefs: whether `write_mutations` writes each mutation as it is, whatever was written before
     /// it: the journal then serializes them before taking its writer's lock, which only orders
     /// them (`Journal::commit`).
     fn writes_mutations_as_they_are(&self) -> bool {
@@ -259,12 +259,12 @@ pub struct SyncOptions<'a> {
     /// sync needs to proceed.
     pub precondition: Option<Box<dyn FnOnce() -> bool + 'a + Send>>,
 
-    /// fxdax: with `flush_device`, return without waiting for the frees of the extents that the
+    /// cladefs: with `flush_device`, return without waiting for the frees of the extents that the
     /// flush lets die, round trips to the device that the next flush waits for (as an fsync
     /// needs only what it wrote to be on the device).
     pub background_frees: bool,
 
-    /// fxdax: the caller holds the commit lock: an allocation for the journal's own transaction
+    /// cladefs: the caller holds the commit lock: an allocation for the journal's own transaction
     /// (`Transaction::holding_commits`), short of room, as a commit makes room in the journal. The
     /// sync records no reaches, whose transaction would wait for that lock, its own task's, for
     /// ever (TASK-233); the next sync records them.
@@ -360,19 +360,19 @@ impl FxFilesystemBuilder {
         self
     }
 
-    /// fxdax: sets how many objects' records the stores cache (`Options::object_cache_items`).
+    /// cladefs: sets how many objects' records the stores cache (`Options::object_cache_items`).
     pub fn object_cache_items(mut self, items: usize) -> Self {
         self.options.object_cache_items = items;
         self
     }
 
-    /// fxdax: has the graveyard tombstone in batches (`Options::graveyard_batch_delay`).
+    /// cladefs: has the graveyard tombstone in batches (`Options::graveyard_batch_delay`).
     pub fn graveyard_batch_delay(mut self, delay: std::time::Duration) -> Self {
         self.options.graveyard_batch_delay = Some(delay);
         self
     }
 
-    /// fxdax: opens volumes as they are asked for (`Options::lazy_volumes`).
+    /// cladefs: opens volumes as they are asked for (`Options::lazy_volumes`).
     pub fn lazy_volumes(mut self, lazy: bool) -> Self {
         self.options.lazy_volumes = lazy;
         self
@@ -581,7 +581,7 @@ impl FxFilesystemBuilder {
                 .context("Journal replay failed")?;
             filesystem.root_store().set_trace(self.trace);
 
-            // fxdax: the journal continues in new extents, which a super-block records. No
+            // cladefs: the journal continues in new extents, which a super-block records. No
             // compaction, which writes a super-block too, runs meanwhile, nor until the initial
             // reap's done: as below, it may otherwise find what a compaction just put in the
             // graveyard, tombstoning it twice.
@@ -594,7 +594,7 @@ impl FxFilesystemBuilder {
                     if filesystem.renew_journal_tail().await? {
                         filesystem.record_journal_tail().await?;
                     }
-                    // fxdax: the extents a crash orphaned go with a flush, now: they hold room on
+                    // cladefs: the extents a crash orphaned go with a flush, now: they hold room on
                     // the device Fxfs doesn't count, so that writes would find it full before Fxfs
                     // did, with no NoSpace to say so. Before any compaction, which records them
                     // while they die: they may be as many as were sought, of numbers the device
@@ -657,7 +657,7 @@ pub struct FxFilesystem {
     // An event that is signalled when the filesystem starts to shut down.
     trace: bool,
     graveyard: Arc<Graveyard>,
-    /// fxdax: what the caches of its stores' records share (`Options::object_cache_items`).
+    /// cladefs: what the caches of its stores' records share (`Options::object_cache_items`).
     tree_cache_budget: Arc<TreeCacheBudget>,
     completed_transactions: UintProperty,
     options: Options,
@@ -674,7 +674,7 @@ pub struct FxFilesystem {
 
     layer_pager: Option<Arc<dyn LayerPager>>,
 
-    // fxdax: a read-only mount's following of its writer (crate::follower).
+    // cladefs: a read-only mount's following of its writer (crate::follower).
     follower: crate::follower::Follower,
 
     // NOTE: This *must* go last so that when users take the device from a closed filesystem, the
@@ -709,7 +709,7 @@ impl FxFilesystem {
         assert_eq!(self.closed.swap(true, Ordering::SeqCst), false);
         debug_assert_not_too_long!(self.graveyard.wait_for_reap());
         debug_assert_not_too_long!(self.background_tasks.clone().cancel());
-        // fxdax: what dropped allocations left in shared extents, which the next mount counts.
+        // cladefs: what dropped allocations left in shared extents, which the next mount counts.
         if !self.options().read_only && self.journal().image_builder_mode().is_none() {
             self.allocator().record_reaches().await?;
         }
@@ -721,12 +721,12 @@ impl FxFilesystem {
         } else {
             match self.journal.sync(SyncOptions { flush_device: true, ..Default::default() }).await
             {
-                // fxdax: the frees the sync let die, before the device closes.
+                // cladefs: the frees the sync let die, before the device closes.
                 Ok(checkpoint) => self.allocator().freed().await.map(|()| checkpoint),
                 Err(error) => Err(error),
             }
         };
-        // fxdax: with nothing in flight, what the filesystem holds, its metadata reservation
+        // cladefs: with nothing in flight, what the filesystem holds, its metadata reservation
         // included, which the next mount reserves again, fits in the device: one holding more
         // counted bytes it didn't hold, and its next mount fails (TASK-211).
         if let Ok(Some(_)) = &sync_status {
@@ -794,7 +794,7 @@ impl FxFilesystem {
 
     pub async fn sync(&self, options: SyncOptions<'_>) -> Result<(), Error> {
         let wait_for_frees = options.flush_device && !options.background_frees;
-        // fxdax: what dropped allocations left in shared extents, before the barrier that seals it:
+        // cladefs: what dropped allocations left in shared extents, before the barrier that seals it:
         // boxed, as an allocation short of room syncs, and this commits a transaction; but not as
         // the caller holds the commit lock, which that transaction would wait for (TASK-233).
         if !self.options.read_only && !options.holding_commits {
@@ -834,7 +834,7 @@ impl FxFilesystem {
         &self.options
     }
 
-    /// fxdax: a new cache of a store's records.
+    /// cladefs: a new cache of a store's records.
     pub fn new_tree_cache(&self) -> TreeCache {
         TreeCache::sharing(&self.tree_cache_budget)
     }
@@ -853,7 +853,7 @@ impl FxFilesystem {
         self.commit_mutex.lock().await
     }
 
-    /// fxdax: gives the journal new extents past where it continues, if it can't write those it
+    /// cladefs: gives the journal new extents past where it continues, if it can't write those it
     /// has there, and returns whether it did: after replay, and as the filesystem thaws in a VM
     /// restored from a snapshot, whose device's branch is new
     /// ([`Journal::renew_tail`](crate::object_store::journal::Journal::renew_tail)). Nothing may
@@ -867,7 +867,7 @@ impl FxFilesystem {
         Ok(renewed)
     }
 
-    /// fxdax: writes a super-block recording the journal's new extents
+    /// cladefs: writes a super-block recording the journal's new extents
     /// ([`FxFilesystem::renew_journal_tail`]). It waits for the frees the last flush let die,
     /// which commit: so commits must go on. And for any compaction, whose super-block it may not
     /// write beside.
@@ -906,7 +906,7 @@ impl FxFilesystem {
             assert!(object_id > last_object_id);
             last_object_id = object_id;
 
-            // fxdax: a store's commits, which a snapshot of it holds back from its flush until it
+            // cladefs: a store's commits, which a snapshot of it holds back from its flush until it
             // commits (TASK-241): a flush's BeginFlush and EndFlush, above, take nothing, as the
             // snapshot's flush makes them.
             if self.object_manager().store(object_id).is_some() {
@@ -1002,7 +1002,7 @@ impl FxFilesystem {
         }
     }
 
-    /// fxdax: waits for room in the journal, which only the flush task's compactions make: it is
+    /// cladefs: waits for room in the journal, which only the flush task's compactions make: it is
     /// started first, as a mount that has committed nothing yet has none, and a wait without it
     /// never ends (TASK-272).
     pub(crate) async fn wait_for_journal_space(&self) -> Result<(), Error> {
@@ -1050,7 +1050,7 @@ impl FxFilesystem {
         //   3. No reservation is supplied, so we try and reserve space with the allocator now,
         //      and will return NoSpace if that fails.
         //
-        // fxdax: a transaction that may borrow reserves with the allocator if it can, unless it
+        // cladefs: a transaction that may borrow reserves with the allocator if it can, unless it
         // compacts or brings a reservation of its own, and borrows only what that doesn't pay
         // for (`MetadataReservation::Borrowing`): all of it if the filesystem is too full. A
         // borrowing transaction is charged its journal usage four times over, the padding of the
@@ -1093,7 +1093,7 @@ impl FxFilesystem {
         Ok((metadata_reservation, options.allocator_reservation, hold))
     }
 
-    /// fxdax: renews the metadata reservation of `transaction`, committed and continued
+    /// cladefs: renews the metadata reservation of `transaction`, committed and continued
     /// (`Transaction::commit_and_continue`), to what a new transaction's holds
     /// (TRANSACTION_METADATA_MAX_AMOUNT): its commit moved what it used of it to the metadata
     /// reservation, and what it commits next must be paid for again. Without this, a truncate of
@@ -1259,7 +1259,7 @@ impl FsckAfterEveryTransaction {
 
     async fn run(self: Arc<Self>) {
         if let Some(fs) = self.fs.get().and_then(Weak::upgrade) {
-            // fxdax: says what it found, not "1 error".
+            // cladefs: says what it found, not "1 error".
             let issues = Arc::new(Mutex::new(Vec::new()));
             let found = issues.clone();
             let options = FsckOptions {
@@ -1902,7 +1902,7 @@ mod tests {
         }
     }
 
-    /// fxdax: the extents of the device's branch that it holds and Fxfs doesn't know.
+    /// cladefs: the extents of the device's branch that it holds and Fxfs doesn't know.
     async fn leaked_extents(fs: &FxFilesystem) -> Vec<ExtentId> {
         let device = fs.device();
         let known = fs.allocator().extents();
@@ -1911,7 +1911,7 @@ mod tests {
         held.filter(|extent| extent.branch == branch && !known.contains_key(extent)).collect()
     }
 
-    /// fxdax: Fxfs writes, overwrites, renames and deletes files while its store crashes at
+    /// cladefs: Fxfs writes, overwrites, renames and deletes files while its store crashes at
     /// every barrier (backlog doc-4: a crash keeps what preceded the last barrier, and any of what
     /// followed it, at random). Each crash leaves a filesystem that mounts and checks, holds the files
     /// synced before it, and goes on writing.
@@ -2140,7 +2140,7 @@ mod tests {
         }
     }
 
-    /// fxdax: Fxfs counts space against the store's capacity: it runs out with NoSpace before the
+    /// cladefs: Fxfs counts space against the store's capacity: it runs out with NoSpace before the
     /// store refuses a write, and the extents of files deleted are freed, which makes room again.
     #[fuchsia::test]
     async fn test_space_runs_out_at_the_stores_capacity() {
@@ -2223,7 +2223,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a fork of the store (backlog doc-4) has a branch of its own, and holds the
+    /// cladefs: a fork of the store (backlog doc-4) has a branch of its own, and holds the
     /// filesystem as its parent did, which it mounts, changes and checks apart from its parent.
     #[fuchsia::test]
     async fn test_fork() {
@@ -2295,7 +2295,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: random 4 KiB writes over a large file, each to new blocks that leave the old ones'
+    /// cladefs: random 4 KiB writes over a large file, each to new blocks that leave the old ones'
     /// extents partly dead, as a guest's mmapped writes make, and the journal compacted.
     #[fuchsia::test]
     async fn test_compaction_after_random_overwrites() {
@@ -2671,7 +2671,7 @@ mod tests {
     async fn test_image_builder_mode() {
         const BLOCK_SIZE: u32 = 4096;
         const EXISTING_FILE_RANGE: Range<u64> = 4096 * 1024..4096 * 1025;
-        // fxdax: the data is an extent of the device's branch, which Fxfs mints past.
+        // cladefs: the data is an extent of the device's branch, which Fxfs mints past.
         let device =
             DeviceHolder::new(FakeDevice::new(2048, BLOCK_SIZE).with_branch(TEST_EXTENT.branch));
 
@@ -2795,7 +2795,7 @@ mod tests {
 
         fs.close().await.expect("Close failed");
 
-        // fxdax: the device is full, as nothing more could be written; upstream copies the part
+        // cladefs: the device is full, as nothing more could be written; upstream copies the part
         // of the device written to a device that size.
         let device = fs.take_device().await;
         device.reopen(true);
@@ -2860,7 +2860,7 @@ mod tests {
 
         let other_sb = target_sb.next();
 
-        // 5. Verify `target_sb` is valid and `other_sb` is empty: fxdax: the root names only
+        // 5. Verify `target_sb` is valid and `other_sb` is empty: cladefs: the root names only
         // `target_sb`.
         let device = fs.take_device().await;
         device.reopen(true); // Read-only is fine for verifying.

@@ -1,16 +1,16 @@
 # Integrator guide: running tenants' VMs on extentd
 
 For whoever writes the VM manager, the trusted service on each host that talks to the extentd
-daemon and starts Firecracker. `crates/fxdax/proto/fxdax/extentd/v1/extentd.proto` is the reference
+daemon and starts Firecracker. `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto` is the reference
 for every call named here.
 
-A VM manager in Go uses the Go package fxdax generates from it, `go/extentd/v1` (TASK-219): its
+A VM manager in Go uses the Go package cladefs generates from it, `go/extentd/v1` (TASK-219): its
 messages and stubs, and `NewClient`, which connects to the control socket and has a failed call's
 error carry the daemon's errno (`errors.Is(err, syscall.ENOENT)`). Take it from the commit the
 daemon is built from, so that the two agree:
 
 ```sh
-go get github.com/semistrict/fxdax/go@<fxdax commit>
+go get github.com/semistrict/cladefs/go@<cladefs commit>
 ```
 
 The VM manager is trusted. VM processes are not: treat one as compromised, and everything here
@@ -18,7 +18,7 @@ follows from that.
 
 ## Per-host setup
 
-1. Start `fxdax-extentd` with `FXDAX_EXTENTD_GRPC` naming its control socket. Keep that socket away
+1. Start `cladefs-extentd` with `CLADEFS_EXTENTD_GRPC` naming its control socket. Keep that socket away
    from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
    (TASK-159): run the VM manager as that user, or as root.
 2. For each tenant, call `Grant` with the tenant's name, the directory of its stores, and its jails'
@@ -112,7 +112,7 @@ This ends the tenant's access on this host and frees the copy. Nothing needs it 
 elsewhere, or to work again here: `CreateStore` takes it back.
 
 `DropStore` fails with `FAILED_PRECONDITION` (`EBUSY`) while a VM process has the store open.
-`fxdaxctl drop DIR` does the same from a shell.
+`cladefsctl drop DIR` does the same from a shell.
 
 ### 5. When the snapshot is finished with, everywhere
 
@@ -141,11 +141,11 @@ right after (TASK-277). So in every agent of yours that connects from the guest 
 - **Only resend what the host can safely see twice.** The host may have read the ask before the
   reset. Make the host's side idempotent, or give each ask an ID the host deduplicates on.
 
-`crates/fxfs-automount/src/reconnect.rs` does this for fxdax's own guest agent (`fxfs-automount`,
+`crates/fxfs-automount/src/reconnect.rs` does this for cladefs's own guest agent (`fxfs-automount`,
 `git-remote-fxfs`), whose asks to the sandbox manager are idempotent: `AttachBase` of a base that is
 already attached does nothing. Copy its rules, or call it from Rust.
 
-This needs fxdax's Firecracker series `fxdax-v1.16.1-r3` or later. When it takes a snapshot, it
+This needs cladefs's Firecracker series `fxdax-v1.16.1-r3` or later. When it takes a snapshot, it
 queues an RST behind any response still in the guest's receive queue. On older series, the guest
 can take such a response after the reset: its connection then connects to nothing, and its reads
 hang forever.
@@ -168,7 +168,7 @@ ForkStore(from = <base point>, to = <VM's store>)
 The base stays writable on its host. What it writes after reaches no fork of the point: make a new
 point to pass that on. `DeleteStore(<base point>)` ends the point everywhere, and the forks keep
 what they inherited. A point of a point fails with `INVALID_ARGUMENT`: fork the point itself.
-`fxdaxctl point SRC DST` makes one from a shell.
+`cladefsctl point SRC DST` makes one from a shell.
 
 ## Limits
 

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: cells (TASK-364). A tenant's cell is its unit of placement: a host at a time holds it,
+//! cladefs: cells (TASK-364). A tenant's cell is its unit of placement: a host at a time holds it,
 //! and with it every one of its volumes, each a branch of its own, kept under the cell's prefix
 //! ([`Cell::prefix`]). The cell's object ([`layout::cell`]) says who holds it, at what epoch, by
 //! which placement's fencing token, and what volumes it has.
@@ -17,11 +17,11 @@
 //! The volumes a cell has change only by its holder, each change conditional on the object being
 //! as its holder last took or changed it: another's taking since fails it ([`Error::Fenced`]).
 //!
-//! fxdax: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
+//! cladefs: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
 //! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`]);
 //! none, it is in the clear, and so are its branches ([`crate::keys`]).
 //!
-//! fxdax: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
+//! cladefs: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
 //! ([`shred`], doc-16, Shredding; TASK-411.7): its branches' DEKs unwrap no more, and no one takes
 //! the cell again, nor writes a branch of it in the clear. Only as strong as the bucket keeps no
 //! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
@@ -93,16 +93,16 @@ pub struct Object {
     pub volumes: BTreeMap<String, Volume>,
     /// Whether it was deleted: then no one takes it again.
     pub deleted: bool,
-    /// fxdax: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first:
+    /// cladefs: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first:
     /// none, in the clear (TASK-411.3).
     pub keks: Vec<Kek>,
-    /// fxdax: whether it was shredded ([`shred`], TASK-411.7): its KEKs gone, so that its
+    /// cladefs: whether it was shredded ([`shred`], TASK-411.7): its KEKs gone, so that its
     /// branches' data is unreadable, and no one takes it again.
     pub shredded: bool,
 }
 
 impl Object {
-    /// fxdax: a cell's object as its maker makes it, held by `holder` of the placement of `token`
+    /// cladefs: a cell's object as its maker makes it, held by `holder` of the placement of `token`
     /// at epoch 1, of no volumes, its KEK `kek`, if any.
     fn made(holder: u64, token: u64, kek: Option<Kek>) -> Self {
         Self {
@@ -153,7 +153,7 @@ async fn change<R>(
 }
 
 /// Creates `cell`, of no volumes, held by `holder` of the placement of `token` at epoch 1: a
-/// create of another's finds its object there. fxdax: its KEK `kek`, if given (TASK-411.3).
+/// create of another's finds its object there. cladefs: its KEK `kek`, if given (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
     cell: Cell,
@@ -170,7 +170,7 @@ pub async fn create(
     Ok(Held { cell, epoch: 1, holder })
 }
 
-/// fxdax: makes `cell`, of no volumes, its KEK `kek`, as `holder` makes it, held by no placement
+/// cladefs: makes `cell`, of no volumes, its KEK `kek`, as `holder` makes it, held by no placement
 /// (token 0), so that any placement takes it (TASK-411.4): what a fork into a new cell makes as it
 /// gives its child its keys, before the child's store opens, wherever it does. Returns the cell's
 /// object, and whether this made it: one there already, another's, is left as it is.
@@ -194,7 +194,7 @@ pub async fn make(
 
 /// Takes `cell` for `holder`, of the placement of `token`, at the epoch after its last taking's:
 /// refused if it has no object ([`Error::NoCell`]), if it was deleted ([`Error::Deleted`]), or if
-/// a placement of a higher token holds it ([`Error::Stale`]). fxdax: and if it was shredded
+/// a placement of a higher token holds it ([`Error::Stale`]). cladefs: and if it was shredded
 /// ([`shredded`]).
 pub async fn take(
     bucket: &impl Bucket,
@@ -245,7 +245,7 @@ async fn change_held<R>(
 
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
 /// takes it as [`take`] does, a shredded one refused; or, if it has no object and `make` says so, makes it, held at epoch 1,
-/// fxdax: its KEK `kek`, if given (TASK-411.3);
+/// cladefs: its KEK `kek`, if given (TASK-411.3);
 /// and, given `volume`, has it hold that volume, under that name, unless it names the volume's
 /// branch already, under whatever name it gave it: refused, as [`add_volume`] refuses, if another
 /// branch has the name, or the name names no volume. A volume's name is its branch's from its
@@ -324,7 +324,7 @@ pub async fn remove_volume(bucket: &impl Bucket, held: Held, name: &str) -> Resu
     .await
 }
 
-/// fxdax: adds `kek`, a new generation of its KEK, to the cell `held` holds, if `held` holds it
+/// cladefs: adds `kek`, a new generation of its KEK, to the cell `held` holds, if `held` holds it
 /// still: the cell's KEK rotated ([`crate::keys::rotate`], TASK-411.3). Returns its object as left.
 pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Object, Error> {
     change_held(bucket, held, |mut found| {
@@ -343,7 +343,7 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
     .await
 }
 
-/// fxdax: shreds `cell` (doc-16, Shredding; TASK-411.7): takes every generation of its KEK out of
+/// cladefs: shreds `cell` (doc-16, Shredding; TASK-411.7): takes every generation of its KEK out of
 /// its object and marks it shredded, by one conditional update, whoever holds it: its branches'
 /// DEKs, wrapped by those KEKs, unwrap no more, and no one takes it again ([`take`], [`hold`]).
 /// Its holder, if any, goes on changing its volumes until told (the mark stays, as every change
@@ -366,7 +366,7 @@ pub async fn shred(bucket: &impl Bucket, cell: Cell) -> Result<usize, Error> {
     .await
 }
 
-/// fxdax: the refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its
+/// cladefs: the refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its
 /// stores opening no more (`EACCES`), and the collector leaving its sealed objects uncompacted.
 pub fn shredded(cell: Cell) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
@@ -403,7 +403,7 @@ pub async fn holds(bucket: &impl Bucket, held: Held) -> Result<bool, Error> {
     }))
 }
 
-/// fxdax: every cell of `bucket` with an object under its prefix, in the order of their keys: found
+/// cladefs: every cell of `bucket` with an object under its prefix, in the order of their keys: found
 /// by delimiter listings of `tenants/` then of each tenant's `cells/`, listing none of their objects
 /// (TASK-395.4, TASK-395.5): what a sweep of the collector over every cell visits. A page at a
 /// time, of tenants and of a tenant's cells, each listed as the cells before it are taken: so it
@@ -414,15 +414,15 @@ pub fn listed<B: Bucket>(bucket: &B) -> impl Stream<Item = Cell> + Send + '_ {
     tenants(bucket).flat_map(move |tenant| of_tenant(bucket, tenant))
 }
 
-/// fxdax: every tenant of `bucket` with a cell, in order: by a delimiter listing of `tenants/`, a
+/// cladefs: every tenant of `bucket` with a cell, in order: by a delimiter listing of `tenants/`, a
 /// page at a time, listing none of their cells' objects.
 pub fn tenants<B: Bucket>(bucket: &B) -> impl Stream<Item = u64> + Send + '_ {
     let tenants = bucket::prefixes(bucket, layout::TENANTS.to_owned());
     tenants.filter_map(|prefix| std::future::ready(layout::tenant_of_prefix(&prefix)))
 }
 
-/// fxdax: every cell of `tenant` with an object under its prefix, in order: by a delimiter listing
-/// of the tenant's `cells/`, a page at a time, listing none of their objects (`fxdax-gc --usage`,
+/// cladefs: every cell of `tenant` with an object under its prefix, in order: by a delimiter listing
+/// of the tenant's `cells/`, a page at a time, listing none of their objects (`cladefs-gc --usage`,
 /// TASK-395.8).
 pub fn of_tenant<B: Bucket>(bucket: &B, tenant: u64) -> impl Stream<Item = Cell> + Send + '_ {
     let cells = bucket::prefixes(bucket, layout::cells_of(tenant));

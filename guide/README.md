@@ -1,4 +1,4 @@
-# fxdax Flight School
+# cladefs Flight School
 
 An interactive guide to this repo's code, built from the code itself, its design docs, its TLA+
 specs, its past bugs and its dead ends. It has four parts:
@@ -7,7 +7,7 @@ specs, its past bugs and its dead ends. It has four parts:
   writes a prompt for Claude Code naming your gaps.
 - **Invariants.** The claims that let you predict the code, each with the code that keeps it and
   the evidence that it is needed.
-- **Index.** Every symbol of fxdax, and of the Fuchsia code it copies, labelled by origin.
+- **Index.** Every symbol of cladefs, and of the Fuchsia code it copies, labelled by origin.
 - **Page Pilot.** A mission: follow one DAX page through copy-on-write, predicting before each
   reveal, then replay TLC's counterexamples with a rule removed.
 

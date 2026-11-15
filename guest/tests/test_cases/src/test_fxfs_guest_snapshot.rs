@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Snapshots of a VM with an extent-store device (fxdax's TASK-39.1): the guest's Fxfs, written
+//! Snapshots of a VM with an extent-store device (cladefs's TASK-39.1): the guest's Fxfs, written
 //! to and frozen, is snapshotted, the VM goes, and the snapshot is restored (`Mode`):
 //!
 //! - **Zygote:** twice, as a zygote's children are, each into a store of its own, forked from the
@@ -12,10 +12,10 @@
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
 //!   restore names a point and a store it doesn't have here, so it takes the point's branch from
-//!   the bucket, and forks the store from it. The bucket is FXDAX_EXTENTD_REMOTE's, if set, or one
-//!   in the daemon's memory. With FXDAX_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
+//!   the bucket, and forks the store from it. The bucket is CLADEFS_EXTENTD_REMOTE's, if set, or one
+//!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
 //!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
-//!   leaves the snapshot, its memory and the VM's root filesystem in FXDAX_MIGRATE_BUNDLE; then
+//!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
 //!   `target`, on another host, which has nothing of the store, restores it from there, at the
 //!   same paths, the root filesystem's too, which the restored VM goes on reading.
 //! - **TenantMigrate:** as Migrate, for a tenant's VM (TASK-154): the tenant's VM process names no
@@ -29,7 +29,7 @@
 //! through a mapping made before it, which the restored window maps again), writes its own file,
 //! which mints extents of its store's branch, and remounts.
 //!
-//! fxdax TASK-92.14: before the snapshot, the guest maps a file of `PIECES` pages, each an extent
+//! cladefs TASK-92.14: before the snapshot, the guest maps a file of `PIECES` pages, each an extent
 //! of its own, read in from a mount before, so that the window maps each page apart (with a DAX
 //! window), and reads it; frozen, it holds no private page. Restored, the mapping reads the same.
 //! The host says how long each restore (`/snapshot/load`) took, which maps the window's mappings
@@ -111,7 +111,7 @@ impl Mode {
     }
 }
 
-/// Which part of a migration between hosts runs here (FXDAX_MIGRATE_PHASE), if one does.
+/// Which part of a migration between hosts runs here (CLADEFS_MIGRATE_PHASE), if one does.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Phase {
@@ -124,10 +124,10 @@ enum Phase {
 #[cfg_attr(feature = "guest", allow(dead_code))]
 impl Phase {
     fn of_env() -> Option<Self> {
-        match std::env::var("FXDAX_MIGRATE_PHASE").ok()?.as_str() {
+        match std::env::var("CLADEFS_MIGRATE_PHASE").ok()?.as_str() {
             "source" => Some(Self::Source),
             "target" => Some(Self::Target),
-            other => panic!("FXDAX_MIGRATE_PHASE is source or target, not {other:?}"),
+            other => panic!("CLADEFS_MIGRATE_PHASE is source or target, not {other:?}"),
         }
     }
 }
@@ -194,12 +194,12 @@ fn pieces_stored() -> Vec<u8> {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use futures::executor::block_on;
-    use fxdax::{Filesystem, Image, Storage};
+    use cladefs::{Filesystem, Image, Storage};
     use std::io::{BufRead, BufReader, Write};
     use std::os::unix::net::UnixListener;
     use std::path::{Path, PathBuf};
@@ -207,7 +207,7 @@ mod host {
     /// A short path for a vsock's socket, which Unix sockets' 107 bytes hold: the test's
     /// directory may be deep.
     fn uds(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fxdax-snap-{}-{name}.vsock", std::process::id()))
+        std::env::temp_dir().join(format!("cladefs-snap-{}-{name}.vsock", std::process::id()))
     }
 
     /// Reads a line from the guest on the vsock port the VM at `uds` forwards to the host.
@@ -256,7 +256,7 @@ mod host {
         // In the bucket once taken: no sync.
         let branch = control.branch(Path::new(&taken))?;
         let id = |name: &str| std::env::var(name).ok().map(|id| id.parse()).transpose();
-        let socket = control.grant(tenant, dir, id("FXDAX_JAIL_UID")?, id("FXDAX_JAIL_GID")?)?;
+        let socket = control.grant(tenant, dir, id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?)?;
         control.create_store(point, CAPACITY, branch, None)?;
         Ok(socket)
     }
@@ -276,7 +276,7 @@ mod host {
 
     /// The bundle a migration between hosts leaves the VM in, and restores it from.
     fn bundle() -> anyhow::Result<PathBuf> {
-        Ok(std::env::var_os("FXDAX_MIGRATE_BUNDLE").context("FXDAX_MIGRATE_BUNDLE not set")?.into())
+        Ok(std::env::var_os("CLADEFS_MIGRATE_BUNDLE").context("CLADEFS_MIGRATE_BUNDLE not set")?.into())
     }
 
     impl TestFxfsGuestSnapshot {
@@ -300,23 +300,23 @@ mod host {
                     // In the temporary directory, as a socket's path is short (SUN_LEN), and a
                     // test's directory, a round's of a soak, may not be.
                     let socket = std::env::temp_dir()
-                        .join(format!("fxdax-{}-extentd.sock", std::process::id()));
-                    let named = std::env::var_os("FXDAX_EXTENTD_REMOTE")
+                        .join(format!("cladefs-{}-extentd.sock", std::process::id()));
+                    let named = std::env::var_os("CLADEFS_EXTENTD_REMOTE")
                         .is_some_and(|remote| !remote.is_empty());
                     let bucket = std::ffi::OsStr::new("memory:///migrate");
                     // Beside it, for its tenant's socket, in the jail if there is one.
                     let tenants =
-                        std::env::temp_dir().join(format!("fxdax-{}-tenants", std::process::id()));
-                    let mut env = vec![("FXDAX_EXTENTD_TENANTS", tenants.as_os_str())];
+                        std::env::temp_dir().join(format!("cladefs-{}-tenants", std::process::id()));
+                    let mut env = vec![("CLADEFS_EXTENTD_TENANTS", tenants.as_os_str())];
                     if !named {
-                        env.push(("FXDAX_EXTENTD_REMOTE", bucket));
+                        env.push(("CLADEFS_EXTENTD_REMOTE", bucket));
                     }
                     let daemon =
                         crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, None)?;
                     std::mem::forget(daemon);
                     socket
                 }
-                _ => std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD not set")?.into(),
+                _ => std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into(),
             };
             let (snapshot, memory) = (dir.join("snapshot"), dir.join("memory"));
             if phase == Some(Phase::Target) {
@@ -444,7 +444,7 @@ mod host {
                 });
                 restored.push(firecracker);
             }
-            // All at once: no restore of one point waits for another's. fxdax: each timed, as it
+            // All at once: no restore of one point waits for another's. cladefs: each timed, as it
             // maps the window's mappings again before the VM resumes (TASK-92.14).
             std::thread::scope(|scope| {
                 let loading: Vec<_> = (restored.iter().zip(&loads).zip(self.restores(phase)))
@@ -479,7 +479,7 @@ mod host {
         loop {
             match control.resize_store(path, GROWN) {
                 Err(error)
-                    if error.errno() == Some(fxdax::Errno::EBUSY)
+                    if error.errno() == Some(cladefs::Errno::EBUSY)
                         && std::time::Instant::now() < deadline =>
                 {
                     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -491,7 +491,7 @@ mod host {
 
     impl Test for TestFxfsGuestSnapshot {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -527,7 +527,7 @@ mod host {
             // open meanwhile: a look at the point through the daemon's control API, which works
             // on the point alone, closes it first.
             if !stores.is_empty() {
-                let extentd = std::env::var_os("FXDAX_EXTENTD").expect("FXDAX_EXTENTD");
+                let extentd = std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD");
                 let mut point = test_setup.tmp_dir.join("snapshot").into_os_string();
                 point.push(".extent-extents");
                 let control = crate::common::control(Path::new(&extentd)).expect("control API");

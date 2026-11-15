@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -6,9 +6,9 @@
 //! epoch and root, and an owner of each part of the rest, which keeps that part's invariants: the
 //! room its extents take ([`Space`]), what it changed since its last commit ([`Uncommitted`]), the
 //! gate writes pass ([`Gate`]), its segments ([`Segments`]), its extents' own files
-//! ([`OwnFiles`]), what its next commit makes unreferenced ([`Unreferenced`]); fxdax: its
+//! ([`OwnFiles`]), what its next commit makes unreferenced ([`Unreferenced`]); cladefs: its
 //! write-ahead log's segments not yet acknowledged in the bucket ([`Queue`], TASK-165.9), the
-//! frees it keeps ([`KeptExtents`]), and what views refuse ([`Sealed`]). fxdax: the state locked
+//! frees it keeps ([`KeptExtents`]), and what views refuse ([`Sealed`]). cladefs: the state locked
 //! ([`Locked`]), which the builds of the tests audit as it lets it go ([`State::audit`],
 //! TASK-160.16).
 
@@ -53,7 +53,7 @@ pub(crate) struct State<F> {
     /// The root as of the last commit.
     pub root: Vec<u8>,
     pub next_sequence: u64,
-    /// fxdax: the sequence numbers of its own extents it opens no more (TASK-79.6).
+    /// cladefs: the sequence numbers of its own extents it opens no more (TASK-79.6).
     pub spent: Spent,
     /// What it changed since the last commit, which the next records.
     pub uncommitted: Uncommitted<F>,
@@ -65,37 +65,37 @@ pub(crate) struct State<F> {
     pub own_files: OwnFiles<F>,
     /// The files the next commit makes unreferenced.
     pub unreferenced: Unreferenced,
-    /// fxdax: its write-ahead log's segments not yet acknowledged in the bucket, which the
+    /// cladefs: its write-ahead log's segments not yet acknowledged in the bucket, which the
     /// uploader takes (TASK-165.9).
     pub wal: Queue,
-    /// fxdax: whether it holds a point, which nothing writes (doc-7, Points).
+    /// cladefs: whether it holds a point, which nothing writes (doc-7, Points).
     pub point: bool,
-    /// fxdax: the extents freed whose data stays.
+    /// cladefs: the extents freed whose data stays.
     pub kept: KeptExtents,
-    /// fxdax: the extents views refuse, sealed after their commits.
+    /// cladefs: the extents views refuse, sealed after their commits.
     pub sealed: Sealed,
-    /// fxdax: where the store is in its life: open, closed, or failed, and why ([`Standing`],
+    /// cladefs: where the store is in its life: open, closed, or failed, and why ([`Standing`],
     /// TASK-160.19), which its guards read ([`Guarded`]).
     pub standing: Standing,
-    /// fxdax: the segments closed for want of room since the last commit, which the next frames,
+    /// cladefs: the segments closed for want of room since the last commit, which the next frames,
     /// with the rule that framings end themselves off alone (TASK-150.2's shape, TASK-153.8).
     pub deferred: Vec<Unframed<F>>,
-    /// fxdax: the framings to run, one at a time, in the order their segments closed
+    /// cladefs: the framings to run, one at a time, in the order their segments closed
     /// (TASK-165.9).
     pub framing: Framing<F>,
-    /// fxdax: the branch as the replay of its footers has it, from its opening on, in the builds
+    /// cladefs: the branch as the replay of its footers has it, from its opening on, in the builds
     /// of the tests ([`Replay`], TASK-165.9).
     #[cfg(any(test, feature = "audit"))]
     pub replay: Replay,
 }
 
-/// fxdax: a branch as the one replay of its segments' footers has it, the bucket's and its
+/// cladefs: a branch as the one replay of its segments' footers has it, the bucket's and its
 /// write-ahead log's from its store's opening on, its extents by their lengths: which the state,
 /// as of each commit that closes a segment, must hold, the audit asserts (TASK-165.9's AC #5).
 #[cfg(any(test, feature = "audit"))]
 pub(crate) type Replay = extent_remote::State<Lengths>;
 
-/// fxdax: the lengths of a branch's extents, as a replay of its footers places them ([`Replay`]).
+/// cladefs: the lengths of a branch's extents, as a replay of its footers places them ([`Replay`]).
 #[cfg(any(test, feature = "audit"))]
 #[derive(Default)]
 pub(crate) struct Lengths(pub BTreeMap<ExtentId, u64>);
@@ -113,7 +113,7 @@ impl extent_remote::recovery::Places for Lengths {
     }
 }
 
-/// fxdax: the segments closed whose framings are yet to run, in the order they closed, and whether
+/// cladefs: the segments closed whose framings are yet to run, in the order they closed, and whether
 /// a framer runs them, one after another (`wal`'s docs, TASK-165.9), with the looks ahead at parts
 /// of segments filling between them (TASK-400); and those it framed, written, not yet durable,
 /// since when the first of them waits, and whether a thread makes them durable, together
@@ -121,7 +121,7 @@ impl extent_remote::recovery::Places for Lengths {
 pub(crate) struct Framing<F> {
     pub queue: std::collections::VecDeque<Job<F>>,
     pub running: bool,
-    /// fxdax: whether the framer's thread reads a part looked at ahead, holding no lock
+    /// cladefs: whether the framer's thread reads a part looked at ahead, holding no lock
     /// (`Framer::see`, TASK-423).
     pub looking: bool,
     pub written: Vec<(SegmentId, Arc<Framed<F>>)>,
@@ -129,7 +129,7 @@ pub(crate) struct Framing<F> {
     pub syncing: bool,
 }
 
-/// fxdax: what a store's framer does ([`Framing`]), in order: a look ahead at a part of a segment,
+/// cladefs: what a store's framer does ([`Framing`]), in order: a look ahead at a part of a segment,
 /// written whole, as it fills (`framing::see`, TASK-400); or a segment's framing.
 pub(crate) enum Job<F> {
     See(SegmentId, u64),
@@ -145,18 +145,18 @@ impl<F> Default for Framing<F> {
 }
 
 impl<F> Framing<F> {
-    /// fxdax: whether a look ahead is queued, or reading its part ([`Framing::looking`]).
+    /// cladefs: whether a look ahead is queued, or reading its part ([`Framing::looking`]).
     pub fn looks_ahead(&self) -> bool {
         self.looking || self.queue.iter().any(|job| matches!(job, Job::See(..)))
     }
 
-    /// fxdax: segment `number`'s framing wrote `framed`, to be made durable.
+    /// cladefs: segment `number`'s framing wrote `framed`, to be made durable.
     pub fn wrote(&mut self, number: SegmentId, framed: Arc<Framed<F>>) {
         self.written.push((number, framed));
         self.since.get_or_insert_with(Instant::now);
     }
 
-    /// fxdax: the segments framed, written, to be made durable together, and since when the first
+    /// cladefs: the segments framed, written, to be made durable together, and since when the first
     /// of them waits: none left.
     pub fn take_written(&mut self) -> (Vec<(SegmentId, Arc<Framed<F>>)>, Instant) {
         let since = self.since.take().unwrap_or_else(Instant::now);
@@ -175,7 +175,7 @@ pub(crate) enum Reader {
     View { epoch: u64, since: u64, pinned: bool },
 }
 
-/// fxdax: where an extent is in its life, as the store's state has it, found in one place
+/// cladefs: where an extent is in its life, as the store's state has it, found in one place
 /// ([`State::life`], TASK-160.18), which readers and writers decide by.
 pub(crate) enum Life<'a> {
     /// Written since the last commit, which seals it: its entry, as the writes that finished left
@@ -216,12 +216,12 @@ impl<F: File> State<F> {
         changed
     }
 
-    /// fxdax: fails the store, for `error`, unless it failed before ([`Standing::fail`]).
+    /// cladefs: fails the store, for `error`, unless it failed before ([`Standing::fail`]).
     pub fn fail(&mut self, error: &Error) {
         self.standing.fail(error);
     }
 
-    /// fxdax: where `extent` is in its life ([`Life`], TASK-160.18).
+    /// cladefs: where `extent` is in its life ([`Life`], TASK-160.18).
     pub fn life(&self, extent: ExtentId) -> Life<'_> {
         let open = self.uncommitted.is_open(extent);
         match self.extents.get(&extent) {
@@ -284,7 +284,7 @@ impl<F: File> State<F> {
         }
     }
 
-    /// fxdax: the extents `moved` says the collector moved, from where to where, held or kept, named
+    /// cladefs: the extents `moved` says the collector moved, from where to where, held or kept, named
     /// where they went, if they are named on their way there ([`Store::moved`](crate::Store::moved)).
     pub fn moved(&mut self, moved: &[(ExtentId, Location, Location)]) {
         for (extent, _, to) in moved {
@@ -295,7 +295,7 @@ impl<F: File> State<F> {
         }
     }
 
-    /// fxdax: segment `segment`, closed, is acknowledged in the bucket, at `key`, and the extents
+    /// cladefs: segment `segment`, closed, is acknowledged in the bucket, at `key`, and the extents
     /// stored on their own its footer names are at `own` there (TASK-165.8): its extents sealed in
     /// it, and those stored on their own, held or kept, are the bucket's from now on, read there,
     /// and their files leave the store, for the host's cache if `cached`, its framed file being
@@ -314,7 +314,7 @@ impl<F: File> State<F> {
         self.into_bucket(segment, (key, cached), sealed, own, |_| true)
     }
 
-    /// fxdax: `sealed`, extents sealed in segment `segment`, one run each, those kept in it that
+    /// cladefs: `sealed`, extents sealed in segment `segment`, one run each, those kept in it that
     /// `named` names, and `own`, stored on their own, are read in the bucket from now on, in the
     /// object at `key`, or where `own` says ([`State::acknowledge`]). Returns the files that leave,
     /// by their paths, with their keys in the bucket, if into the host's cache, as `cached` says.
@@ -390,7 +390,7 @@ impl<F: File> State<F> {
         self.space.check(grows, self.kept.for_views(), wasted)
     }
 
-    /// fxdax: the bucket needs the frees of the commits up to `epoch` no more, acknowledged there:
+    /// cladefs: the bucket needs the frees of the commits up to `epoch` no more, acknowledged there:
     /// trims let them go once views need them no more either.
     pub fn release_kept(&mut self, epoch: u64) {
         self.kept.release(epoch);
@@ -412,7 +412,7 @@ impl<F: File> State<F> {
     }
 }
 
-/// fxdax: where a store is in its life, one value (TASK-160.19): open; closed
+/// cladefs: where a store is in its life, one value (TASK-160.19): open; closed
 /// ([`Store::close`](crate::Store::close)), when it reads what it holds, and changes nothing; or
 /// failed, its state ahead of its files, when it does nothing more, saying why: the first
 /// failure's error (TASK-165.9: a framing's failure, which no flush waits for, failed a later
@@ -466,14 +466,14 @@ impl Standing {
     }
 }
 
-/// fxdax: what a [`Guarded`] state holds to, checked as it is taken and again after each of its
+/// cladefs: what a [`Guarded`] state holds to, checked as it is taken and again after each of its
 /// waits (TASK-160.19).
 pub(crate) trait Holds {
     /// Fails unless `state`, of branch `branch`, holds to it.
     fn check<F: File>(state: &State<F>, branch: Branch) -> Result<(), Error>;
 }
 
-/// fxdax: a store not failed: what reading takes ([`Readable`]).
+/// cladefs: a store not failed: what reading takes ([`Readable`]).
 pub(crate) struct Whole;
 
 impl Holds for Whole {
@@ -482,7 +482,7 @@ impl Holds for Whole {
     }
 }
 
-/// fxdax: a store not failed, nor closed, its branch no point: what changing it takes
+/// cladefs: a store not failed, nor closed, its branch no point: what changing it takes
 /// ([`Writable`]).
 pub(crate) struct Changeable;
 
@@ -495,7 +495,7 @@ impl Holds for Changeable {
     }
 }
 
-/// fxdax: the state, locked, as `H` holds it to (TASK-160.19): made only by checking it, and
+/// cladefs: the state, locked, as `H` holds it to (TASK-160.19): made only by checking it, and
 /// checked again by each of its waits, which let the lock go meanwhile, so that no caller goes on
 /// after waiting as if the store couldn't have failed, or closed, since (TASK-83). With the rule
 /// `recheck_after_waiting` off, as a Shuttle test has it to show it needed, its waits check
@@ -506,10 +506,10 @@ pub(crate) struct Guarded<'a, F: File, H> {
     holds: std::marker::PhantomData<H>,
 }
 
-/// fxdax: the state of a store not failed ([`Whole`]).
+/// cladefs: the state of a store not failed ([`Whole`]).
 pub(crate) type Readable<'a, F> = Guarded<'a, F, Whole>;
 
-/// fxdax: the state of a store to change ([`Changeable`]).
+/// cladefs: the state of a store to change ([`Changeable`]).
 pub(crate) type Writable<'a, F> = Guarded<'a, F, Changeable>;
 
 impl<'a, F: File, H: Holds> Guarded<'a, F, H> {
@@ -573,7 +573,7 @@ impl<F: File, H> DerefMut for Guarded<'_, F, H> {
     }
 }
 
-/// fxdax: the state, locked, which the builds of the tests audit as they let it go, waiting or
+/// cladefs: the state, locked, which the builds of the tests audit as they let it go, waiting or
 /// done ([`State::audit`], TASK-160.16): so that whatever changed it, its counts are found right
 /// before anything else reads them. Unless the store failed, which changes nothing more, its
 /// state other than its files say; or the thread is panicking, which another panic would abort.
@@ -582,7 +582,7 @@ pub(crate) struct Locked<'a, F: File> {
     guard: Option<StateGuard<'a, F>>,
 }
 
-/// fxdax: the state's lock held, shared beyond one store, as its followers share it with its
+/// cladefs: the state's lock held, shared beyond one store, as its followers share it with its
 /// writer, which a panic holding aborts the extent daemon (`crate::shared`, TASK-149.24).
 pub(crate) type StateGuard<'a, F> = Shared<MutexGuard<'a, State<F>>>;
 
@@ -620,14 +620,14 @@ impl<F: File> Drop for Locked<'_, F> {
     }
 }
 
-/// fxdax: the most extents a branch may hold for the audit to recount its state ([`Locked`]): it
-/// goes through them all each time the state is let go, which took a test of fxdax's, writing a
+/// cladefs: the most extents a branch may hold for the audit to recount its state ([`Locked`]): it
+/// goes through them all each time the state is let go, which took a test of cladefs's, writing a
 /// base of 32,768 extents one at a time and forking it a hundred times, past an hour; the stores
 /// of the store's own tests hold hundreds at most (TASK-160.16).
 #[cfg(any(test, feature = "audit"))]
 const AUDITED_EXTENTS: usize = 4096;
 
-/// fxdax: `guard`'s state, audited, in the builds of the tests ([`Locked`]), if its branch holds
+/// cladefs: `guard`'s state, audited, in the builds of the tests ([`Locked`]), if its branch holds
 /// [`AUDITED_EXTENTS`] at most. An audit that fails panics once it has let the state go,
 /// unpoisoned, saying what it found after [`AUDIT_FAILED`]: the store's drop, closing its branch,
 /// locks it again, which a lock poisoned would panic in, aborting as the audit's panic unwinds.
@@ -650,26 +650,26 @@ fn audited<F: File>(guard: StateGuard<'_, F>) -> StateGuard<'_, F> {
     }
 }
 
-/// fxdax: what a failed audit's panic begins with, whatever it found (TASK-160.16).
+/// cladefs: what a failed audit's panic begins with, whatever it found (TASK-160.16).
 #[cfg(any(test, feature = "audit"))]
 pub const AUDIT_FAILED: &str = "the extent store's audit found its counts drifted";
 
-/// fxdax: `guard`, audited not, in the other builds.
+/// cladefs: `guard`, audited not, in the other builds.
 #[cfg(not(any(test, feature = "audit")))]
 fn audited<F: File>(guard: StateGuard<'_, F>) -> StateGuard<'_, F> {
     guard
 }
 
-/// fxdax: the audit of the state's counts, in the builds of the tests (TASK-160.16).
+/// cladefs: the audit of the state's counts, in the builds of the tests (TASK-160.16).
 #[cfg(any(test, feature = "audit"))]
 impl<F: File> State<F> {
-    /// fxdax: the replay ([`Replay`]) applies `footer`, of a segment just closed; and, if the
+    /// cladefs: the replay ([`Replay`]) applies `footer`, of a segment just closed; and, if the
     /// state holds nothing open nor changed since its last commit, which the footer names last,
     /// panics unless the state is what the replay says: its extents and their lengths, its root,
     /// what it spent and its capacity (TASK-165.9's AC #5).
     pub fn closed(&mut self, footer: &extent_frame::segment::Footer) {
         self.replay.apply_contents(footer.seq, footer.epoch, &footer.contents);
-        // fxdax: nor a commit begun in the footers, which the open segment's ends (TASK-92.41).
+        // cladefs: nor a commit begun in the footers, which the open segment's ends (TASK-92.41).
         if !self.uncommitted.is_empty() || self.replay.begun.is_some() {
             return;
         }
@@ -725,7 +725,7 @@ impl<F: File> State<F> {
 /// The room a branch's extents take: the most they may hold, as its record says
 /// ([`Store::set_capacity`](crate::Store::set_capacity)), the bytes they hold, and those writes
 /// in progress may add. A write takes room only if what they hold and may add, with what views
-/// keep of the frees, which counts as used, fits. fxdax: and with what writes since the last
+/// keep of the frees, which counts as used, fits. cladefs: and with what writes since the last
 /// commit wasted past the capacity's worth, which counts as used too (TASK-79.2): what they wrote
 /// over, in segments, and what frees of extents open let go of, and writes dropped, of what they
 /// wrote. That is its writer's own, which no commit held, and which its next commit takes back:
@@ -743,7 +743,7 @@ pub(crate) struct Space {
     capacity: u64,
     /// The bytes extents hold.
     stored: u64,
-    /// fxdax: of those, the bytes of the extents the branch wrote (TASK-49).
+    /// cladefs: of those, the bytes of the extents the branch wrote (TASK-49).
     own: u64,
     /// The bytes writes in progress may add.
     reserved: u64,
@@ -774,7 +774,7 @@ impl Space {
         Ok(())
     }
 
-    /// fxdax: of `wasted`, what is past the capacity's worth, which counts as used (TASK-79.2).
+    /// cladefs: of `wasted`, what is past the capacity's worth, which counts as used (TASK-79.2).
     fn past_slack(&self, wasted: u64) -> u64 {
         wasted.saturating_sub(self.capacity)
     }
@@ -836,7 +836,7 @@ impl Space {
         }
     }
 
-    /// fxdax: panics unless it counts what `held`, the extents of `branch`, hold, of them its own;
+    /// cladefs: panics unless it counts what `held`, the extents of `branch`, hold, of them its own;
     /// and, unless `writing`, writes in progress reserving none (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
     fn audit(&self, branch: u64, held: &[(&ExtentId, &Extent)], writing: bool) {
@@ -875,19 +875,19 @@ pub(crate) struct Uncommitted<F> {
     /// written again, is opened anew, and the writes to it before are another opening's.
     openings: u64,
     changes: Vec<Change>,
-    /// fxdax: the bytes the open extents' writes wrote over, in segments (TASK-79.2).
+    /// cladefs: the bytes the open extents' writes wrote over, in segments (TASK-79.2).
     overwritten: u64,
-    /// fxdax: the bytes writes since the last commit wrote that no extent holds any more, which
+    /// cladefs: the bytes writes since the last commit wrote that no extent holds any more, which
     /// no commit held: of the extents freed while open, in segments, what they wrote over too, or
     /// in raw files of their own; and of the writes dropped, in segments (TASK-79.2).
     let_go: u64,
-    /// fxdax: the capacity set since the last commit, which the next sets in the branch's state
+    /// cladefs: the capacity set since the last commit, which the next sets in the branch's state
     /// as object storage keeps it, its segment's footer saying so (TASK-165.3).
     capacity: Option<u64>,
 }
 
 /// An extent open: where its data goes, and its opening's number, which the writes to it carry;
-/// fxdax: and the bytes its writes wrote over, in segments, which its pieces hold until it is
+/// cladefs: and the bytes its writes wrote over, in segments, which its pieces hold until it is
 /// sealed, or freed.
 struct Open<F> {
     placement: Placement<F>,
@@ -928,7 +928,7 @@ impl<F> Uncommitted<F> {
         !self.open.is_empty()
     }
 
-    /// fxdax: whether nothing changed since the last commit: no extent open, no free.
+    /// cladefs: whether nothing changed since the last commit: no extent open, no free.
     #[cfg(any(test, feature = "audit"))]
     pub fn is_empty(&self) -> bool {
         self.open.is_empty() && self.changes.is_empty() && self.capacity.is_none()
@@ -942,7 +942,7 @@ impl<F> Uncommitted<F> {
         opening
     }
 
-    /// fxdax: a write to `extent`, open, wrote over `bytes` of what it held, in segments
+    /// cladefs: a write to `extent`, open, wrote over `bytes` of what it held, in segments
     /// (TASK-79.2).
     pub fn wrote_over(&mut self, extent: ExtentId, bytes: u64) {
         if let Some(open) = self.open.get_mut(&extent) {
@@ -951,13 +951,13 @@ impl<F> Uncommitted<F> {
         }
     }
 
-    /// fxdax: `bytes` that writes since the last commit wrote are no extent's any more: of an
+    /// cladefs: `bytes` that writes since the last commit wrote are no extent's any more: of an
     /// extent freed while open, or of a write dropped (TASK-79.2).
     pub fn let_go(&mut self, bytes: u64) {
         self.let_go += bytes;
     }
 
-    /// fxdax: the bytes writes since the last commit wasted: what the open extents' writes wrote
+    /// cladefs: the bytes writes since the last commit wasted: what the open extents' writes wrote
     /// over, and what those freed, and writes dropped, let go of (TASK-79.2). The next commit takes
     /// them back: as dead space, which leaves with the segments once acknowledged in the bucket
     /// (TASK-165.8); and of raw files, which its flush removes.
@@ -965,7 +965,7 @@ impl<F> Uncommitted<F> {
         self.overwritten + self.let_go
     }
 
-    /// `extent`, freed, is open no more: where its data went, if it was. fxdax: what its writes
+    /// `extent`, freed, is open no more: where its data went, if it was. cladefs: what its writes
     /// wrote over is let go of with the rest of what they wrote, which its free lets go of; and its
     /// raw file, if it has one, which the next commit's flush removes.
     pub fn remove(&mut self, extent: ExtentId) -> Option<Placement<F>> {
@@ -974,7 +974,7 @@ impl<F> Uncommitted<F> {
         Some(open.placement)
     }
 
-    /// The extents open, which the next commit seals, in the order they were opened. fxdax: an
+    /// The extents open, which the next commit seals, in the order they were opened. cladefs: an
     /// order the branch's writes decide, not the map's, which differs from one run to the next,
     /// so that where a commit seals each, and what its record says, do not (TASK-79.79).
     pub fn open_extents(&self) -> Vec<ExtentId> {
@@ -988,12 +988,12 @@ impl<F> Uncommitted<F> {
         self.changes.push(change);
     }
 
-    /// fxdax: the branch's capacity is `capacity`, as of the next commit.
+    /// cladefs: the branch's capacity is `capacity`, as of the next commit.
     pub fn resize(&mut self, capacity: u64) {
         self.capacity = Some(capacity);
     }
 
-    /// fxdax: the capacity set since the last commit, if any, for the commit, which sets it.
+    /// cladefs: the capacity set since the last commit, if any, for the commit, which sets it.
     pub fn take_capacity(&mut self) -> Option<u64> {
         self.capacity.take()
     }
@@ -1006,7 +1006,7 @@ impl<F> Uncommitted<F> {
         std::mem::take(&mut self.changes)
     }
 
-    /// fxdax: panics unless what it counts of the open extents, which `extents` holds as the
+    /// cladefs: panics unless what it counts of the open extents, which `extents` holds as the
     /// writes that finished left them, is theirs (TASK-160.16): what their writes wrote over, in
     /// segments, the bytes of their pieces past what the extent holds of them. What writes since
     /// the last commit let go of, which nothing it holds says, it can't recount.
@@ -1082,13 +1082,13 @@ impl Gate {
 pub(crate) struct OwnFiles<F> {
     open: Files<ExtentId, F>,
     sizes: HashMap<ExtentId, u64>,
-    /// fxdax: in order, which their flush syncs them in, rather than the order of a map that
+    /// cladefs: in order, which their flush syncs them in, rather than the order of a map that
     /// differs from one run to the next (TASK-79.79).
     unsynced: BTreeMap<ExtentId, Arc<F>>,
     /// Their directory, the branch's, and whether its entries changed since the last commit.
     dir: String,
     written: bool,
-    /// fxdax: the store's keys, which its files are read under (TASK-411.3).
+    /// cladefs: the store's keys, which its files are read under (TASK-411.3).
     keys: Arc<extent_remote::keys::Ring>,
 }
 
@@ -1150,7 +1150,7 @@ impl<F: File> OwnFiles<F> {
         self.sizes.values().sum()
     }
 
-    /// fxdax: panics unless they are the files of `sealed`, the branch's own extents sealed in
+    /// cladefs: panics unless they are the files of `sealed`, the branch's own extents sealed in
     /// files of their own, held or kept (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
     pub fn audit(&self, sealed: &HashSet<ExtentId>) {
@@ -1180,7 +1180,7 @@ impl Unreferenced {
 mod tests {
     use super::*;
 
-    /// fxdax: a store's standing: closing says whether it was open; failing keeps its first cause,
+    /// cladefs: a store's standing: closing says whether it was open; failing keeps its first cause,
     /// and whether it was closed, closed or failed in either order; a failed store refuses, saying
     /// why, and closes all the same, once (TASK-160.19).
     #[test]

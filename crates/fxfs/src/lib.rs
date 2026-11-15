@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/storage/fxfs/src/lib.rs`, without `virtual_device`, which reads an image within a
-// file as a device: fxdax's extent store has no images within files (backlog doc-4).
+// file as a device: cladefs's extent store has no images within files (backlog doc-4).
 
 //! Fxfs is a log-structured filesystem for [Fuchsia](https://fuchsia.dev/).
 //!

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the case copy-on-write DAX is for (doc-13, TASK-164.5), the user's 400 GB file, scaled to
+//! cladefs: the case copy-on-write DAX is for (doc-13, TASK-164.5), the user's 400 GB file, scaled to
 //! a host of 4 vCPUs and 16 GB: a file four times the guest's memory, in a base, mapped `MAP_SHARED`
 //! read-write by a VM on a fork of it, read all over at random, then 5% of its pages written, at
 //! random, and synced. A base VM writes the file, through its page cache; the host forks the base;
@@ -10,8 +10,8 @@
 //! without a window (fxfs-guest-bigmap), maps the file whole, and:
 //!
 //! 1. reads a word of each page once, in a random order (`read-cold`), then of pages at random for
-//!    FXDAX_BIGMAP_READ_SECS (10, `read-warm`);
-//! 2. stores a word to FXDAX_BIGMAP_WRITE_PERCENT (5) of its pages, in a random order, each store
+//!    CLADEFS_BIGMAP_READ_SECS (10, `read-warm`);
+//! 2. stores a word to CLADEFS_BIGMAP_WRITE_PERCENT (5) of its pages, in a random order, each store
 //!    timed, the first to a page faulting (`written`);
 //! 3. msyncs it (`synced`);
 //! 4. checks each page's words through the mapping, and the written pages' through read(2)
@@ -20,7 +20,7 @@
 //! The guest says each step's throughput, faults and stores' latencies on its console, as
 //! `bigmap: NAME VALUE`, and asks the host to measure its memory and the host's after each
 //! (`crate::measure`). scripts/pgbench-gate.py gates them (docs/measurements/dax-cow-gate.md).
-//! FXDAX_BIGMAP_MIB sizes the file (4096), FXDAX_BIGMAP_MEMORY_MIB the VMs' memory (1024).
+//! CLADEFS_BIGMAP_MIB sizes the file (4096), CLADEFS_BIGMAP_MEMORY_MIB the VMs' memory (1024).
 
 use macros::{guest, host};
 
@@ -33,7 +33,7 @@ pub struct TestFxfsGuestBigmap {
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::measure::{HostMemory, LAST, Requests};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
@@ -48,14 +48,14 @@ mod host {
         }
     }
 
-    /// The file's size, in bytes: FXDAX_BIGMAP_MIB MiB, or 4 GiB, four times the guest's memory.
+    /// The file's size, in bytes: CLADEFS_BIGMAP_MIB MiB, or 4 GiB, four times the guest's memory.
     fn file_bytes() -> anyhow::Result<u64> {
-        Ok(setting("FXDAX_BIGMAP_MIB", 4096)?.max(1) << 20)
+        Ok(setting("CLADEFS_BIGMAP_MIB", 4096)?.max(1) << 20)
     }
 
-    /// The VMs' memory, in MiB: FXDAX_BIGMAP_MEMORY_MIB, or 1024.
+    /// The VMs' memory, in MiB: CLADEFS_BIGMAP_MEMORY_MIB, or 1024.
     fn memory() -> anyhow::Result<u32> {
-        Ok(u32::try_from(setting("FXDAX_BIGMAP_MEMORY_MIB", 1024)?)?)
+        Ok(u32::try_from(setting("CLADEFS_BIGMAP_MEMORY_MIB", 1024)?)?)
     }
 
     /// A VM, its guest in role `role` (`base` or `map`), on the store at `store`, of `capacity`
@@ -70,9 +70,9 @@ mod host {
         let mut vm = Vm::new(2, memory()?)?;
         vm.guest_kernel()?;
         vm.extent_store_served("extents", store, capacity, window, extentd);
-        vm.env(&CString::new(format!("FXDAX_BIGMAP_ROLE={role}"))?);
-        vm.env(&CString::new(format!("FXDAX_BIGMAP_BYTES={}", file_bytes()?))?);
-        for var in ["FXDAX_BIGMAP_READ_SECS", "FXDAX_BIGMAP_WRITE_PERCENT"] {
+        vm.env(&CString::new(format!("CLADEFS_BIGMAP_ROLE={role}"))?);
+        vm.env(&CString::new(format!("CLADEFS_BIGMAP_BYTES={}", file_bytes()?))?);
+        for var in ["CLADEFS_BIGMAP_READ_SECS", "CLADEFS_BIGMAP_WRITE_PERCENT"] {
             if let Ok(value) = std::env::var(var) {
                 vm.env(&CString::new(format!("{var}={value}"))?);
             }
@@ -107,11 +107,11 @@ mod host {
             let bytes = file_bytes()?;
             // Its socket's path short, as Unix sockets' must be; its metrics, which say what its
             // memory holds.
-            let sockets = tempdir::TempDir::new("fxdax-bigmap")?;
+            let sockets = tempdir::TempDir::new("cladefs-bigmap")?;
             let socket = sockets.path().join("extentd.sock");
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
-            let env = [("FXDAX_EXTENTD_METRICS", OsStr::new(&metrics_at))];
+            let env = [("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at))];
             // The file whole in its memory, as a host keeps a base's pages for its forks, and room.
             let memory = Some(bytes + (2 << 30));
             let daemon = crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, memory)?;
@@ -144,7 +144,7 @@ mod host {
 
     impl Test for TestFxfsGuestBigmap {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -373,7 +373,7 @@ mod guest {
         measure("read-cold");
 
         // Pages at random, for a while.
-        let secs = Duration::from_secs(count("FXDAX_BIGMAP_READ_SECS", 10).max(1));
+        let secs = Duration::from_secs(count("CLADEFS_BIGMAP_READ_SECS", 10).max(1));
         let (mut reads, start) = (0u64, Instant::now());
         while start.elapsed() < secs {
             for _ in 0..4096 {
@@ -387,7 +387,7 @@ mod guest {
         measure("read-warm");
 
         // Some of the pages, at random, each store timed.
-        let percent = count("FXDAX_BIGMAP_WRITE_PERCENT", 5).clamp(1, 100) as usize;
+        let percent = count("CLADEFS_BIGMAP_WRITE_PERCENT", 5).clamp(1, 100) as usize;
         let order = random.shuffled(pages);
         let chosen = &order[..(pages * percent / 100).max(1)];
         let mut is_written = vec![false; pages];
@@ -434,10 +434,10 @@ mod guest {
 
     impl Test for TestFxfsGuestBigmap {
         fn in_guest(self: Box<Self>) {
-            let bytes = count("FXDAX_BIGMAP_BYTES", 0) as usize;
-            assert!(bytes > 0 && bytes % PAGE == 0, "FXDAX_BIGMAP_BYTES is {bytes}");
+            let bytes = count("CLADEFS_BIGMAP_BYTES", 0) as usize;
+            assert!(bytes > 0 && bytes % PAGE == 0, "CLADEFS_BIGMAP_BYTES is {bytes}");
             mount();
-            match std::env::var("FXDAX_BIGMAP_ROLE").unwrap().as_str() {
+            match std::env::var("CLADEFS_BIGMAP_ROLE").unwrap().as_str() {
                 "base" => {
                     make_base(bytes);
                     unmount();

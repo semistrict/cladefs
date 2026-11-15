@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store.rs`. fxdax snapshots (volume snapshots that share
+// Fuchsia's `src/storage/fxfs/src/object_store.rs`. cladefs snapshots (volume snapshots that share
 // their source's layers and extents) deviate from upstream here: `ObjectStore::snapshot_store_info`
 // gives a snapshot's store information. Volumes are not installed from images within files (no
-// `install`, `extent_mapping_iterator`): such an image is a block device's, which fxdax's extent
+// `install`, `extent_mapping_iterator`): such an image is a block device's, which cladefs's extent
 // store has none of (backlog doc-4). `dirty_reservation` reserves room for the data a page cache
 // holds dirty as it dirties it, as Fuchsia's pager-backed files do in its platform crate, for the
 // guest kernel's page cache (TASK-80). A store may have layers of a base, a volume another
@@ -176,11 +176,11 @@ pub struct StoreInfoV61 {
     /// when the directory doesn't yet exist.
     internal_directory_object_id: u64,
 
-    /// fxdax: the store's layers below `layers`, newest first: those of a volume another filesystem
+    /// cladefs: the store's layers below `layers`, newest first: those of a volume another filesystem
     /// wrote, which the store merges over and never rewrites (backlog doc-10).
     pub base_layers: Vec<BaseLayerV61>,
 
-    /// fxdax: the branches of the extents the base layers, and the data they name, are in. The
+    /// cladefs: the branches of the extents the base layers, and the data they name, are in. The
     /// allocator holds none of them.
     pub base_branches: Vec<u64>,
 }
@@ -223,7 +223,7 @@ impl StoreInfo {
 }
 
 impl StoreInfo {
-    /// fxdax: fails unless this describes a volume to make over a base (backlog doc-10): an
+    /// cladefs: fails unless this describes a volume to make over a base (backlog doc-10): an
     /// argument, which a caller gives, wrong (`InvalidArgs`), not the filesystem inconsistent.
     fn check_manifest(&self) -> Result<(), Error> {
         ensure!(
@@ -237,7 +237,7 @@ impl StoreInfo {
         Ok(())
     }
 
-    /// fxdax: gives the store a new identifier, as a new store from then on.
+    /// cladefs: gives the store a new identifier, as a new store from then on.
     fn set_new_guid(&mut self) {
         self.guid = *Uuid::new_v4().as_bytes();
     }
@@ -247,7 +247,7 @@ impl StoreInfo {
 // It will likely involve placing limits on the maximum number of layers.
 pub const MAX_STORE_INFO_SERIALIZED_SIZE: usize = 131072;
 
-// fxdax: the most a manifest may take of a store's information, leaving room for layers of its own.
+// cladefs: the most a manifest may take of a store's information, leaving room for layers of its own.
 pub const MAX_MANIFEST_SIZE: usize = MAX_STORE_INFO_SERIALIZED_SIZE / 2;
 
 // This needs to be large enough to accommodate the maximum amount of unflushed data (data that is
@@ -384,7 +384,7 @@ impl EncryptedMutations {
         let len = data.len();
         self.data.append(&mut data.into());
         // Chunks of the same transaction share the same checkpoint, so coalesce their lengths.
-        // fxdax: as version 57's and later's: no versions before 60 are read (backlog doc-4).
+        // cladefs: as version 57's and later's: no versions before 60 are read (backlog doc-4).
         if let Some((last_checkpoint, total_len)) = self.transactions.last_mut() {
             if last_checkpoint.file_offset == checkpoint.file_offset {
                 *total_len += len as u64;
@@ -1493,7 +1493,7 @@ impl ObjectStore {
         txn_options: Options<'_>,
         truncate_guard: Option<&TruncateGuard<'_>>,
     ) -> Result<(), Error> {
-        // fxdax: errors, where upstream asserts: what's in a graveyard, reaped from a mount on, is
+        // cladefs: errors, where upstream asserts: what's in a graveyard, reaped from a mount on, is
         // what an image says, of an object that may not be there.
         ensure!(
             self.tree.exists(&ObjectKey::object(object_id)).await?,
@@ -1522,7 +1522,7 @@ impl ObjectStore {
         self.trim_or_tombstone(object_id, true, txn_options, truncate_guard).await
     }
 
-    /// fxdax: tombstones the objects `object_ids`, which are in the graveyard, as `tombstone_object`
+    /// cladefs: tombstones the objects `object_ids`, which are in the graveyard, as `tombstone_object`
     /// does each, but as many to a transaction as fit (`txn_tombstone_unlinked`): a small file's
     /// tombstone is a few mutations, which a transaction of its own costs several times over. An
     /// object with more than one attribute, or more extents than fit, is finished on its own.
@@ -1783,7 +1783,7 @@ impl ObjectStore {
                         // the next attribute instead: a removed one's tombstone is not.
                         return Ok(TrimResult::Done(Some(found.next())));
                     } else {
-                        // fxdax: past the attributes, there are none to trim: an object's extended
+                        // cladefs: past the attributes, there are none to trim: an object's extended
                         // attributes sort after them, and this would find them from each attribute
                         // ID in turn, of 2^64, the graveyard's task spinning all the while.
                         return Ok(TrimResult::Done(None));
@@ -1843,7 +1843,7 @@ impl ObjectStore {
                     ensure!(block_size.is_aligned(&device_range.range), FxfsError::Inconsistent);
                     allocator.deallocate(transaction, self.store_object_id, device_range).await?;
                     deallocated += len;
-                    // Stop if the transaction is getting too big. fxdax: as it says, in what it
+                    // Stop if the transaction is getting too big. cladefs: as it says, in what it
                     // takes of the journal.
                     if transaction.is_full() {
                         result = TrimResult::Incomplete;
@@ -1875,7 +1875,7 @@ impl ObjectStore {
                 }
                 object_mutation = Some(mutation);
             } else {
-                // fxdax: not a panic: the graveyard's entry is what an image says.
+                // cladefs: not a panic: the graveyard's entry is what an image says.
                 bail!(anyhow!(FxfsError::Inconsistent).context("Inconsistent object type"));
             }
         }
@@ -1920,7 +1920,7 @@ impl ObjectStore {
                         anyhow!(FxfsError::Inconsistent).context("Allocated size overflow")
                     })?;
                 } else {
-                    // fxdax: not a panic, as above.
+                    // cladefs: not a panic, as above.
                     bail!(anyhow!(FxfsError::Inconsistent).context("Unexpected object value"));
                 }
                 transaction.add(self.store_object_id, Mutation::ObjectStore(mutation));
@@ -1929,7 +1929,7 @@ impl ObjectStore {
         Ok(result)
     }
 
-    /// fxdax: tombstones `object_id`, which has no names left, in `transaction`, as the graveyard's
+    /// cladefs: tombstones `object_id`, which has no names left, in `transaction`, as the graveyard's
     /// `tombstone_object` would in transactions of its own: and returns whether it did. What
     /// tombstones an unlinked object in a transaction of its caller's does so here: the graveyard's
     /// batches (`tombstone_objects`), an unlink that frees what it unlinks (fxfs-posix's queued
@@ -1990,7 +1990,7 @@ impl ObjectStore {
         Ok(tombstoned)
     }
 
-    /// fxdax: tombstones `object_id` in `transaction`, if it has nothing allocated, as `trim_some`
+    /// cladefs: tombstones `object_id` in `transaction`, if it has nothing allocated, as `trim_some`
     /// (TrimMode::Tombstone(TombstoneMode::Object)) would, without walking its extents, of which
     /// it has none: and returns whether it did. An object with storage allocated is left to
     /// `trim_some`. Nor has it attributes in the graveyard, which their writes' extents put there.
@@ -2075,7 +2075,7 @@ impl ObjectStore {
                 .await?;
 
         let info = load_store_info(parent_store, store_object_id).await?;
-        // fxdax: what adds to a graveyard asserts there is one, as there is of any store that was
+        // cladefs: what adds to a graveyard asserts there is one, as there is of any store that was
         // made: this is what an image says.
         ensure!(
             info.graveyard_directory_object_id != INVALID_OBJECT_ID,
@@ -2142,7 +2142,7 @@ impl ObjectStore {
                 .append_layers(&parent_store, object_tree_layer_object_ids, None)
                 .await
                 .context("Failed to read object store layers")?;
-            // fxdax: below them, what the store has of a base, which is no part of the size above:
+            // cladefs: below them, what the store has of a base, which is no part of the size above:
             // no compaction rewrites it, so no reservation pays for that.
             fs.allocator().add_base_branches(&base_branches);
             let block_size = store.block_size();
@@ -2385,7 +2385,7 @@ impl ObjectStore {
             unwrapped_key_rolls.push((offset, unwrapped));
         }
 
-        // fxdax: every mutation is AES-256-XTS's, of version 57 or later: no versions before 60 are
+        // cladefs: every mutation is AES-256-XTS's, of version 57 or later: no versions before 60 are
         // read (backlog doc-4).
         let mut cipher = JournalXtsCipher::new(&unwrapped_key, store_info.mutations_cipher_offset);
         let key_rolls: Vec<(usize, UnwrappedKey)> = unwrapped_key_rolls;
@@ -2527,15 +2527,15 @@ impl ObjectStore {
         self.store_info.lock().as_ref().unwrap().mutations_key.is_some()
     }
 
-    /// fxdax: the information of a new store that is a snapshot of this one, which must be
+    /// cladefs: the information of a new store that is a snapshot of this one, which must be
     /// unencrypted: this store's persistent layers and root and graveyard directories as they
     /// are, the object ids it has used so far, and a new guid.
-    /// fxdax: how many layers of a base the store's tree has, at its bottom.
+    /// cladefs: how many layers of a base the store's tree has, at its bottom.
     pub(crate) fn base_layer_count(&self) -> usize {
         self.store_info.lock().as_ref().map_or(0, |info| info.base_layers.len())
     }
 
-    /// fxdax: what describes the store to a filesystem that reads its extents (backlog doc-10): a
+    /// cladefs: what describes the store to a filesystem that reads its extents (backlog doc-10): a
     /// `StoreInfo` with no layers of its own, as its layers are base layers there. `Unavailable` if
     /// the journal holds anything of the store, which layers alone wouldn't say. The caller keeps
     /// compactions off it, with the flush lock or by freezing the filesystem, so that its layers
@@ -2976,7 +2976,7 @@ impl ObjectStore {
                 if !link.is_empty() {
                     return Ok(link.into_vec());
                 }
-                // fxdax: a long target, in its chunks (see `directory::LONG_SYMLINK_XATTR`).
+                // cladefs: a long target, in its chunks (see `directory::LONG_SYMLINK_XATTR`).
                 let mut target = Vec::new();
                 for index in 0.. {
                     let key = ObjectKey::extended_attribute(
@@ -3970,7 +3970,7 @@ mod tests {
         fsck(fs.clone()).await.expect("fsck failed");
     }
 
-    /// fxdax: a store's information may say it has no graveyard, which what adds to one asserts it
+    /// cladefs: a store's information may say it has no graveyard, which what adds to one asserts it
     /// has, so it doesn't open.
     #[fuchsia::test]
     async fn test_store_with_no_graveyard() {
@@ -3998,7 +3998,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: what a graveyard holds is what an image says: an object that isn't there, or isn't
+    /// cladefs: what a graveyard holds is what an image says: an object that isn't there, or isn't
     /// in it, fails its tombstone, where a mount reaps it, and panics nothing.
     #[fuchsia::test]
     async fn test_tombstone_of_what_a_graveyard_should_not_hold() {
@@ -4044,7 +4044,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: an unlinked object is tombstoned in its caller's transaction, whatever its graveyard
+    /// cladefs: an unlinked object is tombstoned in its caller's transaction, whatever its graveyard
     /// entry is (the transaction's own, the tree's, or both, the tree's a trim's), taking the entry
     /// with it, which the graveyard's count says too; one with attributes other than its data
     /// stays in the graveyard, and one not in it isn't tombstoned.

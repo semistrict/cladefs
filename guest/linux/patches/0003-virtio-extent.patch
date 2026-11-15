@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
-virtio_extent: the driver of fxdax's extent-store device
+# Copyright 2026 The cladefs Authors.
+virtio_extent: the driver of cladefs's extent-store device
 
-The virtio extent-store device of fxdax's backlog doc-4: extents named,
+The virtio extent-store device of cladefs's backlog doc-4: extents named,
 written once and freed whole, a root, and a DAX window that extents map
 into, which Fxfs stores its filesystem through. drivers/virtio_extent and
 include/linux/virtio_extent.h, which this adds, and the lines that build

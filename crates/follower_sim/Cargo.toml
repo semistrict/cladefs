@@ -1,4 +1,4 @@
-# fxdax's own: the deterministic simulation of live read-only followers (backlog doc-8, testing
+# cladefs's own: the deterministic simulation of live read-only followers (backlog doc-8, testing
 # 3; TASK-42.1): the real Fxfs as writer and follower on one extent store, and readers, under
 # Shuttle's scheduler. Its tests run with the `shuttle` feature alone:
 # `cargo nextest run -p follower_sim --features shuttle`.

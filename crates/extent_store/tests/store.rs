@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -56,7 +56,7 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
     Store::create(dir, description, OPTIONS).unwrap()
 }
 
-/// fxdax: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
+/// cladefs: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
 /// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
     let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
@@ -66,7 +66,7 @@ fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<Me
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 
-/// fxdax: a new store in `dir`, of `capacity` bytes, made whole, opened as [`opened_on`] opens it.
+/// cladefs: a new store in `dir`, of `capacity` bytes, made whole, opened as [`opened_on`] opens it.
 fn created_on(
     dir: MemDir,
     capacity: u64,
@@ -177,7 +177,7 @@ fn writes_once() {
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), [[1; BLOCK], [2; BLOCK]].concat());
 }
 
-/// fxdax: an extent freed once sealed is written no more, nor opened, though the store holds it
+/// cladefs: an extent freed once sealed is written no more, nor opened, though the store holds it
 /// no longer, nor once it opens again, from its deltas or its checkpoint: forks, views and caches
 /// that hold it by its ID would take another's data for it (TASK-79.6). One freed while open,
 /// which nothing but its writer saw, may be written again; and one never written, though below
@@ -239,7 +239,7 @@ fn capacity() {
 }
 
 /// Freed extents' files, and segments whose extents are all freed, are removed once the frees are
-/// committed, and fxdax: their segments acknowledged in the bucket (TASK-165.9).
+/// committed, and cladefs: their segments acknowledged in the bucket (TASK-165.9).
 #[test]
 fn frees_remove_files() {
     let dir = MemDir::new();
@@ -252,7 +252,7 @@ fn frees_remove_files() {
     store.commit(None).unwrap();
     settled(&store);
     // The first segment, closed, and the next, open.
-    // fxdax: segments' files, not the next segment's, placed ahead of it (TASK-384).
+    // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
     let segments = || {
         let count = |kind| segment_files(&store, &dir, kind).len();
         (count("segments"), count("open-segments"))
@@ -264,7 +264,7 @@ fn frees_remove_files() {
     for sequence in 0..=16 {
         store.free(extent(sequence)).unwrap();
     }
-    // fxdax: not until the frees are committed, and the segment is acknowledged in the bucket,
+    // cladefs: not until the frees are committed, and the segment is acknowledged in the bucket,
     // the write-ahead log keeping it until then (TASK-165.9).
     assert_eq!(segments(), (1, 1));
     assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
@@ -279,7 +279,7 @@ fn frees_remove_files() {
     assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap(), Vec::<String>::new());
 }
 
-/// fxdax: a commit that fills the open segment closes it, and leaves its framing to a thread of
+/// cladefs: a commit that fills the open segment closes it, and leaves its framing to a thread of
 /// its own: its extents read from its raw file meanwhile, and the flush of the commit waits for
 /// its framed file, which holds them from then on, the uploader takes, and its raw file goes for
 /// (TASK-41).
@@ -291,7 +291,7 @@ fn segments_close_framed_by_the_commits_flush() {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
     }
     store.commit_ordered(None).unwrap();
-    // fxdax: segments' files, not the next segment's, placed ahead of it (TASK-384).
+    // cladefs: segments' files, not the next segment's, placed ahead of it (TASK-384).
     let count = |kind| segment_files(&store, &dir, kind).len();
     // Closed, and the next open: its raw file stays until the commit is durable.
     assert_eq!(count("open-segments"), 2);
@@ -301,7 +301,7 @@ fn segments_close_framed_by_the_commits_flush() {
     // Not the uploader's until its commit is durable (TASK-165.9).
     assert!(store.closed(usize::MAX).unwrap().is_empty());
 
-    // fxdax: framed, then its commit's flush: its raw file the spare, the segment after the next
+    // cladefs: framed, then its commit's flush: its raw file the spare, the segment after the next
     // one's placed ahead of it as the next opened, before, its raw file made anew (TASK-384).
     store.wait_framed().unwrap();
     store.flush().unwrap();
@@ -321,7 +321,7 @@ fn closed_one(store: &Store<MemDir>) -> Closed<MemFile> {
     closed
 }
 
-/// fxdax: the uploader takes the segments of the write-ahead log once their commits are durable,
+/// cladefs: the uploader takes the segments of the write-ahead log once their commits are durable,
 /// whose footers say what the commits wrote, with its lengths, freed, and set as the root; the
 /// data of extents freed since stays in the log's files, which the uploader reads, until the
 /// segments are acknowledged (TASK-165.9).
@@ -387,12 +387,12 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     assert!(dir.list(&of("segments", BRANCH.id)).unwrap().len() < segments);
 }
 
-/// fxdax: where in the bucket an extent of `len` bytes is: at `offset` in the object at `key`.
+/// cladefs: where in the bucket an extent of `len` bytes is: at `offset` in the object at `key`.
 fn bucket_location(key: &str, offset: u64, len: u64) -> Location {
     Location { key: key.to_owned(), offset, len }
 }
 
-/// fxdax: a store holds the extents the bucket holds of its branch as of its opening: recovered
+/// cladefs: a store holds the extents the bucket holds of its branch as of its opening: recovered
 /// there, read there, at their locations there, which a read's error names, and freed like others
 /// (TASK-165.8, TASK-165.9).
 #[test]
@@ -427,7 +427,7 @@ fn extents_the_bucket_holds_are_held_without_their_data() {
     error_is(store.read(extent(5), 0, &mut [0; BLOCK]), NoExtent(extent(5)));
 }
 
-/// fxdax: commits append their records to the open segment's log, its alone, and the store opened
+/// cladefs: commits append their records to the open segment's log, its alone, and the store opened
 /// again holds them all (TASK-165.9). The logs of the segments the commits closed go once their
 /// framed files are durable, after the commits return (framings run off them, TASK-165.9, and
 /// make their framed files durable on a thread of the store's, TASK-310): counted once the store
@@ -497,7 +497,7 @@ fn closed_state<D: Dir>(store: &Store<D>) -> Held {
     (epoch, root, next_sequence, store.places().unwrap(), store.spent().unwrap())
 }
 
-/// fxdax: `store` once the segments its commits closed are framed, and the raw files and logs of
+/// cladefs: `store` once the segments its commits closed are framed, and the raw files and logs of
 /// those whose commits are durable are gone: as a flush after their framings leaves it, none of
 /// which a flush waits for (TASK-165.9).
 fn settled<D: Dir>(store: &Store<D>) {
@@ -515,7 +515,7 @@ fn reopened_state(store: Store<MemDir>, dir: &MemDir) -> (Held, Store<MemDir>) {
     (held, store)
 }
 
-/// fxdax: an extent freed while open, which no commit held, is not spent: the store writes it
+/// cladefs: an extent freed while open, which no commit held, is not spent: the store writes it
 /// again, and so does the store opened again, its write-ahead log's footers spending those freed
 /// once sealed alone, as the store does (TASK-160.15, TASK-165.9). One sealed, and freed by a
 /// later commit of the same segment, is spent, though no footer names it held.
@@ -591,7 +591,7 @@ fn sealed_extents_are_one_run_each() {
 fn closed_segments_hold_the_branchs_history() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 64 << 20);
-    // Closed, and open; fxdax: not the next segment's, placed ahead of it (TASK-384).
+    // Closed, and open; cladefs: not the next segment's, placed ahead of it (TASK-384).
     let segments = |store: &Store<MemDir>| {
         dir.list(&of("segments", BRANCH.id)).unwrap().len()
             + segment_files(store, &dir, "open-segments").len()
@@ -744,7 +744,7 @@ fn compressible_data_takes_less_disk() {
     assert!(usage.disk_bytes * 4 < held, "{usage:?}");
 }
 
-/// fxdax: a segment a commit closes is that commit's record once framed, its framing having made
+/// cladefs: a segment a commit closes is that commit's record once framed, its framing having made
 /// its framed file, which holds the commit's data, durable: a crash after leaves the branch as of
 /// that commit, though no flush made it durable, the framed file read, its raw file gone once
 /// opened (TASK-165.9). Before, a crash closes it again from its log (`wal`'s tests). The next
@@ -764,7 +764,7 @@ fn segments_closed_by_commits_are_their_records_once_framed() {
         let crashed = dir.crash(seed);
         drop(store);
         // The opening's open segment is past every one the crash kept a file of: segment 1's,
-        // opened, and fxdax: segment 2's, placed ahead of it (TASK-384).
+        // opened, and cladefs: segment 2's, placed ahead of it (TASK-384).
         let kept = ["segments", "open-segments", "logs"].iter().flat_map(|kind| {
             let names = crashed.list(&of(kind, BRANCH.id)).unwrap();
             names.into_iter().filter_map(|name| u64::from_str_radix(&name, 16).ok())
@@ -778,7 +778,7 @@ fn segments_closed_by_commits_are_their_records_once_framed() {
     }
 }
 
-/// fxdax: a segment closed between commits, the last of whose commits is not durable, is closed
+/// cladefs: a segment closed between commits, the last of whose commits is not durable, is closed
 /// again with no footer by the branch's next opening: which, crashing as it does, leaves its data
 /// whole, for the opening after (TASK-79.33).
 #[test]
@@ -811,7 +811,7 @@ fn segments_closed_between_commits_survive_crashes_closing_them_again() {
     }
 }
 
-/// fxdax: a segment closed between commits, the commits its footer names durable, whose framing a
+/// cladefs: a segment closed between commits, the commits its footer names durable, whose framing a
 /// crash stopped before its framed file was synced, is framed again by the branch's next opening,
 /// from its raw file: its framed file may be whole in its trailer and footer, and torn in its data
 /// (TASK-79.33).
@@ -838,7 +838,7 @@ fn segments_closed_between_commits_survive_crashes_framing_them() {
     }
 }
 
-/// fxdax: so too if the branch is opened again in the same process, its store failed as the
+/// cladefs: so too if the branch is opened again in the same process, its store failed as the
 /// framed file's sync did: the opening makes the framed file durable before its raw file goes,
 /// whatever a crash after it then keeps (TASK-79.33).
 #[test]
@@ -863,7 +863,7 @@ fn segments_closed_between_commits_survive_failures_framing_them() {
     }
 }
 
-/// fxdax: a segment closed between commits keeps its raw file and log until a commit after it is
+/// cladefs: a segment closed between commits keeps its raw file and log until a commit after it is
 /// durable, with the commits its footer names, though its framed file, durable once framed, holds
 /// them (TASK-92.16, TASK-165.9): a crash then leaves the branch as of its last commit, its
 /// framed file read, whose footer names it.
@@ -938,7 +938,7 @@ fn locating_parts_stored_compressed() {
     assert_eq!(read(&store, extent(2), 0, 16 * BLOCK), noise(2, 16 * BLOCK));
 }
 
-/// fxdax: a resize is a commit of its own, which seals nothing, a segment's footer saying it, as
+/// cladefs: a resize is a commit of its own, which seals nothing, a segment's footer saying it, as
 /// object storage keeps the branch's capacity: the last resize of its commits', or none if none
 /// resized it (TASK-165.3, TASK-165.9). The extents open stay open.
 #[test]
@@ -966,7 +966,7 @@ fn resizes_are_commits_of_their_own() {
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), pattern(1, 0, 2 * BLOCK));
 }
 
-/// fxdax: opened by a writer, the store closes its segments for the writer, as object storage
+/// cladefs: opened by a writer, the store closes its segments for the writer, as object storage
 /// keeps them: numbered on from where the writer's chain is, each following the one before, its
 /// commits tagged with the writer's epoch, its extents of their own at the writer's keys; and
 /// keeps each, once its commits are durable, for the uploader, until it is uploaded. Opened as
@@ -1072,7 +1072,7 @@ fn segments_close_for_the_writer_of_their_chain() {
     assert_eq!(store.usage().unwrap().segments, held - 1);
 }
 
-/// fxdax: a segment closed between commits holds what the commits made, as of the last: not
+/// cladefs: a segment closed between commits holds what the commits made, as of the last: not
 /// what was written or freed since, which the next segment holds.
 #[test]
 fn segments_closed_between_commits_hold_the_last_commits_state() {
@@ -1099,7 +1099,7 @@ fn segments_closed_between_commits_hold_the_last_commits_state() {
     assert_eq!(read(&store, extent(3), 0, BLOCK), pattern(3, 0, BLOCK));
 }
 
-/// fxdax (TASK-79.19): the uploader takes so many of the segments closed at once, oldest first;
+/// cladefs (TASK-79.19): the uploader takes so many of the segments closed at once, oldest first;
 /// the rest wait in the store for its next take.
 #[test]
 fn closed_segments_are_taken_so_many_at_once() {
@@ -1142,7 +1142,7 @@ fn capacity_resizes() {
     assert!(store.set_capacity(BLOCK as u64 - 1).is_err());
     store.set_capacity(held).unwrap();
     assert_eq!(store.info().unwrap().available, 0);
-    // fxdax: durable, though no commit came since, the index holding it (TASK-165.7).
+    // cladefs: durable, though no commit came since, the index holding it (TASK-165.7).
     drop(store);
     let store = Store::open(dir.clone(), OPTIONS).unwrap();
     assert_eq!(store.info().unwrap().capacity, held);
@@ -1154,7 +1154,7 @@ fn capacity_resizes() {
     assert_eq!(read(&store, extent(2), 0, 96 << 10), pattern(2, 0, 96 << 10));
 }
 
-/// fxdax: a framed copy is written back a MiB at a time, each waited for, before it is synced,
+/// cladefs: a framed copy is written back a MiB at a time, each waited for, before it is synced,
 /// so that its sync leaves little for the host's disk to write at once: a framed segment's whole
 /// data, synced at once, filled the disk's queue, which the syncs of a daemon's turns waited
 /// behind, up to a second under pgbench (GCE r728, TASK-165.9). Its framing writes it, the making
@@ -1196,7 +1196,7 @@ fn framings_write_back_as_they_go() {
     }
 }
 
-/// fxdax: what a guest writes to the open segment is written back as it writes it, its writing
+/// cladefs: what a guest writes to the open segment is written back as it writes it, its writing
 /// back begun a MiB at a time and waited for 8 MiB behind, before any commit, so that the sync of
 /// the flush after has little left for the host's disk to write at once: a guest's burst, up to
 /// 300 MB a second under pgbench, waited in the host's page cache for the flush of extentd's next
@@ -1220,7 +1220,7 @@ fn writes_are_written_back_as_they_go() {
     }
 }
 
-/// fxdax: the framing of segment 0, which the commit after `store`'s first closes, held where its
+/// cladefs: the framing of segment 0, which the commit after `store`'s first closes, held where its
 /// framed file is created, not yet written, until the returned sender says go or drops: its
 /// framing begun once this returns.
 fn framing_held(store: &Store<MemDir>) -> (std::sync::mpsc::Sender<()>, fail::FailGuard) {
@@ -1244,7 +1244,7 @@ fn framing_held(store: &Store<MemDir>) -> (std::sync::mpsc::Sender<()>, fail::Fa
     (go, guard)
 }
 
-/// fxdax: a commit made in a segment as it closes, its framing not yet written, is durable once a
+/// cladefs: a commit made in a segment as it closes, its framing not yet written, is durable once a
 /// flush has synced the segment's raw file and appended the commit's record to the segment's log,
 /// which it syncs: no flush waits for a framing (TASK-221), and an opening after a crash closes the
 /// segment again from its raw file and log (TASK-165.9).
@@ -1269,7 +1269,7 @@ fn commits_in_segments_being_framed_are_durable_in_their_raw_files_and_logs() {
     drop(guard);
 }
 
-/// fxdax: a segment's raw file and log stay until its framed file is synced, its commits durable:
+/// cladefs: a segment's raw file and log stay until its framed file is synced, its commits durable:
 /// an opening after a crash closes a segment whose framed file isn't whole again from them
 /// (TASK-165.9); what goes once it is, the framed file holds, a crash after finding it whole.
 #[test]
@@ -1298,18 +1298,18 @@ fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     }
 }
 
-/// fxdax: the bytes the process's stores wrote of extents' own files, framed, since `before`
+/// cladefs: the bytes the process's stores wrote of extents' own files, framed, since `before`
 /// (`extent_store::written`): the tests of a process are its own (cargo nextest's).
 fn own_written_since(before: extent_store::Written) -> usize {
     (extent_store::written().own - before.own) as usize
 }
 
-/// fxdax: the names in the branch's directory of `kind`.
+/// cladefs: the names in the branch's directory of `kind`.
 fn names(dir: &MemDir, kind: &str) -> Vec<String> {
     dir.list(&of(kind, BRANCH.id)).unwrap()
 }
 
-/// fxdax: the names of the branch's files of `kind` in `dir`, `store`'s, but for spare logs
+/// cladefs: the names of the branch's files of `kind` in `dir`, `store`'s, but for spare logs
 /// (TASK-301) and the next segment's raw file and log, placed ahead of it (`Store::placed`,
 /// TASK-384), once the preparation of them ended.
 fn segment_files(store: &Store<MemDir>, dir: &MemDir, kind: &str) -> Vec<String> {
@@ -1319,7 +1319,7 @@ fn segment_files(store: &Store<MemDir>, dir: &MemDir, kind: &str) -> Vec<String>
     names(dir, kind).into_iter().filter(ours).collect()
 }
 
-/// fxdax: a large extent none of whose parts compresses is framed in place: its raw file is its
+/// cladefs: a large extent none of whose parts compresses is framed in place: its raw file is its
 /// own file then, its tail appended, renamed, its data written once, as its guest wrote it, not a
 /// second time framed in a file of its own, as a sandbox host's daemon wrote it, some 2.3 times
 /// what its guests wrote, its framings waiting seconds behind (TASK-310). What it wrote of own
@@ -1333,7 +1333,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.write(extent(1), 0, &data).unwrap();
     let before = extent_store::written();
     store.commit(None).unwrap();
-    // fxdax: its footer names it (TASK-411.3).
+    // cladefs: its footer names it (TASK-411.3).
     let footer = extent_remote::layout::encode(&extent(1));
     let framed = extent_frame::framed(&data, &footer, None);
     assert_eq!(own_written_since(before), framed.len() - data.len());
@@ -1349,7 +1349,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     }
 }
 
-/// fxdax: a guest writing more than a segment of small extents between commits, as one writing a
+/// cladefs: a guest writing more than a segment of small extents between commits, as one writing a
 /// large file before its fsync, after a commit: each segment it fills waits for the next commit,
 /// which seals every extent where it was written, copying nothing and making no file of an
 /// extent's own, and closes them, their footers naming their runs as the commit's, which the open
@@ -1407,7 +1407,7 @@ fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
     }
 }
 
-/// fxdax: segments compressing their parts would save less than an eighth of are framed in place,
+/// cladefs: segments compressing their parts would save less than an eighth of are framed in place,
 /// their parts stored raw, as a guest's filesystem fills them, its metadata compressing in a few
 /// parts of a large file's data; those it would save more of are framed in copies, compressed
 /// (TASK-310). Red with segments framed in place only if no part compresses: none was.
@@ -1445,7 +1445,7 @@ fn segments_compressing_little_are_framed_in_place() {
     }
 }
 
-/// fxdax TASK-343: a segment holding noise, then extents' holes, as Hunt's hostile VM process's
+/// cladefs TASK-343: a segment holding noise, then extents' holes, as Hunt's hostile VM process's
 /// did (3 MiB of its fills' noise, then 2.6 MB of zeros its sparse extents' commit sealed in one run
 /// each), is framed in a copy, compressed, its holes taking nothing; not in place, raw, which kept
 /// the holes, bytes no write of the tenant's was admitted for, on its disk past its limit (Hunt
@@ -1494,7 +1494,7 @@ fn segments_of_noise_then_holes_are_framed_compressed() {
     }
 }
 
-/// fxdax TASK-400: a segment that compresses has its parts packed as they are written whole, held
+/// cladefs TASK-400: a segment that compresses has its parts packed as they are written whole, held
 /// in memory, and its framing in a copy reads none of them back, but its last part, never whole;
 /// one whose parts were let go of to make room, as a daemon's governor lets them go, reads them
 /// back and packs them as before: framed alike, byte for byte, either way. Held parts are derived:
@@ -1585,7 +1585,7 @@ fn segments_framed_in_copies_take_their_parts_held() {
     assert_eq!(concurrent_after.bytes, 0, "{concurrent_after:?}");
 }
 
-/// fxdax: extents not one run in a segment filled since the last commit, written in pieces
+/// cladefs: extents not one run in a segment filled since the last commit, written in pieces
 /// interleaved with others', or across two segments, are copied by the commit into the open
 /// segment, and past its room into the next, it full in turn, which the commit goes on with: none
 /// into a file of its own (TASK-92.41); and all read as written, before and after a crash.
@@ -1624,7 +1624,7 @@ fn copies_past_the_open_segments_room_go_on_in_the_next() {
     }
 }
 
-/// fxdax: a large extent that compresses is framed in a file of its own, as before, its raw file
+/// cladefs: a large extent that compresses is framed in a file of its own, as before, its raw file
 /// gone once its commit is durable; and one whose parts compress past its first 16 MiB, which are
 /// framed in place no more, is too, those copied there as they are ([`Store::seal_own`],
 /// TASK-310): what each wrote of own files, its framed file's bytes.
@@ -1653,7 +1653,7 @@ fn compressible_large_extents_are_framed_in_copies() {
     }
 }
 
-/// fxdax: a commit framing a large extent in place, its raw file renamed from one directory to
+/// cladefs: a commit framing a large extent in place, its raw file renamed from one directory to
 /// another (TASK-310), stopped after each of its operations, as by a crash: the branch opens, the
 /// extent a commit before framed in place reading as written, and the commit's extent reading as
 /// written exactly if the commit is durable.
@@ -1688,7 +1688,7 @@ fn extents_framed_in_place_survive_crashes_framing_them() {
     }
 }
 
-/// fxdax: a commit closing segments filled since the commit before, sealing in them what is one
+/// cladefs: a commit closing segments filled since the commit before, sealing in them what is one
 /// run there, each framed in place, none of its parts compressing, its raw file linked as its
 /// framed file (TASK-310, TASK-92.41), stopped after each of its operations, as by a crash: the
 /// branch opens, what the commit before made reading as written, and what the commit made reading
@@ -1736,7 +1736,7 @@ fn segments_framed_in_place_survive_crashes_framing_them() {
     }
 }
 
-/// fxdax: segments one commit closes, framed one after another, then made durable together, their
+/// cladefs: segments one commit closes, framed one after another, then made durable together, their
 /// framed files synced, then their directory, once
 /// (`segments::make_durable`, TASK-310), stopped after each of the commit's operations, as by a
 /// crash, which may keep any of the framed files whole and any torn, a later one's whole and an
@@ -1801,7 +1801,7 @@ fn segments_made_durable_together_survive_crashes_making_them_durable() {
     }
 }
 
-/// fxdax: a segment's framing waits for no other's syncs: while the segments framed before it
+/// cladefs: a segment's framing waits for no other's syncs: while the segments framed before it
 /// are being made durable, held there, it is framed, its framed file written, and it is made
 /// durable after, with those framed meanwhile; neither is durable, nor its raw file and log gone,
 /// before it is (TASK-310). Each sync of a framing waited for those before it, on a disk VMs
@@ -1868,7 +1868,7 @@ fn framings_wait_for_no_other_framings_syncs() {
     }
 }
 
-/// fxdax: making a segment's framed file durable syncs the directories of raw files and logs only
+/// cladefs: making a segment's framed file durable syncs the directories of raw files and logs only
 /// for its own entries, and only if no flush synced them since it opened: the commit's flush after
 /// a segment opens syncs them, and says so. So a closing costs its commit's flush those two, and
 /// the making durable the directory of framed files alone, made durable here before that flush,
@@ -1888,7 +1888,7 @@ fn segments_made_durable_sync_no_entries_a_flush_synced() {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
         store.commit(None).unwrap();
         settled(&store);
-        // fxdax: and the next segment placed, its entries synced by the store's opener, on a
+        // cladefs: and the next segment placed, its entries synced by the store's opener, on a
         // thread of its own, before the closing and after it, so that it counts those of the next
         // after it alone (TASK-384).
         store.prepared().unwrap();
@@ -1904,7 +1904,7 @@ fn segments_made_durable_sync_no_entries_a_flush_synced() {
     }
 }
 
-/// fxdax: a segment opened from its raw file and log placed ahead of it, their entries made durable
+/// cladefs: a segment opened from its raw file and log placed ahead of it, their entries made durable
 /// off the commits by the store's opener, costs the commits' flush no directory: before, each
 /// segment opened had its commits' next flush sync the directories of raw files and logs, each a
 /// commit of the host's journal, which a durable commit, closing a segment and opening the next
@@ -1937,7 +1937,7 @@ fn segments_opened_ahead_cost_their_commits_flushes_no_directory() {
     }
 }
 
-/// fxdax: a preparation of the next segment's log whose segment opened before it was placed, with
+/// cladefs: a preparation of the next segment's log whose segment opened before it was placed, with
 /// a log of its own, goes on as the next's: no opening, nor flush, began another while it ran, and
 /// ended there it left the next segment nothing placed, as `Store::prepared` found it, until a
 /// flush or closing after it began one (TASK-404: commits_reopen_from_their_logs's (1, false, 2)
@@ -1975,7 +1975,7 @@ fn preparations_overtaken_go_on_as_the_next_segments() {
     }
 }
 
-/// fxdax: a store prepares the next segment's log once a flush made commits durable, a store that
+/// cladefs: a store prepares the next segment's log once a flush made commits durable, a store that
 /// writes, not as it opens (TASK-333): one that only reads, as a fork a daemon serves, prepares
 /// none, nor holds a file open for it, its flushes making nothing durable. Every fork the daemon
 /// served took one, and a file held open (`serves_hundreds_of_forks_of_a_base`).
@@ -1994,7 +1994,7 @@ fn stores_that_only_read_prepare_no_log() {
     assert_eq!(logs(), 2, "the next segment's log not prepared, a commit durable");
 }
 
-/// fxdax: the uploader takes a segment once its framing wrote its framed file, not once it made it
+/// cladefs: the uploader takes a segment once its framing wrote its framed file, not once it made it
 /// durable, which its raw file and log stand for meanwhile, until the commits its footer names are
 /// (TASK-384): a durable commit waited, one after another, for the framed file's sync and its
 /// directory's, each a commit of the host's journal, before its upload began. A crash anywhere
@@ -2080,7 +2080,7 @@ fn closed_segments_keep_no_more_files_open_than_allowed() {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
         store.close_segment().unwrap();
         store.commit(None).unwrap();
-        // fxdax: framed, which no commit waits for: a segment being framed holds its raw file and
+        // cladefs: framed, which no commit waits for: a segment being framed holds its raw file and
         // log open till then (TASK-165.9); and the next segment's placed ahead of it (TASK-384).
         settled(&store);
         store.prepared().unwrap();
@@ -2104,7 +2104,7 @@ struct Counts {
     cached: BTreeMap<String, u64>,
 }
 
-/// fxdax: a store's directory in memory whose files count what they do ([`Counts`]).
+/// cladefs: a store's directory in memory whose files count what they do ([`Counts`]).
 #[derive(Clone)]
 struct Counting {
     dir: MemDir,
@@ -2235,7 +2235,7 @@ impl Dir for Counting {
     }
 }
 
-/// fxdax: durable commits let none of the open segment's pages go from the host's page cache: its
+/// cladefs: durable commits let none of the open segment's pages go from the host's page cache: its
 /// raw file, written and synced again and again, takes them with it once framed and removed; its
 /// framed file, written once, lets them go once synced (TASK-92.23).
 #[test]
@@ -2252,7 +2252,7 @@ fn durable_commits_keep_the_open_segments_pages_cached() {
     assert_eq!(dir.drops(), BTreeMap::from([("segments".to_owned(), 1)]));
 }
 
-/// fxdax: a store reads its raw files, the open segment's, those of segments being framed or set
+/// cladefs: a store reads its raw files, the open segment's, those of segments being framed or set
 /// aside, and open extents' own, through the host's page cache, which holds what was just written
 /// to them: a read bypassing it writes the dirty pages it reads back first, waiting for the host's
 /// disk. Under pgbench's load, a commit copying the extents written in pieces waited about 4 ms a
@@ -2300,7 +2300,7 @@ fn raw_files_are_read_through_the_page_cache() {
     }
 }
 
-/// fxdax: every read of a raw file's data goes through the host's page cache, whoever asks, as the
+/// cladefs: every read of a raw file's data goes through the host's page cache, whoever asks, as the
 /// store's copies and framings do (`raw_files_are_read_through_the_page_cache`): the guest's
 /// (`Store::read`), the uploader's (`Store::read_kept`) and a follower's (`Store::read_view`) of an
 /// extent committed in the open segment, and the guest's of an extent open in a file of its own.
@@ -2328,7 +2328,7 @@ fn reads_of_raw_files_go_through_the_page_cache() {
     assert_eq!(of_raw_files(dir.cached()), cached);
 }
 
-/// fxdax: a branch opening again reads of the segments of its write-ahead log their tails alone:
+/// cladefs: a branch opening again reads of the segments of its write-ahead log their tails alone:
 /// each's trailer and footer, which the replay of its footers needs, and its trailer and table,
 /// which say how much data it holds, three blocks; none of their data, their raw files gone, their
 /// commits durable (TASK-92.16, TASK-165.9).
@@ -2376,7 +2376,7 @@ fn cached_pages(path: &std::path::Path) -> usize {
     }
 }
 
-/// fxdax: on Linux, durable commits leave the pages of the open segment's raw file, written through
+/// cladefs: on Linux, durable commits leave the pages of the open segment's raw file, written through
 /// the host's page cache, in it; its framed file, once synced, lets them go (TASK-92.23).
 ///
 /// Synced, the raw file's pages are clean, which the kernel's reclaim may take under memory
@@ -2414,7 +2414,7 @@ const SMALL_SEGMENTS: Options = Options { max_extent: 64 << 10, ..OPTIONS };
 /// The most bytes of data a segment of [`SMALL_SEGMENTS`] holds: a segment's, and an extent's.
 const SEGMENT_LIMIT: u64 = 128 << 10;
 
-/// fxdax: the bytes of `store`'s segments' data no extent is in, no write being in progress, and
+/// cladefs: the bytes of `store`'s segments' data no extent is in, no write being in progress, and
 /// of the frees it keeps for the bucket alone, until acknowledged there (TASK-165.9).
 fn dead_bytes(store: &Store<MemDir>) -> u64 {
     let usage = store.usage().unwrap();
@@ -2477,7 +2477,7 @@ fn segments_read_beside_the_store_skip_framed_files_being_written() {
     for sequence in 0..48 {
         store.write(extent(sequence), 0, &block(sequence)).unwrap();
     }
-    // fxdax: the segments filled, framed behind the commit closing them (TASK-92.41).
+    // cladefs: the segments filled, framed behind the commit closing them (TASK-92.41).
     store.commit_ordered(None).unwrap();
     loop {
         let begun: Vec<u64> = (store.framing().into_iter()).filter(|n| seen.insert(*n)).collect();
@@ -2532,7 +2532,7 @@ fn segments_filled_go_to_the_uploader_with_no_commit_after() {
     }
 }
 
-/// fxdax: an uploader's interval leaves a segment the guest is filling for its next commit, which
+/// cladefs: an uploader's interval leaves a segment the guest is filling for its next commit, which
 /// seals in place what it wrote there (TASK-92.41): one filled since the last commit, or the open
 /// one past 8 MiB written since; it closes one written little since, as a journal's commits leave
 /// it, and a commit waiting for its upload closes it whatever it holds.
@@ -2690,7 +2690,7 @@ fn rewrites_past_the_capacity_count_as_used() {
     assert_eq!(read(&store, extent(1), 0, BLOCK), pattern(127, 0, BLOCK));
 }
 
-/// fxdax: what frees of extents open let go of, of what writes since the last commit wrote,
+/// cladefs: what frees of extents open let go of, of what writes since the last commit wrote,
 /// written over or not, in segments or in raw files of their own, counts as used past the
 /// capacity's worth, as what writes wrote over does, until the commit takes it back (TASK-79.2):
 /// so that a writer writing extents and freeing them, never committing, takes twice the capacity
@@ -2763,7 +2763,7 @@ fn freed_space_is_dead_space_taking_no_room() {
     assert_eq!(store.info().unwrap().available, capacity - 5 * BLOCK as u64);
 }
 
-/// fxdax: what the branch's segments hold that no extent is in, freed, takes none of the room the
+/// cladefs: what the branch's segments hold that no extent is in, freed, takes none of the room the
 /// branch's writes need, however much it is: it leaves the store with its segments, acknowledged
 /// in the bucket, whose collector takes it back (TASK-165.8). Here it gathers commit by commit,
 /// past twice the capacity (TASK-79.2).
@@ -2789,7 +2789,7 @@ fn dead_space_takes_none_of_the_room_writes_need() {
     assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
 
-/// fxdax: an uploader keeps the frees of a guest writing and freeing files until it has uploaded
+/// cladefs: an uploader keeps the frees of a guest writing and freeing files until it has uploaded
 /// the segments holding them, and lets go of them at once, the branch's dead space past twice its
 /// capacity of a sudden. Counted as used past the capacity's worth, the dead space found the
 /// guest's next write, a journal write of Fxfs's, refused (`ENOSPC`), the store a tenth used: the
@@ -2825,7 +2825,7 @@ fn dead_space_the_uploader_lets_go_takes_none_of_the_room() {
     assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
 
-/// fxdax: the bytes the branch's files of extents' data take of the host's disk: its segments',
+/// cladefs: the bytes the branch's files of extents' data take of the host's disk: its segments',
 /// open and closed, and its extents' own files and raw files (TASK-79.89).
 fn data_files(dir: &MemDir) -> u64 {
     let mut bytes = 0;
@@ -2838,7 +2838,7 @@ fn data_files(dir: &MemDir) -> u64 {
     bytes
 }
 
-/// fxdax: a guest writing a segment of blocks of data that does not compress at each commit, and
+/// cladefs: a guest writing a segment of blocks of data that does not compress at each commit, and
 /// freeing all but two of them at the next, which pin the segment, until it lets go of them too,
 /// twenty-one commits later; its uploader acknowledging each segment the store closes, and
 /// releasing each commit, as it goes. Each segment acknowledged leaves the store, its extents read
@@ -2887,12 +2887,12 @@ fn acknowledged_segments_leave_a_churning_guests_files() {
     }
 }
 
-/// fxdax: an honest guest whose uploader lags (TASK-79.89): forty commits, each of sixteen blocks
+/// cladefs: an honest guest whose uploader lags (TASK-79.89): forty commits, each of sixteen blocks
 /// in segments and an extent of eight in a file of its own, of data that does not compress, all of
 /// it freed by the next, its extents holding a third of its capacity at most. The uploader keeps
 /// what the frees let go of until it releases their commits, and the segments until they are
 /// acknowledged in the bucket, if they are as they close (`acknowledges`): returns what the
-/// branch's files take then, which the upload lag bound bounds, making commits wait (fxdax's
+/// branch's files take then, which the upload lag bound bounds, making commits wait (cladefs's
 /// `max_lag_bytes`). Once the uploader catches up, the next commit lets it all go, the bucket
 /// holding what it kept (TASK-165.8).
 fn uploader_lagging(acknowledges: bool) -> u64 {
@@ -2925,7 +2925,7 @@ fn uploader_lagging(acknowledges: bool) -> u64 {
     files
 }
 
-/// fxdax: `uploader_lagging`, its uploader acknowledging nothing, nor releasing anything: the
+/// cladefs: `uploader_lagging`, its uploader acknowledging nothing, nor releasing anything: the
 /// branch's files take ten times the capacity, which no bound of the store's refuses writes for
 /// (TASK-79.89).
 #[test]
@@ -2934,7 +2934,7 @@ fn what_an_uploader_keeps_stays_until_acknowledged() {
     assert!(files > 10 * 64 * BLOCK as u64, "{files} bytes of files");
 }
 
-/// fxdax: `uploader_lagging`, its uploader acknowledging the segments as the store closes them,
+/// cladefs: `uploader_lagging`, its uploader acknowledging the segments as the store closes them,
 /// and releasing nothing: the frees it keeps, in the bucket, hold no file of the branch's
 /// (TASK-165.8).
 #[test]
@@ -2942,7 +2942,7 @@ fn frees_kept_in_segments_acknowledged_hold_no_file() {
     assert_eq!(uploader_lagging(true), 0);
 }
 
-/// fxdax: a branch opened again in the same process lets go of the segments its last store set
+/// cladefs: a branch opened again in the same process lets go of the segments its last store set
 /// aside, full, or left open, holding only what writes after its last commit wrote: they go, as
 /// opening the store would remove them (TASK-79.2).
 #[test]
@@ -3182,7 +3182,7 @@ fn branches_opened_again_after_a_failed_flush_keep_what_they_hold() {
     assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
 }
 
-/// fxdax: a store of eight closed segments, an extent in each, which keeps the files of
+/// cladefs: a store of eight closed segments, an extent in each, which keeps the files of
 /// `open_files` of them open.
 fn eight_segments(open_files: usize) -> (MemDir, Store<MemDir>) {
     let dir = MemDir::new();
@@ -3195,7 +3195,7 @@ fn eight_segments(open_files: usize) -> (MemDir, Store<MemDir>) {
         store.commit(None).unwrap();
     }
     settled(&store);
-    // fxdax: and the next segment's log prepared, whose spare its preparation opens (TASK-333).
+    // cladefs: and the next segment's log prepared, whose spare its preparation opens (TASK-333).
     store.prepared().unwrap();
     (dir, store)
 }
@@ -3213,7 +3213,7 @@ fn opened_reading(dir: &MemDir, store: &Store<MemDir>) -> (u64, u64) {
     (after.opened - before.opened, after.read - before.read)
 }
 
-/// fxdax: a branch reading what it holds in more closed segments than it keeps the files of open
+/// cladefs: a branch reading what it holds in more closed segments than it keeps the files of open
 /// opens each of them once: as one more opens, the least lately read closes,
 /// not all of them, which reads would open again; and opening one reads its table and trailer,
 /// not its footer, a block, as each part's first read does (TASK-92.2).
@@ -3248,7 +3248,7 @@ fn shrinks_count_writes_in_progress() {
     drop(write);
 }
 
-/// fxdax: a follower waiting for a commit after the one it has hears of the latest, or, if none
+/// cladefs: a follower waiting for a commit after the one it has hears of the latest, or, if none
 /// came, of none.
 #[test]
 fn newer_commits_are_heard_of() {
@@ -3263,7 +3263,7 @@ fn newer_commits_are_heard_of() {
     assert_eq!(store.newer(epoch, std::time::Duration::ZERO), Some(epoch + 2));
 }
 
-/// fxdax: ordered commits wait for a flush to make them durable, and say so.
+/// cladefs: ordered commits wait for a flush to make them durable, and say so.
 #[test]
 fn ordered_commits_are_pending_until_flushed() {
     let store = create(MemDir::new(), 1 << 20);
@@ -3275,7 +3275,7 @@ fn ordered_commits_are_pending_until_flushed() {
     assert!(!store.flush_pending());
 }
 
-/// Where an extent's data is: one run in a segment, once sealed in one write, fxdax: or in writes
+/// Where an extent's data is: one run in a segment, once sealed in one write, cladefs: or in writes
 /// one right after another (TASK-92.1); pieces while open or written in several otherwise; its own
 /// file if large.
 #[test]
@@ -3304,7 +3304,7 @@ fn places_of_extents() {
     );
 }
 
-/// fxdax: the uploader's lag counts the bytes of the write-ahead log's segments not yet
+/// cladefs: the uploader's lag counts the bytes of the write-ahead log's segments not yet
 /// acknowledged, their data and their extents of their own, the open segment's included:
 /// acknowledged, they count no more (TASK-165.9).
 #[test]
@@ -3328,7 +3328,7 @@ fn the_lag_counts_the_logs_bytes_not_acknowledged() {
     assert_eq!(store.wal_bytes().unwrap(), 3 * BLOCK as u64 + (80 << 10));
 }
 
-/// fxdax: an uploader starting while commits wait to be made durable takes no segment of the
+/// cladefs: an uploader starting while commits wait to be made durable takes no segment of the
 /// commits after it until they are: a crash may lose them here, which the bucket would hold
 /// (TASK-165.9).
 #[test]
@@ -3407,7 +3407,7 @@ fn forks_give_their_commits_epoch() {
     assert_eq!((forking.last(), forking.footer.contents.forks.clone()), (2, vec![forked]));
 }
 
-/// fxdax: a fork's child in another cell takes no ID of a branch its parent holds extents of, its
+/// cladefs: a fork's child in another cell takes no ID of a branch its parent holds extents of, its
 /// parent's own among them: an extent's ID names its branch by the ID alone (TASK-364). It is
 /// refused before anything is committed.
 #[test]
@@ -3453,7 +3453,7 @@ fn sealing_moves_pieces_live_once() {
     assert_eq!(read(&store, extent(1), 0, 2 * BLOCK), [[2; BLOCK], [1; BLOCK]].concat());
 }
 
-/// fxdax: an extent written in runs one after another in the open segment, as the guest's device
+/// cladefs: an extent written in runs one after another in the open segment, as the guest's device
 /// splits a write larger than its most I/O (1008 KiB) in two, is one run, which its commit seals
 /// where it is, reading and writing none of it again, whichever of its writes finished first; and
 /// is so once opened again (TASK-92.1).
@@ -3472,7 +3472,7 @@ fn extents_written_in_runs_seal_where_they_are() {
     let second = in_flight(&store, extent(2), MAX_IO as u64, &data(2)[MAX_IO..]);
     second.finish();
     first.finish();
-    // fxdax: the commit's I/O alone: not the framer's reads of the parts written whole, looking at
+    // cladefs: the commit's I/O alone: not the framer's reads of the parts written whole, looking at
     // them ahead as the segment fills, which the writes queued, and which may land in the commit
     // otherwise (TASK-400, TASK-423).
     store.wait_looked_ahead();
@@ -3542,7 +3542,7 @@ fn io_ends_within_the_most_an_extent_holds() {
     assert_eq!(store.extents().unwrap(), [(extent(1), MAX_EXTENT)]);
 }
 
-/// fxdax: what goes to the open segment is whole sectors of 4 KiB, which it is to be encrypted in
+/// cladefs: what goes to the open segment is whole sectors of 4 KiB, which it is to be encrypted in
 /// (doc-16, TASK-411.8): a write of an extent stored in segments at an offset, or of a length, that
 /// is not, though whole blocks of a store of smaller blocks, is refused, writing nothing; a large
 /// extent, in a file of its own, takes it.
@@ -3600,7 +3600,7 @@ fn reads_past_an_extents_end_are_zeros() {
 /// it does nothing more, though its file system works again. Here the file system fails the
 /// commit's first change to it: a seal's copy of an extent written in two writes, its second
 /// block first, which are not one run, or the creation of the next open segment's file as the
-/// commit closes the last. fxdax: not that of the index file a checkpoint begins, which the
+/// commit closes the last. cladefs: not that of the index file a checkpoint begins, which the
 /// commit's flush makes (`checkpoints_failing_in_their_flushes_fail_the_store`, TASK-92.56).
 #[test]
 fn commits_failing_part_way_fail_the_store() {
@@ -3629,7 +3629,7 @@ fn commits_failing_part_way_fail_the_store() {
         for budget in [Some(0), None] {
             dir.fail_after(budget);
             let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
-            // fxdax: saying why (TASK-165.9).
+            // cladefs: saying why (TASK-165.9).
             let failed = "the extent store failed: the file system crashed";
             assert_eq!(failure(store.commit(None)), failed);
             assert_eq!(failure(store.read(extent(1), 0, &mut [0; BLOCK])), failed);
@@ -3638,7 +3638,7 @@ fn commits_failing_part_way_fail_the_store() {
     }
 }
 
-/// fxdax: an ordered commit's record waits for its flush, which appends it to the open segment's
+/// cladefs: an ordered commit's record waits for its flush, which appends it to the open segment's
 /// log: a crash before leaves the store as of the commit before; its flush failing fails the
 /// store, as a flush failing does, its state ahead of its files (TASK-165.9).
 #[test]
@@ -3687,7 +3687,7 @@ fn parts_read_again_are_unpacked_once() {
     assert_eq!(unpacks() - before, 35);
 }
 
-/// fxdax: a store's bytes are its branch's own, of the extents it wrote, or inherited from the
+/// cladefs: a store's bytes are its branch's own, of the extents it wrote, or inherited from the
 /// branches it was forked from, which it holds in the bucket (TASK-165.7), as they write and free,
 /// and opened again (TASK-49).
 #[test]
@@ -3716,7 +3716,7 @@ fn stores_tell_their_own_bytes_from_those_inherited() {
     assert_eq!(bytes(&opened_on(dir, state, WRITER)), (block, 3 * block));
 }
 
-/// TASK-295: a write-ahead log dropped, as `fxdaxctl take` drops one another writer's commits
+/// TASK-295: a write-ahead log dropped, as `cladefsctl take` drops one another writer's commits
 /// moved the branch on from, stays dropped whatever a crash after it keeps: the store's branch is
 /// what it committed since, and none of the log's.
 #[test]

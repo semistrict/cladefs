@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Workqueues. A queued work is a task, which the scheduler runs among the others. Waiters for works
  * poll, sleeping a virtual millisecond at a time: nothing in dax.c depends on how soon they wake.

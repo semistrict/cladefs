@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The guest agent as the guest's init, under fxdax's Firecracker, which has no init of its own:
+//! The guest agent as the guest's init, under cladefs's Firecracker, which has no init of its own:
 //! it sets the guest up as libkrun's init did before it runs the agent, and resets
 //! the VM, which ends it, once the test is done.
 //!
@@ -94,9 +94,9 @@ pub fn set_up() -> Init {
     Init { console, forwarded }
 }
 
-/// fxdax: says on the console, beside the kernel's messages, how long the guest took to boot:
+/// cladefs: says on the console, beside the kernel's messages, how long the guest took to boot:
 /// its kernel from its start to running init, as the kernel's log has it, and the guest to here,
-/// the agent set up, by CLOCK_BOOTTIME, as `fxdax: boot kernel_ns=K agent_ns=A` (TASK-267 compared
+/// the agent set up, by CLOCK_BOOTTIME, as `cladefs: boot kernel_ns=K agent_ns=A` (TASK-267 compared
 /// virtio-PCI's boot with MMIO's by it).
 fn say_boot(mut console: &File) {
     let mut now = libc::timespec { tv_sec: 0, tv_nsec: 0 };
@@ -107,10 +107,10 @@ fn say_boot(mut console: &File) {
     let agent = now.tv_sec as u64 * 1_000_000_000 + now.tv_nsec as u64;
     let kernel = crate::kernel_log::init_started_ns()
         .map_or_else(|| "unknown".to_owned(), |ns| ns.to_string());
-    let _ = writeln!(console, "fxdax: boot kernel_ns={kernel} agent_ns={agent}");
+    let _ = writeln!(console, "cladefs: boot kernel_ns={kernel} agent_ns={agent}");
 }
 
-/// fxdax: says where the guest is stuck if the test still runs [`crate::GUEST_WATCHDOG`] seconds
+/// cladefs: says where the guest is stuck if the test still runs [`crate::GUEST_WATCHDOG`] seconds
 /// after the agent starts, shortly before the runner kills it: its stacks
 /// ([`crate::kernel_log::stacks`]), on standard error, once.
 fn start_watchdog() {
@@ -164,7 +164,7 @@ fn forward(fd: libc::c_int, (start, end): (u8, u8), console: &File) -> mpsc::Rec
     forwarded
 }
 
-/// fxdax: the console, opened anew: for a process the agent's pipes and forwarders may not serve
+/// cladefs: the console, opened anew: for a process the agent's pipes and forwarders may not serve
 /// (`say`, `crash`).
 fn console() -> File {
     use std::os::unix::fs::OpenOptionsExt;
@@ -175,7 +175,7 @@ fn console() -> File {
         .expect("open the console")
 }
 
-/// fxdax: says `line` on the console as the agent's standard output, in a frame of its own, one
+/// cladefs: says `line` on the console as the agent's standard output, in a frame of its own, one
 /// write: from a process whose agent's forwarders may be stuck, as a crash test's stopping one
 /// (TASK-119.16). Its frame comes between the forwarders', which may end mid-line: hence a line
 /// begun anew.
@@ -188,14 +188,14 @@ fn say_to(console: &mut File, (start, end): (u8, u8), line: &str) {
     console.write_all(&framed).expect("write to the console");
 }
 
-/// fxdax: [`say`]s `line`, which has left the guest once this returns: the agent's standard output
+/// cladefs: [`say`]s `line`, which has left the guest once this returns: the agent's standard output
 /// waits in its pipe and the console, which a VM stopping loses, though what follows the line
 /// reached the store (a crash soak's round 21 of 50, 2026-10-31).
 pub fn say_out(line: &str) {
     say_drained((STDOUT_START, STDOUT_END), line);
 }
 
-/// fxdax: [`say_out`], but as the agent's standard error: for a process about to [`crash`], whose
+/// cladefs: [`say_out`], but as the agent's standard error: for a process about to [`crash`], whose
 /// standard error's pipe the VM stopping would lose.
 pub fn complain_out(text: &str) {
     say_drained((STDERR_START, STDERR_END), text);
@@ -213,7 +213,7 @@ fn say_drained(frame: (u8, u8), text: &str) {
     );
 }
 
-/// fxdax: resets the VM at once, without syncing, as a crash does, once the console has passed
+/// cladefs: resets the VM at once, without syncing, as a crash does, once the console has passed
 /// what was written to it: the last lines came out in the midst of the reset's kernel messages
 /// otherwise, and a crash test missed the line it looked for (TASK-119.16, GCE r215, r221).
 pub fn crash() -> ! {

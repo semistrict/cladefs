@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Installs Ubuntu's packages, the arguments, on a GitHub runner, past an outage of ubuntu.com's
 # names: .github/actions/apt-install, whose action.yml says why (TASK-360). Its files are the
-# runner's unless the tests name others (FXDAX_APT_MIRRORS, FXDAX_APT_SOURCES).
+# runner's unless the tests name others (CLADEFS_APT_MIRRORS, CLADEFS_APT_SOURCES).
 set -euo pipefail
 
-mirrors=${FXDAX_APT_MIRRORS:-/etc/apt/apt-mirrors.txt}
-sources=${FXDAX_APT_SOURCES:-/etc/apt/sources.list.d/ubuntu.sources}
+mirrors=${CLADEFS_APT_MIRRORS:-/etc/apt/apt-mirrors.txt}
+sources=${CLADEFS_APT_SOURCES:-/etc/apt/sources.list.d/ubuntu.sources}
 
 # The image changed how apt finds its archive: mirrors listed where apt never looks protect nothing.
 if ! grep -q "mirror+file:$mirrors" "$sources"; then

@@ -1,4 +1,4 @@
-# fxdax's own: a guest's automounter of shared volumes (backlog doc-10, TASK-136.6).
+# cladefs's own: a guest's automounter of shared volumes (backlog doc-10, TASK-136.6).
 [package]
 name = "fxfs-automount"
 version = "0.1.0"

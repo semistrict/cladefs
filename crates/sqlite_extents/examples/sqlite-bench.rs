@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite on a volume on an fxdax image, against SQLite on the host's filesystem (TASK-298):
+//! SQLite on a volume on an cladefs image, against SQLite on the host's filesystem (TASK-298):
 //! the same workloads, each on a database of its own, made under the workspace's target
 //! directory, on the disk the host builds on.
 //!
@@ -13,7 +13,7 @@
 //! - `read`: SELECTs of one random row each, outside transactions;
 //! - `scan`: a sum over every row.
 //!
-//! Configurations: `extents`, this crate's VFS on an image (`fxdax::Storage`), every commit
+//! Configurations: `extents`, this crate's VFS on an image (`cladefs::Storage`), every commit
 //! durable, the image's I/O bypassing the page cache; on Linux, `daemon`, the VFS on a store an
 //! extent daemon on a thread of this process serves, its reads copied from the daemon's window
 //! (TASK-300), and `daemon-mmap`, SQLite's memory-mapped reads reading pages there in place; and SQLite's own unix VFS on a file:
@@ -23,7 +23,7 @@
 //! Usage: sqlite-bench [SCALE], SCALE multiplying the counts (default 1). It prints a table
 //! in markdown, a row per configuration and workload.
 
-use fxdax::Storage;
+use cladefs::Storage;
 use rusqlite::{Connection, OpenFlags, params};
 use sqlite_extents::{Options, Volume, register};
 use std::path::{Path, PathBuf};
@@ -191,7 +191,7 @@ fn on_volume(config: &str, volume: std::sync::Arc<Volume>, pragmas: &str, scale:
 fn daemon(root: &Path) -> PathBuf {
     let socket = root.join("extentd.sock");
     let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-    std::thread::spawn(move || fxdax::extentd::serve(listener));
+    std::thread::spawn(move || cladefs::extentd::serve(listener));
     socket
 }
 
@@ -212,10 +212,10 @@ fn main() {
     // SAFETY: before this process starts any other thread.
     unsafe {
         std::env::set_var(
-            "FXDAX_EXTENTD_REMOTE",
+            "CLADEFS_EXTENTD_REMOTE",
             format!("file://{}/", root.join("daemon.bucket").display()),
         );
-        std::env::set_var("FXDAX_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
     }
     println!("Databases under {}, scale {scale}.", root.display());
     println!();
@@ -228,7 +228,7 @@ fn main() {
         let device = Storage::create(&image, 64 << 30).unwrap().into_device();
         let volume = Volume::open(device, Options::default()).unwrap();
         on_volume("extents", volume, "", scale);
-        // The image, and what the bucket its branch is kept in holds (FXDAX_EXTENTD_REMOTE).
+        // The image, and what the bucket its branch is kept in holds (CLADEFS_EXTENTD_REMOTE).
         sizes.push(("extents", disk_bytes(&image) + bucket_bytes(&root)));
     }
     #[cfg(target_os = "linux")]

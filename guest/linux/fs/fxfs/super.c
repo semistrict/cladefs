@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Fxfs's VFS glue: the kernel's superblock, inode, directory and file operations, over the
  * filesystem in Rust (fxfs.h).
@@ -143,7 +143,7 @@ static void fxfs_vfs_set_attr(struct inode *inode, const struct fxfs_attr *attr)
 }
 
 /*
- * The inode `attr` describes, read in if it is not cached, or fxdax: `created` just now. A follower's
+ * The inode `attr` describes, read in if it is not cached, or cladefs: `created` just now. A follower's
  * with operations of its own, which take its fill barrier where a writer's have nothing to (vfs.h):
  * a writer's are as they would be without followers.
  */
@@ -171,14 +171,14 @@ static struct inode *fxfs_vfs_iget_as(struct super_block *sb, const struct fxfs_
 					 &fxfs_vfs_file_operations;
 		inode->i_mapping->a_ops = &fxfs_vfs_aops;
 		/*
-		 * Small files too: they share extents, and the window's mappings of them. fxdax:
+		 * Small files too: they share extents, and the window's mappings of them. cladefs:
 		 * not those created in this mount (fxfs_dax_set_inode, TASK-164.3).
 		 */
 		if (fxfs_vfs_info(sb)->dax && fxfs_dax_set_inode(inode, created))
 			break;
 		/*
 		 * In the page cache, in large folios, up to what one write to Fxfs takes
-		 * (fxfs_vfs_writepages). fxdax: a follower's in pages, which its batches drop
+		 * (fxfs_vfs_writepages). cladefs: a follower's in pages, which its batches drop
 		 * ranges of, a page's alone where a large folio's would be split or kept.
 		 */
 		if (!follows)
@@ -244,7 +244,7 @@ int fxfs_vfs_write_attr(struct inode *inode, u32 valid)
 static struct dentry *fxfs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 				      unsigned int flags)
 {
-	/* fxdax: a follower's dentry is as of its directory's generation before the lookup. */
+	/* cladefs: a follower's dentry is as of its directory's generation before the lookup. */
 	unsigned long gen = atomic64_read(&fxfs_vfs_inode(dir)->gen);
 	struct fxfs_attr attr;
 	struct inode *inode = NULL;
@@ -254,7 +254,7 @@ static struct dentry *fxfs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	/* Which keeps names longer than Linux's out of Fxfs, which has no limit of its own. */
 	if (dentry->d_name.len > NAME_MAX)
 		return ERR_PTR(-ENAMETOOLONG);
-	/* fxdax: a follower's name, and its inode, as of one state, cached before a batch. */
+	/* cladefs: a follower's name, and its inode, as of one state, cached before a batch. */
 	fxfs_vfs_fill_begin(dir->i_sb);
 	err = fxfs_nofs(fxfs_lookup(fxfs_vfs_fs(dir->i_sb), dir->i_ino, dentry->d_name.name,
 				    dentry->d_name.len, &attr));
@@ -272,7 +272,7 @@ static struct dentry *fxfs_vfs_lookup(struct inode *dir, struct dentry *dentry,
 	return found;
 }
 
-/* fxdax: the attribute flags statx says of `inode`, as lsattr does (xfstests generic/424). */
+/* cladefs: the attribute flags statx says of `inode`, as lsattr does (xfstests generic/424). */
 static void fxfs_vfs_stat_flags(struct inode *inode, struct kstat *stat)
 {
 	u32 fsflags = fxfs_vfs_inode(inode)->fsflags;
@@ -287,7 +287,7 @@ static void fxfs_vfs_stat_flags(struct inode *inode, struct kstat *stat)
 }
 
 /*
- * fxdax: reads a file's blocks again if a commit has been made since they last were: Fxfs's
+ * cladefs: reads a file's blocks again if a commit has been made since they last were: Fxfs's
  * writeback, seals and moves change them, each in a commit, none of which is the kernel's to see.
  * `du` of a file in the inode cache saw what it had as read in: none, of one created here (TASK-138,
  * xfstests generic/615).
@@ -311,7 +311,7 @@ static int fxfs_vfs_refresh_blocks(struct inode *inode)
 }
 
 /*
- * fxdax: an inode's attributes, the kernel's but for a file's blocks. A file with fewer blocks than
+ * cladefs: an inode's attributes, the kernel's but for a file's blocks. A file with fewer blocks than
  * bytes may have dirty pages over its holes, which have no blocks until written back, and which take
  * new ones Fxfs alone knows: it looked sparser than it is to whatever goes by its blocks, as a backup
  * does, so it is written back first (xfstests generic/422, as NFS does for a getattr). A file with
@@ -341,7 +341,7 @@ static int fxfs_vfs_getattr(struct mnt_idmap *idmap, const struct path *path, st
 }
 
 /*
- * fxdax: a follower's inode's attributes, which its batches set as they apply
+ * cladefs: a follower's inode's attributes, which its batches set as they apply
  * (fxfs_vfs_settle_file), read under its fill barrier: none as of a batch half settled.
  */
 static int fxfs_vfs_follower_getattr(struct mnt_idmap *idmap, const struct path *path,
@@ -357,7 +357,7 @@ static int fxfs_vfs_follower_getattr(struct mnt_idmap *idmap, const struct path 
 }
 
 /*
- * fxdax: a follower's dentry is valid while its directory's entries are as they were when it was
+ * cladefs: a follower's dentry is valid while its directory's entries are as they were when it was
  * looked up: a batch that changed them bumps the directory's generation (fxfs_vfs_drop_entries), and
  * the dentry is looked up again, as FUSE's and NFS's are. Its name, or its absence, may be gone.
  */
@@ -439,7 +439,7 @@ static struct posix_acl *fxfs_vfs_get_acl(struct inode *inode, int type, bool rc
 		return ERR_PTR(-ECHILD);
 	if (!name)
 		return ERR_PTR(-EINVAL);
-	/* fxdax: a follower's size and value, as of one state. */
+	/* cladefs: a follower's size and value, as of one state. */
 	fxfs_vfs_fill_begin(inode->i_sb);
 	size = fxfs_nofs(fxfs_getxattr(fs, inode->i_ino, name, strlen(name), NULL, 0));
 	value = size > 0 ? kmalloc(size, GFP_KERNEL) : NULL;
@@ -559,7 +559,7 @@ static int fxfs_vfs_init_acls(struct inode *inode, struct posix_acl *default_acl
 }
 
 /*
- * fxdax: `acl` as an extended attribute of an inode of `mode`, in `xattrs[*nr]`, its value in
+ * cladefs: `acl` as an extended attribute of an inode of `mode`, in `xattrs[*nr]`, its value in
  * `*value`, which the caller frees: the default ACL for directories alone.
  */
 static int fxfs_vfs_acl_xattr(struct posix_acl *acl, int type, umode_t mode,
@@ -585,7 +585,7 @@ static int fxfs_vfs_acl_xattr(struct posix_acl *acl, int type, umode_t mode,
 }
 
 /*
- * fxdax: a directory's entries, all of them, packed as a cursor's buffer packs them, kept with its
+ * cladefs: a directory's entries, all of them, packed as a cursor's buffer packs them, kept with its
  * inode while the kernel caches it, as ext4's directory blocks are kept in the page cache: a read
  * from the start takes them rather than seeking each of Fxfs's layers and decoding its records,
  * and allocating a cursor's buffer: a 91k-file tree's 6,059 directories, warm, took 108 ms to walk
@@ -648,7 +648,7 @@ static int fxfs_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir, struct den
 	if (err)
 		return err;
 	gid = fxfs_vfs_new_gid(idmap, dir, &mode);
-	/* fxdax: the ACLs it inherits, made with it (TASK-79.29). */
+	/* cladefs: the ACLs it inherits, made with it (TASK-79.29). */
 	err = fxfs_vfs_acl_xattr(default_acl, ACL_TYPE_DEFAULT, mode, xattrs, &nr_xattrs,
 				 &values[0]);
 	if (!err)
@@ -673,7 +673,7 @@ static int fxfs_vfs_mknod(struct mnt_idmap *idmap, struct inode *dir, struct den
 	 * look for one (file_remove_privs). Setting one clears S_NOSEC.
 	 */
 	inode_has_no_xattr(d_inode(dentry));
-	/* fxdax: its ACLs, written with it, cached as fxfs_vfs_store_acl caches them. */
+	/* cladefs: its ACLs, written with it, cached as fxfs_vfs_store_acl caches them. */
 	if (default_acl && S_ISDIR(mode))
 		set_cached_acl(d_inode(dentry), ACL_TYPE_DEFAULT, default_acl);
 	if (acl)
@@ -896,7 +896,7 @@ static int fxfs_vfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry, stru
 		err = fxfs_data_resize(inode, size, idmap, iattr);
 	}
 	/*
-	 * fxdax: the access ACL's entries follow the mode, as ext4's: the mask, or the group's, as
+	 * cladefs: the access ACL's entries follow the mode, as ext4's: the mask, or the group's, as
 	 * the group's bits; a chmod left a named user what the mode took away (TASK-79.96).
 	 */
 	if (!err && iattr->ia_valid & ATTR_MODE)
@@ -950,7 +950,7 @@ static int fxfs_vfs_each_extent(struct inode *inode, loff_t start, loff_t end,
 		u64 len = min_t(u64, FXFS_EXTENT_WINDOW, end - at);
 		ssize_t count, i;
 
-		/* fxdax: a follower's window as of one state; `fn` may copy out, which may fault. */
+		/* cladefs: a follower's window as of one state; `fn` may copy out, which may fault. */
 		fxfs_vfs_fill_begin(inode->i_sb);
 		count = fxfs_nofs(fxfs_dax_extents(fxfs_vfs_fs(inode->i_sb), inode->i_ino, at, len,
 						   extents, FXFS_EXTENT_BATCH));
@@ -1010,7 +1010,7 @@ loff_t fxfs_vfs_llseek(struct file *file, loff_t offset, int whence)
 	}
 	seek.found = whence == SEEK_DATA ? size : offset;
 	/*
-	 * Data in the page cache has no pieces until written back. fxdax: nor a DAX file's dirty
+	 * Data in the page cache has no pieces until written back. cladefs: nor a DAX file's dirty
 	 * pages (fxfs_dax_write_back).
 	 */
 	err = filemap_write_and_wait(inode->i_mapping);
@@ -1082,7 +1082,7 @@ static int fxfs_vfs_fiemap(struct inode *inode, struct fiemap_extent_info *fiein
 	size = i_size_read(inode);
 	end = start >= size ? start : min_t(u64, size, start + len);
 	err = filemap_write_and_wait(inode->i_mapping);
-	/* fxdax: a DAX file's dirty pages too (fxfs_dax_write_back). */
+	/* cladefs: a DAX file's dirty pages too (fxfs_dax_write_back). */
 	if (!err)
 		err = fxfs_dax_write_back(inode);
 	if (!err)
@@ -1112,7 +1112,7 @@ static int fxfs_vfs_xattr_get(const struct xattr_handler *handler, struct dentry
 	const char *full = xattr_full_name(handler, name);
 	ssize_t ret;
 
-	/* fxdax: into the kernel's buffer, which the VFS copies out once this returns. */
+	/* cladefs: into the kernel's buffer, which the VFS copies out once this returns. */
 	fxfs_vfs_fill_begin(inode->i_sb);
 	ret = fxfs_nofs(fxfs_getxattr(fxfs_vfs_fs(inode->i_sb), inode->i_ino, full, strlen(full),
 				      buf, size));
@@ -1312,7 +1312,7 @@ static int fxfs_vfs_dir_fill(struct inode *inode, struct fxfs_vfs_dir_cursor *cu
 	}
 	cursor->entries = cursor->buffer;
 	/*
-	 * fxdax: a follower's entries as of one state, under its fill barrier; dir_emit copies them
+	 * cladefs: a follower's entries as of one state, under its fill barrier; dir_emit copies them
 	 * out once it is let go of, as a copy may fault.
 	 */
 	fxfs_vfs_fill_begin(inode->i_sb);
@@ -1386,7 +1386,7 @@ static int fxfs_vfs_iterate(struct file *file, struct dir_context *ctx)
 }
 
 /*
- * fxdax: a follower's pages are read in under its fill barrier, which what reads them in takes
+ * cladefs: a follower's pages are read in under its fill barrier, which what reads them in takes
  * (read(2), splice, fadvise, a fault): before the invalidate_lock, which the page cache holds as it
  * calls in.
  */
@@ -1423,7 +1423,7 @@ static int fxfs_vfs_read_folio(struct file *file, struct folio *folio)
 }
 
 /*
- * fxdax: a readahead's read: its folios, locked, filled from file `ino` from `pos` on, the parts
+ * cladefs: a readahead's read: its folios, locked, filled from file `ino` from `pos` on, the parts
  * fxfs_read_into reads them into. Each holds its folios until it unlocks them: truncation and
  * eviction wait for those locks.
  */
@@ -1469,7 +1469,7 @@ static void fxfs_vfs_read_work(struct work_struct *work)
 
 /*
  * Reads the folios of `rac` with one read, from the device's transfer buffer straight into them.
- * fxdax: off the reader, on the filesystem's readahead workqueue, which `rac`'s reader then waits
+ * cladefs: off the reader, on the filesystem's readahead workqueue, which `rac`'s reader then waits
  * for only on reaching a folio it hasn't filled yet: before, each window blocked the reader for
  * a round trip, and two copies through buffers as large as it (TASK-92.9). A follower's in its
  * reader, under its fill barrier. Folios it can't have the memory for are read one at a time
@@ -1510,7 +1510,7 @@ static void fxfs_vfs_readahead(struct readahead_control *rac)
 }
 
 /*
- * fxdax: which pages of a folio are dirty, so that writeback writes those alone, as iomap's
+ * cladefs: which pages of a folio are dirty, so that writeback writes those alone, as iomap's
  * iomap_folio_state has them: a write(2) of a database's page, 8 KiB, dirtied the whole folio,
  * which readahead made as large as a megabyte, and writeback wrote it whole: 13 GB a minute under
  * pgbench (TASK-91.12). And which of them have room reserved in Fxfs, which their writeback
@@ -1563,14 +1563,14 @@ static struct fxfs_vfs_folio_state *fxfs_vfs_folio_state(struct folio *folio, bo
 	return state;
 }
 
-/* fxdax: the bytes of the pages `bits`, `pages` of them, has set. */
+/* cladefs: the bytes of the pages `bits`, `pages` of them, has set. */
 static size_t fxfs_vfs_pages_bytes(const unsigned long *bits, unsigned long pages)
 {
 	return (size_t)bitmap_weight(bits, pages) << PAGE_SHIFT;
 }
 
 /*
- * fxdax: reserves room in Fxfs for the pages of `folio`, locked, from `offset` for `len` bytes,
+ * cladefs: reserves room in Fxfs for the pages of `folio`, locked, from `offset` for `len` bytes,
  * that have none, which a write or a store then dirties (TASK-80): 0, or -ENOSPC if the filesystem
  * hasn't room for them, or -ENOMEM.
  */
@@ -1601,7 +1601,7 @@ static int fxfs_vfs_reserve_range(struct folio *folio, size_t offset, size_t len
 }
 
 /*
- * fxdax: releases the room reserved for the pages of `folio`, locked, from `offset` for `len`
+ * cladefs: releases the room reserved for the pages of `folio`, locked, from `offset` for `len`
  * bytes, that weren't dirtied: a write short of what it readied (fxfs_vfs_reserve_range).
  */
 static void fxfs_vfs_unreserve_clean(struct folio *folio, size_t offset, size_t len)
@@ -1628,7 +1628,7 @@ static void fxfs_vfs_unreserve_clean(struct folio *folio, size_t offset, size_t 
 }
 
 /*
- * fxdax: makes room in the filesystem for a write that found it full: syncs it, writing back its
+ * cladefs: makes room in the filesystem for a write that found it full: syncs it, writing back its
  * dirty data, which frees what was reserved for it beyond what its writeback took, and the
  * removed files it holds still, as ext4's delayed allocation does (ext4_nonda_switch). Not while
  * it is frozen, or unmounted.
@@ -1662,7 +1662,7 @@ static int fxfs_vfs_zero_past_end(struct inode *inode, loff_t size, loff_t to);
 
 /*
  * Readies the folio a write of `len` bytes at `pos` copies into, as large as the write, reading
- * what the write doesn't cover of it. fxdax: with room reserved for the pages it dirties, making
+ * what the write doesn't cover of it. cladefs: with room reserved for the pages it dirties, making
  * room if the filesystem has none (fxfs_vfs_make_room), or -ENOSPC (TASK-80).
  */
 static int fxfs_vfs_write_begin(const struct kiocb *iocb, struct address_space *mapping,
@@ -1674,7 +1674,7 @@ static int fxfs_vfs_write_begin(const struct kiocb *iocb, struct address_space *
 	size_t offset;
 	int err;
 
-	/* fxdax: what a mapping stored past the end isn't the data between it and the write. */
+	/* cladefs: what a mapping stored past the end isn't the data between it and the write. */
 	if (pos > i_size_read(inode)) {
 		err = fxfs_vfs_zero_past_end(inode, i_size_read(inode), pos);
 		if (err)
@@ -1717,7 +1717,7 @@ out:
 }
 
 /*
- * fxdax: dirties the folio, locked, as a write(2) of `len` bytes at `offset` in it does, its room
+ * cladefs: dirties the folio, locked, as a write(2) of `len` bytes at `offset` in it does, its room
  * reserved (fxfs_vfs_reserve_range).
  */
 static void fxfs_vfs_dirty_range(struct folio *folio, size_t offset, size_t len)
@@ -1734,7 +1734,7 @@ static void fxfs_vfs_dirty_range(struct folio *folio, size_t offset, size_t len)
 }
 
 /*
- * fxdax: dirties the folio whole, as anything but a write(2) does: a store through a mapping
+ * cladefs: dirties the folio whole, as anything but a write(2) does: a store through a mapping
  * (fxfs_vfs_page_mkwrite), which writeback write-protects again, so that the next faults to dirty
  * it. Its pages' room is as it was: a store's reserved as it faulted.
  */
@@ -1750,7 +1750,7 @@ static bool fxfs_vfs_dirty_folio(struct address_space *mapping, struct folio *fo
 	return filemap_dirty_folio(mapping, folio);
 }
 
-/* fxdax: a clean folio's state goes with it. */
+/* cladefs: a clean folio's state goes with it. */
 static bool fxfs_vfs_release_folio(struct folio *folio, gfp_t gfp)
 {
 	if (folio_test_dirty(folio) || folio_test_writeback(folio))
@@ -1760,7 +1760,7 @@ static bool fxfs_vfs_release_folio(struct folio *folio, gfp_t gfp)
 }
 
 /*
- * fxdax: zeroes what the cached folio holding the file's end, `size`, holds past it, up to `to`,
+ * cladefs: zeroes what the cached folio holding the file's end, `size`, holds past it, up to `to`,
  * as the file grows: writeback writes no more than the file holds, and stores through a mapping
  * past its end became its data as it grew (TASK-79.53). The bytes zeroed are written back, now
  * the file's: with room reserved for them, or -ENOSPC (TASK-80).
@@ -1799,7 +1799,7 @@ again:
 }
 
 /*
- * fxdax: as does a folio's dropped whole, and the room its dirty pages had reserved (TASK-80);
+ * cladefs: as does a folio's dropped whole, and the room its dirty pages had reserved (TASK-80);
  * one truncated within keeps its, past the file's end, which its writeback then releases.
  */
 static void fxfs_vfs_invalidate_folio(struct folio *folio, size_t offset, size_t len)
@@ -1820,7 +1820,7 @@ static void fxfs_vfs_invalidate_folio(struct folio *folio, size_t offset, size_t
 }
 
 /*
- * As libfs's simple_write_end: the folio dirty, and the file grown to hold the write. fxdax: the
+ * As libfs's simple_write_end: the folio dirty, and the file grown to hold the write. cladefs: the
  * pages it wrote alone dirty (`fxfs_vfs_folio_state`). A folio never read, which the write was to
  * cover whole (fxfs_vfs_write_begin), takes nothing of a short copy, as block_write_end has it:
  * ramfs's zeroed the rest, which on a file's existing data wrote zeros over it (TASK-79.14), and
@@ -1842,11 +1842,11 @@ static int fxfs_vfs_write_end(const struct kiocb *iocb, struct address_space *ma
 	} else if (copied) {
 		fxfs_vfs_dirty_range(folio, offset_in_folio(folio, pos), copied);
 	}
-	/* fxdax: nothing copied, past the end, the file stays as long as it was. */
+	/* cladefs: nothing copied, past the end, the file stays as long as it was. */
 	if (copied && pos + copied > inode->i_size)
 		i_size_write(inode, pos + copied);
 out:
-	/* fxdax: the room of the pages a short copy didn't dirty (TASK-80). */
+	/* cladefs: the room of the pages a short copy didn't dirty (TASK-80). */
 	fxfs_vfs_unreserve_clean(folio, offset_in_folio(folio, pos), len);
 	folio_unlock(folio);
 	folio_put(folio);
@@ -1862,19 +1862,19 @@ struct fxfs_vfs_run {
 	struct folio *folios[FXFS_IO_MAX / PAGE_SIZE];
 	/* Their data, as much of each as is before the file's end, if any is. */
 	struct fxfs_write_part parts[FXFS_IO_MAX / PAGE_SIZE];
-	/* fxdax: each part's folio, and its pages, `first` to `last`, exclusive (TASK-212). */
+	/* cladefs: each part's folio, and its pages, `first` to `last`, exclusive (TASK-212). */
 	struct fxfs_vfs_run_piece {
 		struct folio *folio;
 		unsigned long first, last;
 	} pieces[FXFS_IO_MAX / PAGE_SIZE];
 	unsigned int count, nr_parts;
 	size_t len;
-	/* fxdax: the bytes of the pages it writes whose room is reserved, which pays for them. */
+	/* cladefs: the bytes of the pages it writes whose room is reserved, which pays for them. */
 	size_t reserved;
 };
 
 /*
- * fxdax: of a run Fxfs had no memory to write, its parts' pages dirty again, in their folios'
+ * cladefs: of a run Fxfs had no memory to write, its parts' pages dirty again, in their folios'
  * states and their folios, their room reserved again, what there is of it (the failed
  * fxfs_write_many took it), so that a writeback later writes them (TASK-212): clean, as an I/O
  * error's, they were lost, the store holding what they replaced, which a read after their eviction
@@ -1911,7 +1911,7 @@ static void fxfs_vfs_keep(struct fxfs_vfs_run *run)
 }
 
 /*
- * Writes `run`'s folios, and ends their writeback. fxdax: with the room reserved for them, which
+ * Writes `run`'s folios, and ends their writeback. cladefs: with the room reserved for them, which
  * is released with what the writes left of it, or, if it writes nothing, the file's end before
  * them, unused. What an I/O error stopped is clean, the error the file's, as any filesystem's;
  * what Fxfs had no memory to write is dirty still, and the run fails ENOMEM (fxfs_vfs_keep).
@@ -1925,7 +1925,7 @@ static int fxfs_vfs_write_run(struct fxfs_vfs_run *run)
 	if (run->nr_parts) {
 		err = fxfs_write_many(fs, run->inode->i_ino, run->parts, run->nr_parts,
 				      run->reserved);
-		/* fxdax: in a DAX mount, read in to the page cache until sealed. */
+		/* cladefs: in a DAX mount, read in to the page cache until sealed. */
 		fxfs_dax_written(run->inode);
 	} else if (run->reserved)
 		fxfs_release_dirty(fs, run->inode->i_ino, run->reserved);
@@ -1943,7 +1943,7 @@ static int fxfs_vfs_write_run(struct fxfs_vfs_run *run)
 }
 
 /*
- * Writes back dirty folios, up to FXFS_IO_MAX bytes of them, contiguous or not, in one call. fxdax:
+ * Writes back dirty folios, up to FXFS_IO_MAX bytes of them, contiguous or not, in one call. cladefs:
  * of a folio, the pages dirty alone (`fxfs_vfs_folio_state`), with the room reserved for them.
  */
 static int fxfs_vfs_writepages(struct address_space *mapping, struct writeback_control *wbc)
@@ -2041,7 +2041,7 @@ static int fxfs_vfs_writepages(struct address_space *mapping, struct writeback_c
  * O_DIRECT's reads and writes of a file in the page cache: straight to and from Fxfs, through a
  * buffer, FXFS_IO_MAX bytes at a time, once the VFS has written back and dropped the page cache's
  * range (generic_file_read_iter, generic_file_direct_write). They needn't be aligned. A DAX file's
- * reads and writes are direct already (fxfs_dax_file_operations). fxdax: a follower's are refused,
+ * reads and writes are direct already (fxfs_dax_file_operations). cladefs: a follower's are refused,
  * as they would read outside its fill barrier (vfs.h).
  */
 static ssize_t fxfs_vfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
@@ -2060,7 +2060,7 @@ static ssize_t fxfs_vfs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		if (pos >= size)
 			return 0;
 		/*
-		 * fxdax: what is past the file's end is given back as it returns, as the caller reverts
+		 * cladefs: what is past the file's end is given back as it returns, as the caller reverts
 		 * the iterator by what it took: past its start, a BUG(), otherwise (TASK-79.15).
 		 */
 		past_end = iov_iter_count(iter) - min_t(u64, iov_iter_count(iter), size - pos);
@@ -2123,7 +2123,7 @@ static const struct address_space_operations fxfs_vfs_aops = {
  * sealing what was written back. And a file's directory's times, which creates
  * and unlinks leave to the kernel (write_inode), as a journaling filesystem's fsync of a file
  * commits the change to its directory that made it: so that a sync of the directory after it has
- * nothing of its own to commit. fxdax: fdatasync writes back neither's times, as data doesn't
+ * nothing of its own to commit. cladefs: fdatasync writes back neither's times, as data doesn't
  * need them to be read back: only what does (I_DIRTY_DATASYNC), as generic_file_fsync. Fxfs has a
  * file's size already, which its writes of the data change (TASK-41).
  */
@@ -2136,7 +2136,7 @@ int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 	err = file_write_and_wait_range(file, start, end);
 
 	/*
-	 * fxdax: a DAX file's dirty pages, which a write(2)'s leave the mapping untagged for, so that
+	 * cladefs: a DAX file's dirty pages, which a write(2)'s leave the mapping untagged for, so that
 	 * the writeback above may not have been asked for them (doc-13).
 	 */
 	if (!err)
@@ -2156,7 +2156,7 @@ int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 }
 
 /*
- * Each kind of inode's operations, a writer's; fxdax: and a follower's, which read its attributes
+ * Each kind of inode's operations, a writer's; cladefs: and a follower's, which read its attributes
  * under its fill barrier (fxfs_vfs_follower_getattr).
  */
 #define FXFS_VFS_DIR_INODE_OPERATIONS		\
@@ -2327,7 +2327,7 @@ ssize_t fxfs_vfs_follower_read(struct kiocb *iocb, struct iov_iter *to,
 }
 
 /*
- * fxdax: a follower's read(2) of a file in the page cache, under its fill barrier, which its pages
+ * cladefs: a follower's read(2) of a file in the page cache, under its fill barrier, which its pages
  * are read in, and copied from, under (fxfs_vfs_follower_read).
  */
 static ssize_t fxfs_vfs_follower_read_iter(struct kiocb *iocb, struct iov_iter *to)
@@ -2335,7 +2335,7 @@ static ssize_t fxfs_vfs_follower_read_iter(struct kiocb *iocb, struct iov_iter *
 	return fxfs_vfs_follower_read(iocb, to, generic_file_read_iter);
 }
 
-/* fxdax: a follower's pages, read in and spliced under its fill barrier: kernel copies only. */
+/* cladefs: a follower's pages, read in and spliced under its fill barrier: kernel copies only. */
 static ssize_t fxfs_vfs_follower_splice_read(struct file *in, loff_t *ppos,
 					     struct pipe_inode_info *pipe, size_t len,
 					     unsigned int flags)
@@ -2349,7 +2349,7 @@ static ssize_t fxfs_vfs_follower_splice_read(struct file *in, loff_t *ppos,
 	return ret;
 }
 
-/* fxdax: a follower's readahead (fadvise, madvise, readahead(2)), under its fill barrier. */
+/* cladefs: a follower's readahead (fadvise, madvise, readahead(2)), under its fill barrier. */
 static int fxfs_vfs_follower_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
@@ -2362,7 +2362,7 @@ static int fxfs_vfs_follower_fadvise(struct file *file, loff_t offset, loff_t le
 }
 
 /*
- * fxdax: a follower's fault of a page of a file in the page cache, read in under its fill barrier,
+ * cladefs: a follower's fault of a page of a file in the page cache, read in under its fill barrier,
  * taken before the invalidate_lock filemap_fault takes. Pages already cached are mapped as they
  * are (filemap_map_pages): a batch drops those it changes before it applies.
  */
@@ -2392,7 +2392,7 @@ static int fxfs_vfs_follower_mmap(struct file *file, struct vm_area_struct *vma)
 }
 
 /*
- * fxdax: a store through a shared mapping to a folio of a file in the page cache, which dirties it
+ * cladefs: a store through a shared mapping to a folio of a file in the page cache, which dirties it
  * whole (fxfs_vfs_dirty_folio), as filemap_page_mkwrite: with room reserved for its pages that
  * have none, making room if the filesystem has none (fxfs_vfs_make_room), or SIGBUS, as ext4's
  * delayed allocation has it (TASK-80).
@@ -2449,7 +2449,7 @@ static int fxfs_vfs_mmap(struct file *file, struct vm_area_struct *vma)
 	return err;
 }
 
-/* fxdax: a page-cache file's size changes: what its cached page held past the end, zeroed. */
+/* cladefs: a page-cache file's size changes: what its cached page held past the end, zeroed. */
 static int fxfs_vfs_cache_resize_begin(struct inode *inode, loff_t size)
 {
 	if (size <= i_size_read(inode))
@@ -2458,7 +2458,7 @@ static int fxfs_vfs_cache_resize_begin(struct inode *inode, loff_t size)
 }
 
 /*
- * fxdax: a hole punched: its range written back, and its folios gone whole, clean, not zeroed in
+ * cladefs: a hole punched: its range written back, and its folios gone whole, clean, not zeroed in
  * part: a partial page's zeros, in the cache before Fxfs has them, stayed there if it had no room,
  * what the file held coming back when the cache let them go. Its partial pages are zeroed in Fxfs
  * (fxfs_vfs_write_zeros).
@@ -2474,7 +2474,7 @@ static int fxfs_vfs_cache_punch_begin(struct inode *inode, loff_t start, loff_t 
 }
 
 /*
- * fxdax: as every growth past the end: what the cached page held past it, up to the clone at
+ * cladefs: as every growth past the end: what the cached page held past it, up to the clone at
  * `pos`, is no data, stores through a mapping there for one (TASK-79.53, TASK-153.4). A clone from
  * before the end replaces the last block whole. Written back, as the VFS wrote back the clone's
  * range, so that its folio, which may reach into that range, goes clean.
@@ -2502,7 +2502,7 @@ static int fxfs_vfs_cache_remapped(struct inode *inode, loff_t pos, loff_t len)
 					     (pos + len - 1) >> PAGE_SHIFT);
 }
 
-/* fxdax: a regular file in the page cache: what its data's changes do there (data.c). */
+/* cladefs: a regular file in the page cache: what its data's changes do there (data.c). */
 static const struct fxfs_data_ops fxfs_vfs_cache_data = {
 	.resize_begin = fxfs_vfs_cache_resize_begin,
 	.punch_begin = fxfs_vfs_cache_punch_begin,
@@ -2525,7 +2525,7 @@ static const struct file_operations fxfs_vfs_file_operations = {
 	.remap_file_range = fxfs_data_remap_file_range,
 };
 
-/* fxdax: a follower's regular files, in the page cache: read-only, under its fill barrier. */
+/* cladefs: a follower's regular files, in the page cache: read-only, under its fill barrier. */
 static const struct file_operations fxfs_vfs_follower_file_operations = {
 	.open = fxfs_vfs_file_open,
 	.release = fxfs_vfs_file_release,
@@ -2557,7 +2557,7 @@ static void fxfs_vfs_evict_inode(struct inode *inode)
 }
 
 /*
- * fxdax: fault injection (TASK-199): the next write-back of the inode this numbers fails (-EIO),
+ * cladefs: fault injection (TASK-199): the next write-back of the inode this numbers fails (-EIO),
  * and it is 0 again; 0, none.
  */
 static unsigned long fxfs_vfs_fail_write_inode;
@@ -2565,7 +2565,7 @@ module_param_named(fail_write_inode, fxfs_vfs_fail_write_inode, ulong, 0644);
 MODULE_PARM_DESC(fail_write_inode, "Fail the next write-back of this inode's attributes (fault injection)");
 
 /*
- * Writes back the attributes the kernel keeps (fxfs_vfs_write_attr). fxdax: failing, the inode is
+ * Writes back the attributes the kernel keeps (fxfs_vfs_write_attr). cladefs: failing, the inode is
  * dirty again, for the next write-back to retry, and the next fsync to report until one works: the
  * VFS took it for clean before the call, and the flusher's and sync's, which nothing reports, left
  * the next fsync nothing to write and 0 to return, the change lost at eviction (TASK-199).
@@ -2579,7 +2579,7 @@ static int fxfs_vfs_write_inode(struct inode *inode, struct writeback_control *w
 	    cmpxchg(&fxfs_vfs_fail_write_inode, ino, 0) == ino)
 		err = -EIO;
 	else
-		/* fxdax: a DAX file's dirty pages first, which Fxfs takes its size from (doc-13). */
+		/* cladefs: a DAX file's dirty pages first, which Fxfs takes its size from (doc-13). */
 		err = fxfs_dax_write_back(inode) ?: fxfs_vfs_write_attr(inode, 0);
 	if (err && !(READ_ONCE(inode->i_state) & (I_WILL_FREE | I_FREEING)))
 		mark_inode_dirty_sync(inode);
@@ -2587,7 +2587,7 @@ static int fxfs_vfs_write_inode(struct inode *inode, struct writeback_control *w
 }
 
 /*
- * fxdax: makes what the volume of `sb` holds durable: the window's dirty pages written back before
+ * cladefs: makes what the volume of `sb` holds durable: the window's dirty pages written back before
  * the sync seals them, which sync's writepages may not have been asked for; then one durable
  * commit of the device, a round trip to object storage (TASK-371).
  */
@@ -2608,7 +2608,7 @@ static int fxfs_vfs_sync_fs(struct super_block *sb, int wait)
 	if (sb->s_writers.frozen == SB_FREEZE_COMPLETE)
 		return 0;
 	/*
-	 * fxdax: once, as the VFS asks waiting: it asks without first, then waiting (sync, syncfs,
+	 * cladefs: once, as the VFS asks waiting: it asks without first, then waiting (sync, syncfs,
 	 * freeze_super's sync_filesystem), and each durable commit waits for object storage
 	 * (TASK-371). Freezing, the freeze makes it durable (fxfs_vfs_freeze_fs).
 	 */
@@ -2618,7 +2618,7 @@ static int fxfs_vfs_sync_fs(struct super_block *sb, int wait)
 }
 
 /*
- * fxdax: fault injection (TASK-200): the next thaw of a filesystem fails before its step this
+ * cladefs: fault injection (TASK-200): the next thaw of a filesystem fails before its step this
  * names, 1 telling the device, 2 renewing the journal's tail, 3 recording it, which is 0 again
  * then (fxfs_set_fail_thaw_at): it stays frozen, for the next thaw to go on from that step.
  */
@@ -2649,7 +2649,7 @@ MODULE_PARM_DESC(fail_thaw_at, "Fail the next thaw before this step: 1 telling t
  * Freezing (fsfreeze, FIFREEZE): the VFS stops a volume's writers and syncs it, and once all the
  * filesystem's volumes are frozen, read-only ones too (fxfs_vfs_settle_frozen), the filesystem is
  * made durable, and holds its background work, compacting and freeing, which writes nothing until
- * it thaws: nothing is open on the device, the point a snapshot of the VM is taken at (fxdax's
+ * it thaws: nothing is open on the device, the point a snapshot of the VM is taken at (cladefs's
  * TASK-39.1). With the first volume to thaw, it learns the device's branch, which a VM restored
  * from the snapshot has its own of. With the lock held.
  */
@@ -2669,7 +2669,7 @@ static int fxfs_vfs_filesystem_freeze(struct fxfs_vfs_filesystem *filesystem)
 			fxfs_dax_thaw(dax);
 		return err;
 	}
-	/* fxdax: the window's private pages rebound, for the snapshot (doc-13). */
+	/* cladefs: the window's private pages rebound, for the snapshot (doc-13). */
 	if (dax)
 		fxfs_dax_frozen(dax);
 	filesystem->frozen = true;
@@ -2677,7 +2677,7 @@ static int fxfs_vfs_filesystem_freeze(struct fxfs_vfs_filesystem *filesystem)
 }
 
 /*
- * fxdax: thaws the filesystem, if it is frozen. A thaw that fails leaves it frozen, its DAX
+ * cladefs: thaws the filesystem, if it is frozen. A thaw that fails leaves it frozen, its DAX
  * quiesced, as the VFS leaves a superblock whose unfreeze_fs failed: the next thaw goes on from the
  * step this one stopped at (fxfs_thaw), where taking the filesystem for thawed had writers pass
  * the VFS to wait for ever at the device Fxfs still held closed (TASK-200). With the lock held.
@@ -2696,7 +2696,7 @@ static int fxfs_vfs_filesystem_thaw(struct fxfs_vfs_filesystem *filesystem)
 		fxfs_dax_thaw(filesystem->dax);
 	filesystem->frozen = false;
 	/*
-	 * fxdax: a store resized while the VM was away, snapshotted, told it nothing: what the device
+	 * cladefs: a store resized while the VM was away, snapshotted, told it nothing: what the device
 	 * says now it takes as if told, before anything thawed sees the filesystem's size.
 	 */
 	if (!fxfs_filesystem_follows(filesystem->filesystem)) {
@@ -2706,7 +2706,7 @@ static int fxfs_vfs_filesystem_thaw(struct fxfs_vfs_filesystem *filesystem)
 	return 0;
 }
 
-/* fxdax: the volume of `info` frozen, and its filesystem with it, if it was the last. */
+/* cladefs: the volume of `info` frozen, and its filesystem with it, if it was the last. */
 static int fxfs_vfs_volume_freeze(struct fxfs_vfs_info *info)
 {
 	struct fxfs_vfs_filesystem *filesystem = info->filesystem;
@@ -2726,7 +2726,7 @@ static int fxfs_vfs_volume_freeze(struct fxfs_vfs_info *info)
 }
 
 /*
- * fxdax: the volume of `info` thawed, and its filesystem, if frozen, first: a failed thaw leaves
+ * cladefs: the volume of `info` thawed, and its filesystem, if frozen, first: a failed thaw leaves
  * both frozen.
  */
 static int fxfs_vfs_volume_thaw(struct fxfs_vfs_info *info)
@@ -2747,7 +2747,7 @@ static int fxfs_vfs_volume_thaw(struct fxfs_vfs_info *info)
 }
 
 /*
- * fxdax: what the VFS synced as it froze the volume made durable, once (fxfs_vfs_sync_fs leaves
+ * cladefs: what the VFS synced as it froze the volume made durable, once (fxfs_vfs_sync_fs leaves
  * it to the freeze, TASK-371): by the filesystem's freeze, if this volume is its last to freeze,
  * else by a sync of its own, before the volume counts as frozen, which a sync failing leaves it
  * not.
@@ -2779,7 +2779,7 @@ static int fxfs_vfs_unfreeze_fs(struct super_block *sb)
 }
 
 /*
- * fxdax: a read-only superblock, frozen or thawed as the VFS says, taken so by its filesystem: the
+ * cladefs: a read-only superblock, frozen or thawed as the VFS says, taken so by its filesystem: the
  * VFS freezes and thaws one without a call to the filesystem (freeze_super calls no freeze_fs for
  * it), whose freeze, waiting for every superblock, would otherwise never come, and its VM never be
  * snapshotted, though each fsfreeze returned 0 (TASK-202). A writable one's freeze_fs and
@@ -2808,7 +2808,7 @@ static int fxfs_vfs_settle_frozen(struct super_block *sb)
 }
 
 /*
- * fxdax: FIFREEZE's, and the kernel's, freeze of a superblock (freeze_super), then its
+ * cladefs: FIFREEZE's, and the kernel's, freeze of a superblock (freeze_super), then its
  * filesystem's of a read-only one (fxfs_vfs_settle_frozen): failing, the superblock is thawed
  * again, as a writable one stays thawed if its freeze_fs fails.
  */
@@ -2830,7 +2830,7 @@ static int fxfs_vfs_freeze_super(struct super_block *sb, enum freeze_holder who,
 }
 
 /*
- * fxdax: FITHAW's, and the kernel's, thaw of a superblock (thaw_super), then its filesystem's of a
+ * cladefs: FITHAW's, and the kernel's, thaw of a superblock (thaw_super), then its filesystem's of a
  * read-only one (fxfs_vfs_settle_frozen). One whose filesystem failed to thaw is thawed already
  * for the VFS, which refuses it a second thaw (-EINVAL): that retries the filesystem's.
  */
@@ -2874,7 +2874,7 @@ static struct inode *fxfs_vfs_alloc_inode(struct super_block *sb)
 
 	if (!fi)
 		return NULL;
-	/* fxdax: in the page cache, unless it is made a DAX inode (fxfs_dax_set_inode). */
+	/* cladefs: in the page cache, unless it is made a DAX inode (fxfs_dax_set_inode). */
 	fi->data = &fxfs_vfs_cache_data;
 	fxfs_dax_inode_init(&fi->dax);
 	atomic64_set(&fi->gen, 0);
@@ -2989,7 +2989,7 @@ static const struct export_operations fxfs_vfs_export_operations = {
 	.fh_to_dentry = fxfs_vfs_fh_to_dentry,
 };
 
-/* fxdax: takes the size the host resized the store to. */
+/* cladefs: takes the size the host resized the store to. */
 static void fxfs_vfs_resize_work(struct work_struct *work)
 {
 	struct fxfs_vfs_filesystem *filesystem = container_of(work, struct fxfs_vfs_filesystem, resize);
@@ -3000,7 +3000,7 @@ static void fxfs_vfs_resize_work(struct work_struct *work)
 }
 
 /*
- * fxdax: the host resized the store, or asks the guest to shrink: from the device's interrupt. The
+ * cladefs: the host resized the store, or asks the guest to shrink: from the device's interrupt. The
  * work finds what changed, if anything did, in the device's configuration.
  */
 static void fxfs_vfs_changed(void *arg)
@@ -3012,7 +3012,7 @@ static void fxfs_vfs_changed(void *arg)
 
 DEFINE_STATIC_KEY_FALSE(fxfs_vfs_followers);
 
-/* fxdax: the torture test's knobs (vfs.h). */
+/* cladefs: the torture test's knobs (vfs.h). */
 unsigned int fxfs_follow_apply_delay_us;
 module_param_named(follow_apply_delay_us, fxfs_follow_apply_delay_us, uint, 0644);
 MODULE_PARM_DESC(follow_apply_delay_us,
@@ -3038,7 +3038,7 @@ bool fxfs_follow_fail_batch;
 module_param_named(follow_fail_batch, fxfs_follow_fail_batch, bool, 0644);
 MODULE_PARM_DESC(follow_fail_batch, "A follower's batches fail once applied (tests)");
 
-/* fxdax: a follower's batch, as its device tells of its writer's commits. */
+/* cladefs: a follower's batch, as its device tells of its writer's commits. */
 static void fxfs_vfs_follow_work(struct work_struct *work)
 {
 	struct fxfs_vfs_info *info = container_of(work, struct fxfs_vfs_info, follow);
@@ -3048,7 +3048,7 @@ static void fxfs_vfs_follow_work(struct work_struct *work)
 		pr_warn_ratelimited("fxfs: following the writer: %d\n", err);
 }
 
-/* fxdax: a follower's device tells of its writer's commits: from its interrupt. */
+/* cladefs: a follower's device tells of its writer's commits: from its interrupt. */
 static void fxfs_vfs_committed(void *arg)
 {
 	struct fxfs_vfs_info *info = arg;
@@ -3056,7 +3056,7 @@ static void fxfs_vfs_committed(void *arg)
 	schedule_work(&info->follow);
 }
 
-/* fxdax: a follower's primitives (fxfs.h), of the superblock `vfs`. */
+/* cladefs: a follower's primitives (fxfs.h), of the superblock `vfs`. */
 static struct fxfs_vfs_info *fxfs_vfs_follow_info(void *vfs)
 {
 	return fxfs_vfs_info(vfs);
@@ -3079,7 +3079,7 @@ void fxfs_vfs_follow_assert_filling(void *vfs)
 }
 
 /*
- * fxdax: a follower's batch takes its fill barrier, once its readers holding it are done, and
+ * cladefs: a follower's batch takes its fill barrier, once its readers holding it are done, and
  * keeps new ones waiting until it lets go (vfs.h): how long it waited is counted.
  */
 void fxfs_vfs_follow_barrier_take(void *vfs)
@@ -3124,7 +3124,7 @@ void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch)
 		smp_store_release(at, epoch);
 }
 
-/* fxdax: FXFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
+/* cladefs: FXFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
 static long fxfs_vfs_ioc_flush(struct super_block *sb)
 {
 	struct fxfs_vfs_filesystem *filesystem = fxfs_vfs_info(sb)->filesystem;
@@ -3137,7 +3137,7 @@ static long fxfs_vfs_ioc_flush(struct super_block *sb)
 	return err;
 }
 
-/* fxdax: FXFS_IOC_MANIFEST (vfs.h). The lock keeps the filesystem frozen. */
+/* cladefs: FXFS_IOC_MANIFEST (vfs.h). The lock keeps the filesystem frozen. */
 static long fxfs_vfs_ioc_manifest(struct super_block *sb, struct fxfs_manifest __user *arg)
 {
 	struct fxfs_vfs_filesystem *filesystem = fxfs_vfs_info(sb)->filesystem;
@@ -3163,7 +3163,7 @@ static long fxfs_vfs_ioc_manifest(struct super_block *sb, struct fxfs_manifest _
 	return size < 0 ? size : 0;
 }
 
-/* fxdax: FXFS_IOC_IMPORT (vfs.h). */
+/* cladefs: FXFS_IOC_IMPORT (vfs.h). */
 static long fxfs_vfs_ioc_import(struct super_block *sb, struct fxfs_import __user *arg)
 {
 	struct fxfs_vfs_filesystem *filesystem = fxfs_vfs_info(sb)->filesystem;
@@ -3193,7 +3193,7 @@ static long fxfs_vfs_ioc_import(struct super_block *sb, struct fxfs_import __use
 	return err;
 }
 
-/* fxdax: a directory's ioctls (vfs.h). */
+/* cladefs: a directory's ioctls (vfs.h). */
 static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct super_block *sb = file_inode(file)->i_sb;
@@ -3237,7 +3237,7 @@ static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned lon
 }
 
 /*
- * fxdax: a follower's file `ino`, `inode` if one is read in, whose data a batch changes from
+ * cladefs: a follower's file `ino`, `inode` if one is read in, whose data a batch changes from
  * `start` to `end`, exclusive: what the window maps of it, or the page cache holds, goes. Under the
  * fill barrier, which the batch holds, and with an inode, its invalidate_lock held for writing.
  */
@@ -3254,7 +3254,7 @@ static void fxfs_vfs_drop_data(struct super_block *sb, struct inode *inode, u64 
 		return;
 	if (inode)
 		lockdep_assert_held_write(&inode->i_mapping->invalidate_lock);
-	/* fxdax: as the inode has its data: one that got no file stays in the page cache (TASK-79.97). */
+	/* cladefs: as the inode has its data: one that got no file stays in the page cache (TASK-79.97). */
 	if (dax && (!inode || IS_DAX(inode))) {
 		err = fxfs_dax_changed(dax, info->dax_volume, inode, ino, first, last);
 		if (err)
@@ -3270,7 +3270,7 @@ static void fxfs_vfs_drop_data(struct super_block *sb, struct inode *inode, u64 
 }
 
 /*
- * fxdax: a follower's inode takes the attributes `attr` a batch left its object with; or, gone, no
+ * cladefs: a follower's inode takes the attributes `attr` a batch left its object with; or, gone, no
  * name links it. With its invalidate_lock held for writing, as a writer's truncate holds it: a
  * fault, holding it shared, checks its page against the size, then maps the file's chunk as large
  * as the size is. A file grown has its window's ranges past its old end dropped first, which were
@@ -3373,11 +3373,11 @@ void fxfs_vfs_drop_entries(void *vfs, u64 ino)
 	iput(inode);
 }
 
-/* fxdax: /proc/fs/fxfs, where each filesystem says what it waited on, by its device's tag. */
+/* cladefs: /proc/fs/fxfs, where each filesystem says what it waited on, by its device's tag. */
 static struct proc_dir_entry *fxfs_vfs_proc;
 
 /*
- * fxdax: /proc/fs/fxfs/build, the commit the filesystem was built of (`commit COMMIT`), as
+ * cladefs: /proc/fs/fxfs/build, the commit the filesystem was built of (`commit COMMIT`), as
  * scripts/build-commit.sh said (the Makefile's FXFS_BUILD_COMMIT, TASK-111.7). A device tagged
  * `build` keeps no stats there.
  */
@@ -3388,7 +3388,7 @@ static int fxfs_vfs_build_show(struct seq_file *m, void *v)
 }
 
 /*
- * fxdax: what the filesystem `m` is of waited on, and its device's and window's requests took, as
+ * cladefs: what the filesystem `m` is of waited on, and its device's and window's requests took, as
  * lines of a name and a number, all told since it opened (TASK-91.7): Fxfs waits on the device in
  * the kernel, which counts it as idle, not iowait, so that nothing else tells those waits apart.
  */
@@ -3412,7 +3412,7 @@ static int fxfs_vfs_stats_show(struct seq_file *m, void *v)
 }
 
 /*
- * fxdax: what the filesystem `arg` is of says to the host's asks for its stats (the driver's
+ * cladefs: what the filesystem `arg` is of says to the host's asks for its stats (the driver's
  * F_STATS, TASK-111.4), in the `len` bytes at `buf`: what /proc/fs/fxfs/<its tag> says, and its
  * build, as /proc/fs/fxfs/build says it. One show function writes both, here through a seq_file
  * over `buf`, which writes nothing past it: -EOVERFLOW if it would have.
@@ -3464,7 +3464,7 @@ static void fxfs_vfs_filesystem_close(struct fxfs_vfs_filesystem *filesystem)
 {
 	unsigned int nofs;
 
-	/* Once its readers are done: fxdax: the host's asks for its stats', too (TASK-111.4). */
+	/* Once its readers are done: cladefs: the host's asks for its stats', too (TASK-111.4). */
 	virtio_extent_set_stats(filesystem->vext, NULL, NULL);
 	proc_remove(filesystem->stats);
 	filesystem->stats = NULL;
@@ -3487,7 +3487,7 @@ static void fxfs_vfs_filesystem_close(struct fxfs_vfs_filesystem *filesystem)
 	if (filesystem->dax)
 		fxfs_dax_destroy(filesystem->dax);
 	filesystem->dax = NULL;
-	/* fxdax: a follower lets go of its store, which keeps a writer from it once it was cut off. */
+	/* cladefs: a follower lets go of its store, which keeps a writer from it once it was cut off. */
 	virtio_extent_close(filesystem->vext);
 }
 
@@ -3498,7 +3498,7 @@ static int fxfs_vfs_filesystem_open(struct fxfs_vfs_filesystem *filesystem, stru
 	struct fxfs_dax *dax;
 	int err;
 
-	/* fxdax: a follower's device, closed as it last unmounted, opens on a new view of its store. */
+	/* cladefs: a follower's device, closed as it last unmounted, opens on a new view of its store. */
 	err = virtio_extent_open(filesystem->vext);
 	if (err)
 		goto err_close;
@@ -3508,7 +3508,7 @@ static int fxfs_vfs_filesystem_open(struct fxfs_vfs_filesystem *filesystem, stru
 	if (err)
 		goto err_close;
 	filesystem->filesystem = fs;
-	/* fxdax: readahead off the reader; a follower's in it (fxfs_vfs_readahead). */
+	/* cladefs: readahead off the reader; a follower's in it (fxfs_vfs_readahead). */
 	if (!fxfs_filesystem_follows(fs)) {
 		fxfs_device_set_changed(fxfs_dax_device(fs), fxfs_vfs_changed, filesystem);
 		filesystem->readahead = alloc_workqueue("fxfs-read", WQ_UNBOUND, 0);
@@ -3527,7 +3527,7 @@ static int fxfs_vfs_filesystem_open(struct fxfs_vfs_filesystem *filesystem, stru
 	if (fxfs_vfs_proc && !strchr(fc->source, '/'))
 		filesystem->stats = proc_create_single_data(fc->source, 0444, fxfs_vfs_proc,
 							    fxfs_vfs_stats_show, filesystem);
-	/* fxdax: and the host's asks for its stats have it say them (TASK-111.4). */
+	/* cladefs: and the host's asks for its stats have it say them (TASK-111.4). */
 	virtio_extent_set_stats(filesystem->vext, fxfs_vfs_stats_text, filesystem);
 	return 0;
 err_close:
@@ -3560,7 +3560,7 @@ static int fxfs_vfs_filesystem_join(struct fxfs_vfs_info *info, struct fs_contex
 /*
  * The volume of `info`, its inodes evicted, leaves its filesystem, which closes with the last. The
  * volumes left may all be frozen by then, which freezes the filesystem. A frozen filesystem has
- * none leave: a frozen superblock stays until it thaws. fxdax: but a read-only one an emergency
+ * none leave: a frozen superblock stays until it thaws. cladefs: but a read-only one an emergency
  * thaw thawed (do_thaw_all, which calls no thaw_super of a filesystem's), which writes nothing; the
  * last to leave thaws the filesystem, which then closes.
  */
@@ -3586,7 +3586,7 @@ static void fxfs_vfs_filesystem_leave(struct fxfs_vfs_info *info)
 		fxfs_dax_remove_volume(info->dax, info->dax_volume);
 	else if (info->dax && !filesystem->volumes)
 		fxfs_dax_quiesce(info->dax);
-	/* fxdax: the budget's worker, which fxfs_vfs_kill_sb stopped, for the volumes left. */
+	/* cladefs: the budget's worker, which fxfs_vfs_kill_sb stopped, for the volumes left. */
 	else if (info->dax)
 		fxfs_dax_start(info->dax);
 	if (info->fs) {
@@ -3618,12 +3618,12 @@ static int fxfs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (err)
 		return err;
 	/*
-	 * fxdax: readahead as far as one call to Fxfs reads: at the default 128 KiB, a cold
+	 * cladefs: readahead as far as one call to Fxfs reads: at the default 128 KiB, a cold
 	 * sequential read waited for one round trip each 128 KiB (TASK-92.9).
 	 */
 	sb->s_bdi->ra_pages = FXFS_IO_MAX / PAGE_SIZE;
 	sb->s_bdi->io_pages = FXFS_IO_MAX / PAGE_SIZE;
-	/* fxdax: what a follower's batches and readers keep, readied before it mounts. */
+	/* cladefs: what a follower's batches and readers keep, readied before it mounts. */
 	init_rwsem(&info->follow_barrier);
 	INIT_WORK(&info->follow, fxfs_vfs_follow_work);
 	err = fxfs_vfs_filesystem_join(info, fc);
@@ -3635,7 +3635,7 @@ static int fxfs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (err)
 		return err;
 	info->fs = fs;
-	/* fxdax: read-only, it writes nothing; a follower's device tells of its writer's commits. */
+	/* cladefs: read-only, it writes nothing; a follower's device tells of its writer's commits. */
 	if (fxfs_read_only(fs))
 		sb->s_flags |= SB_RDONLY;
 	info->follows = fxfs_follows(fs);
@@ -3657,14 +3657,14 @@ static int fxfs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	sb->s_blocksize = PAGE_SIZE;
 	sb->s_blocksize_bits = PAGE_SHIFT;
 	/*
-	 * fxdax: a DAX file's offsets stop a chunk short: its ranges reckon in chunks' ends, which
+	 * cladefs: a DAX file's offsets stop a chunk short: its ranges reckon in chunks' ends, which
 	 * at the very end overflow a loff_t: a write spun, and a read saw a hole for what was written
 	 * (xfstests generic/303, 525, 564).
 	 */
 	sb->s_maxbytes = info->dax ? round_down(MAX_LFS_FILESIZE, SZ_2M) : MAX_LFS_FILESIZE;
 	sb->s_time_gran = 1;
 	/*
-	 * fxdax: 64 bits of nanoseconds, signed: the VFS clamps a time to these as it sets it, or the
+	 * cladefs: 64 bits of nanoseconds, signed: the VFS clamps a time to these as it sets it, or the
 	 * inode would keep one its next read in finds clamped (timespec64_to_ns, TASK-79.55).
 	 */
 	sb->s_time_min = KTIME_SEC_MIN + 1;
@@ -3684,7 +3684,7 @@ static int fxfs_vfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (!sb->s_root)
 		return -ENOMEM;
 	/*
-	 * fxdax: a follower hears of its writer's commits, and follows those since its device's view
+	 * cladefs: a follower hears of its writer's commits, and follows those since its device's view
 	 * opened, once all a batch uses is here: its DAX state, and the root, which it settles
 	 * (TASK-79.54).
 	 */
@@ -3770,7 +3770,7 @@ static int fxfs_vfs_get_tree(struct fs_context *fc)
 }
 
 /*
- * fxdax: a filesystem mounted read-only, or following its writer, stays so, and a volume itself.
+ * cladefs: a filesystem mounted read-only, or following its writer, stays so, and a volume itself.
  * A volume remounted read-only is synced first, as ext4's and XFS's are, leaving nothing dirty: the
  * VFS freezes a read-only superblock without syncing it, and its filesystem's freeze waits for
  * nothing of it (TASK-202). One remounted writable that its filesystem counts frozen, which an
@@ -3850,7 +3850,7 @@ static void fxfs_vfs_kill_sb(struct super_block *sb)
 		cancel_work_sync(&info->follow);
 	}
 	/*
-	 * fxdax: the DAX's budget's worker holds no inode of the volume as the VFS
+	 * cladefs: the DAX's budget's worker holds no inode of the volume as the VFS
 	 * evicts them all: it is started again as the volume leaves, if others stay.
 	 */
 	if (info->dax)

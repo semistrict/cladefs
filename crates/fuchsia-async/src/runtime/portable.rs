@@ -4,7 +4,7 @@
 
 pub mod scope;
 
-// fxdax: with the `shuttle` feature, its tasks, executors and timers are Shuttle's (TASK-42.1).
+// cladefs: with the `shuttle` feature, its tasks, executors and timers are Shuttle's (TASK-42.1).
 #[cfg(feature = "shuttle")]
 mod shuttle;
 #[cfg(feature = "shuttle")]

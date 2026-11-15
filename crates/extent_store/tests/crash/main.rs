@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! A store crashes at random points of random workloads, and recovers to a prefix of its commits:
 //! exactly the extents and root of an epoch at least as late as the last commit made durable, by
-//! a durable commit or a flush of commits only ordered; fxdax: as its open segment closes between
+//! a durable commit or a flush of commits only ordered; cladefs: as its open segment closes between
 //! commits too, as an uploader has it close.
 //!
-//! fxdax: a round is a function of its seed (TASK-79.79): its store does its I/O on the test's
+//! cladefs: a round is a function of its seed (TASK-79.79): its store does its I/O on the test's
 //! thread alone, none on threads of its own ([`MemDir::serial`]), so that the operation its file
 //! system fails from, and what the crash keeps, are the same each time it is run. The Shuttle tests
 //! run the same rounds ([`rounds`]) with the store's threads, which frame the segments commits
@@ -21,7 +21,7 @@ use extent_store::MemDir;
 use kept::{CUT_ROUNDS, KEPT_ROUNDS, cut, kept};
 use rounds::{ROUNDS, recovering, same, twice};
 
-/// fxdax: each round runs twice, at once, and its two runs' crashes leave the same directories,
+/// cladefs: each round runs twice, at once, and its two runs' crashes leave the same directories,
 /// and they end with the same: a round is a function of its seed alone, so that a round that failed
 /// fails again, and a round that passed says what it seems (TASK-79.79).
 #[test]
@@ -34,13 +34,13 @@ fn recovers_a_prefix_of_its_commits() {
     }
     // The crashes hit commits as well as what came between them.
     assert!(crashes_mid_commit > ROUNDS / 10, "{crashes_mid_commit} crashes in commits");
-    // fxdax: and the workloads' commits spanned segments, sealing extents in those filled between
+    // cladefs: and the workloads' commits spanned segments, sealing extents in those filled between
     // commits (TASK-92.41): with segments that never filled, none did.
     let spanning = extent_store::commits_spanning_segments();
     assert!(spanning > ROUNDS, "{spanning} commits spanned segments in {ROUNDS} rounds");
 }
 
-/// fxdax: a store keeping its branch in a bucket, crashing as its uploader uploads, recovers from
+/// cladefs: a store keeping its branch in a bucket, crashing as its uploader uploads, recovers from
 /// the bucket alone at least what its uploader acknowledged, and from its disk at least what it
 /// made durable (TASK-165.9's AC #4); the host's collector passing over the bucket all along, cut
 /// in a pass as it crashes, or before, and a full pass after (TASK-291.2); then passes alone,
@@ -64,7 +64,7 @@ fn recovers_from_its_bucket_with_and_without_its_disk() {
     assert!(cut > KEPT_ROUNDS / 4, "{cut} rounds cut a pass before the crash");
     assert!(compacted > KEPT_ROUNDS / 10, "{compacted} rounds' passes compacted");
     assert!(deleted > KEPT_ROUNDS / 3, "{deleted} rounds' passes deleted");
-    // fxdax: and commits spanning segments uploaded, acknowledged with the segments ending them,
+    // cladefs: and commits spanning segments uploaded, acknowledged with the segments ending them,
     // and recovered (TASK-92.41).
     let spanning = extent_store::commits_spanning_segments();
     assert!(
@@ -73,7 +73,7 @@ fn recovers_from_its_bucket_with_and_without_its_disk() {
     );
 }
 
-/// fxdax: a store's opening cut by a crash at each of its writes in turn leaves what opens again
+/// cladefs: a store's opening cut by a crash at each of its writes in turn leaves what opens again
 /// to at least what the store made durable (TASK-165.9).
 #[test]
 fn openings_cut_at_each_write_open_again() {

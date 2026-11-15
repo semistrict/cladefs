@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a closed segment's parts, read from its raw file and looked at on the framer's thread,
+//! cladefs: a closed segment's parts, read from its raw file and looked at on the framer's thread,
 //! then packed on threads, each part in a buffer kept for the framings after, as are the
 //! compressors (TASK-336): what a framing does with its data before it writes it
 //! (`segments::frame_segment`). And a look at each part as the segment fills, once it is written
@@ -29,7 +29,7 @@
 //! so, and holds it packed in memory ([`crate::held`]), which its framing takes; a part let go of
 //! meanwhile, the host's memory short, its framing reads back and packs, as before.
 //!
-//! fxdax: a sealed store's segments are neither looked at ahead nor held (TASK-411.5): their raw
+//! cladefs: a sealed store's segments are neither looked at ahead nor held (TASK-411.5): their raw
 //! files' bytes are XTS ciphertext, their framings never frame in place, and packing a part ahead
 //! would seal it under a framed object's key not drawn until its framing. Their framings read every
 //! part through the raw file ([`crate::RawFile`]), decrypting, and pack and seal it then.
@@ -42,7 +42,7 @@ use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 
-/// fxdax: the most part buffers ([`Buffer`]) and compressors ([`PartPacker`]) kept for framings to
+/// cladefs: the most part buffers ([`Buffer`]) and compressors ([`PartPacker`]) kept for framings to
 /// come: two segments' worth of parts, 64 MiB, and as many compressors. Taken
 /// afresh, each framing's 32 MiB of buffers were faulted in page by page, 8,192 faults, and each
 /// thread's compressor's tables too, every framing: as much of its reading's time as the copying
@@ -50,7 +50,7 @@ use std::sync::{Condvar, Mutex};
 /// and keep them only while there is room.
 const KEPT: usize = 2 * 32;
 
-/// fxdax: what [`KEPT`] keeps, taken by framings and given back.
+/// cladefs: what [`KEPT`] keeps, taken by framings and given back.
 struct Kept<T> {
     kept: Mutex<Vec<T>>,
 }
@@ -78,7 +78,7 @@ impl<T> Kept<T> {
 static BUFFERS: Kept<Vec<u8>> = Kept::new();
 static PACKERS: Kept<PartPacker> = Kept::new();
 
-/// fxdax: the bytes of a part of a segment's data, read, in a buffer of a part's bytes kept for
+/// cladefs: the bytes of a part of a segment's data, read, in a buffer of a part's bytes kept for
 /// the framings after it once it goes, if there is room ([`KEPT`]).
 pub(crate) struct Buffer(Vec<u8>);
 
@@ -117,7 +117,7 @@ impl Drop for Buffer {
     }
 }
 
-/// fxdax: what of a segment's data compressing its parts must save for it to be framed in a copy,
+/// cladefs: what of a segment's data compressing its parts must save for it to be framed in a copy,
 /// compressed, rather than in place, every part raw (`segments::frame_segment`, TASK-310): an
 /// eighth. Writing the data again to save less of it, in the bucket and in the host's cache, costs
 /// the host's disk more than it saves, on a disk VMs share with their bucket above all. Framed in
@@ -125,14 +125,14 @@ impl Drop for Buffer {
 /// metadata in a few of their parts, were all framed in copies but for a few.
 pub(crate) const IN_PLACE_SAVING: u64 = 8;
 
-/// fxdax: the bytes of each part of a segment's data its sample compresses ([`Look`]): an eighth,
+/// cladefs: the bytes of each part of a segment's data its sample compresses ([`Look`]): an eighth,
 /// its first, so that every part has its share sampled, spread over all of it (TASK-343).
 pub(crate) const SAMPLE: usize = (PART / 8) as usize;
 
-/// fxdax: the blocks of a segment's data [`Look`] finds zeros in, every one of them.
+/// cladefs: the blocks of a segment's data [`Look`] finds zeros in, every one of them.
 const ZERO_BLOCK: usize = 4096;
 
-/// fxdax: a look at parts of a segment's data short of compressing them: their bytes, those of
+/// cladefs: a look at parts of a segment's data short of compressing them: their bytes, those of
 /// their blocks of zeros, and of their samples, as they are and compressed (TASK-310).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Look {
@@ -184,7 +184,7 @@ impl Look {
     }
 }
 
-/// fxdax: what a look at a part of a segment's data that may be framed in place saw of it: the CRC
+/// cladefs: what a look at a part of a segment's data that may be framed in place saw of it: the CRC
 /// of its bytes, as a raw part's, and a look at them (TASK-310).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Seen {
@@ -199,7 +199,7 @@ impl Seen {
     }
 }
 
-/// fxdax: what a look ahead at a part of a segment's data took of it, as the segment filled
+/// cladefs: what a look ahead at a part of a segment's data took of it, as the segment filled
 /// ([`see`], TASK-400): what it saw, and the part packed, held, if its segment looked as if it would
 /// be framed in a copy then.
 #[derive(Debug)]
@@ -208,7 +208,7 @@ pub(crate) struct Looked {
     pub held: Option<Hold>,
 }
 
-/// fxdax: a part of a segment's data packed ([`PartPacker::pack`]), as a framing in a copy stores
+/// cladefs: a part of a segment's data packed ([`PartPacker::pack`]), as a framing in a copy stores
 /// it: compressed (or sealed, framing), or raw, then its bytes in `raw` if they are held with it
 /// ([`see`]).
 #[derive(Debug)]
@@ -234,7 +234,7 @@ impl Stored {
     }
 }
 
-/// fxdax: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
+/// cladefs: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
 /// segment fills ([`look_ahead`]), and the part packed then and there ([`stored`]), if it is to be:
 /// as the store's framer packs it on a directory whose I/O is its callers' alone.
 pub(crate) fn see<F: File>(raw: &F, part: u64, before: Look) -> io::Result<(Seen, Option<Stored>)> {
@@ -248,7 +248,7 @@ pub(crate) fn see<F: File>(raw: &F, part: u64, before: Look) -> io::Result<(Seen
     Ok((seen, packed))
 }
 
-/// fxdax: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
+/// cladefs: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
 /// segment fills ([`Seen`], TASK-400), on the framer's thread, in order with the framings: read
 /// through the host's page cache, which holds it, just written, still, and looked at. Its bytes
 /// change no more: the writes to a segment write each of its bytes once, and the part is whole once
@@ -271,7 +271,7 @@ pub(crate) fn look_ahead<F: File>(
     Ok((seen, packs.then_some(data)))
 }
 
-/// fxdax: `data`, part `index` of a segment's data, packed by `packer`, as a framing in a copy of a
+/// cladefs: `data`, part `index` of a segment's data, packed by `packer`, as a framing in a copy of a
 /// clear store stores it (a sealed store's are never packed ahead): compressed, holding only what of
 /// the buffer compressing took the compressed bytes need, or raw, its bytes kept.
 fn stored(index: u64, data: Buffer, packer: &mut PartPacker) -> Stored {
@@ -287,29 +287,29 @@ fn stored(index: u64, data: Buffer, packer: &mut PartPacker) -> Stored {
     Stored { part, raw }
 }
 
-/// fxdax: how many threads pack parts ahead ([`pack_ahead`]), the process's stores': at the host's
+/// cladefs: how many threads pack parts ahead ([`pack_ahead`]), the process's stores': at the host's
 /// lowest priority, so that they take only what CPU nothing else wants.
 const PACKING_AHEAD: usize = 2;
 
-/// fxdax: the most parts waiting to be packed ahead, a MiB each: past them, the packing is too far
+/// cladefs: the most parts waiting to be packed ahead, a MiB each: past them, the packing is too far
 /// behind for a part's framing to find it packed, and it skips them ([`Pending::skip`]).
 const WAITING_MOST: usize = 64;
 
-/// fxdax: the parts waiting to be packed ahead, and the threads packing them, started as there are
+/// cladefs: the parts waiting to be packed ahead, and the threads packing them, started as there are
 /// parts for them, and kept for the process's life.
 struct Ahead {
     waiting: Mutex<(std::collections::VecDeque<Waiting>, usize)>,
     ready: Condvar,
 }
 
-/// fxdax: a part waiting to be packed ahead ([`pack_ahead`]): its index in its segment, which its
+/// cladefs: a part waiting to be packed ahead ([`pack_ahead`]): its index in its segment, which its
 /// packing takes (`PartPacker::pack`, TASK-411.2), its bytes, and where it is to be held.
 type Waiting = (u64, Buffer, Pending);
 
 static AHEAD: Ahead =
     Ahead { waiting: Mutex::new((std::collections::VecDeque::new(), 0)), ready: Condvar::new() };
 
-/// fxdax: packs `data`, part `part` of a segment's data a look ahead took ([`look_ahead`]), on a thread
+/// cladefs: packs `data`, part `part` of a segment's data a look ahead took ([`look_ahead`]), on a thread
 /// of [`PACKING_AHEAD`], at the host's lowest priority, and holds it as `pending` says, if it is
 /// still to be held then: off the framer's thread, so that a look ahead starved of CPU, the host's
 /// vCPUs and flushes taking it, leaves its parts unheld, which their framings read and pack, at
@@ -342,7 +342,7 @@ pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
     AHEAD.ready.notify_one();
 }
 
-/// fxdax: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
+/// cladefs: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
 fn packing() {
     lowest_priority();
     let mut packer = PartPacker::new();
@@ -362,7 +362,7 @@ fn packing() {
     }
 }
 
-/// fxdax: has the calling thread run at the host's lowest priority: Linux's idle scheduling class,
+/// cladefs: has the calling thread run at the host's lowest priority: Linux's idle scheduling class,
 /// which runs it only on CPUs nothing else wants, or else its lowest niceness; macOS's background
 /// band. Logged if refused: it runs at its priority then.
 fn lowest_priority() {
@@ -402,7 +402,7 @@ fn lowest_priority() {
     }
 }
 
-/// fxdax: what a look at part `part` of a segment's data, whole, in its raw file `raw`, sees: what
+/// cladefs: what a look at part `part` of a segment's data, whole, in its raw file `raw`, sees: what
 /// a look ahead at it saw, if it changed not since.
 #[cfg(any(test, feature = "audit"))]
 fn seen_again<F: File>(raw: &F, part: u64) -> io::Result<Seen> {
@@ -414,15 +414,15 @@ fn seen_again<F: File>(raw: &F, part: u64) -> io::Result<Seen> {
     Ok(seen)
 }
 
-/// fxdax: the bytes of segments' parts [`see`] read, this process's stores'.
+/// cladefs: the bytes of segments' parts [`see`] read, this process's stores'.
 static SEEN_AHEAD: AtomicU64 = AtomicU64::new(0);
 
-/// fxdax: the bytes of segments' parts looks ahead read since this process started ([`see`]).
+/// cladefs: the bytes of segments' parts looks ahead read since this process started ([`see`]).
 pub(crate) fn seen_ahead() -> u64 {
     SEEN_AHEAD.load(Ordering::Relaxed)
 }
 
-/// fxdax: a part of a segment's data, being framed ([`read`]), of `len` bytes: its bytes, once
+/// cladefs: a part of a segment's data, being framed ([`read`]), of `len` bytes: its bytes, once
 /// read, each in a buffer of its own ([`Buffer`]); packed, once it is, ahead or framing; held, if a
 /// look ahead packed it, until the framing takes it ([`fill`]); and if its segment may be framed in
 /// place, what a look at it saw, ahead or not.
@@ -448,7 +448,7 @@ impl Read {
     }
 }
 
-/// fxdax: the parts of the `len` bytes of a segment's data its raw file `raw` holds, on the
+/// cladefs: the parts of the `len` bytes of a segment's data its raw file `raw` holds, on the
 /// calling thread; and, if `in_place`, the segment may be framed in place, what a look at each saw:
 /// of those `ahead` saw, ahead ([`see`]), that, their bytes not read; of the others, a look at their
 /// bytes, read. Those packed ahead, held, it reads not either way. Those whose bytes it didn't read
@@ -489,7 +489,7 @@ pub(crate) fn read<F: File>(
     parts
 }
 
-/// fxdax: for a framing in a copy, which packs all of `parts`, of the `len` bytes of a segment's
+/// cladefs: for a framing in a copy, which packs all of `parts`, of the `len` bytes of a segment's
 /// data its raw file `raw` holds, those [`read`] didn't read: each held, packed ahead, taken; the
 /// others, those not packed ahead, or let go of since, read.
 pub(crate) fn fill<F: File>(raw: &F, len: u64, parts: &mut [Read]) -> io::Result<()> {
@@ -518,7 +518,7 @@ pub(crate) fn fill<F: File>(raw: &F, len: u64, parts: &mut [Read]) -> io::Result
     Ok(())
 }
 
-/// fxdax: part `part` of the `len` bytes of a segment's data its raw file `raw` holds, read.
+/// cladefs: part `part` of the `len` bytes of a segment's data its raw file `raw` holds, read.
 fn read_part<F: File>(raw: &F, len: u64, part: u64) -> io::Result<Buffer> {
     let at = part * PART;
     let mut data = Buffer::of((len - at).min(PART) as usize);
@@ -526,7 +526,7 @@ fn read_part<F: File>(raw: &F, len: u64, part: u64) -> io::Result<Buffer> {
     Ok(data)
 }
 
-/// fxdax: packs those of `parts`, a segment's data, read ([`read`], [`fill`]), not packed ahead,
+/// cladefs: packs those of `parts`, a segment's data, read ([`read`], [`fill`]), not packed ahead,
 /// on threads ([`on_threads`]), sealed under `key`, its framed file's, if it is sealed
 /// (TASK-411.2); and returns the longest any thread waited to run, in nanoseconds. Those packed
 /// ahead are a clear store's, in the clear: a sealed store packs none ahead.
@@ -545,7 +545,7 @@ pub(crate) fn pack(parts: &mut [Read], key: Option<&ObjectKey>) -> u64 {
     waited
 }
 
-/// fxdax: `each` of `count` parts, on as many threads as the host has CPUs for this process, but
+/// cladefs: `each` of `count` parts, on as many threads as the host has CPUs for this process, but
 /// no more than there are parts, each thread taking those after the last's, with a packer of its
 /// own, kept for the threads after ([`KEPT`]): their results, in order, or the first error; and the longest any of the threads waited to
 /// run, runnable, in nanoseconds ([`runnable_ns`]). On the calling thread, if one is all it takes.

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: views of a branch as of a commit (TASK-42.2): what they read while the writer goes on,
+//! cladefs: views of a branch as of a commit (TASK-42.2): what they read while the writer goes on,
 //! what they keep of its frees, and for how long, their pins, and their cutting off. Their
 //! concurrency with the writer is tests/shuttle/main.rs's.
 
@@ -79,7 +79,7 @@ fn store_bytes(store: &Store<MemDir>) -> u64 {
     store.extents().unwrap().iter().map(|(_, len)| len).sum()
 }
 
-/// fxdax: a view reads what its commit holds that the writer freed after it in the bucket, once
+/// cladefs: a view reads what its commit holds that the writer freed after it in the bucket, once
 /// the segment holding it is acknowledged there, and leaves the store: its read fails saying where
 /// in the bucket the data is ([`RemoteData`]), for the fetcher to read there, as the store's own
 /// do (TASK-165.8). What the uploader kept of the frees, the view keeps, as before.
@@ -163,7 +163,7 @@ fn kept_frees_go_once_views_advance_or_drop() {
     drop(other);
     store.commit(None).unwrap();
     assert_eq!(kept(&store), 0);
-    // fxdax: kept still for the bucket, until the segments holding them are acknowledged there
+    // cladefs: kept still for the bucket, until the segments holding them are acknowledged there
     // (TASK-165.9).
     assert_eq!(store.usage().unwrap().kept_bytes, 4 * BLOCK as u64);
 }

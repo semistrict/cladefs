@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a branch's record: what made it, which is what it is ([`Kind`]), whose it is, whether
+//! cladefs: a branch's record: what made it, which is what it is ([`Kind`]), whose it is, whether
 //! it was deleted (doc-7, Layout; TASK-160.14), and, of a point, whether other tenants may fork it
-//! ([`Record::shared`], TASK-395.7); fxdax: and its DEKs, wrapped by its cell's KEK, if its cell
+//! ([`Record::shared`], TASK-395.7); cladefs: and its DEKs, wrapped by its cell's KEK, if its cell
 //! is sealed ([`Record::deks`], doc-16, TASK-411.3).
 //!
 //! In object storage a record is flags, as doc-7 lists them; read, it is decoded once, into the
@@ -89,18 +89,18 @@ pub struct Record {
     /// A deleted branch's record stays, which a writer of a parent that is slow to record a fork to
     /// its ID could make again were it removed ([`Record::may_drop`]).
     pub deleted: bool,
-    /// fxdax: whether a point's forks may be of other tenants' cells than its own: a base image or
+    /// cladefs: whether a point's forks may be of other tenants' cells than its own: a base image or
     /// a snapshot many tenants clone (TASK-395.7). Of a point alone, which its maker's trusted
     /// control API shares and unshares ([`crate::branch::share`]); a fork of another tenant's point
     /// not shared is refused as it reads the point's record ([`Record::may_fork_into`]). Unshared, a
     /// point's forks made stay.
     pub shared: bool,
-    /// fxdax: the branch's DEK, each generation of it, wrapped by its cell's KEK, oldest first:
+    /// cladefs: the branch's DEK, each generation of it, wrapped by its cell's KEK, oldest first:
     /// none in a cell in the clear, nor before its first writer took it, nor of a point, which
     /// nothing writes (TASK-411.3). Given by its writer ([`crate::keys::with_dek`]), whoever made
     /// the record: the parent's writers recording a fork write none, so that they write the same.
     pub deks: Vec<Dek>,
-    /// fxdax: the DEKs of every ancestor of another cell whose objects the branch reads, each
+    /// cladefs: the DEKs of every ancestor of another cell whose objects the branch reads, each
     /// generation, rewrapped under its own cell's KEK (doc-16, Forks and shared points;
     /// TASK-411.4): given with its first DEK, in one conditional update, so that a record with
     /// DEKs holds all it inherits from other cells, its readers needing no other cell's KEK, nor
@@ -131,7 +131,7 @@ impl Record {
         matches!(self.kind, Kind::Point(_))
     }
 
-    /// fxdax: whether a fork of `point`, whose record it is, may make a branch of a cell of
+    /// cladefs: whether a fork of `point`, whose record it is, may make a branch of a cell of
     /// `tenant`'s: of the point's own tenant, or of any if the point is shared (TASK-395.7).
     pub fn may_fork_into(&self, point: Branch, tenant: u64) -> bool {
         point.cell.tenant == tenant || self.shared
@@ -179,7 +179,7 @@ impl Record {
 }
 
 /// A record as object storage holds it (doc-7, Layout): flags, which say its [`Kind`] together,
-/// and whether a point is shared; fxdax: and its DEKs (TASK-411.3) and those it inherits
+/// and whether a point is shared; cladefs: and its DEKs (TASK-411.3) and those it inherits
 /// (TASK-411.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Flags {
@@ -192,11 +192,11 @@ struct Flags {
     point: bool,
     forking: Option<Branch>,
     claimed: bool,
-    /// fxdax: of a point alone ([`Record::shared`], TASK-395.7).
+    /// cladefs: of a point alone ([`Record::shared`], TASK-395.7).
     shared: bool,
-    /// fxdax: [`Record::deks`].
+    /// cladefs: [`Record::deks`].
     deks: Vec<Dek>,
-    /// fxdax: [`Record::inherited`].
+    /// cladefs: [`Record::inherited`].
     inherited: Vec<Inherited>,
 }
 

@@ -5,7 +5,7 @@ edition = "2024"
 [features]
 host = [
     "bytes",
-    "fxdax",
+    "cladefs",
     "extent_remote",
     "extent_store",
     "follower_history",
@@ -29,18 +29,18 @@ anyhow = "1.0.95"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tempdir = "0.3.7"
-# fxdax's automounter of shared volumes, which the guest runs and whose asks the host answers
+# cladefs's automounter of shared volumes, which the guest runs and whose asks the host answers
 # (TASK-136.6).
 fxfs-automount = { path = "../../../crates/fxfs-automount" }
-# The fxdax repository whose guest tests these are.
-fxdax = { path = "../../../crates/fxdax", optional = true, features = ["testing"] }
+# The cladefs repository whose guest tests these are.
+cladefs = { path = "../../../crates/cladefs", optional = true, features = ["testing"] }
 futures = { version = "0.3.34", optional = true }
-# fxdax's extent store, whose directory the crash test takes before it copies it (TASK-129).
+# cladefs's extent store, whose directory the crash test takes before it copies it (TASK-129).
 extent_store = { path = "../../../crates/extent_store", optional = true }
-# fxdax's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
+# cladefs's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
 extent_remote = { path = "../../../crates/extent_remote", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "time", "net", "sync", "macros"] }
-# fxdax's history checker of followers (TASK-42.1), which the followers' torture test's host runs.
+# cladefs's history checker of followers (TASK-42.1), which the followers' torture test's host runs.
 follower_history = { path = "../../../crates/follower_history", optional = true }
 # The S3 proxy a soak degrades its bucket through, in front of RustFS (TASK-330.4).
 hyper = { version = "1.12.0", features = ["server", "client", "http1"], optional = true }

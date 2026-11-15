@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Memory management beneath fs/dax.c: the window's struct pages, and each VMA's page tables, with
  * what mm/memory.c does to them for a DAX file's shared mapping, rewritten for two flat arrays:

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -9,7 +9,7 @@
 //! and its interrupt ([`QueueInterrupt`]); it takes the queues back as the workers stop, as they
 //! left them, for a snapshot or a reset.
 //!
-//! Threads start through `fxdax::thread`'s spawner, which the VMM sets: Firecracker's starts them
+//! Threads start through `cladefs::thread`'s spawner, which the VMM sets: Firecracker's starts them
 //! under its VMM thread's seccomp filter, rather than the vCPU's that activates the device
 //! (TASK-50.1).
 
@@ -158,7 +158,7 @@ impl<Q: RequestQueue> Shared<Q> {
 struct Worker<Q> {
     index: u16,
     /// Returns the queue, as the worker left it.
-    thread: fxdax::thread::Thread<Q>,
+    thread: cladefs::thread::Thread<Q>,
     stop: OwnedFd,
 }
 
@@ -168,7 +168,7 @@ impl<Q: RequestQueue> Worker<Q> {
         let stop = eventfd()?;
         let stop_theirs = stop.try_clone()?;
         let shared = Arc::new(Shared { queue: Mutex::new(queue), interrupt, requests });
-        let thread = fxdax::thread::spawn(format!("{name}{index}"), move || {
+        let thread = cladefs::thread::spawn(format!("{name}{index}"), move || {
             work(shared, &event, &stop_theirs)
         })?;
         Ok(Self { index, thread, stop })

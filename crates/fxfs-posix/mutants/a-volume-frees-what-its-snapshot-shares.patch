@@ -7,4 +7,4 @@
 -            || self.frozen_owner(range).is_some()
      }
  
-     /// fxdax: notes that a store opened has a base whose extents are in `branches`.
+     /// cladefs: notes that a store opened has a base whose extents are in `branches`.

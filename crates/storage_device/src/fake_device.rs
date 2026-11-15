@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax: Fuchsia's fake device is a range of memory. This one is an extent store in memory
+// cladefs: Fuchsia's fake device is a range of memory. This one is an extent store in memory
 // (backlog doc-4): it holds extents by ID, each as long as its furthest write, written once (until
 // the next barrier seals them) and only by their branch, frees them, and simulates a crash by undoing any of what happened
 // since the last barrier (writes and frees). It can record such crashes at random barriers
@@ -31,7 +31,7 @@ pub enum Op {
     Write,
     Flush,
     Free,
-    /// fxdax: the barrier after a write with `POST_BARRIER`, which a flush would otherwise be.
+    /// cladefs: the barrier after a write with `POST_BARRIER`, which a flush would otherwise be.
     PostBarrier,
 }
 
@@ -52,7 +52,7 @@ struct Inner {
     next_sequence: u64,
     /// The extents written since the last barrier, which are open: the others are sealed.
     open: HashSet<ExtentId>,
-    /// fxdax: those that were open as the seal in flight began (`Awkward::seal`): the seal's own
+    /// cladefs: those that were open as the seal in flight began (`Awkward::seal`): the seal's own
     /// write may yet write them, and no one may take them for open.
     sealing: HashSet<ExtentId>,
     /// The root.
@@ -117,7 +117,7 @@ impl Inner {
         }
     }
 
-    /// fxdax: the changes since the last barrier that a crash loses together or not at all: a free,
+    /// cladefs: the changes since the last barrier that a crash loses together or not at all: a free,
     /// or the writes to an extent: of those, by their indices in `since_barrier`.
     fn lost_together(&self) -> Vec<Vec<usize>> {
         let mut together = Vec::new();
@@ -137,7 +137,7 @@ impl Inner {
         together
     }
 
-    /// fxdax: undoes the changes at `lost` since the last barrier.
+    /// cladefs: undoes the changes at `lost` since the last barrier.
     fn undo_lost(&mut self, lost: &[usize], block_size: usize) {
         let changes = std::mem::take(&mut self.since_barrier);
         let mut lost = lost.iter().copied().peekable();
@@ -161,12 +161,12 @@ struct CrashesInner {
     recording: Recording,
     /// The mark that crashes recorded from now on carry, if any are recorded.
     mark: Option<u64>,
-    /// fxdax: whether the next barrier is recorded both ways (`Crashes::last`).
+    /// cladefs: whether the next barrier is recorded both ways (`Crashes::last`).
     last: bool,
     recorded: Vec<Crash>,
-    /// fxdax: what `recording` got to.
+    /// cladefs: what `recording` got to.
     counts: CrashCounts,
-    /// fxdax: called as each crash is recorded (`Crashes::on_record`).
+    /// cladefs: called as each crash is recorded (`Crashes::on_record`).
     on_record: Option<Box<dyn Fn() + Send>>,
 }
 
@@ -178,7 +178,7 @@ enum Recording {
     Every { most: usize },
 }
 
-/// fxdax: what `Crashes::every` went through, which its bound is honest about.
+/// cladefs: what `Crashes::every` went through, which its bound is honest about.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CrashCounts {
     /// The barrier with anything to lose.
@@ -199,7 +199,7 @@ struct Crash {
     capacity: u64,
     block_size: u32,
     branch: u64,
-    /// fxdax: the seed of the device that recovers, if it is awkward, and the floor before.
+    /// cladefs: the seed of the device that recovers, if it is awkward, and the floor before.
     awkward: Option<(u64, u64)>,
 }
 
@@ -252,7 +252,7 @@ impl Crashes {
         })))
     }
 
-    /// fxdax: calls `on_record` as each crash is recorded, at the barrier it is recorded at, in the
+    /// cladefs: calls `on_record` as each crash is recorded, at the barrier it is recorded at, in the
     /// order `take` yields them: for a test that traces where crashes fell among what it traces
     /// (the journal's trace validation, TASK-444.1).
     pub fn on_record(&self, on_record: impl Fn() + Send + 'static) {
@@ -265,7 +265,7 @@ impl Crashes {
         Self::with(seed, Recording::Random { one_in })
     }
 
-    /// fxdax: every crash at every barrier: every subset of what a crash may lose there, where that
+    /// cladefs: every crash at every barrier: every subset of what a crash may lose there, where that
     /// is at most `most` things, a free or an extent's writes each; and otherwise losing nothing,
     /// all, each alone, or all but each, which the counts say of how many barriers (`counts`). What
     /// recovers from each follows `seed`, if it is awkward.
@@ -284,13 +284,13 @@ impl Crashes {
         self.0.lock().mark = None;
     }
 
-    /// fxdax: the next barrier records a crash whatever else it would, and one that loses nothing:
+    /// cladefs: the next barrier records a crash whatever else it would, and one that loses nothing:
     /// for a test that wants what a device holds, at last, as a crash leaves it, and as it stands.
     pub fn last(&self) {
         self.0.lock().last = true;
     }
 
-    /// fxdax: what was gone through so far.
+    /// cladefs: what was gone through so far.
     pub fn counts(&self) -> CrashCounts {
         self.0.lock().counts
     }
@@ -376,10 +376,10 @@ async fn turn() {
     .await;
 }
 
-/// fxdax: the most turns of the executor an awkward device's request takes to answer.
+/// cladefs: the most turns of the executor an awkward device's request takes to answer.
 const MOST_TURNS: u32 = 16;
 
-/// fxdax: a device as awkward as a store (backlog doc-4), which memory, answering at once and from
+/// cladefs: a device as awkward as a store (backlog doc-4), which memory, answering at once and from
 /// sequence number 0, is not: a search from 0 was tiny on it, and took a guest's allocator 2 GiB.
 /// All of it follows a seed.
 ///
@@ -483,22 +483,22 @@ impl Drop for Passage<'_> {
     }
 }
 
-/// fxdax: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/extent_remote).
+/// cladefs: a store's writers' ranges are this far apart (`EPOCH_SHIFT` in crates/extent_remote).
 const EPOCH_SHIFT: u32 = 40;
 
-/// fxdax: the seed of the next device that isn't given one: FXDAX_DEVICE_SEED, or 0, then the next
+/// cladefs: the seed of the next device that isn't given one: CLADEFS_DEVICE_SEED, or 0, then the next
 /// for each device a process makes, so that a test run alone, as nextest runs each, sees the same
 /// device, and a run with another seed other devices.
 fn next_seed() -> u64 {
     static FIRST: OnceLock<u64> = OnceLock::new();
     static DEVICES: AtomicU64 = AtomicU64::new(0);
     let first = FIRST.get_or_init(|| {
-        std::env::var("FXDAX_DEVICE_SEED").map_or(0, |seed| seed.parse().expect("a seed"))
+        std::env::var("CLADEFS_DEVICE_SEED").map_or(0, |seed| seed.parse().expect("a seed"))
     });
     first.wrapping_add(DEVICES.fetch_add(1, Ordering::Relaxed))
 }
 
-/// fxdax: the round trips a device's reads and writes take (`FakeDevice::with_round_trips`), were
+/// cladefs: the round trips a device's reads and writes take (`FakeDevice::with_round_trips`), were
 /// each a request to a store that answers a while after, as an extent store over a VM's queue
 /// does. What a caller waits for, reading or writing, is a round trip each, whatever their size.
 #[derive(Debug, Default)]
@@ -507,7 +507,7 @@ pub struct RoundTrips {
     pub writes: Requests,
 }
 
-/// fxdax: requests of one kind, and their round trips (`RoundTrips`): those in flight together
+/// cladefs: requests of one kind, and their round trips (`RoundTrips`): those in flight together
 /// share one, and one issued once none is in flight takes one more.
 #[derive(Debug, Default)]
 pub struct Requests(Mutex<RequestsInner>);
@@ -566,36 +566,36 @@ pub struct FakeDevice {
     branch: u64,
     closed: AtomicBool,
     operation_closure: Box<dyn Fn(Op) -> Result<(), Error> + Send + Sync>,
-    /// fxdax: what each write waits for first, if anything (`FakeDevice::set_write_hook`).
+    /// cladefs: what each write waits for first, if anything (`FakeDevice::set_write_hook`).
     write_hook: Option<WriteHook>,
     read_only: AtomicBool,
     poisoned: AtomicBool,
     observer: Option<Box<dyn Observer>>,
     crashes: Option<Arc<Crashes>>,
-    /// fxdax: what `Device::sequence_floor` says, which its test may change.
+    /// cladefs: what `Device::sequence_floor` says, which its test may change.
     sequence_floor: Arc<AtomicU64>,
-    /// fxdax: what each free waits for, if anything (`FakeDevice::with_frees_held_by`).
+    /// cladefs: what each free waits for, if anything (`FakeDevice::with_frees_held_by`).
     frees_held_by: Option<Arc<futures::lock::Mutex<()>>>,
-    /// fxdax: what counts the reads' round trips, if anything (`FakeDevice::with_round_trips`).
+    /// cladefs: what counts the reads' round trips, if anything (`FakeDevice::with_round_trips`).
     round_trips: Option<Arc<RoundTrips>>,
-    /// fxdax: how it is as awkward as a store, unless it is calm (`FakeDevice::calm`).
+    /// cladefs: how it is as awkward as a store, unless it is calm (`FakeDevice::calm`).
     awkward: Option<Awkward>,
-    /// fxdax: what the filesystem may take for open, as a guest's device has it, which `Inner`'s
+    /// cladefs: what the filesystem may take for open, as a guest's device has it, which `Inner`'s
     /// `open`, what this device would refuse, isn't: a write opens nothing here.
     known_open: OpenExtents,
-    /// fxdax: the devices reads of extents this one doesn't hold fall through to, which forks of it
+    /// cladefs: the devices reads of extents this one doesn't hold fall through to, which forks of it
     /// fall through to too (`FakeDevice::attach`), each with what counts the reads that reach it.
     attached: Vec<(Arc<DeviceHolder>, Arc<AtomicU64>)>,
 }
 
 const TRANSFER_HEAP_SIZE: usize = 64 * 1024 * 1024;
 
-/// fxdax: what a write to an extent waits for first (`FakeDevice::set_write_hook`).
+/// cladefs: what a write to an extent waits for first (`FakeDevice::set_write_hook`).
 type WriteHook = Box<dyn Fn(ExtentId) -> BoxFuture<'static, ()> + Send + Sync>;
 
 impl FakeDevice {
     /// A device holding at most `block_count` blocks of `block_size` bytes, as awkward as a store,
-    /// as FXDAX_DEVICE_SEED says (`FakeDevice::awkward`).
+    /// as CLADEFS_DEVICE_SEED says (`FakeDevice::awkward`).
     pub fn new(block_count: u64, block_size: u32) -> Self {
         Self::with_inner(Inner::default(), block_count * block_size as u64, block_size)
             .awkward(next_seed())
@@ -625,7 +625,7 @@ impl FakeDevice {
         }
     }
 
-    /// fxdax: makes the device, new, as awkward as a store (`Awkward`), as `seed` says.
+    /// cladefs: makes the device, new, as awkward as a store (`Awkward`), as `seed` says.
     pub fn awkward(mut self, seed: u64) -> Self {
         let awkward = Awkward::new(seed);
         awkward.start(self.inner.get_mut(), &self.sequence_floor);
@@ -633,7 +633,7 @@ impl FakeDevice {
         self
     }
 
-    /// fxdax: makes the device, new, answer at once, in order, with numbers from 0 and no floor: a
+    /// cladefs: makes the device, new, answer at once, in order, with numbers from 0 and no floor: a
     /// test's counts and a benchmark's times depend on it.
     pub fn calm(mut self) -> Self {
         self.awkward = None;
@@ -642,7 +642,7 @@ impl FakeDevice {
         self
     }
 
-    /// fxdax: makes the device, what a crash left of an awkward one, awkward as `seed` says: its
+    /// cladefs: makes the device, what a crash left of an awkward one, awkward as `seed` says: its
     /// floor was `floor`, until someone else took over.
     fn recovered_awkward(mut self, seed: u64, floor: u64) -> Self {
         let awkward = Awkward::new(seed);
@@ -658,7 +658,7 @@ impl FakeDevice {
         self
     }
 
-    /// fxdax: makes reads of extents the device doesn't hold fall through to `device`, as a VM's
+    /// cladefs: makes reads of extents the device doesn't hold fall through to `device`, as a VM's
     /// reads do to a fork attached to it (backlog doc-10). Returns what counts those that reach it.
     pub fn attach(&mut self, device: DeviceHolder) -> Arc<AtomicU64> {
         let reads = Arc::new(AtomicU64::new(0));
@@ -666,14 +666,14 @@ impl FakeDevice {
         reads
     }
 
-    /// fxdax: makes `floor` the device's sequence floor (`Device::sequence_floor`), as it is when
+    /// cladefs: makes `floor` the device's sequence floor (`Device::sequence_floor`), as it is when
     /// the test sets it.
     pub fn with_sequence_floor(mut self, floor: Arc<AtomicU64>) -> Self {
         self.sequence_floor = floor;
         self
     }
 
-    /// fxdax: makes each free wait for `held`'s lock, after the op callback is told of it, before
+    /// cladefs: makes each free wait for `held`'s lock, after the op callback is told of it, before
     /// it frees anything: a test holding the lock holds the frees in flight, as an extent store's
     /// are over their round trips, until it lets go.
     pub fn with_frees_held_by(mut self, held: Arc<futures::lock::Mutex<()>>) -> Self {
@@ -681,7 +681,7 @@ impl FakeDevice {
         self
     }
 
-    /// fxdax: counts the round trips of the device's reads and writes in `trips`.
+    /// cladefs: counts the round trips of the device's reads and writes in `trips`.
     pub fn with_round_trips(mut self, trips: Arc<RoundTrips>) -> Self {
         self.round_trips = Some(trips);
         self
@@ -693,7 +693,7 @@ impl FakeDevice {
         self
     }
 
-    /// fxdax: makes each write to an extent wait first for what `hook` returns for it, which may
+    /// cladefs: makes each write to an extent wait first for what `hook` returns for it, which may
     /// make requests of the device, flushes among them: what came between the write's allocation
     /// and its arrival, as another's writes and syncs do on a guest.
     pub fn set_write_hook(
@@ -740,7 +740,7 @@ impl FakeDevice {
         Self::with_inner(inner, capacity, block_size)
     }
 
-    /// fxdax: a calm device of `branch` holding what this one does, sealed.
+    /// cladefs: a calm device of `branch` holding what this one does, sealed.
     fn copy_of_branch(&self, branch: u64) -> Self {
         let mut inner = self.inner.lock().clone();
         inner.open.clear();
@@ -752,7 +752,7 @@ impl FakeDevice {
         Self::with_inner(inner, self.capacity, self.block_size()).with_branch(branch)
     }
 
-    /// fxdax: a copy of the device, as if it crashed losing nothing and recovered, awkward as
+    /// cladefs: a copy of the device, as if it crashed losing nothing and recovered, awkward as
     /// `seed` says, if it is: one image, many times, as `corrupt` leaves each.
     pub fn recovered(&self, seed: u64) -> Self {
         let copy = self.copy_of_branch(self.branch);
@@ -763,12 +763,12 @@ impl FakeDevice {
         }
     }
 
-    /// fxdax: what `extent` holds, if it exists, as `corrupt` finds it.
+    /// cladefs: what `extent` holds, if it exists, as `corrupt` finds it.
     pub fn held(&self, extent: ExtentId) -> Option<Vec<u8>> {
         self.inner.lock().extents.get(&extent).cloned()
     }
 
-    /// fxdax: changes what the device holds, its extents and its root, as no request may: as a host
+    /// cladefs: changes what the device holds, its extents and its root, as no request may: as a host
     /// failure or a bad upload does.
     pub fn corrupt(&self, corrupt: impl FnOnce(&mut HashMap<ExtentId, Vec<u8>>, &mut Vec<u8>)) {
         let mut inner = self.inner.lock();
@@ -784,14 +784,14 @@ impl FakeDevice {
         (self.operation_closure)(Op::Free)
     }
 
-    /// fxdax: takes the turns an awkward device's read or free takes to answer.
+    /// cladefs: takes the turns an awkward device's read or free takes to answer.
     async fn answer(&self) {
         if let Some(awkward) = &self.awkward {
             awkward.answer().await;
         }
     }
 
-    /// fxdax: waits for the place of a write, or of a request that `seals`, among seals, on an
+    /// cladefs: waits for the place of a write, or of a request that `seals`, among seals, on an
     /// awkward device, then the turns it takes to answer.
     async fn passage(&self, seals: bool) -> Option<Passage<'_>> {
         let awkward = self.awkward.as_ref()?;
@@ -977,7 +977,7 @@ impl Device for FakeDevice {
         self.free_extents(&[extent]).await.pop().expect("a result")
     }
 
-    /// fxdax: as one request, as a guest's `FREE_MANY`, which waits and answers once.
+    /// cladefs: as one request, as a guest's `FREE_MANY`, which waits and answers once.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
         let mut results = Vec::with_capacity(extents.len());
         for _ in extents {
@@ -987,7 +987,7 @@ impl Device for FakeDevice {
             drop(held.lock().await);
         }
         self.answer().await;
-        // fxdax: what reads fall through to is a filesystem's never to free.
+        // cladefs: what reads fall through to is a filesystem's never to free.
         for &extent in extents {
             let holds = self.inner.lock().extents.contains_key(&extent);
             if !holds {
@@ -1039,7 +1039,7 @@ impl Device for FakeDevice {
 
     async fn flush(&self) -> Result<(), Error> {
         let _passage = self.passage(true).await;
-        // fxdax: first: a flush that fails seals nothing, as a commit that fails doesn't.
+        // cladefs: first: a flush that fails seals nothing, as a commit that fails doesn't.
         (self.operation_closure)(Op::Flush)?;
         self.barrier(&mut self.inner.lock());
         Ok(())
@@ -1320,7 +1320,7 @@ mod tests {
         held
     }
 
-    /// fxdax: every crash at a barrier is every subset of what it may lose: writes to an extent
+    /// cladefs: every crash at a barrier is every subset of what it may lose: writes to an extent
     /// lost together, frees alone. A barrier with nothing to lose has no crash.
     #[fuchsia::test]
     async fn test_every_crash() {
@@ -1359,7 +1359,7 @@ mod tests {
         assert_eq!((counts.barriers, counts.crashes, counts.beyond_the_bound), (1, 8, 0));
     }
 
-    /// fxdax: past its bound, a barrier's crashes are losing nothing, all, each alone, or all but
+    /// cladefs: past its bound, a barrier's crashes are losing nothing, all, each alone, or all but
     /// each, which the counts own up to.
     #[fuchsia::test]
     async fn test_every_crash_past_the_bound() {
@@ -1384,7 +1384,7 @@ mod tests {
         assert_eq!((counts.barriers, counts.crashes, counts.beyond_the_bound), (1, 10, 1));
     }
 
-    /// fxdax: a free waits while the test holds the frees, and is made once it lets go.
+    /// cladefs: a free waits while the test holds the frees, and is made once it lets go.
     #[fuchsia::test]
     async fn test_frees_held() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
@@ -1401,7 +1401,7 @@ mod tests {
         assert_eq!(device.extents(), vec![]);
     }
 
-    /// fxdax: reads, or writes, awaited one after another take a round trip each; those issued
+    /// cladefs: reads, or writes, awaited one after another take a round trip each; those issued
     /// together, few or many (which `join_all` polls otherwise), share one.
     #[fuchsia::test]
     async fn test_round_trips() {
@@ -1433,7 +1433,7 @@ mod tests {
         assert_eq!(read(&device, ExtentId::new(1, 3), 0, 40 * BS).await, vec![3; 40 * BS]);
     }
 
-    /// fxdax: an awkward device's numbers start large, as its seed says, some past a floor, and
+    /// cladefs: an awkward device's numbers start large, as its seed says, some past a floor, and
     /// only those floors jump, as another writer takes over: all of it as its seed says.
     #[fuchsia::test]
     async fn test_awkward_numbers() {
@@ -1466,7 +1466,7 @@ mod tests {
         assert!((1..32).contains(&floorless), "{floorless} of 32 had no floor");
     }
 
-    /// fxdax: what a crash leaves of an awkward device is awkward: a floor as it was, or past it,
+    /// cladefs: what a crash leaves of an awkward device is awkward: a floor as it was, or past it,
     /// and numbers as they were.
     #[fuchsia::test]
     async fn test_awkward_crashes() {
@@ -1489,7 +1489,7 @@ mod tests {
         assert!(recovered.awkward.is_some());
     }
 
-    /// fxdax: reads, writes and frees issued together on an awkward device end in another order
+    /// cladefs: reads, writes and frees issued together on an awkward device end in another order
     /// than they were issued, as its seed says.
     #[fuchsia::test]
     async fn test_awkward_requests_finish_out_of_order() {
@@ -1517,7 +1517,7 @@ mod tests {
         assert_ne!(first, other);
     }
 
-    /// fxdax: a seal on an awkward device, as a guest's: it waits for writes in flight and keeps
+    /// cladefs: a seal on an awkward device, as a guest's: it waits for writes in flight and keeps
     /// new ones out until it answers, and no one takes an extent for open from when it starts.
     #[fuchsia::test]
     async fn test_awkward_seals() {
@@ -1546,7 +1546,7 @@ mod tests {
         device.write(other, BS as u64, buffer.as_ref()).await.expect("the write came before");
     }
 
-    /// fxdax: a seal's own write may write what was open when it started.
+    /// cladefs: a seal's own write may write what was open when it started.
     #[fuchsia::test]
     async fn test_awkward_commit_writes_what_was_open() {
         const BS: usize = TEST_DEVICE_BLOCK_SIZE;
@@ -1563,7 +1563,7 @@ mod tests {
         assert!(!device.is_open(extent));
     }
 
-    /// fxdax: a write's barrier sets the root it carries, which a crash after it keeps, with the
+    /// cladefs: a write's barrier sets the root it carries, which a crash after it keeps, with the
     /// write.
     #[fuchsia::test]
     async fn test_post_barrier_sets_the_root() {
@@ -1612,7 +1612,7 @@ mod tests {
         let device = FakeDevice::new(8192, TEST_DEVICE_BLOCK_SIZE as u32);
         // Loop 100 times to catch errors.
         for iteration in 0..1000 {
-            // fxdax: extents are written once, before the next barrier, so each epoch's writes are
+            // cladefs: extents are written once, before the next barrier, so each epoch's writes are
             // to an extent of their own: writes 0-1, 2-4 and 5-6.
             let extent = |i: usize| {
                 let epoch = if i < 2 {

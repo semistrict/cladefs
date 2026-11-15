@@ -1,8 +1,8 @@
 # Runbook: upgrading a host's extent daemon by draining it
 
-For whoever operates fxdax hosts: how a host's `fxdax-extentd` and Firecracker are upgraded, and what
+For whoever operates cladefs hosts: how a host's `cladefs-extentd` and Firecracker are upgraded, and what
 a format change refuses on the way. The design behind it is backlog doc-11 (TASK-141); the VM
-manager's calls named here are `crates/fxdax/proto/fxdax/extentd/v1/extentd.proto`'s.
+manager's calls named here are `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`'s.
 
 ## Why a drain
 
@@ -11,7 +11,7 @@ another process. When it exits, every VM on the host exits with 158 (`ExtentdLos
 is upgraded by emptying its host first: its VMs move to other hosts or stop, and only then does the
 daemon stop.
 
-fxdax migrates nothing (AGENTS.md, "No migrations, ever"). Each format says its version, and a
+cladefs migrates nothing (AGENTS.md, "No migrations, ever"). Each format says its version, and a
 reader refuses any other. The components of one build run together, and two builds meet only where
 their formats are the same. A VM moves only to a host whose build has the same formats as its own.
 
@@ -39,8 +39,8 @@ otherwise. A store or bucket format change means its stores are made again, not 
    `scripts/migrate-host.sh` does, to a host whose build has the VM's formats (above); the
    integrator guide's "Restoring a snapshot" has the calls. Stop a VM whose tenant accepts that.
    Followers go with or after their writer. When the host is empty, its daemon's `/metrics` says
-   `fxdax_extentd_connections 0`.
-3. **Stop the daemon with SIGTERM.** It drains, then exits (`fxdax::extentd::drain`, TASK-141.4):
+   `cladefs_extentd_connections 0`.
+3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::extentd::drain`, TASK-141.4):
    - its health service reports NOT_SERVING;
    - its VM sockets refuse connections, and its control API refuses calls with `UNAVAILABLE`;
    - any VM still connected is cut off and exits 158, its last commits made durable and its store
@@ -48,7 +48,7 @@ otherwise. A store or bucket format change means its stores are made again, not 
    - the points it kept open for forks are closed;
    - every store's uploader uploads what its store made durable, and stops.
 
-   It does all of that within `FXDAX_EXTENTD_DRAIN` seconds (60 by default). If it finishes, it logs
+   It does all of that within `CLADEFS_EXTENTD_DRAIN` seconds (60 by default). If it finishes, it logs
    "drained in ...: every store closed" and exits 0. If not, it logs "not drained within Ns: ...
    left", naming how many connections, control calls and uploaders were left, and exits 1. Then the
    stores' durable commits are still on the host's disk, and the next daemon to open each store
@@ -56,10 +56,10 @@ otherwise. A store or bucket format change means its stores are made again, not 
 4. **Install the new daemon and Firecracker together.** They are one build. A guest kernel is
    upgraded as its VM next boots, with the Firecracker it boots on. It isn't part of this.
 5. **Start the daemon, and check it.** Its health service says SERVING, and `/metrics` says the new
-   build: `fxdax_extentd_build_info{commit="..."} 1`. Call `Grant` again for each tenant, because
+   build: `cladefs_extentd_build_info{commit="..."} 1`. Call `Grant` again for each tenant, because
    grants don't survive a restart.
 6. **Uncordon the host.** Moving VMs back is step 2 again, onto this host. Each one restored here
-   then runs on the new Firecracker, which `fxdax_extentd_vm_build_info` shows by branch.
+   then runs on the new Firecracker, which `cladefs_extentd_vm_build_info` shows by branch.
 
 ## Rolling back
 

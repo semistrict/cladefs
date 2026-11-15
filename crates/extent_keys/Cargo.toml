@@ -1,4 +1,4 @@
-# fxdax's own: the keys a tenant's data is encrypted under at rest, and the primitives that use them
+# cladefs's own: the keys a tenant's data is encrypted under at rest, and the primitives that use them
 # (backlog doc-16).
 [package]
 name = "extent_keys"
@@ -8,7 +8,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
-# fxdax: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
+# cladefs: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
 # (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
 aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
@@ -29,6 +29,6 @@ tempfile.workspace = true
 workspace = true
 
 [features]
-# fxdax: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
+# cladefs: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
 # counts the calls made of it (`testing::Counted`).
 testing = []

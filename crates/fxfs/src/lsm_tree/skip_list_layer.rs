@@ -29,7 +29,7 @@ use std::sync::atomic::{self, AtomicPtr, AtomicU32};
 // form of a pointer list. Index 0 in the pointer list is the chain with the most elements i.e.
 // contains every element in the list.
 //
-// fxdax: a pointer list is a handle on its index-0 pointer, and index `i` is `i` places below it
+// cladefs: a pointer list is a handle on its index-0 pointer, and index `i` is `i` places below it
 // in memory: a node's pointers precede it in its allocation, so that a search's step to a node
 // finds the node's key right after the pointer it follows next, rather than the pointers in an
 // allocation of their own (two cache misses a step, in a list too large for the cache).
@@ -47,7 +47,7 @@ impl<K, V> Copy for PointerList<K, V> {}
 unsafe impl<K, V> Send for PointerList<K, V> {}
 unsafe impl<K, V> Sync for PointerList<K, V> {}
 
-// fxdax: the most pointers the head or a node has, enough for 2^32 items, so that a mutable
+// cladefs: the most pointers the head or a node has, enough for 2^32 items, so that a mutable
 // iterator keeps its pointers in arrays of its own rather than allocating them for each mutation.
 const MAX_POINTERS: usize = 32;
 
@@ -90,7 +90,7 @@ impl<K, V> PointerList<K, V> {
     }
 }
 
-// fxdax: allocated with its `pointer_count` pointers before it (`PointerList`).
+// cladefs: allocated with its `pointer_count` pointers before it (`PointerList`).
 #[repr(C)]
 struct SkipListNode<K, V> {
     pointer_count: usize,
@@ -760,7 +760,7 @@ mod tests {
     impl DefaultOrdLowerBound for TestKey {}
     impl DefaultOrdUpperBound for TestKey {}
 
-    // fxdax: a key says what a layer's item may hold (`LayerKey::is_valid_item`).
+    // cladefs: a key says what a layer's item may hold (`LayerKey::is_valid_item`).
     impl LayerKey for TestKey {
         fn overlaps(&self, other: &Self) -> bool {
             self == other

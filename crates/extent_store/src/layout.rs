@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;
 
-/// The first line of a store's description: its format. fxdax: 6 names the bucket a host's store
+/// The first line of a store's description: its format. cladefs: 6 names the bucket a host's store
 /// keeps its branches in (TASK-165.6); 7 places an extent whose data is in the bucket by its
 /// location there (TASK-165.8), and holds one branch, no branch records (TASK-165.7); 8 has no
 /// index: its branch is the bucket's, its write-ahead log and its segments' logs of their
@@ -25,9 +25,9 @@ use storage_device::ExtentId;
 /// segments, and every log has one (`wal::LOG_MAGIC`, TASK-341); 11's description names its branch
 /// with its tenant's cell, `TENANT/CELL/ID` in hexadecimal (TASK-364). A store of another format is
 /// refused ([`Format`]): nothing reads, converts or upgrades it.
-pub(crate) const FORMAT: &str = "fxdax extent store 11";
+pub(crate) const FORMAT: &str = "cladefs extent store 11";
 
-/// fxdax: the error of a store whose description is of another format than [`FORMAT`], an older
+/// cladefs: the error of a store whose description is of another format than [`FORMAT`], an older
 /// one included: refused, as nothing reads it.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("a store of format {found:?}, not {FORMAT:?}: refused")]
@@ -45,7 +45,7 @@ pub struct Description {
     pub branch: Branch,
 }
 
-/// The store's description, its `store` file: its format, block size, and branch; and fxdax: the
+/// The store's description, its `store` file: its format, block size, and branch; and cladefs: the
 /// URL of the bucket its branch is kept in, which every store in a host's directory names
 /// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its branch has
 /// until a commit sets one, as a branch made for it, or taken into it, says none; and the fencing
@@ -58,12 +58,12 @@ pub(crate) struct StoreFile {
     pub bucket: Option<String>,
     pub capacity: u64,
     pub token: Option<u64>,
-    /// fxdax: the volume of its branch's cell it is, if it is kept in a bucket: its name there,
+    /// cladefs: the volume of its branch's cell it is, if it is kept in a bucket: its name there,
     /// and its kind (TASK-364).
     pub volume: Option<Volume>,
 }
 
-/// fxdax: what a store kept in a bucket is of its branch's cell: a volume, of a name and a kind
+/// cladefs: what a store kept in a bucket is of its branch's cell: a volume, of a name and a kind
 /// (`extent_remote::cell`, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Volume {
@@ -140,7 +140,7 @@ pub(crate) const DESCRIPTION: &str = "store";
 pub(crate) const SEGMENTS: &str = "segments";
 /// The directory of extents stored on their own, a directory for each branch's.
 pub(crate) const EXTENTS: &str = "extents";
-/// fxdax: the directory of the open segments' logs, a directory for each branch's: the commits each
+/// cladefs: the directory of the open segments' logs, a directory for each branch's: the commits each
 /// holds, appended and synced by the flushes that make them durable (TASK-165.9).
 pub(crate) const LOGS: &str = "logs";
 /// The directory of open segments' files, raw, a directory for each branch's.
@@ -181,7 +181,7 @@ pub(crate) fn extent_path(extent: ExtentId) -> String {
     format!("{}/{:016x}", branch_dir(EXTENTS, extent.branch), extent.sequence)
 }
 
-/// fxdax: the path of the log of the commits of a segment, while it is open (TASK-165.9).
+/// cladefs: the path of the log of the commits of a segment, while it is open (TASK-165.9).
 pub(crate) fn log_path(segment: SegmentId) -> String {
     format!("{}/{:016x}", branch_dir(LOGS, segment.branch), segment.number)
 }
@@ -192,27 +192,27 @@ pub(crate) fn parse_number(name: &str) -> Option<u64> {
     (name.len() == 16).then(|| u64::from_str_radix(name, 16).ok()).flatten()
 }
 
-/// fxdax: the prefix of the names of spare logs, in a branch's directory of logs: logs of segments
+/// cladefs: the prefix of the names of spare logs, in a branch's directory of logs: logs of segments
 /// gone, kept to be the logs of segments to come (`segments::Segments::recycle`, TASK-301).
 pub(crate) const SPARE: &str = "spare-";
 
-/// fxdax: the path of the spare log that was the log of `segment`.
+/// cladefs: the path of the spare log that was the log of `segment`.
 pub(crate) fn spare_path(segment: SegmentId) -> String {
     format!("{}/{SPARE}{:016x}", branch_dir(LOGS, segment.branch), segment.number)
 }
 
-/// fxdax: the prefix of the names of segments' framed files being made durable, in a branch's
+/// cladefs: the prefix of the names of segments' framed files being made durable, in a branch's
 /// directory of segments: renamed to theirs once their raw files' and logs' entries are durable
 /// (`segments::make_durable`, TASK-310), so that no framed file's entry is durable before those;
 /// an opening removes any left.
 pub(crate) const FRAMING: &str = "framing-";
 
-/// fxdax: the path of `segment`'s framed file being made durable ([`FRAMING`]).
+/// cladefs: the path of `segment`'s framed file being made durable ([`FRAMING`]).
 pub(crate) fn framing_path(segment: SegmentId) -> String {
     format!("{}/{FRAMING}{:016x}", branch_dir(SEGMENTS, segment.branch), segment.number)
 }
 
-/// The numbers of the files in `path`, in order; fxdax: but spare logs, which hold none, and
+/// The numbers of the files in `path`, in order; cladefs: but spare logs, which hold none, and
 /// framed files being made durable ([`FRAMING`]).
 pub(crate) fn list_numbers<D: Dir>(dir: &D, path: &str) -> Result<Vec<u64>, Error> {
     let mut numbers = Vec::new();
@@ -250,7 +250,7 @@ pub(crate) struct Piece {
 }
 
 impl Piece {
-    /// fxdax: this piece and `other` as one, if they are one run: one right after the other in
+    /// cladefs: this piece and `other` as one, if they are one run: one right after the other in
     /// the extent, and so in the segment, whichever comes first.
     fn joined(&self, other: &Piece) -> Option<Piece> {
         let (first, second) =
@@ -264,7 +264,7 @@ impl Piece {
 
 /// Adds `piece`, written last, to `pieces`, an extent's, joined to the last while they are one
 /// run: they hold none of each other's bytes, so that which is painted over which does not matter.
-/// fxdax: an extent written in runs one after another in a segment, as the guest's device splits a
+/// cladefs: an extent written in runs one after another in a segment, as the guest's device splits a
 /// write larger than its most I/O, is so one piece, which its commit seals where it is, rather than
 /// reading it back and writing it again (TASK-92.1).
 pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
@@ -276,7 +276,7 @@ pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
 }
 
 /// Where an extent's data is: pieces in segments, the later of overlapping pieces holding the data
-/// written last, or a file of its own; or, fxdax, in the bucket, at its location there, which the
+/// written last, or a file of its own; or, cladefs, in the bucket, at its location there, which the
 /// store's user reads it from (TASK-165.8).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Data {
@@ -286,7 +286,7 @@ pub(crate) enum Data {
 }
 
 impl Data {
-    /// fxdax: if in the bucket, named at `to`, where the collector moved it, if it is named on its
+    /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on its
     /// way there (`extent_remote::layout::further`, TASK-195).
     pub fn follow(&mut self, to: &Location) {
         if let Data::Remote(at) = self
@@ -359,7 +359,7 @@ pub(crate) enum Change {
     MoveOwn { extent: ExtentId },
 }
 
-/// fxdax: of `changes`, an epoch's, the extents it freed that a commit held: but those written in
+/// cladefs: of `changes`, an epoch's, the extents it freed that a commit held: but those written in
 /// it, open, which their frees let go of before any commit held them (TASK-79.1). Those of them
 /// that are the branch's own it spends, as the store spends them as it frees them (TASK-79.6);
 /// and a footer frees them alone, so that what its readers spend of it, all its frees, is that
@@ -387,7 +387,7 @@ pub enum Place {
     Run { branch: u64, number: u64, offset: u64 },
     /// Its own file.
     Own,
-    /// fxdax: in the bucket, at its location there.
+    /// cladefs: in the bucket, at its location there.
     Remote(Location),
     /// Pieces, as it was written: the extent is open.
     Pieces,
@@ -408,13 +408,13 @@ pub(crate) fn encode<R: Serialize>(record: &R) -> Vec<u8> {
     encode_salted(record, 0)
 }
 
-/// fxdax: `record`, encoded as [`encode`] does, its hash salted with `salt`: what reads it with
+/// cladefs: `record`, encoded as [`encode`] does, its hash salted with `salt`: what reads it with
 /// another salt finds torn, as a log reused finds what it held before (TASK-301).
 pub(crate) fn encode_salted<R: Serialize>(record: &R, salt: u64) -> Vec<u8> {
     frame_salted(&bincode::serialize(record).expect("records serialize"), salt)
 }
 
-/// fxdax: `payload`, a record's, as a log holds it, its hash salted with `salt`: its header, then
+/// cladefs: `payload`, a record's, as a log holds it, its hash salted with `salt`: its header, then
 /// it ([`encode_salted`]).
 pub(crate) fn frame_salted(payload: &[u8], salt: u64) -> Vec<u8> {
     let len = u32::try_from(payload.len()).expect("a record is under 4 GiB");
@@ -430,7 +430,7 @@ pub(crate) fn decode<R: serde::de::DeserializeOwned>(bytes: &[u8]) -> (Vec<R>, u
     decode_with(bytes, 0, |_, payload| bincode::deserialize(payload).ok())
 }
 
-/// fxdax: the records at the start of `bytes` that are whole and intact, their hashes salted with
+/// cladefs: the records at the start of `bytes` that are whole and intact, their hashes salted with
 /// `salt` ([`encode_salted`]), each payload's as `parse` reads it, given where in `bytes` its
 /// record starts, and how many bytes they take.
 pub(crate) fn decode_with<R>(
@@ -495,7 +495,7 @@ mod tests {
         assert_eq!(decode::<Contents>(&zeros), (decode(&bytes).0, bytes.len()));
     }
 
-    /// fxdax: pieces one right after another, in the extent and so in the segment, are one,
+    /// cladefs: pieces one right after another, in the extent and so in the segment, are one,
     /// whichever was written first; those apart in either, holding each other's bytes, or in
     /// other segments, are not (TASK-92.1).
     #[test]
@@ -543,14 +543,14 @@ mod tests {
             volume: None,
         };
         assert_eq!(StoreFile::parse(&file.text()).unwrap(), file);
-        // fxdax: a host's store names its bucket (TASK-165.6), and a placed one its placement's
+        // cladefs: a host's store names its bucket (TASK-165.6), and a placed one its placement's
         // token (TASK-165.9).
         let bucket = Some("file:///images/a/bucket".to_owned());
         let kept = StoreFile { bucket, token: Some(7), ..file.clone() };
         assert_eq!(StoreFile::parse(&kept.text()).unwrap(), kept);
-        // fxdax: older formats are refused, by their format (TASK-165.6), the index's last
+        // cladefs: older formats are refused, by their format (TASK-165.6), the index's last
         // (TASK-165.9).
-        for older in ["fxdax extent store 2", "fxdax extent store 7", "fxdax extent store 10"] {
+        for older in ["cladefs extent store 2", "cladefs extent store 7", "cladefs extent store 10"] {
             let refused = StoreFile::parse(&format!("{older}\nblock_size 4096\nbranch 1\n"));
             let found = refused.unwrap_err().downcast::<Format>().unwrap().found;
             assert_eq!(found, older);
@@ -558,13 +558,13 @@ mod tests {
         let capacity = "capacity 4096\n";
         assert!(StoreFile::parse(&format!("{FORMAT}\nblock_size 4096\n{capacity}")).is_err());
         assert!(StoreFile::parse(&format!("{FORMAT}\nblock_size 4096\nbranch 1\n")).is_err());
-        // fxdax: its branch is named with its cell, as the bucket names it (TASK-364).
+        // cladefs: its branch is named with its cell, as the bucket names it (TASK-364).
         let text = file.text();
         assert!(text.contains("\nbranch a/ffffffffffffffff/ffffffffffffffff\n"), "{text}");
         let bare = format!("{FORMAT}\nblock_size 4096\nbranch 1\n{capacity}");
         let refused = StoreFile::parse(&bare).unwrap_err().to_string();
         assert_eq!(refused, "bad branch: no branch, TENANT/CELL/ID in hexadecimal: 1");
-        // fxdax: a store kept in a bucket names the volume of its cell it is, by name and kind.
+        // cladefs: a store kept in a bucket names the volume of its cell it is, by name and kind.
         let volume = Some(Volume { name: "db".into(), kind: Kind::Sqlite });
         let named = StoreFile { volume, ..kept.clone() };
         assert!(named.text().ends_with("volume db\nkind sqlite\n"));

@@ -59,7 +59,7 @@ impl_fuzzy_hash!(String);
 impl_fuzzy_hash!(Vec<u8>);
 
 /// Keys and values need to implement the following traits.  For merging, they need to implement
-/// MergeableKey.  TODO: Use trait_alias when available. fxdax: `LayerKey` too, which says what a
+/// MergeableKey.  TODO: Use trait_alias when available. cladefs: `LayerKey` too, which says what a
 /// layer's item may hold (`LayerKey::is_valid_item`).
 pub trait Key:
     Clone
@@ -145,7 +145,7 @@ impl<'a, K, V> Copy for ItemRef<'a, K, V> {}
 /// Item is a struct that combines a key and a value.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(fuzz, derive(arbitrary::Arbitrary))]
-// fxdax: the key first, where a skip list's search finds it next to the pointer it followed
+// cladefs: the key first, where a skip list's search finds it next to the pointer it followed
 // (skip_list_layer.rs).
 #[repr(C)]
 pub struct Item<K, V> {
@@ -315,7 +315,7 @@ pub trait LayerKey: Clone {
     /// Returns true if the keys are overlapping or equal.
     fn overlaps(&self, other: &Self) -> bool;
 
-    /// fxdax: whether `value` is what an item of this key may hold, in a filesystem of
+    /// cladefs: whether `value` is what an item of this key may hold, in a filesystem of
     /// `block_size` blocks. What a layer file holds is what an image says, which may be anything,
     /// so each item is checked as it's read from one, once, and what reads it after trusts it, as
     /// what replays the journal trusts what `Journal::validate_mutation` let by: the one trust

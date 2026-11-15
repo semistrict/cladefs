@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// fxdax: a write whose source is a mapping of the file it grows: faulting that source in, it
+/// cladefs: a write whose source is a mapping of the file it grows: faulting that source in, it
 /// mapped the chunk only as large as the file, which the write's range then couldn't reach,
 /// again and again, until it stopped short: the write's end lost, or EIO (xfstests generic/638,
 /// TASK-147).
@@ -150,7 +150,7 @@ pub(super) fn test_write_over_mapped_hole() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a read into a mapping of the file it reads, whose pages the window maps read-only:
+/// cladefs: a read into a mapping of the file it reads, whose pages the window maps read-only:
 /// the read's copy faults, the fault can't store to a slice, and dropping the slice waited for
 /// the slice's users, the read among them, for ever.
 pub(super) fn test_read_into_own_mapping() {

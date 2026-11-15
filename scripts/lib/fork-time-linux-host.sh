@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# How long a fork of a large base takes, on trees of fxdax's (TASK-165.7): on an x86-64
-# Linux host, as root, for each LABEL=TREE, builds TREE's extent daemon and fxdaxctl, starts the
-# daemon on a file bucket and a part cache of its own, imports a base of FXDAX_FORK_TIME_FILES
-# files (2,560) of FXDAX_FORK_TIME_FILE_MIB MiB (4) of random bytes, 10 GiB, which compress no
-# smaller, waits for its uploads, then forks it FXDAX_FORK_TIME_FORKS times (5), each fork timed,
+# How long a fork of a large base takes, on trees of cladefs's (TASK-165.7): on an x86-64
+# Linux host, as root, for each LABEL=TREE, builds TREE's extent daemon and cladefsctl, starts the
+# daemon on a file bucket and a part cache of its own, imports a base of CLADEFS_FORK_TIME_FILES
+# files (2,560) of CLADEFS_FORK_TIME_FILE_MIB MiB (4) of random bytes, 10 GiB, which compress no
+# smaller, waits for its uploads, then forks it CLADEFS_FORK_TIME_FORKS times (5), each fork timed,
 # and the fork's first stat after it, which opens it. Every command goes through the daemon's
 # control API, as a host's control plane's would, which both trees have the same way. One image,
 # made once, for every tree. RESULTS/LABEL.tsv has `step iteration seconds` lines (import, sync,
@@ -26,9 +26,9 @@ source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
 host_setup
 host_record > "$results/host.txt"
 
-files=${FXDAX_FORK_TIME_FILES:-2560}
-mib=${FXDAX_FORK_TIME_FILE_MIB:-4}
-forks=${FXDAX_FORK_TIME_FORKS:-5}
+files=${CLADEFS_FORK_TIME_FILES:-2560}
+mib=${CLADEFS_FORK_TIME_FILE_MIB:-4}
+forks=${CLADEFS_FORK_TIME_FORKS:-5}
 scratch=$work/fork-time
 mkdir -p "$scratch"
 
@@ -55,8 +55,8 @@ for pair in "$@"; do
     [[ $label =~ ^[a-z0-9-]+$ ]] || { echo "$label: a label is a word" >&2; exit 2; }
     echo "== $label: building $tree" >&2
     target=$scratch/target-$label
-    (cd "$tree" && CARGO_TARGET_DIR=$target cargo build --release -q -p fxdax \
-        --bin fxdax-extentd --bin fxdaxctl)
+    (cd "$tree" && CARGO_TARGET_DIR=$target cargo build --release -q -p cladefs \
+        --bin cladefs-extentd --bin cladefsctl)
     bin=$target/release
     dir=$scratch/$label
     if [[ -e $dir ]]; then rm -r -- "$dir"; fi
@@ -64,17 +64,17 @@ for pair in "$@"; do
     out=$results/$label.tsv
     : > "$out"
     echo "== $label: timing" >&2
-    FXDAX_EXTENTD_REMOTE="file://$dir/bucket/" FXDAX_EXTENTD_TOKEN=1 \
-        FXDAX_EXTENTD_CACHE="$dir/cache" FXDAX_EXTENTD_GRPC="$dir/extentd.control" \
-        FXDAX_EXTENTD_STATS="$results/$label-stats.txt" \
-        "$bin/fxdax-extentd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
+    CLADEFS_EXTENTD_REMOTE="file://$dir/bucket/" CLADEFS_EXTENTD_TOKEN=1 \
+        CLADEFS_EXTENTD_CACHE="$dir/cache" CLADEFS_EXTENTD_GRPC="$dir/extentd.control" \
+        CLADEFS_EXTENTD_STATS="$results/$label-stats.txt" \
+        "$bin/cladefs-extentd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
     daemon=$!
     for _ in {1..600}; do
         [[ -S $dir/extentd.control ]] && break
         kill -0 "$daemon" || { echo "$label: the daemon exited" >&2; exit 1; }
         sleep 0.1
     done
-    export FXDAX_EXTENTD_GRPC=$dir/extentd.control
+    export CLADEFS_EXTENTD_GRPC=$dir/extentd.control
     # timed STEP ITERATION COMMAND... runs COMMAND and records how long it took.
     timed() {
         local step=$1 iteration=$2 start end
@@ -84,12 +84,12 @@ for pair in "$@"; do
         end=$(date +%s.%N)
         printf '%s\t%s\t%.3f\n' "$step" "$iteration" "$(echo "$end - $start" | bc)" | tee -a "$out" >&2
     }
-    timed import 0 "$bin/fxdaxctl" import "$dir/stores/base" "$capacity" "$layer"
-    timed sync 0 "$bin/fxdaxctl" sync "$dir/stores/base"
-    timed stat 0 "$bin/fxdaxctl" stat "$dir/stores/base"
+    timed import 0 "$bin/cladefsctl" import "$dir/stores/base" "$capacity" "$layer"
+    timed sync 0 "$bin/cladefsctl" sync "$dir/stores/base"
+    timed stat 0 "$bin/cladefsctl" stat "$dir/stores/base"
     for (( i = 1; i <= forks; i++ )); do
-        timed fork "$i" "$bin/fxdaxctl" fork "$dir/stores/base" "$dir/stores/fork-$i"
-        timed stat "$i" "$bin/fxdaxctl" stat "$dir/stores/fork-$i"
+        timed fork "$i" "$bin/cladefsctl" fork "$dir/stores/base" "$dir/stores/fork-$i"
+        timed stat "$i" "$bin/cladefsctl" stat "$dir/stores/fork-$i"
     done
     kill -TERM "$daemon"
     wait "$daemon" || echo "$label: the daemon exited $?" >&2

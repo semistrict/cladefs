@@ -7,7 +7,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-# fxdax's: its locks and condition variables as Shuttle's (awslabs/shuttle), whose scheduler then
+# cladefs's: its locks and condition variables as Shuttle's (awslabs/shuttle), whose scheduler then
 # chooses every interleaving of their users', such as Fxfs's in the follower simulation
 # (TASK-42.1). Only for such tests.
 shuttle = ["parking_lot/shuttle", "dep:shuttle"]
@@ -15,7 +15,7 @@ shuttle = ["parking_lot/shuttle", "dep:shuttle"]
 [dependencies]
 lock_api.workspace = true
 
-# The guest kernel's (fxdax's TASK-26.6) are its std's, over the kernel's futexes: parking_lot's
+# The guest kernel's (cladefs's TASK-26.6) are its std's, over the kernel's futexes: parking_lot's
 # parker spins there.
 [target.'cfg(not(target_os = "none"))'.dependencies]
 # parking_lot itself without the `shuttle` feature; with it, Shuttle's locks behind parking_lot's

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -50,7 +50,7 @@ export interface Progress {
   catches: Record<string, string>;
 }
 
-const KEY = "fxdax-flight-school/v1";
+const KEY = "cladefs-flight-school/v1";
 const empty = (): Progress => ({ notebook: [], copied: 0, answers: {}, designs: {}, marks: {}, transfer: {}, catches: {} });
 
 function read(): Progress {

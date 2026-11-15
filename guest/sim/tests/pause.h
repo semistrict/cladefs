@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * dax.c's pause points (fxfs.dax_pause, TASK-119.9), as guest/tests' checks use them: a test plays
  * an interleaving out exactly. Each scenario here is a guest check's, so that the check's steps

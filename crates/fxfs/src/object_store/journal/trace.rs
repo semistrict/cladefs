@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: traces of the journal's steps that specs/journal's actions are of, for TLC to check that
+//! cladefs: traces of the journal's steps that specs/journal's actions are of, for TLC to check that
 //! a run of the code is a behaviour of the spec (specs/journal/trace, TASK-444.1), as the
 //! followers' are (crates/follower/src/shuttle_trace.rs). Compiled with the `journal_trace`
 //! feature only, and recorded only for a journal given a [`JournalTrace`]

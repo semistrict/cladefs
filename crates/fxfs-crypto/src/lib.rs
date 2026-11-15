@@ -346,8 +346,8 @@ impl JournalXtsCipher {
     }
 }
 
-// fxdax: no ChaCha20 cipher, which only Fxfs's versions before 57 encrypt mutations with:
-// fxdax reads versions from 60 on (backlog doc-4).
+// cladefs: no ChaCha20 cipher, which only Fxfs's versions before 57 encrypt mutations with:
+// cladefs reads versions from 60 on (backlog doc-4).
 pub enum JournalCipher {
     Aes256Xts(Box<JournalXtsCipher>),
 }

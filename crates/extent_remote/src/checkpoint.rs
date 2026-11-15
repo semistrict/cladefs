@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -21,7 +21,7 @@ pub fn encode(state: &State) -> Vec<u8> {
     encode_under(state, None)
 }
 
-/// fxdax: the checkpoint of `state`, authenticated, not sealed, under the DEK `sealing` gives, if
+/// cladefs: the checkpoint of `state`, authenticated, not sealed, under the DEK `sealing` gives, if
 /// it gives one: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
 pub fn encode_under(state: &State, sealing: layout::Sealing<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
@@ -42,7 +42,7 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
     decode_under(bytes, &extent_frame::NoKeys)
 }
 
-/// fxdax: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
+/// cladefs: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
 /// and MACs if they hold its key, and refused in the clear if they hold its branch sealed
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {

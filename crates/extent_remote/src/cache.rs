@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -252,7 +252,7 @@ impl Kept {
 }
 
 /// Where the cache keeps its files under the directory it is given.
-const FILES: &str = "fxdax-parts";
+const FILES: &str = "cladefs-parts";
 
 /// The blocks of the filesystems the cache's files are on, as the parts in them are aligned to:
 /// what punching a hole frees whole.
@@ -312,7 +312,7 @@ impl Cache {
             checked => {
                 let failed =
                     checked.err().map_or("its frame changed".into(), |err| err.to_string());
-                log::warn!("fxdax: the tail of {key} in the cache: {failed}");
+                log::warn!("cladefs: the tail of {key} in the cache: {failed}");
                 self.forget(key)?;
                 Ok(None)
             }
@@ -344,7 +344,7 @@ impl Cache {
         if stored.check(&bytes).is_ok() {
             return Ok(Some(bytes));
         }
-        log::warn!("fxdax: part {part} of {key} in the cache failed its CRC");
+        log::warn!("cladefs: part {part} of {key} in the cache failed its CRC");
         self.forget_part(key, part)?;
         Ok(None)
     }
@@ -464,7 +464,7 @@ impl Cache {
     fn settle(&self, key: &str, part: u64, written: io::Result<()>) -> io::Result<()> {
         let gone = self.kept.lock().unwrap().written(key, part, written.is_ok());
         if let Err(err) = self.evict(Vec::from_iter(gone)) {
-            log::warn!("fxdax: removing {key} from the cache: {err}");
+            log::warn!("cladefs: removing {key} from the cache: {err}");
         }
         written
     }
@@ -655,7 +655,7 @@ fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
     Ok(Some(Found { parts: tail.parts, kept, modified: metadata.modified()? }))
 }
 
-/// fxdax: the file at `path`, opened to read, and to write if `write`, bypassing the host's page
+/// cladefs: the file at `path`, opened to read, and to write if `write`, bypassing the host's page
 /// cache if its file system allows ([`crate::direct::bypass`], TASK-433.4): and whether it does.
 fn opened(path: &Path, write: bool) -> io::Result<(File, bool)> {
     let file = File::options().read(true).write(write).open(path)?;
@@ -668,7 +668,7 @@ fn opened(path: &Path, write: bool) -> io::Result<(File, bool)> {
     Ok((file, direct))
 }
 
-/// fxdax: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing as
+/// cladefs: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing as
 /// `read_exact_at` does if the file ends before them (`UnexpectedEof`): one that shrank behind
 /// the cache's back.
 fn read_exact(file: &File, direct: bool, bytes: &mut [u8], at: u64) -> io::Result<()> {
@@ -785,7 +785,7 @@ impl Files {
                 if self.walk(&rel, found)? {
                     any = true;
                 } else if let Err(err) = std::fs::remove_dir(&path) {
-                    log::warn!("fxdax: removing {} from the cache: {err}", path.display());
+                    log::warn!("cladefs: removing {} from the cache: {err}", path.display());
                 }
                 continue;
             }
@@ -793,7 +793,7 @@ impl Files {
                 Some(key) if kind.is_file() => match self::found(&path, key, self.holes) {
                     Ok(object) => object.map(|object| (key.to_owned(), object)),
                     Err(err) => {
-                        log::warn!("fxdax: reading {} in the cache: {err}", path.display());
+                        log::warn!("cladefs: reading {} in the cache: {err}", path.display());
                         None
                     }
                 },
@@ -805,7 +805,7 @@ impl Files {
                     any = true;
                 }
                 None => {
-                    log::warn!("fxdax: removing {} from the cache: no object", path.display());
+                    log::warn!("cladefs: removing {} from the cache: no object", path.display());
                     std::fs::remove_file(&path)?;
                 }
             }

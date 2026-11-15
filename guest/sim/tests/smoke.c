@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * One task, with no VM: mounts a file on the DAX window, writes it, reads it back, takes faults
  * through a mapping, whose stores copy on write (doc-13), and writes it back and seals.

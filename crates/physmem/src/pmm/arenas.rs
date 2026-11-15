@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! fxdax's own: the PMM's arenas, which its free pages are of (TASK-43). An arena takes physical
+//! cladefs's own: the PMM's arenas, which its free pages are of (TASK-43). An arena takes physical
 //! memory a chunk (`physmap::CHUNK_SIZE`) at a time, and its free blocks (`FreeBlocks`) hold the
 //! free pages of the chunks it has; a chunk whose pages are all free goes back, its memory to the
 //! host. An arena also keeps a spare chunk, one free block of a chunk's size, taken from last, as
@@ -96,7 +96,7 @@ struct Relief {
     /// rather than wait for ever, until a page of it is freed, a cap changes, pins are let go of,
     /// or a pass, which each of them still asks for, frees something.
     exhausted: bool,
-    /// fxdax: the pages relief's passes for it evicted, and quarantined, which come back once every
+    /// cladefs: the pages relief's passes for it evicted, and quarantined, which come back once every
     /// second stage has made the changes taking them away (`pmm::quarantine`): room on its way,
     /// which its next pass waits for rather than evict more for it (TASK-161).
     owed: usize,
@@ -116,12 +116,12 @@ struct ArenaPages {
     /// The most chunks it may have, if capped.
     cap: Option<usize>,
     relief: Relief,
-    /// fxdax: its pages freed and quarantined, as a second stage may map them still, which come
+    /// cladefs: its pages freed and quarantined, as a second stage may map them still, which come
     /// back to it once every second stage has made the changes taking them away
     /// (`pmm::quarantine`): relief exhausts it not while any is to come back, as each makes it room
     /// (TASK-106).
     quarantined: usize,
-    /// fxdax: how many pages are pinned against it ([`Arenas::pin`]).
+    /// cladefs: how many pages are pinned against it ([`Arenas::pin`]).
     pinned: usize,
     /// Whether it was removed, and goes with its last chunk: it gives no page meanwhile.
     retiring: bool,
@@ -287,7 +287,7 @@ impl Arenas {
         Ok((first, count))
     }
 
-    /// fxdax: the page after `page`, physically, if it is free, of its arena's free blocks, and of
+    /// cladefs: the page after `page`, physically, if it is free, of its arena's free blocks, and of
     /// the same chunk, taken as [`Arenas::take`] takes one: so that the pages an allocation takes
     /// together are consecutive where they can be, as a window's second stage maps each run of
     /// them with a mapping of its own, not a page each (TASK-108.1). The caller marks each page it
@@ -350,7 +350,7 @@ impl Arenas {
         !self.within_caps(arena) || self.free_chunks.is_empty()
     }
 
-    /// fxdax: `page`, freed, is quarantined, to come back to its arena ([`Arenas::put`]) once every
+    /// cladefs: `page`, freed, is quarantined, to come back to its arena ([`Arenas::put`]) once every
     /// second stage has made the changes taking it away; or, `quarantined` false, it is coming
     /// back now (TASK-106).
     pub(super) fn quarantine(&mut self, pages: &PmmPages, page: u32, quarantined: bool) {

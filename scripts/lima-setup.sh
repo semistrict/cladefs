@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Create, and provision, the Lima VM that scripts/test-linux.sh, test-e2e-linux.sh,
-# bench-linux.sh, test-guest-kernel.sh and lib/lima.sh run fxdax's Linux side in on macOS:
+# bench-linux.sh, test-guest-kernel.sh and lib/lima.sh run cladefs's Linux side in on macOS:
 # Ubuntu 24.04 on Apple's virtualization with nested virtualization (KVM for the guests), 8
-# CPUs, 16 GiB, a 256 GiB disk. FXDAX_LIMA_INSTANCE names it (default: `default`). Running it
+# CPUs, 16 GiB, a 256 GiB disk. CLADEFS_LIMA_INSTANCE names it (default: `default`). Running it
 # again provisions what is missing, and changes nothing else.
 #
 # Inside it: the packages Firecracker, the guest kernel (cross-built for x86-64 too) and the
 # guests' root filesystems need, and fuse3, whose fusermount3 mounts the FUSE tests' stores
-# (crates/fxdax/tests/fuse_mount.rs); Rust and cargo-nextest (the guest's pinned nightly installs
+# (crates/cladefs/tests/fuse_mount.rs); Rust and cargo-nextest (the guest's pinned nightly installs
 # itself, from guest/rust/rust-toolchain.toml), with the musl targets the guest tests' agent is
 # built for; and libseccomp 2.6 in /usr/local, which Firecracker's seccompiler needs and Ubuntu
 # 24.04 lacks (it has 2.5.5).
 set -euo pipefail
 
-instance="${FXDAX_LIMA_INSTANCE:-default}"
+instance="${CLADEFS_LIMA_INSTANCE:-default}"
 
 if ! limactl list --quiet | grep -qx "$instance"; then
     limactl create --tty=false --name "$instance" --vm-type vz --cpus 8 --memory 16 --disk 256 \
@@ -56,7 +56,7 @@ sudo udevadm control --reload && sudo udevadm trigger --name-match=userfaultfd
 # guest's EOI then leaves its active priority (ICH_AP1R0_EL2) set, so that no interrupt of that
 # priority reaches it again: a guest stops for good a few seconds into its boot, its timer and
 # virtio interrupts pending. Trapping its group 1 EOIs has KVM drop the priority itself.
-grub=/etc/default/grub.d/60-fxdax-kvm.cfg
+grub=/etc/default/grub.d/60-cladefs-kvm.cfg
 if [[ ! -f $grub ]]; then
     echo 'GRUB_CMDLINE_LINUX="$GRUB_CMDLINE_LINUX kvm-arm.vgic_v3_group1_trap=1"' |
         sudo tee "$grub" >/dev/null

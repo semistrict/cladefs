@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -16,10 +16,10 @@ from pathlib import Path
 import script
 
 # The fake test-host.sh: records its arguments and the variables the gate sets, and writes each case
-# it is to run, those of the suite FXDAX_E2E_TEST tags as the runner has them, a log as the case's
+# it is to run, those of the suite CLADEFS_E2E_TEST tags as the runner has them, a log as the case's
 # would be, or fails if FAKE_FAIL names its results. A pgbench
 # case's: a VM a run of tps 100, every VM after the first one a run of tps 80, as
-# FXDAX_PGBENCH_VMS has it: the tps on the console (log.txt), the runs each VM made in the guest's
+# CLADEFS_PGBENCH_VMS has it: the tps on the console (log.txt), the runs each VM made in the guest's
 # output (stdout.txt); a density case's, the host's memory too, before the first VM and after each
 # VM's runs, each VM costing it 1000 MiB without DAX, 300 with it. A bigmap case's: its results,
 # cold reads at 100 MiB/s without DAX, 400 with it, its guest's cache grown by a quarter of its
@@ -28,16 +28,16 @@ import script
 FAKE_TEST_HOST = r"""#!/usr/bin/env bash
 set -euo pipefail
 results=$1
-echo "$* E2E_TEST=$FXDAX_E2E_TEST VMS=${FXDAX_PGBENCH_VMS:-} RUNS=${FXDAX_PGBENCH_RUNS:-} \
-ROUNDS=$FXDAX_E2E_ROUNDS WORKSPACE=$FXDAX_WORKSPACE_TESTS KERNEL=$FXDAX_GUEST_KERNEL_BUILD \
-JAIL=${FXDAX_FIRECRACKER_JAIL:-} BENCH=$FXDAX_HOST_BENCH" >> "$CALLS"
+echo "$* E2E_TEST=$CLADEFS_E2E_TEST VMS=${CLADEFS_PGBENCH_VMS:-} RUNS=${CLADEFS_PGBENCH_RUNS:-} \
+ROUNDS=$CLADEFS_E2E_ROUNDS WORKSPACE=$CLADEFS_WORKSPACE_TESTS KERNEL=$CLADEFS_GUEST_KERNEL_BUILD \
+JAIL=${CLADEFS_FIRECRACKER_JAIL:-} BENCH=$CLADEFS_HOST_BENCH" >> "$CALLS"
 mib=1048576
-case $FXDAX_E2E_TEST in
+case $CLADEFS_E2E_TEST in
     "--tag perf-single") cases="fxfs-guest-pgbench fxfs-guest-pgbench-dax pgbench-ext4-dax-pmem
         pgbench-ext4-blk-unsafe pgbench-ext4-blk-writeback fxfs-guest-pgbench-forked
         fxfs-guest-pgbench-dax-forked fxfs-guest-bigmap fxfs-guest-bigmap-dax" ;;
     "--tag perf-density") cases="fxfs-guest-pgbench-density fxfs-guest-pgbench-dax-density" ;;
-    *) echo "no such suite: $FXDAX_E2E_TEST" >&2; exit 2 ;;
+    *) echo "no such suite: $CLADEFS_E2E_TEST" >&2; exit 2 ;;
 esac
 for case in $cases; do
     place=$results/e2e/$case/$case
@@ -67,7 +67,7 @@ for case in $cases; do
         echo "memory: vm=0 phase=base host_used=$((1000 * mib))" >> "$log"
     fi
     echo 'OK base' > "$place/stdout.txt"
-    for ((vm = 0; vm < ${FXDAX_PGBENCH_VMS:-1}; vm++)); do
+    for ((vm = 0; vm < ${CLADEFS_PGBENCH_VMS:-1}; vm++)); do
         tps=$((vm == 0 ? 100 : 80))
         echo "pgbench: at 16.00 s: pgbench -h /run/postgresql -c 4 -j 2 -T 60 bench" >> "$log"
         echo "pgbench: 60.1s, exit status: 0" >> "$log"
@@ -157,15 +157,15 @@ class PerfGateHost(unittest.TestCase):
         ])
 
     def test_a_nested_host_with_the_gates_passing(self):
-        gated = self.gate("--nested", FXDAX_GATE_DENSITY="0.8", FXDAX_PERF_GATE_VMS="2",
-                          FXDAX_PERF_GATE_DENSITY_RUNS="3", FXDAX_GUEST_KERNEL_BUILD="debug")
+        gated = self.gate("--nested", CLADEFS_GATE_DENSITY="0.8", CLADEFS_PERF_GATE_VMS="2",
+                          CLADEFS_PERF_GATE_DENSITY_RUNS="3", CLADEFS_GUEST_KERNEL_BUILD="debug")
         self.assertEqual((gated.returncode, gated.stderr), (0, ""))
         self.assertIn("VMS=2 RUNS=3 ROUNDS=1 WORKSPACE=0 KERNEL=debug JAIL=1",
                       self.calls.read_text().splitlines()[1])
         self.assertEqual(json.loads((self.results / "gate.json").read_text())["host"], "nested")
 
     def test_a_failed_run_fails_it_after_the_gate(self):
-        gated = self.gate(FXDAX_GATE_DENSITY="0.8", FAKE_FAIL="single")
+        gated = self.gate(CLADEFS_GATE_DENSITY="0.8", FAKE_FAIL="single")
         self.assertEqual(gated.returncode, 1)
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
         self.assertTrue((self.results / "gate.json").exists())
@@ -173,7 +173,7 @@ class PerfGateHost(unittest.TestCase):
     def test_its_phases_one_a_command_then_the_gate_over_both(self):
         """TASK-164.5: each phase a command of its own, as a driver whose commands have a time limit
         runs them (r580 met a two-hour limit), unjailed if asked; the gate reads both runs'."""
-        self.assertEqual(self.gate(phases=["single"], FXDAX_FIRECRACKER_JAIL="").returncode, 0)
+        self.assertEqual(self.gate(phases=["single"], CLADEFS_FIRECRACKER_JAIL="").returncode, 0)
         self.assertEqual(self.gate(phases=["density"]).returncode, 0)
         self.assertEqual(self.calls.read_text().splitlines(), [
             f"{self.results}/single E2E_TEST={SINGLE} VMS= RUNS= "
@@ -182,7 +182,7 @@ class PerfGateHost(unittest.TestCase):
             "RUNS=2 ROUNDS=1 WORKSPACE=0 KERNEL=release JAIL=1 BENCH=1",
         ])
         self.assertFalse((self.results / "gate.json").exists())
-        gated = self.gate(phases=["gate"], FXDAX_GATE_DENSITY="0.8")
+        gated = self.gate(phases=["gate"], CLADEFS_GATE_DENSITY="0.8")
         self.assertEqual((gated.returncode, gated.stderr), (0, ""))
         self.assertEqual(len(self.calls.read_text().splitlines()), 2)
         report = json.loads((self.results / "gate.json").read_text())

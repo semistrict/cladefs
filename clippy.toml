@@ -1,4 +1,4 @@
-# Clippy's configuration for fxdax's crates (crates/extent_store has its own: see there).
+# Clippy's configuration for cladefs's crates (crates/extent_store has its own: see there).
 
 # Calls that block their thread, which async code must not make while other futures of its own
 # task may be what they wait for: each use says, in an allow, why it can't (TASK-44.20).

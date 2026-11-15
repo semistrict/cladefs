@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
- * fxdax: the state of a range's pages, copying on write (doc-13, TASK-160.4): which of them have
+ * cladefs: the state of a range's pages, copying on write (doc-13, TASK-160.4): which of them have
  * a window page, which of those are zeros, which the host holds private, the VM's own, and which
  * are in their file's dirty set. Each page is one of
  *
@@ -61,7 +61,7 @@ long fxfs_dax_pages_rebind(struct fxfs_dax_pages *pages, unsigned long first, un
 struct fxfs_dax_change fxfs_dax_pages_dirty(struct fxfs_dax_pages *pages, unsigned long first,
 					    unsigned long n);
 /*
- * fxdax: a write's PRIVATE made them private ahead of its stores, clean (TASK-164.10): each
+ * cladefs: a write's PRIVATE made them private ahead of its stores, clean (TASK-164.10): each
  * private. How many it made so, others' iomaps beside it making some so meanwhile;
  * fxfs_dax_pages_would_dirty's private says what it would, before. Each mapped, none unwritten.
  * With the file's semaphore held shared or more.
@@ -74,7 +74,7 @@ long fxfs_dax_pages_private_ahead(struct fxfs_dax_pages *pages, unsigned long fi
  */
 unsigned long fxfs_dax_pages_swap(struct fxfs_dax_pages *pages, unsigned long *set);
 /*
- * fxdax: a writeback that Fxfs had no memory for gives back `set`, of its writeback set: each page
+ * cladefs: a writeback that Fxfs had no memory for gives back `set`, of its writeback set: each page
  * of it private still dirty again, as before the swap, those a store dirtied again meanwhile
  * dirty already (TASK-207). How many it made dirty.
  */
@@ -113,7 +113,7 @@ unsigned long fxfs_dax_pages_mapped_run(const struct fxfs_dax_pages *pages, unsi
 /* Whether page `page` maps zeros and was never written: a hole, or past the file's end. */
 bool fxfs_dax_pages_unwritten(const struct fxfs_dax_pages *pages, unsigned long page);
 /*
- * fxdax: where the run of pages from `first` that a PRIVATE may make private ahead of a write
+ * cladefs: where the run of pages from `first` that a PRIVATE may make private ahead of a write
  * ends, up to `last`: each mapped, and not unwritten, a hole's zeros (TASK-164.10).
  */
 unsigned long fxfs_dax_pages_aheadable_run(const struct fxfs_dax_pages *pages, unsigned long first,

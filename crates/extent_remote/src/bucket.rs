@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -41,7 +41,7 @@ pub struct Meta {
     pub modified: u64,
 }
 
-/// fxdax: one level of the keys under a prefix, or a page of it, as a listing by delimiter finds
+/// cladefs: one level of the keys under a prefix, or a page of it, as a listing by delimiter finds
 /// it ([`Bucket::list_delimited`], TASK-395.5).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
@@ -56,7 +56,7 @@ pub struct Listing {
 }
 
 impl Listing {
-    /// fxdax: the page `page` of this listing of a whole level, for a bucket that lists a level
+    /// cladefs: the page `page` of this listing of a whole level, for a bucket that lists a level
     /// whole whatever page is asked (files, memory, the simulation's): the prefixes and objects
     /// after `page.after` (here the key of the last of the page before), in the order of their
     /// keys among each other, `page.max` of them at most, and the last one's key as where the next
@@ -91,7 +91,7 @@ impl Listing {
     }
 }
 
-/// fxdax: which page of a level of keys a listing by delimiter lists ([`Bucket::list_delimited`],
+/// cladefs: which page of a level of keys a listing by delimiter lists ([`Bucket::list_delimited`],
 /// TASK-395.5): a level of millions of keys, a tenant's cells, is listed a page at a time, none of
 /// its pages held but the one listed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -107,18 +107,18 @@ impl Page<'_> {
     pub const FIRST: Page<'static> = Page { after: None, max: LIST_PAGE };
 }
 
-/// fxdax: the most prefixes and objects a page of a listing by delimiter holds: as many as S3's and
+/// cladefs: the most prefixes and objects a page of a listing by delimiter holds: as many as S3's and
 /// GCS's ListObjects give a request.
 pub const LIST_PAGE: usize = 1000;
 
-/// fxdax: the most objects [`Bucket::delete_batch`] is given at once: as many as S3's
+/// cladefs: the most objects [`Bucket::delete_batch`] is given at once: as many as S3's
 /// DeleteObjects takes (TASK-395.5).
 pub const DELETE_BATCH: usize = 1000;
 
-/// fxdax: how many deletes of a batch a bucket with no batch delete has in flight at once.
+/// cladefs: how many deletes of a batch a bucket with no batch delete has in flight at once.
 const DELETES_AT_ONCE: usize = 32;
 
-/// fxdax: how many batches [`delete_all`] has in flight at once.
+/// cladefs: how many batches [`delete_all`] has in flight at once.
 const BATCHES_AT_ONCE: usize = 4;
 
 /// An object, read whole.
@@ -175,7 +175,7 @@ pub trait Bucket: Send + Sync + 'static {
     /// The objects whose keys start with `prefix`, in the order of their keys.
     fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, Error>> + Send;
 
-    /// fxdax: a page of one level of the keys under `prefix`, empty or ending with `/`, by delimiter
+    /// cladefs: a page of one level of the keys under `prefix`, empty or ending with `/`, by delimiter
     /// `/` (S3's and GCS's `delimiter=/`, TASK-395.5): the objects right under it, and the
     /// prefixes of the rest, listing none of the objects under those; of them, `page.max` at most,
     /// after where `page` says, in the order of their keys, and where the next page starts, if
@@ -198,7 +198,7 @@ pub trait Bucket: Send + Sync + 'static {
     /// Deletes the object at `key`. Deleting none is no error.
     fn delete(&self, key: &str) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// fxdax: deletes the objects at `keys`, at most [`DELETE_BATCH`] of them (TASK-395.5): in
+    /// cladefs: deletes the objects at `keys`, at most [`DELETE_BATCH`] of them (TASK-395.5): in
     /// one request where the store deletes many at once (S3's DeleteObjects), else, as here, one
     /// each, [`DELETES_AT_ONCE`] at once. Deleting none is no error. It fails if a delete did,
     /// which may or may not have taken effect, nor need the others have.
@@ -219,7 +219,7 @@ pub trait Bucket: Send + Sync + 'static {
         std::future::ready(())
     }
 
-    /// fxdax: the checkpoints' states the recoveries reading through it decoded, which they share,
+    /// cladefs: the checkpoints' states the recoveries reading through it decoded, which they share,
     /// if it keeps them: a host's bucket does, so that the forks of a base it opens decode the
     /// checkpoint they start from once (TASK-92.55).
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
@@ -293,7 +293,7 @@ pub(crate) async fn get_range(
     }
 }
 
-/// fxdax: what `objects`, a listing of a prefix holding `prefix`, by their keys, holds under
+/// cladefs: what `objects`, a listing of a prefix holding `prefix`, by their keys, holds under
 /// `prefix`, in the order of their keys: as a listing of `prefix` alone, made when that one was,
 /// would list it (TASK-395.16).
 pub(crate) fn under(objects: &std::collections::BTreeMap<String, Meta>, prefix: &str) -> Vec<Meta> {
@@ -314,7 +314,7 @@ pub(crate) async fn list(bucket: &impl Bucket, prefix: &str) -> Vec<Meta> {
     }
 }
 
-/// fxdax: the page `page` of the listing of `prefix` by delimiter ([`Bucket::list_delimited`]),
+/// cladefs: the page `page` of the listing of `prefix` by delimiter ([`Bucket::list_delimited`]),
 /// retried while it fails.
 pub(crate) async fn list_delimited_page(
     bucket: &impl Bucket,
@@ -330,7 +330,7 @@ pub(crate) async fn list_delimited_page(
     }
 }
 
-/// fxdax: the prefixes of the listing of `prefix` by delimiter ([`Bucket::list_delimited`]), in
+/// cladefs: the prefixes of the listing of `prefix` by delimiter ([`Bucket::list_delimited`]), in
 /// their order, a page at a time, each page listed once those before it are taken, and retried while
 /// it fails: so that a level of millions, a tenant's cells, is held no more than a page of it at a
 /// time (TASK-395.5, TASK-395.8). A request for every [`LIST_PAGE`] keys of the level.
@@ -353,7 +353,7 @@ pub(crate) fn prefixes<B: Bucket>(
     .flatten()
 }
 
-/// fxdax: the whole listing of `prefix` by delimiter, its pages one after another, each retried
+/// cladefs: the whole listing of `prefix` by delimiter, its pages one after another, each retried
 /// while it fails: for a level of a cell's, whose keys are few (its parents with references, a
 /// parent's fork points), never one of every cell's.
 pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listing {
@@ -371,7 +371,7 @@ pub(crate) async fn list_delimited(bucket: &impl Bucket, prefix: &str) -> Listin
     }
 }
 
-/// fxdax: deletes the objects at `keys`, in batches of [`DELETE_BATCH`] ([`Bucket::delete_batch`]),
+/// cladefs: deletes the objects at `keys`, in batches of [`DELETE_BATCH`] ([`Bucket::delete_batch`]),
 /// [`BATCHES_AT_ONCE`] at once, in any order, each batch retried whole while it fails: deleting
 /// what is gone is no error (TASK-395.5).
 pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) {
@@ -383,7 +383,7 @@ pub(crate) async fn delete_all(bucket: &impl Bucket, keys: &[&str]) {
     futures::stream::iter(batches).buffer_unordered(BATCHES_AT_ONCE).collect::<()>().await;
 }
 
-/// fxdax: deletes the objects at `keys` in one batch ([`Bucket::delete_batch`]), retried whole
+/// cladefs: deletes the objects at `keys` in one batch ([`Bucket::delete_batch`]), retried whole
 /// while it fails. A function of its own, not a closure's future, so that a future awaiting
 /// [`delete_all`] is seen to be `Send` (TASK-395.15: a sweep spawning its passes).
 async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) {
@@ -393,7 +393,7 @@ async fn delete_batch(bucket: &impl Bucket, keys: &[&str]) {
     }
 }
 
-/// fxdax: deletes the object at `key`, retried while it fails: deleting what is gone is no error.
+/// cladefs: deletes the object at `key`, retried while it fails: deleting what is gone is no error.
 /// One key's, with no stream of batches, so that a writer's future, which the uploader's runtime
 /// needs `Send`, may await it (TASK-395.10).
 pub(crate) async fn delete(bucket: &impl Bucket, key: &str) {
@@ -464,7 +464,7 @@ pub(crate) async fn update(
     }
 }
 
-/// fxdax: what every bucket must do, which branches rely on (TASK-165.1), with objects under
+/// cladefs: what every bucket must do, which branches rely on (TASK-165.1), with objects under
 /// `root`, which it leaves as it found them: a bucket in memory, on the host's filesystem, the
 /// simulation's, and S3's and Azure's servers alike run it.
 #[cfg(test)]
@@ -473,7 +473,7 @@ pub(crate) async fn conformance(bucket: &impl Bucket, root: &str) {
     // A version no object has: GCS's generation 0 is none, but a write conditional on it is one
     // where no object is, which creates one (TASK-205); its generations are times, in µs.
     let none =
-        Version { e_tag: Some("\"fxdax-conformance\"".to_owned()), version: Some("1".to_owned()) };
+        Version { e_tag: Some("\"cladefs-conformance\"".to_owned()), version: Some("1".to_owned()) };
 
     // Nothing there: read as none, deleted as nothing, updated from no version.
     assert_eq!(bucket.get(key).await.map(|object| object.bytes), Err(Error::NotFound));
@@ -531,7 +531,7 @@ pub(crate) async fn conformance(bucket: &impl Bucket, root: &str) {
     expected.sort();
     assert_eq!(all, expected);
 
-    // fxdax: listed a level at a time, by delimiter (TASK-395.5): the objects right under the
+    // cladefs: listed a level at a time, by delimiter (TASK-395.5): the objects right under the
     // prefix and the prefixes of the rest, each once, none of what is under them; a prefix whole
     // segments, as above. Then deleted in a batch, which deletes what is gone as nothing.
     let level = |prefix: String| async move {

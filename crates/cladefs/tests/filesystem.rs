@@ -1,0 +1,1130 @@
+// Copyright 2026 The cladefs Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE file.
+
+//! Tests of a filesystem through its public API, as a host uses it.
+
+use futures::executor::block_on;
+use cladefs::{
+    DirEntry, Errno, FileType, Filesystem, Node, Owner, RenameFlags, Result, SetAttr, SetTime,
+    Storage, VolatileSlice, VolatileSliceMut, XattrMode, pages,
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const OWNER: Owner = Owner { uid: 1000, gid: 100 };
+
+/// The size of the filesystems the tests format.
+const STORAGE_SIZE: u64 = 8 << 20;
+
+async fn format() -> Filesystem {
+    Filesystem::format(Storage::memory(STORAGE_SIZE)).await.expect("format failed")
+}
+
+/// Runs `test` on a new filesystem, then closes and checks it.
+fn with_fs(test: impl AsyncFnOnce(&Filesystem)) {
+    block_on(async {
+        let fs = format().await;
+        test(&fs).await;
+        close_and_check(fs).await;
+    })
+}
+
+/// Closes `fs`, checks the filesystem and returns its storage.
+async fn close_and_check(fs: Filesystem) -> Storage {
+    fs.close().await.expect("close failed").check().await.expect("check failed")
+}
+
+fn errno<T: std::fmt::Debug>(result: Result<T>) -> Errno {
+    result.expect_err("succeeded")
+}
+
+fn names(entries: &[DirEntry]) -> Vec<(&[u8], FileType)> {
+    entries.iter().map(|entry| (entry.name.as_slice(), entry.file_type)).collect()
+}
+
+async fn read_all(file: &Node) -> Vec<u8> {
+    let mut buf = vec![0; file.getattr().await.unwrap().size as usize + 16];
+    let len = file.read(0, &mut buf).await.expect("read failed");
+    buf.truncate(len);
+    buf
+}
+
+/// The time `secs` and `nanos` after the Unix epoch.
+fn time(secs: u64, nanos: u32) -> SystemTime {
+    UNIX_EPOCH + Duration::new(secs, nanos)
+}
+
+#[test]
+fn root_is_a_directory() {
+    with_fs(async |fs| {
+        let root = fs.root().getattr().await.expect("getattr failed");
+        assert_eq!(root.inode, fs.root().inode());
+        assert_eq!(root.file_type, FileType::Directory);
+        assert_eq!(root.perm, 0o755);
+        assert_eq!(root.mode(), 0o040755);
+    })
+}
+
+#[test]
+fn create_then_lookup() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (file, created) = root.create(b"file", 0o640, OWNER).await.expect("create failed");
+        assert_eq!(created.file_type, FileType::File);
+        assert_eq!(created.perm, 0o640);
+        assert_eq!((created.uid, created.gid), (1000, 100));
+        assert_eq!(created.size, 0);
+        assert_eq!(created.nlink, 1);
+        assert_eq!(created.inode, file.inode());
+        assert_ne!(created.inode, root.inode());
+
+        let (found, attr) = root.lookup(b"file").await.expect("lookup failed");
+        assert_eq!(attr, created);
+        assert_eq!(found.inode(), file.inode());
+        assert_eq!(errno(root.create(b"file", 0o640, OWNER).await), Errno::EEXIST);
+        assert_eq!(errno(root.lookup(b"missing").await), Errno::ENOENT);
+    })
+}
+
+#[test]
+fn write_then_read() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        assert_eq!(file.write(0, b"hello, world").await.expect("write failed"), 12);
+        assert_eq!(file.write(7, b"cladefs").await.expect("write failed"), 5);
+        assert_eq!(file.getattr().await.unwrap().size, 12);
+
+        let mut buf = [0; 32];
+        assert_eq!(file.read(0, &mut buf).await.expect("read failed"), 12);
+        assert_eq!(&buf[..12], b"hello, cladefs");
+        assert_eq!(file.read(7, &mut buf[..3]).await.expect("read failed"), 3);
+        assert_eq!(&buf[..3], b"fxd");
+        assert_eq!(file.read(100, &mut buf).await.expect("read failed"), 0);
+        assert_eq!(errno(fs.root().read(0, &mut buf).await), Errno::EISDIR);
+    })
+}
+
+#[test]
+fn write_past_the_end_leaves_a_hole() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(100_000, b"end").await.expect("write failed");
+        assert_eq!(file.getattr().await.unwrap().size, 100_003);
+        let contents = read_all(&file).await;
+        assert!(contents[..100_000].iter().all(|&byte| byte == 0));
+        assert_eq!(&contents[100_000..], b"end");
+    })
+}
+
+#[test]
+fn setattr_changes_size() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"0123456789").await.unwrap();
+        let attr = file.setattr(&SetAttr { size: Some(4), ..Default::default() }).await.unwrap();
+        assert_eq!(attr.size, 4);
+        assert_eq!(read_all(&file).await, b"0123");
+        let attr = file.setattr(&SetAttr { size: Some(8), ..Default::default() }).await.unwrap();
+        assert_eq!(attr.size, 8);
+        assert_eq!(read_all(&file).await, b"0123\0\0\0\0");
+        assert_eq!(
+            errno(fs.root().setattr(&SetAttr { size: Some(0), ..Default::default() }).await),
+            Errno::EISDIR
+        );
+    })
+}
+
+#[test]
+fn setattr_changes_owner_permissions_and_times() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        let attr = file
+            .setattr(&SetAttr {
+                perm: Some(0o4755),
+                uid: Some(7),
+                gid: Some(8),
+                atime: Some(SetTime::At(time(1_000, 5))),
+                mtime: Some(SetTime::At(time(2_000, 6))),
+                ..Default::default()
+            })
+            .await
+            .expect("setattr failed");
+        assert_eq!(attr.perm, 0o4755);
+        assert_eq!(attr.file_type, FileType::File);
+        assert_eq!((attr.uid, attr.gid), (7, 8));
+        assert_eq!(attr.atime, time(1_000, 5));
+        assert_eq!(attr.mtime, time(2_000, 6));
+
+        // Clearing setuid leaves setgid alone unless the file is group-executable.
+        let attr =
+            file.setattr(&SetAttr { perm: Some(0o6745), ..Default::default() }).await.unwrap();
+        assert_eq!(attr.perm, 0o6745);
+        let attr =
+            file.setattr(&SetAttr { kill_suid_sgid: true, ..Default::default() }).await.unwrap();
+        assert_eq!(attr.perm, 0o2745);
+        let attr =
+            file.setattr(&SetAttr { perm: Some(0o6755), ..Default::default() }).await.unwrap();
+        assert_eq!(attr.perm, 0o6755);
+        let attr =
+            file.setattr(&SetAttr { kill_suid_sgid: true, ..Default::default() }).await.unwrap();
+        assert_eq!(attr.perm, 0o0755);
+
+        // A directory's are kept: its setgid gives its new nodes its group.
+        let (dir, _) = fs.root().mkdir(b"dir", 0o6775, OWNER).await.unwrap();
+        let chown = SetAttr { uid: Some(7), kill_suid_sgid: true, ..Default::default() };
+        assert_eq!(dir.setattr(&chown).await.unwrap().perm, 0o6775);
+
+        let before = SystemTime::now();
+        let attr = file.setattr(&SetAttr { mtime: Some(SetTime::Now), ..Default::default() }).await;
+        assert!(attr.unwrap().mtime >= before);
+
+        // Fxfs's times can't be before the epoch.
+        let before_epoch = SetTime::At(UNIX_EPOCH - Duration::from_secs(1));
+        let set = SetAttr { mtime: Some(before_epoch), ..Default::default() };
+        assert_eq!(errno(file.setattr(&set).await), Errno::EINVAL);
+    })
+}
+
+/// An open with `O_TRUNC` truncates the file with a setattr, clearing setuid as an unprivileged
+/// truncation does.
+#[test]
+fn truncating_open() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o4755, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+        let truncate = SetAttr { size: Some(0), kill_suid_sgid: true, ..Default::default() };
+        let attr = file.setattr(&truncate).await.expect("setattr failed");
+        assert_eq!((attr.size, attr.perm), (0, 0o755));
+        assert_eq!(read_all(&file).await, b"");
+    })
+}
+
+#[test]
+fn mkdir_and_rmdir() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (dir, attr) = root.mkdir(b"dir", 0o750, OWNER).await.expect("mkdir failed");
+        assert_eq!(attr.file_type, FileType::Directory);
+        assert_eq!(attr.perm, 0o750);
+        assert_eq!((attr.uid, attr.gid), (1000, 100));
+        let (file, _) = dir.create(b"file", 0o644, OWNER).await.unwrap();
+
+        assert_eq!(errno(root.rmdir(b"dir").await), Errno::ENOTEMPTY);
+        assert_eq!(errno(dir.rmdir(b"file").await), Errno::ENOTDIR);
+        dir.unlink(b"file").await.expect("unlink failed");
+        drop(file);
+        root.rmdir(b"dir").await.expect("rmdir failed");
+        assert_eq!(errno(root.lookup(b"dir").await), Errno::ENOENT);
+        assert_eq!(errno(root.rmdir(b"dir").await), Errno::ENOENT);
+    })
+}
+
+#[test]
+fn unlink() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+        root.unlink(b"file").await.expect("unlink failed");
+        assert_eq!(errno(root.lookup(b"file").await), Errno::ENOENT);
+        assert_eq!(errno(root.unlink(b"file").await), Errno::ENOENT);
+
+        // The handle still holds the file, which stays readable until it drops.
+        assert_eq!(read_all(&file).await, b"contents");
+        assert_eq!(file.getattr().await.unwrap().nlink, 0);
+    })
+}
+
+/// Unlinking removes no directory, empty or not: it fails with `EISDIR`, as unlink(2) does on
+/// Linux, and the directory stays.
+#[test]
+fn unlink_removes_no_directory() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (empty, _) = root.mkdir(b"empty", 0o755, OWNER).await.unwrap();
+        let (full, _) = root.mkdir(b"full", 0o755, OWNER).await.unwrap();
+        full.create(b"file", 0o644, OWNER).await.unwrap();
+
+        assert_eq!(errno(root.unlink(b"empty").await), Errno::EISDIR);
+        assert_eq!(errno(root.unlink(b"full").await), Errno::EISDIR);
+        assert_eq!(root.lookup(b"empty").await.unwrap().0.inode(), empty.inode());
+        assert_eq!(root.lookup(b"full").await.unwrap().0.inode(), full.inode());
+    })
+}
+
+/// Each handle to a node holds it, a lookup's as a create's: unlinked from every link it has, a
+/// file stays readable while one lives.
+#[test]
+fn each_handle_holds_its_node() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+        file.link(root, b"other").await.expect("link failed");
+        let (other, _) = root.lookup(b"other").await.unwrap();
+        assert_eq!(other.inode(), file.inode());
+        root.unlink(b"file").await.unwrap();
+        root.unlink(b"other").await.unwrap();
+        drop(file);
+        assert_eq!(read_all(&other).await, b"contents");
+        assert_eq!(other.getattr().await.unwrap().nlink, 0);
+    })
+}
+
+/// A file only looked up, with no connection to it yet, is kept too, and its connection opens
+/// once it is unlinked.
+#[test]
+fn unlink_a_file_only_looked_up() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+        drop(file);
+        let (file, _) = root.lookup(b"file").await.unwrap();
+        root.unlink(b"file").await.expect("unlink failed");
+
+        assert_eq!(file.getattr().await.unwrap().nlink, 0);
+        assert_eq!(read_all(&file).await, b"contents");
+    })
+}
+
+#[test]
+fn rename_within_and_across_directories() {
+    with_fs(async |fs| {
+        let (a, _) = fs.root().mkdir(b"a", 0o755, OWNER).await.unwrap();
+        let (b, _) = fs.root().mkdir(b"b", 0o755, OWNER).await.unwrap();
+        let (file, _) = a.create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+
+        a.rename(b"file", &a, b"renamed", RenameFlags::empty()).await.expect("rename failed");
+        assert_eq!(a.lookup(b"renamed").await.unwrap().1.inode, file.inode());
+        a.rename(b"renamed", &b, b"moved", RenameFlags::empty()).await.expect("rename failed");
+        assert_eq!(errno(a.lookup(b"renamed").await), Errno::ENOENT);
+        let (moved, _) = b.lookup(b"moved").await.unwrap();
+        assert_eq!(moved.inode(), file.inode());
+        assert_eq!(read_all(&moved).await, b"contents");
+    })
+}
+
+#[test]
+fn rename_replaces_unless_told_not_to() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (first, _) = root.create(b"first", 0o644, OWNER).await.unwrap();
+        let (second, _) = root.create(b"second", 0o644, OWNER).await.unwrap();
+        first.write(0, b"first").await.unwrap();
+        second.write(0, b"second").await.unwrap();
+
+        assert_eq!(
+            errno(root.rename(b"first", root, b"second", RenameFlags::NOREPLACE).await),
+            Errno::EEXIST
+        );
+        assert_eq!(
+            errno(root.rename(b"first", root, b"second", RenameFlags::EXCHANGE).await),
+            Errno::EINVAL
+        );
+        root.rename(b"first", root, b"third", RenameFlags::NOREPLACE).await.expect("rename failed");
+        root.rename(b"third", root, b"second", RenameFlags::empty()).await.expect("rename failed");
+        let (replaced, _) = root.lookup(b"second").await.unwrap();
+        assert_eq!(replaced.inode(), first.inode());
+        assert_eq!(read_all(&replaced).await, b"first");
+    })
+}
+
+/// A rename that must not replace fails as Linux's renameat2 does: with `ENOENT` if the name
+/// renamed is missing, whatever the new name holds, and otherwise with `EEXIST` if the new name
+/// holds anything, the name renamed itself too.
+#[test]
+fn rename_noreplace_fails_as_linux_does() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        root.create(b"other", 0o644, OWNER).await.unwrap();
+
+        assert_eq!(
+            errno(root.rename(b"missing", root, b"other", RenameFlags::NOREPLACE).await),
+            Errno::ENOENT
+        );
+        assert_eq!(
+            errno(root.rename(b"file", root, b"file", RenameFlags::NOREPLACE).await),
+            Errno::EEXIST
+        );
+        assert_eq!(root.lookup(b"file").await.unwrap().0.inode(), file.inode());
+    })
+}
+
+/// A rename that must not replace, racing a create of its new name, takes the name or fails with
+/// `EEXIST`, and never replaces the file created: exactly one of the two fails, with `EEXIST`.
+///
+/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's `shuttle`
+/// feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on, and a
+/// filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
+#[test]
+fn rename_noreplace_racing_a_create_never_replaces_it() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        for round in 0..16 {
+            let (old, new) = (format!("old-{round}"), format!("new-{round}"));
+            root.create(old.as_bytes(), 0o644, OWNER).await.unwrap();
+            let (renamed, created) = futures::join!(
+                root.rename(old.as_bytes(), root, new.as_bytes(), RenameFlags::NOREPLACE),
+                root.create(new.as_bytes(), 0o644, OWNER),
+            );
+            let failures: Vec<Errno> =
+                [renamed.err(), created.err()].into_iter().flatten().collect();
+            assert_eq!(failures, [Errno::EEXIST], "round {round}");
+        }
+    })
+}
+
+/// A directory renamed is listed by its new parent, under its inode, and not by its old one; its
+/// handle lists it as before.
+#[test]
+fn renamed_directory_has_its_new_parent() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (a, _) = root.mkdir(b"a", 0o755, OWNER).await.unwrap();
+        let (sub, _) = a.mkdir(b"sub", 0o755, OWNER).await.unwrap();
+        a.rename(b"sub", root, b"sub", RenameFlags::empty()).await.expect("rename failed");
+        let listed = root.entries().await.expect("entries failed");
+        let entry = listed.iter().find(|entry| entry.name == b"sub");
+        assert_eq!(
+            entry.map(|entry| (entry.inode, entry.file_type)),
+            Some((sub.inode(), FileType::Directory))
+        );
+        assert_eq!(a.entries().await.unwrap(), []);
+        assert_eq!(sub.entries().await.unwrap(), []);
+    })
+}
+
+/// A directory's parent, `..`, is the directory it was found in, and moves with a rename; the
+/// root's is itself, and a file has none.
+#[test]
+fn directories_know_their_parents() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        assert_eq!(root.parent(), Ok(root.inode()));
+        let (a, _) = root.mkdir(b"a", 0o755, OWNER).await.unwrap();
+        let (b, _) = a.mkdir(b"b", 0o755, OWNER).await.unwrap();
+        assert_eq!((a.parent(), b.parent()), (Ok(root.inode()), Ok(a.inode())));
+        a.rename(b"b", root, b"b", RenameFlags::empty()).await.unwrap();
+        assert_eq!(b.parent(), Ok(root.inode()));
+        let (file, _) = a.create(b"file", 0o644, OWNER).await.unwrap();
+        assert_eq!(file.parent(), Err(Errno::ENOTDIR));
+    })
+}
+
+/// A directory renamed into itself, or a directory in it however deep, fails with `EINVAL`, as
+/// rename(2) does, and stays where it is; a file over a directory fails with `EISDIR`, a directory
+/// over a file with `ENOTDIR`, and over a directory holding anything with `ENOTEMPTY`.
+#[test]
+fn renames_that_rename2_refuses_fail_as_it_does() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (outer, _) = root.mkdir(b"outer", 0o755, OWNER).await.unwrap();
+        let (inner, _) = outer.mkdir(b"inner", 0o755, OWNER).await.unwrap();
+        let (deepest, _) = inner.mkdir(b"deepest", 0o755, OWNER).await.unwrap();
+        drop(inner);
+        let rename = |dir: &Node, name: &'static [u8], to: &Node, new_name: &'static [u8]| {
+            let (dir, to) = (dir.clone(), to.clone());
+            async move { dir.rename(name, &to, new_name, RenameFlags::empty()).await }
+        };
+        assert_eq!(errno(rename(root, b"outer", &outer, b"moved").await), Errno::EINVAL);
+        assert_eq!(errno(rename(root, b"outer", &deepest, b"moved").await), Errno::EINVAL);
+        assert_eq!(root.lookup(b"outer").await.unwrap().0.inode(), outer.inode());
+
+        let (_, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        let (full, _) = root.mkdir(b"full", 0o755, OWNER).await.unwrap();
+        full.create(b"child", 0o644, OWNER).await.unwrap();
+        assert_eq!(errno(rename(root, b"file", root, b"outer").await), Errno::EISDIR);
+        assert_eq!(errno(rename(root, b"outer", root, b"file").await), Errno::ENOTDIR);
+        assert_eq!(errno(rename(root, b"outer", root, b"full").await), Errno::ENOTEMPTY);
+        // Into a directory removed, nothing goes.
+        let (gone, _) = root.mkdir(b"gone", 0o755, OWNER).await.unwrap();
+        root.rmdir(b"gone").await.unwrap();
+        assert_eq!(errno(rename(root, b"file", &gone, b"file").await), Errno::ENOENT);
+        assert_eq!(errno(gone.create(b"new", 0o644, OWNER).await), Errno::ENOENT);
+        assert_eq!(gone.getattr().await.unwrap().nlink, 0);
+    })
+}
+
+/// A directory moved deeper still refuses being renamed into what is now in it: the parents
+/// the filesystem knows its directories by move with it.
+#[test]
+fn directories_moved_are_known_where_they_went() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (a, _) = root.mkdir(b"a", 0o755, OWNER).await.unwrap();
+        let (b, _) = root.mkdir(b"b", 0o755, OWNER).await.unwrap();
+        root.rename(b"b", &a, b"b", RenameFlags::empty()).await.unwrap();
+        assert_eq!(errno(root.rename(b"a", &b, b"a", RenameFlags::empty()).await), Errno::EINVAL);
+        a.rename(b"b", root, b"b", RenameFlags::empty()).await.unwrap();
+        root.rename(b"a", &b, b"a", RenameFlags::empty()).await.expect("rename failed");
+        assert_eq!(b.lookup(b"a").await.unwrap().0.inode(), a.inode());
+    })
+}
+
+/// Times are as Linux keeps them: a write changes its file's modification and change times, and
+/// making or removing a name its directory's.
+#[test]
+fn writes_and_names_change_times() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let epoch = SetAttr {
+            atime: Some(SetTime::At(time(1, 0))),
+            mtime: Some(SetTime::At(time(1, 0))),
+            ..Default::default()
+        };
+        root.setattr(&epoch).await.unwrap();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        assert!(root.getattr().await.unwrap().mtime > time(1, 0), "the directory's time stayed");
+        file.setattr(&epoch).await.unwrap();
+        file.write(0, b"changed").await.unwrap();
+        let written = file.getattr().await.unwrap();
+        assert!(written.mtime > time(1, 0), "the file's time stayed");
+        assert!(written.ctime >= written.mtime);
+        root.setattr(&epoch).await.unwrap();
+        root.unlink(b"file").await.unwrap();
+        assert!(root.getattr().await.unwrap().mtime > time(1, 0), "the directory's time stayed");
+    })
+}
+
+/// What changes a node changes its status change time, as Linux's filesystems have it (TASK-149.37,
+/// each found staying by the FUSE differential): an extended attribute set or removed, a setattr
+/// of nothing (chown to the owner and group it has), an allocation, which changes its modification
+/// time too; and what fails, nothing.
+#[test]
+fn changes_of_status_change_the_ctime() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        let mut then = file.getattr().await.unwrap();
+        let mut changed = async |what: &str, mtime_too: bool| {
+            let now = file.getattr().await.unwrap();
+            assert!(now.ctime > then.ctime, "{what}: the ctime stayed");
+            assert_eq!(now.mtime > then.mtime, mtime_too, "{what}: the mtime");
+            then = now;
+        };
+        file.setxattr(b"user.a", b"1", XattrMode::Set).await.unwrap();
+        changed("a setxattr", false).await;
+        file.removexattr(b"user.a").await.unwrap();
+        changed("a removexattr", false).await;
+        file.setattr(&SetAttr::default()).await.unwrap();
+        changed("a setattr of nothing", false).await;
+        file.allocate(0, 4096).await.unwrap();
+        changed("an allocation", true).await;
+        assert_eq!(errno(file.removexattr(b"user.a").await), Errno::ENODATA);
+        assert_eq!(file.getattr().await.unwrap().ctime, then.ctime, "a removexattr that failed");
+    })
+}
+
+#[test]
+fn symlink_and_readlink() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (link, attr) =
+            root.symlink(b"link", b"some/target", OWNER).await.expect("symlink failed");
+        assert_eq!(attr.file_type, FileType::Symlink);
+        assert_eq!(attr.size, 11);
+        assert_eq!(link.readlink().await.expect("readlink failed"), b"some/target");
+        assert_eq!(root.lookup(b"link").await.unwrap().1.file_type, FileType::Symlink);
+        assert_eq!(errno(root.readlink().await), Errno::EINVAL);
+        assert_eq!(errno(root.symlink(b"link", b"other", OWNER).await), Errno::EEXIST);
+    })
+}
+
+/// A symlink's size is its target's length, however long: those past a record's 256 bytes, which
+/// Fxfs keeps in chunks of their own, too (TASK-149.37: such a symlink's size was 0), as made,
+/// looked up, and once the filesystem is mounted again.
+#[test]
+fn symlinks_are_as_large_as_their_targets() {
+    const LENGTHS: [usize; 6] = [1, 256, 257, 2048, 2049, 4095];
+    block_on(async {
+        let fs = format().await;
+        for len in LENGTHS {
+            let (target, name) = (vec![b't'; len], format!("link{len}"));
+            let (link, attr) = fs.root().symlink(name.as_bytes(), &target, OWNER).await.unwrap();
+            assert_eq!(attr.size, len as u64, "made");
+            assert_eq!(link.getattr().await.unwrap().size, len as u64, "its attributes");
+            assert_eq!(fs.root().lookup(name.as_bytes()).await.unwrap().1.size, len as u64);
+            assert_eq!(link.readlink().await.unwrap(), target);
+        }
+        let fs = Filesystem::mount(close_and_check(fs).await).await.unwrap();
+        for len in LENGTHS {
+            let (_, attr) = fs.root().lookup(format!("link{len}").as_bytes()).await.unwrap();
+            assert_eq!(attr.size, len as u64, "mounted again");
+        }
+        close_and_check(fs).await;
+    })
+}
+
+#[test]
+fn symlinks_have_owners_and_times() {
+    block_on(async {
+        let fs = format().await;
+        let (link, attr) = fs.root().symlink(b"link", b"target", OWNER).await.unwrap();
+        assert_eq!((attr.uid, attr.gid, attr.perm), (OWNER.uid, OWNER.gid, 0o777));
+        let set = SetAttr {
+            uid: Some(7),
+            atime: Some(SetTime::At(time(1_000, 1))),
+            mtime: Some(SetTime::At(time(2_000, 2))),
+            ..Default::default()
+        };
+        let changed = link.setattr(&set).await.expect("setattr failed");
+        assert_eq!((changed.uid, changed.gid), (7, OWNER.gid));
+        assert_eq!((changed.atime, changed.mtime), (time(1_000, 1), time(2_000, 2)));
+        assert_eq!(changed.file_type, FileType::Symlink);
+        // A symlink's permissions are always all of them.
+        let chmod = SetAttr { perm: Some(0o600), ..Default::default() };
+        assert_eq!(link.setattr(&chmod).await.expect("chmod failed").perm, 0o777);
+        let storage = close_and_check(fs).await;
+
+        let fs = Filesystem::mount(storage).await.unwrap();
+        let (link, attr) = fs.root().lookup(b"link").await.unwrap();
+        assert_eq!((attr.uid, attr.gid, attr.perm), (7, OWNER.gid, 0o777));
+        assert_eq!(attr.mtime, time(2_000, 2));
+        assert_eq!(link.readlink().await.unwrap(), b"target");
+        close_and_check(fs).await;
+    })
+}
+
+#[test]
+fn extended_attributes() {
+    block_on(async {
+        let fs = format().await;
+        let root = fs.root();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        let (dir, _) = root.mkdir(b"dir", 0o755, OWNER).await.unwrap();
+        let (link, _) = root.symlink(b"link", b"file", OWNER).await.unwrap();
+        for (node, value) in
+            [(&file, &b"of a file"[..]), (&dir, b"of a dir"), (&link, b"of a link")]
+        {
+            node.setxattr(b"user.what", value, XattrMode::Set).await.expect("setxattr failed");
+            assert_eq!(node.getxattr(b"user.what").await.unwrap(), value);
+        }
+        file.setxattr(b"security.capability", &[1, 0, 0, 2], XattrMode::Create).await.unwrap();
+        assert_eq!(
+            errno(file.setxattr(b"user.what", b"again", XattrMode::Create).await),
+            Errno::EEXIST
+        );
+        assert_eq!(
+            errno(file.setxattr(b"user.none", b"x", XattrMode::Replace).await),
+            Errno::ENODATA
+        );
+        file.setxattr(b"user.what", b"replaced", XattrMode::Replace).await.unwrap();
+        let mut names = file.listxattr().await.expect("listxattr failed");
+        names.sort();
+        assert_eq!(names, [b"security.capability".to_vec(), b"user.what".to_vec()]);
+        assert_eq!(errno(file.getxattr(b"user.none").await), Errno::ENODATA);
+        dir.removexattr(b"user.what").await.expect("removexattr failed");
+        assert_eq!(errno(dir.removexattr(b"user.what").await), Errno::ENODATA);
+        assert_eq!(dir.listxattr().await.unwrap(), Vec::<Vec<u8>>::new());
+        let storage = close_and_check(fs).await;
+
+        let fs = Filesystem::mount(storage).await.unwrap();
+        let (file, _) = fs.root().lookup(b"file").await.unwrap();
+        assert_eq!(file.getxattr(b"user.what").await.unwrap(), b"replaced");
+        assert_eq!(file.getxattr(b"security.capability").await.unwrap(), [1, 0, 0, 2]);
+        let (link, _) = fs.root().lookup(b"link").await.unwrap();
+        assert_eq!(link.getxattr(b"user.what").await.unwrap(), b"of a link");
+        close_and_check(fs).await;
+    })
+}
+
+#[test]
+fn link() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (dir, _) = root.mkdir(b"dir", 0o755, OWNER).await.unwrap();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+
+        let linked = file.link(&dir, b"link").await.expect("link failed");
+        assert_eq!(linked.inode, file.inode());
+        assert_eq!(linked.nlink, 2);
+        assert_eq!(dir.lookup(b"link").await.unwrap().1.inode, file.inode());
+        root.unlink(b"file").await.unwrap();
+        assert_eq!(file.getattr().await.unwrap().nlink, 1);
+        assert_eq!(read_all(&file).await, b"contents");
+
+        let (symlink, _) = root.symlink(b"symlink", b"target", OWNER).await.unwrap();
+        assert_eq!(symlink.link(&dir, b"symlink").await.unwrap().nlink, 2);
+        assert_eq!(errno(dir.link(root, b"dir-link").await), Errno::EPERM);
+    })
+}
+
+#[test]
+fn mknod_makes_special_files() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (_, fifo) =
+            root.mknod(b"fifo", FileType::Fifo, 0o640, 0, OWNER).await.expect("mknod failed");
+        assert_eq!(fifo.file_type, FileType::Fifo);
+        assert_eq!(fifo.perm, 0o640);
+        let (_, device) =
+            root.mknod(b"device", FileType::CharDevice, 0o600, 0x0103, OWNER).await.unwrap();
+        assert_eq!(device.file_type, FileType::CharDevice);
+        assert_eq!(device.rdev, 0x0103);
+        let (_, socket) = root.mknod(b"socket", FileType::Socket, 0o755, 0, OWNER).await.unwrap();
+        assert_eq!(socket.file_type, FileType::Socket);
+        let (_, file) = root.mknod(b"file", FileType::File, 0o600, 0, OWNER).await.unwrap();
+        assert_eq!(file.file_type, FileType::File);
+        assert_eq!(
+            errno(root.mknod(b"dir", FileType::Directory, 0o755, 0, OWNER).await),
+            Errno::EINVAL
+        );
+
+        assert_eq!(root.lookup(b"fifo").await.unwrap().1.file_type, FileType::Fifo);
+        assert_eq!(root.lookup(b"device").await.unwrap().1.rdev, 0x0103);
+    })
+}
+
+/// Each listing of a directory lists the entries it holds then.
+#[test]
+fn each_listing_is_of_its_time() {
+    with_fs(async |fs| {
+        let first = fs.root().entries().await.unwrap();
+        fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        let second = fs.root().entries().await.unwrap();
+        assert_eq!(first, []);
+        assert_eq!(names(&second), [(&b"file"[..], FileType::File)]);
+    })
+}
+
+/// A directory renamed moves, with what it holds: its new parent lists it, its old one doesn't,
+/// and its siblings stay.
+#[test]
+fn renamed_directories_move_with_their_entries() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (outer, _) = root.mkdir(b"outer", 0o755, OWNER).await.unwrap();
+        let (inner, _) = outer.mkdir(b"inner", 0o755, OWNER).await.unwrap();
+        let (other, _) = root.mkdir(b"other", 0o755, OWNER).await.unwrap();
+        let (sibling, _) = outer.mkdir(b"sibling", 0o755, OWNER).await.unwrap();
+        let (child, _) = inner.create(b"child", 0o644, OWNER).await.unwrap();
+        outer.rename(b"inner", &other, b"moved", RenameFlags::empty()).await.unwrap();
+        assert_eq!(
+            other.entries().await.unwrap(),
+            [DirEntry {
+                inode: inner.inode(),
+                file_type: FileType::Directory,
+                name: b"moved".to_vec()
+            }]
+        );
+        // Only the directory renamed moves.
+        assert_eq!(
+            outer.entries().await.unwrap(),
+            [DirEntry {
+                inode: sibling.inode(),
+                file_type: FileType::Directory,
+                name: b"sibling".to_vec()
+            }]
+        );
+        assert_eq!(
+            inner.entries().await.unwrap(),
+            [DirEntry { inode: child.inode(), file_type: FileType::File, name: b"child".to_vec() }]
+        );
+    })
+}
+
+#[test]
+fn entries() {
+    with_fs(async |fs| {
+        let root = fs.root();
+        let (dir, _) = root.mkdir(b"dir", 0o755, OWNER).await.unwrap();
+        let (file, _) = root.create(b"file", 0o644, OWNER).await.unwrap();
+        let (link, _) = root.symlink(b"link", b"file", OWNER).await.unwrap();
+
+        let entries = root.entries().await.expect("entries failed");
+        assert_eq!(
+            names(&entries),
+            [
+                (&b"dir"[..], FileType::Directory),
+                (b"file", FileType::File),
+                (b"link", FileType::Symlink),
+            ]
+        );
+        assert_eq!(
+            entries.iter().map(|entry| entry.inode).collect::<Vec<_>>(),
+            [dir.inode(), file.inode(), link.inode()]
+        );
+        assert_eq!(errno(file.entries().await), Errno::ENOTDIR);
+    })
+}
+
+#[test]
+fn entries_of_many() {
+    with_fs(async |fs| {
+        let names: Vec<Vec<u8>> =
+            (0..500).map(|i| format!("file-with-a-long-name-{i:04}").into_bytes()).collect();
+        for name in &names {
+            fs.root().create(name, 0o644, OWNER).await.unwrap();
+        }
+        let entries = fs.root().entries().await.unwrap();
+        assert_eq!(entries.iter().map(|entry| entry.name.clone()).collect::<Vec<_>>(), names);
+    })
+}
+
+/// Listings of one directory at once, many entries long, each list every entry, once: none moves
+/// where another reads from.
+///
+/// It joins futures rather than run under Shuttle, which doesn't reach this code: cladefs's `shuttle`
+/// feature doesn't enable fuchsia-async's, whose executor and tasks vfs and Fxfs run on, and a
+/// filesystem runs them on a `SendExecutor` of its own, on threads Shuttle doesn't schedule.
+#[test]
+fn concurrent_listings_each_list_every_entry_once() {
+    with_fs(async |fs| {
+        let names: Vec<String> =
+            (0..500).map(|i| format!("file-with-a-long-name-{i:04}")).collect();
+        for name in &names {
+            fs.root().create(name.as_bytes(), 0o644, OWNER).await.unwrap();
+        }
+        let listings = futures::future::join_all((0..4).map(|_| fs.root().entries())).await;
+        let listed: Vec<Vec<String>> = listings
+            .into_iter()
+            .map(|entries| {
+                let entries = entries.expect("entries failed").into_iter();
+                entries.map(|entry| String::from_utf8(entry.name).unwrap()).collect()
+            })
+            .collect();
+        assert_eq!(listed, vec![names; 4]);
+    })
+}
+
+/// An allocation grows the file, setting no blocks aside, which an extent store can't, each write
+/// taking new ones: more than the filesystem has room for is refused.
+#[test]
+fn allocate() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.allocate(0, 65536).await.expect("allocate failed");
+        let attr = file.getattr().await.unwrap();
+        assert_eq!((attr.size, attr.blocks), (65536, 0));
+        assert_eq!(read_all(&file).await, vec![0; 65536]);
+        // Within the file, it changes nothing.
+        file.allocate(4096, 4096).await.expect("allocate failed");
+        assert_eq!(file.getattr().await.unwrap().size, 65536);
+        assert_eq!(errno(file.allocate(0, 2 * STORAGE_SIZE).await), Errno::ENOSPC);
+        assert_eq!(errno(fs.root().allocate(0, 4096).await), Errno::EISDIR);
+    })
+}
+
+/// A file allocated past its end, then written across where the allocation begins, of every
+/// length, leaves the filesystem whole, holding what was written (TASK-149.39: the FUSE fuzzer's
+/// FALLOCATE of a byte at 28672 then a WRITE at 28469 left fsck's MissingOverwriteExtents).
+#[test]
+fn writes_across_an_allocation_past_the_end() {
+    for len in [1, 203, 204, 205, 300, 4096, 4300, 70000] {
+        with_fs(async |fs| {
+            let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+            file.allocate(28672, 1).await.expect("allocate failed");
+            let data = vec![7u8; len];
+            assert_eq!(file.write(28469, &data).await, Ok(len));
+            let end = (28469 + len).max(28673);
+            let mut expected = vec![0u8; end];
+            expected[28469..28469 + len].copy_from_slice(&data);
+            assert_eq!(read_all(&file).await, expected, "{len}");
+        })
+    }
+}
+
+#[test]
+fn fsync() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"contents").await.unwrap();
+        file.fsync().await.expect("fsync failed");
+        fs.root().fsync().await.expect("fsync failed");
+    })
+}
+
+#[test]
+fn statfs() {
+    with_fs(async |fs| {
+        let before = fs.statfs().await.expect("statfs failed");
+        assert_eq!(before.block_size, 4096);
+        assert_eq!(before.blocks, STORAGE_SIZE / 4096);
+        assert_eq!(before.name_max, 255);
+        assert!(before.blocks_free < before.blocks);
+
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, &vec![0xaa; 1 << 20]).await.unwrap();
+        file.fsync().await.unwrap();
+        let after = fs.statfs().await.unwrap();
+        assert!(after.blocks_free + 256 <= before.blocks_free, "{after:?} vs {before:?}");
+    })
+}
+
+#[test]
+fn contents_survive_remount() {
+    block_on(async {
+        let fs = format().await;
+        let (dir, _) = fs.root().mkdir(b"dir", 0o755, OWNER).await.unwrap();
+        let (file, _) = dir.create(b"file", 0o600, OWNER).await.unwrap();
+        file.write(0, b"persistent").await.unwrap();
+        dir.symlink(b"link", b"file", OWNER).await.unwrap();
+        dir.mknod(b"fifo", FileType::Fifo, 0o644, 0, OWNER).await.unwrap();
+        let storage = close_and_check(fs).await;
+
+        let fs = Filesystem::mount(storage).await.expect("mount failed");
+        let (dir, _) = fs.root().lookup(b"dir").await.unwrap();
+        let (file, attr) = dir.lookup(b"file").await.unwrap();
+        assert_eq!((attr.perm, attr.uid, attr.gid), (0o600, 1000, 100));
+        assert_eq!(read_all(&file).await, b"persistent");
+        let (link, _) = dir.lookup(b"link").await.unwrap();
+        assert_eq!(link.readlink().await.unwrap(), b"file");
+        assert_eq!(dir.lookup(b"fifo").await.unwrap().1.file_type, FileType::Fifo);
+        close_and_check(fs).await;
+    })
+}
+
+/// cladefs TASK-79.6: an image formatted, closed, then opened again and mounted, as a guest mounts
+/// the store its host formatted, takes writes, synced: its journal writes the blocks of its tail
+/// minted before, never written, below the store's next sequence number, which the store took for
+/// spent once, failing the journal's flush.
+#[test]
+fn images_opened_again_take_synced_writes() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        let fs = Filesystem::format(Storage::create(&path, 64 << 20).unwrap()).await.unwrap();
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"formatted").await.unwrap();
+        drop(file);
+        drop(fs.close().await.expect("close failed"));
+
+        for round in 0..3u8 {
+            let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+            let (file, _) = fs.root().lookup(b"file").await.unwrap();
+            file.write(0, &[round; 8192]).await.unwrap();
+            file.fsync().await.expect("fsync failed");
+            drop(file);
+            drop(fs.close().await.expect("close failed"));
+        }
+        let fs = Filesystem::mount(Storage::open(&path).unwrap()).await.expect("mount failed");
+        let (file, _) = fs.root().lookup(b"file").await.unwrap();
+        assert!(read_all(&file).await == [2; 8192], "the file holds other data");
+        drop(file);
+        fs.close().await.expect("close failed").check().await.expect("check failed");
+    })
+}
+
+#[test]
+fn contents_survive_remount_of_an_image() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("image");
+        let storage = Storage::create(&path, 64 << 20).expect("create failed");
+        assert_eq!(storage.size(), 64 << 20);
+        assert!(Storage::create(&path, 64 << 20).is_err(), "created an image over another");
+
+        let fs = Filesystem::format(storage).await.expect("format failed");
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"on disk").await.unwrap();
+        // Dropping the filesystem unmounts it; a handle that outlives it holds nothing open, the
+        // image included.
+        drop(fs);
+        assert_eq!(errno(file.getattr().await), Errno::ENOTCONN);
+        let storage =
+            Storage::open(&path).expect("open failed").check().await.expect("check failed");
+        drop(file);
+
+        // The storage a filesystem gives back can be mounted again.
+        let fs = Filesystem::mount(storage).await.expect("mount failed");
+        let storage = fs.close().await.expect("close failed");
+        let fs = Filesystem::mount(storage).await.expect("mount failed");
+        let (file, _) = fs.root().lookup(b"file").await.unwrap();
+        assert_eq!(read_all(&file).await, b"on disk");
+        fs.unmount().await.expect("unmount failed");
+        // Unmounting again does nothing.
+        fs.unmount().await.expect("unmount failed");
+        assert_eq!(errno(file.getattr().await), Errno::ENOTCONN);
+        assert_eq!(errno(fs.root().lookup(b"file").await), Errno::ENOTCONN);
+        // The unmounted filesystem keeps its storage for close.
+        let storage = fs.close().await.expect("close failed");
+        assert_eq!(errno(file.read(0, &mut [0; 8]).await), Errno::ENOTCONN);
+        drop(file);
+        storage.check().await.expect("check failed");
+    })
+}
+
+/// Unmounts at once are one unmount, which each waits for, and after which the filesystem's
+/// storage is closed, for close to give back.
+#[test]
+fn concurrent_unmounts_wait_for_one() {
+    block_on(async {
+        let fs = format().await;
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        file.write(0, b"written").await.unwrap();
+        let (first, second) = futures::join!(fs.unmount(), fs.unmount());
+        first.expect("unmount failed");
+        second.expect("unmount failed");
+        assert_eq!(errno(file.getattr().await), Errno::ENOTCONN);
+        let fs = Filesystem::mount(close_and_check(fs).await).await.unwrap();
+        let (file, _) = fs.root().lookup(b"file").await.unwrap();
+        assert_eq!(read_all(&file).await, b"written");
+        close_and_check(fs).await;
+    })
+}
+
+#[test]
+fn storage_errors() {
+    block_on(async {
+        let dir = tempfile::tempdir().unwrap();
+        let missing =
+            Storage::open(dir.path().join("missing")).expect_err("opened a missing image");
+        assert!(format!("{missing:#}").contains("missing"), "{missing:#}");
+        let empty =
+            Storage::create(dir.path().join("empty"), 0).expect_err("created an empty image");
+        assert_eq!(empty.to_string(), "the image is smaller than a block");
+        assert!(!dir.path().join("empty").exists(), "left an empty image behind");
+        let unformatted = Filesystem::mount(Storage::memory(STORAGE_SIZE)).await;
+        assert!(unformatted.is_err(), "mounted unformatted storage");
+    })
+}
+
+#[test]
+fn vectored_io() {
+    with_fs(async |fs| {
+        let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+        let written = file
+            .write_vectored(
+                3,
+                &[
+                    VolatileSlice::from(&b"hello"[..]),
+                    VolatileSlice::from(&b""[..]),
+                    VolatileSlice::from(&b", world"[..]),
+                ],
+            )
+            .await
+            .expect("write_vectored failed");
+        assert_eq!(written, 12);
+        assert_eq!(read_all(&file).await, b"\0\0\0hello, world");
+
+        let (mut first, mut second) = ([0; 4], [0; 32]);
+        let read = file
+            .read_vectored(
+                1,
+                &mut [
+                    VolatileSliceMut::from(&mut first[..]),
+                    VolatileSliceMut::from(&mut second[..]),
+                ],
+            )
+            .await
+            .expect("read_vectored failed");
+        assert_eq!(read, 14);
+        assert_eq!(&first, b"\0\0he");
+        assert_eq!(&second[..10], b"llo, world");
+        assert_eq!(
+            errno(fs.root().write_vectored(0, &[VolatileSlice::from(&b"x"[..])]).await),
+            Errno::EISDIR
+        );
+    })
+}
+
+#[test]
+fn an_empty_directory_has_no_entries() {
+    with_fs(async |fs| {
+        assert_eq!(fs.root().entries().await.unwrap(), []);
+    })
+}
+
+#[test]
+fn errno_names() {
+    block_on(async {
+        assert_eq!(Errno::ENOENT.raw(), 2);
+        assert_eq!(Errno::from_raw(39), Errno::ENOTEMPTY);
+        assert_eq!(Errno::ENOENT.to_string(), "ENOENT (errno 2)");
+        assert_eq!(format!("{:?}", Errno::from_raw(4000)), "Errno(4000)");
+        assert_eq!(cladefs::Error::from(Errno::EIO).errno(), Some(Errno::EIO));
+    })
+}
+
+#[test]
+fn file_types() {
+    block_on(async {
+        for (file_type, mode, dirent) in [
+            (FileType::File, 0o100644, 8),
+            (FileType::Directory, 0o040755, 4),
+            (FileType::Symlink, 0o120777, 10),
+            (FileType::Fifo, 0o010600, 1),
+            (FileType::CharDevice, 0o020600, 2),
+            (FileType::BlockDevice, 0o060600, 6),
+            (FileType::Socket, 0o140755, 12),
+        ] {
+            assert_eq!(FileType::from_mode(mode), Some(file_type));
+            assert_eq!(file_type.mode_bits() | (mode & 0o7777), mode);
+            assert_eq!(file_type.dirent_type(), dirent);
+        }
+        assert_eq!(FileType::from_mode(0o644), None);
+    })
+}
+
+/// Operations run on any executor: here tokio's, on one thread and on several, where the
+/// filesystem is also dropped, which unmounts it.
+#[test]
+fn operations_run_on_tokio_runtimes() {
+    let runtimes = [
+        tokio::runtime::Builder::new_current_thread().build().unwrap(),
+        tokio::runtime::Builder::new_multi_thread().worker_threads(2).build().unwrap(),
+    ];
+    for runtime in runtimes {
+        runtime.block_on(async {
+            let fs = format().await;
+            let (file, _) = fs.root().create(b"file", 0o644, OWNER).await.unwrap();
+            file.write(0, b"tokio").await.unwrap();
+            assert_eq!(read_all(&file).await, b"tokio");
+            drop(fs);
+        });
+    }
+}
+
+/// Many operations wait at once on one thread, each completing as Fxfs completes it.
+#[test]
+fn concurrent_operations_on_one_thread() {
+    block_on(async {
+        // Fxfs reserves space for each write in flight, so many at once need more than the others.
+        let fs = &Filesystem::format(Storage::memory(64 << 20)).await.unwrap();
+        let names: Vec<Vec<u8>> = (0..32).map(|i| format!("file-{i}").into_bytes()).collect();
+        let files: Vec<Node> = futures::future::join_all(
+            names.iter().map(|name| fs.root().create(name, 0o644, OWNER)),
+        )
+        .await
+        .into_iter()
+        .map(|created| created.unwrap().0)
+        .collect();
+        let contents = |i: usize| vec![i as u8; 3 * pages::page_size() as usize];
+        let written = futures::future::join_all(
+            files
+                .iter()
+                .enumerate()
+                .map(|(i, file)| async move { file.write(0, &contents(i)).await.unwrap() }),
+        )
+        .await;
+        assert!(written.iter().all(|&len| len == 3 * pages::page_size() as usize));
+        fs.root().fsync().await.unwrap();
+        let read = futures::future::join_all(files.iter().map(read_all)).await;
+        assert_eq!(read, (0..32).map(contents).collect::<Vec<_>>());
+    })
+}
+
+/// The futures of the operations are `Send`, so that they may run on any executor's threads.
+#[test]
+fn futures_are_send() {
+    fn send<T: Send>(_: T) {}
+    let fs = block_on(format());
+    let root = fs.root();
+    let mut buf = [0u8; 1];
+    let mut bufs = [VolatileSliceMut::from(&mut buf[..])];
+    send(Filesystem::format(Storage::memory(STORAGE_SIZE)));
+    send(Storage::memory(STORAGE_SIZE).check());
+    send(root.lookup(b"file"));
+    send(root.getattr());
+    send(root.setattr(&SetAttr::default()));
+    send(root.create(b"file", 0o644, OWNER));
+    send(root.rename(b"a", root, b"b", RenameFlags::empty()));
+    send(root.read_vectored(0, &mut bufs));
+    send(root.write_vectored(0, &[VolatileSlice::from(&b"x"[..])]));
+    send(root.entries());
+    send(fs.unmount());
+    block_on(close_and_check(fs));
+}

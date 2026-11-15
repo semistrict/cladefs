@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -19,7 +19,7 @@ pub struct Location {
     pub len: u64,
 }
 
-/// fxdax: a tenant's cell, its unit of placement: one host at a time writes all the branches in it,
+/// cladefs: a tenant's cell, its unit of placement: one host at a time writes all the branches in it,
 /// under its one lease, and keeps them under its prefix in the bucket (TASK-364). Tenants and cells
 /// are IDs alone; what they stand for, their callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -35,8 +35,8 @@ impl Cell {
     }
 }
 
-/// fxdax: a cell as operators read and write it: `TENANT/CELL`, each in hexadecimal, as a branch's
-/// first two parts (`fxdax-gc --cell`, TASK-395.4).
+/// cladefs: a cell as operators read and write it: `TENANT/CELL`, each in hexadecimal, as a branch's
+/// first two parts (`cladefs-gc --cell`, TASK-395.4).
 impl std::fmt::Display for Cell {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:x}/{:x}", self.tenant, self.id)
@@ -58,7 +58,7 @@ impl std::str::FromStr for Cell {
     }
 }
 
-/// fxdax: where a branch is: its cell, and its ID, which no other branch its extents are inherited
+/// cladefs: where a branch is: its cell, and its ID, which no other branch its extents are inherited
 /// from or by has: an extent's ID names its branch by the ID alone (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Branch {
@@ -100,7 +100,7 @@ impl std::str::FromStr for Branch {
     }
 }
 
-/// fxdax: a fork made at a segment's end: its child's branch, the child's owner, which every
+/// cladefs: a fork made at a segment's end: its child's branch, the child's owner, which every
 /// record of the child names, whoever writes it (TASK-79.82, TASK-153.9), and whether the child is
 /// a point: a name of the branch's state there, which nothing writes (doc-7, Points).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -151,7 +151,7 @@ impl Footer {
 /// number as of them, at least; the forks made at its end, by their children; and the branch's
 /// capacity, the most bytes its extents may hold, if they set it: a resize is a commit's, ordered
 /// with the others, so that the branch has it wherever it is taken, its forks inherit it, and a
-/// point keeps it as it was (TASK-165.3). fxdax: and the runs in its data of the commit it ends
+/// point keeps it as it was (TASK-165.3). cladefs: and the runs in its data of the commit it ends
 /// inside of, if it does, which the next segment goes on with ([`Continued`], TASK-92.41).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Contents {
@@ -166,7 +166,7 @@ pub struct Contents {
     pub continued: Option<Continued>,
 }
 
-/// fxdax: the runs a commit sealed in a segment's data, past the commits the segment ends, which
+/// cladefs: the runs a commit sealed in a segment's data, past the commits the segment ends, which
 /// the segments after it go on with: a commit spanning segments (TASK-92.41, the user's decision
 /// of 2026-10-23). A guest writing more than a segment between two commits fills segments that
 /// hold no commit; the commit after seals each extent where it was written, in whichever of them
@@ -185,14 +185,14 @@ pub struct Continued {
 }
 
 impl Contents {
-    /// fxdax: the runs sealed in its segment's data: those of the commits it ends, then those of
+    /// cladefs: the runs sealed in its segment's data: those of the commits it ends, then those of
     /// the commit it goes on with, if any ([`Continued`]).
     pub fn runs(&self) -> impl Iterator<Item = &(ExtentId, u64, u64)> + '_ {
         let continued = self.continued.iter().flat_map(|continued| &continued.extents);
         self.extents.iter().chain(continued)
     }
 
-    /// fxdax: whether a segment of these contents, following one that went on with commit
+    /// cladefs: whether a segment of these contents, following one that went on with commit
     /// `commit` ([`Continued`]), ends it: it names a commit of `commit`'s writer, `commit` or a
     /// later one, as the segment a store's commit ends in names its last; one that names none, a
     /// fence, ends it not, nor does one going on with it.
@@ -202,7 +202,7 @@ impl Contents {
         })
     }
 
-    /// fxdax: whether a segment of these contents, following one that went on with commit
+    /// cladefs: whether a segment of these contents, following one that went on with commit
     /// `commit`, goes on with it too, ending no commit.
     pub fn continues(&self, commit: u64) -> bool {
         self.commits.is_empty()
@@ -329,7 +329,7 @@ pub fn writer_of(tag: u64) -> u64 {
 }
 
 /// The key of the object of an extent stored on its own, uploaded by the writer of lease epoch
-/// `epoch` before its segment `seq`, whose footer names it. fxdax: the segment's number tells the
+/// `epoch` before its segment `seq`, whose footer names it. cladefs: the segment's number tells the
 /// collector whether the object is ahead of its segment, which may yet land, or a landed one's,
 /// which no state naming it frees it: what the branch's next sequence number can't tell, as its
 /// extents are committed in no order of their sequence numbers (TASK-79.3). Under the prefix of
@@ -389,7 +389,7 @@ mod tests {
         assert!(Footer::decode(&bytes[..bytes.len() - 1]).is_err());
     }
 
-    /// fxdax: a commit a segment goes on with is ended by a segment naming it, or a later commit of
+    /// cladefs: a commit a segment goes on with is ended by a segment naming it, or a later commit of
     /// its writer's, as the segment a store's commit ends in names its last; gone on with by one
     /// naming no commit and going on with it; and neither by a fence, nor by another writer's
     /// segment, nor by one going on with another commit (TASK-92.41). A segment's runs are its
@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(runs.runs().collect::<Vec<_>>(), [&(extent(1), 8, 8), &(extent(2), 0, 8)]);
     }
 
-    /// fxdax: a branch reads as it displays, `TENANT/CELL/ID` in hexadecimal; anything else is no
+    /// cladefs: a branch reads as it displays, `TENANT/CELL/ID` in hexadecimal; anything else is no
     /// branch.
     #[test]
     fn branches_parse_as_they_display() {

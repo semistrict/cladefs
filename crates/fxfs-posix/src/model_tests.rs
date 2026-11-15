@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -22,17 +22,17 @@
 //!
 //! Seeded by proptest, which says the sequence if one fails, shrunk.
 //!
-//! FXDAX_MODEL_CASES asks for more sequences, to hunt, and FXDAX_MODEL_OPS for longer ones.
-//! FXDAX_MODEL_FSCK does the hunt with fsck after every transaction, slowly: corruption is found at
-//! the transaction that made it, not operations later. FXDAX_MODEL_WORKERS has tasks apply queued
+//! CLADEFS_MODEL_CASES asks for more sequences, to hunt, and CLADEFS_MODEL_OPS for longer ones.
+//! CLADEFS_MODEL_FSCK does the hunt with fsck after every transaction, slowly: corruption is found at
+//! the transaction that made it, not operations later. CLADEFS_MODEL_WORKERS has tasks apply queued
 //! unlinks as a guest's do, by the clock, which a seed then doesn't replay.
 //!
 //! Random cuts took minutes to reach some bugs. Short sequences are also cut at every barrier, with
 //! every subset of what it may lose, up to a bound (`every_cut_of_a_short_sequence`), which
-//! FXDAX_MODEL_EVERY_CUT asks for more of.
+//! CLADEFS_MODEL_EVERY_CUT asks for more of.
 //!
 //! Devices fail too: some sequences' requests do, as a seed says, until an operation doesn't survive
-//! it (`a_device_that_fails_loses_nothing_durable`, FXDAX_MODEL_FAILURES): which a filesystem must
+//! it (`a_device_that_fails_loses_nothing_durable`, CLADEFS_MODEL_FAILURES): which a filesystem must
 //! say, and leave what was durable as it was, without panicking, in any task.
 //!
 //! Names are in directories that move, and go, as files do, across them and for each other, which
@@ -94,7 +94,7 @@ const PAGE: u64 = 4096;
 const FILE: u32 = S_IFREG | 0o644;
 const DIR: u32 = S_IFDIR | 0o755;
 const SYMLINK: u32 = S_IFLNK | 0o777;
-/// What of a mode isn't its type: its permissions, and fxdax's attribute flags (chattr), which it
+/// What of a mode isn't its type: its permissions, and cladefs's attribute flags (chattr), which it
 /// keeps above the kernel's 16 bits (`Attr::mode`).
 const PERMISSIONS: u32 = 0o7777 | 0xf << 16;
 /// What a setattr may change but a file's size: what the kernel writes back of its inode.
@@ -833,7 +833,7 @@ fn id() -> impl Strategy<Value = u32> {
     prop_oneof![Just(0u32), 1u32..2000, Just(65534), Just(u32::MAX - 1)]
 }
 
-/// Permissions, setuid, setgid and sticky too, and fxdax's attribute flags (`PERMISSIONS`).
+/// Permissions, setuid, setgid and sticky too, and cladefs's attribute flags (`PERMISSIONS`).
 fn permissions() -> impl Strategy<Value = u32> {
     (0u32..0o10000, 0u32..16).prop_map(|(permissions, flags)| permissions | flags << 16)
 }
@@ -2090,7 +2090,7 @@ impl<const KEEPS: bool> World<KEEPS> {
     }
 
     /// The pages of file `ino` whose blocks Fxfs records as written in place, as its preallocation
-    /// made them: none, since nothing of fxdax's preallocates, its writes copy-on-write.
+    /// made them: none, since nothing of cladefs's preallocates, its writes copy-on-write.
     async fn written_in_place(&self, ino: u64) -> Result<BTreeSet<u64>, String> {
         let failed = |e: Error| format!("the extents of {ino}: {e:#}");
         let layer_set = self.fs.volume.tree().layer_set();
@@ -3341,11 +3341,11 @@ pub(super) fn watch_sequences(limit: Duration) -> mpsc::Sender<String> {
 
 #[test]
 fn whatever_a_vfs_asks_reads_back_as_a_model_says() {
-    let cases = std::env::var("FXDAX_MODEL_CASES").map_or(96, |cases| cases.parse().unwrap());
-    let fsck_each = std::env::var_os("FXDAX_MODEL_FSCK").is_some();
-    let workers = std::env::var_os("FXDAX_MODEL_WORKERS").is_some();
+    let cases = std::env::var("CLADEFS_MODEL_CASES").map_or(96, |cases| cases.parse().unwrap());
+    let fsck_each = std::env::var_os("CLADEFS_MODEL_FSCK").is_some();
+    let workers = std::env::var_os("CLADEFS_MODEL_WORKERS").is_some();
     let config = config(cases);
-    let most: u32 = std::env::var("FXDAX_MODEL_OPS").map_or(48, |most| most.parse().unwrap());
+    let most: u32 = std::env::var("CLADEFS_MODEL_OPS").map_or(48, |most| most.parse().unwrap());
     let room = prop_oneof![Just(ROOMY), Just(TIGHT)];
     let sequences = (any::<u64>(), room, proptest::collection::vec(op(), 1..most as usize));
     let tally = Rc::new(Tally::default());
@@ -3387,14 +3387,14 @@ static PANICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// operation that failed got as far as: nothing panics, and no sync that said it was done isn't.
 ///
 /// The same sequences every run, of `FAILING_SEQUENCES`, unless a hunt asks for others
-/// (FXDAX_MODEL_FAILURES, for more, and PROPTEST_RNG_SEED): a sequence fails as its seed says,
+/// (CLADEFS_MODEL_FAILURES, for more, and PROPTEST_RNG_SEED): a sequence fails as its seed says,
 /// requests of one kind, one in 4, 32 or 256, and about two in three fail no operation, most
 /// because no request did. 24 sequences drawn afresh each run all did so once in about 10,000
 /// runs, and the check that something failed failed with them (CI 42446163807: one request failed,
 /// a flush, no operation).
 #[test]
 fn a_device_that_fails_loses_nothing_durable() {
-    let hunt = std::env::var("FXDAX_MODEL_FAILURES").ok();
+    let hunt = std::env::var("CLADEFS_MODEL_FAILURES").ok();
     let cases = hunt.as_ref().map_or(24, |cases| cases.parse().unwrap());
     let config = match (config(cases), hunt) {
         (config, None) if config.rng_seed == RngSeed::Random => {
@@ -3477,11 +3477,11 @@ fn a_failed_fsync_is_reported_and_keeps_what_was_synced() {
 }
 
 /// Short sequences, cut at every barrier with every subset of what it may lose (`EVERY_SUBSET_OF`),
-/// which is complete up to a bound, as ALICE and CrashMonkey are: FXDAX_MODEL_EVERY_CUT asks for more
+/// which is complete up to a bound, as ALICE and CrashMonkey are: CLADEFS_MODEL_EVERY_CUT asks for more
 /// of them. The test says how far the bound went: the barriers past it were tried with less.
 #[test]
 fn every_cut_of_a_short_sequence() {
-    let cases = std::env::var("FXDAX_MODEL_EVERY_CUT").map_or(6, |cases| cases.parse().unwrap());
+    let cases = std::env::var("CLADEFS_MODEL_EVERY_CUT").map_or(6, |cases| cases.parse().unwrap());
     let config = config(cases);
     let sequences = (any::<u64>(), proptest::collection::vec(short_op(), 1..=SHORT));
     let tally = Rc::new(Tally::default());
@@ -3791,7 +3791,7 @@ fn a_compaction_waits_for_another() {
 }
 
 /// Fsck after every transaction runs, around a sequence's compactions, crashes and remounts, and
-/// passes: the hunt that does it, FXDAX_MODEL_FSCK, is too slow to run always.
+/// passes: the hunt that does it, CLADEFS_MODEL_FSCK, is too slow to run always.
 #[test]
 fn fsck_can_follow_every_transaction() {
     let ops = vec![

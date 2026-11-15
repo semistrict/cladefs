@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -12,7 +12,7 @@
 //!   futures on kernel workers, and `Timer` wakes them after a while;
 //! - randomness, from the kernel's generator.
 //!
-//! The kernel's threads have small stacks (64 KiB with fxdax's patch,
+//! The kernel's threads have small stacks (64 KiB with cladefs's patch,
 //! guest/linux/patches/0002-stack-size.patch, rather than 16), and Fxfs's futures are large, so
 //! futures are polled from the heap.
 

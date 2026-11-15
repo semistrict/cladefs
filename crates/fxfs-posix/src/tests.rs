@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the queued unlinks of doc-6 (TASK-79.21), on a fake device: what the kernel's calls find
+//! cladefs: the queued unlinks of doc-6 (TASK-79.21), on a fake device: what the kernel's calls find
 //! of them. Unlinks are queued as the guest's VFS queues them, which nothing on the host does. And
 //! what else a VFS's calls find: extended attributes made at once (TASK-199), a volume's read-only.
 
@@ -86,7 +86,7 @@ impl Fxfs<Tested> {
     }
 }
 
-/// fxdax: a node's mode, owner and group are changed one at a time as together: the others keep
+/// cladefs: a node's mode, owner and group are changed one at a time as together: the others keep
 /// what they were. A new volume's root directory has no POSIX attributes of its own, whose
 /// defaults its attributes give, and which Fxfs makes of the fields a change gives, the rest 0: a
 /// chown of it alone left it mode 000, which a FUSE mount of a new store refused its owner
@@ -408,7 +408,7 @@ async fn every_growth_finds_what_a_cut_left_past_the_end_zeroed() {
     fs.stop_delayed().await.unwrap();
 }
 
-/// fxdax: a writeback paid with the room the page cache reserved for the pages it dirtied, growing
+/// cladefs: a writeback paid with the room the page cache reserved for the pages it dirtied, growing
 /// the file past an end within a block that a cut left as it was (SET_KEEP_TAIL, a DAX file's),
 /// rewrites that block too, zeroed past the end (`txn_grow_size`), which no page of it paid for: it
 /// failed NoSpace, on a filesystem all but empty (TASK-149.29, found by crates/fxfs-sim-diff).
@@ -504,7 +504,7 @@ async fn a_files_last_bytes_read_back_after_a_remount() {
     fs.stop_delayed().await.unwrap();
 }
 
-/// fxdax: an extended attribute set or removed is in Fxfs at once, in a transaction of its own,
+/// cladefs: an extended attribute set or removed is in Fxfs at once, in a transaction of its own,
 /// as ext4's setxattr journals it: no writeback of the inode (`write_inode`) is waited for, which
 /// lost a change it failed to write behind fsync's 0 (TASK-199). A new object's, inline or not, are
 /// made in its creation's transaction.
@@ -558,7 +558,7 @@ async fn xattrs_are_made_at_once() {
     filesystem.close().await.expect("closing");
 }
 
-/// fxdax: a full filesystem refuses an extended attribute it has no room for (NoSpace), as ext4
+/// cladefs: a full filesystem refuses an extended attribute it has no room for (NoSpace), as ext4
 /// does, where one kept in memory was lost as its writeback failed; what it refused it hasn't; and
 /// it removes one, which frees what it held, as an unlink does (TASK-199).
 #[fuchsia::test]
@@ -771,7 +771,7 @@ async fn every_change_fails_once_a_batch_failed() {
     assert_eq!(refused, changes);
 }
 
-/// fxdax: a platform whose syncs' durability is counted, as the guest's device has it: commits
+/// cladefs: a platform whose syncs' durability is counted, as the guest's device has it: commits
 /// made while a sync wants durability (`Platform::durable`) are durable, the others ordered alone.
 struct Durably(Arc<std::sync::atomic::AtomicUsize>);
 
@@ -799,7 +799,7 @@ impl Platform for Durably {
     }
 }
 
-/// fxdax: a sync ends with a durable commit of the device, whatever the journal had flushed: an
+/// cladefs: a sync ends with a durable commit of the device, whatever the journal had flushed: an
 /// fsync's flush of it is ordered alone, and a sync after it, finding the journal flushed as far,
 /// asked the device nothing, and returned with the fsync's commit not yet durable, which a lost
 /// host lost (fxfs-guest-soak, TASK-67: syncfs returned for files a lost host's successor didn't
@@ -837,7 +837,7 @@ async fn syncs_make_what_fsyncs_ordered_durable() {
     }
 }
 
-/// fxdax: a sync makes one commit of the device durable, its last, after the journal's flushes,
+/// cladefs: a sync makes one commit of the device durable, its last, after the journal's flushes,
 /// ordered alone: each durable commit waits for object storage, a round trip, where the guest's
 /// sync(2) made three, a write overwriting a block (the frees its flush records) then a sync, as
 /// a loop of them does (TASK-371: 3 a second at 25 ms of latency).
@@ -872,7 +872,7 @@ async fn syncs_make_one_commit_durable() {
     assert_eq!(durable, [1, 1, 1, 1]);
 }
 
-/// fxdax: a file that filled the filesystem, removed, gives back all the data it took, but for the
+/// cladefs: a file that filled the filesystem, removed, gives back all the data it took, but for the
 /// staging extent's reach; and statfs's free space changes by nothing else but Fxfs's metadata,
 /// held and reserved: with the journal near its reclaim size, as the guest's checks before
 /// leave it, a flush during the fill writes the volume's layer file as the metadata reservation

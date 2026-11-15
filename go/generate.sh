@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Generate the Go package extentdv1 (go/extentd/v1) from the extent daemon's .proto
-# (crates/fxdax/proto/fxdax/extentd/v1/extentd.proto, TASK-219), as buf.gen.yaml says: into go/,
+# (crates/cladefs/proto/cladefs/extentd/v1/extentd.proto, TASK-219), as buf.gen.yaml says: into go/,
 # or with --check, into a scratch directory, failing if what is checked in differs from it.
 #
 #   go/generate.sh [--check]

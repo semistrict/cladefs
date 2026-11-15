@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,8 +14,8 @@ import { indexRepo } from "../tools/lib/symbols.ts";
 describe("code by text, from the local source", () => {
   test("rg gets the snippet quoted for a shell, quotes and all", () => {
     expect(shellQuote("Transaction<'_>")).toBe("'Transaction<'\\''_>'");
-    expect(rgCommand("crates/fxdax/src/extents.rs", "pub struct ExtentStore")).toBe(
-      "rg -n -F 'pub struct ExtentStore' crates/fxdax/src/extents.rs",
+    expect(rgCommand("crates/cladefs/src/extents.rs", "pub struct ExtentStore")).toBe(
+      "rg -n -F 'pub struct ExtentStore' crates/cladefs/src/extents.rs",
     );
   });
 
@@ -72,7 +72,7 @@ describe("Page Pilot", () => {
     const accepted = transferTasks.map((task) => [task.id, [...new Set(symbols.filter(task.accepts).map((s) => `${s.path} ${s.name}`))].sort()]);
     expect(accepted).toEqual([
       ["private-before-dirty", ["guest/linux/fs/fxfs/dax.c fxfs_dax_dirty", "guest/linux/fs/fxfs/device.c fxfs_device_private"]],
-      ["host-copy", ["crates/fxdax/src/dax.rs make_private", "crates/fxdax/src/dax/uffd.rs make_private"]],
+      ["host-copy", ["crates/cladefs/src/dax.rs make_private", "crates/cladefs/src/dax/uffd.rs make_private"]],
       ["rebind", ["guest/linux/fs/fxfs/dax.c fxfs_dax_rebind", "guest/linux/fs/fxfs/dax.c fxfs_dax_rebind_range"]],
     ]);
     for (const task of transferTasks) {

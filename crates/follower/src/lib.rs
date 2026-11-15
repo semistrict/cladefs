@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: the concurrency protocol of live read-only followers (backlog doc-8, Concurrency;
+//! cladefs's own: the concurrency protocol of live read-only followers (backlog doc-8, Concurrency;
 //! TASK-42.5, TASK-42.10), checked as a model in TLA+ first (specs/follower, TASK-42.8).
 //!
 //! A follower applies its writer's commits to the trees readers read, and readers cache what they

@@ -11,10 +11,10 @@ license.workspace = true
 migration = []
 # Hooks for benchmarks.
 benchmark = []
-# fxdax: the follower's rules settable (`follower::set_rules`), for the mutation tests of the
+# cladefs: the follower's rules settable (`follower::set_rules`), for the mutation tests of the
 # followers' simulation (crates/follower_sim), which runs under Shuttle.
 shuttle = []
-# fxdax: journals given a trace record their steps, for specs/journal's trace validation
+# cladefs: journals given a trace record their steps, for specs/journal's trace validation
 # (`object_store::journal::trace`, TASK-444.1).
 journal_trace = []
 

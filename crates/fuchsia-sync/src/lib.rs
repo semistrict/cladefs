@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 // Fuchsia's `src/lib/fuchsia-sync/src/lib.rs`, for the host: parking_lot's locks, without Fuchsia's
-// futex-based ones and completions. In the guest kernel (fxdax's TASK-26.6), its std's locks
+// futex-based ones and completions. In the guest kernel (cladefs's TASK-26.6), its std's locks
 // (`kernel`). With the `shuttle` feature, Shuttle's, and its condvar's futex of Shuttle's
 // primitives (TASK-42.1).
 

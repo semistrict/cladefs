@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -13,16 +13,16 @@
 # shared their runner with their sandboxes (TASK-330.5), where a container's ran in the engine's
 # cgroup, beside other agents' jobs.
 #
-# FXDAX_RUSTFS_BIN names a RustFS binary to run instead of the release's.
+# CLADEFS_RUSTFS_BIN names a RustFS binary to run instead of the release's.
 
 # The release run, and each platform's archive's SHA-256 (its SHA256SUMS).
 RUSTFS_VERSION=1.0.4
 
 # rustfs_binary prints the path of the release's binary for this platform, fetching it once into
-# the cache (XDG_CACHE_HOME's, or ~/.cache's, fxdax/rustfs-VERSION).
+# the cache (XDG_CACHE_HOME's, or ~/.cache's, cladefs/rustfs-VERSION).
 rustfs_binary() {
-    if [[ -n ${FXDAX_RUSTFS_BIN:-} ]]; then
-        echo "$FXDAX_RUSTFS_BIN"
+    if [[ -n ${CLADEFS_RUSTFS_BIN:-} ]]; then
+        echo "$CLADEFS_RUSTFS_BIN"
         return
     fi
     local platform sha256 dir
@@ -38,7 +38,7 @@ rustfs_binary() {
             sha256=49057482769d7904ef95dc40457d71122f48cbb8e9e0725a0817a3ec6daf8270 ;;
         *) echo "RustFS $RUSTFS_VERSION has no release for $(uname -s) $(uname -m)" >&2; return 1 ;;
     esac
-    dir="${XDG_CACHE_HOME:-$HOME/.cache}/fxdax/rustfs-$RUSTFS_VERSION-$platform"
+    dir="${XDG_CACHE_HOME:-$HOME/.cache}/cladefs/rustfs-$RUSTFS_VERSION-$platform"
     if [[ ! -x $dir/rustfs ]]; then
         mkdir -p "$dir" || return
         curl -fsSL --retry 3 -o "$dir.zip" "https://github.com/rustfs/rustfs/releases/download/$RUSTFS_VERSION/rustfs-$platform-v$RUSTFS_VERSION.zip" ||
@@ -51,8 +51,8 @@ rustfs_binary() {
 }
 
 # rustfs_start [DATA]: starts RustFS on a free port of 127.0.0.1, ready once its readiness
-# endpoint says so, and makes its bucket `fxdax`. Its objects are in DATA, a directory, if given;
-# else in one of its own, gone as it stops. Its log is FXDAX_RUSTFS_LOG's file if set, else one of
+# endpoint says so, and makes its bucket `cladefs`. Its objects are in DATA, a directory, if given;
+# else in one of its own, gone as it stops. Its log is CLADEFS_RUSTFS_LOG's file if set, else one of
 # its own, said if it fails to start. It exports what S3's clients (object_store, the AWS CLI) find
 # a server and its credentials by, AWS_ENDPOINT and AWS_ACCESS_KEY_ID among them, and sets
 # rustfs_server, its pid, which rustfs_stop stops. It fails, the server stopped, if the server
@@ -62,18 +62,18 @@ rustfs_start() {
     bin=$(rustfs_binary) || return
     port="$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')"
     # Test credentials, for this server alone.
-    export AWS_ACCESS_KEY_ID=fxdaxtest AWS_SECRET_ACCESS_KEY=fxdaxtestsecret
+    export AWS_ACCESS_KEY_ID=cladefstest AWS_SECRET_ACCESS_KEY=cladefstestsecret
     export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1
     export AWS_ENDPOINT="http://127.0.0.1:$port" AWS_ALLOW_HTTP=true
     rustfs_own_data=
     if [[ -z $data ]]; then
-        data=$(mktemp -d "${TMPDIR:-/tmp}/fxdax-rustfs.XXXXXX") || return
+        data=$(mktemp -d "${TMPDIR:-/tmp}/cladefs-rustfs.XXXXXX") || return
         rustfs_own_data=$data
     fi
-    rustfs_log=${FXDAX_RUSTFS_LOG:-}
+    rustfs_log=${CLADEFS_RUSTFS_LOG:-}
     rustfs_own_log=
     if [[ -z $rustfs_log ]]; then
-        rustfs_log=$(mktemp "${TMPDIR:-/tmp}/fxdax-rustfs-log.XXXXXX") || return
+        rustfs_log=$(mktemp "${TMPDIR:-/tmp}/cladefs-rustfs-log.XXXXXX") || return
         rustfs_own_log=$rustfs_log
     fi
     "$bin" server --address "127.0.0.1:$port" --access-key "$AWS_ACCESS_KEY_ID" \
@@ -97,7 +97,7 @@ rustfs_start() {
     fi
     # The bucket, made with a request curl signs as S3's API wants (SigV4).
     if ! curl -fsS -X PUT --aws-sigv4 "aws:amz:$AWS_REGION:s3" \
-        --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/fxdax"; then
+        --user "$AWS_ACCESS_KEY_ID:$AWS_SECRET_ACCESS_KEY" "$AWS_ENDPOINT/cladefs"; then
         rustfs_stop
         return 1
     fi

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: `write_many` writes data scattered across a file
+//! cladefs's own, a child of data_object_handle.rs: `write_many` writes data scattered across a file
 //! in as few transactions, and device writes, as hold it: the guest kernel's writeback, of its page
 //! cache and of its DAX window's private pages.
 
@@ -21,7 +21,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use storage_device::{ExtentId, ExtentRange, SealedExtent};
 
-/// fxdax: one of `write_many`'s writes: `data`, its bytes, to `range` of the file, which covers
+/// cladefs: one of `write_many`'s writes: `data`, its bytes, to `range` of the file, which covers
 /// `blocks`.
 struct BlocksWrite<'d> {
     range: Range<u64>,
@@ -29,14 +29,14 @@ struct BlocksWrite<'d> {
     data: &'d [u8],
 }
 
-/// fxdax: fault injection (TASK-164.2): the next this many of [`DataObjectHandle::write_many`]'s
+/// cladefs: fault injection (TASK-164.2): the next this many of [`DataObjectHandle::write_many`]'s
 /// transactions fail once their blocks are written, before they commit, leaving the file as a
 /// crash between the two would: its old blocks, the new ones named by no record. A guest's
 /// copy-on-write writeback commits after its bytes, as the page cache's does, which this checks.
 pub static FAIL_COMMITS: AtomicU64 = AtomicU64::new(0);
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: writes `writes`, each bytes at an offset, as `txn_write` writes one, in as few
+    /// cladefs: writes `writes`, each bytes at an offset, as `txn_write` writes one, in as few
     /// transactions as have room for them (`writes_in_room`), each with one `multi_write`: a
     /// transaction's writes have their blocks allocated together, and written with as few of the
     /// device's writes as they take, at once. They are in order of offset, and no two share a
@@ -47,7 +47,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.write_many_paid(writes, None).await
     }
 
-    /// fxdax: `write_many`, its blocks paid for from `reserved`, which a page cache reserved as it
+    /// cladefs: `write_many`, its blocks paid for from `reserved`, which a page cache reserved as it
     /// dirtied them (`DirtyReservation::take`), so that the filesystem filled since doesn't fail
     /// them (TASK-80). Its transactions hold their metadata space in it too, topped up from the
     /// allocator if it is short; or, with no room there either, borrow it, as removing a file
@@ -60,7 +60,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.write_many_paid(writes, Some(reserved)).await
     }
 
-    /// fxdax: `write_many`, paid for from `reserved` if given (`write_many_reserved`). A
+    /// cladefs: `write_many`, paid for from `reserved` if given (`write_many_reserved`). A
     /// transaction's small writes pack into the staging extent (`txn_write_blocks`), which is open
     /// to every file's: another's write reaching it, and any barrier after, seal it under those
     /// whose blocks are taken but not yet written, which the device then refuses (`SealedExtent`).
@@ -105,7 +105,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
                     Err(error) => return Err(error),
                 }
             };
-            // fxdax: fault injection, a crash between the bytes and the commit (`FAIL_COMMITS`).
+            // cladefs: fault injection, a crash between the bytes and the commit (`FAIL_COMMITS`).
             let injected = FAIL_COMMITS
                 .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| left.checked_sub(1))
                 .is_ok();
@@ -118,7 +118,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         Ok(())
     }
 
-    /// fxdax: how many of `writes`, one at least, `transaction` has room for, as written by one
+    /// cladefs: how many of `writes`, one at least, `transaction` has room for, as written by one
     /// `multi_write`, which has yet to find what they replace, or what it allocates. The most it
     /// can take: for each run of them its extent's record, and a record of the checksums unless
     /// barriers stand for them, and for each block its checksums and the record freeing an extent
@@ -160,7 +160,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         held
     }
 
-    /// fxdax: the options of a transaction of `write_many_reserved` of writes that have yet to
+    /// cladefs: the options of a transaction of `write_many_reserved` of writes that have yet to
     /// write `data` bytes of blocks, paid for from `reserved`: holding its metadata space in what
     /// `reserved` has beyond the blocks, topped up from the allocator if it hasn't enough, so that
     /// it never pays for metadata with room for blocks; or, the allocator full, borrowing it, and
@@ -195,7 +195,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         }
     }
 
-    /// fxdax: `writes`, but those empty, with the blocks each covers, which are in order and apart.
+    /// cladefs: `writes`, but those empty, with the blocks each covers, which are in order and apart.
     fn blocks_of<'d>(&self, writes: &[(u64, &'d [u8])]) -> Result<Vec<BlocksWrite<'d>>, Error> {
         let block_size = self.block_size();
         let mut blocks_writes: Vec<BlocksWrite<'_>> = Vec::with_capacity(writes.len());
@@ -211,7 +211,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         Ok(blocks_writes)
     }
 
-    /// fxdax: writes `writes`, whose blocks `blocks_of` found, in `transaction`, with one
+    /// cladefs: writes `writes`, whose blocks `blocks_of` found, in `transaction`, with one
     /// `multi_write`, and grows the file to the last one's end. If `packed`, small writes (at most
     /// STAGED_MAX bytes in all) take blocks of the staging extent, which other files' small writes
     /// share (`StoreObjectHandle::multi_write_packed`): small files written back pack into one
@@ -278,7 +278,7 @@ mod tests {
     use storage_device::fake_device::FakeDevice;
     use storage_device::{ExtentId, ExtentRange, NoExtent, SealedExtent};
 
-    /// fxdax: small files written back (`write_many`) share the staging extent, so that a DAX
+    /// cladefs: small files written back (`write_many`) share the staging extent, so that a DAX
     /// window maps them with one MAP rather than one each: their pieces name one extent, in the
     /// order they were written, a transaction's writes together. The extent lives while any file
     /// holds its blocks, and dies once none does and it is the staging extent no more; a large
@@ -386,7 +386,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a small write back whose blocks of the staging extent the device refuses, as a
+    /// cladefs: a small write back whose blocks of the staging extent the device refuses, as a
     /// barrier sealing it between the allocation and the write has it do, is tried again in a new
     /// transaction, unpacked, which writes it (`write_many_paid`); one the device goes on refusing
     /// fails with the device's error.
@@ -425,7 +425,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: small writes back to files of their own, packed into the staging extent, with their
+    /// cladefs: small writes back to files of their own, packed into the staging extent, with their
     /// own syncs and another's coming between them all the time, as a guest's writers fdatasync
     /// while another fsyncs (r549's log_writes): each seals the staging extent, the device's
     /// barrier sealing it for real rather than a callback refusing writes, and each write is
@@ -496,7 +496,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: the staging extent, emptied, takes another small write, which a crash loses: replay
+    /// cladefs: the staging extent, emptied, takes another small write, which a crash loses: replay
     /// discards that write's transaction, after the deallocation that emptied the extent, so the
     /// extent dies there. A mount freed it at once, and a cut before the journal recorded the
     /// discard had the next replay read the write again, and verify it in an extent the device no
@@ -562,7 +562,7 @@ mod tests {
         assert!(count > 0, "no cut of the mount");
     }
 
-    /// fxdax: an extent minted for a write whose transaction hasn't committed as the allocator's
+    /// cladefs: an extent minted for a write whose transaction hasn't committed as the allocator's
     /// tree is compacted is recorded dying, and its allocation commits after, which a crash loses
     /// the write of: replay discards its transaction, and the mount finds the extent dead. It freed
     /// it at once, and a cut before the journal recorded the discard had the next replay read the
@@ -626,7 +626,7 @@ mod tests {
         assert!(count > 0, "no cut of the mount");
     }
 
-    /// fxdax: a small write back whose blocks of the staging extent another file's small write
+    /// cladefs: a small write back whose blocks of the staging extent another file's small write
     /// reaches, and a sync then seals, each time it is about to write them, as a guest's writers
     /// racing syncs can have it as often as they like (r549): the device refuses the packed write
     /// for real, and its one try again takes an extent of its own, which no other write reaches,
@@ -699,7 +699,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: a page cache's writeback of 64 pages scattered across a file, every other block of
+    /// cladefs: a page cache's writeback of 64 pages scattered across a file, every other block of
     /// it, the last one up to the file's new end, short of its block: through `write_many`, one
     /// transaction, whose blocks one device write writes, at once. One write each, as the guest
     /// wrote back each run of pages, took a transaction and a round trip to the device each
@@ -746,7 +746,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: `write_many` writes each write as `write_or_append` does: parts of blocks keep what
+    /// cladefs: `write_many` writes each write as `write_or_append` does: parts of blocks keep what
     /// the file holds around them, empty writes write nothing, and the file grows to the last
     /// one's end. Writes out of order, or sharing a block, are refused.
     #[fuchsia::test]
@@ -790,7 +790,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: `write_many`'s transactions hold the writes they have room for, by what they could
+    /// cladefs: `write_many`'s transactions hold the writes they have room for, by what they could
     /// cost, unless one alone costs more: each a device write here.
     #[fuchsia::test]
     async fn test_write_many_splits_its_transactions() {
@@ -824,7 +824,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: `write_many`'s transactions, of as many writes as they have room for, that overwrite
+    /// cladefs: `write_many`'s transactions, of as many writes as they have room for, that overwrite
     /// as many records as they can, take no more than the room it counted on, which leaves what
     /// else they take within what a transaction may take of the journal, their records' integers
     /// as long as a branch's and a large file's make them; and one holds the

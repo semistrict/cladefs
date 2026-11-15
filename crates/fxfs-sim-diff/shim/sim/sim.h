@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * What guest/sim/fxfs/fxfs.c, the sim's model of Fxfs, asks of guest/sim's kernel, over libc, for
  * a process of one thread that drives it beside fxfs-posix (crates/fxfs-sim-diff): no scheduler,
@@ -132,7 +132,7 @@ void fxfs_sim_free(struct fxfs *fs);
 void fxfs_sim_stats(u64 *written, u64 *frees, u64 *failed);
 void fxfs_sim_fail(unsigned int odds);
 void fxfs_sim_hold_commits(bool hold);
-/* fxdax: the next `count` writebacks failing before their commits with `err` (TASK-207). */
+/* cladefs: the next `count` writebacks failing before their commits with `err` (TASK-207). */
 void fxfs_sim_fail_commits_with(u64 count, int err);
 bool fxfs_sim_commit_held(void);
 void fxfs_sim_hold_seals(bool hold);

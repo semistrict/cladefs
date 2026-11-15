@@ -22,11 +22,11 @@ another.
 
 1. **Request intake stops for every VM once ~512 requests block** (checked; three reviewers
    independently; the stall itself rests on tokio's behaviour at its blocking-thread cap).
-   `crates/fxdax/src/extentd/server.rs`: the `IO` runtime has `.worker_threads(2)` and no
+   `crates/cladefs/src/extentd/server.rs`: the `IO` runtime has `.worker_threads(2)` and no
    `max_blocking_threads`; every request is served in
    `tokio::task::block_in_place(move || connection.serve_in_turn(message))`, 8 a connection
    (`WORKERS`). A `READ` of data not in memory sleeps in
-   `futures::executor::block_on(self.clone().bring_in(page))` (`crates/fxdax/src/cache.rs`); durable
+   `futures::executor::block_on(self.clone().bring_in(page))` (`crates/cladefs/src/cache.rs`); durable
    and lagging commits wait likewise. ~65 VMs with 8 cold reads each, or a slow bucket with a few
    hundred VMs, and no connection's requests or faults are received. TASK-92.20 fixed this for
    `FAULT` alone. *Measure:* 80 non-DAX forks cold-reading through a throttled bucket and one VM
@@ -42,7 +42,7 @@ another.
    by `CopyOnWrite::reserve`, against 7/8 of the allowance (`Arenas::pin`): ~105 VMs on 128 GiB, 7
    for a tenant limited to 8 GiB. And an idle guest keeps up to 7/8 of it in clean private pages
    (`fxfs_dax_work` relieves only near the bound). *Measure:* idle VMs started until `WINDOW` fails;
-   `fxdax_extentd_vm_window_private_pages` after a write burst and five idle minutes. The perf
+   `cladefs_extentd_vm_window_private_pages` after a write burst and five idle minutes. The perf
    gate's density phase runs 3 VMs.
 4. **Every sandbox ever made costs every sweep 5 requests, for ever** (checked: `Kind::Head` is
    `Fate::Stays`, `records_kept` is true). `crates/extent_remote/src/collector.rs`: a dead cell
@@ -81,7 +81,7 @@ another.
    read-ahead on and off; `bench_reads_while_parts_are_kept` beside a disk writer.
 10. **Under 4 GiB free on the SSD the part cache empties itself and keeps nothing** (checked:
     `Kept::make_room` walks `by_use` to its end). That is when the bucket is slow and WALs back up.
-    *Measure:* `fxdax_extentd_part_cache_bytes` as the disk fills.
+    *Measure:* `cladefs_extentd_part_cache_bytes` as the disk fills.
 11. **A restored VM's window comes back one userfaultfd fault at a time on one thread**
     (`uffd.rs` `map` installs nothing since TASK-276.6; the guest has its PTEs, so no `MAP_AHEAD`),
     five syscalls a present run, a bucket page-in otherwise. *Measure:* `dax-stage-syscalls.bt` and

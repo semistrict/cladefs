@@ -1,10 +1,10 @@
 #!/bin/bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
 # Puts each mutant of guest/mutants that changes guest/sim's model of Fxfs (guest/sim/fxfs/fxfs.c)
-# into a copy of the model, runs the model's comparison with Fxfs against it (FXDAX_SIM_MODEL), and
+# into a copy of the model, runs the model's comparison with Fxfs against it (CLADEFS_SIM_MODEL), and
 # says its fate (guest/mutants/README.md). One whose header names the model as its kernel
 # (`Kernel: model`) is run against its killer alone (`Killer: fxfs-sim-diff TEST`): killed if that
 # fails, MISSED if it passes, BROKEN if it doesn't apply or build; this fails unless each is killed.
@@ -107,7 +107,7 @@ for name in "${names[@]}"; do
     fi
     log=$(mktemp)
     began=$SECONDS
-    FXDAX_SIM_MODEL=$copy FXDAX_SIM_DIFF_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
+    CLADEFS_SIM_MODEL=$copy CLADEFS_SIM_DIFF_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
         cargo nextest run -p fxfs-sim-diff ${filter:+"$filter"} > "$log" 2>&1
     status=$?
     took="$((SECONDS - began)) s"

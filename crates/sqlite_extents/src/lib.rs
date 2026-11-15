@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: SQLite databases kept straight on an extent device, with no filesystem between
+//! cladefs's own: SQLite databases kept straight on an extent device, with no filesystem between
 //! (TASK-296): a [`Volume`] on a `storage_device::Device`, the interface Fxfs keeps itself on,
 //! registered as a SQLite VFS ([`register`]).
 //!

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a checkout the size of Linux's costs (fxdax's TASK-136.1, backlog doc-10): on the guest's
+//! What a checkout the size of Linux's costs (cladefs's TASK-136.1, backlog doc-10): on the guest's
 //! Fxfs, with a DAX window and without, against ext4 on a virtio-blk disk, and on virtio-pmem with
 //! DAX, which TASK-227 takes Fxfs's DAX to match; and as a shared volume, a sandbox's volume over a
 //! read-only base.
@@ -28,10 +28,10 @@
 //! log's `memory:` lines. The guest's timings are lines of standard output, `measure ROLE NAME
 //! VALUE UNIT`, which the log keeps; a memory stage whose name ends in `-pinned` is measured after
 //! dropping the guest's caches. In no suite, for what it takes: each case runs by name
-//! (`FXDAX_E2E_TEST=linux-checkout-fxfs-dax scripts/test-host.sh`), and
-//! scripts/linux-checkout-report.py makes tables of what they said. FXDAX_LINUX_CHECKOUT_WINDOW
+//! (`CLADEFS_E2E_TEST=linux-checkout-fxfs-dax scripts/test-host.sh`), and
+//! scripts/linux-checkout-report.py makes tables of what they said. CLADEFS_LINUX_CHECKOUT_WINDOW
 //! sets the DAX window's bytes (as large as the data, [`crate::common::dax_window`]), and
-//! FXDAX_LINUX_CHECKOUT_EXTENTD_MEMORY the daemon's (by default, a page cache of the host's free memory, TASK-358): each
+//! CLADEFS_LINUX_CHECKOUT_EXTENTD_MEMORY the daemon's (by default, a page cache of the host's free memory, TASK-358): each
 //! larger than the tree, its warm reread finds it all still there, as ext4's finds the host's page
 //! cache; a window or memory smaller than the tree, 1 GiB, finds nothing of it the second time
 //! (GCE r870 and r881: 25.6 s against 600 ms, TASK-227). ext4's disk, and its pmem device, is an 8 GiB image file, the host's page cache
@@ -68,13 +68,13 @@ pub struct TestLinuxCheckout {
 
 /// The variable naming the ext4 device in the guest.
 #[cfg_attr(feature = "host", allow(dead_code))]
-const DEVICE: &str = "FXDAX_LINUX_CHECKOUT_DEVICE";
+const DEVICE: &str = "CLADEFS_LINUX_CHECKOUT_DEVICE";
 
 #[host]
 mod host {
     use super::*;
     use crate::common::{
-        Window, control, dax_window, fxdax_guest_should_run, setup_rootfs, spawn_daemon,
+        Window, control, dax_window, cladefs_guest_should_run, setup_rootfs, spawn_daemon,
     };
     use crate::measure::{HostMemory, metrics_address};
     use crate::shared_volumes::host::{Vms, format, next_generation};
@@ -82,7 +82,7 @@ mod host {
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
     use futures::executor::block_on;
-    use fxdax::{Image, Storage};
+    use cladefs::{Image, Storage};
     use std::ffi::{CString, OsStr};
     use std::os::unix::fs::MetadataExt as _;
     use std::path::Path;
@@ -154,7 +154,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             let root = setup_rootfs(test_setup)?;
             // A daemon of the case's own, whose memory the host measures, its socket's path short,
             // as Unix sockets' must be; its bucket a directory, whose bytes the host measures.
-            let sockets = tempdir::TempDir::new("fxdax-linux")?;
+            let sockets = tempdir::TempDir::new("cladefs-linux")?;
             let extentd = sockets.path().join("extentd.sock");
             let metrics = metrics_address()?;
             let bucket = dir.join("bucket");
@@ -162,15 +162,15 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
             let (metrics_at, bucket_at) =
                 (metrics.to_string(), format!("file://{}/", bucket.canonicalize()?.display()));
             let env = [
-                ("FXDAX_EXTENTD_METRICS", OsStr::new(&metrics_at)),
-                ("FXDAX_EXTENTD_REMOTE", OsStr::new(&bucket_at)),
+                ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
+                ("CLADEFS_EXTENTD_REMOTE", OsStr::new(&bucket_at)),
             ];
-            let memory = bytes("FXDAX_LINUX_CHECKOUT_EXTENTD_MEMORY")?;
+            let memory = bytes("CLADEFS_LINUX_CHECKOUT_EXTENTD_MEMORY")?;
             let daemon = spawn_daemon(test_setup, &extentd, "extentd", &env, memory)?;
             let memory = HostMemory::new(daemon.id(), metrics);
             memory.say(0, "before", None, "")?;
             let window = match self.on {
-                Checkout::FxfsDax => match bytes("FXDAX_LINUX_CHECKOUT_WINDOW")? {
+                Checkout::FxfsDax => match bytes("CLADEFS_LINUX_CHECKOUT_WINDOW")? {
                     Some(window) => window,
                     None => dax_window(Window::Large)?,
                 },
@@ -233,7 +233,7 @@ RUN git clone --bare --depth 1 --branch v6.18 https://github.com/torvalds/linux 
 
     impl Test for TestLinuxCheckout {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn rootfs_image(&self) -> Option<crate::rootfs::Image> {
@@ -579,7 +579,7 @@ mod guest {
 
     impl Test for TestLinuxCheckout {
         fn in_guest(self: Box<Self>) {
-            let role = std::env::var("FXDAX_SHARED_VOLUMES").unwrap();
+            let role = std::env::var("CLADEFS_SHARED_VOLUMES").unwrap();
             let measure = Measure { role: role.clone() };
             fs::create_dir_all(MNT).unwrap();
             if self.on.ext4() {

@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -18,18 +18,18 @@ guest_results = script.load("guest_results")
 
 # The knobs a run is given, and what says where it writes, which aren't knobs.
 GIVEN = {
-    "FXDAX_E2E_ROUNDS": "3",
-    "FXDAX_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
-    "FXDAX_GUEST_KERNEL_BUILD": "release",
+    "CLADEFS_E2E_ROUNDS": "3",
+    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
-    "FXDAX_GUEST_KERNEL": "/var/lib/fxdax-test/guest-kernel-release/out/x86_64/vmlinux",
-    "FXDAX_E2E_RESULTS": "/home/x/run-1/results/e2e",
+    "CLADEFS_GUEST_KERNEL": "/var/lib/fxdax-test/guest-kernel-release/out/x86_64/vmlinux",
+    "CLADEFS_E2E_RESULTS": "/home/x/run-1/results/e2e",
     "HOME": "/home/x",
 }
 KNOBS = {
-    "FXDAX_E2E_ROUNDS": "3",
-    "FXDAX_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
-    "FXDAX_GUEST_KERNEL_BUILD": "release",
+    "CLADEFS_E2E_ROUNDS": "3",
+    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
 }
 
@@ -38,16 +38,16 @@ def outcome(case, round_, outcome_, failed_checks=(), reason=None):
     """A round's outcome, as the runner writes it (`runner test --outcome`)."""
     return {"case": case, "round": round_, "rounds": 3, "outcome": outcome_, "reason": reason,
             "failed_checks": list(failed_checks), "took_secs": 1.5, "limit_secs": 15,
-            "commit": "abc123", "replay": f"FXDAX_E2E_TEST={case} scripts/test-host.sh",
+            "commit": "abc123", "replay": f"CLADEFS_E2E_TEST={case} scripts/test-host.sh",
             "knobs": KNOBS}
 
 
 class GuestResults(unittest.TestCase):
     def setUp(self):
         self.results = Path(tempfile.mkdtemp()) / "e2e"
-        # The run's environment alone, none of this one's FXDAX_* (FXDAX_TEST_PARTS, as CI's).
+        # The run's environment alone, none of this one's CLADEFS_* (CLADEFS_TEST_PARTS, as CI's).
         self.environment = mock.patch.dict(
-            os.environ, {**GIVEN, "FXDAX_BUILD_COMMIT": "abc123", "PATH": os.environ["PATH"]},
+            os.environ, {**GIVEN, "CLADEFS_BUILD_COMMIT": "abc123", "PATH": os.environ["PATH"]},
             clear=True)
         self.environment.start()
         self.addCleanup(self.environment.stop)
@@ -61,17 +61,17 @@ class GuestResults(unittest.TestCase):
             guest_results.ended(self.results, case)
 
     def test_the_knobs_are_how_a_run_runs(self):
-        self.assertEqual(guest_results.knobs({**GIVEN, "FXDAX_BUILD_COMMIT": "abc123"}),
-                         {**KNOBS, "FXDAX_BUILD_COMMIT": "abc123"})
+        self.assertEqual(guest_results.knobs({**GIVEN, "CLADEFS_BUILD_COMMIT": "abc123"}),
+                         {**KNOBS, "CLADEFS_BUILD_COMMIT": "abc123"})
         # A kernel named, not built, is one.
-        given = {name: value for name, value in GIVEN.items() if name != "FXDAX_GUEST_KERNEL_BUILD"}
-        self.assertEqual(guest_results.knobs(given)["FXDAX_GUEST_KERNEL"], GIVEN["FXDAX_GUEST_KERNEL"])
+        given = {name: value for name, value in GIVEN.items() if name != "CLADEFS_GUEST_KERNEL_BUILD"}
+        self.assertEqual(guest_results.knobs(given)["CLADEFS_GUEST_KERNEL"], GIVEN["CLADEFS_GUEST_KERNEL"])
 
     def test_a_summary_of_each_case_as_its_rounds_end(self):
         cases = ["fxfs-guest-dax", "fxfs-guest-checks-dax", "fxfs-guest-crash-dax", "extent-guest"]
         guest_results.start(self.results, 3, cases)
         self.assertEqual(json.loads((self.results / "run.json").read_text()),
-                         {"commit": "abc123", "knobs": {**KNOBS, "FXDAX_BUILD_COMMIT": "abc123"},
+                         {"commit": "abc123", "knobs": {**KNOBS, "CLADEFS_BUILD_COMMIT": "abc123"},
                           "rounds": 3, "cases": cases})
         self.assertEqual([each["outcome"] for each in guest_results.load(self.results)["cases"]],
                          ["unrun"] * 4)
@@ -84,12 +84,12 @@ class GuestResults(unittest.TestCase):
         self.assertEqual(summary["cases"][1], {
             "case": "fxfs-guest-checks-dax", "outcome": "fail", "round": 2, "rounds_passed": 1,
             "failed_checks": ["sparse", "acls"], "reason": "seed 7: …",
-            "replay": "FXDAX_E2E_TEST=fxfs-guest-checks-dax scripts/test-host.sh",
+            "replay": "CLADEFS_E2E_TEST=fxfs-guest-checks-dax scripts/test-host.sh",
             "daemons": []})
         self.assertEqual(guest_results.report(summary), [
             "fxfs-guest-dax: passed 3 rounds",
             "fxfs-guest-checks-dax: failed in round 2 of 3, checks sparse, acls",
-            "  replay: FXDAX_E2E_TEST=fxfs-guest-checks-dax scripts/test-host.sh",
+            "  replay: CLADEFS_E2E_TEST=fxfs-guest-checks-dax scripts/test-host.sh",
             "fxfs-guest-crash-dax: stopped after round 1 of 3, which passed",
             "extent-guest: not run",
             "the run did not finish",
@@ -100,7 +100,7 @@ class GuestResults(unittest.TestCase):
             self.assertEqual(guest_results.main(["report", str(self.results)]), 1)
 
     def test_each_daemon_says_what_it_downloaded_against_what_it_read(self):
-        """TASK-165.12: each extent daemon's last counts (its stats file, FXDAX_EXTENTD_STATS, the
+        """TASK-165.12: each extent daemon's last counts (its stats file, CLADEFS_EXTENTD_STATS, the
         run's and each case's own, `NAME-stats.txt`): the bytes it downloaded from its bucket
         against those its page-ins read of the bucket's data, through its part cache, and of its
         store's. A case's daemon with no part cache downloaded the same parts four times over (GCE

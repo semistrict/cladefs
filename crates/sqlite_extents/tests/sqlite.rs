@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -116,7 +116,7 @@ struct Mounted {
 impl Mounted {
     fn new(device: DeviceHolder, mode: Mode) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let vfs = format!("fxdax-test-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let vfs = format!("cladefs-test-{}", NEXT.fetch_add(1, Ordering::Relaxed));
         let options = Options::default();
         let volume = match mode {
             Mode::Device => Volume::open(device, options),

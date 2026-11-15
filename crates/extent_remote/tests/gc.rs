@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax-gc, the program: a pass over a bucket, and its usage.
+//! cladefs-gc, the program: a pass over a bucket, and its usage.
 
 use std::process::Command;
 
@@ -12,7 +12,7 @@ fn test_branch(id: u64) -> extent_remote::layout::Branch {
 }
 
 fn gc(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_fxdax-gc")).args(args).output().unwrap()
+    Command::new(env!("CARGO_BIN_EXE_cladefs-gc")).args(args).output().unwrap()
 }
 
 /// What `out` said on standard error, its times, which vary, as `T`, and the requests it says it
@@ -39,9 +39,9 @@ fn said(out: &std::process::Output) -> String {
 /// took, and its slowest, `slowest`.
 fn swept(deleted: usize, bytes: u64, cells: usize, slowest: &str) -> String {
     format!(
-        "fxdax-gc: deleted {deleted} ({bytes} bytes), compacted 0 (0 bytes), retired 0 references, \
+        "cladefs-gc: deleted {deleted} ({bytes} bytes), compacted 0 (0 bytes), retired 0 references, \
          over {cells} cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
-         failed; requests: R\nfxdax-gc: took T s; slowest: {slowest}\n"
+         failed; requests: R\ncladefs-gc: took T s; slowest: {slowest}\n"
     )
 }
 
@@ -63,15 +63,15 @@ fn sweeps_write_their_metrics() {
     assert!(out.status.success());
     let metrics = std::fs::read_to_string(&file).unwrap();
     for line in [
-        "fxdax_gc_sweeps_total 1",
-        "fxdax_gc_sweep_cells{outcome=\"passed\"} 0",
-        "fxdax_gc_sweep_cells{outcome=\"skipped\"} 0",
-        "fxdax_gc_sweep_requests{request=\"list-delimited\"} 1",
-        "fxdax_gc_pass_seconds_count 0",
+        "cladefs_gc_sweeps_total 1",
+        "cladefs_gc_sweep_cells{outcome=\"passed\"} 0",
+        "cladefs_gc_sweep_cells{outcome=\"skipped\"} 0",
+        "cladefs_gc_sweep_requests{request=\"list-delimited\"} 1",
+        "cladefs_gc_pass_seconds_count 0",
     ] {
         assert!(metrics.lines().any(|had| had == line), "{line} in {metrics}");
     }
-    let peak = metrics.lines().find_map(|line| line.strip_prefix("fxdax_gc_peak_resident_bytes "));
+    let peak = metrics.lines().find_map(|line| line.strip_prefix("cladefs_gc_peak_resident_bytes "));
     let peak: u64 = peak.unwrap().parse().unwrap();
     assert!((1 << 20..1 << 34).contains(&peak), "a process's memory, at most: {peak}");
 }
@@ -88,7 +88,7 @@ fn lists_and_deletes_branches() {
     assert!(out.status.success());
 }
 
-/// fxdax: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
+/// cladefs: a pass over a bucket on the host's filesystem (TASK-165.1), from a process of its own:
 /// it reclaims the branch's segments its checkpoint covers, which hold no live extent (the one
 /// holding what it freed, the one freeing it), and lists the branch.
 #[test]
@@ -134,7 +134,7 @@ fn collects_a_file_bucket() {
     assert_eq!(
         said(&out),
         format!(
-            "fxdax-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
+            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
              references, in T s; requests: R\n{}",
             swept(2, bytes, 1, "1/1 T s")
         )
@@ -227,7 +227,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert_eq!(
         String::from_utf8_lossy(&out.stderr),
         format!(
-            "fxdax-gc: dry run: a pass would delete 2 objects ({bytes} bytes), and more: it would \
+            "cladefs-gc: dry run: a pass would delete 2 objects ({bytes} bytes), and more: it would \
              compact 0 (0 bytes), and delete what it compacts a grace period after, which a dry \
              run, compacting nothing, doesn't count; and retire 0 references\n"
         )
@@ -241,12 +241,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert_eq!(
         said(&out),
         format!(
-            "fxdax-gc: cell 1/1: marked 2 ({bytes} bytes) in {marks}, deleted 0, compacted 0, \
+            "cladefs-gc: cell 1/1: marked 2 ({bytes} bytes) in {marks}, deleted 0, compacted 0, \
              resurrected 0, in T s; requests: R\n\
-             fxdax-gc: marked 2 ({bytes} bytes), compacted 0 (0 bytes), resurrected 0, over 1 \
+             cladefs-gc: marked 2 ({bytes} bytes), compacted 0 (0 bytes), resurrected 0, over 1 \
              cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 failed; \
              requests: R\n\
-             fxdax-gc: took T s; slowest: 1/1 T s\n"
+             cladefs-gc: took T s; slowest: 1/1 T s\n"
         )
     );
     let names: Vec<String> = files().into_iter().map(|(name, _)| name).collect();
@@ -259,7 +259,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     assert_eq!(
         said(&out),
         format!(
-            "fxdax-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
+            "cladefs-gc: cell 1/1: deleted 2 ({bytes} bytes), compacted 0 (0 bytes), retired 0 \
              references, in T s; requests: R\n{}",
             swept(2, bytes, 1, "1/1 T s")
         )
@@ -342,15 +342,15 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let out = gc(&[&url, "--grace", "0"]);
     let said = said(&out);
     // The slowest passes, last, in an order of their times.
-    let (did, slowest) = said.split_at(said.find("fxdax-gc: took").unwrap());
+    let (did, slowest) = said.split_at(said.find("cladefs-gc: took").unwrap());
     assert_eq!(
         did,
-        "fxdax-gc: cell 1/1: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\nfxdax-gc: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 \
+        "cladefs-gc: cell 1/1: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 references, \
+         in T s; requests: R\ncladefs-gc: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 \
          references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\n"
     );
-    assert!(slowest.starts_with("fxdax-gc: took T s; slowest: "), "{slowest}");
+    assert!(slowest.starts_with("cladefs-gc: took T s; slowest: "), "{slowest}");
     let after = now().as_millis() as u64;
     // A cell made after the pass, which no pass went over.
     futures::executor::block_on(branch::create(&*bucket, Branch { cell: unpassed, id: 4 }, 0))
@@ -454,7 +454,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 /// TASK-411.14: `--delete-branch` of a sealed branch whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
 /// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
-/// the KMS `FXDAX_KMS` names. Without one, it fails, naming the tenant and what it needs, the
+/// the KMS `CLADEFS_KMS` names. Without one, it fails, naming the tenant and what it needs, the
 /// branch left as a deletion stopped partway: its record not deleted, the child unrecorded; run
 /// again with one, it finishes.
 #[test]
@@ -520,18 +520,18 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     };
     assert_eq!(record(child), None);
     let delete = |kms: Option<&std::path::Path>| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_fxdax-gc"));
-        command.args([url.as_str(), "--delete-branch", "1/1/1"]).env_remove("FXDAX_KMS");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
+        command.args([url.as_str(), "--delete-branch", "1/1/1"]).env_remove("CLADEFS_KMS");
         if let Some(kms) = kms {
-            command.env("FXDAX_KMS", format!("local://{}", kms.display()));
+            command.env("CLADEFS_KMS", format!("local://{}", kms.display()));
         }
         command.output().unwrap()
     };
 
     let out = delete(None);
     let refused = "deleting branch 1/1/1: tenant 1: cell 1/1 is encrypted, and this host has no \
-                   KMS: fxdax-gc reads it from FXDAX_KMS, which names none; the deletion stopped \
-                   partway: run it again with FXDAX_KMS to finish it";
+                   KMS: cladefs-gc reads it from CLADEFS_KMS, which names none; the deletion stopped \
+                   partway: run it again with CLADEFS_KMS to finish it";
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(record(parent).map(|record| record.deleted), Some(false));
@@ -554,12 +554,12 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
 #[test]
 fn without_a_bucket_prints_its_usage() {
     let out = gc(&[]);
-    let usage = "usage: fxdax-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
+    let usage = "usage: cladefs-gc URL [--cell TENANT/CELL] [--mark-only] [--every SECONDS] \
                  [--grace SECONDS] [--compact-below FRACTION] [--at-once PASSES] [--lease SECONDS] \
-                 [--metrics FILE] | fxdax-gc URL [--cell TENANT/CELL] \
-                 --dry-run [--grace SECONDS] [--compact-below FRACTION] | fxdax-gc URL --branches \
-                 [--cell TENANT/CELL] [--held FILE] | fxdax-gc URL --delete-branch \
-                 TENANT/CELL/ID | fxdax-gc URL --usage [--tenant TENANT] (every cell, or the one \
+                 [--metrics FILE] | cladefs-gc URL [--cell TENANT/CELL] \
+                 --dry-run [--grace SECONDS] [--compact-below FRACTION] | cladefs-gc URL --branches \
+                 [--cell TENANT/CELL] [--held FILE] | cladefs-gc URL --delete-branch \
+                 TENANT/CELL/ID | cladefs-gc URL --usage [--tenant TENANT] (every cell, or the one \
                  --cell names; \
                  --mark-only deletes nothing, writing each cell's gc/marks/EPOCH: the bucket \
                  grows; --dry-run writes nothing, and finds less than a pass deletes)";

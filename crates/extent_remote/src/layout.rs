@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -15,7 +15,7 @@ pub use extent_frame::segment::{
     Branch, Cell, Chain, Child, Contents, Continued, Footer, Location, epoch_of, tag, writer_of,
 };
 
-/// fxdax: the format of a branch's objects, which its record says first
+/// cladefs: the format of a branch's objects, which its record says first
 /// ([`Record::format`](crate::record::Record::format)): a reader refuses a branch of any other,
 /// newer or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds
 /// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the branch's
@@ -43,22 +43,22 @@ pub use extent_frame::segment::{
 /// nothing reads 10's.
 pub const FORMAT: u32 = 11;
 
-/// fxdax: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
+/// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";
-/// fxdax: under a cell's prefix, the collector's own: its lease, its marks, and what else its
+/// cladefs: under a cell's prefix, the collector's own: its lease, its marks, and what else its
 /// passes over the cell keep there; never a pass's candidate (TASK-395.2).
 const GC: &str = "gc/";
 const GC_LEASE: &str = "gc/lease";
 const GC_MARKS: &str = "gc/marks/";
 /// Under a cell's prefix, the moves of its objects, and the moves of those, `moves/moves/...`.
 const MOVES: &str = "moves/";
-/// fxdax: under a cell's prefix, the references of forks of its branches ([`reference`]).
+/// cladefs: under a cell's prefix, the references of forks of its branches ([`reference`]).
 const REFS: &str = "refs/";
-/// fxdax: under a cell's prefix, the marks of the references retired or taken back ([`retired`]).
+/// cladefs: under a cell's prefix, the marks of the references retired or taken back ([`retired`]).
 const RETIRED: &str = "retired/";
-/// fxdax: the prefix of the blocks of object IDs taken ([`objectid_block`]).
+/// cladefs: the prefix of the blocks of object IDs taken ([`objectid_block`]).
 const OBJECTIDS: &str = "objectid/";
-/// fxdax: there while a mark-only pass marks the bucket, which it writes and an operator removes
+/// cladefs: there while a mark-only pass marks the bucket, which it writes and an operator removes
 /// with the marks: the one thing readers read to know whether to watch any cell's marks
 /// ([`crate::marks`], TASK-395.4's review). No cell's, and no candidate of any pass.
 pub const MARKING: &str = "gc/marking";
@@ -102,7 +102,7 @@ pub fn checkpoint(branch: Branch, seq: u64, epoch: u64) -> String {
     format!("{}{:016x}.{seq:016x}", checkpoints(branch), keyed(epoch))
 }
 
-/// fxdax: the prefix of the records of `cell`'s branches.
+/// cladefs: the prefix of the records of `cell`'s branches.
 pub fn records(cell: Cell) -> String {
     format!("{}branches/", cell.prefix())
 }
@@ -117,42 +117,42 @@ pub fn head(branch: Branch) -> String {
     format!("{}heads/{:016x}", branch.cell.prefix(), branch.id)
 }
 
-/// fxdax: the block of object IDs `block` taken, by one allocator of one process's
+/// cladefs: the block of object IDs `block` taken, by one allocator of one process's
 /// ([`crate::objectid`], TASK-364): there once taken, and kept for good, so that no other takes
 /// it, and none of its IDs is given twice.
 pub fn objectid_block(block: u64) -> String {
     format!("{OBJECTIDS}{block:016x}")
 }
 
-/// fxdax: the prefix of `tenant`'s cells: listed by delimiter, its cells' prefixes
+/// cladefs: the prefix of `tenant`'s cells: listed by delimiter, its cells' prefixes
 /// ([`crate::cell::of_tenant`]).
 pub fn cells_of(tenant: u64) -> String {
     format!("{TENANTS}{tenant:016x}/cells/")
 }
 
-/// fxdax: the tenant a prefix of a delimiter listing of [`TENANTS`] names, `tenants/<tenant>/`.
+/// cladefs: the tenant a prefix of a delimiter listing of [`TENANTS`] names, `tenants/<tenant>/`.
 pub fn tenant_of_prefix(prefix: &str) -> Option<u64> {
     hex(prefix.strip_prefix(TENANTS)?.strip_suffix('/')?)
 }
 
-/// fxdax: the object of `cell` itself: who holds it, and its volumes ([`crate::cell`]).
+/// cladefs: the object of `cell` itself: who holds it, and its volumes ([`crate::cell`]).
 pub fn cell(cell: Cell) -> String {
     format!("{}cell", cell.prefix())
 }
 
-/// fxdax: the cell whose prefix `key` is under, and the rest of it: none for a key of no cell's.
+/// cladefs: the cell whose prefix `key` is under, and the rest of it: none for a key of no cell's.
 fn in_cell(key: &str) -> Option<(Cell, &str)> {
     let (tenant, rest) = key.strip_prefix(TENANTS)?.split_once('/')?;
     let (id, rest) = rest.strip_prefix("cells/")?.split_once('/')?;
     Some((Cell { tenant: hex(tenant)?, id: hex(id)? }, rest))
 }
 
-/// fxdax: the cell whose prefix `key` is under, a key or a prefix: none for one of no cell's.
+/// cladefs: the cell whose prefix `key` is under, a key or a prefix: none for one of no cell's.
 pub fn cell_of(key: &str) -> Option<Cell> {
     in_cell(key).map(|(cell, _)| cell)
 }
 
-/// fxdax: the cell whose whole prefix `prefix` is, as a listing of every object of the cell's
+/// cladefs: the cell whose whole prefix `prefix` is, as a listing of every object of the cell's
 /// names it: none for any other prefix.
 pub fn cell_of_prefix(prefix: &str) -> Option<Cell> {
     in_cell(prefix).filter(|(_, rest)| rest.is_empty()).map(|(cell, _)| cell)
@@ -160,7 +160,7 @@ pub fn cell_of_prefix(prefix: &str) -> Option<Cell> {
 
 /// What the pass of the collector of epoch `pass` made of the object at `key` when it compacted
 /// it: the extents of it that were live, and where in it each is. Being one object, written whole,
-/// it is never there without them. fxdax: under the cell of the object, `<C>moves/<rest>/<pass>`
+/// it is never there without them. cladefs: under the cell of the object, `<C>moves/<rest>/<pass>`
 /// for the object `<C><rest>`, and so `<C>moves/moves/<rest>/<pass>/<pass>` for its moves' moves,
 /// so that the cell's pass of the collector lists them with the cell (TASK-395.2). The pass's epoch
 /// in the key, the cell's collector lease's, two passes' moves of one object never share a key:
@@ -174,13 +174,13 @@ pub fn moves(key: &str, pass: u64) -> Result<String, crate::Error> {
     Ok(format!("{}{pass:016x}", moves_of(key)?))
 }
 
-/// fxdax: the prefix of the keys of the moves of the object at `key`, whichever passes made them
+/// cladefs: the prefix of the keys of the moves of the object at `key`, whichever passes made them
 /// ([`moves`]).
 pub fn moves_of(key: &str) -> Result<String, crate::Error> {
     Ok(format!("{}/", moves_under(key)?))
 }
 
-/// fxdax: the prefix of the keys of the moves of the objects whose keys start with `prefix`, a
+/// cladefs: the prefix of the keys of the moves of the objects whose keys start with `prefix`, a
 /// cell's: `<C>moves/<rest>` for `<C><rest>`.
 pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
     let Some((cell, rest)) = in_cell(prefix) else {
@@ -189,7 +189,7 @@ pub fn moves_under(prefix: &str) -> Result<String, crate::Error> {
     Ok(format!("{}{MOVES}{rest}", cell.prefix()))
 }
 
-/// fxdax: the key of the object the moves at `key` are of, if they are moves: the inverse of
+/// cladefs: the key of the object the moves at `key` are of, if they are moves: the inverse of
 /// [`moves`].
 pub fn moved_from(key: &str) -> Option<String> {
     match kind(key) {
@@ -198,51 +198,51 @@ pub fn moved_from(key: &str) -> Option<String> {
     }
 }
 
-/// fxdax: the collector's lease over `cell`, which its passes over the cell take (doc-7, Garbage
+/// cladefs: the collector's lease over `cell`, which its passes over the cell take (doc-7, Garbage
 /// collection; TASK-395.2), a [`crate::passed::GcLease`]: passes over other cells run beside them,
 /// unfenced.
 pub fn gc_lease(cell: Cell) -> String {
     format!("{}{GC_LEASE}", cell.prefix())
 }
 
-/// fxdax: the prefix of the collector's own objects under `cell`: its lease, which holds what its
+/// cladefs: the prefix of the collector's own objects under `cell`: its lease, which holds what its
 /// passes record ([`crate::passed`]), and its marks; never a pass's candidate, nor what a pass
 /// decides by but its lease.
 pub fn collectors(cell: Cell) -> String {
     format!("{}{GC}", cell.prefix())
 }
 
-/// fxdax: the prefix of the marks of the mark-only passes over `cell` ([`marks`]).
+/// cladefs: the prefix of the marks of the mark-only passes over `cell` ([`marks`]).
 pub fn marks_of(cell: Cell) -> String {
     format!("{}{GC_MARKS}", cell.prefix())
 }
 
-/// fxdax: what the mark-only pass over `cell` of the collector that took the cell's lease at
+/// cladefs: what the mark-only pass over `cell` of the collector that took the cell's lease at
 /// `epoch` found no live branch needs, and would have deleted ([`Marks`]; doc-7, Garbage collection;
 /// TASK-264): keyed by the epoch, so that the newest lists last.
 pub fn marks(cell: Cell, epoch: u64) -> String {
     format!("{}{epoch:016x}", marks_of(cell))
 }
 
-/// fxdax: the prefix of the references of forks of `cell`'s branches ([`reference`]): listed by
+/// cladefs: the prefix of the references of forks of `cell`'s branches ([`reference`]): listed by
 /// delimiter, the branches of the cell with forks referring to them.
 pub fn references(cell: Cell) -> String {
     format!("{}{REFS}", cell.prefix())
 }
 
-/// fxdax: the prefix of the references of forks of `parent`: listed by delimiter, its distinct fork
+/// cladefs: the prefix of the references of forks of `parent`: listed by delimiter, its distinct fork
 /// points, which a pass over its cell keeps the states of ([`fork_point`]).
 pub fn references_of(parent: Branch) -> String {
     format!("{}{:016x}/", references(parent.cell), parent.id)
 }
 
-/// fxdax: the prefix of the references of the forks of `parent` at the end of its segment `at`:
+/// cladefs: the prefix of the references of the forks of `parent` at the end of its segment `at`:
 /// listed, their children.
 pub fn fork_point(parent: Branch, at: u64) -> String {
     format!("{}{at:016x}/", references_of(parent))
 }
 
-/// fxdax: the reference of the fork of `parent` at the end of its segment `at` to `child`, under
+/// cladefs: the reference of the fork of `parent` at the end of its segment `at` to `child`, under
 /// the parent's cell, the cell holding what the child inherits, whatever the child's (doc-7,
 /// References; TASK-395.2): while it stands, the parent's cell's passes keep the parent's whole
 /// state at the fork point. Its bytes are a [`Reference`], unique to the fork, so that every writer
@@ -253,7 +253,7 @@ pub fn reference(parent: Branch, at: u64, child: Branch) -> String {
     format!("{}{tenant:016x}.{cell:016x}.{id:016x}", fork_point(parent, at))
 }
 
-/// fxdax: the mark of the reference of the fork of `parent` at the end of its segment `at` to
+/// cladefs: the mark of the reference of the fork of `parent` at the end of its segment `at` to
 /// `child` ([`reference`]), retired or taken back, under the parent's cell beside the references,
 /// outside their prefix, which a pass lists by delimiter (TASK-395.13, TASK-395.14): written before
 /// the reference is deleted, and kept for good, its bytes a [`Retired`]. The reference is garbage
@@ -269,7 +269,7 @@ pub fn retired(parent: Branch, at: u64, child: Branch) -> String {
     )
 }
 
-/// fxdax: the mark of the reference at `key` ([`retired`]), if it is a reference's key.
+/// cladefs: the mark of the reference at `key` ([`retired`]), if it is a reference's key.
 pub fn retired_of(key: &str) -> Option<String> {
     match kind(key) {
         Kind::Reference { parent, at, child } => Some(retired(parent, at, child)),
@@ -277,14 +277,14 @@ pub fn retired_of(key: &str) -> Option<String> {
     }
 }
 
-/// fxdax: the parent a prefix of `cell`'s references names, `<C>refs/<parent>/`, as a delimiter
+/// cladefs: the parent a prefix of `cell`'s references names, `<C>refs/<parent>/`, as a delimiter
 /// listing of [`references`] gives it.
 pub fn referenced_parent(cell: Cell, prefix: &str) -> Option<Branch> {
     let rest = prefix.strip_prefix(&references(cell))?.strip_suffix('/')?;
     Some(Branch { cell, id: hex(rest)? })
 }
 
-/// fxdax: the fork point a prefix of `parent`'s references names, `<C>refs/<parent>/<at>/`, as a
+/// cladefs: the fork point a prefix of `parent`'s references names, `<C>refs/<parent>/<at>/`, as a
 /// delimiter listing of [`references_of`] gives it.
 pub fn referenced_at(parent: Branch, prefix: &str) -> Option<u64> {
     hex(prefix.strip_prefix(&references_of(parent))?.strip_suffix('/')?)
@@ -303,7 +303,7 @@ pub fn further(key: &str, later: &str) -> bool {
     false
 }
 
-/// What kind of object a key names, and what its key says. fxdax: an extent's says the segment
+/// What kind of object a key names, and what its key says. cladefs: an extent's says the segment
 /// that names it, `seq`, of the writer of `epoch`, which uploaded it before: what it may yet be
 /// named by, as its writer declares it (TASK-79.3, TASK-153.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -330,21 +330,21 @@ pub enum Kind<'a> {
     Head {
         branch: Branch,
     },
-    /// fxdax: a cell's own object ([`cell`]).
+    /// cladefs: a cell's own object ([`cell`]).
     Cell {
         cell: Cell,
     },
-    /// fxdax: a block of object IDs taken ([`objectid_block`]).
+    /// cladefs: a block of object IDs taken ([`objectid_block`]).
     ObjectIds {
         block: u64,
     },
-    /// fxdax: the collector's lease over a cell ([`gc_lease`]).
+    /// cladefs: the collector's lease over a cell ([`gc_lease`]).
     GcLease {
         cell: Cell,
     },
-    /// fxdax: a mark-only pass's word that it marks the bucket ([`MARKING`]).
+    /// cladefs: a mark-only pass's word that it marks the bucket ([`MARKING`]).
     Marking,
-    /// fxdax: a mark-only pass's marks over a cell ([`marks`]): the collector's own, never a
+    /// cladefs: a mark-only pass's marks over a cell ([`marks`]): the collector's own, never a
     /// candidate.
     Marks {
         cell: Cell,
@@ -357,14 +357,14 @@ pub enum Kind<'a> {
         of: &'a str,
         pass: u64,
     },
-    /// fxdax: the reference of the fork of `parent`, of the cell it is under, at the end of its
+    /// cladefs: the reference of the fork of `parent`, of the cell it is under, at the end of its
     /// segment `at`, to `child` ([`reference`]): never a candidate.
     Reference {
         parent: Branch,
         at: u64,
         child: Branch,
     },
-    /// fxdax: the mark of that reference, retired or taken back ([`retired`]): never a candidate.
+    /// cladefs: the mark of that reference, retired or taken back ([`retired`]): never a candidate.
     Retired {
         parent: Branch,
         at: u64,
@@ -374,7 +374,7 @@ pub enum Kind<'a> {
 }
 
 impl Kind<'_> {
-    /// fxdax: its name, as an operator reads it (`fxdax-gc --dry-run`).
+    /// cladefs: its name, as an operator reads it (`cladefs-gc --dry-run`).
     pub fn name(&self) -> &'static str {
         match self {
             Self::Segment { .. } => "segment",
@@ -395,9 +395,9 @@ impl Kind<'_> {
     }
 }
 
-/// fxdax: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of its
+/// cladefs: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of its
 /// objects and of their moves, its collector's lease and marks, and the references of forks of its
-/// branches, under the parent's cell (`fxdax-gc --usage`, TASK-394, TASK-395.2).
+/// branches, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
 pub fn owner(key: &str) -> Option<Cell> {
     match kind(key) {
         Kind::Segment { branch, .. }
@@ -504,7 +504,7 @@ pub struct Fork {
     pub at: u64,
     /// Whether its child is a point ([`Kind::Point`](crate::record::Kind::Point)).
     pub point: bool,
-    /// fxdax: its child's owner, which every record of the child names
+    /// cladefs: its child's owner, which every record of the child names
     /// ([`Record::owner`](crate::record::Record::owner)).
     pub owner: u64,
 }
@@ -530,11 +530,11 @@ pub(crate) fn child(branch: Branch) -> Child {
     Child { branch, owner: 0, point: false }
 }
 
-/// fxdax: the cell of tests' branches, of tenant 1.
+/// cladefs: the cell of tests' branches, of tenant 1.
 #[cfg(any(test, feature = "testing"))]
 pub const TEST_CELL: Cell = Cell { tenant: 1, id: 1 };
 
-/// fxdax: tests' branch `id`, of [`TEST_CELL`].
+/// cladefs: tests' branch `id`, of [`TEST_CELL`].
 #[cfg(any(test, feature = "testing"))]
 pub const fn test_branch(id: u64) -> Branch {
     Branch { cell: TEST_CELL, id }
@@ -618,7 +618,7 @@ impl Head {
     }
 }
 
-/// fxdax: a mark-only pass's marks object ([`marks`]): what it would have deleted, each object as
+/// cladefs: a mark-only pass's marks object ([`marks`]): what it would have deleted, each object as
 /// its listing found it, which readers warn of reaching, and the next such pass compares what it
 /// finds doomed with (TASK-264).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -632,7 +632,7 @@ pub struct Marks {
     pub marked: Vec<Marked>,
 }
 
-/// fxdax: a reference's bytes ([`reference`]): the format of the bucket's objects, first, as a
+/// cladefs: a reference's bytes ([`reference`]): the format of the bucket's objects, first, as a
 /// record's, and the fork's owner, its child's ([`Child::owner`], a clone's its restore's): unique
 /// to the fork, so that every writer of it writes the same, a writable fork's host, its parent's
 /// writers and its parent's deletion alike, and a create landed though its answer was lost is taken
@@ -650,7 +650,7 @@ impl Reference {
     }
 }
 
-/// fxdax: a reference's mark's bytes ([`retired`]): the format of the bucket's objects alone, the
+/// cladefs: a reference's mark's bytes ([`retired`]): the format of the bucket's objects alone, the
 /// same whoever writes it. What a pass deletes by is its key alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Retired {
@@ -695,7 +695,7 @@ impl Marked {
 }
 
 /// The footer of a compacted object's moves: where in the moves each extent the object held, live,
-/// now is. fxdax: and the key of the object they are the moves of, which a reader checks against
+/// now is. cladefs: and the key of the object they are the moves of, which a reader checks against
 /// theirs: a whole moves copied to another's key is no moves of it (TASK-411.3).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Moves {
@@ -718,19 +718,19 @@ pub use extent_frame::{Frame, PART, TRAILER, crc};
 pub type Sealing<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
-/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. fxdax: in the
+/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: in the
 /// clear: tests', and the collector's moves of objects in the clear (TASK-411.6).
 pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
     with_footer_under(data, footer, None)
 }
 
-/// fxdax: the bytes of an object of `data` and `footer`, as [`with_footer`], sealed as `sealing`
+/// cladefs: the bytes of an object of `data` and `footer`, as [`with_footer`], sealed as `sealing`
 /// says (TASK-411.3).
 pub fn with_footer_under<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
     extent_frame::framed(data, &encode(footer), sealing)
 }
 
-/// fxdax: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
+/// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
 /// copied to another key, sealed, is refused (TASK-411.3), sealed as `sealing` says.
 pub fn own_extent(extent: ExtentId, data: &[u8], sealing: Sealing<'_>) -> Vec<u8> {
     with_footer_under(data, &extent, sealing)
@@ -742,7 +742,7 @@ pub fn data(bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
     data_under(bytes, &extent_frame::NoKeys)
 }
 
-/// fxdax: the data of a whole object, as [`data`], by a reader holding `keys` (TASK-411.3).
+/// cladefs: the data of a whole object, as [`data`], by a reader holding `keys` (TASK-411.3).
 pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>, crate::Error> {
     Ok(extent_frame::data(bytes, keys)?)
 }
@@ -752,7 +752,7 @@ pub fn footer<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
     footer_under(bytes, &extent_frame::NoKeys)
 }
 
-/// fxdax: the footer of a whole object, as [`footer`], by a reader holding `keys`: checked
+/// cladefs: the footer of a whole object, as [`footer`], by a reader holding `keys`: checked
 /// against its MAC too, if it holds the object's key, and refused as `extent_frame` refuses it
 /// (TASK-411.3).
 pub fn footer_under<T: DeserializeOwned>(
@@ -767,7 +767,7 @@ impl Segment {
         self.encode_under(None)
     }
 
-    /// fxdax: its object, sealed as `sealing` says (TASK-411.3).
+    /// cladefs: its object, sealed as `sealing` says (TASK-411.3).
     pub fn encode_under(&self, sealing: Sealing<'_>) -> Vec<u8> {
         with_footer_under(&self.data, &self.footer, sealing)
     }
@@ -803,7 +803,7 @@ mod tests {
         assert!(!extent(elsewhere, 1, 3, ExtentId::new(0x12, 5)).starts_with(&extents(branch)));
     }
 
-    /// fxdax: every object of a branch, and its cell's own, is under the cell's prefix, by tenant
+    /// cladefs: every object of a branch, and its cell's own, is under the cell's prefix, by tenant
     /// then cell (TASK-364); and since format 9 everything the cell's collection reads: its objects'
     /// moves and their moves, its collector's lease and marks, and the references of forks of its
     /// branches, whatever the children's cells (TASK-395.2).

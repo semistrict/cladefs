@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,7 +14,7 @@
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-work=${FXDAX_GUEST_KERNEL_WORK:-$HOME/fxdax-guest-kernel}
+work=${CLADEFS_GUEST_KERNEL_WORK:-$HOME/cladefs-guest-kernel}
 kernel_tag=kernel6.18-6.18.54-121.166.amzn2023
 
 arch=${1:-$(uname -m)}

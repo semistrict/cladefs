@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # fs/fxfs's dax.c in a process of its own (README.md): built on Linux, with clang, against a
 # configured tree of the guest's kernel for what is taken from it unchanged.
 #
 #   make KERNEL=<the kernel's tree> [BUILD=<where>]
 
-KERNEL ?= $(HOME)/fxdax-guest-kernel/kernel6.18-6.18.54-121.166.amzn2023-arm64
+KERNEL ?= $(HOME)/cladefs-guest-kernel/kernel6.18-6.18.54-121.166.amzn2023-arm64
 BUILD ?= build
 FXFS := ../linux/fs/fxfs
 CC := clang

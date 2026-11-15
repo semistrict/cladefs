@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/extent_record.rs`. fxdax: an extent is located by
+// Fuchsia's `src/storage/fxfs/src/object_store/extent_record.rs`. cladefs: an extent is located by
 // an extent in the extent store and an offset within it (`ExtentValueV60`), not a device offset
 // (backlog doc-4); and an overwrite extent's bitmap, offset, is collected rather than split off
 // (`offset_by`), as bit-vec 0.10's `split_off` may leave storage its deserializer refuses.
 
-// TODO(https://fxbug.dev/42178223): need validation after deserialization. fxdax: what a layer or
+// TODO(https://fxbug.dev/42178223): need validation after deserialization. cladefs: what a layer or
 // the journal holds is validated as it's read (`ExtentValue::fits`, `ObjectValue::is_valid_for`).
 
 use crate::checksum::{Checksums, ChecksumsV38};
@@ -122,7 +122,7 @@ impl ExtentValue {
         if let ExtentValue::None = self { true } else { false }
     }
 
-    /// fxdax: whether what this says fits an extent `len` bytes long, of `block_size` blocks:
+    /// cladefs: whether what this says fits an extent `len` bytes long, of `block_size` blocks:
     /// checksums each of a whole number of blocks, a bit a block, and an offset on blocks that
     /// doesn't overflow, as an object store's records must (`ObjectValue::is_valid_for`).
     pub fn fits(&self, len: u64, block_size: BlockSize) -> bool {
@@ -162,7 +162,7 @@ impl ExtentValue {
                     ExtentMode::OverwritePartial(bitmap) => {
                         debug_assert!(bitmap.len() > 0);
                         let index = (amount / (extent_len / bitmap.len() as u64)) as usize;
-                        // fxdax: the bits after `index`, collected: bit-vec 0.10's `split_off` can
+                        // cladefs: the bits after `index`, collected: bit-vec 0.10's `split_off` can
                         // leave a word of storage more than the bits need, which its deserializer
                         // refuses, so that the record couldn't be read back.
                         ExtentMode::OverwritePartial(bitmap.iter().skip(index).collect())
@@ -302,7 +302,7 @@ mod tests {
         );
     }
 
-    /// fxdax: an overwrite extent offset by a number of blocks that isn't a multiple of 32 keeps a
+    /// cladefs: an overwrite extent offset by a number of blocks that isn't a multiple of 32 keeps a
     /// bitmap that serializes and deserializes back.
     #[test]
     fn extent_value_offset_by_bitmap_round_trips() {

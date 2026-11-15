@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
+//! cladefs's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
 //! KMS that counts the calls made of it ([`Counted`]), so that a test can say how many a path
 //! costs: none on a fork's, one for a host taking a cell.
 

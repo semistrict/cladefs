@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: a host's write-ahead log of a branch (doc-14): its closed segments not yet
+//! cladefs's own: a host's write-ahead log of a branch (doc-14): its closed segments not yet
 //! acknowledged, each stamped by its writer's chain, the very object it is to be in the bucket. A
 //! segment is in the log before its upload starts, so that every segment that may land in the
 //! writer's name is the log's; one leaves it once acknowledged.
@@ -14,7 +14,7 @@
 //! to it are the branch's; if it is that one, or the base, the rest are stamped again on the new
 //! writer's chain, after the head's end; otherwise another writer's commits moved the branch on,
 //! and the log diverged ([`Error::Diverged`]): its commits, never acknowledged, are lost once
-//! `fxdaxctl take` drops it. By commits, not by the keys the head names: a log stamped again on a
+//! `cladefsctl take` drops it. By commits, not by the keys the head names: a log stamped again on a
 //! writer's chain is kept so in memory alone (TASK-165.9), a crash after finding it stamped as
 //! before, at the keys of none of what landed. A head names a writer's segments only between its
 //! commits, so that the log keeps a commit whole until the branch has it whole.
@@ -69,7 +69,7 @@ impl<T> Wal<T> {
         Self { base, segments: VecDeque::new() }
     }
 
-    /// fxdax: the log a host's disk held, after `base`, of `segments`, in order, stamped as they
+    /// cladefs: the log a host's disk held, after `base`, of `segments`, in order, stamped as they
     /// were, which needn't follow each other: what follows the branch is the log's commits, and
     /// [`Wal::rebase`] stamps it anew (TASK-165.9).
     pub fn of(base: Option<u64>, segments: impl IntoIterator<Item = (Footer, T)>) -> Self {
@@ -343,7 +343,7 @@ mod tests {
         });
     }
 
-    /// fxdax: a log whose commit spans two segments, the first landed, the second not: no head
+    /// cladefs: a log whose commit spans two segments, the first landed, the second not: no head
     /// names the first, as its writer acknowledges whole commits alone, so both are stamped again
     /// after the head's end, and land, the commit once, its runs in both sealed (TASK-92.41).
     #[test]
@@ -380,7 +380,7 @@ mod tests {
         });
     }
 
-    /// fxdax: a log whose segment ending commit 1 goes on with commit 2, landed alone, the
+    /// cladefs: a log whose segment ending commit 1 goes on with commit 2, landed alone, the
     /// segment ending commit 2 not: no head names it, as its writer acknowledges whole commits
     /// alone, so both are stamped again after the head's end, and land, each commit once, both
     /// runs sealed (TASK-345's case, which diverged when the log was put after the branch by

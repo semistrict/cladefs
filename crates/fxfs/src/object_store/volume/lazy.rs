@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of volume.rs: the tests of lazy volumes, which `RootVolume::volume` opens
+//! cladefs's own, a child of volume.rs: the tests of lazy volumes, which `RootVolume::volume` opens
 //! as they are asked for (`Options::lazy_volumes`, `ObjectManager::open_volume`).
 
 use crate::errors::FxfsError;
@@ -35,7 +35,7 @@ async fn two_flushed_volumes() -> crate::filesystem::OpenFxFilesystem {
     filesystem
 }
 
-/// fxdax: volumes open as they are asked for, and only then, with what they require of the
+/// cladefs: volumes open as they are asked for, and only then, with what they require of the
 /// metadata reservation paid for.
 #[fuchsia::test]
 async fn test_lazy_volumes() {
@@ -74,7 +74,7 @@ async fn test_lazy_volumes() {
     filesystem.close().await.expect("Close failed");
 }
 
-/// fxdax: replay opens a volume the journal holds something of, and leaves the others closed.
+/// cladefs: replay opens a volume the journal holds something of, and leaves the others closed.
 #[fuchsia::test]
 async fn test_lazy_volumes_replay() {
     let filesystem = two_flushed_volumes().await;
@@ -99,7 +99,7 @@ async fn test_lazy_volumes_replay() {
     filesystem.close().await.expect("Close failed");
 }
 
-/// fxdax: a volume closed through a mount is reaped as it opens: what a crash left in its
+/// cladefs: a volume closed through a mount is reaped as it opens: what a crash left in its
 /// graveyard goes then.
 #[fuchsia::test]
 async fn test_lazy_volumes_reap_as_they_open() {
@@ -149,7 +149,7 @@ async fn volume_id(root: &crate::object_store::volume::RootVolume, name: &str) -
     root.volume_directory().lookup(name).await.unwrap().unwrap().0
 }
 
-/// fxdax: a volume closed once nothing has it open lets go of its store, what the journal held of
+/// cladefs: a volume closed once nothing has it open lets go of its store, what the journal held of
 /// it flushed into its layers, and opens again as asked, with what was written to it (TASK-136.6).
 #[fuchsia::test]
 async fn test_closed_volumes_open_again() {
@@ -182,7 +182,7 @@ async fn test_closed_volumes_open_again() {
     filesystem.close().await.expect("Close failed");
 }
 
-/// fxdax: what was written to a volume before it closed is in its layers: a crash after loses
+/// cladefs: what was written to a volume before it closed is in its layers: a crash after loses
 /// none of it, and once the journal no longer names the volume, a replay leaves it closed
 /// (TASK-136.6).
 #[fuchsia::test]
@@ -223,7 +223,7 @@ async fn test_closed_volumes_keep_what_was_written_through_a_crash() {
     }
 }
 
-/// fxdax: a volume whose store anything else holds stays open, as does one the journal holds
+/// cladefs: a volume whose store anything else holds stays open, as does one the journal holds
 /// something of on a read-only filesystem, which can't flush it; one it holds nothing of closes
 /// there too (TASK-136.6).
 #[fuchsia::test]

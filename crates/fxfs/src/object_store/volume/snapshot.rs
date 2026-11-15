@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of volume.rs: volume snapshots, which share their source's layers, by
+//! cladefs's own, a child of volume.rs: volume snapshots, which share their source's layers, by
 //! reference count, and its extents, which the allocator freezes (`Allocator::snapshot`).
 
 use super::RootVolume;
@@ -16,7 +16,7 @@ use anyhow::{Context, Error, anyhow, bail, ensure};
 use std::sync::Arc;
 
 impl RootVolume {
-    /// fxdax: snapshots the volume `source_name`, which must be unencrypted, into the new volume
+    /// cladefs: snapshots the volume `source_name`, which must be unencrypted, into the new volume
     /// `snapshot_name`, which holds what the source held when it was flushed here, and is a volume
     /// of its own from then on.
     ///
@@ -48,14 +48,14 @@ impl RootVolume {
             .ok_or(FxfsError::NotFound)
             .context("Missing volume store")?;
 
-        // fxdax: room in the journal waited for first, holding nothing: what makes it is a
+        // cladefs: room in the journal waited for first, holding nothing: what makes it is a
         // compaction, which flushes the source if it has mutations journaled, and so waits for the
         // flush lock taken below, which the snapshot's transaction, waiting for room with it held,
         // never let go of (TASK-245). That transaction then takes what it needs past the room, as a
         // store's flush does its own. The journal's flush task started for it, as a transaction
         // does: after a mount that has committed nothing, none runs to compact (TASK-272).
         filesystem.wait_for_journal_space().await?;
-        // fxdax: the source's commits held back until the snapshot commits, taken before the flush
+        // cladefs: the source's commits held back until the snapshot commits, taken before the flush
         // lock: a commit in flight may compact the journal, which flushes the source (TASK-241).
         let _commits = filesystem
             .lock_manager()
@@ -143,7 +143,7 @@ mod tests {
     use storage_device::fake_device::FakeDevice;
     use test_case::test_case;
 
-    /// fxdax: a snapshot holds what its source held, and each changes on its own after it.
+    /// cladefs: a snapshot holds what its source held, and each changes on its own after it.
     #[fuchsia::test]
     async fn test_snapshot_volume() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
@@ -193,7 +193,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: the pages of a file that a snapshot shares are frozen, until written.
+    /// cladefs: the pages of a file that a snapshot shares are frozen, until written.
     #[fuchsia::test]
     async fn test_snapshot_frozen_pages() {
         const PAGE: u64 = 4096;
@@ -236,7 +236,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: a snapshot replays from the journal.
+    /// cladefs: a snapshot replays from the journal.
     #[fuchsia::test]
     async fn test_snapshot_volume_replays() {
         let device = DeviceHolder::new(FakeDevice::new(16384, 512));
@@ -279,7 +279,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: a snapshot is atomic with its source's commits (TASK-241): writes of the source
+    /// cladefs: a snapshot is atomic with its source's commits (TASK-241): writes of the source
     /// racing it, each overwriting a file whole, which frees the extents it overwrote, are in it
     /// or not, each file whole, and free nothing it shares; the snapshot reads back, passes fsck,
     /// and so after a remount. A commit between the snapshot's flush and its own freed extents
@@ -334,7 +334,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: a snapshot waits for room in the journal holding nothing a compaction needs
+    /// cladefs: a snapshot waits for room in the journal holding nothing a compaction needs
     /// (TASK-245). A compaction flushes each store with mutations journaled as it began, the source
     /// among them; one held up on another store, here by its flush lock, has the journal fill, so
     /// that the snapshot's transaction waits for room. Holding the source's flush lock as it
@@ -426,7 +426,7 @@ mod tests {
         drop(hooks);
     }
 
-    /// fxdax: what a snapshot shares is freed once neither it nor its source references it, in
+    /// cladefs: what a snapshot shares is freed once neither it nor its source references it, in
     /// either order of deletion.
     #[test_case(true; "source first")]
     #[test_case(false; "snapshot first")]
@@ -480,7 +480,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: overwriting a preallocated file's blocks that a snapshot shares writes new blocks,
+    /// cladefs: overwriting a preallocated file's blocks that a snapshot shares writes new blocks,
     /// leaving the snapshot's as they were.
     #[fuchsia::test]
     async fn test_snapshot_volume_overwrite_extents() {
@@ -555,7 +555,7 @@ mod tests {
         filesystem.close().await.expect("Close failed");
     }
 
-    /// fxdax: snapshots of snapshots share what each was made from, and deleting them in any order
+    /// cladefs: snapshots of snapshots share what each was made from, and deleting them in any order
     /// frees everything once the last is gone.
     #[fuchsia::test]
     async fn test_snapshot_volume_chain() {

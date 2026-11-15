@@ -18,7 +18,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
-// fxdax: Fuchsia's alone; fxdax's buffers, the host's and the guest kernel's, are plain memory.
+// cladefs: Fuchsia's alone; cladefs's buffers, the host's and the guest kernel's, are plain memory.
 #[cfg(target_os = "fuchsia")]
 mod buffer_source {
     use crate::buffer::{round_down, round_up};
@@ -50,7 +50,7 @@ mod buffer_source {
             Self::new_internal(size, true).unwrap()
         }
 
-        /// fxdax: a trusted source, or why its VMO couldn't be made or mapped, as when the kernel's
+        /// cladefs: a trusted source, or why its VMO couldn't be made or mapped, as when the kernel's
         /// handles run out (TASK-105), which `new_trusted` panics on.
         pub fn try_new_trusted(size: usize) -> Result<Self, zx::Status> {
             Self::new_internal(size, true)
@@ -138,7 +138,7 @@ mod buffer_source {
 
         /// Commits the range in memory to avoid future page faults.
         ///
-        /// fxdax: the pages the range is in, through the source's mapping, which maps them too, as
+        /// cladefs: the pages the range is in, through the source's mapping, which maps them too, as
         /// upstream's commit of the VMO alone does not (TASK-92.19): writing them would fault each
         /// few in, each fault the host's signal and system call (`zircon::arch::host`).
         pub fn commit_range(&self, range: Range<usize>) -> Result<(), zx::Status> {
@@ -168,7 +168,7 @@ mod buffer_source {
     }
 }
 
-/// fxdax: where Fxfs has no VMOs, in the guest kernel (TASK-26.6) and on the host (TASK-96.1),
+/// cladefs: where Fxfs has no VMOs, in the guest kernel (TASK-26.6) and on the host (TASK-96.1),
 /// buffers are plain memory, which only Fxfs and its device use, so they are all trusted.
 #[cfg(not(target_os = "fuchsia"))]
 mod buffer_source {
@@ -958,11 +958,11 @@ mod tests {
         });
     }
 
-    /// fxdax (TASK-92.19): committing a range of a source maps the pages it is in, in the source's
+    /// cladefs (TASK-92.19): committing a range of a source maps the pages it is in, in the source's
     /// mapping, so that writing them takes no fault, each of which the host makes a signal and a
     /// system call of; and maps those alone. The host holds a page of the mapping only once the
     /// in-process kernel has mapped it there.
-    // fxdax: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
+    // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
     #[cfg(target_os = "fuchsia")]
     #[fuchsia::test]
     async fn committed_ranges_are_mapped() {
@@ -1131,7 +1131,7 @@ mod tests {
     #[fuchsia::test]
     async fn test_trusted_buffer_apis() {
         // Untrusted allocator (only relevant/testable on Fuchsia)
-        // fxdax: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
+        // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
         #[cfg(target_os = "fuchsia")]
         {
             let source = BufferSource::new(4096);
@@ -1163,7 +1163,7 @@ mod tests {
         }
     }
 
-    // fxdax: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
+    // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
     #[cfg(target_os = "fuchsia")]
     #[fuchsia::test]
     async fn test_trusted_buffer_rights() {
@@ -1202,7 +1202,7 @@ mod tests {
         assert_eq!(unpinned.contiguity(), None);
     }
 
-    // fxdax: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
+    // cladefs: of VMO-backed buffers, which only Fuchsia has (TASK-96.1).
     #[cfg(target_os = "fuchsia")]
     #[fuchsia::test]
     async fn test_vmo_trusted_vs_untrusted() {

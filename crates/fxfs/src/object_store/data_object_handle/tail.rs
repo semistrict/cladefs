@@ -16,7 +16,7 @@ use anyhow::Error;
 use std::ops::Range;
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: zeros what the last block of a file of `size` bytes holds past them, unless it is
+    /// cladefs: zeros what the last block of a file of `size` bytes holds past them, unless it is
     /// zeros already, as it nearly always is: says whether it wrote the block. A growth's zeroing
     /// writes back no block its writes didn't reserve room for but one a cut left so, whose room a
     /// writeback paid with its dirty pages' counts (`growth_zeroes_tail`; TASK-80, TASK-153.4,
@@ -50,7 +50,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         Ok(true)
     }
 
-    /// fxdax: makes the file `size` bytes long if it is shorter, in `transaction`, which writes
+    /// cladefs: makes the file `size` bytes long if it is shorter, in `transaction`, which writes
     /// `replaced` of its blocks anew (block aligned): zeroing what its last block holds past its end,
     /// unless `replaced` has that block. What a cut left there is no data, and a cut with no room to
     /// zero it leaves it: the growth zeroes it, as `grow` does, every way a file grows but a DAX
@@ -72,7 +72,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         self.txn_update_size(transaction, size, None).await
     }
 
-    /// fxdax: whether a growth of the file from `old` bytes to `size` zeros its last block past
+    /// cladefs: whether a growth of the file from `old` bytes to `size` zeros its last block past
     /// `old`: if `old` is within it, unless `replaced`, the blocks it writes anew, has it. Where the
     /// block holds zeros there, as it nearly always does, the zeroing writes nothing
     /// (`txn_zero_tail`); where a cut left what it held (SET_KEEP_TAIL, a DAX file's), the block is
@@ -92,7 +92,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
             && !replaced.any(|blocks| blocks.start <= last && last < blocks.end)
     }
 
-    /// fxdax: ahead of a growth to `size` that finds the file's extents before it changes them, a
+    /// cladefs: ahead of a growth to `size` that finds the file's extents before it changes them, a
     /// clone's or an allocation's, zeros what the last block holds past the end, as `txn_grow_size`
     /// does, unless `replaced` has that block, and commits it: in one transaction, the growth would
     /// take the block the zeroing frees for the file's (TASK-153.4).
@@ -112,7 +112,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
         Ok(())
     }
 
-    /// fxdax: zeros what the file's last block holds past its end: a truncate leaves it there, for
+    /// cladefs: zeros what the file's last block holds past its end: a truncate leaves it there, for
     /// a write past the end to bring back (xfstests generic/130, TASK-139).
     pub async fn zero_tail(&self) -> Result<(), Error> {
         let size = self.get_size();
@@ -130,7 +130,7 @@ mod tests {
     use crate::object_handle::WriteObjectHandle;
     use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with_key;
 
-    /// fxdax: a file allocated part of a block grows: the block, which nothing wrote, isn't on the
+    /// cladefs: a file allocated part of a block grows: the block, which nothing wrote, isn't on the
     /// device, and reads as zeros, so the growth has nothing to zero. Read from its extent, the
     /// growth failed, "no extent" (TASK-149.36).
     #[fuchsia::test]

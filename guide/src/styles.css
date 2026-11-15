@@ -1,8 +1,8 @@
-/* Copyright 2026 The fxdax Authors. All rights reserved.
+/* Copyright 2026 The cladefs Authors. All rights reserved.
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file. */
 
-/* fxdax Flight School.
+/* cladefs Flight School.
  * Layout: a sticky instrument bar over one working column; missions put the machine (diagram)
  * beside the narrative on wide screens and above it on narrow ones. The stack's seven layers each
  * keep one colour in every view, so a colour always means a place in the system. */
@@ -28,7 +28,7 @@
   --l-disk: #5c6a2c;
   --l-bucket: #2c5996;
 
-  --o-fxdax: #0d6c75;
+  --o-cladefs: #0d6c75;
   --o-ported: #4b6e8f;
   --o-fuchsia: #a14d7a;
   --o-fuchsia-changed: #b5651d;
@@ -67,7 +67,7 @@
     --l-memory: #a99be8;
     --l-disk: #b0be6a;
     --l-bucket: #82a9ea;
-    --o-fxdax: #5cc3cc;
+    --o-cladefs: #5cc3cc;
     --o-ported: #8fb2d4;
     --o-fuchsia: #e08fbd;
     --o-fuchsia-changed: #eda35f;
@@ -95,7 +95,7 @@
   --l-memory: #a99be8;
   --l-disk: #b0be6a;
   --l-bucket: #82a9ea;
-  --o-fxdax: #5cc3cc;
+  --o-cladefs: #5cc3cc;
   --o-ported: #8fb2d4;
   --o-fuchsia: #e08fbd;
   --o-fuchsia-changed: #eda35f;
@@ -204,7 +204,7 @@ button { font: inherit; color: inherit; }
   white-space: nowrap;
 }
 .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
-.o-fxdax { color: var(--o-fxdax); }
+.o-cladefs { color: var(--o-cladefs); }
 .o-ported { color: var(--o-ported); }
 .o-fuchsia { color: var(--o-fuchsia); }
 .o-fuchsia-changed { color: var(--o-fuchsia-changed); }

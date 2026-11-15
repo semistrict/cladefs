@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 mm/mprotect: a writable batch of a shared mapping's PTEs is of PTEs alike in dirtiness
 
 change_pte_range batches a large folio's PTEs alike in their write and
@@ -8,10 +8,10 @@ the batch's dirty bits into its first PTE, and making a shared mapping
 writable again (MM_CP_TRY_CHANGE_WRITABLE) makes the whole batch
 writable if that one is dirty (can_change_shared_pte_writable). One PTE
 stored to makes its folio's clean PTEs writable too, which a filesystem
-that needs a write fault for each page may not have had: fxdax's DAX
+that needs a write fault for each page may not have had: cladefs's DAX
 pages are made the VM's own one at a time, at their write faults, and a
 store through a clean PTE so made writable went to a page the host had
-not given the VM, which refused it until the VM went down (fxdax
+not given the VM, which refused it until the VM went down (cladefs
 TASK-149.42). With MEM_SOFT_DIRTY unset, as the guest's is, soft-dirty
 splits no batch. A batch made writable takes PTEs alike in dirtiness
 too, so that each is decided as it was before 6.17's batching.

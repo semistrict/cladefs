@@ -1,8 +1,8 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
-//! fxdax's guest tests: VMs booted with fxdax's Firecracker and guest kernel, each a test case run
+//! cladefs's guest tests: VMs booted with cladefs's Firecracker and guest kernel, each a test case run
 //! by the runner (`runner test --test-case NAME`), its host half here under the `host` feature and
 //! its guest half, in the guest agent, under `guest`. Moved from libkrun's tests (TASK-40), whose
 //! framework this is.
@@ -37,16 +37,16 @@ use test_fxfs_guest_pgbench::{
     Database as PgbenchDatabase, Probe, Storage as PgbenchStorage, TestFxfsGuestPgbench,
 };
 mod test_fxfs_guest_bigmap;
-// fxdax: what extentd asks of a disk it shares with many VMs and the bucket (TASK-310).
+// cladefs: what extentd asks of a disk it shares with many VMs and the bucket (TASK-310).
 mod test_fxfs_guest_shared_disk;
 use test_fxfs_guest_shared_disk::TestFxfsGuestSharedDisk;
 mod test_fxfs_guest_bucket_soak;
 use test_fxfs_guest_bucket_soak::TestFxfsGuestBucketSoak;
-// fxdax: sandboxes as LangSmith's CI runs them, two hosts and a bucket on one disk (TASK-330.1).
+// cladefs: sandboxes as LangSmith's CI runs them, two hosts and a bucket on one disk (TASK-330.1).
 mod test_fxfs_guest_sandboxes;
 use test_fxfs_guest_bigmap::TestFxfsGuestBigmap;
 use test_fxfs_guest_sandboxes::TestFxfsGuestSandboxes;
-// fxdax: what a VM costs its host's memory, measured when its guest asks (TASK-164.5).
+// cladefs: what a VM costs its host's memory, measured when its guest asks (TASK-164.5).
 mod measure;
 mod test_fxfs_guest_daemon_lost;
 use test_fxfs_guest_daemon_lost::TestFxfsGuestDaemonLost;
@@ -59,7 +59,7 @@ use test_fxfs_guest_follow_torture::{Mutant, TestFxfsGuestFollowTorture};
 mod test_fxfs_guest_import;
 use test_fxfs_guest_import::TestFxfsGuestImport;
 mod test_fxfs_guest_automount;
-// fxdax: the guest Fxfs's tracepoints under bpftrace (TASK-44.16).
+// cladefs: the guest Fxfs's tracepoints under bpftrace (TASK-44.16).
 mod test_fxfs_guest_bpftrace;
 use test_fxfs_guest_bpftrace::TestFxfsGuestBpftrace;
 mod test_fxfs_guest_git_fetch;
@@ -67,7 +67,7 @@ mod test_fxfs_guest_shared_volumes;
 use test_fxfs_guest_automount::TestFxfsGuestAutomount;
 use test_fxfs_guest_git_fetch::TestFxfsGuestGitFetch;
 use test_fxfs_guest_shared_volumes::TestFxfsGuestSharedVolumes;
-// fxdax: what a checkout the size of Linux's costs, shared and not (TASK-136.1).
+// cladefs: what a checkout the size of Linux's costs, shared and not (TASK-136.1).
 mod test_linux_checkout;
 use test_linux_checkout::{Checkout, TestLinuxCheckout};
 mod test_fxfs_guest_volumes;
@@ -95,7 +95,7 @@ use test_fxfs_guest_script::TestFxfsGuestScript;
 mod test_fxfs_guest_fsx;
 #[cfg(any(feature = "host", target_os = "linux"))]
 use test_fxfs_guest_fsx::TestFxfsGuestFsx;
-// fxdax: hours of mixed load through every crash doc-12 names (TASK-67), its plans and verdicts in
+// cladefs: hours of mixed load through every crash doc-12 names (TASK-67), its plans and verdicts in
 // `soak`.
 pub mod soak;
 #[cfg(any(feature = "host", target_os = "linux"))]
@@ -108,7 +108,7 @@ use test_fxfs_guest_soak::TestFxfsGuestSoak;
 pub mod script;
 #[cfg(all(feature = "guest", target_os = "linux"))]
 mod script_run;
-// fxdax: a script on two filesystems at once, step by step (TASK-44.15).
+// cladefs: a script on two filesystems at once, step by step (TASK-44.15).
 #[cfg(all(feature = "guest", target_os = "linux"))]
 mod differential;
 #[cfg(feature = "host")]
@@ -118,7 +118,7 @@ mod script_vm;
 #[cfg(feature = "guest")]
 mod kernel_log;
 
-// fxdax: what the guest halves of the guest's Fxfs's tests share: evicting, DAX, a mount's counts,
+// cladefs: what the guest halves of the guest's Fxfs's tests share: evicting, DAX, a mount's counts,
 // and copying on write's files read in from sealed extents (doc-13).
 #[cfg(feature = "guest")]
 mod guest_fxfs;
@@ -131,7 +131,7 @@ mod extent_driver;
 mod sqlite;
 #[cfg(any(feature = "host", target_os = "linux"))]
 mod test_fs_bench;
-// fxdax: the loop-device baseline's disk keeps what a guest fsyncs (TASK-350.1).
+// cladefs: the loop-device baseline's disk keeps what a guest fsyncs (TASK-350.1).
 #[cfg(any(feature = "host", target_os = "linux"))]
 mod test_ext4_loop_persists;
 #[cfg(any(feature = "host", target_os = "linux"))]
@@ -159,10 +159,10 @@ impl ShouldRun {
     }
 }
 
-/// fxdax: declares [`Tag`], each tag's variant and name, its doc its help (`runner list --help`).
+/// cladefs: declares [`Tag`], each tag's variant and name, its doc its help (`runner list --help`).
 macro_rules! tags {
     ($($(#[doc = $doc:literal])+ $tag:ident = $name:literal,)+) => {
-        /// fxdax: the suites a case is in, which the scripts select it by (`runner list --tag`),
+        /// cladefs: the suites a case is in, which the scripts select it by (`runner list --tag`),
         /// none of them keeping a list of names: each list a script kept missed cases the others
         /// had, and a case new to the harness was in none (TASK-160.29). Every case has one at
         /// least, [`Tag::Manual`] if no suite runs it.
@@ -198,7 +198,7 @@ macro_rules! tags {
 
 tags! {
     /// scripts/test-e2e.sh's cases unless it is told others, which scripts/test-host.sh runs
-    /// unless FXDAX_E2E_TEST says otherwise: the guest's Fxfs, its crash tests and checks, and
+    /// unless CLADEFS_E2E_TEST says otherwise: the guest's Fxfs, its crash tests and checks, and
     /// pgbench, with a DAX window and without, in minutes.
     E2e = "e2e",
     /// scripts/test-guest-kernel.sh's: the guest kernel's Fxfs, as its every feature is used.
@@ -223,14 +223,14 @@ tags! {
     PerfSingle = "perf-single",
     /// scripts/perf-gate-host.sh's density run, VMs on forks of one base.
     PerfDensity = "perf-density",
-    /// scripts/bench.sh's cases unless FXDAX_BENCH_CASES says others.
+    /// scripts/bench.sh's cases unless CLADEFS_BENCH_CASES says others.
     Bench = "bench",
     /// In no suite, run by name alone: measurements of one thing (a profile, a lock's
     /// contention, a fork's), and runner-deadlock, which fails on purpose.
     Manual = "manual",
 }
 
-/// fxdax: the cases of `cases` named by `names` or tagged with one of `tags`, each once, in their
+/// cladefs: the cases of `cases` named by `names` or tagged with one of `tags`, each once, in their
 /// order there: those a script runs (`runner list`). It fails on a name no case has.
 pub fn select(
     cases: Vec<TestCase>,
@@ -249,7 +249,7 @@ pub fn select(
         .collect())
 }
 
-/// fxdax: one of a run's parts, the `index`th of `count` (`runner list --shard K/N`): a
+/// cladefs: one of a run's parts, the `index`th of `count` (`runner list --shard K/N`): a
 /// selection's every `count`th case from its `index`th, as registered. The parts of a selection
 /// are it, each case in one of them, and a case's part is its place's alone, so that jobs of a
 /// matrix, each a part, run a suite together, no list of names kept (TASK-284).
@@ -281,7 +281,7 @@ impl Shard {
 }
 
 pub fn test_cases() -> Vec<TestCase> {
-    // Register your test here, with the suites it is in (fxdax: TASK-160.29):
+    // Register your test here, with the suites it is in (cladefs: TASK-160.29):
     vec![
         TestCase::new(
             "pjdfstest-fxfs-guest",
@@ -293,7 +293,7 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::Kernel, Tag::Nightly],
             Box::new(TestPjdfstest { dax: true }),
         ),
-        // fxdax: the kernel's own filesystem suite, nightly, its known failures checked each
+        // cladefs: the kernel's own filesystem suite, nightly, its known failures checked each
         // night: in no suite, it ran only when someone named it (TASK-149.20.1).
         TestCase::new(
             "xfstests-fxfs-guest",
@@ -340,10 +340,10 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::Manual],
             Box::new(TestFxfsGuestSharedDisk { dax: true }),
         ),
-        // fxdax: guests writing against a degraded bucket for half an hour, TASK-330's
+        // cladefs: guests writing against a degraded bucket for half an hour, TASK-330's
         // qualification's (TASK-330.3).
         TestCase::new("fxfs-guest-bucket-soak", &[Tag::Manual], Box::new(TestFxfsGuestBucketSoak)),
-        // fxdax: sandboxes as LangSmith's CI runs them, TASK-330's qualification's, which
+        // cladefs: sandboxes as LangSmith's CI runs them, TASK-330's qualification's, which
         // scripts/sandboxes.sh runs with the S3 server it needs (TASK-330.1).
         TestCase::new("fxfs-guest-sandboxes", &[Tag::Manual], Box::new(TestFxfsGuestSandboxes)),
         TestCase::new(
@@ -703,7 +703,7 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::E2e, Tag::Kernel, Tag::Nightly, Tag::DaxGate, Tag::SoakChecks],
             Box::new(TestFxfsGuestChecks { dax: true, small_window: true, ..PAGE_CACHE_CHECKS }),
         ),
-        // fxdax: a check outrunning its budget fails the run by name (TASK-168).
+        // cladefs: a check outrunning its budget fails the run by name (TASK-168).
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new(
             "fxfs-guest-checks-overrun",
@@ -736,7 +736,7 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::Nightly],
             Box::new(TestFxfsGuestScript { dax: true, full: true, killed: false }),
         ),
-        // fxdax: the script's VM killed part way, its files checked against what a kill may leave
+        // cladefs: the script's VM killed part way, its files checked against what a kill may leave
         // (TASK-149.2).
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new(
@@ -762,7 +762,7 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::Nightly],
             Box::new(TestFxfsGuestScript { dax: true, full: true, killed: true }),
         ),
-        // fxdax: fsx-style scripts on Fxfs and ext4 in one guest (TASK-44.15).
+        // cladefs: fsx-style scripts on Fxfs and ext4 in one guest (TASK-44.15).
         #[cfg(any(feature = "host", target_os = "linux"))]
         TestCase::new(
             "fxfs-guest-fsx",
@@ -822,7 +822,7 @@ pub fn test_cases() -> Vec<TestCase> {
             &[Tag::E2e, Tag::Nightly],
             Box::new(TestFxfsGuestDocker { build: false }),
         ),
-        // fxdax: LangSmith's builds, on 8 vCPUs, which oopsed 2 in 17 times (TASK-311).
+        // cladefs: LangSmith's builds, on 8 vCPUs, which oopsed 2 in 17 times (TASK-311).
         TestCase::new(
             "fxfs-guest-docker-build-dax",
             &[Tag::Manual],
@@ -1009,13 +1009,13 @@ pub const STDOUT_END: u8 = 0x03;
 pub const STDERR_START: u8 = 0x0e;
 pub const STDERR_END: u8 = 0x0f;
 
-/// fxdax: in a test's environment, when the runner kills it if it runs on, in seconds since the
+/// cladefs: in a test's environment, when the runner kills it if it runs on, in seconds since the
 /// epoch: so that its VMs' guests say where they are stuck before then ([`GUEST_WATCHDOG`]).
-pub const TEST_DEADLINE: &str = "FXDAX_TEST_DEADLINE";
+pub const TEST_DEADLINE: &str = "CLADEFS_TEST_DEADLINE";
 
-/// fxdax: in the guest agent's environment, the seconds after which the guest, still running,
+/// cladefs: in the guest agent's environment, the seconds after which the guest, still running,
 /// dumps its tasks' and CPUs' stacks, shortly before the runner's deadline (`guest_init`).
-pub const GUEST_WATCHDOG: &str = "FXDAX_GUEST_WATCHDOG_SECS";
+pub const GUEST_WATCHDOG: &str = "CLADEFS_GUEST_WATCHDOG_SECS";
 
 #[host]
 #[derive(Clone, Debug)]
@@ -1064,7 +1064,7 @@ pub trait Test {
         ShouldRun::Yes
     }
 
-    /// Return the image (its Containerfile, fxdax: and what its build takes from the host) if
+    /// Return the image (its Containerfile, cladefs: and what its build takes from the host) if
     /// this test needs a custom rootfs image.
     /// The runner will build the image via podman and extract it before launching the VM.
     /// If podman is unavailable, the test is skipped.
@@ -1077,12 +1077,12 @@ pub trait Test {
         15
     }
 
-    /// fxdax: what a test that ran out of time, its VM gone, has to add to that.
+    /// cladefs: what a test that ran out of time, its VM gone, has to add to that.
     fn timed_out(self: Box<Self>, _test_setup: TestSetup) -> Option<String> {
         None
     }
 
-    /// fxdax: whether the runner fails the test, once it passed, on its VMs' kernels complaining
+    /// cladefs: whether the runner fails the test, once it passed, on its VMs' kernels complaining
     /// on their consoles (`vm::complaints`, TASK-44.8): unless it means them to.
     fn checks_console(&self) -> bool {
         true
@@ -1097,7 +1097,7 @@ pub trait Test {
 
 pub struct TestCase {
     pub name: &'static str,
-    /// fxdax: the suites it is in.
+    /// cladefs: the suites it is in.
     pub tags: &'static [Tag],
     pub test: Box<dyn Test>,
 }
@@ -1153,12 +1153,12 @@ mod tests {
         }
     }
 
-    /// fxdax: the names of the cases of `cases` in no suite, not even [`Tag::Manual`].
+    /// cladefs: the names of the cases of `cases` in no suite, not even [`Tag::Manual`].
     fn untagged(cases: &[TestCase]) -> Vec<&'static str> {
         cases.iter().filter(|case| case.tags.is_empty()).map(|case| case.name).collect()
     }
 
-    /// fxdax: a case new to the harness says where it runs, or where it doesn't: one in no suite
+    /// cladefs: a case new to the harness says where it runs, or where it doesn't: one in no suite
     /// was run by none of the scripts, as xfstests' and the scripts' cases were (TASK-160.29).
     #[test]
     fn every_case_is_in_a_suite() {
@@ -1168,7 +1168,7 @@ mod tests {
         assert_eq!(untagged(&cases), ["untagged"]);
     }
 
-    /// fxdax: no suite is empty, and each tag's name is its own.
+    /// cladefs: no suite is empty, and each tag's name is its own.
     #[test]
     fn every_tag_selects_cases() {
         let cases = test_cases();
@@ -1184,7 +1184,7 @@ mod tests {
         cases.into_iter().map(|case| case.name).collect()
     }
 
-    /// fxdax: a selection is of the cases named and tagged, once each, as registered.
+    /// cladefs: a selection is of the cases named and tagged, once each, as registered.
     #[test]
     fn a_selection_is_of_cases_named_and_tagged() {
         let select = |names: &[&str], tags: &[Tag]| {
@@ -1217,7 +1217,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a suite's parts are it, each case in one part, every Nth from the Kth (TASK-284).
+    /// cladefs: a suite's parts are it, each case in one part, every Nth from the Kth (TASK-284).
     #[test]
     fn a_suites_parts_are_it_each_case_in_one() {
         let nightly = || select(test_cases(), &[], &[Tag::Nightly]).unwrap();
@@ -1241,7 +1241,7 @@ mod tests {
         );
     }
 
-    /// fxdax: a shard is K/N, 1 <= K <= N.
+    /// cladefs: a shard is K/N, 1 <= K <= N.
     #[test]
     fn a_shard_is_its_part_of_a_count() {
         assert_eq!("3/8".parse(), Ok(Shard { index: 3, count: 8 }));

@@ -1,16 +1,16 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Test Fxfs in the guest's kernel (fxdax's TASK-26.1 and TASK-26.6).
+// Test Fxfs in the guest's kernel (cladefs's TASK-26.1 and TASK-26.6).
 //
-// The host boots the kernel fxdax's scripts/build-guest-kernel.sh builds, which
-// FXDAX_GUEST_KERNEL names, with an extent-store device on a new store. The
+// The host boots the kernel cladefs's scripts/build-guest-kernel.sh builds, which
+// CLADEFS_GUEST_KERNEL names, with an extent-store device on a new store. The
 // guest mounts the store's filesystem with the kernel's Fxfs, writes, links,
 // renames and removes, unmounts and mounts again. After the VM exits, the host
 // mounts the store with its own Fxfs and finds what the guest wrote.
 //
-// fxfs-guest: the host makes an fxdax filesystem on the store first, with a
+// fxfs-guest: the host makes an cladefs filesystem on the store first, with a
 // file, and a directory holding a larger file, which the guest lists and reads.
 // fxfs-guest-format: the store holds nothing, and the guest's Fxfs formats it.
 // fxfs-guest-crash: the guest formats the store, fsyncs file after file,
@@ -29,7 +29,7 @@ enum Mode {
     HostFormats,
     GuestFormats,
     Crash,
-    /// fxdax: writers fsyncing files while the kernel fails their allocations (TASK-44.10).
+    /// cladefs: writers fsyncing files while the kernel fails their allocations (TASK-44.10).
     Faults,
 }
 
@@ -37,14 +37,14 @@ pub struct TestFxfsGuest {
     mode: Mode,
     /// Whether the device has a DAX window.
     dax: bool,
-    /// fxdax: whether a crash test's VM process is killed (SIGKILL), rather than its guest reset
+    /// cladefs: whether a crash test's VM process is killed (SIGKILL), rather than its guest reset
     /// (TASK-119.6).
     killed: bool,
-    /// fxdax: whether the extent daemon is killed in the VM process's place, which what it holds
+    /// cladefs: whether the extent daemon is killed in the VM process's place, which what it holds
     /// goes with, of the commits it has yet to make durable (doc-12, TASK-67).
     #[cfg_attr(feature = "guest", allow(dead_code))]
     daemon_killed: bool,
-    /// fxdax: whether a crash test's guest stops its VM by touching a part of the window it was
+    /// cladefs: whether a crash test's guest stops its VM by touching a part of the window it was
     /// never given, as one that keeps to no protocol may (TASK-77).
     stray: bool,
 }
@@ -65,30 +65,30 @@ impl TestFxfsGuest {
         Self { mode: Mode::Crash, dax: false, killed: false, daemon_killed: false, stray: false }
     }
 
-    /// fxdax: fxfs-guest-crash-dax-killed: the crash test with DAX, its VM process killed
+    /// cladefs: fxfs-guest-crash-dax-killed: the crash test with DAX, its VM process killed
     /// (SIGKILL) where its guest would reset it, as a host's crash would end it, the extent
     /// daemon serving the store on, its requests in flight cut off (TASK-119.6).
     pub fn crash_killed() -> Self {
         Self { killed: true, ..Self::crash().with_dax() }
     }
 
-    /// fxdax: fxfs-guest-crash-dax-daemon-killed: the crash test with DAX, on a daemon of its own,
+    /// cladefs: fxfs-guest-crash-dax-daemon-killed: the crash test with DAX, on a daemon of its own,
     /// killed where its guest would reset its VM: of what fsyncs were told, a prefix stays.
     pub fn crash_daemon_killed() -> Self {
         Self { daemon_killed: true, ..Self::crash_killed() }
     }
 
-    /// fxdax: fxfs-guest-crash-stray-dax: the crash test with DAX, its guest touching the window
+    /// cladefs: fxfs-guest-crash-stray-dax: the crash test with DAX, its guest touching the window
     /// where nothing is mapped where it would reset its VM: a load or a store, within a page or
-    /// across two, which FXDAX_CRASH_MS says. That VM stops, and nothing else does: its store
+    /// across two, which CLADEFS_CRASH_MS says. That VM stops, and nothing else does: its store
     /// holds what fsyncs were told, and the daemon serves on (TASK-77).
     pub fn crash_stray() -> Self {
         Self { stray: true, ..Self::crash_killed() }
     }
 
-    /// fxdax: fxfs-guest-faults-dax: two writers create, write and fsync files, as the crash
+    /// cladefs: fxfs-guest-faults-dax: two writers create, write and fsync files, as the crash
     /// test's do, while the guest's kernel fails their allocations at random, slabs' and pages'
-    /// (failslab, fail_page_alloc, its debug build's: FXDAX_GUEST_KERNEL_BUILD=debug), their
+    /// (failslab, fail_page_alloc, its debug build's: CLADEFS_GUEST_KERNEL_BUILD=debug), their
     /// calls failing as they may; the filesystem complains of nothing, and the store holds every
     /// file whose fsync returned (TASK-44.10).
     pub fn faults() -> Self {
@@ -102,7 +102,7 @@ impl TestFxfsGuest {
 }
 
 
-/// fxdax: the window of a test that strays out of what it was given, and how much of its start the
+/// cladefs: the window of a test that strays out of what it was given, and how much of its start the
 /// test's writers reach: its first half is files' ranges, and regions fill the second from its
 /// start, of which they use tens of mebibytes in their seconds (GCE r350 mapped 270 MiB in).
 #[cfg_attr(feature = "guest", allow(dead_code))]
@@ -136,12 +136,12 @@ fn durable_into(writer: u8, index: usize, bytes: &mut [u8]) {
 /// freed, half, stands out from the store's metadata (some 13 MB once the writers ran).
 const UNNAMED: usize = 48 << 20;
 
-/// fxdax: the crash test's file, a page of `mapped_synced()`, synced, which its guest then stores
+/// cladefs: the crash test's file, a page of `mapped_synced()`, synced, which its guest then stores
 /// a byte to through a mapping, at MAPPED_STORE, as the VM stops (TASK-79.11).
 const MAPPED_SYNCED: &str = "mapped-synced";
 const MAPPED_STORE: usize = 100;
 
-/// fxdax: the crash test's files whose pages are written again and again, each write then synced
+/// cladefs: the crash test's files whose pages are written again and again, each write then synced
 /// (TASK-119.6): through write(2) and fsync, or stores through a mapping and msync.
 const REWRITTEN: [&str; 2] = ["rewritten", "rewritten-mapped"];
 const REWRITTEN_PAGES: usize = 16;
@@ -152,7 +152,7 @@ fn rewritten(page: usize, generation: u32) -> Vec<u8> {
     (0..4096).map(|i| (i % 251) as u8 ^ page as u8 ^ g[0] ^ g[1].rotate_left(3)).collect()
 }
 
-/// fxdax: the crash test's file truncated and extended again and again, each size then synced
+/// cladefs: the crash test's file truncated and extended again and again, each size then synced
 /// (TASK-119.6): wherever it holds bytes, they are `resized_byte`'s, but for those an extension not
 /// yet synced left zeros.
 const RESIZED: &str = "resized";
@@ -170,7 +170,7 @@ fn resized_byte(at: usize) -> u8 {
     (at % 251) as u8 + 1
 }
 
-/// fxdax: the crash test's directory with a default ACL, durable, and what it created inherits it:
+/// cladefs: the crash test's directory with a default ACL, durable, and what it created inherits it:
 /// a file and a directory of these names.
 const INHERITS: &str = "inherits";
 const INHERITS_FILE: &str = "file";
@@ -194,15 +194,15 @@ fn inherited_acl(owner: u16, mask: u16, other: u16) -> Vec<u8> {
     ])
 }
 
-/// fxdax: the line the killed crash test's guest says where it would reset its VM, at which the
+/// cladefs: the line the killed crash test's guest says where it would reset its VM, at which the
 /// host kills the VM's process (TASK-119.6).
 const KILL_ME: &str = "kill me";
 
-/// fxdax: what the crash test's guest says before [`KILL_ME`], and the milliseconds since its
+/// cladefs: what the crash test's guest says before [`KILL_ME`], and the milliseconds since its
 /// writers began, when it asked to be killed (TASK-165.9).
 const KILLING: &str = "killing at ";
 
-/// fxdax: what the guest says before its stray access ([`TestFxfsGuest::crash_stray`]).
+/// cladefs: what the guest says before its stray access ([`TestFxfsGuest::crash_stray`]).
 const STRAY: &str = "stray ";
 
 /// The contents of MAPPED_SYNCED as synced.
@@ -241,16 +241,16 @@ fn written() -> Vec<u8> {
 mod host {
     use super::*;
 
-    use crate::common::{fxdax_guest_should_run, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs, spawn_daemon};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use futures::executor::block_on;
-    use fxdax::{Filesystem, Owner, Storage};
+    use cladefs::{Filesystem, Owner, Storage};
 
     /// The store's capacity: room for the crash test's unnamed file too.
     const CAPACITY: u64 = 128 << 20;
 
-    /// fxdax: doc-12's crash bound: what a daemon crash may lose, the commits ordered, and
+    /// cladefs: doc-12's crash bound: what a daemon crash may lose, the commits ordered, and
     /// answered, within it before. A file whose fsync returned that soon before the kill may be
     /// found short or empty, as one the daemon lost, its creation durable, its data not (TASK-221:
     /// the longest lag main has under pgbench, under 1,024 ms on GCE, 2026-11-08, the window the
@@ -271,7 +271,7 @@ mod host {
             .filter_map(|file| {
                 let mut words = file.split(' ');
                 let (writer, index) = (words.next()?.parse().ok()?, words.next()?.parse().ok()?);
-                // fxdax: and when, unless cut short (TASK-165.9).
+                // cladefs: and when, unless cut short (TASK-165.9).
                 let at = match (words.next(), words.next()) {
                     (Some("at"), Some(at)) => at.strip_suffix("ms").and_then(|at| at.parse().ok()),
                     _ => None,
@@ -280,7 +280,7 @@ mod host {
             })
     }
 
-    /// fxdax: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
+    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
     /// to be killed, as `output` says: those a daemon killed may lose, short or empty.
     fn synced_at_the_kill(output: &str) -> std::collections::BTreeSet<(u8, usize)> {
         let killing = output.lines().find_map(|line| line.strip_prefix(KILLING));
@@ -292,7 +292,7 @@ mod host {
         synced(output).filter(|(_, at)| at.is_some_and(recent)).map(|(file, _)| file).collect()
     }
 
-    /// fxdax: of the files each writer's fsync returned for, in its order, those that stayed, with
+    /// cladefs: of the files each writer's fsync returned for, in its order, those that stayed, with
     /// what was written, followed by those lost: a commit stays only with those before it (doc-12:
     /// up to 50 ms of them go with a daemon). One lost may be there, short or empty, its creation
     /// durable, its data not, if its fsync returned just before the kill (`recent`, TASK-165.9).
@@ -344,7 +344,7 @@ mod host {
         assert_eq!(synced_files(output), vec![(1, 2), (4, 5)]);
     }
 
-    /// fxdax: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
+    /// cladefs: the files whose fsync returned within [`CRASH_LOSS_BOUND_MS`] before the guest asked
     /// to be killed, as it says, are those a daemon killed may leave short; none if it says not
     /// when, or a line cut short says not when (TASK-165.9).
     #[test]
@@ -382,7 +382,7 @@ mod host {
 
     impl Test for TestFxfsGuest {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -412,10 +412,10 @@ mod host {
                 false => 0,
                 true => crate::common::dax_window(crate::common::Window::Large)?,
             };
-            // fxdax: on a daemon of its own, which goes on running till its test's end otherwise.
+            // cladefs: on a daemon of its own, which goes on running till its test's end otherwise.
             let daemon = if self.daemon_killed {
                 let socket = std::env::temp_dir()
-                    .join(format!("fxdax-crash-{}.sock", std::process::id()));
+                    .join(format!("cladefs-crash-{}.sock", std::process::id()));
                 let daemon = spawn_daemon(&test_setup, &socket, "extentd", &[], None)?;
                 vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
@@ -424,18 +424,18 @@ mod host {
                 None
             };
             if self.mode == Mode::Crash {
-                // fxdax: when the VM stops, from when its writers begin: FXDAX_CRASH_MS, to replay
+                // cladefs: when the VM stops, from when its writers begin: CLADEFS_CRASH_MS, to replay
                 // a run, or else a time of the run's own, before the writers fill the store, and
                 // with DAX after its store through a mapping (TASK-119.6).
                 let first = if self.dax { 1100 } else { 300 };
-                let crash_ms = std::env::var("FXDAX_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
+                let crash_ms = std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
                 let crash_ms: u64 = crash_ms.unwrap_or_else(|| {
                     let now =
                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
                     first + now.subsec_nanos() as u64 % (2000 - first)
                 });
-                eprintln!("{}: crash at {crash_ms} ms (FXDAX_CRASH_MS)", test_setup.test_case);
-                vm.env(&std::ffi::CString::new(format!("FXDAX_CRASH_MS={crash_ms}"))?);
+                eprintln!("{}: crash at {crash_ms} ms (CLADEFS_CRASH_MS)", test_setup.test_case);
+                vm.env(&std::ffi::CString::new(format!("CLADEFS_CRASH_MS={crash_ms}"))?);
                 match &daemon {
                     Some(daemon) => vm.kill_daemon_on(KILL_ME, daemon.id()),
                     // FcExitCode::AccessRefused, as a vCPU's KVM_RUN keeps failing (TASK-70).
@@ -448,10 +448,10 @@ mod host {
         }
 
         fn check(self: Box<Self>, stdout: Vec<u8>, test_setup: TestSetup) -> TestOutcome {
-            // fxdax: as the guest wrote it, a stop's kernel lines in its midst gone (GCE r248).
+            // cladefs: as the guest wrote it, a stop's kernel lines in its midst gone (GCE r248).
             let output = crate::vm::without_kernel_lines(&String::from_utf8(stdout).unwrap());
             let path = test_setup.tmp_dir.join("extents");
-            // fxdax: the writers' calls failed, some of them, as their allocations did; the store
+            // cladefs: the writers' calls failed, some of them, as their allocations did; the store
             // holds every file whose fsync returned, whole (TASK-44.10).
             if self.mode == Mode::Faults {
                 // Calls may all succeed, allocations failing where the code falls back: that the
@@ -477,7 +477,7 @@ mod host {
                 if synced.len() < 10 {
                     return TestOutcome::Fail(format!("too few fsyncs returned: {output:?}"));
                 }
-                // fxdax: the access never came back, and the daemon serves on (TASK-77).
+                // cladefs: the access never came back, and the daemon serves on (TASK-77).
                 if self.stray {
                     let [stray] = (output.lines())
                         .filter(|line| line.starts_with(STRAY))
@@ -486,9 +486,9 @@ mod host {
                         return TestOutcome::Fail(format!("no stray access: {output:?}"));
                     };
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
-                    let socket = std::env::var_os("FXDAX_EXTENTD").unwrap();
+                    let socket = std::env::var_os("CLADEFS_EXTENTD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    fxdax::extentd::RemoteExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::extentd::RemoteExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
                     crate::common::say_daemon_stats(&test_setup, "extentd");
@@ -499,7 +499,7 @@ mod host {
                     .unwrap();
                 let storage = block_on(Storage::open(&path).unwrap().check()).unwrap();
                 let fs = block_on(Filesystem::mount(storage)).unwrap();
-                // fxdax: the rest of the test's checks count on what was told of being there.
+                // cladefs: the rest of the test's checks count on what was told of being there.
                 if self.daemon_killed {
                     let lost = assert_kept_prefix(&fs, &synced, &synced_at_the_kill(&output));
                     eprintln!("{lost} of {} files told of went with the daemon", synced.len());
@@ -507,10 +507,10 @@ mod host {
                     return TestOutcome::Pass;
                 }
                 assert_synced(&fs, &synced);
-                // fxdax: what the directory's default ACL handed down came with the creations a
+                // cladefs: what the directory's default ACL handed down came with the creations a
                 // journal flush made durable, their inodes never written back (TASK-79.29).
                 {
-                    let acl = |node: &fxdax::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
+                    let acl = |node: &cladefs::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
                     let (dir, _) = block_on(fs.root().lookup(INHERITS.as_bytes())).unwrap();
                     assert_eq!(acl(&dir, b"system.posix_acl_default"), default_acl());
                     let (file, attr) = block_on(dir.lookup(INHERITS_FILE.as_bytes())).unwrap();
@@ -521,7 +521,7 @@ mod host {
                     assert_eq!(acl(&child, b"system.posix_acl_default"), default_acl());
                     assert_eq!(attr.perm, 0o775, "the inheriting directory's mode");
                 }
-                // fxdax: each page written again and again holds, byte by byte, what one of its
+                // cladefs: each page written again and again holds, byte by byte, what one of its
                 // writes since the last synced (that one's included) wrote: none torn into others',
                 // none older (TASK-119.6).
                 for (file, name) in REWRITTEN.iter().enumerate() {
@@ -567,7 +567,7 @@ mod host {
                         }
                     }
                 }
-                // fxdax: the file resized again and again is as large as its last resize synced
+                // cladefs: the file resized again and again is as large as its last resize synced
                 // made it, or one after; its bytes the pattern's below both, and the pattern's or
                 // an extension's zeros above (TASK-119.6).
                 {
@@ -616,7 +616,7 @@ mod host {
                         );
                     }
                 }
-                // fxdax: a page synced, then stored to through a mapping, and written back again
+                // cladefs: a page synced, then stored to through a mapping, and written back again
                 // and again as the VM stops: it holds what was synced, but for the byte stored,
                 // which it may or may not hold. It held zeros (TASK-79.11).
                 if self.dax {
@@ -662,7 +662,7 @@ mod host {
             }
             // What the guest wrote is in the store, for the host's Fxfs as for the guest's.
             let fs = block_on(Filesystem::mount(Storage::open(&path).unwrap())).unwrap();
-            let lookup = |parent: &fxdax::Node, name: &str| {
+            let lookup = |parent: &cladefs::Node, name: &str| {
                 block_on(parent.lookup(name.as_bytes())).unwrap()
             };
             let (dir, _) = lookup(fs.root(), "guest-dir");
@@ -709,7 +709,7 @@ mod guest {
 
     const MNT: &str = "/mnt/fxfs";
 
-    /// fxdax: how many of the window's pages are private, copying on write (doc-13).
+    /// cladefs: how many of the window's pages are private, copying on write (doc-13).
     fn private_pages() -> u64 {
         crate::guest_fxfs::stats("extents")["dax_private_pages"]
     }
@@ -1005,7 +1005,7 @@ mod guest {
     /// filesystem mounted, for the VM to stop with.
     /// Writes and fsyncs file after file, and the directory, reporting each once both fsyncs
     /// return, until the VM stops.
-    /// fxdax: the faults test's (TASK-44.10): its writers' allocations failed at random for a few
+    /// cladefs: the faults test's (TASK-44.10): its writers' allocations failed at random for a few
     /// seconds, as the debug kernel's fault injection does them for tasks that ask, through
     /// debugfs; each writer reports each file whose fsync returned, and in the end how many of its
     /// calls failed. Fxfs's Rust's runtime's allocations, rt.c's (fxfs_rt_*), its allocator's and
@@ -1030,7 +1030,7 @@ mod guest {
         let set = |attr: &str, name: &str, value: &str| {
             let path = format!("{DEBUGFS}/{attr}/{name}");
             fs::write(&path, value).unwrap_or_else(|err| {
-                panic!("{path}: {err} (the debug kernel injects faults: FXDAX_GUEST_KERNEL_BUILD=debug)")
+                panic!("{path}: {err} (the debug kernel injects faults: CLADEFS_GUEST_KERNEL_BUILD=debug)")
             });
         };
         // What report() maps, before the writers' allocations fail: its mmap failed (GCE r268).
@@ -1113,7 +1113,7 @@ mod guest {
         report(&format!("forced failures {}", forced_failures()));
     }
 
-    /// fxdax: how many failures the kernel's fault injection says it forced, in its log
+    /// cladefs: how many failures the kernel's fault injection says it forced, in its log
     /// (/dev/kmsg), each a line while its rate allows.
     fn forced_failures() -> usize {
         use std::os::unix::fs::OpenOptionsExt;
@@ -1138,10 +1138,10 @@ mod guest {
         }
     }
 
-    /// fxdax: when the crash test's writers began ([`since_writers_began`]).
+    /// cladefs: when the crash test's writers began ([`since_writers_began`]).
     static WRITERS_BEGAN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
 
-    /// fxdax: the milliseconds since the crash test's writers began.
+    /// cladefs: the milliseconds since the crash test's writers began.
     fn since_writers_began() -> u128 {
         WRITERS_BEGAN.get().expect("the writers began").elapsed().as_millis()
     }
@@ -1198,7 +1198,7 @@ mod guest {
         while_loud(|_| crate::guest_init::say_out(line));
     }
 
-    /// fxdax: makes RESIZED, of resize 0's size, synced, then truncates or extends it again and
+    /// cladefs: makes RESIZED, of resize 0's size, synced, then truncates or extends it again and
     /// again, to each resize's size, writing the pattern where it extends, and syncing it,
     /// reporting each resize as it begins, and as its sync returns, until the VM stops
     /// (TASK-119.6).
@@ -1231,7 +1231,7 @@ mod guest {
         unreachable!()
     }
 
-    /// fxdax: makes REWRITTEN[`file`], each page's generation 0 synced, then writes its pages
+    /// cladefs: makes REWRITTEN[`file`], each page's generation 0 synced, then writes its pages
     /// again and again, each a generation more, through write(2) and fsync, or (`file` 1) stores
     /// through a mapping and msync of the page, reporting each write as it begins, and as its sync
     /// returns, until the VM stops (TASK-119.6). The pages of a crash's store hold what one of
@@ -1288,7 +1288,7 @@ mod guest {
         unreachable!()
     }
 
-    /// fxdax: [`INHERITS`], its default ACL durable, and what inherits it, made durable by a
+    /// cladefs: [`INHERITS`], its default ACL durable, and what inherits it, made durable by a
     /// journal flush for another inode's sake: nothing writes theirs back before the VM stops.
     fn inherit_acls() {
         let inherits = format!("{MNT}/{INHERITS}");
@@ -1336,24 +1336,24 @@ mod guest {
             file.write_all(&mapped_synced()).unwrap();
             file.sync_all().unwrap();
             fs::File::open(MNT).unwrap().sync_all().unwrap();
-            // fxdax: created here, it is a page-cache inode until read in again (doc-13,
+            // cladefs: created here, it is a page-cache inode until read in again (doc-13,
             // TASK-164.3): read in again, DAX, its store is the window's.
             drop(file);
             read_in_sealed(&mapped);
         }
-        // fxdax: unless its process is to be killed, whose host the guest asks to (TASK-119.6).
+        // cladefs: unless its process is to be killed, whose host the guest asks to (TASK-119.6).
         let stopper = (!killed).then(Stopper::fork);
-        // fxdax: what the writers say is timed from here, as the VM's stop is (TASK-165.9).
+        // cladefs: what the writers say is timed from here, as the VM's stop is (TASK-165.9).
         WRITERS_BEGAN.get_or_init(std::time::Instant::now);
         std::thread::spawn(|| fsync_files(1));
         std::thread::spawn(|| fsync_files(2));
         std::thread::spawn(|| rewrite(0));
         std::thread::spawn(|| rewrite(1));
         std::thread::spawn(resize);
-        // fxdax: with DAX, a store through a mapping as the VM stops, before the writers fill the
+        // cladefs: with DAX, a store through a mapping as the VM stops, before the writers fill the
         // store, which they do in 2 seconds (TASK-79.11). The VM stops at a time the host picks,
-        // FXDAX_CRASH_MS, from when the writers begin (TASK-119.6).
-        let crash_ms: u64 = std::env::var("FXDAX_CRASH_MS").unwrap().parse().unwrap();
+        // CLADEFS_CRASH_MS, from when the writers begin (TASK-119.6).
+        let crash_ms: u64 = std::env::var("CLADEFS_CRASH_MS").unwrap().parse().unwrap();
         if dax {
             std::thread::sleep(std::time::Duration::from_secs(1));
             store_mapped(&mapped);
@@ -1374,7 +1374,7 @@ mod guest {
                 match &access {
                     Some(access) => writeln!(stdout, "{STRAY}{access}").unwrap(),
                     None => {
-                        // fxdax: when, for the files synced just before, which a daemon killed may
+                        // cladefs: when, for the files synced just before, which a daemon killed may
                         // lose ([`synced_at`], TASK-165.9).
                         writeln!(stdout, "{KILLING}{}ms", since_writers_began()).unwrap();
                         writeln!(stdout, "{KILL_ME}").unwrap();
@@ -1395,7 +1395,7 @@ mod guest {
         }
     }
 
-    /// fxdax: a load or store (fxfs.dax_stray) of the window where nothing is mapped, past what the
+    /// cladefs: a load or store (fxfs.dax_stray) of the window where nothing is mapped, past what the
     /// writers reach, within a page or across two, as `crash_ms` picks.
     fn stray_access(crash_ms: u64) -> String {
         let op = if crash_ms & 1 == 0 { "load" } else { "store" };
@@ -1405,7 +1405,7 @@ mod guest {
         format!("{op} {}", STRAY_WITHIN + page * 4096 + within)
     }
 
-    /// fxdax: what stops the crash test's VM, a process of its own, forked before the writers
+    /// cladefs: what stops the crash test's VM, a process of its own, forked before the writers
     /// begin: a writer's fault may wait holding its process's memory map lock, which the agent's
     /// threads then waited for, the stop's among them, which said nothing and stopped no VM (GCE
     /// r221); nor does it say anything through the agent's
@@ -1415,7 +1415,7 @@ mod guest {
         go: fs::File,
     }
 
-    /// fxdax: whether the VM is about to stop, in memory the process that stops it shares, which
+    /// cladefs: whether the VM is about to stop, in memory the process that stops it shares, which
     /// sets it before it drains the console: the writers report nothing more, and begin no write,
     /// so that the console drains, as writers printing all the while kept it from, and the VM ran
     /// on (TASK-119.6, GCE r247). Made before that process is forked ([`Stopper::fork`]).
@@ -1474,7 +1474,7 @@ mod guest {
         }
     }
 
-    /// fxdax: stores a byte to the page at `path`, synced, through a mapping, as the VM is about
+    /// cladefs: stores a byte to the page at `path`, synced, through a mapping, as the VM is about
     /// to stop, with the writers waiting (TASK-79.11): the store makes the page private, one page
     /// more (doc-13), and a thread of its own stores the byte again and writes the page back, again
     /// and again, so that the VM stops with a writeback of it under way, or just done. The store
@@ -1525,7 +1525,7 @@ mod guest {
             .unwrap_or_else(|| panic!("no count of {kind} requests"))
     }
 
-    /// A file's window ranges outlive its inode. fxdax: a file created here is a page-cache inode
+    /// A file's window ranges outlive its inode. cladefs: a file created here is a page-cache inode
     /// until read in again (doc-13, TASK-164.3): read in, DAX, its first read maps it, and read in
     /// again after that, it takes no MAP and no READ. Fails if its ranges went with the inode the
     /// first read mapped them for.
@@ -1547,7 +1547,7 @@ mod guest {
         fs::remove_file(&path).unwrap();
     }
 
-    /// Small files share an extent, which the window maps once for them all. fxdax: files created
+    /// Small files share an extent, which the window maps once for them all. cladefs: files created
     /// here are page-cache inodes until read in again (doc-13, TASK-164.3): their writes take no
     /// MAP, and their writeback packs them in an extent, sealed, which, read in again, DAX, they
     /// share: their reads take one MAP of its region, and no READ; evicted and read in again, they
@@ -1643,7 +1643,7 @@ mod guest {
         assert!(commit.bytes().all(|byte| byte.is_ascii_hexdigit()), "{build:?}");
     }
 
-    /// The driver uses a request queue per CPU, of the device's four (fxdax TASK-26.18.5): a
+    /// The driver uses a request queue per CPU, of the device's four (cladefs TASK-26.18.5): a
     /// writer on each CPU fsyncs a file, through its CPU's queue.
     fn queue_per_cpu() {
         let cpus = std::thread::available_parallelism().unwrap().get();
