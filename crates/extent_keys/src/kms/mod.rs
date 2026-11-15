@@ -19,7 +19,7 @@ mod aws;
 mod gcp;
 mod local;
 mod names;
-mod openbao;
+pub mod openbao;
 
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
 pub use names::KeyNames;

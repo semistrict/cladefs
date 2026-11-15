@@ -12,7 +12,7 @@ use crate::dir::read_file;
 use crate::layout::SegmentId;
 use crate::{Description, MemDir, RemoteData};
 use extent_frame::{KeyId, Secret};
-use extent_keys::kms::{Kms as _, LocalKms};
+use extent_keys::kms::{Kms, LocalKms};
 use extent_keys::testing::Counted;
 use extent_remote::Bucket as _;
 use extent_remote::bucket::PutMode;
@@ -35,13 +35,13 @@ fn child_in(tenant: u64, cell: u64, id: u64, point: bool) -> Child {
 }
 
 /// What the tests' hosts share: a bucket, its objects as object storage holds them, and a KMS,
-/// counting its calls, holding [`TENANT`]'s KEK.
-struct World {
+/// counting its calls, holding [`TENANT`]'s KEK: a [`LocalKms`], or another (TASK-411.16).
+struct World<K: Kms = LocalKms> {
     runtime: tokio::runtime::Runtime,
     objects: Arc<object_store::memory::InMemory>,
     bucket: Arc<Bucket>,
-    kms: Arc<Counted<LocalKms>>,
-    _kms: tempfile::TempDir,
+    kms: Arc<Counted<K>>,
+    _kms: Option<tempfile::TempDir>,
 }
 
 /// A host: its runtime, keys and all, and what its fetchers keep, whose keys are its runtime's.
@@ -53,13 +53,20 @@ struct Host {
 
 impl World {
     fn new() -> Self {
-        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(Bucket::new(objects.clone(), ""));
         let dir = tempfile::tempdir().unwrap();
         let local = LocalKms::open(dir.path().join("kms")).unwrap();
         local.create(TENANT).unwrap();
-        Self { runtime, objects, bucket, kms: Arc::new(Counted::new(local)), _kms: dir }
+        World { _kms: Some(dir), ..World::with_kms(local) }
+    }
+}
+
+impl<K: Kms> World<K> {
+    /// A world whose KMS is `kms`, which holds [`TENANT`]'s KEK.
+    fn with_kms(kms: K) -> Self {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let bucket = Arc::new(Bucket::new(objects.clone(), ""));
+        Self { runtime, objects, bucket, kms: Arc::new(Counted::new(kms)), _kms: None }
     }
 
     /// A host of placement `token`, its KMS this world's, unwrapping anew what it asks.
@@ -159,8 +166,8 @@ fn made(branch: Branch, name: &str) -> MemDir {
 }
 
 /// The store in `dir`, opened by `host`, made whole if it was unmade; checkpointed each segment.
-fn open_on(
-    world: &World,
+fn open_on<K: Kms>(
+    world: &World<K>,
     host: &Host,
     dir: &MemDir,
 ) -> Result<(Arc<Store<MemDir>>, Remote<MemDir>), Failure> {
@@ -169,8 +176,8 @@ fn open_on(
 
 /// The store in `dir`, opened by `host` as [`open_on`] opens it, its uploader's options `options`
 /// but for its placement's token, `host`'s.
-fn open_with(
-    world: &World,
+fn open_with<K: Kms>(
+    world: &World<K>,
     host: &Host,
     dir: &MemDir,
     options: Options,
@@ -210,8 +217,8 @@ fn written(store: &Store<MemDir>, remote: &Remote<MemDir>, extent: ExtentId, dat
 
 /// The data of `extent`, `len` bytes, as `store` reads it: through `host`'s fetchers, if its data
 /// is in the bucket.
-fn read(
-    world: &World,
+fn read<K: Kms>(
+    world: &World<K>,
     host: &Host,
     store: &Store<MemDir>,
     extent: ExtentId,
@@ -229,8 +236,8 @@ fn read(
 }
 
 /// `extent`'s data at `location`, read by a fetcher keeping what it reads in `memory`.
-fn fetched(
-    world: &World,
+fn fetched<K: Kms>(
+    world: &World<K>,
     memory: &Arc<Memory>,
     extent: ExtentId,
     location: &Location,
@@ -1490,4 +1497,55 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
         refused,
         Failure::Remote(extent_remote::Error::Kms("tenant 1: its KEK is destroyed".into()))
     );
+}
+
+/// TASK-411.16, AC #4: a sealed cell's store, made, taken and refused through OpenBao's Transit
+/// engine, a real KMS (`bao server -dev`; the test is skipped, saying so, without `bao`), as
+/// through [`LocalKms`]: the cell's KEK wrapped under its tenant's Transit key, the header naming
+/// OpenBao, the tenant and the key; one unwrap for a host taking the cell, which reads what was
+/// written; a host taking it once fxdax's token may use the key no more refused, naming the
+/// tenant, and opening once it may again; a tenant with no Transit key's cell in the clear.
+#[test]
+fn sealed_stores_open_through_openbao() {
+    use extent_keys::kms::openbao::{OpenBao, Token};
+    use extent_keys::testing::openbao::DevServer;
+    let Some(bao) = DevServer::start() else { return };
+    bao.transit("transit");
+    bao.bao(&["write", "-f", &format!("transit/keys/fxdax-tenant-{TENANT:x}")]);
+    let policy = DevServer::fxdax_policy("transit", "fxdax-tenant-*");
+    bao.policy("fxdax", &policy);
+    let url = bao.url("transit", "key=fxdax-tenant-{tenant}");
+    let world = World::with_kms(OpenBao::new(&url, Token::Value(bao.token("fxdax"))).unwrap());
+
+    let dir = made(test_branch(7), "a");
+    let (store, remote) = open_on(&world, &world.host(5), &dir).unwrap();
+    let data = noise(1, 4 * 4096);
+    written(&store, &remote, ExtentId::new(7, 1), &data);
+    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: 7, generation: 1 });
+    assert_eq!(world.calls(), (1, 0));
+    drop((store, remote));
+    let object = world.cell();
+    let [kek] = &object.keks[..] else { panic!("{:?}", object.keks) };
+    let header = [&b"fxkm\x01\x07openbao"[..], &TENANT.to_be_bytes(), b"\0\x0efxdax-tenant-1"];
+    assert!(kek.wrapped.0.starts_with(&header.concat()), "{:?}", kek.wrapped);
+    assert!(kek.wrapped.0[header.concat().len()..].starts_with(b"vault:v1:"));
+
+    world.kms.reset();
+    let host = world.host(6);
+    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
+    assert_eq!(world.calls(), (0, 1));
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data.clone()));
+    drop(store);
+
+    bao.policy("fxdax", &DevServer::fxdax_policy("transit", "others-*"));
+    let refused = open_on(&world, &world.host(7), &dir.crash(0)).map(drop).unwrap_err();
+    assert_eq!(refused.to_string(), "tenant 1: its KEK is revoked");
+    bao.policy("fxdax", &policy);
+    let host = world.host(8);
+    let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
+    assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data));
+
+    let clear = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
+    let (store, _remote) = open_on(&world, &host, &made(clear, "a")).unwrap();
+    assert!(store.keys().is_empty());
 }

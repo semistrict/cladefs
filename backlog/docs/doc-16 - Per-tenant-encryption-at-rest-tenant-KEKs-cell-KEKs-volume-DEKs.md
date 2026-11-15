@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 03:59'
+updated_date: '2026-11-15 04:05'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -576,3 +576,81 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   `IncorrectKeyException` (both `Unauthentic`); it deletes no key, pending deletion for ever, so
   `NotFoundException` after deletion is untested; its messages are its own, the pending deletion
   one as AWS's.
+
+## Real KMSes: OpenBao
+
+TASK-411.16: OpenBao's Transit engine (openbao.org, MPL-2.0; Vault is BSL, excluded) as a KMS,
+`extent_keys::kms::openbao::OpenBao`. Self-hosted, so the one real KMS tested anywhere: its tests
+start `bao server -dev` themselves.
+
+- **Configuring.** `FXDAX_KMS=openbao://HOST[:PORT]/MOUNT?key=TEMPLATE[&keys=FILE][&namespace=NS]`
+  (port 8200 by default; `MOUNT` the Transit engine's path, which may hold `/`; `NS` its namespace,
+  sent as `X-Vault-Namespace`), or `openbaos://` over HTTPS, which may add `&ca=FILE`, a PEM file of
+  the only CAs trusted (else the system's). `openbao://` sends the token in the clear: loopback or a
+  trusted network only. Each tenant's key is named by `kms::KeyNames`: `TEMPLATE` with `{tenant}` in
+  hexadecimal, `FILE`'s overrides for tenants bringing their own; names of letters, digits, `-`, `_`
+  and `.`. The token is `FXDAX_KMS_OPENBAO_TOKEN`'s, or that of the file `FXDAX_KMS_OPENBAO_TOKEN_FILE`
+  names (exactly one set), read at start and again whenever OpenBao answers 403, the call made once
+  more if it changed: OpenBao Agent's file sink renewing it works. Credentials in the URL are refused.
+- **The token's policy** needs, for each tenant key `NAME`: `update` on `MOUNT/encrypt/NAME` and
+  `MOUNT/decrypt/NAME`, `read` on `MOUNT/keys/NAME`, and `auth/token/lookup-self` (the `default`
+  policy has it). Not `create` on `MOUNT/encrypt/NAME`: Transit's encrypt makes a missing key when
+  the token may create it (its upsert), so such a token gives every tenant wrapping a key, every cell
+  sealed. Without `read`, a tenant with no key is refused as revoked: its cells are made neither
+  sealed nor in the clear. The keys: `aes256-gcm96` (Transit's default) or `chacha20-poly1305`, for
+  associated data; `derived` keys work too.
+- **Wrapped keys.** A header, `fxkm`, format 1, the backend's name (`openbao`, its length a byte
+  before it), the tenant (u64, big-endian), the key's name (its length two bytes, big-endian, before
+  it); then Transit's ciphertext, `vault:vN:...`. An unwrap refuses, as `Unauthentic`, OpenBao not
+  asked, a header of another magic (a `LocalKms` wrap's `fxkw`), format, backend, tenant, or a key
+  name other than the tenant's now: a tenant's key renamed (overrides changed) unwraps none of what
+  the old name wrapped. The header is the encryption's `associated_data` (and `context`, for
+  derived keys): Transit's AEAD binds it, so two tenants sharing one key (overrides may name one key
+  twice) unwrap only their own wraps (a mutant sending no header was caught). A wrap is the 32-byte
+  key, base64, under the key's newest version; any version Transit keeps unwraps.
+- **What OpenBao says, as `kms::Error`** (OpenBao 2.7.2, each checked against `bao server -dev`):
+
+  | OpenBao | wrap | unwrap |
+  |---|---|---|
+  | 200 | wrapped | the key |
+  | 403, then `GET MOUNT/keys/NAME` 404 with no errors (key missing) | `NoSuchTenant` | `Destroyed` (the header says it wrapped) |
+  | 400 `encryption key not found` (a deleted key's decrypt) | | `Destroyed` |
+  | 403, the key readable; or 403 everywhere, `lookup-self` 200 | `Revoked` | `Revoked` |
+  | 400 `refusing to use soft-deleted key` (soft-delete, restorable) | `Revoked` | `Revoked` |
+  | 400 `disallowed by policy (too old)`, version ≥ `min_available_version` (`min_decryption_version` raised, reversible) | | `Revoked` |
+  | the same, version < `min_available_version` (trimmed, gone) | | `Destroyed` |
+  | 400 `message authentication failed`, `invalid ciphertext` | | `Unauthentic` |
+  | 400 `version is too new` | | `Unauthentic` |
+  | 403 and `lookup-self` 403 (fxdax's token invalid, expired, revoked) | `Io` | `Io` |
+  | 404 route not found (no such mount, a token with rights to it), other 4xx, 412/429/5xx (sealed: 503) after 3 tries, network | `Io` | `Io` |
+
+  Why the probing: OpenBao answers 403 both for a token without rights to a key and for an encrypt
+  of a missing key with a token that may not create one; the key's metadata says which, and
+  `lookup-self` tells a tenant's revocation from fxdax's own token failing, so that an expired host
+  token is not read as every tenant revoked (which would drop their keys from every host's memory).
+  Nothing is `NoSuchTenant` but a key OpenBao says it has not, as that one makes cells in the clear.
+  A mount the token has no rights to, there or not, reads as revoked (OpenBao checks the token
+  first). A deleted key is as missing as one never made: unwraps say `Destroyed`, but wraps say
+  `NoSuchTenant`, so a tenant shredded by deleting its key has new cells made in the clear unless
+  its key is made again or the hosts refuse it (`ForgetTenantKeys`); soft-deleting it first, or
+  trimming its versions (which leaves the key, wrapping anew), keeps them refused.
+- **Calls.** reqwest (rustls over aws-lc-rs; the system's roots by rustls-platform-verifier), on a
+  Tokio runtime of its own (one thread), so its futures run under any executor; timeouts 5 s to
+  connect, 15 s a request; transport errors, 412, 429 and 5xx retried, 3 tries, 100 then 400 ms
+  apart; dropping a call's future aborts it. No redirects followed. Nothing is logged; no error says
+  the token (tested); the key's base64 in the request body and OpenBao's replies are zeroed when
+  dropped, as far as reqwest lets them (its own buffers are not). New dependencies of `extent_keys`,
+  each already in the build through `object_store`/`extent_remote`: reqwest (MIT OR Apache-2.0),
+  tokio (MIT), serde_json (MIT OR Apache-2.0), base64 (MIT OR Apache-2.0), bytes (MIT), url (MIT OR
+  Apache-2.0), zeroize's `serde` feature; tempfile (MIT OR Apache-2.0) for the `testing` feature.
+- **Tests.** `extent_keys` `kms::openbao::tests` (18: URLs, tokens, headers, local refusals with no
+  server, wrap and unwrap, rotation, revocation by policy, soft delete and `min_decryption_version`,
+  destruction by trim and delete, tenants without keys, shared keys, a revoked token and a token file
+  renewed, a sealed server, a missing mount, namespaces, TLS with and without `ca`, `kms::from_url`
+  through the environment, a `derived` key) and `extent_store` `upload::encrypted::sealed_stores_open_through_openbao`
+  (a sealed cell made, taken with one unwrap, refused when the policy drops its key, opened again,
+  a tenant without a key in the clear). Each starts `bao server -dev` on a free port
+  (`extent_keys::testing::openbao::DevServer`, `-dev-no-store-token`), and is skipped, saying so,
+  without `bao` (`FXDAX_BAO`, else `PATH`), unless `FXDAX_REQUIRE_OPENBAO` is set: then it fails.
+  `scripts/test-openbao.sh` fetches OpenBao's release (2.7.2, by digest, `scripts/lib/openbao.sh`)
+  and runs them so required; CI's `object-stores` job could run it (proposed, not added).

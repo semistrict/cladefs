@@ -15,16 +15,26 @@ aws-lc-rs.workspace = true
 # fxdax: AWS KMS (kms/aws.rs, TASK-411.17), its calls on a runtime of its own.
 aws-config.workspace = true
 aws-sdk-kms.workspace = true
+# fxdax: OpenBao's Transit engine as a KMS (TASK-411.16), over HTTP(S): reqwest (MIT OR
+# Apache-2.0) with rustls (Apache-2.0 OR ISC OR MIT) over aws-lc-rs, the system's roots verified by
+# rustls-platform-verifier (MIT OR Apache-2.0); on a Tokio runtime of its own (tokio, MIT); its
+# requests and replies JSON (serde_json, MIT OR Apache-2.0) holding base64 (MIT OR Apache-2.0),
+# their bodies' buffers zeroed (bytes, MIT), its URL parsed by url (MIT OR Apache-2.0). Each is in
+# the build already, through object_store and extent_remote.
+base64.workspace = true
+bytes = "1.12.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls"] }
 serde.workspace = true
+serde_json = "1.0.154"
 storage_ptr_slice.workspace = true
 storage_xts.workspace = true
-# The emulator's directory, for the `testing` feature's (`testing::LocalAwsKms`).
+# The `testing` feature's: an OpenBao dev server's files (TASK-411.16).
 tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net"] }
 url.workspace = true
 zerocopy.workspace = true
-zeroize.workspace = true
+zeroize = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 assert_matches.workspace = true
@@ -37,6 +47,7 @@ workspace = true
 
 [features]
 # fxdax: what tests of encryption at rest outside this crate need, as its own have it: a KMS that
-# counts the calls made of it (`testing::Counted`); AWS KMS's emulator, started for a test
-# (`testing::LocalAwsKms`, TASK-411.17).
+# counts the calls made of it (`testing::Counted`); AWS KMS's emulator (`testing::LocalAwsKms`,
+# TASK-411.17) and an OpenBao dev server (`testing::openbao::DevServer`, TASK-411.16), started for a
+# test.
 testing = ["dep:tempfile"]

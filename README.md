@@ -384,10 +384,18 @@ cloud bucket. fxdaxctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 **Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
-host's KMS (`local:///DIR`, a fake for tests and development, or AWS KMS,
-below), the cells of a tenant whose KEK it holds
-are sealed: the bucket, the stores' directories and the part cache hold their
-data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
+host's KMS, the cells of a tenant whose KEK it holds are sealed: the bucket,
+the stores' directories and the part cache hold their data encrypted. The KMS
+is `local:///DIR`, a fake for tests and development, AWS KMS (below), or
+OpenBao's Transit engine: `openbao://HOST[:PORT]/MOUNT?key=fxdax-tenant-{tenant}`
+(`openbaos://` over TLS, `&ca=FILE` for a private CA; `&namespace=NS`;
+`&keys=FILE` naming tenants' own keys), each tenant's KEK the Transit key the
+template names, `{tenant}` its ID in hex. Its token is
+`FXDAX_KMS_OPENBAO_TOKEN`'s, or in the file `FXDAX_KMS_OPENBAO_TOKEN_FILE`
+names (read again when refused, as OpenBao Agent renews it), its policy
+`update` on `MOUNT/encrypt/*` and `MOUNT/decrypt/*` and `read` on
+`MOUNT/keys/*`, and not `create`, which would make a key for every tenant
+(doc-16, Real KMSes: OpenBao). To shred a **tenant**, destroy its KEK in the KMS, then tell
 every host (`fxdaxctl forget-tenant-keys TENANT`, the control API's
 `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
 version of every object, was wrapped by it. To shred a **cell**, run
