@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 11:09'
-updated_date: '2026-11-15 11:09'
+updated_date: '2026-11-15 11:13'
 labels: []
 dependencies:
   - TASK-411.27
@@ -42,3 +42,9 @@ The user's decision (2026-11-15): remove plaintext entirely. Every cell is seale
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Includes finding TASK-411.26's process (sandboxes: three tenant-0 cells made in the clear by a process that isn't the case's daemons): with no plaintext, it refuses to start; run scripts/sandboxes.sh short sealed on ubu1 after this task and settle TASK-411.26 and TASK-411.23 AC #1.
+<!-- SECTION:NOTES:END -->

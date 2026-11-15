@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 11:06'
+updated_date: '2026-11-15 11:13'
 labels:
   - bug
   - encryption
@@ -33,3 +34,9 @@ Found by TASK-411.23 on ubu1 (2026-11-15, branch t3/sealed-in-place 02302b95, sc
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Likely a process of the sandboxes run started without FXDAX_KMS (cells made by a process not the case's daemons). TASK-411.28 makes every store-opening process refuse to start without a KMS or master key, which will name it; check this task's ACs there.
+<!-- SECTION:NOTES:END -->
