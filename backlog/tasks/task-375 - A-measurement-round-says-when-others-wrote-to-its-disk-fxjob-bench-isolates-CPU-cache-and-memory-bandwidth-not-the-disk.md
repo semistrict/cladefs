@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-12 07:45'
-updated_date: '2026-11-15 14:47'
+updated_date: '2026-11-15 20:47'
 labels:
   - testing
   - ubu1
@@ -25,15 +25,15 @@ Found 2026-11-12 by the coordinator, not by the run: TASK-330.4's qualification 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A round run beside a disk loader is marked contaminated in its results and bench-ab.py's table leaves its timings out, saying so
-- [ ] #2 A round run alone is not
+- [x] #1 A round run beside a disk loader is marked contaminated in its results and bench-ab.py's table leaves its timings out, saying so
+- [x] #2 A round run alone is not
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -66,4 +66,6 @@ Left for ubu1 (AC #1, #2), one command, ~4 min once the bench slot is free, from
   scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check-$(date +%s)
 Two fxjob --bench jobs of 90 s each (a dd+fsync workload in the job's TMPDIR standing for a round): alone, then beside a loader inside the same job writing <=128 MB/s to $HOME (ZFS). Expected: 'alone: clean: others wrote N MB/s ...', its cgroup a path; 'beside: CONTAMINATED: others wrote ~100+ MB/s to its disk over the round, bound 10 (POOL/home-dataset ...)'; ab.md's pass row 'NO RESULT [contaminated rounds left out: 1] | - | NO RESULT', written row kept; 'contamination-check: all passed'.
 Not shown by that check, by the rule that a loader runs inside the round's job: a loader on the scratch disk in another cgroup (zd0's count less the cgroup's), covered by unit tests only. Unverified on ubu1 until it runs: that fxdax-bench.slice has io.stat and the job's scope's ancestors hold nothing else; that the pool's objset kstats and /dev/zvol links are as assumed. If alone says UNCHECKED, its why names which.
+
+2026-11-15, ubu1, main a252cb53f: scripts/contamination-check.sh /mnt/fxdax-scratch/t375check/r1, all passed. Alone: clean, others wrote 2.6 MB/s over 90 s (2.9 worst minute; bounds 10 and 50); its I/O a cgroup's. Beside the loader (in the same bench job, writing to ZFS home): CONTAMINATED, others 91.8 MB/s over the round (rpool/USERDATA/home 89.6, zd0 1.9, var/lib 0.2), 116.1 MB/s in its first minute; bench-ab.py: pass NO RESULT [contaminated rounds left out: 1], written (MiB) kept, exit 1, saying why. The beside job waited 450 s for the bench slot behind another job. DoD #2: scripts/upstream-changes.py --check passes. DoD #3: no upstream code touched. DoD #1 open: the workspace tests on ubu1 under fxjob have not run on this change.
 <!-- SECTION:NOTES:END -->
