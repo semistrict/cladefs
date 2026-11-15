@@ -4,9 +4,11 @@ title: >-
   CI flake: tests walking a store's directory fail when a file goes between
   listing and opening it (sealed_images_hold_no_plaintext,
   what_an_uploader_keeps_stays_until_acknowledged)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 19:02'
+updated_date: '2026-11-15 19:03'
 labels:
   - test
   - flaky
@@ -38,3 +40,9 @@ The store removes files in the background (cleaning, write-back, framing) while 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15 19:10 UTC, coordinator (TASK-336/400 lane): taking it; a delegate fixes it.
+<!-- SECTION:NOTES:END -->
