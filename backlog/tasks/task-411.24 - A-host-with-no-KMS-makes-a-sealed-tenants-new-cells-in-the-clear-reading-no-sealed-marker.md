@@ -3,7 +3,7 @@ id: TASK-411.24
 title: >-
   A host with no KMS makes a sealed tenant's new cells in the clear, reading no
   sealed marker
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-15 09:42'
 updated_date: '2026-11-15 14:26'
@@ -34,3 +34,15 @@ Found in TASK-411.19. A tenant whose first sealed cell was made writes `tenants/
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moot since TASK-411.28 (2026-11-15): a host with no KMS no longer exists. Every process that opens stores (fxdax-extentd, fxdaxctl acting itself, fxdax-mount, fxdax-gc collecting or deleting a branch, fxdax-gc-fill, the guest tests' runner) refuses to start without FXDAX_KMS or a master key (bucket_kms::no_kms, fxdax::remote::require_kms), and the sealed marker this task would have read went: with no clear path, every tenant the KMS has no KEK of is refused.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed as moot by TASK-411.28: no host runs without a KMS (startup refusal naming FXDAX_KMS and FXDAX_MASTER_KEY), and the sealed marker went with plaintext. doc-16, One sealed mode.
+<!-- SECTION:FINAL_SUMMARY:END -->

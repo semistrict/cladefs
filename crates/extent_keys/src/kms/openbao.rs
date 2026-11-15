@@ -128,13 +128,13 @@ impl std::fmt::Debug for Token {
 /// failed. A 403 is read on as it is because OpenBao answers one both for a token lacking rights
 /// to a key and for an encryption of a key that does not exist, which would make it (Transit's
 /// upsert), with a token that may not: the key's metadata says which. Nothing it says is
-/// [`Error::NoSuchTenant`] but a key OpenBao says it has not, as a tenant without a KEK has its
-/// cells made in the clear. A mount the token has no rights to, there or not, is one whose keys it
+/// [`Error::NoSuchTenant`] but a key OpenBao says it has not, which cladefs refuses as destroyed
+/// (TASK-411.28). A mount the token has no rights to, there or not, is one whose keys it
 /// may not use: revoked, as OpenBao refuses the token before it looks for the mount.
 ///
 /// The token needs, of each tenant's key `NAME`: `update` on `MOUNT/encrypt/NAME` and
 /// `MOUNT/decrypt/NAME`, `read` on `MOUNT/keys/NAME` (without which a tenant without a key is
-/// refused as revoked, its cells made neither sealed nor in the clear), and `auth/token/lookup-self`
+/// refused as revoked, rather than as having no key), and `auth/token/lookup-self`
 /// (in the `default` policy); and not `create` on `MOUNT/encrypt/NAME`, which would make a key for
 /// each tenant wrapping without one.
 ///
@@ -1251,7 +1251,7 @@ mod tests {
     }
 
     /// AC #2: a tenant with no key is said to have none, if cladefs's token may read keys' names;
-    /// else revoked, its cells made neither sealed nor in the clear. A token that may make keys
+    /// else revoked. A token that may make keys
     /// (`create`, as root's) makes one for each tenant it wraps for (Transit's upsert).
     #[test]
     fn tenants_without_keys_are_named() {

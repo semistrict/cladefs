@@ -190,7 +190,11 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         store.flush().unwrap();
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
-        assert_eq!(extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap(), data);
+        assert_eq!(
+            extent_frame::data(&bytes, &extent_remote::testing::ring([BRANCH]).of(BRANCH.id))
+                .unwrap(),
+            data
+        );
         let byte = stored(&dir, &store, extent(1), MIB as u64 + 5);
         flip(&dir, &byte);
         let Err(error) = closed.bytes() else { panic!("took a flipped byte") };

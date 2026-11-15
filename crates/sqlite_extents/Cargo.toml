@@ -23,7 +23,8 @@ async-trait.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
 rand.workspace = true
-cladefs = { path = "../cladefs" }
+# Its tests' stores sealed under the tests' KMS, their environment naming none (TASK-411.28).
+cladefs = { path = "../cladefs", features = ["tests-kms"] }
 tempfile.workspace = true
 extent_remote.workspace = true
 tokio.workspace = true

@@ -93,6 +93,12 @@ impl TenantKek {
         aws_lc_rs::rand::fill(&mut id).expect("the system's random generator fills an ID");
         Self { id: KekId(id), key: Secret::random() }
     }
+
+    /// The KEK `key`, of ID `id`: tests' ([`crate::testing::KnownKms`]).
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn of(id: KekId, key: Secret) -> Self {
+        Self { id, key }
+    }
 }
 
 impl std::fmt::Debug for TenantKek {

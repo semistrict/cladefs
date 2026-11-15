@@ -6,19 +6,24 @@
 //! (TASK-411.15): for tests that a sealed store leaves none of its files so, the guest tests'
 //! harness's among them, which knows nothing of a store's directory but this.
 //!
-//! A sealed store's framed files, its closed segments' and its large extents', say they are sealed
-//! in their trailers (`extent_frame::Seal`), and its segments' logs are headed
-//! [`SEALED_LOG_MAGIC`]: a framed file whose trailer says [`Seal::Clear`], and a log headed
-//! [`LOG_MAGIC`], are in the clear. Raw files (open segments, open large extents) say nothing:
+//! A store's framed files, its closed segments' and its large extents', say they are sealed in
+//! their trailers (`extent_frame::Seal`), and its segments' logs are headed [`LOG_MAGIC`]: a framed
+//! file whose trailer's seal is of kind 0 (`extent_frame::in_the_clear`), and a log headed
+//! [`CLEAR_LOG_MAGIC`], are in the clear, as stores wrote them before every store was sealed
+//! (TASK-411.28), which no reader reads now. Raw files (open segments, open large extents) say nothing:
 //! encrypted, they are as random bytes (TASK-411.5), which only a search for what was written in
 //! them tells from the clear.
 
 use crate::dir::{Dir, File as _, not_found, read_file};
 use crate::layout::{DESCRIPTION, EXTENTS, LOGS, SEGMENTS, SPARE, StoreFile, parse_number};
-use crate::wal::{LOG_MAGIC, SEALED_LOG_MAGIC};
+use crate::wal::LOG_MAGIC;
 use extent_frame::segment::Branch;
-use extent_frame::{Frame, Seal, TRAILER};
+use extent_frame::{Frame, TRAILER};
 use std::io;
+
+/// What a segment's log in the clear was headed (TASK-411.5), before every store was sealed
+/// (TASK-411.28): no segment's log now.
+pub const CLEAR_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 
 /// What [`on_disk`] found of a store's directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,22 +65,22 @@ pub fn on_disk(dir: &impl Dir) -> io::Result<Option<OnDisk>> {
         OnDisk { branch: store.branch, bucket: store.bucket, read: 0, clear: Vec::new() };
     for (kind, what) in [(SEGMENTS, "a framed segment"), (EXTENTS, "a framed extent")] {
         for path in files(dir, kind)? {
-            let Some(seal) = seal(dir, &path)? else { continue };
+            let Some(clear) = in_the_clear(dir, &path)? else { continue };
             found.read += 1;
-            if seal == Seal::Clear {
+            if clear {
                 found.clear.push(ClearFile { path, what });
             }
         }
     }
     for path in files(dir, LOGS)? {
-        let mut magic = [0; SEALED_LOG_MAGIC.len()];
+        let mut magic = [0; LOG_MAGIC.len()];
         match dir.open(&path, false).and_then(|file| file.read_at(&mut magic, 0)) {
             Ok(()) => {}
             Err(err) if not_found(&err) || err.kind() == io::ErrorKind::UnexpectedEof => continue,
             Err(err) => return Err(err),
         }
         found.read += 1;
-        if &magic == LOG_MAGIC {
+        if &magic == CLEAR_LOG_MAGIC {
             found.clear.push(ClearFile { path, what: "a segment's log" });
         }
     }
@@ -110,8 +115,9 @@ fn listed(dir: &impl Dir, path: &str) -> io::Result<Vec<String>> {
     }
 }
 
-/// The seal the trailer of the framed file at `path` in `dir` says, none if it is gone.
-fn seal(dir: &impl Dir, path: &str) -> io::Result<Option<Seal>> {
+/// Whether the trailer of the framed file at `path` in `dir` says it is in the clear, none if it is
+/// gone; one that doesn't parse otherwise is an error, naming it.
+fn in_the_clear(dir: &impl Dir, path: &str) -> io::Result<Option<bool>> {
     let file = match dir.open(path, false) {
         Ok(file) => file,
         Err(err) if not_found(&err) => return Ok(None),
@@ -123,7 +129,10 @@ fn seal(dir: &impl Dir, path: &str) -> io::Result<Option<Seal>> {
     })?;
     let mut trailer = vec![0; TRAILER as usize];
     file.read_at(&mut trailer, at)?;
-    let frame = Frame::of_trailer(&trailer)
+    if extent_frame::in_the_clear(&trailer) {
+        return Ok(Some(true));
+    }
+    Frame::of_trailer(&trailer)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("{path}: {err}")))?;
-    Ok(Some(frame.seal))
+    Ok(Some(false))
 }

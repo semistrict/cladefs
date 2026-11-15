@@ -2404,9 +2404,9 @@ mod tests {
     /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
     /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
-    /// inherits; the store, the common tenant's, forks into no cell of a tenant with no KEK, in the
-    /// clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
-    /// forking as before.
+    /// inherits. TASK-411.28: a tenant with no KEK there gets no store, refused as destroyed
+    /// (`EACCES`), and the store, the common tenant's, forks into no cell of its (`EACCES`), nothing
+    /// made.
     #[test]
     fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
@@ -2461,15 +2461,12 @@ mod tests {
         assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
 
-        let clear =
-            ExtentStore::create_in(dir.path().join("clear"), 1 << 20, host_store::new_cell(6));
-        let clear = clear.unwrap();
-        assert!(clear.store.keys().is_empty());
-        write(&clear, id(&clear, 1), 0, &pattern(1, BLOCK)).unwrap();
-        clear.commit(None).unwrap();
-        clear.fork_to(dir.path().join("forked"), host_store::fork_child(clear.branch())).unwrap();
-        let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
-        assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+        // A store of a tenant with no KEK there: none, its cell refused, as destroyed.
+        let none =
+            ExtentStore::create_in(dir.path().join("none"), 1 << 20, host_store::new_cell(6));
+        let refused = none.err().expect("a store of a tenant with no KEK");
+        assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
+        assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
         // The common tenant's, sealed, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
@@ -2481,9 +2478,9 @@ mod tests {
         common.commit(None).unwrap();
         let into =
             crate::Branch { cell: host_store::new_cell(6), id: rand::random::<u64>().max(1) };
-        let refused = common.fork_to(dir.path().join("into-clear"), into).unwrap_err();
-        assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        assert!(!dir.path().join("into-clear").exists());
+        let refused = common.fork_to(dir.path().join("into-none"), into).unwrap_err();
+        assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
+        assert!(!dir.path().join("into-none").exists());
         let found =
             extent_store::upload::block_on(extent_remote::branch::record(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
@@ -2506,7 +2503,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
-        let (dek, _) = store.store.keys().sealing().map(|(dek, id)| (*dek.expose(), id)).unwrap();
+        let dek = *store.store.keys().sealing().0.expose();
         let a = id(&store, 1);
         let data = crate::test_data::noise(1, 2 * BLOCK);
         write(&store, a, 0, &data).unwrap();

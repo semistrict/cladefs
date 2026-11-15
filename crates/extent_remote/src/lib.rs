@@ -129,19 +129,13 @@ pub enum Error {
     /// objects sealed, its compaction reading them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
-    /// cladefs: an object in the clear, of a branch whose record has a DEK, its objects sealed: a
-    /// downgrade, its seal, MACs and tags zeroed by one who can write the bucket, or another's
-    /// object put there (TASK-411.3). It names the object.
-    #[error("{0}: in the clear, of a branch whose objects are sealed")]
-    Downgrade(String),
     /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
     /// cladefs: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
-    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them, or its cell
-    /// is in the clear, which keeps no key, as no sealed data goes into the clear. A fork so is
-    /// refused before anything of it is made (`keys::inheriting`).
+    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them. A fork so
+    /// is refused before anything of it is made (`keys::inheriting`).
     #[error(
         "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed, \
          and its record holds not their keys"
@@ -212,17 +206,6 @@ impl From<extent_frame::Error> for Error {
         match error {
             extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
             extent_frame::Error::NoKey(key) => Self::NoKey(key),
-            extent_frame::Error::Clear => Self::Downgrade("an object".into()),
-        }
-    }
-}
-
-impl Error {
-    /// cladefs: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
-    pub fn reading(self, key: &str) -> Self {
-        match self {
-            Self::Downgrade(_) => Self::Downgrade(key.to_owned()),
-            error => error,
         }
     }
 }

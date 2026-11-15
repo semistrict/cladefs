@@ -219,18 +219,26 @@ impl proto::mount_server::Mount for Control {
                         Some(token) => token,
                         None => crate::host_store::token().map_err(Error::new)?,
                     };
-                    // cladefs: a cell made gets a KEK its tenant's wrapped, if the host has a KMS
-                    // and the tenant a KEK there (TASK-411.3).
+                    // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is sealed
+                    // (TASK-411.3, TASK-411.28).
                     let holding = async {
                         let kms = crate::remote::kms();
                         let kek = match make {
-                            true => keys::new_cell_kek(&*bucket, kms.as_ref(), cell.tenant).await?,
+                            true => Some(keys::new_cell_kek(&kms, cell.tenant).await?),
                             false => None,
                         };
-                        let making = (make, kek.as_ref().map(|(_, kek)| kek));
+                        let making = kek.as_ref().map(|(_, kek)| kek);
                         let held = cell::hold(&*bucket, cell, (placement, placement), making, None);
-                        let (held, object) = held.await?;
-                        drop(keys::held(kms.as_ref(), cell, object.clone(), kek));
+                        let (held, object) = match held.await {
+                            Ok(held) => held,
+                            Err(err) => {
+                                if let Some((secret, kek)) = kek {
+                                    kms.give_back(cell.tenant, (secret, kek.wrapped));
+                                }
+                                return Err(err);
+                            }
+                        };
+                        drop(keys::held(&kms, cell, object.clone(), kek));
                         Ok::<_, extent_remote::Error>((held, object))
                     };
                     let held = extent_store::upload::block_on(holding).map_err(Error::new)?;

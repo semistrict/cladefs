@@ -85,7 +85,7 @@ fn in_bucket(
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::remote::kms();
-        let keys = extent_remote::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
+        let keys = extent_remote::keys::writing(&**bucket, &kms, child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
         let recovering = extent_remote::recovery::recover_under(&**bucket, child, origin, &keys);
         let state = recovering.await.map_err(|err| err.to_string())?.state;
@@ -104,16 +104,15 @@ fn in_bucket(
     })
 }
 
-/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS, if it
-/// has one: what the deletion records of a sealed branch's forks to other cells is sealed
-/// (TASK-411.4).
+/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS: what
+/// the deletion records of a branch's forks to other cells is authenticated (TASK-411.4).
 async fn operator_delete(
     bucket: &Arc<Bucket>,
     branch: crate::Branch,
     holder: u64,
 ) -> Result<(), extent_remote::Error> {
     let kms = crate::remote::kms();
-    branch::delete_under(&**bucket, branch, holder, u64::MAX, kms.as_ref()).await
+    branch::delete(&**bucket, branch, holder, u64::MAX, &kms).await
 }
 
 impl Hosts {
@@ -442,12 +441,11 @@ impl Hosts {
                 }
                 // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
                 // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a
-                // tenant's sealed marker and KEK object (TASK-411.19, TASK-411.27).
+                // tenant's KEK object (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::GcLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
-                | Kind::Sealed { .. }
                 | Kind::Kek { .. }
                 | Kind::Retired { .. } => false,
                 _ => true,

@@ -4,9 +4,8 @@
 
 //! cladefs: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
-//! hold a guest's writes until they are framed, read back by offset meanwhile. A store whose
-//! branch is in the clear writes them as they are written, as it always did. A sealed store's are
-//! encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
+//! hold a guest's writes until they are framed, read back by offset meanwhile. Every store is
+//! sealed (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
 //! tweak, under a key of the file's own: derived from the branch's DEK, the newest, and a salt
 //! drawn for the file ([`Sealer`]). Every write reaching such a file is whole sectors
 //! (TASK-411.8), so none reads, changes and writes a sector again. An open segment's salt and DEK
@@ -82,31 +81,31 @@ fn at_bytes(at: u64, bytes: &[u8]) -> Vec<u8> {
     all
 }
 
-/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, in the clear, or
-/// sealed, encrypted a sector at a time. As a [`File`] it reads and writes what was written,
-/// encrypting and decrypting if sealed: a sealed one takes writes of whole sectors alone, and reads
-/// the sectors a read is in whole. What it stores, as stored, is [`RawFile::file`]'s.
+/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, encrypted a
+/// sector at a time. As a [`File`] it reads and writes what was written, encrypting and
+/// decrypting: it takes writes of whole sectors alone, and reads the sectors a read is in whole.
+/// What it stores, as stored, is [`RawFile::file`]'s.
 pub struct RawFile<F> {
     file: Arc<F>,
-    sealer: Option<Arc<Sealer>>,
+    sealer: Arc<Sealer>,
 }
 
 impl<F> RawFile<F> {
-    /// cladefs: its sectors' key, if it is sealed: the key of the object it is once framed in place,
-    /// its parts its sectors as they are, each tagged under it ([`extent_frame::Packer::in_place`],
-    /// TASK-411.23). None in the clear.
-    pub(crate) fn sectors(&self) -> Option<&Arc<ObjectKey>> {
-        self.sealer.as_ref().map(|sealer| &sealer.sectors)
+    /// cladefs: its sectors' key: the key of the object it is once framed in place, its parts its
+    /// sectors as they are, each tagged under it ([`extent_frame::Packer::in_place`],
+    /// TASK-411.23).
+    pub(crate) fn sectors(&self) -> &Arc<ObjectKey> {
+        &self.sealer.sectors
     }
 }
 
 impl<F: File> RawFile<F> {
-    /// `file`, raw, sealed by `sealer` if any, in the clear otherwise.
-    pub(crate) fn new(file: F, sealer: Option<Arc<Sealer>>) -> Self {
+    /// `file`, raw, sealed by `sealer`.
+    pub(crate) fn new(file: F, sealer: Arc<Sealer>) -> Self {
         Self { file: Arc::new(file), sealer }
     }
 
-    /// The file as it stores the bytes, encrypted if sealed: for a reader of them as stored, as a
+    /// The file as it stores the bytes, encrypted: for a reader of them as stored, as a
     /// log's records hold them (`wal::LogRecord`), syncs and writing back; and for an I/O of a
     /// caller's own, of bytes [`RawFile::read_range`] and [`RawFile::decrypt`] read, or that
     /// [`crate::Write::stored`] gives. Never for writing anything else, but a framing in place's
@@ -116,32 +115,25 @@ impl<F: File> RawFile<F> {
     }
 
     /// The range of the file a read of the `len` bytes at `offset` in it reads: the sectors they
-    /// are in, if it is sealed, which decrypt whole ([`RawFile::decrypt`]); those bytes, if not.
+    /// are in, which decrypt whole ([`RawFile::decrypt`]).
     pub fn read_range(&self, offset: u64, len: u64) -> Range<u64> {
-        match self.sealer {
-            None => offset..offset + len,
-            Some(_) => offset / SECTOR * SECTOR..(offset + len).next_multiple_of(SECTOR),
-        }
+        offset / SECTOR * SECTOR..(offset + len).next_multiple_of(SECTOR)
     }
 
-    /// Decrypts `bytes` in place, read as stored at `at`, the start of a [`RawFile::read_range`],
-    /// if it is sealed: whole sectors then. Nothing if it is in the clear.
+    /// Decrypts `bytes` in place, read as stored at `at`, the start of a [`RawFile::read_range`]:
+    /// whole sectors.
     pub fn decrypt(&self, at: u64, bytes: &mut [u8]) {
-        if let Some(sealer) = &self.sealer {
-            sealer.decrypt(at, bytes);
-        }
+        self.sealer.decrypt(at, bytes);
     }
 
-    /// Encrypts `bytes` in place, to be written at `at`, if it is sealed: whole sectors then,
-    /// refused otherwise. Nothing if it is in the clear.
+    /// Encrypts `bytes` in place, to be written at `at`: whole sectors, refused otherwise.
     pub(crate) fn encrypt(&self, at: u64, bytes: &mut [u8]) -> io::Result<()> {
-        let Some(sealer) = &self.sealer else { return Ok(()) };
         if !at.is_multiple_of(SECTOR) || !(bytes.len() as u64).is_multiple_of(SECTOR) {
             let len = bytes.len();
             let error = format!("{len} bytes at {at}: not whole sectors of a sealed raw file");
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
-        sealer.encrypt(at, bytes);
+        self.sealer.encrypt(at, bytes);
         Ok(())
     }
 
@@ -152,9 +144,6 @@ impl<F: File> RawFile<F> {
         offset: u64,
         read: impl Fn(&F, &mut [u8], u64) -> io::Result<()>,
     ) -> io::Result<()> {
-        if self.sealer.is_none() {
-            return read(&self.file, buf, offset);
-        }
         let range = self.read_range(offset, buf.len() as u64);
         if range == (offset..offset + buf.len() as u64) {
             read(&self.file, buf, offset)?;
@@ -179,12 +168,8 @@ impl<F: File> File for RawFile<F> {
         self.read_with(buf, offset, |file, buf, offset| file.read_cached(buf, offset))
     }
 
-    /// Writes `buf` at `offset`, encrypted through a buffer of its own if sealed, whole sectors
-    /// then.
+    /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.sealer.is_none() {
-            return self.file.write_at(buf, offset);
-        }
         let mut sealed = Aligned::new(buf.len());
         sealed.as_mut_slice().copy_from_slice(buf);
         self.encrypt(offset, sealed.as_mut_slice())?;
@@ -223,13 +208,12 @@ mod tests {
     }
 
     /// A sealed raw file stores no byte of what was written, and reads it back, at any offset and
-    /// length, whole sectors or not; refuses writes of parts of sectors; one in the clear stores
-    /// what was written as it was.
+    /// length, whole sectors or not; refuses writes of parts of sectors.
     #[test]
     fn sealed_raw_files_store_ciphertext_and_read_plaintext() {
         let dir = MemDir::new();
         let data: Vec<u8> = (0..3 * SECTOR as usize).map(|at| (at % 251) as u8).collect();
-        let raw = RawFile::new(dir.create("sealed", true).unwrap(), Some(sealer()));
+        let raw = RawFile::new(dir.create("sealed", true).unwrap(), sealer());
         raw.write_at(&data, SECTOR).unwrap();
         let mut stored = vec![0; 4 * SECTOR as usize];
         raw.file().read_at(&mut stored, 0).unwrap();
@@ -250,12 +234,5 @@ mod tests {
             refused.to_string(),
             "512 bytes at 4096: not whole sectors of a sealed raw file"
         );
-
-        let clear = RawFile::new(dir.create("clear", true).unwrap(), None);
-        clear.write_at(&data[..512], 512).unwrap();
-        let mut stored = vec![0; 1024];
-        clear.file().read_at(&mut stored, 0).unwrap();
-        assert_eq!(&stored[512..], &data[..512]);
-        assert_eq!(clear.read_range(512, 512), 512..1024);
     }
 }

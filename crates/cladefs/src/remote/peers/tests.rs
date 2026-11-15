@@ -40,7 +40,9 @@ pub(crate) fn holding(data: &[u8]) -> (Arc<Bucket>, Location) {
     let contents =
         Contents { extents: vec![(EXTENT, 0, data.len() as u64)], ..Contents::default() };
     let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
-    let object = layout::Segment { data: data.to_vec(), footer }.encode();
+    // cladefs: sealed under the tests' DEK, which the hosts' fetchers hold (TASK-411.28).
+    let object = layout::Segment { data: data.to_vec(), footer }
+        .encode(extent_remote::testing::sealing(test_branch(1)));
     futures::executor::block_on(bucket.put(&key, object.into(), PutMode::Create)).unwrap();
     (bucket, Location { key, offset: 0, len: data.len() as u64 })
 }
@@ -94,6 +96,8 @@ fn hosts(
             let cache = tempfile::tempdir().unwrap();
             let kept = Arc::new(Cache::open(cache.path(), u64::MAX, 0).unwrap());
             let (budget, memory) = (Budget::new(Limits::UNBOUNDED), Memory::new());
+            // cladefs: holding the tests' keys, which the objects are sealed under, for good.
+            std::mem::forget(memory.keys().hold(extent_remote::testing::ring([test_branch(1)])));
             let fetcher =
                 || Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), Some(kept.clone()));
             (fetcher(), Arc::new(fetcher()), cache)

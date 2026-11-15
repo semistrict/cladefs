@@ -18,8 +18,8 @@
 //! as its holder last took or changed it: another's taking since fails it ([`Error::Fenced`]).
 //!
 //! cladefs: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
-//! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`]);
-//! none, it is in the clear, and so are its branches ([`crate::keys`]).
+//! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`],
+//! [`make`]): every cell is made with one, none in the clear (TASK-411.28; [`crate::keys`]).
 //!
 //! cladefs: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
 //! ([`shred`], doc-16, Shredding; TASK-411.7): its branches' DEKs unwrap no more, and no one takes
@@ -93,8 +93,8 @@ pub struct Object {
     pub volumes: BTreeMap<String, Volume>,
     /// Whether it was deleted: then no one takes it again.
     pub deleted: bool,
-    /// cladefs: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first:
-    /// none, in the clear (TASK-411.3).
+    /// cladefs: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first
+    /// (TASK-411.3): never none, but a shredded cell's (TASK-411.28).
     pub keks: Vec<Kek>,
     /// cladefs: whether it was shredded ([`shred`], TASK-411.7): its KEKs gone, so that its
     /// branches' data is unreadable, and no one takes it again.
@@ -103,8 +103,8 @@ pub struct Object {
 
 impl Object {
     /// cladefs: a cell's object as its maker makes it, held by `holder` of the placement of `token`
-    /// at epoch 1, of no volumes, its KEK `kek`, if any.
-    fn made(holder: u64, token: u64, kek: Option<Kek>) -> Self {
+    /// at epoch 1, of no volumes, its KEK `kek`.
+    fn made(holder: u64, token: u64, kek: Kek) -> Self {
         Self {
             format: FORMAT,
             epoch: 1,
@@ -112,7 +112,7 @@ impl Object {
             token,
             volumes: BTreeMap::new(),
             deleted: false,
-            keks: kek.into_iter().collect(),
+            keks: vec![kek],
             shredded: false,
         }
     }
@@ -153,12 +153,12 @@ async fn change<R>(
 }
 
 /// Creates `cell`, of no volumes, held by `holder` of the placement of `token` at epoch 1: a
-/// create of another's finds its object there. cladefs: its KEK `kek`, if given (TASK-411.3).
+/// create of another's finds its object there. cladefs: its KEK `kek` (TASK-411.3).
 pub async fn create(
     bucket: &impl Bucket,
     cell: Cell,
     (holder, token): (u64, u64),
-    kek: Option<Kek>,
+    kek: Kek,
 ) -> Result<Held, Error> {
     let object = Object::made(holder, token, kek);
     change(bucket, cell, Start::Create, |found| match found {
@@ -180,7 +180,7 @@ pub async fn make(
     holder: u64,
     kek: &Kek,
 ) -> Result<(Object, bool), Error> {
-    let object = Object::made(holder, 0, Some(kek.clone()));
+    let object = Object::made(holder, 0, kek.clone());
     change(bucket, cell, Start::Create, |found| match found {
         None => Ok(Step::Write(object.clone(), (object.clone(), true))),
         // Ours, landed though its answer was lost, its bytes this making's alone.
@@ -244,9 +244,8 @@ async fn change_held<R>(
 }
 
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
-/// takes it as [`take`] does, a shredded one refused; or, if it has no object and `make` says so, makes it, held at epoch 1,
-/// cladefs: its KEK `kek`, if given (TASK-411.3);
-/// and, given `volume`, has it hold that volume, under that name, unless it names the volume's
+/// takes it as [`take`] does, a shredded one refused; or, if it has no object and `making` gives
+/// its KEK, makes it, held at epoch 1, cladefs: that KEK its (TASK-411.3); and, given `volume`, has it hold that volume, under that name, unless it names the volume's
 /// branch already, under whatever name it gave it: refused, as [`add_volume`] refuses, if another
 /// branch has the name, or the name names no volume. A volume's name is its branch's from its
 /// first: a store of the branch taken into a directory of another name names it no other way.
@@ -255,7 +254,7 @@ pub async fn hold(
     bucket: &impl Bucket,
     cell: Cell,
     (holder, token): (u64, u64),
-    (make, kek): (bool, Option<&Kek>),
+    making: Option<&Kek>,
     volume: Option<(&str, Volume)>,
 ) -> Result<(Held, Object), Error> {
     if let Some((name, _)) = volume
@@ -265,8 +264,10 @@ pub async fn hold(
     }
     change(bucket, cell, Start::Read, |found| {
         let (mut object, mut changed) = match found {
-            None if !make => return Err(Error::NoCell),
-            None => (Object::made(holder, token, kek.cloned()), true),
+            None => match making {
+                None => return Err(Error::NoCell),
+                Some(kek) => (Object::made(holder, token, kek.clone()), true),
+            },
             Some(found) if found.deleted => return Err(Error::Deleted),
             Some(found) if found.shredded => return Err(shredded(cell)),
             Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
@@ -440,17 +441,22 @@ mod tests {
     const FXFS: Volume = Volume { branch: 7, kind: Kind::Fxfs };
     const SQLITE: Volume = Volume { branch: 8, kind: Kind::Sqlite };
 
+    /// A cell's KEK, wrapped, as its object keeps it: none of these tests unwraps it.
+    fn kek() -> Kek {
+        Kek { generation: crate::keys::FIRST, wrapped: extent_keys::Wrapped(vec![7; 40]) }
+    }
+
     /// A cell made is held by its maker at epoch 1, of no volumes; made again by its maker, whose
     /// answer was lost, it stands; by another, it exists. One that was never made has no object,
     /// and no one takes it.
     #[test]
     fn cells_are_made_once() {
         let bucket = Direct(SimBucket::new());
-        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), None)).unwrap();
+        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
         assert_eq!(held, Held { cell: TEST_CELL, epoch: 1, holder: 0x11 });
-        assert_eq!(block_on(create(&bucket, TEST_CELL, (0x11, 5), None)), Ok(held));
+        assert_eq!(block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())), Ok(held));
         let exists = Error::Corrupt("cell 1/1 exists".into());
-        assert_eq!(block_on(create(&bucket, TEST_CELL, (0x12, 5), None)), Err(exists));
+        assert_eq!(block_on(create(&bucket, TEST_CELL, (0x12, 5), kek())), Err(exists));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
         let expected = Object {
             format: FORMAT,
@@ -459,7 +465,7 @@ mod tests {
             token: 5,
             volumes: BTreeMap::new(),
             deleted: false,
-            keks: Vec::new(),
+            keks: vec![kek()],
             shredded: false,
         };
         assert_eq!(object, expected);
@@ -549,7 +555,7 @@ mod tests {
     #[test]
     fn takings_fence_the_holder_before() {
         let bucket = Direct(SimBucket::new());
-        let first = block_on(create(&bucket, TEST_CELL, (0x11, 5), None)).unwrap();
+        let first = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
         block_on(add_volume(&bucket, first, "root", FXFS)).unwrap();
         let second = block_on(take(&bucket, TEST_CELL, 0x12, 5)).unwrap();
         assert_eq!(second, Held { cell: TEST_CELL, epoch: 2, holder: 0x12 });
@@ -575,7 +581,7 @@ mod tests {
     #[test]
     fn holders_add_and_remove_volumes() {
         let bucket = Direct(SimBucket::new());
-        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), None)).unwrap();
+        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
         block_on(add_volume(&bucket, held, "root", FXFS)).unwrap();
         block_on(add_volume(&bucket, held, "db", SQLITE)).unwrap();
         assert_eq!(block_on(add_volume(&bucket, held, "db", SQLITE)), Ok(()));
@@ -602,17 +608,17 @@ mod tests {
     fn holding_takes_or_makes() {
         let bucket = Direct(SimBucket::new());
         assert_eq!(
-            block_on(hold(&bucket, TEST_CELL, (5, 5), (false, None), None)).map(|(held, _)| held),
+            block_on(hold(&bucket, TEST_CELL, (5, 5), None, None)).map(|(held, _)| held),
             Err(Error::NoCell)
         );
         let (made, object) =
-            block_on(hold(&bucket, TEST_CELL, (5, 5), (true, None), None)).unwrap();
+            block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), None)).unwrap();
         assert_eq!((made.epoch, object.epoch, object.holder), (1, 1, 5));
-        let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), (true, None), None)).unwrap();
+        let (again, _) = block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), None)).unwrap();
         assert_eq!(again, made);
         block_on(add_volume(&bucket, made, "root", FXFS)).unwrap();
         let (taken, object) =
-            block_on(hold(&bucket, TEST_CELL, (6, 6), (true, None), None)).unwrap();
+            block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), None)).unwrap();
         assert_eq!((taken.epoch, object.holder), (2, 6));
         assert_eq!(object.volumes, BTreeMap::from([("root".to_owned(), FXFS)]));
     }
@@ -623,23 +629,23 @@ mod tests {
     #[test]
     fn holding_with_a_volume_names_its_branch_once() {
         let bucket = Direct(SimBucket::new());
-        let made = block_on(hold(&bucket, TEST_CELL, (5, 5), (true, None), Some(("root", FXFS))));
+        let made = block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(("root", FXFS))));
         let (made, object) = made.unwrap();
         assert_eq!((made.epoch, object.volumes.len()), (1, 1));
         let again =
-            block_on(hold(&bucket, TEST_CELL, (5, 5), (true, None), Some(("elsewhere", FXFS))));
+            block_on(hold(&bucket, TEST_CELL, (5, 5), Some(&kek()), Some(("elsewhere", FXFS))));
         let (_, object) = again.unwrap();
         assert_eq!(object.volumes, BTreeMap::from([("root".to_owned(), FXFS)]));
-        let taken = block_on(hold(&bucket, TEST_CELL, (6, 6), (true, None), Some(("db", SQLITE))));
+        let taken = block_on(hold(&bucket, TEST_CELL, (6, 6), Some(&kek()), Some(("db", SQLITE))));
         let (taken, object) = taken.unwrap();
         let both = BTreeMap::from([("db".to_owned(), SQLITE), ("root".to_owned(), FXFS)]);
         assert_eq!((taken.epoch, &object.volumes), (2, &both));
         let other = Volume { branch: 9, kind: Kind::Fxfs };
-        let refused = block_on(hold(&bucket, TEST_CELL, (7, 7), (true, None), Some(("db", other))));
+        let refused = block_on(hold(&bucket, TEST_CELL, (7, 7), Some(&kek()), Some(("db", other))));
         assert_eq!(refused.map(|(held, _)| held), Err(Error::VolumeExists("db".into())));
         let object = block_on(read(&bucket, TEST_CELL)).unwrap().unwrap();
         assert_eq!((object.epoch, object.holder, object.volumes), (2, 6, both));
-        let bad = block_on(hold(&bucket, TEST_CELL, (7, 7), (true, None), Some(("a/b", other))));
+        let bad = block_on(hold(&bucket, TEST_CELL, (7, 7), Some(&kek()), Some(("a/b", other))));
         assert_eq!(bad.map(|(held, _)| held), Err(Error::VolumeName("a/b".into())));
     }
 
@@ -654,7 +660,7 @@ mod tests {
             assert!(!valid_name(name), "{name}");
         }
         let bucket = Direct(SimBucket::new());
-        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), None)).unwrap();
+        let held = block_on(create(&bucket, TEST_CELL, (0x11, 5), kek())).unwrap();
         let refused = block_on(add_volume(&bucket, held, "a/b", FXFS));
         assert_eq!(refused, Err(Error::VolumeName("a/b".into())));
         for kind in [Kind::Fxfs, Kind::Sqlite] {

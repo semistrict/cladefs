@@ -22,8 +22,8 @@ pub const TAIL: u64 = 64 << 10;
 
 /// An object's tail: its footer, the table of where its parts are stored, and its trailer, the
 /// object's bytes from where its footer begins to its end; and where its parts are stored, as a
-/// reader holding no key reads them: what the cache keeps, and peers serve, of a sealed object as
-/// of one in the clear. Its readers open it under their keys ([`Tail::open`], TASK-411.2).
+/// reader holding no key reads them: what the cache keeps, and peers serve, of a sealed object.
+/// Its readers open it under their keys ([`Tail::open`], TASK-411.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tail {
     pub bytes: Vec<u8>,
@@ -131,7 +131,11 @@ mod tests {
         };
         let first = format!("get {KEY} last {TAIL}");
 
-        let short = layout::with_footer(&[1; 5000], &"footer");
+        let short = layout::with_footer(
+            &[1; 5000],
+            &"footer",
+            crate::testing::sealing(layout::test_branch(1)),
+        );
         assert!((short.len() as u64) < TAIL);
         let (read_back, asked) = read(&short);
         let read_back = read_back.unwrap().unwrap();
@@ -141,9 +145,21 @@ mod tests {
 
         // The footer whose tail is TAIL bytes: a few bytes longer than those of a tail with an
         // empty footer would leave.
-        let empty = read_tail(&layout::with_footer(&[1; 5000], &Vec::<u8>::new())).bytes.len();
+        let empty = read_tail(&layout::with_footer(
+            &[1; 5000],
+            &Vec::<u8>::new(),
+            crate::testing::sealing(layout::test_branch(1)),
+        ))
+        .bytes
+        .len();
         let fitting = (TAIL as usize - empty - 16..TAIL as usize)
-            .map(|len| layout::with_footer(&[1; 5000], &vec![2u8; len]))
+            .map(|len| {
+                layout::with_footer(
+                    &[1; 5000],
+                    &vec![2u8; len],
+                    crate::testing::sealing(layout::test_branch(1)),
+                )
+            })
             .find(|bytes| read_tail(bytes).bytes.len() as u64 == TAIL)
             .unwrap();
         assert!(fitting.len() as u64 > TAIL);
@@ -152,7 +168,11 @@ mod tests {
         assert_eq!(asked, std::slice::from_ref(&first));
 
         let footer = vec![2u8; TAIL as usize + 5000];
-        let long = layout::with_footer(&[1; 5000], &footer);
+        let long = layout::with_footer(
+            &[1; 5000],
+            &footer,
+            crate::testing::sealing(layout::test_branch(1)),
+        );
         let range = Frame::of(&long).unwrap().tail();
         let (read_back, asked) = read(&long);
         let read_back = read_back.unwrap().unwrap();
@@ -163,15 +183,15 @@ mod tests {
 
     /// cladefs: a sealed object's tail is read and checked by a reader holding no key, as the cache
     /// keeps it; opened under its key, its parts open, and its footer and table are checked
-    /// against their MACs; under another key of its name, refused (TASK-411.2). One in the clear
-    /// opens alike under any keys.
+    /// against their MACs; under another key of its name, refused (TASK-411.2). One sealed under a
+    /// key of another branch, which the keys hold not, stays unopened.
     #[test]
     fn sealed_tails_are_read_keyless_and_opened_under_their_key() {
         let id = extent_frame::KeyId { branch: 1, generation: 0 };
         let dek = extent_frame::Secret::from_bytes(&[7; 32]);
         let footer = layout::encode(&"footer");
         let keys = std::collections::HashMap::from([(id, dek)]);
-        let sealed = extent_frame::framed(&[1; 5000], &footer, Some((&keys[&id], id)));
+        let sealed = extent_frame::framed(&[1; 5000], &footer, (&keys[&id], id));
         let bucket = holding(sealed.clone());
         let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
         assert_eq!(read.footer(), footer);
@@ -183,8 +203,12 @@ mod tests {
             std::collections::HashMap::from([(id, extent_frame::Secret::from_bytes(&[8; 32]))]);
         let by_mac = Error::Corrupt("an object's table, by its MAC".into());
         assert_eq!(read.open(&wrong), Err(by_mac));
-        let clear = layout::with_footer(&[1; 5000], &"footer");
-        let bucket = holding(clear.clone());
+        let others = layout::with_footer(
+            &[1; 5000],
+            &"footer",
+            crate::testing::sealing(layout::test_branch(1)),
+        );
+        let bucket = holding(others.clone());
         let read = bucket.served(tail(&*bucket, KEY)).0.unwrap().unwrap();
         assert_eq!(read.open(&keys), Ok(read.parts.clone()));
     }
@@ -194,7 +218,11 @@ mod tests {
     #[test]
     fn short_objects_whose_trailers_lie_are_corrupt() {
         let mut bytes = vec![0; 10];
-        bytes.extend_from_slice(&layout::with_footer(&[1; 100], &"footer"));
+        bytes.extend_from_slice(&layout::with_footer(
+            &[1; 100],
+            &"footer",
+            crate::testing::sealing(layout::test_branch(1)),
+        ));
         let bucket = holding(bytes.clone());
         let corrupt = Error::Corrupt(format!("{KEY}, by its trailer"));
         assert_eq!(bucket.served(tail(&*bucket, KEY)).0, Err(corrupt.clone()));
@@ -205,7 +233,11 @@ mod tests {
     /// for an object gone.
     #[test]
     fn footers_are_read_by_two_ranges() {
-        let bytes = layout::with_footer(&[1; 5000], &"footer");
+        let bytes = layout::with_footer(
+            &[1; 5000],
+            &"footer",
+            crate::testing::sealing(layout::test_branch(1)),
+        );
         let bucket = holding(bytes.clone());
         let (read, asked) = bucket.served(footer::<String>(&*bucket, KEY));
         assert_eq!(read, Ok(Some("footer".to_owned())));

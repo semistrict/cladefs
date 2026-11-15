@@ -246,8 +246,7 @@ fn a_database_is_fenced_with_its_cell() {
     // Another host's, placed later.
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
-        let (held, _) =
-            cell::hold(&*objects, ours.cell, (2, 2), (false, None), None).await.unwrap();
+        let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), None, None).await.unwrap();
         // Its writer fences the branch (TASK-371).
         drop(extent_remote::Writer::open(objects.clone(), ours, 0x22, held.epoch).await.unwrap());
     });

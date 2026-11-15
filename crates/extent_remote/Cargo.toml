@@ -49,5 +49,6 @@ workspace = true
 # cladefs: what tests of the protocol outside this crate need, as its own have it: a bucket whose
 # requests take effect when the test says (`testing::SimBucket`), the collector's moves
 # (`testing::MovesMaps`), and the protocol's rules, which they may turn off (`set_rules`), as
-# extent_store's simulation does (TASK-88).
-testing = []
+# extent_store's simulation does (TASK-88). cladefs: and a KMS of the tests' (`keys::testing`,
+# TASK-411.28: every store sealed, every test too).
+testing = ["extent_keys/testing"]

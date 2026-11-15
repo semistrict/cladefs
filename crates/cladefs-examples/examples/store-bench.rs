@@ -50,18 +50,19 @@
 //!   governor short of memory would: what it held, took and let go of, the process's CPU time, and
 //!   how long the writes and commits took, which the looks ahead run behind; and the bytes the
 //!   stores wrote, raw and framed, and the segments framed in place. cladefs: sealed stores look
-//!   ahead, hold and frame in place as clear ones do (TASK-411.23, TASK-421).
+//!   ahead, hold and frame in place (TASK-411.23, TASK-421).
 //! - `writes`: N MiB (256) written to a store's open segments as extents of `CLADEFS_BENCH_EXTENT`
 //!   KiB (1024), in a directory of the host's (`CLADEFS_BENCH_DIR`, or a temporary one), read back
 //!   while open, then committed: MiB/s of the writes, of the reads, and how long the commit took
 //!   (TASK-411.5).
 //!
-//! cladefs: `CLADEFS_BENCH_SEALED` set to `1` has `framing` and `writes` open their stores as a host
-//! with a KMS opens a sealed cell's, through their uploaders, to a bucket in memory: their raw
-//! files encrypted, AES-256-XTS by sector, their segments framed sealed, in place their raw files'
-//! sectors, tagged, or in a copy AES-256-GCM (TASK-411.23); set to `0`,
-//! opened alike, in the clear, of a tenant with no KEK in the KMS, its twin; unset, as before, with
-//! no uploader (TASK-411.5).
+//! cladefs: every store is sealed (TASK-411.28): their raw files encrypted, AES-256-XTS by sector,
+//! their segments framed in place their raw files' sectors, tagged, or in a copy AES-256-GCM
+//! (TASK-411.23). `CLADEFS_BENCH_SEALED` set to `1` has `framing` and `writes` open their stores as
+//! a host with a KMS opens a cell's, through their uploaders, to a bucket in memory; unset, with no
+//! uploader, kept in no bucket, sealed under the tests' DEK (`extent_store::UNKEPT_DEK`,
+//! TASK-411.5). `0`, a clear twin through uploaders before TASK-411.28, is refused: measure the
+//! clear with an old pin's store-bench.
 //!
 //! The stores of all but `close-now`, `burst` and `durable` are in memory ([`MemDir`]), so that
 //! what is timed is the store's own work.
@@ -374,10 +375,9 @@ fn nice(nice: i32) {
 }
 
 /// cladefs: a host with a KMS, whose stores' uploaders keep their branches in a bucket in memory, a
-/// runtime of their own, to open stores sealed or in the clear as `CLADEFS_BENCH_SEALED` says
-/// ([`Host::from_env`], TASK-411.5).
+/// runtime of their own, to open stores as `CLADEFS_BENCH_SEALED` says ([`Host::from_env`],
+/// TASK-411.5).
 struct Host {
-    sealed: bool,
     runtime: tokio::runtime::Runtime,
     bucket: Arc<extent_remote::store::Store>,
     upload: extent_store::upload::Runtime,
@@ -385,33 +385,36 @@ struct Host {
 }
 
 impl Host {
-    /// The tenant whose KEK the host's KMS keeps: its cells are sealed.
+    /// The tenant whose KEK the host's KMS keeps.
     const SEALED: u64 = 1;
-    /// A tenant with no KEK there: its cells are in the clear.
-    const CLEAR: u64 = 2;
 
-    /// A host if `CLADEFS_BENCH_SEALED` is set: its stores sealed if it is `1`.
+    /// A host if `CLADEFS_BENCH_SEALED` is `1`; `0`, a clear twin, refused (TASK-411.28).
     fn from_env() -> Option<Self> {
         let sealed = std::env::var("CLADEFS_BENCH_SEALED").ok()?;
+        assert_eq!(
+            sealed, "1",
+            "CLADEFS_BENCH_SEALED: no store is in the clear since TASK-411.28; an old pin's \
+             store-bench measures one"
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
         let bucket = Arc::new(extent_remote::store::Store::new(objects, ""));
         let kms = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::SEALED).unwrap();
-        let keys = extent_remote::keys::Host {
-            kms: Some(extent_remote::keys::Kms::new(Arc::new(local))),
-            ring: extent_remote::fetch::Memory::new().keys().clone(),
-        };
+        let keys = extent_remote::keys::Host::new(
+            extent_remote::keys::Kms::new(Arc::new(local)),
+            extent_remote::fetch::Memory::new().keys().clone(),
+        );
         let uploads = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);
         let upload =
             extent_store::upload::Runtime { handle: runtime.handle().clone(), uploads, keys };
-        Some(Self { sealed: sealed == "1", runtime, bucket, upload, _kms: kms })
+        Some(Self { runtime, bucket, upload, _kms: kms })
     }
 
-    /// The store in `dir`, made, of branch `id` of the host's cell, sealed or not, opened through
-    /// its uploader, which closes no segment between commits, holding the parts it packs ahead in
-    /// `held` (TASK-400), none if sealed.
+    /// The store in `dir`, made, of branch `id` of the host's cell, sealed, opened through its
+    /// uploader, which closes no segment between commits, holding the parts it packs ahead in
+    /// `held` (TASK-400).
     fn open(
         &self,
         dir: HostDir,
@@ -419,7 +422,7 @@ impl Host {
         options: Options,
         held: Arc<HeldParts>,
     ) -> (Arc<Store<HostDir>>, extent_store::upload::Remote<HostDir>) {
-        let tenant = if self.sealed { Self::SEALED } else { Self::CLEAR };
+        let tenant = Self::SEALED;
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
         let kind = extent_remote::cell::Kind::Fxfs;
@@ -435,7 +438,7 @@ impl Host {
         let (store, remote) =
             extent_store::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
         store.made().unwrap();
-        assert_eq!(store.keys().sealing().is_some(), self.sealed);
+        assert!(store.keys().seals());
         (store, remote)
     }
 }
@@ -485,9 +488,8 @@ fn writes(mib: u64) {
     store.commit(None).unwrap();
     let committed = started.elapsed();
     let kind = match &host {
-        Some(host) if host.sealed => "sealed",
-        Some(_) => "clear, through an uploader",
-        None => "clear",
+        Some(_) => "sealed, through an uploader",
+        None => "sealed, kept nowhere",
     };
     let rate = |elapsed: Duration| (count * len as u64) as f64 / MIB as f64 / elapsed.as_secs_f64();
     println!(
@@ -605,9 +607,8 @@ fn framing(segments: u64) {
     }
     sum.runnable_us -= before.framings.sum.runnable_us;
     let sealed = match &host {
-        Some(host) if host.sealed => ", sealed",
-        Some(_) => ", in the clear through uploaders",
-        None => "",
+        Some(_) => ", sealed, through uploaders",
+        None => ", sealed, kept nowhere",
     };
     println!(
         "{count} framings of {SEGMENT} MiB{sealed}, {stores} stores at once, {hogs} spinning \

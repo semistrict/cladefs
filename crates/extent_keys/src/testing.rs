@@ -3,12 +3,14 @@
 // found in the LICENSE file.
 
 //! cladefs's own: what tests of encryption at rest need (the `testing` feature, backlog doc-16): a
-//! KMS that counts the calls made of it ([`Counted`]), so that a test can say how many a path
-//! costs: none on a fork's, one for a host taking a cell; a KMS forgetting destroyed KEKs, as real
-//! ones forget deleted keys ([`Forgetting`], TASK-411.19); AWS KMS's emulator, started for a test
-//! ([`LocalAwsKms`], TASK-411.17); an OpenBao dev server ([`openbao::DevServer`], TASK-411.16),
-//! the real KMS a test can start; and what tests against real Google Cloud KMS need ([`gcp`],
-//! TASK-411.18).
+//! KMS making every tenant's KEK on first use, in memory, the tests' default ([`MemoryKms`],
+//! TASK-411.28); one whose every tenant's KEK is one known key, which tests' processes share with
+//! those they start ([`KnownKms`], TASK-411.28); a KMS that counts the calls made of it ([`Counted`]), so that a test can say how
+//! many a path costs: none on a fork's, one for a host taking a cell; a KMS forgetting destroyed
+//! KEKs, as real ones forget deleted keys ([`Forgetting`], TASK-411.19); AWS KMS's emulator,
+//! started for a test ([`LocalAwsKms`], TASK-411.17); an OpenBao dev server
+//! ([`openbao::DevServer`], TASK-411.16), the real KMS a test can start; and what tests against
+//! real Google Cloud KMS need ([`gcp`], TASK-411.18).
 
 use crate::kms::{Error, Kms};
 use crate::{Secret, Wrapped};
@@ -77,10 +79,97 @@ impl<K: Kms> Kms for Counted<K> {
     }
 }
 
+/// cladefs: the tests' KMS by default (TASK-411.28: every store sealed, every test too): each
+/// tenant's KEK made on its first wrap and kept in memory, as the bucket KMS makes them in the
+/// bucket (`extent_remote::bucket_kms`), so that any tenant a test names is sealed with no setup.
+/// Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]). A tenant [`MemoryKms::destroy`]ed
+/// is refused for good, as a tenant whose KEK object is a tombstone; an unwrap for a tenant with
+/// no KEK is refused as destroyed, what it names gone. Hosts of one test share one, as they share
+/// a bucket: clone the `Arc` it is held in.
+#[derive(Default)]
+pub struct MemoryKms {
+    keks: std::sync::Mutex<std::collections::HashMap<u64, Option<crate::kms::bucket::TenantKek>>>,
+}
+
+impl MemoryKms {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Destroys `tenant`'s KEK, or makes it never to be had: every call naming the tenant is
+    /// refused from then on ([`Error::Destroyed`]).
+    pub fn destroy(&self, tenant: u64) {
+        self.keks.lock().unwrap().insert(tenant, None);
+    }
+
+    /// `tenant`'s KEK, made if `make` and it has none.
+    fn kek<T>(
+        &self,
+        tenant: u64,
+        make: bool,
+        with: impl FnOnce(&crate::kms::bucket::TenantKek) -> T,
+    ) -> Result<T, Error> {
+        let mut keks = self.keks.lock().unwrap();
+        let kek = match keks.entry(tenant) {
+            std::collections::hash_map::Entry::Occupied(had) => had.into_mut(),
+            std::collections::hash_map::Entry::Vacant(_) if !make => {
+                return Err(Error::Destroyed { tenant });
+            }
+            std::collections::hash_map::Entry::Vacant(none) => {
+                none.insert(Some(crate::kms::bucket::TenantKek::random()))
+            }
+        };
+        kek.as_ref().map(with).ok_or(Error::Destroyed { tenant })
+    }
+}
+
+impl Kms for MemoryKms {
+    async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
+        self.kek(tenant, true, |kek| crate::kms::bucket::wrap(tenant, kek, key))
+    }
+
+    async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
+        let unwrapped =
+            self.kek(tenant, false, |kek| crate::kms::bucket::unwrap(tenant, kek, wrapped))?;
+        unwrapped.map_err(|source| Error::Unauthentic { tenant, source })
+    }
+}
+
+/// A KMS whose every tenant's KEK is one known key, [`KnownKms::KEK`], in every process, never a
+/// host's: what cladefs's tests' processes, and those they start, seal under when their environment
+/// names no KMS, agreeing with no state shared, whatever bucket each keeps its stores in (cladefs's
+/// `tests-kms`, TASK-411.28). Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]), each
+/// under a key derived for its tenant alone: one tenant's key unwraps for no other. No tenant's is
+/// ever destroyed: a test of that has a KMS of its own.
+pub struct KnownKms;
+
+impl KnownKms {
+    /// Every tenant's KEK: 32 bytes of 0x7e, as the tests' master key (`scripts/lib/test-kms.sh`).
+    pub const KEK: [u8; 32] = [0x7e; 32];
+
+    /// The tenants' KEK, of the ID of zeros.
+    fn kek() -> crate::kms::bucket::TenantKek {
+        let id = crate::kms::bucket::KekId([0; crate::kms::bucket::KEK_ID_LEN]);
+        crate::kms::bucket::TenantKek::of(id, Secret::from_bytes(&Self::KEK))
+    }
+}
+
+impl Kms for KnownKms {
+    async fn wrap(&self, tenant: u64, key: &Secret) -> Result<Wrapped, Error> {
+        Ok(crate::kms::bucket::wrap(tenant, &Self::kek(), key))
+    }
+
+    async fn unwrap(&self, tenant: u64, wrapped: &Wrapped) -> Result<Secret, Error> {
+        crate::kms::bucket::unwrap(tenant, &Self::kek(), wrapped)
+            .map_err(|source| Error::Unauthentic { tenant, source })
+    }
+}
+
 /// A KMS that forgets a tenant's KEK once it is destroyed, as a real KMS forgets a deleted key: AWS
 /// KMS once its deletion's waiting period is over, OpenBao Transit's key deleted (TASK-411.19).
 /// Where `inner` answers [`Error::Destroyed`], it answers [`Error::NoSuchTenant`], as for a tenant
-/// that never had a KEK: so a [`crate::kms::LocalKms`]'s `destroy` reads as a real KMS's deletion.
+/// that never had a KEK: so a [`crate::kms::LocalKms`]'s `destroy` reads as a real KMS's deletion,
+/// which every store refuses as destroyed all the same (TASK-411.28).
 pub struct Forgetting<K> {
     inner: K,
 }

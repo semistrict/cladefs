@@ -26,11 +26,15 @@
 //!
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
-//! a thread. It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it
+//! a thread. Sealed, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process
+//! chooses it (`extent_remote::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR
+//! given `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to
+//! start. It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it
 //! wrote, and the largest cell's share.
 
 use extent_remote::batch::{Batch, Commit};
 use extent_remote::bucket::Bucket as _;
+use extent_remote::keys::{self, Kms};
 use extent_remote::layout::{Branch, Cell, Child};
 use extent_remote::store::Store;
 use extent_remote::{Writer, branch, cell};
@@ -102,6 +106,10 @@ fn main() -> Result<(), String> {
         return Err(format!("{}: not empty", dir.display()));
     }
     let files = LocalFileSystem::new_with_prefix(&dir).map_err(|err| err.to_string())?;
+    let dir = dir.canonicalize().map_err(|err| format!("{}: {err}", dir.display()))?;
+    let url = format!("file://{}/", dir.display());
+    let kms = extent_remote::bucket_kms::from_env(|| Ok(Arc::new(Store::from_url(&url)?)))?;
+    let kms = Kms::new(kms.shared());
     let shapes: Vec<(Cell, Shape)> = (1..=tenants)
         .flat_map(|tenant| (1..=cells).map(move |id| Cell { tenant, id }))
         .map(|cell| {
@@ -126,7 +134,7 @@ fn main() -> Result<(), String> {
                     while let Some(&(cell, shape)) =
                         shapes.get(next.fetch_add(1, Ordering::Relaxed))
                     {
-                        let sum = futures::executor::block_on(fill(&files, cell, shape))
+                        let sum = futures::executor::block_on(fill(&files, &kms, cell, shape))
                             .map_err(|err| format!("cell {cell}: {err}"))?;
                         sums.push((cell, sum));
                     }
@@ -157,14 +165,19 @@ fn main() -> Result<(), String> {
 
 /// Writes `cell`, its branch as `shape` says, and a VM's points' cells, into memory, then into
 /// `files`: what it took.
-async fn fill(files: &LocalFileSystem, cell: Cell, shape: Shape) -> Result<Sum, String> {
+async fn fill(
+    files: &LocalFileSystem,
+    kms: &Arc<Kms>,
+    cell: Cell,
+    shape: Shape,
+) -> Result<Sum, String> {
     let memory = Arc::new(object_store::memory::InMemory::new());
     let bucket = Arc::new(Store::new(memory, ""));
     let failed = |err: extent_remote::Error| err.to_string();
-    cell::create(&*bucket, cell, (10, 1), None).await.map_err(failed)?;
     let id = Branch { cell, id: 1 };
     branch::create(&*bucket, id, 0).await.map_err(failed)?;
-    let writer = Writer::open(bucket.clone(), id, 10, 1).await.map_err(failed)?;
+    // Its cell made with a KEK of the host's KMS, its record given its DEK.
+    let writer = Writer::open_under(bucket.clone(), id, (10, 1), kms).await.map_err(failed)?;
     let (segments, per_segment) = match shape {
         Shape::Garbage { segments } => (segments, EXTENTS),
         Shape::Vm { segments, extents, .. } => (segments, extents),
@@ -195,12 +208,13 @@ async fn fill(files: &LocalFileSystem, cell: Cell, shape: Shape) -> Result<Sum, 
         };
         let segment = match point_at(shape, cell.tenant, n) {
             Some(point) => {
-                cell::create(&*bucket, point.cell, (10, 1), None).await.map_err(failed)?;
+                let (_, kek) = keys::new_cell_kek(kms, point.cell.tenant).await.map_err(failed)?;
+                cell::create(&*bucket, point.cell, (10, 1), kek).await.map_err(failed)?;
                 batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
             }
             None => batch.close(&mut writer.chain()),
         };
-        let seq = writer.add_segment(segment.frame()).map_err(failed)?;
+        let seq = writer.add_segment(segment.frame(writer.keys().sealing())).map_err(failed)?;
         writer.upload(seq).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
     }

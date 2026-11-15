@@ -918,6 +918,10 @@ fn main() -> anyhow::Result<()> {
         }
         CliCommand::Test { test_case, base_dir, keep_all, github_summary, outcome, run, round } => {
             sockets_fit(&std::env::temp_dir())?;
+            // cladefs: the stores its cases make and open in its own processes are sealed under the
+            // host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as every
+            // process that opens stores does (TASK-411.28); scripts/test-e2e.sh names one.
+            sealed::require_kms()?;
             let record = outcome.map(|outcome| Record { outcome, run, round });
             run_tests(&test_case, base_dir, keep_all, github_summary, record)
         }

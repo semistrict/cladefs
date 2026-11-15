@@ -37,6 +37,13 @@ pub const SEALED: &str = "CLADEFS_E2E_SEALED";
 /// cladefsctl's `create`), and granted ones, of IDs up to 15 (fxfs-guest-migrate-tenant-dax's 1-4).
 pub const TENANTS: std::ops::RangeInclusive<u64> = 0..=15;
 
+/// Whether this process has a KMS to seal and open stores under (`CLADEFS_KMS`, `CLADEFS_MASTER_KEY`):
+/// what the runner asks before it runs any case, refusing to start with none, naming both, as
+/// every process that opens stores does (TASK-411.28; `cladefs::remote::require_kms`).
+pub fn require_kms() -> anyhow::Result<()> {
+    cladefs::remote::require_kms().map_err(anyhow::Error::msg)
+}
+
 /// Makes a local KMS in `dir` (`CLADEFS_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK for
 /// each of [`TENANTS`]: those it holds already are kept.
 pub fn kms(dir: &Path) -> anyhow::Result<()> {
@@ -247,12 +254,10 @@ async fn bucket(
         report.objects += 1;
         report.bytes += object.bytes.len() as u64;
         if framed {
-            match extent_frame::Frame::of(&object.bytes) {
-                Ok(frame) if frame.seal == extent_frame::Seal::Clear => {
-                    report.clear.push(format!("{}: framed in the clear", at()));
-                }
-                Ok(_) => {}
-                Err(err) => report.clear.push(format!("{}: not a frame: {err}", at())),
+            if extent_frame::in_the_clear(&object.bytes) {
+                report.clear.push(format!("{}: framed in the clear", at()));
+            } else if let Err(err) = extent_frame::Frame::of(&object.bytes) {
+                report.clear.push(format!("{}: not a frame: {err}", at()));
             }
         }
         if let Some(offset) = finder.find(&object.bytes) {

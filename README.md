@@ -389,53 +389,56 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
-**Encryption and shredding** (backlog doc-16). With `CLADEFS_KMS` naming the
-host's KMS, the cells of a tenant whose KEK it holds are sealed: the bucket,
-the stores' directories and the part cache hold their data encrypted. The KMS
-is `local:///DIR`, a fake for tests and development, AWS KMS or Google Cloud KMS
-(below), or OpenBao's Transit engine: `openbao://HOST[:PORT]/MOUNT?key=cladefs-tenant-{tenant}`
-(`openbaos://` over TLS, `&ca=FILE` for a private CA; `&namespace=NS`;
-`&keys=FILE` naming tenants' own keys), each tenant's KEK the Transit key the
-template names, `{tenant}` its ID in hex. Its token is
-`CLADEFS_KMS_OPENBAO_TOKEN`'s, or in the file `CLADEFS_KMS_OPENBAO_TOKEN_FILE`
-names (read again when refused, as OpenBao Agent renews it), its policy
-`update` on `MOUNT/encrypt/*` and `MOUNT/decrypt/*` and `read` on
-`MOUNT/keys/*`, and not `create`, which would make a key for every tenant
-(doc-16, Real KMSes: OpenBao). To shred a **tenant**, destroy its KEK in the KMS, then tell
-every host (`cladefsctl forget-tenant-keys TENANT`, the control API's
-`ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
-version of every object, was wrapped by it. To shred a **cell**, run
-`cladefsctl shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon:
-it takes the cell's wrapped KEKs out of its object `<C>cell` and has each host
-forget them. That is only as strong as the bucket keeps no older version of
-that object, so a bucket with versioning on needs a lifecycle rule expiring
-non-current versions: on S3, `NoncurrentVersionExpiration` (with
-`NoncurrentDays` as short as the deployment's recovery needs allow); on GCS,
-object versioning off, or a lifecycle rule deleting non-current versions
-(`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
-old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
-versioning off needs nothing. A host told either fences the stores of the
-tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
-a fenced store's own keys stay in memory until its VM process closes it.
+**Encryption and shredding** (backlog doc-16). Every store is sealed, always:
+the bucket, the stores' directories and the part cache hold its data encrypted,
+under its cell's KEK, which its tenant's KEK wraps. Every process that opens
+stores (extentd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
+unless `CLADEFS_KMS` names the host's KMS or `CLADEFS_MASTER_KEY` gives a master key
+for the bucket KMS (below); a tenant the KMS has no KEK of gets no store,
+refused as destroyed (`EACCES`). The KMS `CLADEFS_KMS` names is `local:///DIR`, a
+fake for tests and development, AWS KMS or Google Cloud KMS (below), or
+OpenBao's Transit engine:
+`openbao://HOST[:PORT]/MOUNT?key=cladefs-tenant-{tenant}` (`openbaos://` over TLS,
+`&ca=FILE` for a private CA; `&namespace=NS`; `&keys=FILE` naming tenants' own
+keys), each tenant's KEK the Transit key the template names, `{tenant}` its ID
+in hex. Its token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or in the file
+`CLADEFS_KMS_OPENBAO_TOKEN_FILE` names (read again when refused, as OpenBao Agent
+renews it), its policy `update` on `MOUNT/encrypt/*` and `MOUNT/decrypt/*` and
+`read` on `MOUNT/keys/*`, and not `create`, which would make a key for every
+tenant (doc-16, Real KMSes: OpenBao). To shred a **tenant**, destroy its KEK in
+the KMS, then tell every host (`cladefsctl forget-tenant-keys TENANT`, the control
+API's `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
+version of every object, was wrapped by it. To shred a **cell**, run `cladefsctl
+shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon: it takes the
+cell's wrapped KEKs out of its object `<C>cell` and has each host forget them.
+That is only as strong as the bucket keeps no older version of that object, so a
+bucket with versioning on needs a lifecycle rule expiring non-current versions:
+on S3, `NoncurrentVersionExpiration` (with `NoncurrentDays` as short as the
+deployment's recovery needs allow); on GCS, object versioning off, or a
+lifecycle rule deleting non-current versions (`isLive: false`, or
+`daysSinceNoncurrentTime`). Until that rule has run, the old version's wrapped
+KEK unwraps while the tenant's KEK lives. A bucket with versioning off needs
+nothing. A host told either fences the stores of the tenant or cell it has open
+(`EACCES`) and drops their keys and cached pages; a fenced store's own keys stay
+in memory until its VM process closes it.
 
-**The bucket KMS** (doc-16, The bucket KMS). With no `CLADEFS_KMS`, a host given
-a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex 32`) or
-`CLADEFS_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text), keeps
-each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
-master key and made on the tenant's first use: every tenant's cells are
-sealed, with no setup per tenant. Every process that opens stores (extentd,
-cladefsctl, mounts, cladefs-gc) is given the same key, and the bucket never holds
-it; logs and errors name it only by its ID, a short hash. To rotate it, give
-every host `CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest
-first: it wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which
-rewraps every tenant's KEK under NEW, then give the hosts NEW alone. To shred a
-tenant, run `cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's
-daemon: it replaces the tenant's KEK object by a tombstone, so that nothing of
-the tenant's unwraps anywhere and no KEK is made for it again, and has each
-host forget its keys (a host not told refuses it within a minute). As for a
-cell, a bucket with versioning on needs non-current versions of
-`tenants/<tenant>/kek` expired, by the rule above. It is not BYOK: a tenant holding its
-own key uses a real KMS.
+**The bucket KMS** (doc-16, The bucket KMS), the default. With no `CLADEFS_KMS`, a
+host given a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex
+32`) or `CLADEFS_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text),
+keeps each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
+master key and made on the tenant's first use: every tenant's cells are sealed,
+with no setup per tenant. Every process that opens stores (extentd, cladefsctl,
+mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs and
+errors name it only by its ID, a short hash. To rotate it, give every host
+`CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
+wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which rewraps every
+tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
+`cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
+replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
+unwraps anywhere and no KEK is made for it again, and has each host forget its
+keys (a host not told refuses it within a minute). As for a cell, a bucket with
+versioning on needs non-current versions of `tenants/<tenant>/kek` expired, by
+the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
 
 **AWS KMS** (doc-16, Real KMSes: AWS KMS). `CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE`,
 say `aws-kms://us-east-1?key=alias/cladefs-tenant-{tenant}`: each tenant's KEK is a

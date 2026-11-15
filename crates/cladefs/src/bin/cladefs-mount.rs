@@ -120,6 +120,9 @@ fn mount(args: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
     use std::io::Write as _;
     use std::path::PathBuf;
     cladefs::extentd::logging::to_stderr()?;
+    // cladefs: every store it serves is sealed under the host's KMS: none chosen, it refuses to
+    // start, naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
+    cladefs::remote::require_kms().map_err(anyhow::Error::msg)?;
     // Before any thread is started, which would take the signals otherwise.
     cladefs::stacks::on_sigquit().context("handling SIGQUIT")?;
     let stop = cladefs::signals::Signals::block(&[libc::SIGINT, libc::SIGTERM])

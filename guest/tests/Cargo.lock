@@ -1177,6 +1177,7 @@ dependencies = [
  "serde_json",
  "storage_ptr_slice",
  "storage_xts",
+ "tempfile",
  "thiserror",
  "tokio",
  "url",

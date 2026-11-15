@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-15 19:09'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -67,9 +67,9 @@ Per store directory (one branch, `<b>` its ID; `extent_store::layout`):
 |---|---|---|
 | `store` | the description (`layout::FORMAT`, local format 11): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the volume of its cell it is, by name and kind (`volume`, `kind`), which its opening adds to the cell | the store is deleted |
 | `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the store is whole; opening refuses a store holding it (TASK-196) | the store is whole |
-| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: a sealed store's encrypted, AES-256-XTS by 4 KiB sector (doc-16, TASK-411.5) | it closes and its framed file is synced |
-| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit durable, whether the segment is open or being framed; cladefs: a sealed store's header names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16) | as above |
-| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: a sealed store's encrypted as open segments are, its salt in memory alone | sealed |
+| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: encrypted, AES-256-XTS by 4 KiB sector, as every store is sealed (doc-16, TASK-411.5, TASK-411.28) | it closes and its framed file is synced |
+| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit durable, whether the segment is open or being framed; cladefs: its header (`FXLOG\0\0\x03`) names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16; a clear store's `\x02` header is no more, TASK-411.28) | as above |
+| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: encrypted as open segments are, its salt in memory alone | sealed |
 | `segments/<b>/<n>` | a closed segment, framed, numbered locally, its footer stamped by the writer's chain as it closed: the object `segments/<branch>/<seq>` byte for byte, but for a rebase's restamping, which is in memory, the upload restamping the bytes (`extent_frame::restamp`) | acknowledged, then moved into the part cache |
 | `extents/<b>/<sequence>` | its extents stored on their own, framed: the objects `extents/<branch>/<epoch>.<seq>.<sequence>` | likewise |
 | `wal` | the WAL's base, the commit its first segment was stamped over: two 4 KiB slots, written durably before what an acknowledgement let go of leaves (`wal::BASE`) | the store is deleted |
@@ -186,7 +186,7 @@ the commits in turn.
    and stamped by the new chain. Writes after the last durable commit are dropped, as now.
    *(TASK-411.9)* The WAL's recovery (`Store::recover`) decides this before the store's keys are
    known, and frames nothing: the segment keeps its raw file and log until `Recovering::open`,
-   holding the store's keys (doc-16), frames it first of all, sealed if the branch is.
+   holding the store's keys (doc-16), frames it first of all, sealed, as every store is (TASK-411.28).
 4. **Put the WAL after the branch's end** (`extent_remote::wal::rebase`, new), by commits, as the
    head the writer took names it (`Taken`; until TASK-407, as the branch was after the fence,
    `wal_after_fence`, which might have applied the WAL's own segments landed since recovery found

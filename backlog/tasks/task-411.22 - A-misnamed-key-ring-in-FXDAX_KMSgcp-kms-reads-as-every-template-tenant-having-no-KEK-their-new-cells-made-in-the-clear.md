@@ -3,7 +3,7 @@ id: TASK-411.22
 title: >-
   A misnamed key ring in CLADEFS_KMS=gcp-kms:// reads as every template tenant
   having no KEK: their new cells made in the clear
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-15 04:04'
 updated_date: '2026-11-15 14:28'
@@ -34,3 +34,15 @@ Found building the Google Cloud KMS backend (TASK-411.18). Cloud KMS answers a m
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Moot since TASK-411.28 (2026-11-15): no cell is ever made in the clear. Every NoSuchTenant, Cloud KMS's missing key ring included, refuses the tenant's new cells as destroyed (EACCES, 'tenant T: no KEK in the KMS'), so a misnamed key ring fails closed: every template tenant's new cells are refused, none made unencrypted. Telling a missing ring from a missing key (AC #1's startup error) would only improve the message; not needed for safety.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Closed as moot by TASK-411.28: NoSuchTenant refuses as destroyed for every backend, so a misnamed gcp-kms:// key ring refuses new cells instead of making them in the clear. doc-16 (Real KMSes: Google Cloud KMS) says so.
+<!-- SECTION:FINAL_SUMMARY:END -->

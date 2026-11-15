@@ -351,14 +351,22 @@ control="$sockets/extentd.control"
 # it names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_SEALED has the
 # runner check each case's stores, once it passed, holding no key (test_cases::sealed): its cells'
 # KEKs, its records' DEKs, its objects' and files' seals, and no known plaintext anywhere; and the
-# run's own bucket and part cache at its end. A daemon or harness built before encryption (an A/B's
-# old side, CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT) runs in the clear, unchecked, saying so: what each
-# run was is in encryption.txt.
+# run's own bucket and part cache at its end. Every store is sealed since TASK-411.28: its daemon,
+# cladefsctl, cladefs-gc, FUSE mounts and runner refuse to start without a KMS. A daemon and harness
+# both built before encryption (an A/B's old side, CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT, of an old
+# pin) run in the clear, unchecked, saying so; one of them old and the other not is refused, as
+# neither reads the other's stores: what each run was is in encryption.txt.
 kms_dir="$sockets/kms"
-if ! grep -qa CLADEFS_KMS "$extentd_bin"; then
-    echo "clear: $extentd_bin predates encryption (it reads no CLADEFS_KMS)" > "$results/encryption.txt"
-elif ! "$runner" kms --help > /dev/null 2>&1; then
-    echo "clear: $runner predates encryption (no \`runner kms\`)" > "$results/encryption.txt"
+old_daemon='' old_runner=''
+grep -qa CLADEFS_KMS "$extentd_bin" || old_daemon=1
+"$runner" kms --help > /dev/null 2>&1 || old_runner=1
+if [[ -n $old_daemon && -n $old_runner ]]; then
+    echo "clear: $extentd_bin and $runner predate encryption (no CLADEFS_KMS, no \`runner kms\`)" \
+        > "$results/encryption.txt"
+elif [[ -n $old_daemon$old_runner ]]; then
+    echo "$extentd_bin and $runner: one predates encryption, the other seals every store" \
+        "(TASK-411.28): run a daemon and a harness of one pin" >&2
+    exit 1
 else
     if [[ -z ${CLADEFS_KMS:-} ]]; then
         "$runner" kms "$kms_dir"

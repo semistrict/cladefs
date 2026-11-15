@@ -19,28 +19,28 @@ pub use extent_frame::segment::{
 /// ([`Record::format`](crate::record::Record::format)): a reader refuses a branch of any other,
 /// newer or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds
 /// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the branch's
-/// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may
-/// span segments, a footer naming the runs in its data of the commit it goes on with
+/// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may span
+/// segments, a footer naming the runs in its data of the commit it goes on with
 /// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the branch's
-/// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences),
-/// TASK-371); nothing reads 3's. 5: a branch's objects are under its tenant's cell's prefix, and
-/// footers, forks and origins name branches with their cells ([`Branch`], TASK-364); nothing reads
-/// 4's. 6: a checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose
-/// fences lack them. 7: a checkpoint names the branch's strays apart from its fences, each void or
-/// late ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
+/// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences), TASK-371);
+/// nothing reads 3's. 5: a branch's objects are under its tenant's cell's prefix, and footers,
+/// forks and origins name branches with their cells ([`Branch`], TASK-364); nothing reads 4's. 6: a
+/// checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose fences lack
+/// them. 7: a checkpoint names the branch's strays apart from its fences, each void or late
+/// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
 /// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`gc_lease`],
 /// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
-/// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's lease
-/// were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in a
-/// KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
-/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, sealed under their branch's DEK or
-/// in the clear, own extents' footers naming their extents, and moves' the object they are the
-/// moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints' keys
-/// name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it holds
-/// and its newest checkpoint, replacing its lease, and footers name no segment they follow;
-/// nothing reads 10's.
+/// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
+/// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
+/// a KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
+/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, sealed under their branch's DEK
+/// (none in the clear since TASK-411.28, which changed no format), own extents' footers naming
+/// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is
+/// written once (TASK-407): segments' and checkpoints' keys name their writers' epochs, a branch's
+/// head ([`head`], [`Head`]) names the segments it holds and its newest checkpoint, replacing its
+/// lease, and footers name no segment they follow; nothing reads 10's.
 pub const FORMAT: u32 = 11;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
@@ -134,20 +134,6 @@ pub fn cells_of(tenant: u64) -> String {
 pub fn tenant_of_prefix(prefix: &str) -> Option<u64> {
     hex(prefix.strip_prefix(TENANTS)?.strip_suffix('/')?)
 }
-
-/// cladefs: `tenant`'s sealed marker (doc-16, How a forgotten KEK is told from none; TASK-411.19):
-/// there once a cell of the tenant's was made sealed, created (create-only) before the first
-/// such cell's object, and kept for good, the collector never deleting it. A KMS saying the
-/// tenant has no KEK is then believed not: its KEK was forgotten (a real KMS's deleted key), and
-/// its cells are refused as destroyed, never made in the clear ([`crate::keys::new_cell_kek`]).
-/// Under the tenant's prefix, beside its cells', no cell's: a delimiter listing of the tenant's
-/// cells ([`cells_of`]) lists it not.
-pub fn sealed(tenant: u64) -> String {
-    format!("{TENANTS}{tenant:016x}/{SEALED}")
-}
-
-/// cladefs: what [`sealed`] names under a tenant's prefix.
-const SEALED: &str = "sealed";
 
 /// cladefs: `tenant`'s KEK object, under the bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
 /// KEK wrapped by a master key, created (create-only) on the tenant's first wrap, rewrapped by a
@@ -246,8 +232,8 @@ pub fn marks_of(cell: Cell) -> String {
 }
 
 /// cladefs: what the mark-only pass over `cell` of the collector that took the cell's lease at
-/// `epoch` found no live branch needs, and would have deleted ([`Marks`]; doc-7, Garbage collection;
-/// TASK-264): keyed by the epoch, so that the newest lists last.
+/// `epoch` found no live branch needs, and would have deleted ([`Marks`]; doc-7, Garbage
+/// collection; TASK-264): keyed by the epoch, so that the newest lists last.
 pub fn marks(cell: Cell, epoch: u64) -> String {
     format!("{}{epoch:016x}", marks_of(cell))
 }
@@ -366,10 +352,6 @@ pub enum Kind<'a> {
     ObjectIds {
         block: u64,
     },
-    /// cladefs: a tenant's sealed marker ([`sealed`], TASK-411.19): no cell's, kept for good.
-    Sealed {
-        tenant: u64,
-    },
     /// cladefs: a tenant's KEK object under the bucket KMS ([`kek`], TASK-411.27): no cell's, kept
     /// for good.
     Kek {
@@ -421,7 +403,6 @@ impl Kind<'_> {
             Self::Head { .. } => "head",
             Self::Cell { .. } => "cell",
             Self::ObjectIds { .. } => "objectid",
-            Self::Sealed { .. } => "sealed",
             Self::Kek { .. } => "kek",
             Self::GcLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
@@ -434,9 +415,9 @@ impl Kind<'_> {
     }
 }
 
-/// cladefs: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of its
-/// objects and of their moves, its collector's lease and marks, and the references of forks of its
-/// branches, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
+/// cladefs: the cell whose object `key` is, if a cell's: every kind under its prefix, the moves of
+/// its objects and of their moves, its collector's lease and marks, and the references of forks of
+/// its branches, under the parent's cell (`cladefs-gc --usage`, TASK-394, TASK-395.2).
 pub fn owner(key: &str) -> Option<Cell> {
     match kind(key) {
         Kind::Segment { branch, .. }
@@ -448,11 +429,7 @@ pub fn owner(key: &str) -> Option<Cell> {
         | Kind::Retired { parent: branch, .. } => Some(branch.cell),
         Kind::Cell { cell } | Kind::GcLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
-        Kind::ObjectIds { .. }
-        | Kind::Sealed { .. }
-        | Kind::Kek { .. }
-        | Kind::Marking
-        | Kind::Unknown => None,
+        Kind::ObjectIds { .. } | Kind::Kek { .. } | Kind::Marking | Kind::Unknown => None,
     }
 }
 
@@ -467,11 +444,6 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some(block) = key.strip_prefix(OBJECTIDS) {
             return Some(Kind::ObjectIds { block: hex(block)? });
-        }
-        if let Some(tenant) = (key.strip_prefix(TENANTS))
-            .and_then(|rest| rest.strip_suffix(SEALED)?.strip_suffix('/'))
-        {
-            return Some(Kind::Sealed { tenant: hex(tenant)? });
         }
         if let Some(tenant) =
             (key.strip_prefix(TENANTS)).and_then(|rest| rest.strip_suffix(KEK)?.strip_suffix('/'))
@@ -766,36 +738,25 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
-/// How a writer seals what it frames: under its branch's DEK, the newest, and which it is, or in
-/// the clear ([`crate::keys::Ring::sealing`], TASK-411.3).
-pub type Sealing<'a> = Option<(&'a extent_frame::Secret, extent_frame::KeyId)>;
+/// How a writer seals what it frames: under its branch's DEK, the newest, and which it is
+/// ([`crate::keys::Ring::sealing`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
+pub type Sealing<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
-/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: in the
-/// clear: tests', and the collector's moves of objects in the clear (TASK-411.6).
-pub fn with_footer<T: Serialize>(data: &[u8], footer: &T) -> Vec<u8> {
-    with_footer_under(data, footer, None)
-}
-
-/// cladefs: the bytes of an object of `data` and `footer`, as [`with_footer`], sealed as `sealing`
-/// says (TASK-411.3).
-pub fn with_footer_under<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
+/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: sealed
+/// as `sealing` says (TASK-411.3).
+pub fn with_footer<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
     extent_frame::framed(data, &encode(footer), sealing)
 }
 
 /// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
 /// copied to another key, sealed, is refused (TASK-411.3), sealed as `sealing` says.
 pub fn own_extent(extent: ExtentId, data: &[u8], sealing: Sealing<'_>) -> Vec<u8> {
-    with_footer_under(data, &extent, sealing)
+    with_footer(data, &extent, sealing)
 }
 
-/// The data of a whole object [`with_footer`] made, checked against its CRCs: by a reader holding
-/// no key, which reads none of a sealed object's ([`crate::Error::NoKey`], TASK-411.2).
-pub fn data(bytes: &[u8]) -> Result<Vec<u8>, crate::Error> {
-    data_under(bytes, &extent_frame::NoKeys)
-}
-
-/// cladefs: the data of a whole object, as [`data`], by a reader holding `keys` (TASK-411.3).
+/// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
+/// `keys` (TASK-411.3): none of an object sealed under a key not of them ([`crate::Error::NoKey`]).
 pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>, crate::Error> {
     Ok(extent_frame::data(bytes, keys)?)
 }
@@ -816,13 +777,9 @@ pub fn footer_under<T: DeserializeOwned>(
 }
 
 impl Segment {
-    pub fn encode(&self) -> Vec<u8> {
-        self.encode_under(None)
-    }
-
-    /// cladefs: its object, sealed as `sealing` says (TASK-411.3).
-    pub fn encode_under(&self, sealing: Sealing<'_>) -> Vec<u8> {
-        with_footer_under(&self.data, &self.footer, sealing)
+    /// Its object, cladefs: sealed as `sealing` says (TASK-411.3).
+    pub fn encode(&self, sealing: Sealing<'_>) -> Vec<u8> {
+        with_footer(&self.data, &self.footer, sealing)
     }
 
     /// The footer of a segment's object.
@@ -857,9 +814,9 @@ mod tests {
     }
 
     /// cladefs: every object of a branch, and its cell's own, is under the cell's prefix, by tenant
-    /// then cell (TASK-364); and since format 9 everything the cell's collection reads: its objects'
-    /// moves and their moves, its collector's lease and marks, and the references of forks of its
-    /// branches, whatever the children's cells (TASK-395.2).
+    /// then cell (TASK-364); and since format 9 everything the cell's collection reads: its
+    /// objects' moves and their moves, its collector's lease and marks, and the references of forks
+    /// of its branches, whatever the children's cells (TASK-395.2).
     #[test]
     fn a_cells_objects_are_under_its_tenants_prefix() {
         let cell = Cell { tenant: 0xa, id: 0xc };
@@ -994,9 +951,6 @@ mod tests {
         assert_eq!(objectid_block(0x2a), "objectid/000000000000002a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
-        assert_eq!(sealed(0x2a), "tenants/000000000000002a/sealed");
-        assert_eq!(kind(&sealed(0x2a)), Kind::Sealed { tenant: 0x2a });
-        assert_eq!(owner(&sealed(0x2a)), None);
         assert_eq!(kind("tenants/2a/sealed"), Kind::Unknown);
         assert_eq!(kek(0x2a), "tenants/000000000000002a/kek");
         assert_eq!(kind(&kek(0x2a)), Kind::Kek { tenant: 0x2a });
@@ -1139,8 +1093,10 @@ mod tests {
             },
         };
         let segment = Segment { data: b"abc".to_vec(), footer: footer.clone() };
-        let bytes = segment.encode();
-        assert_eq!(&bytes[..3], b"abc");
+        let bytes = segment.encode(crate::testing::sealing(test_branch(1)));
+        let keys = crate::testing::ring([test_branch(1)]);
+        assert_eq!(data_under(&bytes, &keys.of(1)).unwrap(), b"abc");
+        assert!(!bytes.windows(3).any(|bytes| bytes == b"abc"), "sealed");
         assert_eq!(Segment::footer(&bytes).unwrap(), footer);
         assert!(Segment::footer(&bytes[..bytes.len() - 1]).is_err());
     }
@@ -1148,13 +1104,16 @@ mod tests {
     /// Objects' footers are found by their frames.
     #[test]
     fn objects_hold_their_footers() {
-        let bytes = with_footer(&[1; 5000], &"footer");
+        let sealing = crate::testing::sealing(test_branch(1));
+        let bytes = with_footer(&[1; 5000], &"footer", sealing);
         assert_eq!(footer::<String>(&bytes).unwrap(), "footer");
-        assert_eq!(data(&bytes).unwrap(), &[1; 5000][..]);
+        let keys = crate::testing::ring([test_branch(1)]);
+        let keys = keys.of(1);
+        assert_eq!(data_under(&bytes, &keys).unwrap(), &[1; 5000][..]);
         let mut flipped = bytes.clone();
         flipped[7] ^= 1;
         assert_eq!(
-            data(&flipped),
+            data_under(&flipped, &keys),
             Err(crate::Error::Corrupt("an object's part, by its CRC".into()))
         );
     }

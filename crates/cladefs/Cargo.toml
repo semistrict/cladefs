@@ -8,8 +8,9 @@ license.workspace = true
 publish = false
 
 [features]
-# Images for tests of importing them, here and in the guest's (`import::testing`).
-testing = []
+# Images for tests of importing them, here and in the guest's (`import::testing`); the tests' KMS,
+# which tests' processes and benches seal under (`remote::testing`, TASK-411.28).
+testing = ["extent_keys/testing"]
 # The extent daemon's registry of open stores and its requests on them (open_stores and
 # store_requests, TASK-44.6), and the kernel and its DAX windows, with their userfaultfd stage (dax,
 # TASK-44.3), on Shuttle's locks, whose scheduler then chooses every interleaving of their tests'
@@ -29,6 +30,12 @@ failpoints = ["fail/failpoints"]
 # (docs/memory-ordering.md, TASK-444.2). Only for those models, as loom's atomics work only in one:
 # `cargo nextest run -p cladefs --features loom --lib loom::`.
 loom = ["dep:loom"]
+# cladefs: a host whose environment names no KMS and gives no master key seals under the tests' KMS,
+# every tenant's KEK one known key (`remote::testing`, TASK-411.28), as every process does that
+# this crate's tests and sqlite_extents' start (cladefs-extentd, cladefsctl, cladefs-mount), agreeing
+# with them: every store is sealed, and a process given no KMS refuses to start, but a test's needs
+# none. Never a host's: a release build refuses it.
+tests-kms = ["testing"]
 
 [dependencies]
 anyhow.workspace = true
@@ -69,7 +76,7 @@ loom = { workspace = true, optional = true }
 
 [dev-dependencies]
 async-trait.workspace = true
-cladefs = { path = ".", features = ["failpoints", "testing"] }
+cladefs = { path = ".", features = ["failpoints", "testing", "tests-kms"] }
 # Panics holding a lock shared beyond one store, in tests that ask (TASK-149.24).
 extent_store = { workspace = true, features = ["testing"] }
 # Tests' branches, of a cell of their own (`layout::test_branch`, TASK-364).

@@ -91,7 +91,7 @@ impl Host {
         let runtime = Runtime {
             handle: self.runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: Default::default(),
+            keys: extent_remote::keys::testing::host(),
         };
         // Checkpoints often, so that the collector's passes find segments recoveries no longer read,
         // which they compact.
@@ -109,7 +109,7 @@ impl Host {
                 let RemoteData { location, .. } =
                     err.downcast_ref::<RemoteData>().cloned().unwrap_or_else(|| panic!("{err:#}"));
                 let bucket = self.bucket();
-                let read = extent_remote::fetch::read(&bucket, extent, &location);
+                let read = extent_remote::testing::read(&bucket, extent, &location);
                 data = self.runtime.block_on(read).unwrap();
             }
             extents.insert(extent, data);

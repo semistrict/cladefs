@@ -7,7 +7,8 @@
 //! effect, or after whoever made them has gone; a writer's creates of segments, if it says, only
 //! once an object at their keys was deleted; and the collector's moves, which a test follows as a
 //! reader does ([`MovesMaps`]). extent_store's simulation of doc-7's protocol runs on it, as this
-//! crate's own tests do.
+//! crate's own tests do. cladefs: and a DEK objects framed outside a writer are sealed under, and a
+//! ring holding it ([`sealing`], [`ring`]): nothing is framed in the clear (TASK-411.28).
 
 use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
 use crate::layout::{self, Branch, Kind};
@@ -146,7 +147,7 @@ impl SimBucket {
     }
 
     /// Every request completed, in the order they were, each as [`SimBucket::describe`] says,
-    /// a put's with a hash of its bytes, and how it failed, if it did: what a run of a seed of a
+    /// a put's with its bytes' length, and how it failed, if it did: what a run of a seed of a
     /// simulation asked of the bucket, which another run of that seed must ask the same.
     pub fn journal(&self) -> Vec<String> {
         self.inner.lock().unwrap().journal.clone()
@@ -251,16 +252,13 @@ impl Op {
         }
     }
 
-    /// As [`Op::describe_key`], a put's with a hash of its bytes and its mode, as the journal
-    /// keeps it: SipHash of fixed keys, the same in every process.
+    /// As [`Op::describe_key`], a put's with its bytes' length and its mode, as the journal keeps
+    /// it. cladefs: not a hash of its bytes, as before every object was sealed (TASK-411.28): each
+    /// is sealed under keys and salts drawn at random, a run's bytes not another's, their lengths
+    /// the same.
     fn describe(&self) -> String {
-        use std::hash::{DefaultHasher, Hasher as _};
         match self {
-            Op::Put(key, bytes, mode) => {
-                let mut hasher = DefaultHasher::new();
-                hasher.write(bytes);
-                format!("put {key} {:016x} {mode:?}", hasher.finish())
-            }
+            Op::Put(key, bytes, mode) => format!("put {key} {}B {mode:?}", bytes.len()),
             op => op.describe_key(),
         }
     }
@@ -511,12 +509,14 @@ pub async fn live(
 /// its own, until two in a row delete and compact nothing: their reports, summed. Two, as a pass
 /// over a dead cell retires the references that kept what its parents' cells reclaim at their next,
 /// and a pass retiring them again deletes nothing (TASK-395.4). It fails as a sweep fails, and
-/// panics after [`SWEEPS`]: passes that never settle are a bug.
+/// panics after [`SWEEPS`]: passes that never settle are a bug. cladefs: compacting under the tests'
+/// KMS (`keys::testing`), which every test writer seals under (TASK-411.28).
 pub async fn collect_until_quiet(
     bucket: &impl Bucket,
     options: &crate::collector::Options,
 ) -> Result<crate::collector::Report, crate::Error> {
-    let mut collector = crate::collector::Collector::new(*options);
+    let kms = Some(crate::keys::testing::kms());
+    let mut collector = crate::collector::Collector::new(*options).kms(kms);
     let (mut total, mut quiet) = (crate::collector::Report::default(), 0);
     for sweep in 0..SWEEPS {
         let report = collector.collect(bucket, 1 << 40 | sweep).await?;
@@ -721,12 +721,11 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for key in &keys {
         // cladefs: cells' objects stay, as their branches' records do, their epochs fencing their
         // volumes' leases; blocks of object IDs taken, for good (TASK-364); and the collector's
-        // leases and marks, and references not yet retirable (TASK-395); tenants' sealed markers
-        // and KEK objects, for good (TASK-411.19, TASK-411.27).
+        // leases and marks, and references not yet retirable (TASK-395); tenants' KEK objects,
+        // for good (TASK-411.27).
         let kept = match layout::kind(key) {
             Kind::Cell { .. }
             | Kind::ObjectIds { .. }
-            | Kind::Sealed { .. }
             | Kind::Kek { .. }
             | Kind::GcLease { .. }
             | Kind::Marks { .. }
@@ -745,13 +744,84 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             continue;
         }
         let Some(object) = crate::bucket::get(bucket, &key).await else { continue };
-        let Ok(data) = layout::data(&object.bytes) else { continue };
+        // cladefs: its data's length, as its trailer says, read holding no key (TASK-411.28).
+        let Ok(frame) = layout::Frame::of(&object.bytes) else { continue };
         let used: u64 = extents.values().sum();
-        if (used as f64) < compact_below * data.len() as f64 {
-            left.push(format!("left uncompacted: {key}, {used} of its {} bytes live", data.len()));
+        if (used as f64) < compact_below * frame.data_len as f64 {
+            left.push(format!(
+                "left uncompacted: {key}, {used} of its {} bytes live",
+                frame.data_len
+            ));
         }
     }
     left
+}
+
+/// cladefs: the DEK tests frame objects under outside a writer, of every branch (TASK-411.28:
+/// nothing is framed in the clear): a reader holding no key reads their metadata as ever, and one
+/// holding [`ring`] their data.
+pub fn dek() -> &'static extent_frame::Secret {
+    static DEK: std::sync::LazyLock<extent_frame::Secret> =
+        std::sync::LazyLock::new(|| extent_frame::Secret::from_bytes(&[0x7e; 32]));
+    &DEK
+}
+
+/// cladefs: how a test frames an object of `branch` outside a writer: under [`dek`], as the branch's
+/// DEK of the first generation.
+pub fn sealing(branch: Branch) -> layout::Sealing<'static> {
+    (dek(), extent_frame::KeyId { branch: branch.id, generation: crate::keys::FIRST })
+}
+
+/// cladefs: a ring holding [`dek`] as the DEK of each of `branches`, which a test's reader reads
+/// what [`sealing`] sealed under, sealing as the first's writer.
+pub fn ring(branches: impl IntoIterator<Item = Branch>) -> Arc<crate::keys::Ring> {
+    let mut branches = branches.into_iter();
+    let first = branches.next().expect("a branch, at least");
+    let key = |branch: Branch| sealing(branch).1;
+    let others =
+        branches.map(|branch| (key(branch), extent_frame::Secret::from_bytes(dek().expose())));
+    let dek = extent_frame::Secret::from_bytes(dek().expose());
+    crate::keys::Ring::sealing_for_tests(first.id, crate::keys::FIRST, dek, others)
+}
+
+/// cladefs: the branch whose object is at `key`, by its key: of a moves', the object's they are of.
+fn branch_of_key(key: &str) -> Option<Branch> {
+    match layout::kind(key) {
+        Kind::Segment { branch, .. }
+        | Kind::Extent { branch, .. }
+        | Kind::Checkpoint { branch, .. } => Some(branch),
+        Kind::Moves { .. } => branch_of_key(&layout::moved_from(key)?),
+        _ => None,
+    }
+}
+
+/// cladefs: the ring a reader of `branch`'s store holds, as a host opening it reads it: its record,
+/// and its cell's object, its KEK unwrapped by the tests' KMS (`keys::testing`), which every test
+/// writer seals under (TASK-411.28).
+pub async fn ring_of(
+    bucket: &impl Bucket,
+    branch: Branch,
+) -> Result<Arc<crate::keys::Ring>, crate::Error> {
+    let record = crate::branch::record(bucket, branch).await?.ok_or(crate::Error::NoBranch)?;
+    let kms = crate::keys::testing::host_kms();
+    let keys = match crate::cell::read(bucket, branch.cell).await? {
+        Some(object) => crate::keys::CellKeys::of(branch.cell, &object, kms),
+        None => crate::keys::CellKeys::objectless(branch.cell, kms),
+    };
+    crate::keys::ring(bucket, &keys, branch, &record, false).await
+}
+
+/// cladefs: [`crate::fetch::read`] holding the ring of the branch whose object `location` names
+/// ([`ring_of`]): what a test reads an extent's data by, as a host serving its store would.
+pub async fn read<B: Bucket>(
+    bucket: &Arc<B>,
+    extent: storage_device::ExtentId,
+    location: &layout::Location,
+) -> Result<Vec<u8>, crate::Error> {
+    let branch = branch_of_key(&location.key)
+        .ok_or_else(|| crate::Error::Corrupt(format!("{} is of no branch", location.key)))?;
+    let keys = ring_of(&**bucket, branch).await?;
+    crate::fetch::read(bucket, &keys, extent, location).await
 }
 
 #[cfg(test)]
@@ -793,7 +863,7 @@ mod tests {
         bucket.hold(test_branch(2), 1);
         let key = layout::segment(test_branch(2), 4, 1);
         let footer = layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
-        let stale = layout::Segment { data: Vec::new(), footer }.encode();
+        let stale = layout::Segment { data: Vec::new(), footer }.encode(sealing(test_branch(1)));
         let created = bucket.put(&key, stale.into(), PutMode::Create);
         assert_eq!(bucket.waiting(), 0);
         let deleted = bucket.delete(&key);

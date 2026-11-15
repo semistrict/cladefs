@@ -198,13 +198,15 @@ pub use host::{
 };
 pub use layout::{Description, Format, Place, Volume};
 pub use mem::{Io, MemDir, MemFile};
-pub use on_disk::{ClearFile, OnDisk, on_disk};
+pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};
 pub use segments::{
     Unsectored, commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,
 };
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
+#[cfg(any(test, feature = "unkept"))]
+pub use store::UNKEPT_DEK;
 pub use store::{
     DirHold, ForkCommitted, Info, Inherited, NoSpace, Opening, Options, Recovering, RemoteData,
     Spent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,

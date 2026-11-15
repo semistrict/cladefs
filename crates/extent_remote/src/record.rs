@@ -96,8 +96,8 @@ pub struct Record {
     /// point's forks made stay.
     pub shared: bool,
     /// cladefs: the branch's DEK, each generation of it, wrapped by its cell's KEK, oldest first:
-    /// none in a cell in the clear, nor before its first writer took it, nor of a point, which
-    /// nothing writes (TASK-411.3). Given by its writer ([`crate::keys::with_dek`]), whoever made
+    /// none before its first writer took it, nor of a point, which nothing writes (TASK-411.3);
+    /// a writer's ring of a record with none is refused (TASK-411.28). Given by its writer ([`crate::keys::with_dek`]), whoever made
     /// the record: the parent's writers recording a fork write none, so that they write the same.
     pub deks: Vec<Dek>,
     /// cladefs: the DEKs of every ancestor of another cell whose objects the branch reads, each

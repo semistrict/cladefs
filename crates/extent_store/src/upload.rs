@@ -132,15 +132,15 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
 /// taken out of the cell (`extent_remote::cell::forget`, TASK-364). A sealed branch's forks to
 /// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
-/// unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
+/// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
     bucket: &Bucket,
     branch: Branch,
     token: u64,
-    kms: Option<&Arc<keys::Kms>>,
+    kms: &Arc<keys::Kms>,
 ) -> Result<(), Failure> {
     Ok(block_on(async {
-        branch::delete_under(bucket, branch, rand::random(), token, kms).await?;
+        branch::delete(bucket, branch, rand::random(), token, kms).await?;
         cell::forget(bucket, branch.cell, branch.id).await
     })??)
 }
@@ -265,7 +265,7 @@ pub fn open<D: Dir>(
     runtime: &Runtime,
 ) -> Result<(Arc<Store<D>>, Remote<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
-    let shared = Shared::new(options, runtime.uploads.clone(), sleep).keyed(runtime.keys.clone());
+    let shared = Shared::new(options, runtime.uploads.clone(), sleep, runtime.keys.clone());
     let (started, start) = std::sync::mpsc::channel();
     let (stop, stopped) = std::sync::mpsc::channel();
     let (uploader, uploads) = (shared.clone(), bucket.clone());
@@ -595,15 +595,14 @@ impl<D: Dir> Remote<D> {
     /// fork is made, its commit or its record, so that a fork refused makes nothing (TASK-411.4):
     /// if `child` is of another cell, no point, and the store's keys, which it inherits, are of
     /// branches of other cells than its own, those keys and a KEK for the child's cell from the
-    /// host's pool; none otherwise, a fork of branches in the clear making no request more.
-    /// Refused if the host's KMS last heard a tenant of theirs revoked or destroyed, if the
-    /// child's tenant has no KEK, its cell in the clear, or as the KMS refuses one
-    /// (`keys::inheriting`). No KMS call is made with the pool not empty.
+    /// host's pool; none otherwise. Refused if the host's KMS last heard a tenant of theirs
+    /// revoked or destroyed, or as the KMS refuses a KEK (`keys::inheriting`). No KMS call is made
+    /// with the pool not empty.
     pub fn inheriting(&self, child: Child) -> Result<Option<keys::Inheriting>, Failure> {
         let store = self.store();
         let (source, parent) = (store.keys(), store.description().branch);
-        let kms = self.shared.keys.kms.as_ref();
-        Ok(block_on(keys::inheriting(&*self.bucket, kms, source, parent, child))??)
+        let kms = &self.shared.keys.kms;
+        Ok(block_on(keys::inheriting(kms, source, parent, child))??)
     }
 
     /// Deletes `child` in object storage, a fork the store made that [`Remote::forked`] failed to
@@ -628,13 +627,13 @@ impl<D: Dir> Remote<D> {
             (None, Some(origin), false) => Kind::Fork(origin),
         };
         let (holder, token) = (self.shared.holder(), self.shared.options.token);
-        let deleting = branch::delete_fork_under(
+        let deleting = branch::delete_fork(
             &*self.bucket,
             child.branch,
             forked,
             child.owner,
             (holder, token),
-            self.shared.keys.kms.as_ref(),
+            &self.shared.keys.kms,
         );
         if !block_on(deleting)?? {
             log::warn!(
@@ -717,8 +716,14 @@ impl<D: Dir> Drop for Remote<D> {
 
 impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
-    /// `clock`: started by [`Shared::run`].
-    pub(crate) fn new(options: Options, uploads: Arc<Budget>, clock: Clock) -> Arc<Self> {
+    /// `clock`: started by [`Shared::run`]. cladefs: sealing and reading under `keys`, the host's
+    /// (TASK-411.3).
+    pub(crate) fn new(
+        options: Options,
+        uploads: Arc<Budget>,
+        clock: Clock,
+        keys: keys::Host,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: std::sync::OnceLock::new(),
             writer: Default::default(),
@@ -732,17 +737,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             uploads,
             clock,
             holders: Mutex::default(),
-            keys: keys::Host::default(),
+            keys,
             held: Mutex::default(),
         })
-    }
-
-    /// cladefs: the uploader, sealing and reading under `keys`, the host's (TASK-411.3). Before it
-    /// starts.
-    pub(crate) fn keyed(self: Arc<Self>, keys: keys::Host) -> Arc<Self> {
-        let mut shared = Arc::into_inner(self).expect("an uploader not started");
-        shared.keys = keys;
-        Arc::new(shared)
     }
 
     /// cladefs: holds `ring`, the store's keys, among the host's, which its fetchers read under,
@@ -752,7 +749,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 
     /// cladefs: the keys of `cell` as read now, to be held by `placement` next
-    /// ([`CellKeys::to_hold`]), if the host has a KMS: none read otherwise, no request made.
+    /// ([`CellKeys::to_hold`]): none, of a cell with no object, a point's.
     async fn cell_keys(
         &self,
         bucket: &B,
@@ -760,13 +757,10 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         placement: Option<u64>,
     ) -> Result<CellKeys, Failure> {
         let kms = self.keys.kms.clone();
-        if kms.is_none() {
-            return Ok(CellKeys::none(cell, None));
-        }
         Ok(match (cell::read(bucket, cell).await?, placement) {
             (Some(object), Some(placement)) => CellKeys::to_hold(cell, &object, kms, placement),
             (Some(object), None) => CellKeys::of(cell, &object, kms),
-            (None, _) => CellKeys::none(cell, kms),
+            (None, _) => CellKeys::objectless(cell, kms),
         })
     }
 
@@ -1034,7 +1028,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None if recovering.base().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
-            // cladefs: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
+            // cladefs: made once its cell is held, which gives it its DEK (TASK-411.3).
             None => None,
             Some(record) if record.is_point() => {
                 let (state, keys) = self.point(bucket, branch, record).await?;
@@ -1049,10 +1043,11 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 return Ok(None);
             }
             Some(record) => {
-                // cladefs: recovered under its keys, if its record says it is sealed: its cell's,
-                // as this placement holds it next, unwrapped once for that taking (TASK-411.3).
+                // cladefs: recovered under its keys: its cell's, as this placement holds it next,
+                // unwrapped once for that taking (TASK-411.3); holding none, a record not given
+                // its DEK yet (a fork's child's), read anew once it is, below.
                 let before = match record.deks.is_empty() {
-                    true => Ring::clear(),
+                    true => Ring::keyless(),
                     false => {
                         let keys = self.cell_keys(bucket, branch.cell, Some(placement)).await?;
                         keys::ring(&**bucket, &keys, branch, &record, true).await?
@@ -1088,40 +1083,35 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         // on, under the name its description gives it unless the cell names its branch already:
         // all in one compare-and-swap of the cell's object, a read alone when nothing changes. Not
         // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
-        // made gets a KEK, wrapped by its tenant's ahead, if the host has a KMS and the tenant a
-        // KEK there; one of a branch with DEKs is there already (TASK-411.3).
+        // made gets a KEK, wrapped by its tenant's ahead: every cell is sealed (TASK-411.28); one
+        // of a branch with DEKs is there already (TASK-411.3).
         let volume = recovering.volume().map(|volume| {
             (volume.name.as_str(), cell::Volume { branch: branch.id, kind: volume.kind })
         });
-        let kms = self.keys.kms.as_ref();
+        let kms = &self.keys.kms;
         let kek = match &found {
             Some((record, ..)) if !record.deks.is_empty() => None,
-            _ => keys::new_cell_kek(&**bucket, kms, branch.cell.tenant).await?,
+            _ => Some(keys::new_cell_kek(kms, branch.cell.tenant).await?),
         };
-        let making = (true, kek.as_ref().map(|(_, kek)| kek));
+        let making = kek.as_ref().map(|(_, kek)| kek);
         let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, volume);
         let (held, object) = match holding.await {
             Ok(held) => held,
             Err(err) => {
-                if let (Some(kms), Some((secret, kek))) = (kms, kek) {
+                if let Some((secret, kek)) = kek {
                     kms.give_back(branch.cell.tenant, (secret, kek.wrapped));
                 }
                 return Err(err.into());
             }
         };
         let cell_keys = keys::held(kms, branch.cell, object, kek);
-        // cladefs: the host serves a sealed cell of the tenant's: its pool of new cell KEKs, which
-        // forks of its stores into new cells take, filled off this path (TASK-411.4).
-        if let Some(kms) = kms
-            && cell_keys.sealed()
-        {
-            kms.refill(branch.cell.tenant);
-        }
+        // cladefs: the host serves a cell of the tenant's: its pool of new cell KEKs, which forks of
+        // its stores into new cells take, filled off this path (TASK-411.4).
+        kms.refill(branch.cell.tenant);
         let token = held.epoch;
         // Its state, once it holds the lease, recovered on from what was found before. cladefs:
-        // under its keys, its DEK given it first if its cell is sealed and it has none: a new
-        // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
-        // under them (TASK-411.3).
+        // under its keys, its DEK given it first if it has none: a new branch's, or a fork's
+        // child's, whose recovery, read holding no key, it recovers anew under them (TASK-411.3).
         let keyed = |record| self.ring_of(bucket, &cell_keys, branch, record);
         let writer = match found {
             None => {
@@ -1158,9 +1148,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 
     /// cladefs: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's: its
-    /// record's DEKs, given it its first if its cell is sealed and it has none, and its
-    /// ancestors' (`keys::with_dek`, `keys::ring`, TASK-411.3). Its record is `record`, if read,
-    /// or read now if its cell is sealed.
+    /// record's DEKs, given it its first if it has none, and its ancestors' (`keys::with_dek`,
+    /// `keys::ring`, TASK-411.3). Its record is `record`, if read, or read now.
     async fn ring_of(
         &self,
         bucket: &Arc<B>,
@@ -1168,9 +1157,6 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         branch: extent_remote::layout::Branch,
         record: Option<Record>,
     ) -> Result<Arc<Ring>, Failure> {
-        if !cell_keys.sealed() && !cell_keys.has_kms() {
-            return Ok(Ring::clear());
-        }
         let record = match record {
             Some(record) => record,
             None => {
@@ -1226,6 +1212,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let recovering =
             extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
         let state = recovering.await?.state;
+        // cladefs: its store's open segment, which nothing writes, sealed as every store's is
+        // (TASK-411.28).
+        let keys = keys.for_point(branch);
         let _ = self.point.set(Point { branch, origin });
         Ok((state, keys))
     }
@@ -1470,7 +1459,7 @@ mod tests {
         let host = Runtime {
             handle: runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: Default::default(),
+            keys: extent_remote::keys::testing::host(),
         };
         let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
@@ -1496,8 +1485,7 @@ mod tests {
         // Another placement takes the cell, and its writer the branch with the cell's epoch,
         // fencing it (TASK-371).
         let taken = runtime.block_on(async {
-            let (held, _) =
-                cell::hold(&*bucket, BRANCH.cell, (6, 6), (false, None), None).await.unwrap();
+            let (held, _) = cell::hold(&*bucket, BRANCH.cell, (6, 6), None, None).await.unwrap();
             drop(
                 extent_remote::Writer::open(bucket.clone(), BRANCH, 0x66, held.epoch)
                     .await
@@ -1510,7 +1498,7 @@ mod tests {
         store.commit(None).unwrap();
         let fenced = remote.wait_uploaded(store.epoch().unwrap());
         assert!(matches!(fenced, Err(Failure::Remote(extent_remote::Error::Fenced))), "{fenced:?}");
-        let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), (false, None), None));
+        let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), None, None));
         assert_eq!(back.map(|(held, _)| held), Err(extent_remote::Error::Stale));
     }
 
@@ -1522,7 +1510,7 @@ mod tests {
         let host = Runtime {
             handle: runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: Default::default(),
+            keys: extent_remote::keys::testing::host(),
         };
         let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
@@ -1750,7 +1738,8 @@ mod shuttle_tests {
             return Err(format!("branch {branch} holds {held:?}, not {:?}", holds.keys()));
         }
         for (extent, location) in &state.extents {
-            let read = shuttle::future::block_on(extent_remote::read(bucket, *extent, location));
+            let read =
+                shuttle::future::block_on(extent_remote::testing::read(bucket, *extent, location));
             if read.as_ref() != Ok(&holds[extent]) {
                 return Err(format!("branch {branch}: {extent:?} reads {read:?}"));
             }
@@ -1787,7 +1776,12 @@ mod shuttle_tests {
             // Its interval never runs out: the writer asks for what it commits.
             let never: Clock = Arc::new(|_| futures::future::pending().boxed());
             let options = Options { token: holder, ..Options::default() };
-            let uploader = Shared::new(options, Budget::new(Limits::UNBOUNDED), never);
+            let uploader = Shared::new(
+                options,
+                Budget::new(Limits::UNBOUNDED),
+                never,
+                extent_remote::keys::testing::host(),
+            );
             let (started, start) = std::sync::mpsc::channel();
             let running = {
                 let (uploader, bucket) = (uploader.clone(), bucket.clone());

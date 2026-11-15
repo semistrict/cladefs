@@ -437,7 +437,8 @@ mod tests {
                 commits.push(Commit { tag: 4, frees: vec![large], ..Commit::default() });
             }
             for commit in commits {
-                let segment = Batch::from(commit).close(&mut writer.chain()).frame();
+                let segment =
+                    Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
                 let seq = writer.add_segment(segment).unwrap();
                 writer.upload(seq).await.unwrap();
                 writer.acknowledge().await.unwrap();
@@ -507,7 +508,7 @@ mod tests {
             lease: LEASE,
             slowest: 3,
             spawned: false,
-            kms: None,
+            kms: Some(crate::keys::testing::kms()),
         }
     }
 
@@ -860,13 +861,16 @@ mod tests {
         };
         let holding = |lease, since| Holding { lease, since };
         let pass = |holding: Holding, holder| {
-            let mut collector = Collector::new(NOW).holding(holding);
+            let mut collector =
+                Collector::new(NOW).kms(Some(crate::keys::testing::kms())).holding(holding);
             block_on(collector.collect_cell(&*bucket, cell, holder))
         };
         sim.advance(10);
         // Gone mid-pass: its lease held till 10 + LEASE.
         let gone = Arc::new(Gone(Direct(sim.clone())));
-        let mut collector = Collector::new(NOW).holding(holding(LEASE, None));
+        let mut collector = Collector::new(NOW)
+            .kms(Some(crate::keys::testing::kms()))
+            .holding(holding(LEASE, None));
         stalled(collector.collect_cell(&*gone, cell, 0x51));
         let held = (1, 0x51, 10 + LEASE, 0);
         assert_eq!(lease(&bucket), held);
@@ -931,7 +935,9 @@ mod tests {
         }
         // A sweep that began before the last pass, which skipped, ended leaves the cell to it.
         let began = bucket.now() - 1;
-        let mut late = Collector::new(NOW).holding(Holding { lease: LEASE, since: Some(began) });
+        let mut late = Collector::new(NOW)
+            .kms(Some(crate::keys::testing::kms()))
+            .holding(Holding { lease: LEASE, since: Some(began) });
         assert_eq!(
             block_on(late.collect_cell(&*bucket, cell, 0x77)),
             Err(Error::Left(Left::Swept))

@@ -292,6 +292,9 @@ struct Host {
     /// What holds the parts its stores pack as their segments fill, which they share, as a
     /// daemon's do (`crate::held`, TASK-400).
     held: Arc<crate::HeldParts>,
+    /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its stores share,
+    /// as a daemon's do: every store sealed (TASK-411.28).
+    keys: extent_remote::keys::Host,
 }
 
 impl Default for Host {
@@ -299,7 +302,8 @@ impl Default for Host {
         let limits = Limits { requests: UPLOADS_AT_ONCE, bytes: u64::MAX };
         let (disks, sessions) = (HashMap::new(), BTreeMap::new());
         let held = crate::HeldParts::new();
-        Self { disks, sessions, uploads: Budget::new(limits), held }
+        let keys = extent_remote::keys::testing::host();
+        Self { disks, sessions, uploads: Budget::new(limits), held, keys }
     }
 }
 
@@ -824,7 +828,16 @@ impl World {
             if !rules().records_after_ack {
                 let bucket = self.bucket.clone();
                 self.spawn(async move {
-                    let _ = branch::record_fork(&*bucket, child, origin).await;
+                    let _ = branch::record_fork(
+                        &*bucket,
+                        child,
+                        origin,
+                        extent_remote::keys::Parents::Kms(
+                            &extent_remote::keys::testing::host_kms(),
+                            None,
+                        ),
+                    )
+                    .await;
                 });
             }
         }
@@ -887,8 +900,8 @@ impl World {
             // (TASK-92.41).
             filling_wait: Duration::ZERO,
         };
-        let uploads = self.hosts[host].uploads.clone();
-        let uploader = Shared::new(options, uploads, intervals.clock());
+        let (uploads, keys) = (self.hosts[host].uploads.clone(), self.hosts[host].keys.clone());
+        let uploader = Shared::new(options, uploads, intervals.clock(), keys);
         let (started, start) = mpsc::channel();
         let (running, bucket) = (uploader.clone(), self.bucket.clone());
         let running = self.spawn_uploader(async move {
@@ -1072,8 +1085,16 @@ impl World {
     }
 
     /// `branch`'s store on `host` failed doing what its guest asked, for `err`: which it may only
-    /// once its uploader stopped.
-    fn store_failed(&mut self, host: usize, branch: u64, err: anyhow::Error) {
+    /// once its uploader stopped. `store` is the caller's hold of it, let go first, as the
+    /// session's end closes the store ([`World::stop`]).
+    fn store_failed(
+        &mut self,
+        host: usize,
+        branch: u64,
+        store: Arc<Store<MemDir>>,
+        err: anyhow::Error,
+    ) {
+        drop(store);
         let session = &self.hosts[host].sessions[&branch];
         let (id, stopped) = (session.id, session.uploader.failed().is_some());
         if !stopped {
@@ -1148,7 +1169,7 @@ impl World {
         let bytes = Self::content(seed, extent, len);
         let store = session.store.clone().unwrap();
         if let Err(err) = store.write(extent, 0, &bytes) {
-            self.store_failed(host, branch, err);
+            self.store_failed(host, branch, store, err);
             return false;
         }
         session.guest.written.insert(extent, bytes);
@@ -1229,7 +1250,7 @@ impl World {
         };
         let before = match committing() {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, branch, err),
+            Err(err) => return self.store_failed(host, branch, store, err),
         };
         let Some(epoch) = self.committed(branch, &store, before) else { return };
         let session = self.hosts[host].sessions.get_mut(&branch).unwrap();
@@ -1253,7 +1274,7 @@ impl World {
         let before = match resizing() {
             Ok(before) => before,
             Err(err) => {
-                self.store_failed(host, branch, err);
+                self.store_failed(host, branch, store, err);
                 return false;
             }
         };
@@ -1277,7 +1298,8 @@ impl World {
         let asked =
             store.epoch().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
         if let Err(failure) = asked {
-            self.store_failed(host, branch, anyhow::Error::new(failure));
+            drop(uploader);
+            self.store_failed(host, branch, store, anyhow::Error::new(failure));
         }
     }
 
@@ -1314,13 +1336,14 @@ impl World {
         let (store, uploader, parent) =
             (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
         let forked = Child { branch: sim_branch(child), owner, point };
-        let before = match store.epoch() {
+        let before = store.epoch().and_then(|before| store.commit_fork(forked).map(|_| before));
+        let before = match before {
             Ok(before) => before,
-            Err(err) => return self.store_failed(host, branch, err),
+            Err(err) => {
+                drop(uploader);
+                return self.store_failed(host, branch, store, err);
+            }
         };
-        if let Err(err) = store.commit_fork(forked) {
-            return self.store_failed(host, branch, err);
-        }
         let Some(epoch) = self.committed(branch, &store, before) else { return };
         let session = self.hosts[host].sessions.get_mut(&branch).unwrap();
         let extents = std::mem::take(&mut session.guest.written).into_iter().collect();
@@ -1614,8 +1637,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
-            let result =
-                branch::delete_fork(&*bucket, sim_branch(child), forked, owner, holder, 0).await;
+            let result = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                forked,
+                owner,
+                (holder, 0),
+                &extent_remote::keys::testing::host_kms(),
+            )
+            .await;
             events.borrow_mut().push(Event::Unforked { child, result });
         });
         self.unforks.get_mut(&child).unwrap().running = Some(running);
@@ -1629,8 +1659,15 @@ impl World {
         let (forks, owner) = (self.id(), self.id());
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let deleting =
-                branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, forks, holder, 0);
+            let kms = extent_remote::keys::testing::host_kms();
+            let deleting = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                Kind::Own,
+                forks,
+                (holder, 0),
+                &kms,
+            );
             let taking = async {
                 branch::create(&*bucket, sim_branch(child), owner).await?;
                 let taking = extent_remote::head::take(&*bucket, sim_branch(child), other, 0);
@@ -1675,7 +1712,16 @@ impl World {
         self.spawn(async move {
             let created = branch::create(&*bucket, sim_branch(child), owner).await;
             let deleted = match created {
-                Ok(()) => Some(branch::delete(&*bucket, sim_branch(child), holder, 0).await),
+                Ok(()) => Some(
+                    branch::delete(
+                        &*bucket,
+                        sim_branch(child),
+                        holder,
+                        0,
+                        &extent_remote::keys::testing::host_kms(),
+                    )
+                    .await,
+                ),
                 Err(_) => None,
             };
             events.borrow_mut().push(Event::Usurped { child, owner, created, deleted });
@@ -1688,8 +1734,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let result =
-                branch::delete_fork(&*bucket, sim_branch(child), Kind::Own, owner, holder, 0).await;
+            let result = branch::delete_fork(
+                &*bucket,
+                sim_branch(child),
+                Kind::Own,
+                owner,
+                (holder, 0),
+                &extent_remote::keys::testing::host_kms(),
+            )
+            .await;
             events.borrow_mut().push(Event::Untwinned { child, result });
         });
     }
@@ -1747,7 +1800,15 @@ impl World {
         let holder = self.id();
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         self.spawn(async move {
-            let result = match branch::delete(&*bucket, sim_branch(branch), holder, token).await {
+            let result = match branch::delete(
+                &*bucket,
+                sim_branch(branch),
+                holder,
+                token,
+                &extent_remote::keys::testing::host_kms(),
+            )
+            .await
+            {
                 // A fork whose segment never made it: no branch.
                 Err(Error::NoBranch) => Ok(()),
                 result => result,
@@ -1935,7 +1996,8 @@ impl World {
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
-            // Its cells are in the clear: nothing is left sealed (TASK-411.6).
+            // Its cells are sealed under the tests' KMS, which its collectors hold: nothing is
+            // left locked (TASK-411.6, TASK-411.28).
             locked: 0,
             uncompacted: 0,
         };
@@ -2275,7 +2337,7 @@ impl World {
                 continue;
             }
             for (extent, location) in &state.extents {
-                match block_on(extent_remote::read(&direct, *extent, location)) {
+                match block_on(extent_remote::testing::read(&direct, *extent, location)) {
                     Ok(bytes) if bytes == extents[extent] => {}
                     Ok(_) => violations.push(format!("branch {id:x}: {extent:?} reads wrong")),
                     Err(error) => violations.push(format!("branch {id:x}: {error}")),
@@ -2301,7 +2363,7 @@ impl World {
                     // yet, whose free a collector may already have reclaimed (seed 4116 of
                     // `everything` at 25x, TASK-149.32).
                     let Some(bytes) = session.guest.held.get(extent) else { continue };
-                    match block_on(extent_remote::read(&direct, *extent, location)) {
+                    match block_on(extent_remote::testing::read(&direct, *extent, location)) {
                         Ok(read) if read == *bytes => {}
                         Ok(_) => violations
                             .push(format!("branch {id:x}'s writer: {extent:?} reads wrong")),
@@ -2322,7 +2384,7 @@ impl World {
                             continue;
                         }
                     };
-                    match block_on(extent_remote::read(&direct, *extent, &location)) {
+                    match block_on(extent_remote::testing::read(&direct, *extent, &location)) {
                         Ok(read) if read == *bytes => {}
                         Ok(_) => violations
                             .push(format!("branch {id:x}'s store: {extent:?} reads wrong")),

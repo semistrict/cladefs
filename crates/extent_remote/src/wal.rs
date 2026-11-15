@@ -212,7 +212,7 @@ mod tests {
     /// number.
     fn close(writer: &Writer<Store>, wal: &mut Wal<Data>, batch: impl Into<Batch>) -> u64 {
         let Unframed { footer, data } = batch.into().close(&mut writer.chain());
-        let seq = writer.add_segment(data.frame(&footer)).unwrap();
+        let seq = writer.add_segment(data.frame(&footer, writer.keys().sealing())).unwrap();
         wal.push(footer, data);
         seq
     }
@@ -228,7 +228,7 @@ mod tests {
     async fn rebase(writer: &Writer<Store>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
-            let seq = writer.add_segment(data.frame(footer)).unwrap();
+            let seq = writer.add_segment(data.frame(footer, writer.keys().sealing())).unwrap();
             land(writer, seq).await;
         }
         wal.acknowledge(writer.state().through.unwrap());
@@ -356,7 +356,7 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let seq = first.add_segment(data.frame(&footer)).unwrap();
+                let seq = first.add_segment(data.frame(&footer, first.keys().sealing())).unwrap();
                 wal.push(footer, data);
                 seq
             };
@@ -395,7 +395,7 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let seq = first.add_segment(data.frame(&footer)).unwrap();
+                let seq = first.add_segment(data.frame(&footer, first.keys().sealing())).unwrap();
                 wal.push(footer, data);
                 seq
             };
@@ -469,7 +469,7 @@ mod tests {
             let state = second.state();
             for (extent, bytes) in [(inside, &b"inside"[..]), (own, b"own")] {
                 assert_eq!(
-                    crate::read(&bucket, extent, &state.extents[&extent]).await,
+                    crate::testing::read(&bucket, extent, &state.extents[&extent]).await,
                     Ok(bytes.into())
                 );
             }
@@ -542,7 +542,7 @@ mod tests {
             let seq = close(&first, &mut wal, commit(1));
             let Unframed { footer, data } =
                 Batch::default().fork(child(test_branch(2)), &mut first.chain());
-            first.add_segment(data.frame(&footer)).unwrap();
+            first.add_segment(data.frame(&footer, first.keys().sealing())).unwrap();
             wal.push(footer, data);
             close(&first, &mut wal, commit(3));
             land(&first, seq).await;

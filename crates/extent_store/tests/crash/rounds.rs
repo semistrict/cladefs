@@ -241,7 +241,10 @@ fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng)
 }
 
 /// What a directory holds: each file's path, with its length and a hash of its contents; and each
-/// directory's, with neither.
+/// directory's, with neither. cladefs: of a framed file's data, opened under the store's keys
+/// (`UNKEPT_DEK`'s); of no other file's, its length alone: every raw file, log and framed object is
+/// sealed under salts drawn at random (TASK-411.28), so their bytes differ from run to run, but not
+/// their lengths, nor what they hold.
 type Digest = BTreeMap<String, Option<(u64, u64)>>;
 
 /// What `dir` holds.
@@ -260,7 +263,12 @@ fn digest(dir: &MemDir) -> Digest {
                 let file = dir.open(&path, false).unwrap();
                 let mut data = vec![0; file.size().unwrap() as usize];
                 file.read_at(&mut data, 0).unwrap();
-                Some((data.len() as u64, rapidhash::rapidhash(&data)))
+                let keys = extent_remote::testing::ring([BRANCH]);
+                let opened = match path.starts_with("segments/") || path.starts_with("extents/") {
+                    true => extent_frame::data(&data, &keys.of(BRANCH.id)).ok(),
+                    false => None,
+                };
+                Some((data.len() as u64, opened.map_or(0, |data| rapidhash::rapidhash(&data))))
             }
         };
         digest.insert(path, held);

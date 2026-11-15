@@ -31,13 +31,15 @@
 //! sweep after that collects them. A pass that fails says so and stops none of the others; the next
 //! pass tries it again. A compacted object goes, and moves no state names, a grace period after (60
 //! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
-//! A sealed cell's objects are compacted under its keys (TASK-411.6): its KEK unwrapped once a pass,
-//! by the host's KMS, as every cladefs process chooses it (`extent_remote::bucket_kms::from_env`:
-//! the one `CLADEFS_KMS` names; else, given `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket
-//! KMS over URL's bucket, TASK-411.27; one that can't be had stops cladefs-gc at once), and only by
-//! a pass compacting something sealed. With none,
-//! or its tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what is
-//! sealed uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
+//! Every cell's objects are sealed (TASK-411.28), and compacted under its keys (TASK-411.6): its
+//! KEK unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
+//! (`extent_remote::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
+//! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket, TASK-411.27),
+//! and only by a pass compacting something. With neither variable giving a KMS, or one that can't
+//! be had, cladefs-gc refuses to start collecting or deleting a branch, saying so; a dry run,
+//! `--branches`, `--usage` and `--rotate-master-key` read no data, and need none. With its tenant's
+//! KEK revoked or destroyed, a pass marks and deletes as ever but leaves what it would compact
+//! uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
 //! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
 //! a tenant (TASK-411.13), saying nothing of it but in the sweep's lines; once it is, the next
 //! passes over it in full and compacts.
@@ -76,10 +78,9 @@
 //! those FILE names, as `cladefsctl stat` calls them, separated by white space: with FILE naming
 //! every branch every host holds, those left are no host's, or newer than FILE. `--delete-branch`
 //! deletes one, whichever host took it last, which stops writing if there is one, and the next pass
-//! frees what only it held (TASK-79.85). A sealed branch's deletion that records a fork of it into
-//! another cell, whose child has no record yet, seals its checkpoint at the fork point under the
-//! branch's DEK, through `CLADEFS_KMS`'s KMS; without one it fails, naming the tenant, and stops
-//! partway, as a deletion may, until run again with it (TASK-411.14).
+//! frees what only it held (TASK-79.85). A branch's deletion that records a fork of it into another
+//! cell, whose child has no record yet, authenticates its checkpoint at the fork point under the
+//! branch's DEK, through the host's KMS (TASK-411.14).
 //!
 //! `--usage` says what each cell takes, and each tenant, every cell's or `--tenant`'s alone, as
 //! the collector's last pass over each cell to end found it, writing nothing (TASK-394,
@@ -414,7 +415,7 @@ async fn collect(
     let kms = match mode {
         // It compacts nothing, asking the KMS nothing.
         Mode::DryRun => None,
-        Mode::Delete | Mode::MarkOnly => kms(bucket)?,
+        Mode::Delete | Mode::MarkOnly => Some(kms(bucket)?),
     };
     let swept_mode = match mode {
         Mode::Delete => sweep::Mode::Delete,
@@ -459,13 +460,12 @@ async fn collect(
 /// The host's KMS, as every cladefs process chooses it (TASK-411.3,
 /// `extent_remote::bucket_kms::from_env`): the one `CLADEFS_KMS` names; else, given a master key,
 /// the bucket KMS over `bucket`, the one collected (TASK-411.27). What passes unwrap their cells'
-/// KEKs through, to compact what is sealed (TASK-411.6). None if it chooses none: passes compact
-/// what is in the clear alone, leaving what is sealed and saying so; and what a deletion seals its
-/// checkpoints at fork points under (TASK-411.14). One that can't be had stops cladefs-gc before it
-/// collects or deletes anything.
-fn kms(bucket: &Arc<Store>) -> Result<Option<extent_keys::kms::Shared>, String> {
+/// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
+/// fork points under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
+/// collects or deletes anything (TASK-411.28).
+fn kms(bucket: &Arc<Store>) -> Result<extent_keys::kms::Shared, String> {
     let chosen = extent_remote::bucket_kms::from_env(|| Ok(bucket.clone()))?;
-    Ok(chosen.map(|chosen| chosen.shared()))
+    Ok(chosen.shared())
 }
 
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
@@ -500,28 +500,21 @@ async fn rotate_master_key(bucket: &Store) -> Result<(), String> {
 }
 
 /// Deletes `branch` of `bucket`, whichever placement took it last, as an operator does, under
-/// `kms`, `CLADEFS_KMS`'s, if it names one (TASK-411.14): a sealed branch's forks into other cells
-/// that it records, their children having no record yet (their writer died between the fork's
-/// acknowledgement and recording it), get its checkpoint at their fork points sealed under its DEK,
-/// its cell's KEK unwrapped by the KMS, as their children refuse one in the clear. Without one, such
-/// a deletion fails, naming the tenant and what it needs, the branch left as a deletion stopped
-/// partway, its lease ended: running it again with `CLADEFS_KMS` finishes it.
+/// `kms`, the host's (TASK-411.14): a branch's forks into other cells that it records, their
+/// children having no record yet (their writer died between the fork's acknowledgement and
+/// recording it), get its checkpoint at their fork points authenticated under its DEK, its cell's
+/// KEK unwrapped by the KMS, as their children refuse one under another key. The KMS refusing it,
+/// such a deletion fails, naming the tenant, the branch left as a deletion stopped partway, its
+/// lease ended: running it again once the KMS answers finishes it.
 async fn delete_branch(
     bucket: &Store,
     branch: layout::Branch,
-    kms: Option<extent_keys::kms::Shared>,
+    kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
-    let keys = kms.map(extent_remote::keys::Kms::new);
+    let keys = extent_remote::keys::Kms::new(kms);
     // Whichever placement took it last: u64::MAX is no lower than any's token.
-    let deleted = branch::delete_under(bucket, branch, rand::random(), u64::MAX, keys.as_ref());
-    match deleted.await {
-        Ok(()) => Ok(()),
-        Err(err @ extent_remote::Error::Kms(_)) if keys.is_none() => Err(format!(
-            "deleting branch {branch}: {err}: cladefs-gc reads it from CLADEFS_KMS, which names none; \
-             the deletion stopped partway: run it again with CLADEFS_KMS to finish it"
-        )),
-        Err(err) => Err(format!("deleting branch {branch}: {err}")),
-    }
+    let deleted = branch::delete(bucket, branch, rand::random(), u64::MAX, &keys);
+    deleted.await.map_err(|err| format!("deleting branch {branch}: {err}"))
 }
 
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, printed, a cell at a

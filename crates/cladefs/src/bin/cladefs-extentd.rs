@@ -117,6 +117,9 @@ fn main() -> anyhow::Result<()> {
     cladefs::extentd::raise_open_files_limit().context("raising the limit of open files")?;
     // A host of the multi-node system: the bucket and this host's placement token named.
     cladefs::remote::Host::from_env().map_err(anyhow::Error::msg)?;
+    // cladefs: its KMS, which every store is sealed under: none chosen, it refuses to start, naming
+    // CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28).
+    cladefs::remote::require_kms().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     cladefs::extentd::cache_config().map_err(anyhow::Error::msg)?;
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).

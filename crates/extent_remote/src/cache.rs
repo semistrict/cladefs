@@ -990,7 +990,11 @@ mod tests {
     impl Object {
         /// The object of `data` at `key`.
         fn new(key: &str, data: &[u8]) -> Self {
-            let bytes = extent_frame::framed(data, b"footer", None);
+            let bytes = extent_frame::framed(
+                data,
+                b"footer",
+                crate::testing::sealing(crate::layout::test_branch(1)),
+            );
             let start = Frame::of(&bytes).unwrap().tail().start as usize;
             let tail = object::Tail::of(key, bytes[start..].to_vec()).unwrap();
             Self { key: key.to_owned(), bytes, tail }
@@ -1778,14 +1782,19 @@ mod tests {
     /// The crash test's objects: one of two parts, its last short; one of a part shorter than a
     /// block; one of a third of a part; one whose part compresses; and one adopted, of two parts.
     fn crash_objects() -> [Object; 5] {
-        let pattern: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
-        [
-            Object::noise(KEY, PART + 3000, 1),
-            Object::noise(OTHER, 3000, 2),
-            Object::noise("segments/0000000000000001/0000000000000004", 300_000, 3),
-            Object::new("checkpoints/0000000000000001/0000000000000004", &pattern),
-            Object::noise("segments/0000000000000002/0000000000000001", PART + 100, 4),
-        ]
+        // Framed once: each framing seals under a salt of its own (TASK-411.28), and the crash
+        // test's workload and its checks must see the same bytes.
+        static OBJECTS: std::sync::LazyLock<[Object; 5]> = std::sync::LazyLock::new(|| {
+            let pattern: Vec<u8> = (0..300_000u32).map(|at| (at % 251) as u8).collect();
+            [
+                Object::noise(KEY, PART + 3000, 1),
+                Object::noise(OTHER, 3000, 2),
+                Object::noise("segments/0000000000000001/0000000000000004", 300_000, 3),
+                Object::new("checkpoints/0000000000000001/0000000000000004", &pattern),
+                Object::noise("segments/0000000000000002/0000000000000001", PART + 100, 4),
+            ]
+        });
+        OBJECTS.clone()
     }
 
     /// The crash test's capacity: the first object, and a part's third, so that what it keeps

@@ -93,17 +93,9 @@ pub fn read_object<F: File>(file: &F) -> io::Result<Vec<u8>> {
 }
 
 /// cladefs: the parts of a framed file's last bytes, `suffix`, read holding `keys`, if they pass
-/// their checks: refused if it is in the clear and `keys` hold its branch sealed, a downgrade
-/// (TASK-411.3).
+/// their checks (TASK-411.3): one in the clear does not (TASK-411.28).
 fn parts_of(suffix: &[u8], keys: &dyn Keys) -> Result<Option<Parts>, Error> {
-    match Parts::of_suffix(suffix, keys) {
-        Ok(parts) => Ok(Some(parts)),
-        Err(extent_frame::Error::Clear) => {
-            let named = extent_remote::Error::Downgrade("a framed file of the store's".into());
-            Err(Error::new(named))
-        }
-        Err(_) => Ok(None),
-    }
+    Ok(Parts::of_suffix(suffix, keys).ok())
 }
 
 /// The parts of the framed file `file`, and its footer, if it is whole: its trailer, table and
@@ -497,7 +489,11 @@ mod tests {
     fn bytes_past_the_data_are_located_nowhere() {
         let dir = MemDir::new();
         let file = dir.create("framed", true).unwrap();
-        let bytes = extent_frame::framed(&[7; 4096], &[], None);
+        let bytes = extent_frame::framed(
+            &[7; 4096],
+            &[],
+            extent_remote::testing::sealing(extent_remote::layout::test_branch(1)),
+        );
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
         let source = Source::Framed(Arc::new(framed));
@@ -522,7 +518,11 @@ mod tests {
         let framed = |key: u64| {
             made.set(made.get() + 1);
             let file = dir.create(&made.get().to_string(), true).unwrap();
-            let bytes = extent_frame::framed(&[key as u8; 4096], &[], None);
+            let bytes = extent_frame::framed(
+                &[key as u8; 4096],
+                &[],
+                extent_remote::testing::sealing(extent_remote::layout::test_branch(1)),
+            );
             file.write_at(&bytes, 0).unwrap();
             Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))
         };

@@ -65,6 +65,8 @@ Implemented (2026-11-15):
 - Validation (Mac): nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax (sim excluded): 1033 passed, 0 failed. clippy --all-targets on touched crates: no new warnings. scripts/upstream-changes.py --check: passes.
 
 Simulation sample: sim::one, SIM_SEEDS=10 from SIM_SEED=4119000, for all 23 profiles (collectors, fresh_cells, everything, forks, bases, stale, collected, takeovers, recreated, crashes, taken, children, recovering, failed, restores, forgotten, whole_restores, taking_ids, usurped, deleted_forking, wals, forked_wals, late_checkpoints): all passed. DoD #1 (macOS and Linux ubu1) not checked: Linux not run (Mac only for this task). DoD #3: no upstream code changed beyond fxdax-marked additions; left for review.
+
+TASK-411.28 (2026-11-15) removed the sealed marker (layout::sealed, layout::Kind::Sealed, bucket::put_if_absent and exists, keys::Kms's markers, the bucket KMS's marker read). It told a KEK the KMS forgot from a tenant that never had one, because the second meant the clear; with no plaintext both refuse the tenant alike, for every real backend (NoSuchTenant refused as destroyed). The bucket KMS shreds by tombstone; a KEK object deleted outright, no tombstone, gets a new KEK at the next wrap, what the old one wrapped lost as shredding loses it (bucket_kms test kek_objects_deleted_outright_lose_what_they_wrapped), never a cell in the clear. AC #1 holds without the marker: extent_store upload::encrypted::tenants_whose_kek_the_kms_forgot_get_no_cell and fxdax remote::tests::tenants_with_no_kek_in_the_kms_open_no_store. doc-16 marks the section removed.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

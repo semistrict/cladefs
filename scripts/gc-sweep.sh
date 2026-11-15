@@ -24,6 +24,10 @@
 #
 #   scripts/gc-sweep.sh WORK RESULTS [SIDE=TREE...]
 set -euo pipefail
+# cladefs: cladefs-gc-fill seals the cells it fills, which cladefs-gc compacts, under the bucket KMS of a
+# test master key, unless the environment names a KMS (TASK-411.28).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/test-kms.sh"
+test_master_key
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 (( $# >= 2 )) || { echo "Usage: $0 WORK RESULTS [SIDE=TREE...]" >&2; exit 2; }
 mkdir -p "$1" "$2"

@@ -2,9 +2,25 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs-gc, the program: a pass over a bucket, and its usage.
+//! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every store sealed
+//! (TASK-411.28), the program given a master key, its bucket KMS keeping the tests' tenants' KEKs
+//! in the bucket ([`MASTER_KEY`]), as their writers' are ([`host_kms`]).
 
 use std::process::Command;
+use std::sync::Arc;
+
+/// The master key the program and the tests' writers are given, in hexadecimal.
+const MASTER_KEY: &str = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
+
+/// A host's KMS over `bucket`, as the program's environment chooses it: the bucket KMS, given
+/// [`MASTER_KEY`], which the tests' writers seal under.
+fn host_kms<B: extent_remote::Bucket>(bucket: &Arc<B>) -> Arc<extent_remote::keys::Kms> {
+    use extent_keys::kms::master::MasterKeys;
+    let key = extent_keys::Secret::from_bytes(&[0x7e; 32]);
+    let keys = MasterKeys::new(vec![key]).unwrap();
+    let kms = extent_remote::bucket_kms::BucketKms::new(bucket.clone(), keys);
+    extent_remote::keys::Kms::new(Arc::new(kms))
+}
 
 /// Branch `id` of tenant 1's cell 1, the tests'.
 fn test_branch(id: u64) -> extent_remote::layout::Branch {
@@ -12,7 +28,9 @@ fn test_branch(id: u64) -> extent_remote::layout::Branch {
 }
 
 fn gc(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_cladefs-gc")).args(args).output().unwrap()
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
+    command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY_FILE");
+    command.env("CLADEFS_MASTER_KEY", MASTER_KEY).args(args).output().unwrap()
 }
 
 /// What `out` said on standard error, its times, which vary, as `T`, and the requests it says it
@@ -51,6 +69,37 @@ fn collects_a_bucket_once() {
     let out = gc(&["memory:///", "--grace", "1"]);
     assert_eq!(said(&out), swept(0, 0, 0, "none"));
     assert!(out.status.success());
+}
+
+/// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect or
+/// to delete a branch, before it touches the bucket, naming both variables: every cell is sealed,
+/// and compacting needs its KEK. What reads no data, a dry run, `--branches`, `--usage`, needs
+/// none.
+#[test]
+fn refuses_to_collect_without_a_kms() {
+    let keyless = |args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
+        command.env_remove("CLADEFS_KMS").env_remove("CLADEFS_MASTER_KEY");
+        command.env_remove("CLADEFS_MASTER_KEY_FILE").args(args).output().unwrap()
+    };
+    let refused = format!("Error: {:?}\n", extent_remote::bucket_kms::no_kms());
+    for args in [
+        &["memory:///"][..],
+        &["memory:///", "--mark-only"],
+        &["memory:///", "--delete-branch", "1/1/1"],
+    ] {
+        let out = keyless(args);
+        assert_eq!(String::from_utf8_lossy(&out.stderr), refused, "{args:?}");
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+    }
+    assert!(refused.contains("CLADEFS_KMS") && refused.contains("CLADEFS_MASTER_KEY"));
+    for args in [
+        &["memory:///", "--dry-run"][..],
+        &["memory:///", "--branches"],
+        &["memory:///", "--usage"],
+    ] {
+        assert!(keyless(args).status.success(), "{args:?}");
+    }
 }
 
 /// TASK-395.5: `--metrics` writes what the sweep did, in Prometheus' text format, to its file.
@@ -97,7 +146,6 @@ fn collects_a_file_bucket() {
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::store::Store;
     use extent_remote::{Writer, branch};
-    use std::sync::Arc;
     use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
@@ -105,13 +153,15 @@ fn collects_a_file_bucket() {
     futures::executor::block_on(async {
         let bucket = Arc::new(Store::from_url(&url).unwrap());
         branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket, test_branch(1), 10, 1).await.unwrap();
+        let kms = host_kms(&bucket);
+        let writer = Writer::open_under(bucket, test_branch(1), (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
+            let segment =
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -154,11 +204,14 @@ fn collects_a_file_bucket() {
     let left: Vec<&str> = left.iter().map(String::as_str).collect();
     let at = "tenants/0000000000000001/cells/0000000000000001";
     let branch = "0000000000000001";
-    // Its head, which names its checkpoint (TASK-407).
+    // Its head, which names its checkpoint (TASK-407); cladefs: its cell's object, keeping its
+    // KEK, and its tenant's KEK object, the bucket KMS's (TASK-411.28).
     let kept = [
         format!("{at}/branches/{branch}"),
+        format!("{at}/cell"),
         format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
         format!("{at}/heads/{branch}"),
+        "tenants/0000000000000001/kek".to_owned(),
     ];
     assert_eq!(left, kept);
     let out = gc(&[&url, "--branches"]);
@@ -177,7 +230,6 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::store::Store;
     use extent_remote::{Writer, branch};
-    use std::sync::Arc;
     use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
@@ -185,13 +237,15 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     futures::executor::block_on(async {
         let bucket = Arc::new(Store::from_url(&url).unwrap());
         branch::create(&*bucket, test_branch(1), 0).await.unwrap();
-        let writer = Writer::open(bucket, test_branch(1), 10, 1).await.unwrap();
+        let kms = host_kms(&bucket);
+        let writer = Writer::open_under(bucket, test_branch(1), (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
+            let segment =
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -275,10 +329,12 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         // The word that the bucket is marked, which an operator removes with the marks.
         extent_remote::layout::MARKING.to_owned(),
         format!("{at}/branches/{branch}"),
+        format!("{at}/cell"),
         format!("{at}/checkpoints/{branch}/0000000000000001.0000000000000001"),
         format!("{at}/gc/lease"),
         marks,
         format!("{at}/heads/{branch}"),
+        "tenants/0000000000000001/kek".to_owned(),
     ];
     assert_eq!(names, kept);
 }
@@ -310,7 +366,6 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use extent_remote::{Writer, branch};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
-    use std::sync::Arc;
     use storage_device::ExtentId;
 
     let dir = tempfile::tempdir().unwrap();
@@ -324,14 +379,16 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
             branch::create(&*bucket, Branch { cell, id: id as u64 + 1 }, 0).await.unwrap();
         }
         // In the first cell, a segment written and one freeing it: what the pass deletes.
-        let writer = Writer::open(bucket.clone(), Branch { cell: cells[0], id: 1 }, 10, 1);
-        let writer = writer.await.unwrap();
+        let kms = host_kms(&bucket);
+        let branch = Branch { cell: cells[0], id: 1 };
+        let writer = Writer::open_under(bucket.clone(), branch, (10, 1), &kms).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
+            let segment =
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -455,9 +512,8 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 /// TASK-411.14: `--delete-branch` of a sealed branch whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
 /// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
-/// the KMS `CLADEFS_KMS` names. Without one, it fails, naming the tenant and what it needs, the
-/// branch left as a deletion stopped partway: its record not deleted, the child unrecorded; run
-/// again with one, it finishes.
+/// the KMS `CLADEFS_KMS` names. TASK-411.28: without a KMS, it refuses to start, naming
+/// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the branch as it was; run again with one, it deletes it.
 #[test]
 fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms() {
     use extent_frame::{Frame, KeyId, Seal};
@@ -483,10 +539,10 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let bucket = Arc::new(Store::from_url(&url).unwrap());
         let shared: extent_keys::kms::Shared = local.clone();
         let host = keys::Kms::new(shared);
-        let kek = keys::new_cell_kek(&*bucket, Some(&host), 1).await.unwrap();
-        let making = (true, kek.as_ref().map(|(_, kek)| kek));
+        let kek = keys::new_cell_kek(&host, 1).await.unwrap();
+        let making = Some(&kek.1);
         let (_, object) = cell::hold(&*bucket, parent.cell, (5, 5), making, None).await.unwrap();
-        let cell_keys = keys::held(Some(&host), parent.cell, object, kek);
+        let cell_keys = keys::held(&host, parent.cell, object, Some(kek));
         branch::create(&*bucket, parent, 0).await.unwrap();
         let record = branch::record(&*bucket, parent).await.unwrap().unwrap();
         let record = keys::with_dek(&*bucket, &cell_keys, parent, record).await.unwrap();
@@ -497,7 +553,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let written = Batch::from(written).close(&mut writer.chain());
-        let seq = writer.add_segment(written.frame_under(ring.sealing())).unwrap();
+        let seq = writer.add_segment(written.frame(ring.sealing())).unwrap();
         writer.upload(seq).await.unwrap();
         writer.acknowledge().await.unwrap();
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
@@ -505,7 +561,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
         let forked = Child { branch: child, owner: 0x109, point: false };
         let forking = forking.fork(forked, &mut writer.chain());
-        let at = writer.add_segment(forking.frame_under(ring.sealing())).unwrap();
+        let at = writer.add_segment(forking.frame(ring.sealing())).unwrap();
         writer.upload(at).await.unwrap();
         let head = extent_remote::head::get(&*bucket, parent).await.unwrap().unwrap();
         let named = layout::encode(&head.holding(writer.epoch(), at + 1));
@@ -523,6 +579,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     let delete = |kms: Option<&std::path::Path>| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-gc"));
         command.args([url.as_str(), "--delete-branch", "1/1/1"]).env_remove("CLADEFS_KMS");
+        command.env_remove("CLADEFS_MASTER_KEY").env_remove("CLADEFS_MASTER_KEY_FILE");
         if let Some(kms) = kms {
             command.env("CLADEFS_KMS", format!("local://{}", kms.display()));
         }
@@ -530,9 +587,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     };
 
     let out = delete(None);
-    let refused = "deleting branch 1/1/1: tenant 1: cell 1/1 is encrypted, and this host has no \
-                   KMS: cladefs-gc reads it from CLADEFS_KMS, which names none; the deletion stopped \
-                   partway: run it again with CLADEFS_KMS to finish it";
+    let refused = extent_remote::bucket_kms::no_kms();
     assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
     assert_eq!(out.status.code(), Some(1));
     assert_eq!(record(parent).map(|record| record.deleted), Some(false));

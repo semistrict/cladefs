@@ -412,6 +412,9 @@ impl Command {
         if let Some(what) = daemons {
             bail!("{what} the extent daemon's: name its control socket (CLADEFS_EXTENTD_GRPC)");
         }
+        // cladefs: every store it opens here, or deletes the branch of, is sealed under the host's
+        // KMS: none chosen, it refuses before it touches any (TASK-411.28).
+        cladefs::remote::require_kms().map_err(anyhow::Error::msg)?;
         // What stat reads needs no branch changed, nor does a copy dropped, its branch left be.
         let existing = !matches!(
             self,

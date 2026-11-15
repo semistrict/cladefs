@@ -73,7 +73,7 @@ impl<K: Kms> World<K> {
     fn host(&self, token: u64) -> Host {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
-        let keys = keys::Host { kms: Some(keys::Kms::new(kms)), ring: memory.keys().clone() };
+        let keys = keys::Host::new(keys::Kms::new(kms), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
@@ -88,8 +88,7 @@ impl<K: Kms> World<K> {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
         let pooling = keys::Pooling { low: 2, batch: 4, handle: self.runtime.handle().clone() };
-        let keys =
-            keys::Host { kms: Some(keys::Kms::pooled(kms, pooling)), ring: memory.keys().clone() };
+        let keys = keys::Host::new(keys::Kms::pooled(kms, pooling), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
@@ -289,7 +288,7 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
         let branch = volumes[at].0;
         let written_data = noise(at as u64 + 1, 4 * 4096);
         written(&store, &remote, ExtentId::new(branch.id, 1), &written_data);
-        let (dek, id) = store.keys().sealing().unwrap();
+        let (dek, id) = store.keys().sealing();
         assert_eq!(id, KeyId { branch: branch.id, generation: 1 });
         deks.push(Secret::from_bytes(dek.expose()));
         data.push(written_data);
@@ -357,40 +356,23 @@ fn cells_keep_keys_wrapped_and_one_unwrap_takes_a_cell() {
     assert_eq!(world.calls(), (0, 1));
 }
 
-/// AC #1's twin: a cell of a tenant with no KEK in the host's KMS is made in the clear, its
-/// records with no DEK, its objects in the clear, read as before.
+/// TASK-411.28, AC #3: a store of a tenant the host's KMS has no KEK of opens not, refused as
+/// destroyed, naming the tenant: no cell made, nothing of it in the bucket. Asked again, the KMS
+/// is asked again: no answer is believed for a while (TASK-411.10's went with the clear).
 #[test]
-fn cells_of_tenants_with_no_kek_are_in_the_clear() {
+fn stores_of_tenants_with_no_kek_open_not() {
     let world = World::new();
     let host = world.host(5);
-    let branch = Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 1 }, id: 7 };
-    let dir = made(branch, "a");
-    let (store, remote) = open_on(&world, &host, &dir).unwrap();
-    let data = noise(1, 4096);
-    written(&store, &remote, ExtentId::new(branch.id, 1), &data);
-    assert!(store.keys().is_empty());
-    let object = world.runtime.block_on(cell::read(&*world.bucket, branch.cell)).unwrap().unwrap();
-    assert_eq!(object.keks, Vec::new());
-    assert_eq!(world.record(branch).deks, Vec::new());
-    let segment = world.object(&layout::segment(branch, 0, 1));
-    assert_eq!(extent_frame::Frame::of(&segment).unwrap().seal, extent_frame::Seal::Clear);
-    assert_eq!(read(&world, &host, &store, ExtentId::new(branch.id, 1), 4096), Ok(data));
-    // The tenant's KEK asked for once, which it has not.
-    assert_eq!(world.calls(), (1, 0));
-    // TASK-411.10: its other stores opened by the host, a volume of the cell, one of a new cell,
-    // and the first again, ask nothing more: the answer is believed for `keys::KEKLESS_FOR`.
-    drop((store, remote));
-    let other = Branch { id: 8, ..branch };
-    let elsewhere = Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 2 }, id: 9 };
-    let dirs = [made(other, "b"), made(elsewhere, "a"), dir.crash(0)];
-    for dir in &dirs {
-        let (store, _remote) = open_on(&world, &host, dir).unwrap();
-        assert!(store.keys().is_empty());
+    let branch = Branch { cell: Cell { tenant: 2, id: 1 }, id: 7 };
+    let refused = Failure::Remote(extent_remote::Error::Kms("tenant 2: no KEK in the KMS".into()));
+    for calls in 1..=2 {
+        let opened = open_on(&world, &host, &made(branch, "a")).map(drop);
+        assert_eq!(opened, Err(refused.clone()));
+        assert_eq!(world.calls(), (calls, 0));
     }
-    assert_eq!(world.calls(), (1, 0));
-    // Another host asks once itself.
-    open_on(&world, &world.host(6), &made(Branch { id: 10, ..elsewhere }, "b")).unwrap();
-    assert_eq!(world.calls(), (2, 0));
+    assert_eq!(world.cell_of(branch.cell), None);
+    assert!(!world.has_record(branch));
+    assert_eq!(world.objects(), Vec::<(String, Vec<u8>)>::new());
 }
 
 /// AC #3: a store whose tenant's KEK is revoked opens on no host taking its cell, the error naming
@@ -434,7 +416,7 @@ fn generations_seal_new_objects_and_rotations_rewrap() {
     drop((store, remote));
     let (store, remote) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
     assert_eq!(store.keys().generations(7), [1, 2]);
-    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: 7, generation: 2 });
+    assert_eq!(store.keys().sealing().1, KeyId { branch: 7, generation: 2 });
     written(&store, &remote, ExtentId::new(7, 2), &noise(2, 4096));
     let first = location(&store, ExtentId::new(7, 2)).key;
     assert_eq!(segment_key(&first, &world.object(&first)), KeyId { branch: 7, generation: 2 });
@@ -445,7 +427,6 @@ fn generations_seal_new_objects_and_rotations_rewrap() {
 
     // The cell's KEK rotated by its holder.
     let held = cell::Held { cell: TEST_CELL, epoch: world.cell().epoch, holder: 5 };
-    let kms = kms.unwrap();
     let rotated = world.runtime.block_on(keys::rotate(&*world.bucket, &kms, held, world.cell()));
     assert_eq!(rotated, Ok((2, 2)));
     assert_eq!(world.cell().keks.iter().map(|kek| kek.generation).collect::<Vec<_>>(), [1, 2]);
@@ -478,9 +459,10 @@ fn generations_seal_new_objects_and_rotations_rewrap() {
     assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
 }
 
-/// AC #5: an object of a sealed branch put in the clear at its key, its data and footer framed
-/// anew, CRCs and all, by one who can write the bucket: refused by the branch's readers, the error
-/// naming it, whether its tail was kept before or not.
+/// AC #5, as TASK-411.28 left it: an object of a branch put at its key in the clear, its seal's
+/// kind made 0 as one who can write the bucket would (a downgrade): refused by the branch's readers
+/// and by a reader holding no key, as the collector reads, as corrupt, whether its tail was kept
+/// before or not. Its newest checkpoint so: its store's recovery refuses it.
 #[test]
 fn objects_of_sealed_branches_in_the_clear_are_refused() {
     let world = World::new();
@@ -490,37 +472,31 @@ fn objects_of_sealed_branches_in_the_clear_are_refused() {
     let extent = ExtentId::new(7, 1);
     written(&store, &remote, extent, &noise(1, 4096));
     let at = location(&store, extent);
-    let bytes = world.object(&at.key);
-    let keys = store.keys().of(7);
-    let (data, footer) = (
-        extent_frame::data(&bytes, &keys).unwrap(),
-        extent_frame::footer(&bytes, &keys).unwrap().to_vec(),
-    );
-    world.put(&at.key, extent_frame::framed(&data, &footer, None));
-    let downgraded = extent_remote::Error::Downgrade(at.key.clone());
-    assert_eq!(
-        downgraded.to_string(),
-        format!("{}: in the clear, of a branch whose objects are sealed", at.key)
-    );
+    // Its trailer's seal's kind, after the lengths of its data, parts and footer, and the
+    // footer's CRC: 0, in the clear.
+    let downgraded = |mut bytes: Vec<u8>| {
+        let trailer = bytes.len() - extent_frame::TRAILER as usize;
+        bytes[trailer + 28] = 0;
+        assert!(extent_frame::in_the_clear(&bytes));
+        bytes
+    };
+    world.put(&at.key, downgraded(world.object(&at.key)));
+    let clear = "an object's trailer: a seal in the clear, which no object has";
+    let corrupt = extent_remote::Error::Corrupt(clear.into());
     // A host's fetchers, holding the store's keys, of no tail kept.
-    assert_eq!(read(&world, &host, &store, extent, 4096), Err(downgraded.clone()));
-    // And a reader holding none, as the collector reads, reads it.
-    assert_eq!(fetched(&world, &Memory::new(), extent, &at), Ok(noise(1, 4096)));
-    // Its newest checkpoint so, authenticated no more: its store's recovery refuses it, naming it.
+    assert_eq!(read(&world, &host, &store, extent, 4096), Err(corrupt.clone()));
+    // And a reader holding none, as the collector reads.
+    assert_eq!(fetched(&world, &Memory::new(), extent, &at), Err(corrupt.clone()));
+    // Its newest checkpoint so: its store's recovery refuses it.
     drop((store, remote));
     let objects = world.objects();
     let mut checkpoints = objects.iter().filter(|(key, _)| {
         matches!(layout::kind(key), layout::Kind::Checkpoint { branch, .. } if branch.id == 7)
     });
     let (key, bytes) = checkpoints.next_back().unwrap();
-    let keyless = &extent_frame::NoKeys;
-    let (data, footer) = (
-        extent_frame::data(bytes, keyless).unwrap(),
-        extent_frame::footer(bytes, keyless).unwrap().to_vec(),
-    );
-    world.put(key, extent_frame::framed(&data, &footer, None));
+    world.put(key, downgraded(bytes.clone()));
     let refused = open_on(&world, &world.host(6), &dir.crash(0)).map(drop).unwrap_err();
-    assert_eq!(refused, Failure::Remote(extent_remote::Error::Downgrade(key.clone())));
+    assert_eq!(refused, Failure::Remote(corrupt));
 }
 
 /// AC #6: the object of an extent stored on its own, copied whole to another extent's key of the
@@ -620,7 +596,7 @@ fn forks_and_points_within_a_sealed_cell_read_what_they_inherit() {
     assert_eq!(world.record(child.branch).deks.len(), 1);
     let keys = forked_store.keys();
     assert_eq!((keys.generations(7), keys.generations(8)), (vec![1], vec![1]));
-    assert_eq!(keys.sealing().unwrap().1, KeyId { branch: 8, generation: 1 });
+    assert_eq!(keys.sealing().1, KeyId { branch: 8, generation: 1 });
     assert_eq!(read(&world, &host, &forked_store, inherited, 4096), Ok(noise(1, 4096)));
     let own = ExtentId::new(8, forked_remote.next_sequence().max(1));
     written(&forked_store, &forked_remote, own, &noise(2, 4096));
@@ -635,7 +611,9 @@ fn forks_and_points_within_a_sealed_cell_read_what_they_inherit() {
         open_on(&world, &host, &made(point.branch, "point")).unwrap();
     assert_eq!(world.record(point.branch).deks, Vec::new());
     assert_eq!(point_store.keys().generations(7), [1]);
-    assert_eq!(point_store.keys().sealing().map(|(_, id)| id), None);
+    // Its store's open segment, which nothing writes, sealed under a key of its own, of
+    // generation 0, which no record keeps.
+    assert_eq!(point_store.keys().sealing().1, KeyId { branch: 9, generation: 0 });
     assert_eq!(read(&world, &host, &point_store, inherited, 4096), Ok(noise(1, 4096)));
 }
 
@@ -652,7 +630,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
-    let kms = host.runtime.keys.kms.clone().unwrap();
+    let kms = host.runtime.keys.kms.clone();
     let parent = test_branch(7);
     let parent_dir = made(parent, "parent");
     let (store, remote) = open_on(&world, &host, &parent_dir).unwrap();
@@ -682,7 +660,7 @@ fn forks_into_other_cells_keep_what_they_inherit_rewrapped_and_outlive_their_par
     assert_eq!((made_cell.epoch, made_cell.token, made_cell.volumes.len()), (1, 0, 0));
     let kek = world.unwrapped(OTHER, &made_cell.keks[0].wrapped);
     let dek = keys::unwrap_inherited(&kek, child.branch, &record.inherited[0]).unwrap();
-    assert_eq!(dek.expose(), store.keys().sealing().unwrap().0.expose());
+    assert_eq!(dek.expose(), store.keys().sealing().0.expose());
     assert!(keys::unwrap_inherited(&kek, test_branch(8), &record.inherited[0]).is_err());
     world.kms.reset();
 
@@ -767,7 +745,7 @@ fn points_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused(
     // A host holding a copy open, told the point's tenant's KEK is revoked: the clone refused
     // before anything of it is made.
     let forker = world.pooled_host(7);
-    let kms = forker.runtime.keys.kms.clone().unwrap();
+    let kms = forker.runtime.keys.kms.clone();
     let (copy, copy_remote) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
     kms.refill(OTHER);
     world.runtime.block_on(kms.filled(OTHER));
@@ -783,7 +761,7 @@ fn points_fork_into_other_tenants_cells_rewrapped_unless_their_keys_are_refused(
     // Another host's copy forks it: no KMS call but its origin's cell's KEK unwrapped as the copy
     // opened.
     let forker = world.pooled_host(8);
-    let kms = forker.runtime.keys.kms.clone().unwrap();
+    let kms = forker.runtime.keys.kms.clone();
     world.kms.reset();
     let (copy, copy_remote) = open_on(&world, &forker, &point_dir.crash(0)).unwrap();
     assert_eq!(world.calls(), (0, 1));
@@ -819,7 +797,7 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     let world = World::new();
     world.kms.inner().create(OTHER).unwrap();
     let host = world.pooled_host(5);
-    let kms = host.runtime.keys.kms.clone().unwrap();
+    let kms = host.runtime.keys.kms.clone();
     let (store, remote) = open_on(&world, &host, &made(test_branch(7), "parent")).unwrap();
     written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
     kms.refill(OTHER);
@@ -857,62 +835,29 @@ fn revoked_tenants_pools_go_and_forks_into_their_new_cells_are_refused() {
     assert!(!world.has_record(last.branch) && world.cell_of(last.branch.cell).is_none());
 }
 
-/// TASK-411.4's twin in the clear: a fork of a store in the clear into another cell asks for
-/// nothing more than before, no request made for what it inherits, on a host with no KMS or with
-/// one its tenant has no KEK in; its child's record keeps no key, its store opening as before. A
-/// sealed store forks into no cell in the clear: refused before anything is made (`Inherited`).
+/// TASK-411.4, as TASK-411.28 left it: a sealed store forks into no cell of a tenant the KMS has no
+/// KEK of: refused before anything is made, as destroyed, naming the tenant; no cell is made in the
+/// clear.
 #[test]
-fn forks_in_the_clear_ask_for_nothing_more_and_sealed_ones_go_into_no_clear_cell() {
-    let clear = Branch { cell: Cell { tenant: 3, id: 1 }, id: 7 };
-    for kms in [true, false] {
-        let world = World::new();
-        let host = world.host(5);
-        let host = match kms {
-            true => host,
-            false => Host {
-                runtime: Runtime {
-                    keys: keys::Host { kms: None, ring: host.memory.keys().clone() },
-                    ..host.runtime
-                },
-                ..host
-            },
-        };
-        let dir = made(clear, "clear");
-        let (store, remote) = open_on(&world, &host, &dir).unwrap();
-        written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
-        let child = child_in(3, 2, 8, false);
-        // Nothing asked of the KMS, nor of the bucket, which it is not given.
-        world.kms.reset();
-        assert!(remote.inheriting(child).unwrap().is_none());
-        assert_eq!(world.calls(), (0, 0));
-        forked(&store, &remote, child).unwrap();
-        let record = world.record(child.branch);
-        assert_eq!((record.deks.len(), record.inherited.len()), (0, 0));
-        let (forked_store, _forked_remote) =
-            open_on(&world, &host, &made(child.branch, "child")).unwrap();
-        let read = read(&world, &host, &forked_store, ExtentId::new(7, 1), 4096);
-        assert_eq!(read, Ok(noise(1, 4096)));
-    }
-    // Sealed, into a cell of a tenant with no KEK.
+fn forks_into_cells_of_tenants_with_no_kek_are_refused() {
     let world = World::new();
     let host = world.host(5);
     let (store, remote) = open_on(&world, &host, &made(test_branch(7), "sealed")).unwrap();
     written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
     let child = child_in(3, 9, 8, false);
     let refused = forked(&store, &remote, child).unwrap_err();
-    let inherited = extent_remote::Error::Inherited { branch: child.branch, from: test_branch(7) };
-    assert_eq!(refused, Failure::Remote(inherited));
+    let none = extent_remote::Error::Kms("tenant 3: no KEK in the KMS".into());
+    assert_eq!(refused, Failure::Remote(none));
     assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
 }
 
-/// TASK-411.19: a tenant whose KEK the KMS forgot (a real KMS's key deleted, answering as for a
-/// tenant that never had one, [`extent_keys::testing::Forgetting`]) gets no cell in the clear: its
-/// first sealed cell wrote its sealed marker, so a store opening on another host, of a new cell
-/// or of a new volume of its sealed cell, and a fork of its open store into a new cell, are each
-/// refused as destroyed, naming the tenant, nothing made. A tenant that never had a KEK has no
-/// marker, its cells in the clear as before. A collector's sweep of every cell leaves the marker.
+/// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS forgot (a real KMS's key
+/// deleted, answering as for a tenant that never had one, [`extent_keys::testing::Forgetting`])
+/// gets no cell: a store opening on another host, of a new cell or of a new volume of its sealed
+/// cell, and a fork of its open store into a new cell, are each refused, naming the tenant,
+/// nothing made. No marker is needed for it, nor written: no cell is ever made in the clear.
 #[test]
-fn tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear() {
+fn tenants_whose_kek_the_kms_forgot_get_no_cell() {
     let dir = tempfile::tempdir().unwrap();
     let local = LocalKms::open(dir.path().join("kms")).unwrap();
     local.create(TENANT).unwrap();
@@ -920,13 +865,10 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear() {
     let first = world.host(5);
     let (store, remote) = open_on(&world, &first, &made(test_branch(7), "a")).unwrap();
     written(&store, &remote, ExtentId::new(7, 1), &noise(1, 4096));
-    let marker = layout::sealed(TENANT);
-    assert_eq!(world.object(&marker), layout::encode(&layout::FORMAT));
 
     world.kms.inner().inner().destroy(TENANT).unwrap();
-    let destroyed = "tenant 1: its KEK is destroyed: the KMS has none, and \
-                     tenants/0000000000000001/sealed says it had one";
-    let refused = Failure::Remote(extent_remote::Error::Kms(destroyed.into()));
+    let none = "tenant 1: no KEK in the KMS";
+    let refused = Failure::Remote(extent_remote::Error::Kms(none.into()));
     let second = world.host(6);
     let elsewhere = Branch { cell: Cell { tenant: TENANT, id: 2 }, id: 9 };
     for branch in [elsewhere, test_branch(8)] {
@@ -938,33 +880,11 @@ fn tenants_whose_kek_the_kms_forgot_get_no_cell_in_the_clear() {
     // The first host's open store forks into a new cell of the tenant's: refused before anything
     // of the fork is made.
     let child = child_in(TENANT, 3, 10, false);
-    assert_eq!(forked(&store, &remote, child), Err(refused.clone()));
+    assert_eq!(forked(&store, &remote, child), Err(refused));
     assert!(!world.has_record(child.branch) && world.cell_of(child.branch.cell).is_none());
-
-    // A tenant that never had a KEK: in the clear, no marker of its.
-    let clear = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 11 };
-    let (clear_store, clear_remote) = open_on(&world, &second, &made(clear, "c")).unwrap();
-    written(&clear_store, &clear_remote, ExtentId::new(11, 1), &noise(2, 4096));
-    assert!(clear_store.keys().is_empty());
-    assert_eq!(world.cell_of(clear.cell).unwrap().keks, Vec::new());
-    drop((store, remote, clear_store, clear_remote));
-
-    let sweep = extent_remote::sweep::Sweep {
-        options: extent_remote::collector::Options { compact_below: 1.0, grace: 0 },
-        mode: extent_remote::sweep::Mode::Delete,
-        at_once: 1,
-        lease: 60_000,
-        slowest: 0,
-        spawned: false,
-        kms: None,
-    };
-    let swept = world.runtime.block_on(sweep.run(&world.bucket, |_| {}));
-    assert_eq!(swept.visited, 2);
-    let markers: Vec<String> = (world.objects().into_iter())
-        .map(|(key, _)| key)
-        .filter(|key| matches!(layout::kind(key), layout::Kind::Sealed { .. }))
-        .collect();
-    assert_eq!(markers, [marker]);
+    drop((store, remote));
+    let objects: Vec<String> = world.objects().into_iter().map(|(key, _)| key).collect();
+    assert!(objects.iter().all(|key| !key.ends_with("/sealed")), "{objects:?}");
 }
 
 /// The paths of the files of `dir` that hold any of `data`'s sectors' first 32 bytes: data the
@@ -1031,21 +951,11 @@ fn segments_closed_again_are_never_in_the_clear() {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
         if let layout::Kind::Segment { .. } = layout::kind(&key) {
             let seal = extent_frame::Frame::of(&bytes).unwrap().seal;
-            // Sealed: GCM parts in a copy, or the raw file's XTS sectors framed in place (TASK-411.23).
-            let sealed = matches!(
-                seal,
-                extent_frame::Seal::Sealed { .. } | extent_frame::Seal::Sectors { .. }
-            );
-            assert!(sealed, "{key}: {seal:?}");
+            assert!(matches!(seal, extent_frame::Seal::Sealed { .. }), "{key}: {seal:?}");
             segments += 1;
         }
     }
     assert!(segments > 0);
-}
-
-/// The branch of a cell of a tenant with no KEK in the tests' KMS: in the clear.
-fn clear_branch() -> Branch {
-    Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 1 }, id: 7 }
 }
 
 /// The bytes of the files of `dir` whose paths start with `kind`, by their paths.
@@ -1056,77 +966,76 @@ fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
 /// TASK-411.5, AC #1, #2, #4: what a sealed store's guest writes is in no file of its directory,
 /// its open segment's raw file, its log and a large extent's raw file among them, written,
 /// committed, or framed; reads of the extents, open, sealed in the open segment or in a file of
-/// their own, and framed, give it back. Its clear twin's raw files hold it as written, and its
-/// logs are headed as before (`wal::LOG_MAGIC`). TASK-411.15: [`crate::on_disk`], holding no key,
-/// finds none of the sealed store's framed files and logs in the clear, and its twin's all so.
+/// their own, and framed, give it back; its logs are headed `wal::LOG_MAGIC`. TASK-411.15:
+/// [`crate::on_disk`], holding no key, finds none of its framed files and logs in the clear; and
+/// copies of them made as stores wrote them in the clear before TASK-411.28, a framed file's seal
+/// of kind 0 and a log headed `FXLOG\0\0\x02`, all so.
 #[test]
 fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
-    for sealed in [true, false] {
-        let world = World::new();
-        let host = world.host(5);
-        let branch = if sealed { test_branch(7) } else { clear_branch() };
-        let dir = made(branch, "a");
-        let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
-        let (store, remote) = open_with(&world, &host, &dir, quiet).unwrap();
-        assert_eq!(store.keys().sealing().is_some(), sealed);
-        let (small, large) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
-        let small_data = noise(1, 8 * 4096);
-        let large_data = noise(2, crate::Options::default().large_extent as usize);
-        store.write(small, 0, &small_data).unwrap();
-        store.write(large, 0, &large_data).unwrap();
-        let check = |when: &str| {
-            for (extent, data) in [(small, &small_data), (large, &large_data)] {
-                let mut buf = vec![0; data.len()];
-                store.read(extent, 0, &mut buf).unwrap();
-                assert!(buf == **data, "{when}, sealed {sealed}: {extent:?} read back");
-            }
-            let mut found = clear_files(&dir, &small_data);
-            found.extend(clear_files(&dir, &large_data));
-            found
-        };
-        let found = check("written");
-        match sealed {
-            true => assert_eq!(found, Vec::<String>::new(), "written"),
-            false => {
-                for kind in ["open-segments/", "open-extents/"] {
-                    assert!(found.iter().any(|path| path.starts_with(kind)), "{kind}: {found:?}");
-                }
-                let [(_, raw)] = &files_of(&dir, "open-segments/")[..] else { panic!() };
-                assert_eq!(&raw[..small_data.len()], &small_data[..]);
-            }
+    let world = World::new();
+    let host = world.host(5);
+    let branch = test_branch(7);
+    let dir = made(branch, "a");
+    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let (store, remote) = open_with(&world, &host, &dir, quiet).unwrap();
+    assert!(store.keys().seals());
+    let (small, large) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
+    let small_data = noise(1, 8 * 4096);
+    let large_data = noise(2, crate::Options::default().large_extent as usize);
+    store.write(small, 0, &small_data).unwrap();
+    store.write(large, 0, &large_data).unwrap();
+    let check = |when: &str| {
+        for (extent, data) in [(small, &small_data), (large, &large_data)] {
+            let mut buf = vec![0; data.len()];
+            store.read(extent, 0, &mut buf).unwrap();
+            assert!(buf == **data, "{when}: {extent:?} read back");
         }
-        store.commit(None).unwrap();
-        let found = check("committed");
-        assert_eq!(found.is_empty(), sealed, "committed: {found:?}");
-        store.close_segment().unwrap();
-        store.commit(None).unwrap();
-        store.closed(usize::MAX).unwrap();
-        let found = check("framed");
-        assert_eq!(found.is_empty(), sealed, "framed: {found:?}");
-        let magic = if sealed { crate::wal::SEALED_LOG_MAGIC } else { crate::wal::LOG_MAGIC };
-        let logs = files_of(&dir, "logs/");
-        assert!(!logs.is_empty());
-        for (path, log) in logs {
-            assert_eq!(&log[..8], magic, "{path}");
-        }
-        // TASK-411.15: and so a reader holding no key tells, by their trailers and headers.
-        let on_disk = crate::on_disk(&dir).unwrap().unwrap();
-        assert_eq!(on_disk.bucket.as_deref(), Some("memory:///encrypted"));
-        assert_eq!(on_disk.branch, branch);
-        let clear: BTreeSet<&str> = on_disk.clear.iter().map(|file| file.what).collect();
-        let expected = match sealed {
-            true => BTreeSet::new(),
-            false => BTreeSet::from(["a framed extent", "a framed segment", "a segment's log"]),
-        };
-        assert_eq!(clear, expected, "sealed {sealed}: {on_disk:?}");
-        assert!(on_disk.read >= 3, "sealed {sealed}: {on_disk:?}");
-        remote.cut_short()();
+        let mut found = clear_files(&dir, &small_data);
+        found.extend(clear_files(&dir, &large_data));
+        assert_eq!(found, Vec::<String>::new(), "{when}");
+    };
+    check("written");
+    store.commit(None).unwrap();
+    check("committed");
+    store.close_segment().unwrap();
+    store.commit(None).unwrap();
+    store.closed(usize::MAX).unwrap();
+    check("framed");
+    let logs = files_of(&dir, "logs/");
+    assert!(!logs.is_empty());
+    for (path, log) in &logs {
+        assert_eq!(&log[..8], crate::wal::LOG_MAGIC, "{path}");
     }
+    // TASK-411.15: and so a reader holding no key tells, by their trailers and headers.
+    let on_disk = crate::on_disk(&dir).unwrap().unwrap();
+    assert_eq!(on_disk.bucket.as_deref(), Some("memory:///encrypted"));
+    assert_eq!(on_disk.branch, branch);
+    assert_eq!(on_disk.clear, Vec::new(), "{on_disk:?}");
+    assert!(on_disk.read >= 3, "{on_disk:?}");
+    // Copies headed and sealed as stores in the clear wrote them: found so.
+    let (log, mut header) = logs[0].clone();
+    header[..8].copy_from_slice(crate::CLEAR_LOG_MAGIC);
+    let framed = files_of(&dir, "segments/").into_iter().chain(files_of(&dir, "extents/"));
+    for (path, mut bytes) in framed.chain([(log, header)]) {
+        if !path.starts_with("logs/") {
+            let at = bytes.len() - extent_frame::TRAILER as usize;
+            // The trailer's seal's kind, after the lengths of its data, parts and footer, and the
+            // footer's CRC.
+            bytes[at + 28] = 0;
+            assert!(extent_frame::in_the_clear(&bytes), "{path}");
+        }
+        dir.open(&path, false).unwrap().write_at(&bytes, 0).unwrap();
+    }
+    let on_disk = crate::on_disk(&dir).unwrap().unwrap();
+    let clear: BTreeSet<&str> = on_disk.clear.iter().map(|file| file.what).collect();
+    let expected = BTreeSet::from(["a framed extent", "a framed segment", "a segment's log"]);
+    assert_eq!(clear, expected, "{on_disk:?}");
+    remote.cut_short()();
     assert_eq!(crate::on_disk(&MemDir::new()).unwrap(), None, "no store");
 }
 
 /// TASK-421, TASK-400 in a sealed store: a sealed store's segment that compresses has its whole
-/// parts packed and held as they are written, in the clear, in memory, as its clear twin's are; its
+/// parts packed and held as they are written, compressed alone, in memory; its
 /// framing, in a copy, reads only its last part back, never whole, and seals what was held under
 /// its object's key: nothing of its data in any file of its directory, nor held once framed, and
 /// read back as written. Both on a directory whose I/O is its callers' alone, which packs ahead
@@ -1140,11 +1049,10 @@ fn sealed_stores_hold_parts_packed_ahead_and_seal_them_framing() {
         noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
     };
     let data = |sequence: u64| text(sequence, if sequence <= 6 { MIB } else { 4096 });
-    let mut holdings = Vec::new();
-    for sealed in [true, false] {
+    {
         let world = World::new();
         let host = world.host(5);
-        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let branch = test_branch(7);
         let dir = MemDir::serial();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch };
         let volume = crate::Volume { name: "a".into(), kind: cell::Kind::Fxfs };
@@ -1153,33 +1061,29 @@ fn sealed_stores_hold_parts_packed_ahead_and_seal_them_framing() {
         let interval = Duration::from_secs(3600);
         let options = Options { interval, held: Some(held.clone()), ..Options::default() };
         let (store, remote) = open_with(&world, &host, &dir, options).unwrap();
-        assert_eq!(store.keys().sealing().is_some(), sealed);
+        assert!(store.keys().seals());
         for sequence in 1..=7 {
             store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
         }
         store.commit(None).unwrap();
         let holding = held.counts();
-        assert!(holding.bytes > 2 * MIB as u64, "sealed {sealed}: held {holding:?}");
-        holdings.push(holding.bytes);
+        assert!(holding.bytes > 2 * MIB as u64, "held {holding:?}");
         let before = crate::framing_reads().0;
         store.close_segment().unwrap();
         store.commit(None).unwrap();
         store.closed(usize::MAX).unwrap();
         let read_back = crate::framing_reads().0 - before;
-        assert_eq!(read_back, 4096, "sealed {sealed}: the last part alone read back");
-        assert_eq!(held.counts().bytes, 0, "sealed {sealed}: taken");
+        assert_eq!(read_back, 4096, "the last part alone read back");
+        assert_eq!(held.counts().bytes, 0, "taken");
         for sequence in 1..=7 {
             let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
             let mut buf = vec![0; data.len()];
             store.read(extent, 0, &mut buf).unwrap();
-            assert!(buf == data, "sealed {sealed}: {extent:?} read back");
-            if sealed {
-                assert_eq!(clear_files(&dir, &data), Vec::<String>::new(), "{extent:?}");
-            }
+            assert!(buf == data, "{extent:?} read back");
+            assert_eq!(clear_files(&dir, &data), Vec::<String>::new(), "{extent:?}");
         }
         remote.cut_short()();
     }
-    assert_eq!(holdings[0], holdings[1], "held alike, sealed or not");
 }
 
 /// The seals of the framed files of `dir` whose paths start with `kind`, by their paths.
@@ -1188,14 +1092,13 @@ fn seals_of(dir: &MemDir, kind: &str) -> Vec<(String, extent_frame::Seal)> {
     files.map(|(path, bytes)| (path, extent_frame::Frame::of(&bytes).unwrap().seal)).collect()
 }
 
-/// TASK-411.23, AC #2: a sealed store frames in place what compresses too little, as its clear
-/// twin does, writing what it writes: a segment of noise, and of a little text, whose framing
+/// TASK-411.23, AC #2: a sealed store frames in place what compresses too little, as stores in the
+/// clear did before TASK-411.28, writing what they wrote: a segment of noise, and of a little text, whose framing
 /// compresses it all to tell, framed in place, its tail alone written, the object of its raw
 /// file's XTS sectors (`Seal::Sectors`); a large extent of noise sealed in place, its raw file its
 /// framed file; one of noise then text framed in a copy, sealed with AES-GCM, and so one whose text
-/// follows a framing chunk of noise, framed anew whole (`Store::seal_own`). The bytes written of
-/// guests' data, raw, copied, framed and own, are the clear twin's, byte for byte; the logs, MACed,
-/// alone differ. Before, a sealed store framed every segment and large extent in a copy, writing
+/// follows a framing chunk of noise, framed anew whole (`Store::seal_own`). The guests' data written
+/// once, raw, none copied, the segment's tail alone framed. Before, a sealed store framed every segment and large extent in a copy, writing
 /// its data twice. Nothing of the data is in the clear in the sealed store's directory nor its
 /// bucket, and all of it reads back, here and fetched.
 #[test]
@@ -1213,15 +1116,14 @@ fn sealed_stores_frame_in_place_writing_what_clear_stores_write() {
         // A framing chunk's worth of noise, then text: framed anew in a copy, sealed.
         _ => [noise(sequence, crate::store::OWN_CHUNK as usize), text(sequence, MIB)].concat(),
     };
-    let mut wrote = Vec::new();
-    for sealed in [true, false] {
+    {
         let world = World::new();
         let host = world.host(5);
-        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let branch = test_branch(7);
         let dir = made(branch, "a");
         let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let (store, remote) = open_with(&world, &host, &dir, quiet).unwrap();
-        assert_eq!(store.keys().sealing().is_some(), sealed);
+        assert!(store.keys().seals());
         let before = (crate::written(), crate::segments_framed_in_place());
         for sequence in 1..=10 {
             store.write(ExtentId::new(branch.id, sequence), 0, &data(sequence)).unwrap();
@@ -1231,51 +1133,41 @@ fn sealed_stores_frame_in_place_writing_what_clear_stores_write() {
         store.commit(None).unwrap();
         store.wait_framed().unwrap();
         let (after, in_place) = (crate::written(), crate::segments_framed_in_place() - before.1);
-        assert_eq!(in_place, 1, "sealed {sealed}: the segment framed in place");
+        assert_eq!(in_place, 1, "the segment framed in place");
         let delta = |of: fn(&crate::Written) -> u64| of(&after) - of(&before.0);
         let written =
             (delta(|w| w.raw), delta(|w| w.copied), delta(|w| w.framed), delta(|w| w.own));
         let guests: u64 = (1..=10).map(|sequence| data(sequence).len() as u64).sum();
-        assert_eq!(written.0, guests, "sealed {sealed}: raw, as the guests wrote");
-        assert_eq!(written.1, 0, "sealed {sealed}: nothing copied");
-        assert!(written.2 < 64 << 10, "sealed {sealed}: the segment's tail alone: {written:?}");
+        assert_eq!(written.0, guests, "raw, as the guests wrote");
+        assert_eq!(written.1, 0, "nothing copied");
+        assert!(written.2 < 64 << 10, "the segment's tail alone: {written:?}");
         let copies = (data(9).len() + data(10).len()) as u64;
         let noise = (large + crate::store::OWN_CHUNK as usize) as u64;
         assert!(
             written.3 > noise && written.3 < copies,
-            "sealed {sealed}: extents 9 and 10, their text compressed: {written:?}"
+            "extents 9 and 10, their text compressed: {written:?}"
         );
-        wrote.push(written);
-        // In place: the raw file's sectors, sealed; as written, in the clear.
-        let in_place = |seal: &extent_frame::Seal| match sealed {
-            true => matches!(seal, extent_frame::Seal::Sectors { .. }),
-            false => *seal == extent_frame::Seal::Clear,
-        };
+        // In place: the raw file's sectors, sealed.
+        let in_place =
+            |seal: &extent_frame::Seal| matches!(seal, extent_frame::Seal::Sectors { .. });
         let segments = seals_of(&dir, "segments/");
         assert_eq!(segments.len(), 1, "{segments:?}");
-        assert!(in_place(&segments[0].1), "sealed {sealed}: {segments:?}");
+        assert!(in_place(&segments[0].1), "{segments:?}");
         let own = seals_of(&dir, "extents/");
-        let own: Vec<_> = own
-            .into_iter()
-            .map(|(path, seal)| (path, in_place(&seal), seal.keyed().is_some()))
-            .collect();
+        let own: Vec<_> = own.into_iter().map(|(path, seal)| (path, in_place(&seal))).collect();
         let extent_of =
             |sequence: u64| crate::layout::extent_path(ExtentId::new(branch.id, sequence));
-        let expected = vec![
-            (extent_of(8), true, sealed),
-            (extent_of(9), !sealed, sealed),
-            (extent_of(10), !sealed, sealed),
-        ];
-        assert_eq!(own, expected, "sealed {sealed}: 8 in place, 9 and 10 in copies");
+        let expected = vec![(extent_of(8), true), (extent_of(9), false), (extent_of(10), false)];
+        assert_eq!(own, expected, "8 in place, 9 and 10 in copies");
         let all: Vec<u8> = (1..=10).flat_map(data).collect();
         for sequence in 1..=10 {
             let (extent, data) = (ExtentId::new(branch.id, sequence), data(sequence));
             let mut buf = vec![0; data.len()];
             store.read(extent, 0, &mut buf).unwrap();
-            assert!(buf == data, "sealed {sealed}: {extent:?} read back");
+            assert!(buf == data, "{extent:?} read back");
         }
         remote.wait_uploaded(store.epoch().unwrap()).unwrap();
-        if sealed {
+        {
             assert_eq!(clear_files(&dir, &all), Vec::<String>::new());
             assert_eq!(in_the_clear(world.objects(), &all), Vec::<String>::new());
             for sequence in [1, 8] {
@@ -1289,7 +1181,6 @@ fn sealed_stores_frame_in_place_writing_what_clear_stores_write() {
         }
         remote.cut_short()();
     }
-    assert_eq!(wrote[0], wrote[1], "sealed and clear stores write alike");
 }
 
 /// TASK-411.23, the TASK-411.9 pattern: a sealed store crashed as a segment framed in place is
@@ -1386,43 +1277,38 @@ fn segments_framed_in_place_sealed_recover_from_crashes() {
 
 /// TASK-411.5, AC #5: a write's bytes, as a caller writing them by an I/O of its own takes them
 /// ([`crate::Write::stored`]), are encrypted for the file it names, at the offset it names, and
-/// read back as written; a write of a sealed store's large extent that is not whole sectors is
-/// refused (TASK-411.8 refuses such writes to segments, sealed or not), its clear twin's taken.
+/// read back as written; a write of a large extent that is not whole sectors is refused (TASK-411.8
+/// refuses such writes to segments).
 #[test]
 fn writes_stored_by_callers_are_sealed_and_large_extents_take_whole_sectors() {
-    for sealed in [true, false] {
-        let world = World::new();
-        let host = world.host(5);
-        let branch = if sealed { test_branch(7) } else { clear_branch() };
-        let dir = MemDir::new();
-        let description = Description { block_size: 512, capacity: 1 << 30, branch };
-        let volume = crate::Volume { name: "a".into(), kind: cell::Kind::Fxfs };
-        Store::make(&dir, description, Some("memory:///encrypted"), Some(volume)).unwrap();
-        let (store, remote) = open_on(&world, &host, &dir).unwrap();
-        let extent = ExtentId::new(branch.id, 1);
-        let data = noise(3, 4 * 4096);
-        let write = store.begin_write(extent, 0, data.len() as u64).unwrap();
-        let mut bytes = crate::Aligned::new(data.len());
-        bytes.as_mut_slice().copy_from_slice(&data);
-        let stored = write.stored(bytes).unwrap();
-        assert_eq!(stored.bytes.as_slice() == &data[..], !sealed);
-        stored.file.write_at(stored.bytes.as_slice(), stored.offset).unwrap();
-        write.finish();
-        let mut buf = vec![0; data.len()];
-        store.read(extent, 0, &mut buf).unwrap();
-        assert!(buf == data, "sealed {sealed}: read back");
-        assert_eq!(clear_files(&dir, &data).is_empty(), sealed);
-        let large = crate::Options::default().large_extent;
-        let written = store.write(ExtentId::new(branch.id, 2), large, &data[..512]);
-        match sealed {
-            true => assert_eq!(
-                written.unwrap_err().downcast::<crate::Unsectored>().unwrap(),
-                crate::Unsectored { offset: large, len: 512 }
-            ),
-            false => written.unwrap(),
-        }
-        remote.cut_short()();
-    }
+    let world = World::new();
+    let host = world.host(5);
+    let branch = test_branch(7);
+    let dir = MemDir::new();
+    let description = Description { block_size: 512, capacity: 1 << 30, branch };
+    let volume = crate::Volume { name: "a".into(), kind: cell::Kind::Fxfs };
+    Store::make(&dir, description, Some("memory:///encrypted"), Some(volume)).unwrap();
+    let (store, remote) = open_on(&world, &host, &dir).unwrap();
+    let extent = ExtentId::new(branch.id, 1);
+    let data = noise(3, 4 * 4096);
+    let write = store.begin_write(extent, 0, data.len() as u64).unwrap();
+    let mut bytes = crate::Aligned::new(data.len());
+    bytes.as_mut_slice().copy_from_slice(&data);
+    let stored = write.stored(bytes).unwrap();
+    assert!(stored.bytes.as_slice() != &data[..], "encrypted");
+    stored.file.write_at(stored.bytes.as_slice(), stored.offset).unwrap();
+    write.finish();
+    let mut buf = vec![0; data.len()];
+    store.read(extent, 0, &mut buf).unwrap();
+    assert!(buf == data, "read back");
+    assert_eq!(clear_files(&dir, &data), Vec::<String>::new());
+    let large = crate::Options::default().large_extent;
+    let written = store.write(ExtentId::new(branch.id, 2), large, &data[..512]);
+    assert_eq!(
+        written.unwrap_err().downcast::<crate::Unsectored>().unwrap(),
+        crate::Unsectored { offset: large, len: 512 }
+    );
+    remote.cut_short()();
 }
 
 /// TASK-411.5: a sealed store's segment's log whose header, or a record, someone who can write the
@@ -1508,8 +1394,6 @@ fn fetched_by(
 /// The paths of the files under `dir`, on the host's disk, that hold any of `data`'s sectors' first
 /// 32 bytes.
 fn clear_files_on_disk(dir: &std::path::Path, data: &[u8]) -> Vec<String> {
-    // As on the disk, what the store's page cache holds written there first (TASK-433).
-    crate::pages::shared().write_back_all().unwrap();
     let pieces: std::collections::HashSet<&[u8]> =
         data.chunks(4096).map(|sector| &sector[..32]).collect();
     let mut found = Vec::new();
@@ -1597,7 +1481,7 @@ fn shredded_tenants_leave_none_of_their_volumes_readable_on_any_host() {
     for host in [&writer, &reader] {
         assert_eq!(host.runtime.keys.forget(keys::Scope::Tenant(TENANT), why), 1);
         host.memory.forget_kept(keys::Scope::Tenant(TENANT));
-        let kms = host.runtime.keys.kms.as_ref().unwrap();
+        let kms = &host.runtime.keys.kms;
         assert_eq!(kms.refuses(TENANT), Some(extent_remote::Error::Kms(why.into())));
         assert_eq!(kms.in_pool(TENANT), 0);
     }
@@ -1719,7 +1603,7 @@ fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
 /// A host of placement `token` as [`World::host`] makes one, but its KMS `kms`, its own.
 fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
     let memory = Memory::new();
-    let keys = keys::Host { kms: Some(keys::Kms::new(kms)), ring: memory.keys().clone() };
+    let keys = keys::Host::new(keys::Kms::new(kms), memory.keys().clone());
     let uploads = Budget::new(Limits::UNBOUNDED);
     Host {
         runtime: Runtime { handle: world.runtime.handle().clone(), uploads, keys },
@@ -1758,7 +1642,7 @@ fn sealed_stores_open_through_the_bucket_kms_on_two_hosts() {
     let (store, remote) = open_on(&world, &first, &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, extent, &data);
-    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: branch.id, generation: 1 });
+    assert_eq!(store.keys().sealing().1, KeyId { branch: branch.id, generation: 1 });
     drop((store, remote));
     let kek_object = world.object(&kek_key);
     assert_eq!(kek_object.len(), extent_keys::kms::bucket::KEK_OBJECT_LEN);
@@ -1771,10 +1655,13 @@ fn sealed_stores_open_through_the_bucket_kms_on_two_hosts() {
         objects.iter().filter(|(key, _)| key.starts_with(&layout::segments(branch))).collect();
     assert!(!segments.is_empty(), "no segment of {branch}");
     for (key, segment) in segments {
+        // Noise: framed in place, its raw file's sectors, or in a copy, sealed with AES-GCM.
         let seal = extent_frame::Frame::of(segment).unwrap().seal;
-        // Sealed: GCM parts in a copy, or the raw file's XTS sectors framed in place (TASK-411.23).
-        let sealed =
-            matches!(seal, extent_frame::Seal::Sealed { .. } | extent_frame::Seal::Sectors { .. });
+        let sealed = matches!(
+            seal,
+            extent_frame::Seal::Sealed { key, .. } | extent_frame::Seal::Sectors { key, .. }
+                if key.branch == branch.id
+        );
         assert!(sealed, "{key}: {seal:?}");
     }
     for (key, bytes) in &objects {
@@ -1837,7 +1724,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
     let (store, remote) = open_on(&world, &first, &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, extent, &data);
-    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: branch.id, generation: 1 });
+    assert_eq!(store.keys().sealing().1, KeyId { branch: branch.id, generation: 1 });
     drop((store, remote));
 
     let object = world.cell();
@@ -1888,7 +1775,7 @@ fn local_kms_sealed_stores_open_through_aws_kms() {
 /// through [`LocalKms`]: the cell's KEK wrapped under its tenant's Transit key, the header naming
 /// OpenBao, the tenant and the key; one unwrap for a host taking the cell, which reads what was
 /// written; a host taking it once cladefs's token may use the key no more refused, naming the
-/// tenant, and opening once it may again; a tenant with no Transit key's cell in the clear.
+/// tenant, and opening once it may again; a tenant with no Transit key's store refused, no cell made.
 #[test]
 fn sealed_stores_open_through_openbao() {
     use extent_keys::kms::openbao::{OpenBao, Token};
@@ -1905,7 +1792,7 @@ fn sealed_stores_open_through_openbao() {
     let (store, remote) = open_on(&world, &world.host(5), &dir).unwrap();
     let data = noise(1, 4 * 4096);
     written(&store, &remote, ExtentId::new(7, 1), &data);
-    assert_eq!(store.keys().sealing().unwrap().1, KeyId { branch: 7, generation: 1 });
+    assert_eq!(store.keys().sealing().1, KeyId { branch: 7, generation: 1 });
     assert_eq!(world.calls(), (1, 0));
     drop((store, remote));
     let object = world.cell();
@@ -1929,7 +1816,9 @@ fn sealed_stores_open_through_openbao() {
     let (store, _remote) = open_on(&world, &host, &dir.crash(0)).unwrap();
     assert_eq!(read(&world, &host, &store, ExtentId::new(7, 1), data.len()), Ok(data));
 
-    let clear = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
-    let (store, _remote) = open_on(&world, &host, &made(clear, "a")).unwrap();
-    assert!(store.keys().is_empty());
+    // A tenant with no key in OpenBao: its store opens not, refused (TASK-411.28).
+    let keyless = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
+    let refused = open_on(&world, &host, &made(keyless, "a")).map(drop).unwrap_err();
+    assert_eq!(refused.to_string(), "tenant 2: no KEK in the KMS");
+    assert_eq!(world.cell_of(keyless.cell), None);
 }

@@ -14,9 +14,11 @@
 //!   dropped unused. Every tenant is so sealed.
 //! - **Shredding a tenant** ([`destroy`]) replaces its KEK object by a tombstone: every key wrapped
 //!   under its KEK unwraps no more, and the tenant reads as destroyed, never made a KEK again, on
-//!   every host. A KEK object deleted outright, not by [`destroy`], of a tenant whose sealed marker
-//!   is there ([`layout::sealed`], TASK-411.19), reads as destroyed too. Only as strong as the
-//!   bucket keeps no older version of the object, as for a cell shredded (doc-16, Shredding).
+//!   every host. Only as strong as the bucket keeps no older version of the object, as for a cell
+//!   shredded (doc-16, Shredding). A KEK object deleted outright, not by [`destroy`], loses what
+//!   its KEK wrapped as shredding does, its keys refused as another KEK's; the tenant's next wrap
+//!   makes it a new KEK, its new cells sealed under it, never in the clear (TASK-411.28: no cell
+//!   is; the sealed marker that refused such a tenant, TASK-411.19, went).
 //! - **Rotating the master keys** ([`rotate`]): a host given several unwraps under any of them and
 //!   makes KEK objects under the first, the newest; [`rotate`] rewraps every tenant's KEK object
 //!   under it, each by a conditional update, after which the older keys are no longer needed. The
@@ -26,7 +28,8 @@
 //!   that time even if this host is not told; dropped at once by `Kms::forget`, which a host told
 //!   the tenant's keys are revoked or destroyed calls (`keys::Kms::revoked`).
 //! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
-//!   key, this one, over the host's bucket; else none, as before (TASK-411.28 makes that refused).
+//!   key, this one, over the host's bucket; else none, which every process opening stores refuses
+//!   to start with, naming both (TASK-411.28: every store is sealed).
 
 use crate::bucket::{self, Bucket, Created, Updated};
 use crate::layout;
@@ -114,17 +117,16 @@ impl<B: Bucket> BucketKms<B> {
         kek
     }
 
-    /// `tenant`'s KEK, read from its object; or, none there and `make`, made, create-only, unless
-    /// the tenant's sealed marker says it had one. A create finding another host's object there
-    /// takes that.
+    /// `tenant`'s KEK, read from its object; or, none there and `make`, made, create-only. A create
+    /// finding another host's object there takes that.
     async fn read(&self, tenant: u64, make: bool) -> Result<Arc<TenantKek>, Error> {
         let key = layout::kek(tenant);
         if let Some(object) = bucket::get(&*self.bucket, &key).await {
             return self.opened(tenant, &object.bytes);
         }
-        // A key wrapped under a KEK names one that was there; a tenant that had a sealed cell had
-        // one: deleted since, by someone other than `destroy`.
-        if !make || bucket::exists(&*self.bucket, &layout::sealed(tenant)).await {
+        // A key wrapped under a KEK names one that was there: deleted since, by someone other than
+        // `destroy`.
+        if !make {
             return Err(Error::Destroyed { tenant });
         }
         let kek = TenantKek::random();
@@ -281,15 +283,26 @@ impl<B: Bucket> HostKms<B> {
     }
 }
 
+/// Why a host has no KMS ([`from_env`]): neither variable gives one. Every store is sealed
+/// (TASK-411.28), so a process that opens stores refuses to start so, saying this.
+pub fn no_kms() -> String {
+    format!(
+        "no KMS: {KMS_VAR} names none, and neither {MASTER_KEY_VAR} nor {MASTER_KEY_FILE_VAR} \
+         gives a master key; every store is sealed (doc-16): set {KMS_VAR} to a KMS's URL, or \
+         {MASTER_KEY_VAR} to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
+         bucket"
+    )
+}
+
 /// The KMS a host's environment chooses, the one place every process that opens stores asks
 /// (extentd, cladefsctl, the cladefs CLI's mounts through `cladefs::remote::kms`; `cladefs-gc`): the KMS
 /// [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
-/// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else none, cells
-/// made in the clear (TASK-411.28 will refuse that, naming both variables). A KMS named, or master
-/// keys given, that can't be had is refused, saying why, never what a key holds.
+/// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else refused
+/// ([`no_kms`]), as every store is sealed (TASK-411.28). A KMS named, or master keys given, that
+/// can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
-) -> Result<Option<HostKms<B>>, String> {
+) -> Result<HostKms<B>, String> {
     let named = std::env::var(KMS_VAR).ok().filter(|url| !url.is_empty());
     let given = [MASTER_KEY_VAR, MASTER_KEY_FILE_VAR]
         .into_iter()
@@ -300,13 +313,13 @@ pub fn from_env<B: Bucket>(
             log::warn!("cladefs: {name} is set, and unused: {KMS_VAR} names the host's KMS");
         }
         let kms = kms::from_url(&url).map_err(|why| format!("{KMS_VAR}: {why}"))?;
-        return Ok(Some(HostKms::Named(kms)));
+        return Ok(HostKms::Named(kms));
     }
-    let Some(keys) = MasterKeys::from_env()? else { return Ok(None) };
+    let keys = MasterKeys::from_env()?.ok_or_else(no_kms)?;
     let bucket = bucket().map_err(|why| {
         format!("{MASTER_KEY_VAR}: the bucket KMS keeps tenants' KEKs in the host's bucket: {why}")
     })?;
-    Ok(Some(HostKms::Bucket(Arc::new(BucketKms::new(bucket, keys)))))
+    Ok(HostKms::Bucket(Arc::new(BucketKms::new(bucket, keys))))
 }
 
 #[cfg(test)]
@@ -364,8 +377,8 @@ mod tests {
         let key = Secret::random();
         let (wrapped, asked) = sim.served(first.wrap(7, &key));
         let wrapped = wrapped.unwrap();
-        let (kek, sealed) = (layout::kek(7), layout::sealed(7));
-        assert_eq!(asked, [format!("get {kek}"), format!("head {sealed}"), format!("put {kek}")]);
+        let kek = layout::kek(7);
+        assert_eq!(asked, [format!("get {kek}"), format!("put {kek}")]);
         assert_eq!(wrapped.0.len(), formats::WRAPPED_LEN);
         let made = object(&Direct(sim.clone()), 7).unwrap();
         assert_eq!(made.len(), KEK_OBJECT_LEN);
@@ -415,12 +428,11 @@ mod tests {
         let (first_key, second_key) = (Secret::random(), Secret::random());
         let racing = futures::future::join(first.wrap(7, &first_key), second.wrap(7, &second_key));
         let ((first_wrapped, second_wrapped), rounds) = sim.served_in_rounds(racing);
-        let (kek, sealed) = (layout::kek(7), layout::sealed(7));
+        let kek = layout::kek(7);
         assert_eq!(
             rounds,
             [
                 vec![format!("get {kek}"), format!("get {kek}")],
-                vec![format!("head {sealed}"), format!("head {sealed}")],
                 vec![format!("put {kek}"), format!("put {kek}")],
                 // The second create, finding an object there, reads it: another's.
                 vec![format!("get {kek}")],
@@ -566,32 +578,26 @@ mod tests {
         assert_eq!(object(&*bucket, 9), Some(KekObject::tombstone(9)));
     }
 
-    /// AC #3: a KEK object deleted outright, not shredded, of a tenant whose sealed marker says it
-    /// had a sealed cell, reads as destroyed: no KEK is made anew under which its cells would be
-    /// unreadable. A tenant with no marker (no sealed cell yet) is made a new one, and keys wrapped
-    /// under the old are refused, naming why.
+    /// AC #3 (TASK-411.27), as TASK-411.28 left it: a KEK object deleted outright, not shredded,
+    /// loses what its KEK wrapped: keys under it are refused, as destroyed until a wrap makes the
+    /// tenant a new KEK, then as another KEK's. Its new cells are sealed under the new one: no cell
+    /// is ever in the clear, so no marker refuses the tenant (TASK-411.19's went).
     #[test]
-    fn kek_objects_deleted_outright_are_destroyed_once_a_cell_was_sealed() {
+    fn kek_objects_deleted_outright_lose_what_they_wrapped() {
         let master = Secret::random();
         let bucket = bucket();
         let key = Secret::random();
-        let marked = wrap(&host(&bucket, &[&master]), 7, &key).unwrap();
-        let unmarked = wrap(&host(&bucket, &[&master]), 8, &key).unwrap();
-        let marker = layout::encode(&layout::FORMAT);
-        block_on(bucket::put_if_absent(&*bucket, &layout::sealed(7), marker));
-        for tenant in [7, 8] {
-            block_on(bucket.delete(&layout::kek(tenant))).unwrap();
-        }
+        let wrapped = wrap(&host(&bucket, &[&master]), 8, &key).unwrap();
+        block_on(bucket.delete(&layout::kek(8))).unwrap();
         let kms = host(&bucket, &[&master]);
-        assert_eq!(refusal(wrap(&kms, 7, &key)), "tenant 7: its KEK is destroyed");
-        assert_eq!(refusal(unwrap(&kms, 7, &marked)), "tenant 7: its KEK is destroyed");
-        assert_eq!(object(&*bucket, 7), None);
-        assert_eq!(refusal(unwrap(&kms, 8, &unmarked)), "tenant 8: its KEK is destroyed");
-        wrap(&kms, 8, &key).unwrap();
+        assert_eq!(refusal(unwrap(&kms, 8, &wrapped)), "tenant 8: its KEK is destroyed");
+        assert_eq!(object(&*bucket, 8), None);
+        let anew = wrap(&kms, 8, &key).unwrap();
         assert_eq!(
-            refusal(unwrap(&kms, 8, &unmarked)),
+            refusal(unwrap(&kms, 8, &wrapped)),
             "tenant 8: not authentic: a wrapped key, wrapped by another KEK of the tenant's"
         );
+        assert_eq!(unwrap(&kms, 8, &anew).unwrap().expose(), key.expose());
     }
 
     /// AC #4: a host given another master key than the one a tenant's KEK object is under is
@@ -695,11 +701,12 @@ mod tests {
     }
 
     /// The KMS a host's environment chooses: `CLADEFS_KMS`'s if it names one, a master key or not;
-    /// else the bucket KMS over the host's bucket, given a master key; else none. A master key
-    /// with no bucket, or two ways of giving it, is refused naming why. Each nextest test is a
-    /// process of its own: this one's variables are its own.
+    /// else the bucket KMS over the host's bucket, given a master key; else none, refused naming
+    /// both variables (TASK-411.28). A master key with no bucket, or two ways of giving it, is
+    /// refused naming why. Each nextest test is a process of its own: this one's variables are its
+    /// own.
     #[test]
-    fn hosts_choose_cladefs_kms_then_the_bucket_kms_then_none() {
+    fn hosts_choose_cladefs_kms_then_the_bucket_kms_and_refuse_none() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: this test's process is its own (nextest), no other thread reading it.
         let set = |name: &str, value: Option<&str>| unsafe {
@@ -717,16 +724,25 @@ mod tests {
                 bucket.cloned().ok_or_else(|| "CLADEFS_EXTENTD_REMOTE names none".to_owned())
             })
         };
-        let kind = |chosen: &Result<Option<HostKms<Direct>>, String>| match chosen {
-            Ok(None) => "none".to_owned(),
-            Ok(Some(HostKms::Named(_))) => "named".to_owned(),
-            Ok(Some(HostKms::Bucket(_))) => "bucket".to_owned(),
+        let kind = |chosen: &Result<HostKms<Direct>, String>| match chosen {
+            Ok(HostKms::Named(_)) => "named".to_owned(),
+            Ok(HostKms::Bucket(_)) => "bucket".to_owned(),
             Err(why) => why.clone(),
         };
-        assert_eq!(kind(&chosen(Some(&bucket))), "none");
+        assert_eq!(
+            kind(&chosen(Some(&bucket))),
+            "no KMS: CLADEFS_KMS names none, and neither CLADEFS_MASTER_KEY nor CLADEFS_MASTER_KEY_FILE \
+             gives a master key; every store is sealed (doc-16): set CLADEFS_KMS to a KMS's URL, or \
+             CLADEFS_MASTER_KEY to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
+             bucket"
+        );
+        assert_eq!(kind(&chosen(Some(&bucket))), no_kms());
+        set(KMS_VAR, Some(""));
+        assert_eq!(kind(&chosen(Some(&bucket))), no_kms(), "an empty CLADEFS_KMS names none");
+        set(KMS_VAR, None);
         let hex: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
         set(MASTER_KEY_VAR, Some(&hex));
-        let host = chosen(Some(&bucket)).unwrap().unwrap();
+        let host = chosen(Some(&bucket)).unwrap();
         let kms = host.bucket().unwrap();
         assert!(Arc::ptr_eq(kms.bucket(), &bucket));
         assert_eq!(kms.keys().named_ids(), "8b1917a7f2bf1306");

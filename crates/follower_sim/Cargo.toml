@@ -23,7 +23,8 @@ shuttle = [
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
-extent_store.workspace = true
+# cladefs: stores kept in no bucket, sealed under the tests' DEK (TASK-411.28).
+extent_store = { workspace = true, features = ["unkept"] }
 follower.workspace = true
 follower_history.workspace = true
 fuchsia-async.workspace = true

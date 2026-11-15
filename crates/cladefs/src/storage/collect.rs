@@ -53,6 +53,12 @@ fn pace() -> Pace {
     PACE
 }
 
+/// A collector of `options`, which compacts the objects of images' cells, every one sealed, under
+/// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, it would compact none.
+fn new_collector(options: Options) -> Collector {
+    Collector::new(options).kms(Some(crate::remote::kms().inner().clone()))
+}
+
 /// The collectors of the buckets this process has images of open, by their URLs.
 static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
 
@@ -67,7 +73,7 @@ pub(crate) fn of(url: &str, bucket: &Arc<Bucket>) -> Arc<Collecting> {
     let collector = Arc::new(Collecting {
         bucket: bucket.clone(),
         pace,
-        state: Mutex::new(State { idle: Some(Collector::new(pace.options)), ..Default::default() }),
+        state: Mutex::new(State { idle: Some(new_collector(pace.options)), ..Default::default() }),
     });
     collecting.insert(url.to_owned(), Arc::downgrade(&collector));
     collector
@@ -106,7 +112,7 @@ impl State {
     /// Takes the collector back from `running`, waiting for it to end, and what it did.
     fn ended(&mut self, running: JoinHandle<(Collector, Report)>, options: Options) {
         let (collector, report) =
-            running.join().unwrap_or_else(|_| (Collector::new(options), Report::default()));
+            running.join().unwrap_or_else(|_| (new_collector(options), Report::default()));
         self.idle = Some(collector);
         self.collected += report;
     }
@@ -133,7 +139,7 @@ impl Collecting {
             }
             Err(err) => {
                 log::warn!("cladefs: starting a pass of an image's collector: {err}");
-                state.idle = Some(Collector::new(self.pace.options));
+                state.idle = Some(new_collector(self.pace.options));
             }
         }
     }
@@ -162,7 +168,7 @@ impl Collecting {
         if let Some(running) = state.running.take() {
             state.ended(running, self.pace.options);
         }
-        let mut collector = Collector::new(Options { grace: 0, ..self.pace.options });
+        let mut collector = new_collector(Options { grace: 0, ..self.pace.options });
         let collected =
             extent_store::upload::block_on(collector.collect(&*self.bucket, rand::random()));
         collected.unwrap().unwrap()

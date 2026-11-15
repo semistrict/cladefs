@@ -3,11 +3,91 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 14:25'
+updated_date: '2026-11-15 19:09'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`cladefs-gc --delete-branch` under `CLADEFS_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**), TASK-411.16, .17 and .18 (OpenBao, AWS KMS and Google Cloud KMS, below: **Real KMSes**), TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**), TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**) and TASK-411.27 (the bucket KMS, tenants' KEKs kept in the bucket under a master key, below: **The bucket KMS**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused), TASK-411.14 (`cladefs-gc --delete-branch` under `CLADEFS_KMS`), TASK-411.15 (the guest e2e tests run sealed, below: **What TASK-411.15 made**), TASK-411.16, .17 and .18 (OpenBao, AWS KMS and Google Cloud KMS, below: **Real KMSes**), TASK-411.19 (a KEK the KMS forgot told from none by the tenant's sealed marker, below: **A forgotten KEK told from none**), TASK-411.23 (sealed stores frame in place, below: **What TASK-411.23 made**), TASK-411.27 (the bucket KMS, tenants' KEKs kept in the bucket under a master key, below: **The bucket KMS**) and TASK-411.28 (no plaintext: every cell sealed, always, below: **One sealed mode**) are implemented. The sections after **One sealed mode** are the history of how each part was made; where they speak of cells, objects or logs in the clear, of `KEKLESS_FOR` or of the sealed marker, **One sealed mode** says what replaced them.
+
+## One sealed mode (TASK-411.28)
+
+*(decided, the user, 2026-11-15)* **No plaintext.** Every cell is sealed, always, with no opt-out;
+the bucket KMS is the default whenever `CLADEFS_KMS` names none; and every process that opens stores
+refuses to start with neither a KMS nor a master key. What this is now, whatever the sections below
+say of the clear:
+
+- **No clear path.** `extent_frame`'s `Seal::Clear` and `Opening::Clear` went: every object is
+  `Sealed` (kind 1), `Authenticated` (kind 2: checkpoints, metadata) or `Sectors` (kind 3: framed
+  in place under its raw file's XTS key), and a trailer whose seal byte is 0, in the clear, is
+  **corrupt** ("a seal in the clear, which no object has"). `extent_frame::in_the_clear` tells one
+  from its bytes for keyless checkers (`extent_store::on_disk`, the guest tests' `sealed` check). A
+  segment's log is `FXLOG\0\0\x03` alone, its header authenticated; one headed
+  `FXLOG\0\0\x02` is a clear store's, which `on_disk` names (`CLEAR_LOG_MAGIC`). Raw files are
+  always XTS-sealed; a store refuses a write that is not whole sectors whatever its keys. A packer
+  is always keyed (`Packer::new((dek, id))`, `Packer::in_place(sectors)`); parts packed ahead are
+  compressed unsealed in memory (`PartPacker::compress`) and sealed as their object is.
+  `Error::Downgrade` went with the clear: a seal byte zeroed is caught as corruption, by every
+  reader, holding keys or none.
+- **Every cell has a KEK, every writer's record a DEK.** A cell is made only with a KEK its
+  tenant's KEK wraps (`keys::new_cell_kek`, now `(kms, tenant) -> (secret, Kek)`;
+  `cell::Object::made`, `cell::create` and `cell::hold`'s making take a `Kek`, never none). A
+  cell's object without one is refused ("cell X keeps no KEK, which every cell's object does"),
+  as is a writer's record without a DEK ("branch X's record keeps no DEK, which its writer seals
+  under"). A writer's ring always seals (`Ring::sealing`); `Ring::keyless` is the reader's that
+  holds no key (marking, recovery's keyless checks). A point, which no writer takes, seals the
+  open segment it never writes under a key of its own (`Ring::for_point`, kept apart from the
+  DEKs it inherits). `keys::taking` makes a cell with its KEK where a tool takes a branch whose
+  cell has no object (`Writer::open_under`, `cladefs-gc-fill`).
+- **'No such key' is destroyed, for every backend.** `kms::Error::NoSuchTenant` stays the
+  backends' precise answer (`LocalKms`, OpenBao, AWS, Google Cloud), but `keys::Kms` treats it as
+  it treats `Revoked` and `Destroyed` (`keys::revokes`): the tenant's pool and cells' KEKs dropped,
+  the tenant refused (`Kms::revoked`) until the KMS answers a call for it again, and the cell
+  refused, `Error::Kms` naming it (`tenant T: no KEK in the KMS`, `EACCES` at cladefs). A new cell of
+  a tenant the KMS has no KEK of is never made; a fork into one is refused before anything is made.
+- **The sealed marker went** (TASK-411.19; `layout::sealed`, `layout::Kind::Sealed`,
+  `bucket::put_if_absent`, `bucket::exists`, `keys::Kms`'s markers, the bucket KMS's marker read).
+  It told a KEK the KMS forgot from a tenant that never had one, because the second meant the
+  clear. With no clear, both refuse the tenant alike, for real KMSes; the bucket KMS shreds by
+  tombstone; and a tenant's KEK object deleted outright loses what it wrapped as shredding does,
+  its tenant's next cells sealed under a new KEK (`bucket_kms` test
+  `kek_objects_deleted_outright_lose_what_they_wrapped`), never in the clear.
+- **The kekless cache went** (TASK-411.10's `KEKLESS_FOR`, `keys::Kms::kekless`): it spared a
+  plaintext tenant's openings a wrap each; no tenant is plaintext. A refusal is noted as every
+  revocation is (`Kms::revoked`), and a tenant refused asks the KMS again at its next call.
+- **The KMS is required, and checked as each process starts.** `bucket_kms::from_env` returns
+  `Result<HostKms, String>`: `CLADEFS_KMS`'s KMS; else, given a master key, the bucket KMS over the
+  host's bucket; else the refusal `bucket_kms::no_kms()`:
+
+  > no KMS: CLADEFS_KMS names none, and neither CLADEFS_MASTER_KEY nor CLADEFS_MASTER_KEY_FILE gives a
+  > master key; every store is sealed (doc-16): set CLADEFS_KMS to a KMS's URL, or CLADEFS_MASTER_KEY
+  > to a master key (openssl rand -hex 32) to keep tenants' KEKs in the bucket
+
+  `cladefs::remote::require_kms` (`the host's KMS: ...`) is asked as cladefs-extentd starts (after its
+  host's environment is read), as cladefsctl acts on stores itself (`locally`), and as `cladefs-mount`
+  mounts; the guest tests' runner asks it before any case (`test_cases::sealed::require_kms`).
+  `cladefs-gc` needs a KMS to collect (`--delete`, `--mark-only`) and for `--delete-branch`,
+  refusing without one; its dry runs, `--branches`, `--usage` and `--rotate-master-key` need none.
+  `cladefs-gc-fill` chooses its KMS from the environment, else a `LocalKms` of its own.
+- **Collectors.** A collector given no KMS (`Collector::kms(None)`) marks and deletes but compacts
+  nothing, every cell locked, as for a KEK refused; `cladefs-gc` refuses to collect without one, and
+  an image's own collector (`cladefs::storage::collect`) holds the host's KMS.
+- **Tests.** Every test is sealed. `extent_keys::testing::MemoryKms` makes each tenant's KEK on
+  first use, the unit tests' default: `extent_remote::keys::testing::{kms, host_kms, host}`, one
+  per process, which cladefs's unit tests fall back to and `extent_remote::testing`'s readers
+  (`ring_of`, `read`) unwrap under. `extent_keys::testing::KnownKms` keeps every tenant's KEK one
+  known key, so that a test's process and those it starts agree with nothing shared: cladefs's
+  `tests-kms` feature, which cladefs's and sqlite_extents' tests turn on and a release build refuses,
+  has a host given no KMS seal under it (`cladefs::remote::testing`); a bench seals under it unless
+  its environment names a KMS (`cladefs::remote::testing::sealed`). Stores kept in no bucket seal
+  under a fixed DEK (`extent_store`'s `unkept` feature: `Store::create`, `Store::open`,
+  `Opening::new`, `UNKEPT_DEK`). Scripts that start cladefs's processes without a KMS of their own
+  give them the tests' master key (`scripts/lib/test-kms.sh`: gc-sweep.sh,
+  lib/fork-time-linux-host.sh, test-rustfs.sh; pjdfstest-fuse.py's own; the Go daemon test).
+  Clear twins were removed or made to assert the sealed path; a frame in the clear is a
+  corruption test now (`extent_frame` `objects_in_the_clear_are_corrupt`, `extent_store`
+  `upload::encrypted::objects_of_sealed_branches_in_the_clear_are_refused`).
+- **Not done here.** TASK-460: a take of a sealed branch reads its cell's object twice (once for
+  its recovery's KEK, once to hold it), one GET more than a clear take asked.
 
 ## Goals
 
@@ -151,7 +231,7 @@ dropped with its pool, never written out unwrapped.
 
 ## Decided later the same day
 
-- **Unencrypted stores stay** *(decided)*: FORMAT 2's trailer says whether an object is encrypted,
+- **Unencrypted stores stay** *(decided; superseded by TASK-411.28: no plaintext, One sealed mode)*: FORMAT 2's trailer says whether an object is encrypted,
   and a cell with no wrapped KEK (tenant 0, tests that ask) writes in the clear, its records with no
   DEKs. Both paths are tested: every encryption test has a plaintext twin where it applies.
 - **No migration** *(decided)*: no bucket in use needs keeping; FORMAT 2 refuses FORMAT 1 by name,
@@ -175,13 +255,15 @@ dropped with its pool, never written out unwrapped.
 - **The KMS and how a cell chooses.** `CLADEFS_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
   `cladefs::remote::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
-  compact sealed cells (TASK-411.6; marking keyless). A cell is made sealed iff
+  compact sealed cells (TASK-411.6; marking keyless). *(TASK-411.28: every cell is made sealed, a
+  process with no KMS refusing to start; `NoSuchTenant` refuses the cell as destroyed: One sealed
+  mode.)* A cell was made sealed iff
   the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear (unless
   the tenant's sealed marker says it had one: TASK-411.19, below), any
   other refusal (revoked, destroyed, unreachable, a bad `CLADEFS_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
-  *(TASK-411.10)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
+  *(TASK-411.10; gone with TASK-411.28, One sealed mode)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
   that heard it (`keys::Kms::new_kek`, or a pool's refill), asking the KMS nothing for that tenant
   meanwhile: every opening of a store whose record has no DEK asks for a KEK in case it makes the
   cell, so a host opening a plaintext tenant's stores made one wrap call per opening; now one a
@@ -209,6 +291,8 @@ dropped with its pool, never written out unwrapped.
   never kept; peers are served stored bytes, needing none.
 - **Downgrades.** A reader holding a branch sealed (`Keys::sealed`) refuses its objects in the
   clear (`Error::Downgrade`, naming the object) and authenticated ones under keys it lacks.
+  *(TASK-411.28: no object is in the clear; one whose seal says so is corrupt, `Error::Downgrade`
+  gone.)*
 - **Generations and rotation.** `keys::add_generation` appends a DEK generation by a conditional
   update; stores opened after seal under it, the older still read. `keys::rotate` adds a cell KEK
   generation (conditional on the holder holding the cell), then rewraps every record's DEKs under
@@ -476,6 +560,10 @@ dropped with its pool, never written out unwrapped.
 
 ## A forgotten KEK told from none (TASK-411.19)
 
+*(Removed by TASK-411.28, with the clear it told a forgotten KEK from: every `NoSuchTenant` refuses
+the tenant as destroyed now, for every backend, and the marker, its writes and reads went. One
+sealed mode says why. Kept as the history.)*
+
 *(decided 2026-11-15: a tenant marker in the bucket)* A real KMS forgets a deleted key: AWS KMS
 answers `NotFoundException` once a key's deletion waiting period is over, OpenBao Transit a 404 for
 a deleted key, as for a key never made; the backends map both to `NoSuchTenant`, which alone means
@@ -547,9 +635,8 @@ configuration.
 
 *(decided 2026-11-15)* When no `CLADEFS_KMS` names a KMS, a host given a **master key** keeps every
 tenant's KEK in the bucket itself, wrapped by the master key, made on the tenant's first use: no
-setup per tenant, every tenant sealed. TASK-411.28 makes it the default (a host with neither
-refuses to start) and removes plaintext; until then a host with neither makes cells in the clear,
-as before.
+setup per tenant, every tenant sealed. TASK-411.28 made it the default (a host with neither
+refuses to start) and removed plaintext (One sealed mode).
 
 - **What it is not.** BYOK (Goal 1): the tenant holds no key of its own; one wanting that brings a
   real KMS. Goal 3 holds while the master key stays out of the bucket: a reader of the bucket finds
@@ -606,13 +693,14 @@ as before.
   | Found | `kms::Error` |
   |---|---|
   | a tombstone | `Destroyed` |
-  | no object, unwrapping; or no object and the sealed marker, wrapping | `Destroyed` |
+  | no object, unwrapping; or a tombstone, wrapping | `Destroyed` |
   | an object under a master key not given | `UnknownMasterKey`: `tenant T: its KEK is wrapped by master key ID, which this host has not (it has IDS): CLADEFS_MASTER_KEY` |
   | an object or a wrapped key not authentic (another tenant's, tampered, another KEK of the tenant's) | `Unauthentic` |
 
-  Never `NoSuchTenant`: every tenant asked for gets a KEK, so every cell made is sealed. Cells made
-  in the clear before a host had a master key stay in the clear (a cell's sealing is chosen as it
-  is made; TASK-411.28 removes them). A wrong master key is never read as a tenant without a KEK.
+  Never `NoSuchTenant`: every tenant asked for gets a KEK, so every cell made is sealed. A wrong
+  master key is never read as a tenant without a KEK. *(TASK-411.28: a tenant's KEK object
+  deleted outright, no tombstone, is made anew at the next wrap, as the marker no longer tells;
+  what the old KEK wrapped is lost, as shredding loses it.)*
 - **Rotating the master key.** (1) Give every host `CLADEFS_MASTER_KEY=NEW,OLD` and restart its
   processes: from then on they unwrap under either and make new KEK objects under NEW (a host
   still given OLD alone refuses those tenants, naming NEW's ID: update every host first). (2) Run
@@ -697,7 +785,7 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
 
   | AWS KMS's error | `kms::Error` |
   |---|---|
-  | `NotFoundException` | `NoSuchTenant` (a tenant with its sealed marker: refused as destroyed, TASK-411.19) |
+  | `NotFoundException` | `NoSuchTenant` (refused as destroyed, TASK-411.28) |
   | `AccessDeniedException` (the grant or policy taken away), `DisabledException` | `Revoked` |
   | `KMSInvalidStateException`, the key pending deletion | `Destroyed` |
   | `KMSInvalidStateException`, any other state (pending import: imported key material deleted; unavailable: a custom key store disconnected; creating, updating) | `Revoked` |
@@ -708,8 +796,8 @@ refused, so that a misspelt `endpoint` does not send calls to AWS itself.
   mapping reads. A tenant shreds itself by scheduling its key's deletion: `Destroyed` at once, for
   the waiting period's 7 to 30 days; cancelling it leaves the key disabled (`Revoked`) until
   enabled. Once the period is over AWS has forgotten the key and answers `NotFoundException`, as
-  for a key never made: its unwraps fail, and its new cells are refused as destroyed by the
-  tenant's sealed marker, never made in the clear (TASK-411.19, A forgotten KEK told from none). A
+  for a key never made: its unwraps fail, and its new cells are refused as destroyed, as every
+  `NoSuchTenant` is (TASK-411.28). A
   tenant
   with imported key material that deletes it reads as `Revoked` (it may import the same material
   again), never `Destroyed`.
@@ -819,12 +907,12 @@ start `bao server -dev` themselves.
   of a missing key with a token that may not create one; the key's metadata says which, and
   `lookup-self` tells a tenant's revocation from cladefs's own token failing, so that an expired host
   token is not read as every tenant revoked (which would drop their keys from every host's memory).
-  Nothing is `NoSuchTenant` but a key OpenBao says it has not, as that one makes cells in the clear
-  for a tenant never sealed.
+  Nothing is `NoSuchTenant` but a key OpenBao says it has not (refused as destroyed since
+  TASK-411.28, as it once made cells in the clear for a tenant never sealed).
   A mount the token has no rights to, there or not, reads as revoked (OpenBao checks the token
   first). A deleted key is as missing as one never made: unwraps say `Destroyed`, wraps
-  `NoSuchTenant`, and the tenant's sealed marker then refuses its new cells as destroyed
-  (TASK-411.19, A forgotten KEK told from none): deleting the key shreds the tenant, as
+  `NoSuchTenant`, which refuses its new cells as destroyed (TASK-411.28): deleting the key shreds
+  the tenant, as
   soft-deleting it or trimming its versions refuses it.
 - **Calls.** reqwest (rustls over aws-lc-rs; the system's roots by rustls-platform-verifier), on a
   Tokio runtime of its own (one thread), so its futures run under any executor; timeouts 5 s to
@@ -841,7 +929,7 @@ start `bao server -dev` themselves.
   renewed, a sealed server, a missing mount, namespaces, TLS with and without `ca`, `kms::from_url`
   through the environment, a `derived` key) and `extent_store` `upload::encrypted::sealed_stores_open_through_openbao`
   (a sealed cell made, taken with one unwrap, refused when the policy drops its key, opened again,
-  a tenant without a key in the clear). Each starts `bao server -dev` on a free port
+  a tenant without a key refused, TASK-411.28). Each starts `bao server -dev` on a free port
   (`extent_keys::testing::openbao::DevServer`, `-dev-no-store-token`), and is skipped, saying so,
   without `bao` (`CLADEFS_BAO`, else `PATH`), unless `CLADEFS_REQUIRE_OPENBAO` is set: then it fails.
   `scripts/test-openbao.sh` fetches OpenBao's release (2.7.2, by digest, `scripts/lib/openbao.sh`)
@@ -892,10 +980,11 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
 - **Refusals, as Cloud KMS answered them** (2026-11-15, the unit test
   `kms::gcp::tests::refusals_are_mapped_as_cloud_kms_answers_them` holds the bodies):
   - `NOT_FOUND` "CryptoKey NAME not found." (the key missing; a missing key ring answers the same)
-    → `NoSuchTenant`: the tenant's cells are made in the clear. Any other `NOT_FOUND` ("Project
+    → `NoSuchTenant`: the tenant's new cells are refused as destroyed (TASK-411.28; made in the
+    clear before). Any other `NOT_FOUND` ("Project
     'projects/X' not found.", a location Cloud KMS has not) → `Io`, so that a wrong project in an
     override fails closed. A misnamed key ring in the URL reads as every template tenant keyless,
-    their new cells in the clear (TASK-411.22): check the URL.
+    their new cells refused (in the clear before TASK-411.28; TASK-411.22, moot): check the URL.
   - `PERMISSION_DENIED` (the role taken away, or a project cladefs may not see: Cloud KMS says "or it
     may not exist") → `Revoked`.
   - `FAILED_PRECONDITION` "NAME/cryptoKeyVersions/N is not enabled, current state is: S.", its
@@ -947,16 +1036,17 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   exports `CLADEFS_KMS` to every process of the run: its daemon, the cases' own daemons, the runner's
   processes that make and open stores themselves (cladefs's `Storage`, `Image`, `import`), cladefsctl,
   cladefs-gc and FUSE mounts. A caller's own `CLADEFS_KMS` is kept, its KEKs the caller's to make. A
-  daemon or harness built before encryption (an A/B's old pin, through `CLADEFS_E2E_PREBUILT` or
-  `CLADEFS_E2E_ROOT`) runs in the clear, unchecked, saying so; `encryption.txt` in the results says
+  daemon and harness both built before encryption (an A/B's old pin, through `CLADEFS_E2E_PREBUILT`
+  or `CLADEFS_E2E_ROOT`) run in the clear, unchecked, saying so; one old and the other not is
+  refused, as neither reads the other's stores (TASK-411.28); the runner refuses to start with no
+  KMS (`sealed::require_kms`); `encryption.txt` in the results says
   which each run was. qualify.sh, sandboxes.sh, the bench and soak scripts and the nightly all
   run through test-e2e.sh, so sealed.
 - **Tenant 0 has a KEK**, not the cases moved to granted tenants: the default tenant's socket,
   `cladefsctl create`, and every store a case makes in its own process are of tenant 0
   (`host_store::NO_TENANT`); moving them would change most cases and leave the common tenant's
-  path, the daemon's own stores and public bases, untested sealed. doc-16 lets tenant 0 be sealed
-  like any other (a cell is sealed iff the host has a KMS and its tenant a KEK in it), and cladefs's
-  own tests seal it already (`kms.create(NO_TENANT)`). Granted IDs up to 15 cover
+  path, the daemon's own stores and public bases, untested sealed. Tenant 0 is sealed like any
+  other (every cell is, since TASK-411.28), and cladefs's own tests seal it. Granted IDs up to 15 cover
   fxfs-guest-migrate-tenant-dax's 1-4.
 - **The check, holding no key** (`test_cases::sealed`; `extent_store::on_disk` for a store's
   directory): every cell of the buckets read has a wrapped KEK or was shredded; every record of a
@@ -972,8 +1062,8 @@ KMS's REST API (`cloudkms.googleapis.com/v1`).
   run's end, `runner sealed` checks the run's bucket whole and its part cache. A store's bucket in
   a daemon's memory (`memory:///`) can't be read and is named as unread.
 - **Proved both ways** (ubu1, 2026-11-15): `--tag e2e`'s 16 cases pass sealed, each check
-  `0 in the clear`, the run's bucket (8 cells) and part cache too; a run whose KMS holds no KEK
-  (tenant 0's stores in the clear) fails fxfs-guest's check with 21 findings (a cell with no KEK,
+  `0 in the clear`, the run's bucket (8 cells) and part cache too; a run whose KMS held no KEK
+  (tenant 0's stores in the clear, before TASK-411.28 refused such a tenant's cells) failed fxfs-guest's check with 21 findings (a cell with no KEK,
   segments, checkpoints and moves framed in the clear, clear logs, the canary in a segment) and
   the run's part cache's copy of that segment.
 

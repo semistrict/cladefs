@@ -308,7 +308,13 @@ impl World {
         }
         assert!(failed, "{case}: a fork made left orphans: {orphans:x?}");
         assert_eq!(orphans, [self.child], "{case}: orphans");
-        let deleted = block_on(branch::delete(&*self.bucket, self.child, rand::random(), u64::MAX));
+        let deleted = block_on(branch::delete(
+            &*self.bucket,
+            self.child,
+            rand::random(),
+            u64::MAX,
+            &extent_remote::keys::testing::host_kms(),
+        ));
         assert_eq!(deleted, Ok(()), "{case}: deleting the orphan");
     }
 
@@ -444,8 +450,8 @@ impl World {
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
                 // retired or taken back (TASK-395.13), every branch's head, a deleted one's
-                // final, fencing its writers (TASK-407), and a tenant's sealed marker and KEK
-                // object, for good (TASK-411.19, TASK-411.27).
+                // final, fencing its writers (TASK-407), and a tenant's KEK object, for good
+                // (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::GcLease { .. }
                 | Kind::Marks { .. }
@@ -453,7 +459,6 @@ impl World {
                 | Kind::Retired { .. }
                 | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
-                | Kind::Sealed { .. }
                 | Kind::Kek { .. } => false,
                 Kind::Moves { .. } | Kind::Unknown => true,
             })
@@ -675,7 +680,16 @@ fn forks_orphaned_by_a_lost_host_keep_what_they_inherited_until_deleted() {
     let held = [world.branch, world.other.branch()];
     let orphans: Vec<_> = world.live().into_iter().filter(|live| !held.contains(live)).collect();
     assert_eq!(orphans, [world.child]);
-    assert_eq!(block_on(branch::delete(&*world.bucket, world.child, 9, u64::MAX)), Ok(()));
+    assert_eq!(
+        block_on(branch::delete(
+            &*world.bucket,
+            world.child,
+            9,
+            u64::MAX,
+            &extent_remote::keys::testing::host_kms()
+        )),
+        Ok(())
+    );
     // TASK-395.4: the fork in a cell of its own, the parent's cell keeps the fork point while the
     // parent's state names the fork, as the fork may lack its reference yet: until the parent's
     // writer checkpoints, which drops the fork, its child deleted.
