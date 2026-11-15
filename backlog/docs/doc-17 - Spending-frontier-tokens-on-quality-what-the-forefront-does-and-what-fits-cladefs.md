@@ -1,9 +1,11 @@
 ---
 id: doc-17
-title: '>-'
+title: >-
+  Spending frontier tokens on quality: what the forefront does, and what fits
+  cladefs
 type: guide
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-15 13:30'
+updated_date: '2026-11-15 13:41'
 ---
 Web research of 2026-11-15 (four parallel research agents, ~200 searches and fetches), checked
 against main (36f194bbc). The ranked list in §2 is what to do; §1 is the evidence; §3 what not to

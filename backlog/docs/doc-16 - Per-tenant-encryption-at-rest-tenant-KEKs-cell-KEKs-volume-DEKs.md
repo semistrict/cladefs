@@ -1,9 +1,9 @@
 ---
 id: doc-16
-title: '''Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'''
+title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:41'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 

@@ -1,9 +1,9 @@
 ---
 id: doc-14
-title: '''Local disk as the bucket''''s write-ahead log and cache: one storage engine'''
+title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:41'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 

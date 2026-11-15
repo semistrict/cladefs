@@ -1,9 +1,9 @@
 ---
 id: doc-7
-title: '''Object storage: how the host keeps branches in S3 and GCS'''
+title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:41'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 

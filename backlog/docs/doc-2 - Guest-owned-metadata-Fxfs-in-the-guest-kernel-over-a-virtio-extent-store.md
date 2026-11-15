@@ -1,9 +1,9 @@
 ---
 id: doc-2
-title: '''Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store'''
+title: 'Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store'
 type: specification
 created_date: '2026-10-13 19:53'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:41'
 ---
 # Guest-owned metadata: Fxfs in the guest kernel over a virtio extent store
 

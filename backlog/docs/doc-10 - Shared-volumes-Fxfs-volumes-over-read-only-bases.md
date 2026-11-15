@@ -1,9 +1,9 @@
 ---
 id: doc-10
-title: '''Shared volumes: Fxfs volumes over read-only bases'''
+title: 'Shared volumes: Fxfs volumes over read-only bases'
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:41'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 

@@ -3,7 +3,7 @@ id: doc-1
 title: libkrun virtio-fs server interface
 type: specification
 created_date: '2026-09-28 02:44'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 13:42'
 ---
 **Status: historical.** cladefs's virtio-fs (FUSE) server over host Fxfs was removed in 610923b34 (2026-10-15), and libkrun, with `vendor/libkrun`, in 5ba394977 (TASK-40, 2026-10-17). Fxfs runs in the guest's kernel over the virtio extent-store device (doc-4) in Firecracker (`vendor/firecracker`), DAX copying on write (doc-13). The survey below is kept as written.
 
@@ -61,7 +61,7 @@ Everything else takes the trait's default, ENOSYS: xattrs, access, lseek, falloc
 
 - **Backend:** add an `FsBackend::Cladefs(..)` variant and a `devices/src/virtio/fs/cladefs.rs` adapter behind an `cladefs` feature. The adapter stays thin; the filesystem semantics live in an cladefs crate with a synchronous, errno-returning API over FxVolume/FxDirectory/FxFile. TASK-5's tests can then drive that crate directly, without libkrun.
 - **Inode numbers:** Fxfs object ids are not FUSE node ids. The root directory is not object 1, and encrypted volumes use 64-bit ids from `LastObjectId::Encrypted`, so the adapter needs a nodeid ↔ object id map with lookup counts. That also leaves room for `AugmentFs` virtual inodes.
-- **DAX mappings:** the kernel's `GuestPhysicalAspace` (`~/src/cladefs/crates/zircon/src/hypervisor/aspace.rs`) is a host-address window mapped lazily on `page_fault(gpaddr, write)`, with dirty-correct write faults. SETUPMAPPING maps a range of the file's pager-backed VMO into that aspace without populating it. Guest accesses then fault into the pager:
+- **DAX mappings:** the kernel's `GuestPhysicalAspace` (`~/src/fxdax/crates/zircon/src/hypervisor/aspace.rs`) is a host-address window mapped lazily on `page_fault(gpaddr, write)`, with dirty-correct write faults. SETUPMAPPING maps a range of the file's pager-backed VMO into that aspace without populating it. Guest accesses then fault into the pager:
   - on HVF, via data-abort exits (TASK-8);
   - on KVM, via the host fault on the memslot's host mapping (TASK-9).
   The DAX window's host memory must be the aspace window rather than libkrun's anonymous shm mapping.
