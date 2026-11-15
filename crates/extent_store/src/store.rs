@@ -23,8 +23,8 @@ use crate::segments::{
 };
 use crate::shared::{Shared, SharedLock};
 use crate::state::{
-    Framing, Gate, Job, Life, Locked, OwnFiles, Placement, Readable, Reader, Space, Standing,
-    State, Uncommitted, Unreferenced, Writable,
+    Framing, Gate, Holding, Job, Life, Locked, OwnFiles, Placement, Readable, Reader, Space,
+    Standing, State, Uncommitted, Unreferenced, Writable,
 };
 use crate::sync::{Condvar, Mutex, MutexGuard, rules, spawn_or_return, thread};
 use crate::timings::{self, Flush, Waits, flush};
@@ -183,6 +183,11 @@ pub struct Info {
     pub own: u64,
     /// cladefs: those of the extents it inherited from the branches it was forked from.
     pub inherited: u64,
+    /// cladefs: how many extents it holds that its branch wrote (TASK-454): counted as they come
+    /// and go, as the bytes are, not by a walk of them.
+    pub own_extents: u64,
+    /// cladefs: how many it holds that it inherited from the branches it was forked from.
+    pub inherited_extents: u64,
 }
 
 /// The space a store's files take.
@@ -952,15 +957,11 @@ impl<D: Dir> Recovering<D> {
         for (_, number) in wal.segments() {
             tracked.insert(SegmentId { branch: branch.id, number: *number }, 0);
         }
-        let (mut stored, mut own_stored) = (0, 0);
+        let holding = Holding::of(branch.id, &extents);
         let mut own_sizes = HashMap::new();
         let mut lineage = BTreeSet::from([branch.id]);
         for (extent, entry) in &extents {
             lineage.insert(extent.branch);
-            stored += entry.len;
-            if extent.branch == branch.id {
-                own_stored += entry.len;
-            }
             match &entry.data {
                 Data::Pieces(pieces) => {
                     for piece in pieces {
@@ -1023,7 +1024,7 @@ impl<D: Dir> Recovering<D> {
                 "store state",
                 Mutex::new(State {
                     extents,
-                    space: Space::new(capacity, stored, own_stored),
+                    space: Space::new(capacity, holding),
                     epoch,
                     root,
                     next_sequence,
@@ -1700,14 +1701,17 @@ impl<D: Dir> Store<D> {
         state.space.unreserve(write.grows);
         let extent = write.extent;
         let end = write.extent_offset + write.len;
-        let entry = state.extents.entry(extent).or_insert_with(|| Extent {
-            len: 0,
-            data: if write.segment.is_some() { Data::Pieces(Vec::new()) } else { Data::Own },
+        // A write's extent is its branch's.
+        let entry = state.extents.entry(extent).or_insert_with(|| {
+            state.space.entered(true);
+            Extent {
+                len: 0,
+                data: if write.segment.is_some() { Data::Pieces(Vec::new()) } else { Data::Own },
+            }
         });
         let grew = end.saturating_sub(entry.len);
         if grew > 0 {
-            // A write's extent is its branch's.
-            state.space.added(grew, true);
+            state.space.grew(grew, true);
             entry.len = end;
         }
         match (write.segment, &mut entry.data) {
@@ -3452,7 +3456,22 @@ mod tests {
         };
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();
-        store.state.with(Mutex::lock).space.added(4096, true);
+        store.state.with(Mutex::lock).space.grew(4096, true);
+        store.epoch().unwrap();
+    }
+
+    /// cladefs: and here how many extents it holds: one counted that no map holds (TASK-454).
+    #[test]
+    #[should_panic(expected = "their counts")]
+    fn audits_find_extent_counts_drifted() {
+        let description = Description {
+            block_size: 4096,
+            capacity: 1 << 20,
+            branch: extent_remote::layout::test_branch(1),
+        };
+        let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
+        store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();
+        store.state.with(Mutex::lock).space.entered(true);
         store.epoch().unwrap();
     }
 

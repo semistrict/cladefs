@@ -81,10 +81,21 @@ pub struct ExtentInfo {
     pub sequence_floor: u64,
 }
 
-/// cladefs: whose the bytes a store's extents hold are (TASK-49): what billing a store alone charges
-/// it, and what it shares with the branches it was forked from.
+/// cladefs: what a store's branch holds, and whose it is: the bytes its extents hold (TASK-49), what
+/// billing a store alone charges it and what it shares with the branches it was forked from; and
+/// how many extents they are (TASK-454), which what an open store holds in memory grows with
+/// (TASK-443.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct StoreBytes {
+pub struct StoreHolding {
+    /// The bytes its extents hold.
+    pub bytes: Whose,
+    /// How many extents it holds.
+    pub extents: Whose,
+}
+
+/// cladefs: a count of what a store holds ([`StoreHolding`]), split by whose it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Whose {
     /// Of the extents its branch wrote.
     pub own: u64,
     /// Of the extents it inherited from the branches it was forked from, which may still share
@@ -1164,10 +1175,15 @@ impl ExtentStore {
         })
     }
 
-    /// cladefs: whose the bytes its extents hold are: its branch's own, or inherited (TASK-49).
-    pub fn bytes(&self) -> Result<StoreBytes> {
+    /// cladefs: what its branch holds, the bytes (TASK-49) and the number of its extents (TASK-454),
+    /// and whose: its branch's own, or inherited. Kept on as they change, not counted now: as cheap
+    /// as [`ExtentStore::info`], however many extents it holds.
+    pub fn holding(&self) -> Result<StoreHolding> {
         let info = self.store.info().map_err(errno)?;
-        Ok(StoreBytes { own: info.own, inherited: info.inherited })
+        Ok(StoreHolding {
+            bytes: Whose { own: info.own, inherited: info.inherited },
+            extents: Whose { own: info.own_extents, inherited: info.inherited_extents },
+        })
     }
 
     /// Sets the most bytes the store's extents may hold, durably: grows it, or shrinks it no lower
@@ -2372,6 +2388,96 @@ mod tests {
             &mut [VolatileSliceMut::from(first), VolatileSliceMut::from(second)],
         )?;
         Ok(data)
+    }
+
+    /// What [`holding_follows_the_extents`] does to a store: writes `blocks` blocks at block `block`
+    /// of its branch's extent `sequence`, frees the extent `Free` picks of those it holds, its own or
+    /// inherited, commits, opens it again, or forks it and goes on with the fork.
+    #[derive(Clone, Debug)]
+    enum StoreChange {
+        Write { sequence: u64, block: u64, blocks: usize },
+        Free(proptest::sample::Index),
+        Commit,
+        Reopen,
+        Fork,
+    }
+
+    fn store_change() -> impl proptest::strategy::Strategy<Value = StoreChange> {
+        use proptest::prelude::*;
+        prop_oneof![
+            4 => (1..12u64, 0..3u64, 1..3usize)
+                .prop_map(|(sequence, block, blocks)| StoreChange::Write { sequence, block, blocks }),
+            3 => any::<proptest::sample::Index>().prop_map(StoreChange::Free),
+            2 => Just(StoreChange::Commit),
+            1 => Just(StoreChange::Reopen),
+            1 => Just(StoreChange::Fork),
+        ]
+    }
+
+    /// Panics unless what `store` says it holds ([`ExtentStore::holding`]), the counts kept as its
+    /// extents come and go, is what its extents, all walked, hold: how many, own and inherited, and
+    /// their bytes (TASK-454).
+    fn holding_is_recounted(store: &ExtentStore, after: &[StoreChange]) {
+        let branch = store.branch().id;
+        let held = store.store.extents().unwrap();
+        let own: Vec<_> = held.iter().filter(|(extent, _)| extent.branch == branch).collect();
+        let bytes = |held: &mut dyn Iterator<Item = &(storage_device::ExtentId, u64)>| -> u64 {
+            held.map(|(_, len)| len).sum()
+        };
+        let (own_bytes, all_bytes) = (bytes(&mut own.iter().copied()), bytes(&mut held.iter()));
+        let recounted = StoreHolding {
+            bytes: Whose { own: own_bytes, inherited: all_bytes - own_bytes },
+            extents: Whose { own: own.len() as u64, inherited: (held.len() - own.len()) as u64 },
+        };
+        assert_eq!(store.holding().unwrap(), recounted, "after {after:?}");
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(32))]
+
+        /// TASK-454: a store's counts of its extents, own and inherited, and of their bytes, which
+        /// it keeps on as they are written, freed, committed, opened again and forked, are what
+        /// its extents hold, recounted after each change.
+        #[test]
+        fn holding_follows_the_extents(changes in proptest::collection::vec(store_change(), 1..24)) {
+            let dir = tempfile::tempdir().unwrap();
+            let mut path = dir.path().join("store");
+            let mut store = made(&path, 1 << 30);
+            for (done, change) in changes.iter().enumerate() {
+                match change {
+                    StoreChange::Write { sequence, block, blocks } => {
+                        let data = pattern(*sequence as u8, blocks * BLOCK);
+                        let at = block * BLOCK as u64;
+                        // Refused if sealed or spent: the counts stand.
+                        match write(&store, id(&store, *sequence), at, &data) {
+                            Ok(()) | Err(Errno::EPERM) => {}
+                            Err(err) => panic!("writing: {err:?}"),
+                        }
+                    }
+                    StoreChange::Free(pick) => {
+                        let held = store.store.extents().unwrap();
+                        if !held.is_empty() {
+                            let (extent, _) = held[pick.index(held.len())];
+                            let extent = ExtentId { branch: extent.branch, sequence: extent.sequence };
+                            store.free(extent).unwrap();
+                        }
+                    }
+                    StoreChange::Commit => store.commit(None).unwrap(),
+                    StoreChange::Reopen => {
+                        drop(store);
+                        store = ExtentStore::open(&path).unwrap();
+                    }
+                    StoreChange::Fork => {
+                        store.commit(None).unwrap();
+                        let fork = dir.path().join(format!("fork-{done}"));
+                        store.fork_to(&fork, crate::host_store::fork_child(store.branch())).unwrap();
+                        drop(store);
+                        (path, store) = (fork.clone(), ExtentStore::open(&fork).unwrap());
+                    }
+                }
+                holding_is_recounted(&store, &changes[..=done]);
+            }
+        }
     }
 
     #[test]

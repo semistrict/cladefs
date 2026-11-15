@@ -210,6 +210,69 @@ fn stores_are_deleted_while_their_forks_live_through_the_daemon() {
     );
 }
 
+/// TASK-454: `cladefsctl stat` prints how many extents a store holds, own and inherited, with their
+/// bytes: of a new store, none; of one written, its own, an extent written again or grown counted
+/// once; of its fork, all inherited; of the fork written and freed in, what it wrote and kept and
+/// what it kept of what it inherited; the store forked from as before.
+fn stat_counts_extents(cladefsctl: Cladefsctl, dir: &Path) {
+    let (path, fork) = (dir.join("store"), dir.join("fork"));
+    let held = |path: &Path| {
+        let stat = cladefsctl.run(&[Path::new("stat"), path]).unwrap();
+        let named = ["own", "inherited", "own_extents", "inherited_extents"];
+        let value = |name: &str| -> u64 {
+            let line = stat.lines().find_map(|line| line.strip_prefix(&format!("{name} ")));
+            line.unwrap_or_else(|| panic!("no {name} in {stat}")).parse().unwrap()
+        };
+        named.map(value)
+    };
+    let block = BLOCK as u64;
+    let store = ExtentStore::create(&path, 1 << 24).unwrap();
+    let base = store.branch().id;
+    let extent = |store: &ExtentStore, sequence| ExtentId { branch: store.branch().id, sequence };
+    let write = |store: &ExtentStore, extent, offset, byte| {
+        store.write(extent, offset, &[VolatileSlice::from(&[byte; BLOCK][..])]).unwrap();
+    };
+    drop(store);
+    assert_eq!(held(&path), [0, 0, 0, 0]);
+    let store = ExtentStore::open(&path).unwrap();
+    for sequence in 1..=3 {
+        write(&store, extent(&store, sequence), 0, sequence as u8);
+    }
+    // Written again, and grown: still three.
+    write(&store, extent(&store, 1), 0, 9);
+    write(&store, extent(&store, 2), block, 9);
+    store.commit(None).unwrap();
+    drop(store);
+    assert_eq!(held(&path), [4 * block, 0, 3, 0]);
+
+    cladefsctl.run(&[Path::new("fork"), &path, &fork]).unwrap();
+    assert_eq!(held(&fork), [0, 4 * block, 0, 3]);
+    let forked = ExtentStore::open(&fork).unwrap();
+    let inherited = |sequence| ExtentId { branch: base, sequence };
+    for sequence in 1..=2 {
+        write(&forked, extent(&forked, sequence), 0, 7);
+    }
+    forked.free(inherited(2)).unwrap();
+    forked.free(extent(&forked, 2)).unwrap();
+    forked.commit(None).unwrap();
+    drop(forked);
+    assert_eq!(held(&fork), [block, 2 * block, 1, 2]);
+    assert_eq!(held(&path), [4 * block, 0, 3, 0]);
+}
+
+#[test]
+fn stat_counts_extents_locally() {
+    let dir = tempfile::tempdir().unwrap();
+    stat_counts_extents(Cladefsctl::local(), dir.path());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn stat_counts_extents_through_the_daemon() {
+    let dir = tempfile::tempdir().unwrap();
+    stat_counts_extents(Cladefsctl::through_daemon(dir.path(), &[]), dir.path());
+}
+
 /// cladefsctl changes no store whose branches another process has open, as an extent daemon serving
 /// them does: it waits a while for them to close, then refuses, saying `refusal`.
 fn stores_open_elsewhere_are_left_alone(cladefsctl: Cladefsctl, dir: &Path, refusal: &str) {

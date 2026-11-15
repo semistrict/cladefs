@@ -3700,9 +3700,10 @@ fn parts_read_again_are_unpacked_once() {
     assert_eq!(unpacks() - before, 35);
 }
 
-/// cladefs: a store's bytes are its branch's own, of the extents it wrote, or inherited from the
-/// branches it was forked from, which it holds in the bucket (TASK-165.7), as they write and free,
-/// and opened again (TASK-49).
+/// cladefs: a store's bytes, and its extents, are its branch's own, of the extents it wrote, or
+/// inherited from the branches it was forked from, which it holds in the bucket (TASK-165.7), as
+/// they write, grow and free, and opened again (TASK-49); the extents counted as they come and go
+/// (TASK-454).
 #[test]
 fn stores_tell_their_own_bytes_from_those_inherited() {
     let parent = BRANCH.id + 1;
@@ -3713,20 +3714,29 @@ fn stores_tell_their_own_bytes_from_those_inherited() {
         let location = bucket_location(key, sequence * 8 * BLOCK as u64, blocks * BLOCK as u64);
         state.extents.insert(ExtentId::new(parent, sequence), location);
     }
-    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
-    store.write(extent(1), 0, &[3; BLOCK]).unwrap();
-    store.write(extent(2), 0, &[4; 40 << 10]).unwrap();
-    store.free(ExtentId::new(parent, 1)).unwrap();
-    store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
-    let bytes = |store: &Store<MemDir>| {
+    // Own bytes and inherited, own extents and inherited.
+    let held = |store: &Store<MemDir>| {
         let info = store.info().unwrap();
-        (info.own, info.inherited)
+        (info.own, info.inherited, info.own_extents, info.inherited_extents)
     };
     let block = BLOCK as u64;
-    assert_eq!(bytes(&store), (block, 3 * block));
+    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
+    assert_eq!(held(&store), (0, 5 * block, 0, 2));
+    store.write(extent(1), 0, &[3; BLOCK]).unwrap();
+    store.write(extent(2), 0, &[4; 40 << 10]).unwrap();
+    // Written again, and grown: no more extents.
+    store.write(extent(1), 0, &[5; BLOCK]).unwrap();
+    store.write(extent(2), 40 << 10, &[6; BLOCK]).unwrap();
+    assert_eq!(held(&store), (block + (44 << 10), 5 * block, 2, 2));
+    store.free(ExtentId::new(parent, 1)).unwrap();
+    store.free(extent(2)).unwrap();
+    // Freed again: held no more already.
+    store.free(extent(2)).unwrap();
+    assert_eq!(held(&store), (block, 3 * block, 1, 1));
+    store.commit(None).unwrap();
+    assert_eq!(held(&store), (block, 3 * block, 1, 1));
     drop(store);
-    assert_eq!(bytes(&opened_on(dir, state, WRITER)), (block, 3 * block));
+    assert_eq!(held(&opened_on(dir, state, WRITER)), (block, 3 * block, 1, 1));
 }
 
 /// TASK-295: a write-ahead log dropped, as `cladefsctl take` drops one another writer's commits

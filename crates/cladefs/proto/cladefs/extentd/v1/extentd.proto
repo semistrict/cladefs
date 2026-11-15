@@ -144,7 +144,9 @@ service Extentd {
   // Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
   // as before a clean stop.
   rpc SyncStore(SyncStoreRequest) returns (SyncStoreResponse);
-  // What a store is, and holds.
+  // What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
+  // many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
+  // branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
   rpc StatStore(StatStoreRequest) returns (StatStoreResponse);
   // Lists the stores the daemon serves: those VM processes have open, as writers or followers,
   // with what StatStore says of each (TASK-50.5).
@@ -461,6 +463,12 @@ message StatStoreResponse {
   uint64 tenant = 17;
   // The cell its branch is a volume of.
   uint64 cell = 18;
+  // How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
+  // the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
+  // hundred bytes an extent (TASK-443.2).
+  uint64 own_extents = 19;
+  // How many it holds that it inherited: those whose bytes are `inherited`.
+  uint64 inherited_extents = 20;
 }
 
 // Asks for the stores the daemon serves.

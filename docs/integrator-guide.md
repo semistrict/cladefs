@@ -182,3 +182,12 @@ pages by default), reserved against the store's tenant as the guest activates th
 store never waits for memory. The guest writes them back and lets them go below that bound; a store
 past it stops that VM (exit 159). Everything else the window maps is sealed extents' pages, shared
 and evictable.
+
+**Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its
+own and those it inherited: each fork of a base of _n_ extents holds about 220-470 bytes times _n_,
+whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it). StatStore says
+how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
+prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
+open, StatStore reads the count kept as it changes, at no cost; of one none has, it opens the store
+as a VM's would (its state read, its branch's lease taken, the map of its extents built: time and,
+until it closes it again, memory as its extents), as for every other field.

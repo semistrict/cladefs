@@ -182,7 +182,7 @@ pub use extent_remote::layout::{Branch, Cell};
 pub use extentd::{DaemonConnection, RemoteDevice, RemoteExtentStore};
 pub use extents::{
     Commit, ExtentId, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
-    StoreBytes, StoreRole, WindowMapping, WriteBarriers,
+    StoreHolding, StoreRole, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::{BranchOf, new_cell};
