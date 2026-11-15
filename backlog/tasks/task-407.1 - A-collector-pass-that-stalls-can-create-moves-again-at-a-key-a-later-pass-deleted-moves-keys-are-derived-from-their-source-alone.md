@@ -3,11 +3,11 @@ id: TASK-407.1
 title: >-
   A collector pass that stalls can create moves again at a key a later pass
   deleted: moves keys are derived from their source alone
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 22:58'
-updated_date: '2026-11-15 05:50'
+updated_date: '2026-11-15 06:33'
 labels: []
 dependencies: []
 parent_task_id: TASK-407
@@ -30,9 +30,9 @@ collector::compact_object GETs the source object, then creates moves/<source> cr
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -42,3 +42,9 @@ Spec: moves keyed by [b, s, e, way of passes], creates in flight (GcLand, create
 
 Code pushed c8344a37a: moves keys <C>moves/<rest>/<epoch> (layout::moves(key, pass), moves_of, moves_under; Kind::Moves names its pass); fetch lists an object's moves and follows the latest pass's holding the extent; MovesMaps merges in pass order; collector keeps every pass's moves its ways reach. Tests passes_creating_moves_late_create_them_at_keys_of_their_own / _need_moves_by_pass (a stalled pass's create after later passes compacted and deleted: key never written vs written twice with the rule off). macOS gate: clippy + workspace 2493/2493.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Moves keyed by their pass (c8344a37a), with the fork-point fix the simulation found (3f500554b: a pass reads a kept fork point by its checkpoint's key). Spec: NoMovesByPass. Code tests: passes_creating_moves_late_create_them_at_keys_of_their_own / _need_moves_by_pass. Verified: macOS clippy + workspace 2493/2493 and sim part 50/50; ubu1 (e015d0fe, includes both) workspace 2791/2792 (TASK-315 only), Shuttle passing.
+<!-- SECTION:FINAL_SUMMARY:END -->
