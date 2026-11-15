@@ -11,22 +11,22 @@
 # Killer: scripts/sandboxes.sh short
 --- a/crates/extent_store/src/segments.rs
 +++ b/crates/extent_store/src/segments.rs
-@@ -1462,6 +1462,7 @@ fn frame_segment<D: Dir>(
-     timing: &mut Timing<4>,
- ) -> Result<(Arc<Framed<D::File>>, How), Error> {
-     let started = Instant::now();
-+    let quiet = false && quiet;
-     // fxdax: its parts read, each in a buffer kept for the framings after; checksummed and looked
-     // at if it may be framed in place (TASK-336), but for those seen ahead (TASK-400).
-     let mut parts = framing::read(&**raw, len, quiet, seen)?;
+@@ -1558,6 +1558,7 @@ fn frame_segment<D: Dir>(
+     let mut packer = extent_frame::Packer::new(sealing);
+     let clear = raw.clear().filter(|_| packer.key().is_none());
+     let in_place_maybe = quiet && len > 0 && clear.is_some();
++    let in_place_maybe = false && in_place_maybe;
+     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
+     // fxdax: in place at once if a look at its parts says compressing them saves too little,
+     // compressing no more of them: compressing every part to tell was most of what framings took
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -2106,10 +2106,6 @@ impl<D: Dir> Store<D> {
+@@ -2245,10 +2245,6 @@ impl<D: Dir> Store<D> {
              raw.read_cached(buf, at)?;
              let end = packer.end();
              let packed = packer.push(buf);
 -            // As they are, where they are, as those before.
--            if framed.is_none() && end == at && packed[..] == buf[..] {
+-            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
 -                continue;
 -            }
              let file = match &mut framed {

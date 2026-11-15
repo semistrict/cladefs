@@ -199,6 +199,23 @@ service Extentd {
   // without FXDAX_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
   // HOST:PORT.
   rpc SetPeers(SetPeersRequest) returns (SetPeersResponse);
+  // Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
+  // daemon's bucket, by a conditional update, so that its volumes' keys unwrap no more and no host
+  // takes it again; then forgets what this host holds of its keys, as ForgetTenantKeys does for a
+  // tenant. Call it on every host that may hold the cell or serve its volumes: the first call
+  // shreds it, the others find it shredded and forget. Only as strong as the bucket keeps no older
+  // version of the cell's object: with versioning on, a lifecycle rule must expire non-current
+  // versions. A cell with no object, NOT_FOUND (ENOENT).
+  rpc ShredCell(ShredCellRequest) returns (ShredCellResponse);
+  // Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
+  // the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
+  // here are fenced, each request of their VM processes failing with EACCES, as their openings do;
+  // their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+  // a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
+  // tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
+  // for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+  // their VM processes close them.
+  rpc ForgetTenantKeys(ForgetTenantKeysRequest) returns (ForgetTenantKeysResponse);
 }
 
 // Makes an empty store.
@@ -720,4 +737,49 @@ message GetTenantDiskResponse {
   uint64 bytes = 1;
   // Its limit, if it has one.
   optional uint64 limit_bytes = 2;
+}
+
+// Shreds a cell.
+message ShredCellRequest {
+  // The cell's tenant, as StatStore names it.
+  uint64 tenant = 1;
+  // The cell's ID in its tenant, as StatStore names it.
+  uint64 cell = 2;
+}
+
+// The cell is shredded, and this host forgot its keys.
+message ShredCellResponse {
+  // How many generations of the cell's KEK this call took out of its object: 0 if it was
+  // shredded already.
+  uint32 keks_removed = 1;
+  // What this host forgot.
+  Forgotten forgotten = 2;
+}
+
+// Asks the daemon to forget a tenant's keys.
+message ForgetTenantKeysRequest {
+  // The tenant's ID in the bucket, as StatStore names it.
+  uint64 tenant = 1;
+  // Why, for the daemon's log: e.g. that the KEK is destroyed.
+  string why = 2;
+}
+
+// The daemon forgot the tenant's keys.
+message ForgetTenantKeysResponse {
+  // What it forgot.
+  Forgotten forgotten = 1;
+}
+
+// What a host forgot of a tenant's or a cell's keys.
+message Forgotten {
+  // The stores open of them it fenced.
+  uint32 stores = 1;
+  // The stores' keys its fetchers held.
+  uint32 rings = 2;
+  // The objects' tails and parts its fetchers kept in memory.
+  uint32 kept = 3;
+  // The extents taken out of the cache.
+  uint64 extents = 4;
+  // The bytes of their pages evicted.
+  uint64 bytes = 5;
 }

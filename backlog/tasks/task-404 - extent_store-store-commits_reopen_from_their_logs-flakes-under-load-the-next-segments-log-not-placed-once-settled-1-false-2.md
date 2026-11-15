@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13 21:06'
-updated_date: '2026-11-14 22:24'
+updated_date: '2026-11-14 23:49'
 labels:
   - testing
   - flaky
@@ -31,7 +31,7 @@ Seen 2026-11-13 in scripts/test.sh's workspace part on t3/395-integrated (the pe
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -51,6 +51,8 @@ Seen 2026-11-13 in scripts/test.sh's workspace part on t3/395-integrated (the pe
 2026-11-14, coordinator: again on GitHub's macOS workspace job, main 3a01ee0ab (run 43627290622): store.rs commits_reopen_from_their_logs (1, false, 2) != (1, true, 2), failed on both tries. Keeps main's CI red with TASK-385's test_a_migration_restores_on_the_second_run_what_the_first_left (same run).
 
 2026-11-14 (claude): cause in the store, not the test. A preparation of the next segment's log (Store::prepare_next's opener thread) whose segment opened meanwhile (before it placed the log, or after, before placed_synced) ended there; the opening's prepare_next began none as it ran (Segments::to_prepare: preparing), so nothing was prepared until another flush or closing. The test's last commit's flush finding one running left none: prepared() returned with placed() None. Fixed in 00fffc36b: Preparing::Again / placed_synced return the next's preparation, the opener runs on. Fail point segments::preparing; new store test preparations_overtaken_go_on_as_the_next_segments (red without the fix: None vs Some(3)); segments_open_with_their_logs_prepared_syncing_nothing pins both cases. Reproduction: plain stress under 30 busy loops 0/200 (the window needs a slow opener); with preparations slowed by the fail point, commits_reopen_from_their_logs failed with CI's exact (1, false, 2): 41/100 (20 ms), 16/20 (100 ms) before; 0/100 at each after. Unslowed beside a full extent_store suite run: 100/100. extent_store 270/270, test.sh clippy+shuttle+scripts green, upstream-changes --check ok, on macOS; Linux left to main's CI.
+
+2026-11-14, coordinator: main's CI green on efa48fa88 (run 43653116878): test (workspace) on Linux and macos (workspace) both pass, with this fix in.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

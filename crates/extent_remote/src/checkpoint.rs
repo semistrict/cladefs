@@ -16,13 +16,19 @@ use storage_device::ExtentId;
 
 pub use extent_frame::table::BLOCK;
 
-/// The checkpoint of `state`.
+/// The checkpoint of `state`, in the clear.
 pub fn encode(state: &State) -> Vec<u8> {
+    encode_under(state, None)
+}
+
+/// fxdax: the checkpoint of `state`, authenticated, not sealed, under the DEK `sealing` gives, if
+/// it gives one: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
+pub fn encode_under(state: &State, sealing: layout::Sealing<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter()).map(|(extent, location)| {
         ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
     });
-    table::encode(entries, layout::encode(&rest))
+    table::encode(entries, layout::encode(&rest), sealing)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -30,9 +36,17 @@ fn located(entry: Entry) -> (ExtentId, Location) {
     (ExtentId::new(branch, sequence), Location { key, offset, len })
 }
 
-/// The state a checkpoint holds.
+/// The state a checkpoint holds: read by a reader holding no key, which reads an authenticated
+/// one's, checking its CRCs alone, as the collector does (TASK-411.3).
 pub fn decode(bytes: &[u8]) -> Result<State, Error> {
-    let (footer, entries) = table::decode(bytes)?;
+    decode_under(bytes, &extent_frame::NoKeys)
+}
+
+/// fxdax: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
+/// and MACs if they hold its key, and refused in the clear if they hold its branch sealed
+/// (TASK-411.3).
+pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
+    let (footer, entries) = table::decode(bytes, keys)?;
     let mut state: State = layout::decode(&footer.rest)?;
     state.extents.extend(entries.into_iter().map(located));
     Ok(state)
@@ -214,7 +228,7 @@ mod tests {
     fn tables_hold_the_rest_of_the_state() {
         let state = state(3000);
         let bytes = encode(&state);
-        let footer = extent_frame::footer(&bytes).unwrap();
+        let footer = extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap();
         let table = Table::decode(footer).unwrap();
         assert_eq!(*table.state(), State { extents: Default::default(), ..state });
     }
@@ -241,8 +255,10 @@ mod tests {
         let budget = Budget::new(Limits::UNBOUNDED);
         let fetcher = Fetcher::new(bucket.clone(), budget, Memory::new(), None);
         let frame = extent_frame::Frame::of(&bytes).unwrap();
-        let (tail, stored) = (frame.tail(), extent_frame::Parts::of(&bytes).unwrap().stored);
-        let table = Table::decode(extent_frame::footer(&bytes).unwrap()).unwrap();
+        let (tail, stored) =
+            (frame.tail(), extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored);
+        let table =
+            Table::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
         futures::executor::block_on(async {
             bucket.put(&key, bytes.clone().into(), PutMode::Create).await.unwrap();
             let mut counted = bucket.counted();

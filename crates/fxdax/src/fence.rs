@@ -15,51 +15,67 @@
 //! panics beneath a store, past its locks, the extent daemon fences it for, as it answers the
 //! request that panicked.
 //!
+//! fxdax: a store is fenced too as its host is told its tenant's KEK is revoked or destroyed, or its
+//! cell shredded ([`fence_stores`], doc-16, Shredding; TASK-411.7): each request failing with
+//! `EACCES` then, as a store of such a tenant or cell refuses to open. So a host finds the stores to
+//! fence by their branches: every fence of the process is listed, weakly, with its store's.
+//!
 //! A lock shared beyond one store, which no fence contains, as the process's cache of extents, a
 //! window's, a connection's, or `extent_store`'s store's, which its followers share with its writer,
 //! is an `extent_store::shared::SharedLock`: a panic holding one stops the daemon (TASK-149.24).
 
+use crate::Branch;
 use crate::error::{Errno, Result};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    LockResult, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard,
+    Arc, LockResult, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
 };
 
-/// Whether a store is fenced, and why: by the first panic to go through it.
-pub(crate) struct Fence {
+/// Whether a store is fenced, the errno its requests fail with, and why: by the first panic to go
+/// through it, or the first shredding of its tenant or cell its host is told of.
+pub(crate) struct Fence(Arc<Fenced>);
+
+struct Fenced {
     /// The store's path, which its log names.
     store: PathBuf,
-    why: OnceLock<String>,
+    why: OnceLock<(Errno, String)>,
 }
 
+/// fxdax: the fences of the stores open in the process, each with its store's branch, held weakly,
+/// so that a host told to forget a tenant's or a cell's keys fences theirs (TASK-411.7).
+static FENCES: Mutex<Vec<(Branch, Weak<Fenced>)>> = Mutex::new(Vec::new());
+
 impl Fence {
-    /// The fence of the store at `store`, not fenced.
-    pub(crate) fn new(store: &Path) -> Self {
-        Self { store: store.to_owned(), why: OnceLock::new() }
+    /// The fence of the store at `store`, of `branch`, not fenced: listed among the process's.
+    pub(crate) fn new(store: &Path, branch: Branch) -> Self {
+        let fenced = Arc::new(Fenced { store: store.to_owned(), why: OnceLock::new() });
+        let mut fences = FENCES.lock().unwrap();
+        fences.retain(|(_, fence)| fence.strong_count() > 0);
+        fences.push((branch, Arc::downgrade(&fenced)));
+        Self(fenced)
     }
 
-    /// Fences the store, as `why` says, unless it is already: logged once.
+    /// Fences the store, as `why` says, unless it is already: logged once. Its requests fail with
+    /// `EIO`.
     pub(crate) fn fence(&self, why: impl FnOnce() -> String) {
-        let mut said = None;
-        self.why.get_or_init(|| said.insert(why()).clone());
-        if let Some(why) = said {
-            log::error!(
-                "fxdax: the store at {} is fenced, {why}: it serves nothing more, each request \
-                 failing with EIO, until it is opened anew, as of its last commit",
-                self.store.display()
-            );
-        }
+        self.0.fence(Errno::EIO, why);
     }
 
     /// Whether the store is fenced.
     pub(crate) fn is_fenced(&self) -> bool {
-        self.why.get().is_some()
+        self.0.why.get().is_some()
     }
 
-    /// `EIO` if the store is fenced.
+    /// The errno its requests fail with, if the store is fenced.
+    pub(crate) fn errno(&self) -> Option<Errno> {
+        self.0.why.get().map(|(errno, _)| *errno)
+    }
+
+    /// The errno its requests fail with, if the store is fenced: `EIO`, or `EACCES` for a store
+    /// whose tenant's or cell's keys its host forgot.
     pub(crate) fn check(&self) -> Result<()> {
-        if self.is_fenced() { Err(Errno::EIO) } else { Ok(()) }
+        self.errno().map_or(Ok(()), Err)
     }
 
     /// `locked`, the guard of the store's lock called `lock`, held: `EIO`, the lock let go of, if
@@ -76,6 +92,34 @@ impl Fence {
         tests::panic_if_asked(lock);
         Ok(held)
     }
+}
+
+impl Fenced {
+    /// Fences the store, its requests failing with `errno`, as `why` says, unless it is already:
+    /// logged once. Returns whether this fenced it.
+    fn fence(&self, errno: Errno, why: impl FnOnce() -> String) -> bool {
+        let mut said = None;
+        self.why.get_or_init(|| (errno, said.insert(why()).clone()));
+        let Some(why) = said else { return false };
+        log::error!(
+            "fxdax: the store at {} is fenced, {why}: it serves nothing more, each request failing \
+             with {errno:?}, until it is opened anew, as of its last commit",
+            self.store.display()
+        );
+        true
+    }
+}
+
+/// fxdax: fences every store open in the process whose branch `scope` says is of it, its requests
+/// failing with `errno` from then on, as `why` says: what a host told a tenant's KEK is revoked or
+/// destroyed, or a cell shredded, does to their stores (TASK-411.7), which it can't open again
+/// either. Returns how many it fenced, those fenced already left out.
+pub(crate) fn fence_stores(scope: impl Fn(Branch) -> bool, errno: Errno, why: &str) -> usize {
+    let fences: Vec<Arc<Fenced>> = (FENCES.lock().unwrap().iter())
+        .filter(|(branch, _)| scope(*branch))
+        .filter_map(|(_, fence)| fence.upgrade())
+        .collect();
+    fences.iter().filter(|fence| fence.fence(errno, || why.to_owned())).count()
 }
 
 /// A guard of a store's lock: which fences the store if a panic drops it, holding the lock.
@@ -180,7 +224,9 @@ pub(crate) mod tests {
     /// store be read past it; another store's are untouched.
     #[test]
     fn a_panic_holding_a_lock_fences_its_store() {
-        let (fence, other) = (Fence::new(Path::new("store")), Fence::new(Path::new("other")));
+        let branch = crate::host_store::new_alone();
+        let (fence, other) =
+            (Fence::new(Path::new("store"), branch), Fence::new(Path::new("other"), branch));
         let (lock, rw) = (StoreMutex::new("first", 1), StoreRwLock::new("second", 2));
         let panicked = std::panic::catch_unwind(|| {
             let mut held = lock.lock(&fence).unwrap();
@@ -202,7 +248,7 @@ pub(crate) mod tests {
     /// too.
     #[test]
     fn a_panic_holding_a_lock_shared_fences_its_store() {
-        let fence = Fence::new(Path::new("store"));
+        let fence = Fence::new(Path::new("store"), crate::host_store::new_alone());
         let rw = StoreRwLock::new("shared", ());
         let panicked = std::panic::catch_unwind(|| {
             let _held = rw.read(&fence).unwrap();
@@ -215,7 +261,7 @@ pub(crate) mod tests {
     /// A store's lock taken without a panic, and let go of, leaves it unfenced, however often.
     #[test]
     fn locks_let_go_of_leave_their_store_unfenced() {
-        let fence = Fence::new(Path::new("store"));
+        let fence = Fence::new(Path::new("store"), crate::host_store::new_alone());
         let lock = StoreMutex::new("lock", 0);
         for _ in 0..3 {
             *lock.lock(&fence).unwrap() += 1;

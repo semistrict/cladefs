@@ -17,14 +17,16 @@
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
 //! records, as it lets the lease go, the digest of its listing of the cell, but the collector's own
 //! objects (`<C>gc/`); the options it decided by; what it found no live branch needs but for the
-//! time since an object was written, each with when it may go ([`Deferred`]); and the cell's
-//! objects and bytes, by kind, as of its listing ([`Usage`]).
+//! time since an object was written, each with when it may go ([`Deferred`]); the cell's objects
+//! and bytes, by kind, as of its listing ([`Usage`]); and how many objects sealed it left
+//! uncompacted, its cell's KEK not to be had ([`Passed::uncompacted`]).
 //!
 //! A pass whose listing has the digest recorded, of options the same, decides what the recorded
 //! one did: everything it decides by is under the cell's prefix, and an object there written,
 //! rewritten or deleted since changes the listing, or it was recorded with no digest
 //! ([`Passed::listing`]). It deletes what was deferred once due, and nothing else (doc-7 has why
-//! that is as safe as a pass in full). Who recorded it, of what process, is of no matter: the
+//! that is as safe as a pass in full). fxdax: one recorded leaving objects sealed uncompacted holds
+//! only while their cell's tenant's KEK is still not to be had (TASK-411.13). Who recorded it, of what process, is of no matter: the
 //! lease's holders and times are under `<C>gc/`, outside the digest, and a pass of other options
 //! decides anew.
 
@@ -106,6 +108,11 @@ pub struct Passed {
     /// The cell's objects and bytes, as of its listing, less what it deleted, and with what it
     /// compacted to.
     pub usage: Usage,
+    /// fxdax: the objects sealed it would have compacted, and left, its cell's KEK not to be had
+    /// (TASK-411.13): the KMS refusing it, or the collector having none. A pass listing the same
+    /// skips the cell only while its tenant's KEK is still not to be had, as the KMS says once a
+    /// sweep ([`crate::collector::Heard`]), and goes over it in full, compacting them, once it is.
+    pub uncompacted: u64,
 }
 
 impl Passed {
@@ -395,6 +402,7 @@ mod tests {
             decided: Decided { compact_below: 0, grace: 0 },
             deferred,
             usage,
+            uncompacted: 3,
         };
         let passed = Some(passed);
         let lease = GcLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };

@@ -646,6 +646,54 @@ impl Extentd for Control {
         let SetPeersRequest { addresses } = request.into_inner();
         reply(super::peers::set(addresses).map(|()| SetPeersResponse {}))
     }
+
+    async fn shred_cell(
+        &self,
+        request: Request<ShredCellRequest>,
+    ) -> Result<Response<ShredCellResponse>, Status> {
+        let ShredCellRequest { tenant, cell } = request.into_inner();
+        let cell = crate::Cell { tenant, id: cell };
+        let bucket = stores::remote_bucket().map_err(status)?;
+        let shredded = crate::remote::shred_cell(&bucket, cell).await.map_err(|err| {
+            let failure = extent_store::upload::Failure::Remote(err);
+            let errno = crate::remote::errno(&failure).unwrap_or(Errno::EIO);
+            log::error!("extentd: shredding cell {cell}: {failure}");
+            saying(errno, format!("shredding cell {cell}: {failure}"))
+        })?;
+        let (removed, forgotten) = shredded;
+        let keks_removed = u32::try_from(removed).unwrap_or(u32::MAX);
+        Ok(Response::new(ShredCellResponse {
+            keks_removed,
+            forgotten: Some(forgotten_of(forgotten)),
+        }))
+    }
+
+    async fn forget_tenant_keys(
+        &self,
+        request: Request<ForgetTenantKeysRequest>,
+    ) -> Result<Response<ForgetTenantKeysResponse>, Status> {
+        let ForgetTenantKeysRequest { tenant, why } = request.into_inner();
+        let why = match why.is_empty() {
+            true => {
+                format!("tenant {tenant}: its KEK is revoked or destroyed, the control API says")
+            }
+            false => why,
+        };
+        let scope = extent_remote::keys::Scope::Tenant(tenant);
+        let forgotten = stores::blocking(move || Ok(crate::remote::forget(scope, &why))).await;
+        reply(
+            forgotten.map(|forgotten| ForgetTenantKeysResponse {
+                forgotten: Some(forgotten_of(forgotten)),
+            }),
+        )
+    }
+}
+
+/// fxdax: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
+fn forgotten_of(forgotten: crate::remote::Forgotten) -> Forgotten {
+    let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
+    let crate::remote::Forgotten { stores, rings, kept, extents, bytes } = forgotten;
+    Forgotten { stores: count(stores), rings: count(rings), kept: count(kept), extents, bytes }
 }
 
 /// A client of a daemon's control API that blocks, for callers without a runtime of their own:
@@ -933,6 +981,27 @@ impl Client {
         let request = SetPeersRequest { addresses };
         let what = "setting the daemon's peers".to_owned();
         self.call(what, |mut c| async move { c.set_peers(request).await }).map(drop)
+    }
+
+    /// fxdax: shreds the cell `cell` in the daemon's bucket, its wrapped KEKs taken out of its
+    /// object, and has the daemon forget its keys (`ShredCell`, TASK-411.7): how many generations
+    /// of its KEK it took out, 0 if it was shredded already, and what the daemon forgot.
+    pub fn shred_cell(&self, cell: crate::Cell) -> Result<(u32, Forgotten), crate::Error> {
+        let request = ShredCellRequest { tenant: cell.tenant, cell: cell.id };
+        let what = format!("shredding cell {cell}");
+        let response = self.call(what, |mut c| async move { c.shred_cell(request).await })?;
+        Ok((response.keks_removed, response.forgotten.unwrap_or_default()))
+    }
+
+    /// fxdax: has the daemon forget what it holds of the keys of the tenant `tenant`, whose KEK is
+    /// revoked or destroyed in the KMS, as `why` says (`ForgetTenantKeys`, TASK-411.7): what it
+    /// forgot.
+    pub fn forget_tenant_keys(&self, tenant: u64, why: &str) -> Result<Forgotten, crate::Error> {
+        let request = ForgetTenantKeysRequest { tenant, why: why.to_owned() };
+        let what = format!("having the daemon forget tenant {tenant}'s keys");
+        let response =
+            self.call(what, |mut c| async move { c.forget_tenant_keys(request).await })?;
+        Ok(response.forgotten.unwrap_or_default())
     }
 
     /// fxdax: what the disk of the tenant `tenant`, or of every tenant without one, takes, counted

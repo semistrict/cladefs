@@ -162,10 +162,13 @@ mod durability;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
 mod framed;
 mod framing;
+mod held;
+pub use held::{HeldCounts, HeldParts};
 mod host;
 mod kept;
 mod layout;
 mod mem;
+mod raw;
 mod seals;
 mod segments;
 pub mod shared;
@@ -193,8 +196,9 @@ pub use host::{
 };
 pub use layout::{Description, Format, Place, Volume};
 pub use mem::{Io, MemDir, MemFile};
+pub use raw::{RawFile, SECTOR};
 pub use segments::{
-    commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,
+    Unsectored, commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,
 };
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;

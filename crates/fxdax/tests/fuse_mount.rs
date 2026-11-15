@@ -217,6 +217,50 @@ fn a_mount_dropped_unmounts_and_closes() {
     });
 }
 
+/// TASK-411.7 (TASK-411's AC #3, FUSE mounts; Linux): a store of a sealed cell, its tenant's KEK
+/// in the host's KMS (the common tenant's, whose cells `Storage` makes), mounted through the
+/// kernel: a file written is read back through the mount and, unmounted and closed, from the store
+/// opened again; no file of the store's directory, nor of its bucket's, holds it in the clear.
+#[test]
+fn a_sealed_store_mounted_holds_nothing_in_the_clear() {
+    let keys = tempfile::tempdir().unwrap();
+    let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+    kms.create(0).unwrap();
+    fxdax::remote::set_kms(std::sync::Arc::new(kms)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (store, m) = paths(dir.path());
+    // Data that compresses not: from a xorshift generator.
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let data: Vec<u8> = (0..(1 << 20) + 123)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect();
+    let mount = MountOptions::new().mount(format(&store), &m).unwrap();
+    std::fs::write(m.join("file"), &data).unwrap();
+    assert!(std::fs::read(m.join("file")).unwrap() == data, "read back otherwise");
+    drop(mount);
+    block_on(async {
+        let storage = Storage::open(&store).unwrap().check().await.unwrap();
+        let fs = Filesystem::mount(storage).await.unwrap();
+        assert!(contents(fs.root(), b"file").await == data, "reopened, read otherwise");
+        fs.close().await.unwrap();
+    });
+    let mut held = Vec::new();
+    let mut paths = vec![dir.path().to_path_buf()];
+    while let Some(at) = paths.pop() {
+        if at.is_dir() {
+            paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+        } else if std::fs::read(&at).unwrap().windows(64).any(|window| window == &data[..64]) {
+            held.push(at.display().to_string());
+        }
+    }
+    assert_eq!(held, Vec::<String>::new());
+}
+
 /// A child process, killed if the test ends while it runs.
 struct KillOnDrop(Child);
 

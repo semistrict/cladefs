@@ -24,6 +24,8 @@
 //! fxdaxctl stats [--json]
 //! fxdaxctl grant TENANT ID DIR [UID [GID]]
 //! fxdaxctl revoke TENANT
+//! fxdaxctl shred-cell TENANT/CELL
+//! fxdaxctl forget-tenant-keys TENANT
 //! fxdaxctl --version
 //! ```
 //!
@@ -102,6 +104,17 @@
 //! path; granting a tenant again, of the same directory and ID, prints it again. `revoke`
 //! takes the tenant's socket away: its VM processes connected keep their stores, and no more
 //! connect.
+//!
+//! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
+//! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
+//! the cell TENANT/CELL (each in hex): takes its wrapped KEKs out of its object in the daemon's
+//! bucket, so that its volumes' keys unwrap no more, and has the daemon forget what it holds of
+//! them, fencing its stores open there (`EACCES`); run it against every host's daemon, the first
+//! shredding, each forgetting. A bucket that keeps object versions keeps the KEKs in the cell
+//! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
+//! forget the keys of the tenant TENANT (hex), once its KEK is destroyed, or revoked, in the KMS:
+//! its stores there are fenced, their pages leave the cache, its fetchers' and KMS's keys of it
+//! go. Each prints what the daemon forgot, one `name value` a line.
 
 use anyhow::{Context as _, bail};
 use fxdax::ExtentStore;
@@ -117,7 +130,19 @@ fn usage() -> anyhow::Error {
          fxdaxctl resize DIR CAPACITY | fxdaxctl public DIR | \
          fxdaxctl public-generation DIR | fxdaxctl attach DIR BASE | fxdaxctl stat DIR | \
          fxdaxctl stats [--json] | fxdaxctl grant TENANT ID DIR [UID [GID]] | \
-         fxdaxctl revoke TENANT | fxdaxctl --version"
+         fxdaxctl revoke TENANT | fxdaxctl shred-cell TENANT/CELL | \
+         fxdaxctl forget-tenant-keys TENANT | fxdaxctl --version"
+    )
+}
+
+/// fxdax: what a daemon forgot of a tenant's or a cell's keys, one `name value` a line (TASK-411.7).
+#[cfg(target_os = "linux")]
+fn forgotten_lines(forgotten: &fxdax::extentd::control::proto::Forgotten) -> String {
+    let fxdax::extentd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
+        forgotten;
+    format!(
+        "stores_fenced {stores}\nrings_forgotten {rings}\nkept_dropped {kept}\n\
+         extents_evicted {extents}\nbytes_evicted {bytes}\n"
     )
 }
 
@@ -204,6 +229,16 @@ enum Command {
     Revoke {
         tenant: String,
     },
+    /// fxdax: a cell shredded (TASK-411.7).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ShredCell {
+        cell: fxdax::Cell,
+    },
+    /// fxdax: a tenant's keys forgotten, its KEK revoked or destroyed (TASK-411.7).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    ForgetTenantKeys {
+        tenant: u64,
+    },
 }
 
 impl Command {
@@ -255,6 +290,14 @@ impl Command {
                 gid: ids.get(1).map(|gid| id(gid, "GID")).transpose()?,
             },
             ["revoke", tenant] => Self::Revoke { tenant: tenant.to_owned() },
+            ["shred-cell", cell] => {
+                let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
+                let hex = |hex| u64::from_str_radix(hex, 16).context("TENANT/CELL must be hex");
+                Self::ShredCell { cell: fxdax::Cell { tenant: hex(tenant)?, id: hex(id)? } }
+            }
+            ["forget-tenant-keys", tenant] => Self::ForgetTenantKeys {
+                tenant: u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal")?,
+            },
             _ => bail!(usage()),
         })
     }
@@ -315,6 +358,15 @@ impl Command {
                 println!("{}", daemon.grant((&tenant, id), &dir, uid, gid)?.display());
             }
             Self::Revoke { tenant } => daemon.revoke(&tenant)?,
+            Self::ShredCell { cell } => {
+                let (removed, forgotten) = daemon.shred_cell(cell)?;
+                print!("keks_removed {removed}\n{}", forgotten_lines(&forgotten));
+            }
+            Self::ForgetTenantKeys { tenant } => {
+                let why =
+                    format!("tenant {tenant}: its KEK is revoked or destroyed, fxdaxctl says");
+                print!("{}", forgotten_lines(&daemon.forget_tenant_keys(tenant, &why)?));
+            }
         }
         Ok(())
     }
@@ -330,6 +382,9 @@ impl Command {
         let daemons = match self {
             Self::Stats { .. } => Some("stats are"),
             Self::Grant { .. } | Self::Revoke { .. } => Some("tenants' grants are"),
+            Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } => {
+                Some("shredding and forgetting keys are")
+            }
             _ => None,
         };
         if let Some(what) = daemons {
@@ -404,9 +459,11 @@ impl Command {
                 let ancestry = ExtentStore::open(&base)?.ancestry();
                 ExtentStore::open(&dir)?.attach_base(&base.canonicalize()?, &ancestry)?;
             }
-            Self::Stats { .. } | Self::Grant { .. } | Self::Revoke { .. } => {
-                unreachable!("refused above")
-            }
+            Self::Stats { .. }
+            | Self::Grant { .. }
+            | Self::Revoke { .. }
+            | Self::ShredCell { .. }
+            | Self::ForgetTenantKeys { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
                 let store = ExtentStore::open(&dir)?;
                 let (info, bytes) = (store.info()?, store.bytes()?);

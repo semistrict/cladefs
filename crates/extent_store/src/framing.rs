@@ -24,14 +24,23 @@
 //! disk eight VMs and their bucket kept busy, 0.7-5.7 s (TASK-400). Most segments are framed in
 //! place, their parts raw, whose framing needs no more of their data than each part's CRC and a
 //! look at it: those a look ahead took, as each part was written whole, the page cache holding it
-//! still, the framing has and reads not.
+//! still, the framing has and reads not. A segment framed in a copy, which compresses, needs each
+//! part packed: the look ahead packs it too, while the parts seen say the segment will be framed
+//! so, and holds it packed in memory ([`crate::held`]), which its framing takes; a part let go of
+//! meanwhile, the host's memory short, its framing reads back and packs, as before.
+//!
+//! fxdax: a sealed store's segments are neither looked at ahead nor held (TASK-411.5): their raw
+//! files' bytes are XTS ciphertext, their framings never frame in place, and packing a part ahead
+//! would seal it under a framed object's key not drawn until its framing. Their framings read every
+//! part through the raw file ([`crate::RawFile`]), decrypting, and pack and seal it then.
 
 use crate::dir::File;
+use crate::held::{Hold, Pending};
 use crate::timings::runnable_ns;
-use extent_frame::{PART, PackedPart, PartPacker};
+use extent_frame::{ObjectKey, PART, PackedPart, PartPacker};
 use std::io;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 
 /// fxdax: the most part buffers ([`Buffer`]) and compressors ([`PartPacker`]) kept for framings to
 /// come: two segments' worth of parts, 64 MiB, and as many compressors. Taken
@@ -93,6 +102,12 @@ impl std::ops::Deref for Buffer {
 impl std::ops::DerefMut for Buffer {
     fn deref_mut(&mut self) -> &mut [u8] {
         &mut self.0
+    }
+}
+
+impl std::fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Buffer({} bytes)", self.0.len())
     }
 }
 
@@ -180,18 +195,219 @@ pub(crate) struct Seen {
 impl Seen {
     /// What a look at `part`, a part's bytes, sees, its sample compressed by `packer`.
     fn of(part: &[u8], packer: &mut PartPacker) -> Self {
-        Self { crc: PackedPart::raw(part).crc, look: Look::at(part, packer) }
+        Self { crc: extent_frame::crc(part), look: Look::at(part, packer) }
+    }
+}
+
+/// fxdax: what a look ahead at a part of a segment's data took of it, as the segment filled
+/// ([`see`], TASK-400): what it saw, and the part packed, held, if its segment looked as if it would
+/// be framed in a copy then.
+#[derive(Debug)]
+pub(crate) struct Looked {
+    pub seen: Seen,
+    pub held: Option<Hold>,
+}
+
+/// fxdax: a part of a segment's data packed ([`PartPacker::pack`]), as a framing in a copy stores
+/// it: compressed (or sealed, framing), or raw, then its bytes in `raw` if they are held with it
+/// ([`see`]).
+#[derive(Debug)]
+pub(crate) struct Stored {
+    pub part: PackedPart,
+    pub raw: Option<Buffer>,
+}
+
+impl Stored {
+    /// The bytes of memory it takes.
+    pub fn bytes(&self) -> u64 {
+        let raw = self.raw.as_ref().map(|raw| raw.0.capacity());
+        (self.part.stored_capacity() + raw.unwrap_or(0)) as u64
+    }
+}
+
+#[cfg(any(test, feature = "testing"))]
+impl Stored {
+    /// For the tests of what holds parts: one taking `bytes` bytes of memory, of no part's data.
+    pub(crate) fn of_bytes(bytes: usize) -> Self {
+        let part = PartPacker::new().pack(0, &[], None);
+        Self { part, raw: Some(Buffer(vec![0; bytes])) }
     }
 }
 
 /// fxdax: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
-/// segment fills ([`Seen`], TASK-400): read through the host's page cache, which holds it, just
-/// written, still. Its bytes change no more: the writes to a segment write each of its bytes once,
-/// and the part is whole once the last write to it ended.
-pub(crate) fn see<F: File>(raw: &F, part: u64) -> io::Result<Seen> {
+/// segment fills ([`look_ahead`]), and the part packed then and there ([`stored`]), if it is to be:
+/// as the store's framer packs it on a directory whose I/O is its callers' alone.
+pub(crate) fn see<F: File>(raw: &F, part: u64, before: Look) -> io::Result<(Seen, Option<Stored>)> {
+    let (seen, data) = look_ahead(raw, part, before)?;
+    let packed = data.map(|data| {
+        let mut packer = PACKERS.take(PartPacker::new);
+        let packed = stored(part, data, &mut packer);
+        PACKERS.give(packer);
+        packed
+    });
+    Ok((seen, packed))
+}
+
+/// fxdax: a look ahead at part `part` of a segment's data, whole, in its raw file `raw`, as the
+/// segment fills ([`Seen`], TASK-400), on the framer's thread, in order with the framings: read
+/// through the host's page cache, which holds it, just written, still, and looked at. Its bytes
+/// change no more: the writes to a segment write each of its bytes once, and the part is whole once
+/// the last write to it ended. And its bytes, to pack ahead ([`pack_ahead`]), if `before`, the look
+/// at the segment's parts seen before it, with this one's, doesn't say the segment will be framed
+/// in place ([`Look::saves_little`]): so that its framing in a copy reads it no more, the part held
+/// ([`crate::held`]).
+pub(crate) fn look_ahead<F: File>(
+    raw: &F,
+    part: u64,
+    before: Look,
+) -> io::Result<(Seen, Option<Buffer>)> {
     let mut data = Buffer::of(PART as usize);
     raw.read_cached(&mut data, part * PART)?;
     SEEN_AHEAD.fetch_add(PART, Ordering::Relaxed);
+    let mut packer = PACKERS.take(PartPacker::new);
+    let seen = Seen::of(&data, &mut packer);
+    PACKERS.give(packer);
+    let packs = !before.plus(seen.look).saves_little();
+    Ok((seen, packs.then_some(data)))
+}
+
+/// fxdax: `data`, part `index` of a segment's data, packed by `packer`, as a framing in a copy of a
+/// clear store stores it (a sealed store's are never packed ahead): compressed, holding only what of
+/// the buffer compressing took the compressed bytes need, or raw, its bytes kept.
+fn stored(index: u64, data: Buffer, packer: &mut PartPacker) -> Stored {
+    let mut part = packer.pack(index, &data, None);
+    let raw = match part.stored_bytes() {
+        // What it holds of the buffer compressing took, a part's room.
+        Some(_) => {
+            part.shrink_to_fit();
+            None
+        }
+        None => Some(data),
+    };
+    Stored { part, raw }
+}
+
+/// fxdax: how many threads pack parts ahead ([`pack_ahead`]), the process's stores': at the host's
+/// lowest priority, so that they take only what CPU nothing else wants.
+const PACKING_AHEAD: usize = 2;
+
+/// fxdax: the most parts waiting to be packed ahead, a MiB each: past them, the packing is too far
+/// behind for a part's framing to find it packed, and it skips them ([`Pending::skip`]).
+const WAITING_MOST: usize = 64;
+
+/// fxdax: the parts waiting to be packed ahead, and the threads packing them, started as there are
+/// parts for them, and kept for the process's life.
+struct Ahead {
+    waiting: Mutex<(std::collections::VecDeque<Waiting>, usize)>,
+    ready: Condvar,
+}
+
+/// fxdax: a part waiting to be packed ahead ([`pack_ahead`]): its index in its segment, which its
+/// packing takes (`PartPacker::pack`, TASK-411.2), its bytes, and where it is to be held.
+type Waiting = (u64, Buffer, Pending);
+
+static AHEAD: Ahead =
+    Ahead { waiting: Mutex::new((std::collections::VecDeque::new(), 0)), ready: Condvar::new() };
+
+/// fxdax: packs `data`, part `part` of a segment's data a look ahead took ([`look_ahead`]), on a thread
+/// of [`PACKING_AHEAD`], at the host's lowest priority, and holds it as `pending` says, if it is
+/// still to be held then: off the framer's thread, so that a look ahead starved of CPU, the host's
+/// vCPUs and flushes taking it, leaves its parts unheld, which their framings read and pack, at
+/// their own priority, and holds up no framing. Packing ahead on the framer's thread, then on
+/// threads of the framer's priority, all the host's CPUs' worth, while the guests wrote and
+/// committed, took from the daemon's flushes (sandboxes short mode: durable lag within 50 ms down
+/// by 10-30 points). Skipped, if too many wait already ([`WAITING_MOST`]).
+pub(crate) fn pack_ahead(part: u64, data: Buffer, pending: Pending) {
+    let mut waiting = AHEAD.waiting.lock().unwrap();
+    if waiting.0.len() >= WAITING_MOST {
+        drop(waiting);
+        pending.skip();
+        return;
+    }
+    waiting.0.push_back((part, data, pending));
+    if waiting.1 < PACKING_AHEAD {
+        let spawned = std::thread::Builder::new().name("store packing ahead".into()).spawn(packing);
+        match spawned {
+            Ok(_) => waiting.1 += 1,
+            Err(err) if waiting.1 == 0 => {
+                log::warn!("extent store: a thread to pack parts ahead: {err}");
+                let refused: Vec<_> = waiting.0.drain(..).collect();
+                drop(waiting);
+                refused.into_iter().for_each(|(_, _, pending)| pending.skip());
+                return;
+            }
+            Err(_) => {}
+        }
+    }
+    AHEAD.ready.notify_one();
+}
+
+/// fxdax: a thread packing parts ahead ([`pack_ahead`]), as they wait, for the process's life.
+fn packing() {
+    lowest_priority();
+    let mut packer = PartPacker::new();
+    loop {
+        let (part, data, pending) = {
+            let mut waiting = AHEAD.waiting.lock().unwrap();
+            loop {
+                if let Some(next) = waiting.0.pop_front() {
+                    break next;
+                }
+                waiting = AHEAD.ready.wait(waiting).unwrap();
+            }
+        };
+        if pending.wanted() {
+            pending.fill(stored(part, data, &mut packer));
+        }
+    }
+}
+
+/// fxdax: has the calling thread run at the host's lowest priority: Linux's idle scheduling class,
+/// which runs it only on CPUs nothing else wants, or else its lowest niceness; macOS's background
+/// band. Logged if refused: it runs at its priority then.
+fn lowest_priority() {
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: all zeros is a sched_param of priority 0, the idle class's only (musl's has
+        // fields of its own, which zeros leave unused); then sets the calling thread's scheduling
+        // class (0: the calling thread).
+        let set = unsafe {
+            let param: libc::sched_param = std::mem::zeroed();
+            libc::sched_setscheduler(0, libc::SCHED_IDLE, &param)
+        };
+        if set == 0 {
+            return;
+        }
+        // SAFETY: sets the calling thread's niceness: Linux's are a thread's, by its ID.
+        let set = unsafe {
+            let tid = libc::syscall(libc::SYS_gettid) as libc::id_t;
+            libc::setpriority(libc::PRIO_PROCESS, tid, 19)
+        };
+        if set != 0 {
+            log::warn!(
+                "extent store: packing ahead at its priority: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // SAFETY: moves the calling thread into the background band (0: the calling thread).
+        if unsafe { libc::setpriority(libc::PRIO_DARWIN_THREAD, 0, libc::PRIO_DARWIN_BG) } != 0 {
+            log::warn!(
+                "extent store: packing ahead at its priority: {}",
+                io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+/// fxdax: what a look at part `part` of a segment's data, whole, in its raw file `raw`, sees: what
+/// a look ahead at it saw, if it changed not since.
+#[cfg(any(test, feature = "audit"))]
+fn seen_again<F: File>(raw: &F, part: u64) -> io::Result<Seen> {
+    let mut data = Buffer::of(PART as usize);
+    raw.read_cached(&mut data, part * PART)?;
     let mut packer = PACKERS.take(PartPacker::new);
     let seen = Seen::of(&data, &mut packer);
     PACKERS.give(packer);
@@ -206,12 +422,16 @@ pub(crate) fn seen_ahead() -> u64 {
     SEEN_AHEAD.load(Ordering::Relaxed)
 }
 
-/// fxdax: a part of a segment's data, being framed ([`read`]): its bytes, once read, each in a
-/// buffer of its own ([`Buffer`]); if its segment may be framed in place, what a look at them saw,
-/// ahead or not.
+/// fxdax: a part of a segment's data, being framed ([`read`]), of `len` bytes: its bytes, once
+/// read, each in a buffer of its own ([`Buffer`]); packed, once it is, ahead or framing; held, if a
+/// look ahead packed it, until the framing takes it ([`fill`]); and if its segment may be framed in
+/// place, what a look at it saw, ahead or not.
 pub(crate) struct Read {
     pub data: Option<Buffer>,
+    pub packed: Option<Stored>,
+    pub held: Option<Hold>,
     pub seen: Seen,
+    pub len: u64,
 }
 
 impl Read {
@@ -219,42 +439,80 @@ impl Read {
     pub fn data(&self) -> &[u8] {
         self.data.as_deref().expect("a part's bytes, read")
     }
+
+    /// Its bytes as a framing in a copy stores them, packed ([`pack`]), and how.
+    pub fn stored(&self) -> (&[u8], &PackedPart) {
+        let packed = self.packed.as_ref().expect("a part packed");
+        let raw = || packed.raw.as_deref().unwrap_or_else(|| self.data());
+        (packed.part.stored_bytes().unwrap_or_else(raw), &packed.part)
+    }
 }
 
 /// fxdax: the parts of the `len` bytes of a segment's data its raw file `raw` holds, on the
 /// calling thread; and, if `in_place`, the segment may be framed in place, what a look at each saw:
 /// of those `ahead` saw, ahead ([`see`]), that, their bytes not read; of the others, a look at their
-/// bytes, read. Those whose bytes it didn't read [`read_rest`] reads, if the framing needs them.
+/// bytes, read. Those packed ahead, held, it reads not either way. Those whose bytes it didn't read
+/// [`fill`] packs or reads, if the framing needs them.
 pub(crate) fn read<F: File>(
     raw: &F,
     len: u64,
     in_place: bool,
-    ahead: &[Option<Seen>],
+    ahead: Vec<Option<Looked>>,
 ) -> io::Result<Vec<Read>> {
     let mut packer = PACKERS.take(PartPacker::new);
+    let mut ahead = ahead.into_iter();
     let parts = (0..len.div_ceil(PART)).map(|part| {
-        let seen = ahead.get(part as usize).copied().flatten().filter(|_| in_place);
-        if let Some(seen) = seen {
-            // Its bytes as they were seen: else a look ahead raced a write to it.
-            #[cfg(any(test, feature = "audit"))]
-            assert_eq!(see(raw, part)?, seen, "part {part}, seen ahead, changed since");
-            return Ok(Read { data: None, seen });
+        let part_len = (len - part * PART).min(PART);
+        let looked = ahead.next().flatten().filter(|looked| in_place || looked.held.is_some());
+        if let Some(Looked { seen, held }) = looked {
+            let seen = match in_place {
+                true => {
+                    // Its bytes as they were seen: else a look ahead raced a write to it.
+                    #[cfg(any(test, feature = "audit"))]
+                    assert_eq!(
+                        seen_again(raw, part)?,
+                        seen,
+                        "part {part}, seen ahead, changed since"
+                    );
+                    seen
+                }
+                false => Seen::default(),
+            };
+            return Ok(Read { data: None, packed: None, held, seen, len: part_len });
         }
         let data = read_part(raw, len, part)?;
         let seen = if in_place { Seen::of(&data, &mut packer) } else { Seen::default() };
-        Ok(Read { data: Some(data), seen })
+        Ok(Read { data: Some(data), packed: None, held: None, seen, len: part_len })
     });
     let parts = parts.collect();
     PACKERS.give(packer);
     parts
 }
 
-/// fxdax: reads the bytes of those of `parts`, of the `len` bytes of a segment's data its raw file
-/// `raw` holds, that [`read`] didn't: for a framing in a copy, which packs them all.
-pub(crate) fn read_rest<F: File>(raw: &F, len: u64, parts: &mut [Read]) -> io::Result<()> {
+/// fxdax: for a framing in a copy, which packs all of `parts`, of the `len` bytes of a segment's
+/// data its raw file `raw` holds, those [`read`] didn't read: each held, packed ahead, taken; the
+/// others, those not packed ahead, or let go of since, read.
+pub(crate) fn fill<F: File>(raw: &F, len: u64, parts: &mut [Read]) -> io::Result<()> {
     for (part, read) in (0..).zip(parts) {
-        if read.data.is_none() {
-            read.data = Some(read_part(raw, len, part)?);
+        if read.data.is_some() || read.packed.is_some() {
+            continue;
+        }
+        match read.held.take().and_then(Hold::take) {
+            Some(packed) => {
+                // As the part is now, packed: else a look ahead raced a write to it.
+                #[cfg(any(test, feature = "audit"))]
+                {
+                    let data = read_part(raw, len, part)?;
+                    let mut packer = PACKERS.take(PartPacker::new);
+                    let again = packer.pack(part, &data, None);
+                    PACKERS.give(packer);
+                    assert_eq!(again, packed.part, "part {part}, packed ahead, changed since");
+                    let raw = packed.raw.as_deref();
+                    assert!(raw.is_none_or(|raw| raw == &data[..]), "part {part}, held raw");
+                }
+                read.packed = Some(packed);
+            }
+            None => read.data = Some(read_part(raw, len, part)?),
         }
     }
     Ok(())
@@ -268,12 +526,23 @@ fn read_part<F: File>(raw: &F, len: u64, part: u64) -> io::Result<Buffer> {
     Ok(data)
 }
 
-/// fxdax: `parts`, a segment's data, read ([`read`]), packed, on threads ([`on_threads`]); and the
-/// longest any thread waited to run, in nanoseconds.
-pub(crate) fn pack(parts: &[Read]) -> (Vec<PackedPart>, u64) {
-    let (packed, waited) =
-        on_threads(parts.len(), |part, packer| Ok(packer.pack(parts[part].data())));
-    (packed.expect("packing fails not"), waited)
+/// fxdax: packs those of `parts`, a segment's data, read ([`read`], [`fill`]), not packed ahead,
+/// on threads ([`on_threads`]), sealed under `key`, its framed file's, if it is sealed
+/// (TASK-411.2); and returns the longest any thread waited to run, in nanoseconds. Those packed
+/// ahead are a clear store's, in the clear: a sealed store packs none ahead.
+pub(crate) fn pack(parts: &mut [Read], key: Option<&ObjectKey>) -> u64 {
+    let unpacked: Vec<usize> = (0..parts.len()).filter(|&at| parts[at].packed.is_none()).collect();
+    let (packed, waited) = {
+        let parts = &*parts;
+        on_threads(unpacked.len(), |at, packer| {
+            let part = unpacked[at];
+            Ok(packer.pack(part as u64, parts[part].data(), key))
+        })
+    };
+    for (at, part) in unpacked.into_iter().zip(packed.expect("packing fails not")) {
+        parts[at].packed = Some(Stored { part, raw: None });
+    }
+    waited
 }
 
 /// fxdax: `each` of `count` parts, on as many threads as the host has CPUs for this process, but
@@ -317,9 +586,13 @@ fn on_threads<T: Send>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Dir, MemDir};
+    use crate::{Dir, HeldParts, MemDir};
+    use std::sync::Arc;
 
     const MIB: usize = 1 << 20;
+
+    /// The key the tests' sealed segments are sealed under.
+    const KEY: extent_frame::KeyId = extent_frame::KeyId { branch: 1, generation: 0 };
 
     /// `len` bytes that don't compress, of `seed`'s.
     fn noise(seed: u64, len: usize) -> Vec<u8> {
@@ -363,6 +636,30 @@ mod tests {
         assert!(saves_little(&few), "noise, but for four blocks of zeros");
     }
 
+    /// `len` bytes that compress, of `seed`'s: letters at random, sixteen of them.
+    fn text(seed: u64, len: usize) -> Vec<u8> {
+        noise(seed, len).into_iter().map(|byte| b'a' + byte % 16).collect()
+    }
+
+    /// A raw file holding `data`.
+    fn raw_of(data: &[u8]) -> crate::MemFile {
+        let raw = MemDir::new().create("raw", true).unwrap();
+        raw.write_at(data, 0).unwrap();
+        raw
+    }
+
+    /// The bytes `parts` store, framed in a copy, in order.
+    fn stored(parts: &[Read]) -> Vec<u8> {
+        let mut packer = extent_frame::Packer::new(None);
+        let mut bytes = Vec::new();
+        for part in parts {
+            let (stored, how) = part.stored();
+            packer.push_stored(&mut bytes, part.len, stored, how);
+        }
+        bytes.extend(packer.finish(b"footer"));
+        bytes
+    }
+
     /// TASK-336: a segment's parts, read, then packed on threads, are its data's, in order, each
     /// packed as one packer packs it, a last part cut short among them; each checksummed and
     /// looked at as a raw part if it may be framed in place, and not otherwise.
@@ -371,24 +668,53 @@ mod tests {
         let len = 9 * MIB + 1000;
         let mut data = noise(5, len);
         data[2 * MIB..3 * MIB].fill(7);
-        let raw = MemDir::new().create("raw", true).unwrap();
-        raw.write_at(&data, 0).unwrap();
-        let parts = read(&raw, len as u64, true, &[]).unwrap();
+        let raw = raw_of(&data);
+        let mut parts = read(&raw, len as u64, true, Vec::new()).unwrap();
         assert_eq!(parts.len(), 10);
         let mut packer = PartPacker::new();
         for (read, part) in parts.iter().zip(data.chunks(PART as usize)) {
             assert!(read.data() == part, "a part's bytes");
-            assert_eq!(read.seen.crc, PackedPart::raw(part).crc);
+            assert_eq!(read.seen.crc, extent_frame::crc(part));
             assert_eq!(read.seen.look, Look::at(part, &mut packer));
         }
-        let (packed, _) = pack(&parts);
-        let each: Vec<PackedPart> =
-            data.chunks(PART as usize).map(|part| packer.pack(part)).collect();
+        let mut sealed = read(&raw, len as u64, true, Vec::new()).unwrap();
+        pack(&mut parts, None);
+        let packed: Vec<PackedPart> =
+            parts.iter().map(|read| read.packed.as_ref().unwrap().part.clone()).collect();
+        let each: Vec<PackedPart> = (data.chunks(PART as usize).enumerate())
+            .map(|(index, part)| packer.pack(index as u64, part, None))
+            .collect();
         assert_eq!(packed, each);
-        assert!(packed[2].compressed.is_some() && packed[0].compressed.is_none());
-        let parts = read(&raw, len as u64, false, &[]).unwrap();
+        let encodings = (packed[2].encoding(), packed[0].encoding());
+        assert_eq!(encodings, (extent_frame::Encoding::Zstd, extent_frame::Encoding::Raw));
+        // TASK-411.2: sealed under a segment's key, each as one packer seals it.
+        let sealing = extent_frame::Packer::new(Some((&extent_frame::Secret::random(), KEY)));
+        pack(&mut sealed, sealing.key());
+        let sealed: Vec<PackedPart> =
+            sealed.iter().map(|read| read.packed.as_ref().unwrap().part.clone()).collect();
+        let each: Vec<PackedPart> = (data.chunks(PART as usize).enumerate())
+            .map(|(index, part)| packer.pack(index as u64, part, sealing.key()))
+            .collect();
+        assert_eq!(sealed, each);
+        let crcs = |packed: &[PackedPart]| packed.iter().map(PackedPart::crc).collect::<Vec<_>>();
+        assert!((crcs(&sealed).iter().zip(crcs(&packed))).all(|(sealed, clear)| *sealed != clear));
+        let parts = read(&raw, len as u64, false, Vec::new()).unwrap();
         assert!(parts.iter().all(|read| read.seen == Seen::default()));
-        assert!(read(&raw, 0, true, &[]).unwrap().is_empty(), "no data, no parts");
+        assert!(read(&raw, 0, true, Vec::new()).unwrap().is_empty(), "no data, no parts");
+    }
+
+    /// Looks ahead at `parts` of `raw`, as the store's framer does, each with the look at those
+    /// before it, holding in `held` those it packs.
+    fn ahead(raw: &crate::MemFile, parts: &[u64], held: &Arc<HeldParts>) -> Vec<Option<Looked>> {
+        let mut look = Look::default();
+        let mut looked: Vec<Option<Looked>> = Vec::new();
+        for &part in parts {
+            let (seen, packed) = see(raw, part, look).unwrap();
+            look = look.plus(seen.look);
+            looked.resize_with(looked.len().max(part as usize + 1), || None);
+            looked[part as usize] = Some(Looked { seen, held: packed.map(|it| held.hold(it)) });
+        }
+        looked
     }
 
     /// TASK-400: the parts of a segment that may be framed in place a look ahead saw are not read
@@ -399,34 +725,99 @@ mod tests {
     fn parts_seen_ahead_are_read_only_for_a_copy() {
         let len = 3 * MIB + 1000;
         let data = noise(6, len);
-        let raw = MemDir::new().create("raw", true).unwrap();
-        raw.write_at(&data, 0).unwrap();
-        let ahead = [Some(see(&raw, 0).unwrap()), None, Some(see(&raw, 2).unwrap())];
-        let mut parts = read(&raw, len as u64, true, &ahead).unwrap();
+        let raw = raw_of(&data);
+        let held = HeldParts::new();
+        let looked = ahead(&raw, &[0, 2], &held);
+        assert_eq!(held.bytes(), 0, "noise, packed not");
+        let mut parts = read(&raw, len as u64, true, looked).unwrap();
         let unread: Vec<bool> = parts.iter().map(|read| read.data.is_none()).collect();
         assert_eq!(unread, [true, false, true, false]);
-        let fresh = read(&raw, len as u64, true, &[]).unwrap();
+        let fresh = read(&raw, len as u64, true, Vec::new()).unwrap();
         let seen = |parts: &[Read]| parts.iter().map(|read| read.seen).collect::<Vec<_>>();
         assert_eq!(seen(&parts), seen(&fresh), "seen ahead as seen framing");
-        read_rest(&raw, len as u64, &mut parts).unwrap();
+        fill(&raw, len as u64, &mut parts).unwrap();
         for (read, part) in parts.iter().zip(data.chunks(PART as usize)) {
             assert!(read.data() == part, "a part's bytes, read for a copy");
         }
-        let parts = read(&raw, len as u64, false, &ahead).unwrap();
+        let looked = ahead(&raw, &[0, 2], &held);
+        let parts = read(&raw, len as u64, false, looked).unwrap();
         assert!(parts.iter().all(|read| read.data.is_some() && read.seen == Seen::default()));
     }
 
-    /// TASK-400, under the `audit` feature: a part seen ahead that changed since fails its
-    /// framing loudly, a look ahead having raced a write to it, rather than frame a CRC that isn't
-    /// its bytes'.
+    /// TASK-400: the parts of a segment that compresses are packed as a look ahead sees them, and
+    /// held, compressed, or raw for a part that doesn't compress, its bytes with it: its framing in
+    /// a copy reads none of them, and stores the bytes a framing reading them all stores, whether
+    /// all are held, some let go of to make room, newest first, or none. Before, a framing in a
+    /// copy read its whole raw file back as it closed.
     #[test]
-    #[should_panic(expected = "part 1, seen ahead, changed since")]
-    fn a_part_changed_since_it_was_seen_panics() {
-        let raw = MemDir::new().create("raw", true).unwrap();
-        raw.write_at(&noise(7, 2 * MIB), 0).unwrap();
-        let ahead = [None, Some(see(&raw, 1).unwrap())];
-        raw.write_at(&[1; 4096], MIB as u64).unwrap();
-        let _ = read(&raw, 2 * MIB as u64, true, &ahead);
+    fn parts_held_frame_as_parts_read() {
+        let len = 4 * MIB + 1000;
+        let mut data = text(8, len);
+        // A part of noise among them, which is held raw.
+        data[MIB..2 * MIB].copy_from_slice(&noise(9, MIB));
+        let raw = raw_of(&data);
+        let framed = |looked: Vec<Option<Looked>>, quiet: bool| {
+            let mut parts = read(&raw, len as u64, quiet, looked).unwrap();
+            fill(&raw, len as u64, &mut parts).unwrap();
+            let read: Vec<bool> = parts.iter().map(|read| read.data.is_some()).collect();
+            pack(&mut parts, None);
+            (stored(&parts), read)
+        };
+        let (expected, read) = framed(Vec::new(), true);
+        assert_eq!(read, [true; 5], "nothing held, all read");
+
+        let held = HeldParts::new();
+        let looked = ahead(&raw, &[0, 1, 2, 3], &held);
+        let counts = held.counts();
+        let raw_part = PART;
+        assert!(counts.bytes > raw_part && counts.bytes < raw_part + 3 * MIB as u64, "{counts:?}");
+        for quiet in [true, false] {
+            let looked = match quiet {
+                true => std::mem::take(&mut ahead(&raw, &[0, 1, 2, 3], &held)),
+                false => ahead(&raw, &[0, 1, 2, 3], &held),
+            };
+            let (bytes, read) = framed(looked, quiet);
+            assert!(bytes == expected, "held, quiet {quiet}: the bytes framed reading them all");
+            assert_eq!(read, [false, false, false, false, true], "the last part alone read");
+        }
+        drop(looked);
+        assert_eq!(held.bytes(), 0, "taken, or dropped, held no more");
+
+        // Some let go of to make room: the last held first.
+        let looked = ahead(&raw, &[0, 1, 2, 3], &held);
+        let two = held.bytes() - held.evict_to(held.bytes() / 2);
+        assert!(two > 0 && held.counts().evicted_parts >= 1);
+        let (bytes, read) = framed(looked, true);
+        assert!(bytes == expected, "partly held: the bytes framed reading them all");
+        assert_eq!(read.last(), Some(&true));
+        assert!(read[0] == false && read[3] == true, "the first kept, the last let go: {read:?}");
+
+        // All let go of.
+        let looked = ahead(&raw, &[0, 1, 2, 3], &held);
+        held.evict_to(0);
+        let (bytes, read) = framed(looked, true);
+        assert!(bytes == expected, "none held: the bytes framed reading them all");
+        assert_eq!(read, [true; 5]);
+        assert_eq!(held.bytes(), 0);
+    }
+
+    /// TASK-400: a look ahead packs a part only while the parts seen, it among them, don't say
+    /// their segment will be framed in place: a part of text, which compresses by a little under
+    /// half, then noise, packed until the parts seen save less than a sixteenth: seven, then not.
+    #[test]
+    fn parts_are_packed_while_the_parts_seen_say_a_copy() {
+        let mut data = text(10, MIB);
+        data.extend(noise(11, 11 * MIB));
+        let raw = raw_of(&data);
+        let mut look = Look::default();
+        let mut packed = Vec::new();
+        for part in 0..12 {
+            let (seen, part) = see(&raw, part, look).unwrap();
+            look = look.plus(seen.look);
+            packed.push(part.is_some());
+        }
+        let expected: Vec<bool> = (0..12).map(|part| part < 7).collect();
+        assert_eq!(packed, expected);
     }
 
     /// TASK-336: a part that fails to read fails them all.
@@ -453,7 +844,7 @@ mod tests {
                 unreachable!()
             }
         }
-        let error = read(&Failing, 8 * PART, true, &[]).err().expect("a part failed");
+        let error = read(&Failing, 8 * PART, true, Vec::new()).err().expect("a part failed");
         assert_eq!(error.to_string(), "failing");
     }
 }

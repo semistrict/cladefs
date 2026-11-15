@@ -7,16 +7,20 @@
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Batch, Durability, FileSyncs, Syncs};
 use crate::framed::{Aligned, Framed, Packed, Part, Source, Unpacked, read_aligned};
-use crate::framing::{self, Seen};
+use crate::framing::{self, Look, Seen};
+use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, Extents, FileKey, KINDS, LOGS,
     OPEN_EXTENTS, OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Volume, add_piece,
-    branch_dir, create_branch_dirs, encode_salted, extent_path, files_of, list_numbers, log_path,
+    branch_dir, create_branch_dirs, extent_path, files_of, list_numbers, log_path,
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
+use crate::raw::{RawFile, Sealer};
 use crate::seals;
-use crate::segments::{self, Behind, Preparation, Preparing, Segments, Unframed, footer_last};
+use crate::segments::{
+    self, Behind, Preparation, Preparing, SECTOR, Segments, Unframed, Unsectored, footer_last,
+};
 use crate::shared::{Shared, SharedLock};
 use crate::state::{
     Framing, Gate, Job, Life, Locked, OwnFiles, Placement, Readable, Reader, Space, Standing,
@@ -33,6 +37,7 @@ use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
 use extent_remote::cache::Cache;
+use extent_remote::keys::Ring;
 use extent_remote::recovery::{Places, Seal};
 use extent_remote::trace;
 use extent_remote::wal::{Fenced, Rebased, Wal};
@@ -240,12 +245,18 @@ pub struct Store<D: Dir> {
     /// fxdax: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
     /// of the store's goes into it (TASK-165.8).
     cache: Option<Arc<Cache>>,
+    /// fxdax: what holds the parts of its segments packed as they fill, until their framings: the
+    /// process's stores', or its own ([`Opening::held`], TASK-400).
+    held: Arc<HeldParts>,
     /// Notified when the open segment has no write in progress, and when it closed: what
     /// [`Store::close_now`] and the writes it holds up wait for; fxdax: and as each framing of a
     /// segment ends, which flushes, the uploader, forks and the branch's closing wait for.
     idle: Arc<Condvar>,
     /// fxdax: its views, which followers read it through ([`Store::view`]).
     views: Arc<Views>,
+    /// fxdax: its keys, which its segments and extents stored on their own are sealed and read
+    /// under (TASK-411.3).
+    keys: Arc<Ring>,
 }
 
 /// A store's directory, taken for this process ([`Dir::take`]): let go of once dropped.
@@ -305,8 +316,10 @@ struct Logs<F> {
     unsynced: Syncs<F>,
 }
 
-/// A write in progress (see [`Store::begin_write`]): its data goes to `file()` at `offset()`.
-/// Dropping it before it is finished abandons it.
+/// A write in progress (see [`Store::begin_write`]): its data goes to its file, by
+/// [`Write::write`], or by a caller's own I/O of what [`Write::stored`] gives. Dropping it before
+/// it is finished abandons it. fxdax: no caller writes its file otherwise: a sealed store's raw
+/// files are encrypted, a sector at a time, as they write them (TASK-411.5).
 pub struct Write<'a, D: Dir> {
     store: &'a Store<D>,
     extent: ExtentId,
@@ -314,7 +327,7 @@ pub struct Write<'a, D: Dir> {
     opening: u64,
     extent_offset: u64,
     len: u64,
-    file: Arc<D::File>,
+    file: Arc<RawFile<D::File>>,
     offset: u64,
     /// The segment written to, if it isn't the extent's own file.
     segment: Option<SegmentId>,
@@ -324,14 +337,24 @@ pub struct Write<'a, D: Dir> {
 }
 
 impl<D: Dir> Write<'_, D> {
-    /// The file the data goes to.
-    pub fn file(&self) -> &Arc<D::File> {
-        &self.file
+    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is
+    /// sealed, whole sectors then, as what the store takes is (TASK-411.8). fxdax: refused past
+    /// the write's end.
+    pub fn write(&self, data: &[u8], at: u64) -> Result<(), Error> {
+        let len = data.len() as u64;
+        ensure!(at + len <= self.len, "{len} bytes at {at} of a write of {}", self.len);
+        Ok(self.file.write_at(data, self.offset + at)?)
     }
 
-    /// Where in the file the data goes.
-    pub fn offset(&self) -> u64 {
-        self.offset
+    /// fxdax: `data`, the whole write's bytes, as its file is to store them, for a caller writing
+    /// them by an I/O of its own, as an image's device does: encrypted in place if the store is
+    /// sealed (TASK-411.5). They go to the file it names, at the offset it names; written in whole
+    /// sectors if a write of them stops short, from the last whole sector written, they are what
+    /// they are whatever writes them again.
+    pub fn stored(&self, mut data: Aligned) -> Result<Stored<'_, D::File>, Error> {
+        ensure!(data.len() as u64 == self.len, "{} bytes of a write of {}", data.len(), self.len);
+        self.file.encrypt(self.offset, data.as_mut_slice())?;
+        Ok(Stored { file: self.file.file(), offset: self.offset, bytes: data })
     }
 
     /// Records the write, whose data is in the file: reads see it, and the next commit includes
@@ -356,6 +379,14 @@ impl<D: Dir> Write<'_, D> {
             log::warn!("extent store: waiting for {len} bytes at {offset} of a segment: {err}");
         }
     }
+}
+
+/// fxdax: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
+/// in `file`, encrypted if the store is sealed.
+pub struct Stored<'a, F> {
+    pub file: &'a Arc<F>,
+    pub offset: u64,
+    pub bytes: Aligned,
 }
 
 impl<D: Dir> Drop for Write<'_, D> {
@@ -415,12 +446,13 @@ struct Framer<D: Dir> {
     branch: u64,
     state: Arc<SharedLock<Mutex<State<D::File>>>>,
     idle: Arc<Condvar>,
+    held: Arc<HeldParts>,
 }
 
 impl<D: Dir> Clone for Framer<D> {
     fn clone(&self) -> Self {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Self { dir, branch: self.branch, state, idle }
+        Self { dir, branch: self.branch, state, idle, held: self.held.clone() }
     }
 }
 
@@ -445,9 +477,9 @@ impl<D: Dir> Framer<D> {
             // (TASK-165.9).
             let whole = state.standing.whole();
             let number = unframed.number();
-            let seen = state.segments.take_seen(number);
+            let ahead = state.segments.take_seen(number);
             drop(state);
-            let framed = whole.and_then(|()| unframed.frame(&*self.dir, &seen));
+            let framed = whole.and_then(|()| unframed.frame(&*self.dir, ahead));
             state = self.lock();
             if self.wrote(&mut state, number, framed) {
                 // The host refused a thread to make it durable: on this one, as it would.
@@ -467,36 +499,69 @@ impl<D: Dir> Framer<D> {
         number: SegmentId,
         part: u64,
     ) -> Locked<'a, D::File> {
-        let Some(raw) = Self::to_see(&state, number) else { return state };
+        let Some((raw, look)) = Self::to_see(&state, number) else { return state };
         drop(state);
-        let seen = framing::see(&*raw, part);
+        let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
         state
     }
 
     /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
-    /// its framing, which reads it no more if it frames the segment in place; unless its framing
-    /// took its parts' looks already, or the store failed, or closed (TASK-400).
-    fn see_here(state: &mut State<D::File>, number: SegmentId, part: u64) {
-        if let Some(raw) = Self::to_see(state, number) {
-            let seen = framing::see(&*raw, part);
+    /// its framing, which reads it no more if it frames the segment in place, nor if it holds it
+    /// packed, which this has it do if the segment looks as if it will be framed in a copy; unless
+    /// its framing took its parts' looks already, or the store failed, or closed (TASK-400).
+    fn see_here(&self, state: &mut State<D::File>, number: SegmentId, part: u64) {
+        if let Some((raw, look)) = Self::to_see(state, number) {
+            let seen = self.look(&*raw, part, look);
             Self::saw(state, (number, part), seen);
         }
     }
 
     /// fxdax: segment `number`'s raw file, if a look ahead at a part of it is for anything
-    /// ([`Framer::see_here`]).
-    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<Arc<D::File>> {
+    /// ([`Framer::see_here`]), and the look at its parts seen so far.
+    fn to_see(state: &State<D::File>, number: SegmentId) -> Option<(Arc<RawFile<D::File>>, Look)> {
         let open = state.standing.whole().is_ok() && !state.standing.is_closed();
         open.then(|| state.segments.see(number)).flatten()
     }
 
-    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, or failed: its framing
-    /// reads the part itself then, which fails as it may.
-    fn saw(state: &mut State<D::File>, (number, part): (SegmentId, u64), seen: io::Result<Seen>) {
+    /// fxdax: a look ahead at part `part` of a segment, in its raw file `raw`, whose parts seen
+    /// before it look as `look` says ([`framing::look_ahead`]): what it saw, and the part held, if
+    /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
+    /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
+    /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
+    /// thread of the store's runs outside of. fxdax: of a clear raw file alone: a sealed segment's
+    /// parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
+    fn look(
+        &self,
+        raw: &RawFile<D::File>,
+        part: u64,
+        look: Look,
+    ) -> io::Result<(Seen, Option<Hold>)> {
+        assert!(raw.clear().is_some(), "a sealed raw file's part looked at ahead");
+        if !self.dir.concurrent() || cfg!(feature = "shuttle") {
+            let (seen, packed) = framing::see(raw, part, look)?;
+            return Ok((seen, packed.map(|packed| self.held.hold(packed))));
+        }
+        let (seen, data) = framing::look_ahead(raw, part, look)?;
+        let held = data.map(|data| {
+            let (held, pending) = self.held.pend();
+            framing::pack_ahead(part, data, pending);
+            held
+        });
+        Ok((seen, held))
+    }
+
+    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or to,
+    /// if it is to be packed, or failed: its framing reads the part itself then, which fails as it
+    /// may.
+    fn saw(
+        state: &mut State<D::File>,
+        (number, part): (SegmentId, u64),
+        seen: io::Result<(Seen, Option<Hold>)>,
+    ) {
         match seen {
-            Ok(seen) => state.segments.saw(number, part, seen),
+            Ok((seen, held)) => state.segments.saw(number, part, seen, held),
             Err(err) => log::warn!("extent store: looking at part {part} of {number:?}: {err}"),
         }
     }
@@ -557,14 +622,14 @@ impl<D: Dir> Framer<D> {
         while let Some(job) = state.framing.queue.pop_front() {
             let unframed = match job {
                 Job::See(number, part) => {
-                    Self::see_here(state, number, part);
+                    self.see_here(state, number, part);
                     continue;
                 }
                 Job::Frame(unframed) => unframed,
             };
             let number = unframed.number();
-            let seen = state.segments.take_seen(number);
-            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir, &seen)) {
+            let ahead = state.segments.take_seen(number);
+            match state.standing.whole().and_then(|()| unframed.frame(&*self.dir, ahead)) {
                 Ok(framed) => {
                     state.segments.written(number, framed.clone());
                     state.framing.wrote(number, framed);
@@ -657,11 +722,18 @@ pub struct Unmade;
 /// where the writer found its end ([`Fenced`]), which the store's write-ahead log is put after,
 /// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
-/// one, which what the bucket acknowledged of the store's goes into.
+/// one, which what the bucket acknowledged of the store's goes into. fxdax: and the store's keys,
+/// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
+/// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear. And what holds
+/// the parts of its segments packed as they fill, which the process's stores share, so that what
+/// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
+/// one of the store's own, which nothing makes let go. A sealed store holds none (TASK-411.5).
 pub struct Opening {
     pub state: extent_remote::State,
     pub fenced: Option<Fenced>,
     pub cache: Option<Arc<Cache>>,
+    pub keys: Arc<Ring>,
+    pub held: Option<Arc<HeldParts>>,
 }
 
 impl Opening {
@@ -672,7 +744,8 @@ impl Opening {
     pub fn new(branch: Branch) -> Self {
         let chain = Chain::new(branch, 0, 0, None, 0);
         let fenced = Fenced { recovered: None, last_commit: None, chain };
-        Self { state: extent_remote::State::new(branch), fenced: Some(fenced), cache: None }
+        let state = extent_remote::State::new(branch);
+        Self { state, fenced: Some(fenced), cache: None, keys: Ring::clear(), held: None }
     }
 }
 
@@ -749,6 +822,8 @@ impl<D: Dir> Recovering<D> {
     pub fn drop_wal(&mut self) -> Result<(), Error> {
         let dir = &*self.dir;
         let branch = self.file.branch;
+        // fxdax: those closed again, not framed, their raw files and logs going (TASK-411.9).
+        self.wal.drop_closing(dir, branch)?;
         for (footer, number) in std::mem::take(&mut self.wal.segments) {
             let segment = SegmentId { branch: branch.id, number };
             self.remove_files([segment_path(segment)], &footer);
@@ -782,10 +857,13 @@ impl<D: Dir> Recovering<D> {
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
-        let Self { dir, taken, claim, file, wal: recovered } = self;
+        let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
-        let Opening { state, fenced, cache } = opening;
+        let Opening { state, fenced, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
+        // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
+        // before them is (TASK-411.9).
+        recovered.close(&*dir, branch, &keys)?;
         // fxdax: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
@@ -901,7 +979,8 @@ impl<D: Dir> Recovering<D> {
             }
         }
         let opened = (epoch, recovered.next, chain);
-        let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, options.open_files)?;
+        let files = (options.open_files, keys.clone());
+        let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, files)?;
         // fxdax: the sealed extents in each, read in the bucket once it is acknowledged there
         // (TASK-165.8).
         for (extent, entry) in &extents {
@@ -922,7 +1001,7 @@ impl<D: Dir> Recovering<D> {
         }
         let open = segments.open_segment();
         let log = segments.open_log();
-        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt))]);
+        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt, log.sealer))]);
         #[cfg(any(test, feature = "audit"))]
         let replay = {
             let lengths = extents.iter().map(|(extent, entry)| (*extent, entry.len)).collect();
@@ -954,7 +1033,11 @@ impl<D: Dir> Recovering<D> {
                     uncommitted,
                     gate: Gate::default(),
                     segments,
-                    own_files: OwnFiles::new(branch.id, own_sizes, options.open_files),
+                    own_files: OwnFiles::new(
+                        branch.id,
+                        own_sizes,
+                        (options.open_files, keys.clone()),
+                    ),
                     unreferenced: Unreferenced::default(),
                     wal: Queue::new(wal.base(), queued),
                     point: fenced.is_none(),
@@ -975,8 +1058,10 @@ impl<D: Dir> Recovering<D> {
             ),
             base: SharedLock::new("store log base", Mutex::new(base_file)),
             cache,
+            held: held.unwrap_or_default(),
             idle: Arc::new(Condvar::new()),
             views,
+            keys,
         };
         Ok(store)
     }
@@ -1007,6 +1092,13 @@ impl Places for Local {
     fn free(&mut self, extent: ExtentId) {
         self.extents.remove(&extent);
     }
+}
+
+/// fxdax: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
+/// so that one copied to another's key is refused (`extent_remote::layout::own_extent`,
+/// TASK-411.3).
+fn own_footer(extent: ExtentId) -> Vec<u8> {
+    extent_remote::layout::encode(&extent)
 }
 
 /// fxdax: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
@@ -1170,6 +1262,12 @@ impl<D: Dir> Store<D> {
         self.volume.as_ref()
     }
 
+    /// fxdax: its keys, its branch's and its ancestors' DEKs, which it seals and reads under
+    /// (TASK-411.3): empty, in the clear.
+    pub fn keys(&self) -> &Arc<Ring> {
+        &self.keys
+    }
+
     /// fxdax: holds the store's directory taken for this process until what it returns is dropped,
     /// as the store open does: for what outlives the store's closing and still writes in the
     /// directory, as its uploader does as it stops (TASK-129). Fails once it is closed.
@@ -1205,6 +1303,12 @@ impl<D: Dir> Store<D> {
     /// The store's directory.
     pub fn dir(&self) -> &D {
         &self.dir
+    }
+
+    /// fxdax: what holds the parts of its segments packed as they fill ([`Opening::held`],
+    /// TASK-400).
+    pub fn held_parts(&self) -> &Arc<HeldParts> {
+        &self.held
     }
 
     /// The store, as its user sees it.
@@ -1407,6 +1511,13 @@ impl<D: Dir> Store<D> {
             };
             (grows, to_segment, overwrites)
         };
+        // fxdax: whole sectors, which the open segment takes, and its seal, copying it whole from
+        // its start, appends there (TASK-411.8): refused before the extent opens. fxdax: and which
+        // a sealed store's large extents' raw files take, encrypted a sector at a time
+        // (TASK-411.5).
+        if to_segment || self.keys.sealing().is_some() {
+            Unsectored::check(offset, len)?;
+        }
         state.check_room(grows, overwrites)?;
         if to_segment {
             self.make_room(&mut state, len)?;
@@ -1427,7 +1538,7 @@ impl<D: Dir> Store<D> {
         let (file, file_offset, segment) = match placement {
             Placement::Own(file) => (file, offset, None),
             Placement::Segment => {
-                let (number, file, at) = state.segments.reserve(len);
+                let (number, file, at) = state.segments.reserve(len)?;
                 (file, at, Some(number))
             }
         };
@@ -1451,7 +1562,10 @@ impl<D: Dir> Store<D> {
     /// at its path holds nothing the extent does, as no open extent's writes go to it: a free's, of
     /// the extent while it was open, which the next commit's flush removes. It makes way, so that
     /// the extent may be written anew before that flush (TASK-79.5).
-    fn create_raw(&self, extent: ExtentId) -> Result<D::File, Error> {
+    /// fxdax: sealed, if the store is, under its branch's newest DEK, from a salt of its own kept
+    /// in memory alone, as the file never outlives the process: an opening removes those left
+    /// (TASK-411.5).
+    fn create_raw(&self, extent: ExtentId) -> Result<RawFile<D::File>, Error> {
         let (dir, path) = (&*self.dir, open_extent_path(extent));
         let created = match dir.create(&path, true) {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -1459,7 +1573,8 @@ impl<D: Dir> Store<D> {
             }
             created => created,
         };
-        created.with_context(|| format!("creating {path}"))
+        let sealer = self.keys.sealing().map(|(dek, key)| Arc::new(Sealer::new(dek, key)));
+        Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, sealer))
     }
 
     /// fxdax: makes room in the open segment for a write of `len` bytes, if it has none: writes
@@ -1482,7 +1597,7 @@ impl<D: Dir> Store<D> {
     /// commits ([`Framer`]).
     fn framer(&self) -> Framer<D> {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
-        Framer { dir, branch: self.branch.id, state, idle }
+        Framer { dir, branch: self.branch.id, state, idle, held: self.held.clone() }
     }
 
     /// fxdax: prepares the log of the segment after the open one, off the state lock, on a thread
@@ -1746,7 +1861,7 @@ impl<D: Dir> Store<D> {
 
     /// A part of a framed file, read, checked and unpacked.
     pub fn read_packed(&self, part: &Packed<D::File>) -> Result<Arc<Aligned>, Error> {
-        let stored = read_aligned(&*part.file, part.stored.offset, part.stored.len as usize)?;
+        let stored = read_aligned(&*part.file, part.stored().offset, part.stored().len as usize)?;
         self.unpack(part, stored)
     }
 
@@ -2086,7 +2201,7 @@ impl<D: Dir> Store<D> {
                 self.prepare_next(state);
             }
             let open = state.segments.open_segment();
-            let (file, at) = state.segments.append(entry.len);
+            let (file, at) = state.segments.append(entry.len)?;
             file.write_at(data.as_slice(), at)?;
             written::wrote(written::Kind::Copied, data.as_slice().len());
             state.segments.appended(open, at, entry.len);
@@ -2114,11 +2229,14 @@ impl<D: Dir> Store<D> {
         &self,
         state: &mut State<D::File>,
         extent: ExtentId,
-        raw: Arc<D::File>,
+        raw: Arc<RawFile<D::File>>,
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        let mut packer = extent_frame::Packer::new();
+        // fxdax: sealed, no part's packed bytes are its data, and it is framed in a copy
+        // (TASK-411.2, TASK-411.3); its raw file's are not either, encrypted (TASK-411.5).
+        let mut packer = extent_frame::Packer::new(self.keys.sealing());
+        let clear = raw.clear().filter(|_| packer.key().is_none()).cloned();
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
         let mut framed: Option<D::File> = None;
@@ -2128,7 +2246,7 @@ impl<D: Dir> Store<D> {
             let end = packer.end();
             let packed = packer.push(buf);
             // As they are, where they are, as those before.
-            if framed.is_none() && end == at && packed[..] == buf[..] {
+            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
                 continue;
             }
             let file = match &mut framed {
@@ -2144,8 +2262,7 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let tail = packer.finish(&[]);
-        let parts = extent_frame::Parts::of_suffix(&tail)?;
+        let (tail, parts) = packer.finish_parts(&own_footer(extent));
         let (file, copied) = match framed {
             Some(file) => {
                 file.write_at(&tail, end)?;
@@ -2153,6 +2270,7 @@ impl<D: Dir> Store<D> {
                 (Arc::new(file), len)
             }
             None => {
+                let raw = clear.expect("an extent framed in place is in the clear");
                 raw.write_at(&tail, end)?;
                 self.dir
                     .rename(&raw_path, &path)
@@ -2176,7 +2294,7 @@ impl<D: Dir> Store<D> {
     ) -> Result<(), Error> {
         let path = extent_path(extent);
         let file = self.dir.create(&path, true).with_context(|| format!("creating {path}"))?;
-        let mut packer = extent_frame::Packer::new();
+        let mut packer = extent_frame::Packer::new(self.keys.sealing());
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         for at in (0..len).step_by(OWN_CHUNK as usize) {
             let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];
@@ -2187,10 +2305,9 @@ impl<D: Dir> Store<D> {
             written::wrote(written::Kind::Own, packed.len());
         }
         let end = packer.end();
-        let tail = packer.finish(&[]);
+        let (tail, parts) = packer.finish_parts(&own_footer(extent));
         file.write_at(&tail, end)?;
         written::wrote(written::Kind::Own, tail.len());
-        let parts = extent_frame::Parts::of_suffix(&tail)?;
         let framed = Arc::new(Framed::new(Arc::new(file), parts));
         state.own_files.sealed(extent, framed);
         Ok(())
@@ -2480,7 +2597,8 @@ impl<D: Dir> Store<D> {
                 let file = state.own_files.file(&*self.dir, extent)?;
                 own.push((location.key, file.file.clone()));
             }
-            closed.push(Closed { number, footer, file, own, restamped });
+            let keys = self.keys.clone();
+            closed.push(Closed { number, footer, file, own, restamped, keys });
         }
         Ok(closed)
     }
@@ -2863,16 +2981,12 @@ impl<D: Dir> Store<D> {
                 // Its first records: a flush keeps a segment's log while it has one.
                 std::collections::btree_map::Entry::Vacant(vacant) => {
                     let log = self.lock().segments.log_file(&*self.dir, segment)?;
-                    vacant.insert(SegmentLog::new(log.file, log.salt))
+                    vacant.insert(SegmentLog::new(log.file, log.salt, log.sealer))
                 }
             };
-            // Salted as its log's (`wal::LOG_MAGIC`).
-            let salt = log.salt();
-            let encoded: Vec<Vec<u8>> = records[at..at + run]
-                .iter()
-                .map(|(_, record)| encode_salted(record, salt))
-                .collect();
-            log.append(encoded.iter().map(Vec::as_slice)).context("appending commits' records")?;
+            // Salted as its log's (`wal::LOG_MAGIC`); fxdax: MACed, if sealed (TASK-411.5).
+            let appended = records[at..at + run].iter().map(|(_, record)| record);
+            log.append(appended).context("appending commits' records")?;
             at += run;
         }
         Ok(())
@@ -2934,7 +3048,8 @@ impl<D: Dir> Store<D> {
     /// fxdax: writes `len` bytes at `offset` in `extent`, as [`Store::write`] does, one write, but
     /// `piece` bytes at a time at most, each of which `fill(at, buf)` fills with the bytes at `at`
     /// of them: so that what a write holds of memory is a piece, whatever its length, which a VM
-    /// process names (TASK-149.17).
+    /// process names (TASK-149.17). Its pieces are whole sectors, one at least, as what reaches
+    /// the open segment is ([`SECTOR`], TASK-411.8).
     pub fn write_with(
         &self,
         extent: ExtentId,
@@ -2944,12 +3059,13 @@ impl<D: Dir> Store<D> {
         mut fill: impl FnMut(u64, &mut [u8]),
     ) -> Result<(), Error> {
         let write = self.begin_write(extent, offset, len)?;
-        let mut aligned = Aligned::new((len as usize).min(piece.max(1)));
+        let piece = (piece as u64 / SECTOR).max(1) * SECTOR;
+        let mut aligned = Aligned::new(len.min(piece) as usize);
         let mut at = 0;
         while at < len {
-            let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece as u64) as usize];
+            let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece) as usize];
             fill(at, buf);
-            write.file().write_at(buf, write.offset() + at)?;
+            write.write(buf, at)?;
             at += buf.len() as u64;
         }
         write.finish();
@@ -3124,7 +3240,7 @@ const OWN_CHUNK: u64 = 16 * extent_frame::PART;
 /// fxdax: copies the first `len` bytes of `from`, a raw file, into `to`, where they are, so many
 /// at a time: the parts of an extent framed in place before the first that compressed
 /// ([`Store::seal_own`], TASK-310).
-fn copy_range<F: File>(from: &F, to: &F, len: u64) -> Result<(), Error> {
+fn copy_range<F: File>(from: &RawFile<F>, to: &F, len: u64) -> Result<(), Error> {
     let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
     for at in (0..len).step_by(OWN_CHUNK as usize) {
         let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];

@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-14 17:00'
+updated_date: '2026-11-15 01:23'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -84,6 +84,15 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   (docs/measurements/restructure-before-after-2026-11-07.md): the perf gate the same or better,
   forked DAX 58% faster and a VM 557 MiB cheaper; forks 12 ms; a cold host's page-ins of a fork's
   data slower than reading it from local files was (TASK-225).
+
+- **Versioning and shredding** (doc-16, Shredding; TASK-411.7). Nothing of fxdax needs object
+  versions: every object is create-only or updated by a conditional write. A cell is shredded by
+  taking its wrapped KEKs out of its object (`<C>cell`, `extent_remote::cell::shred`), which holds
+  only while no older version of that object is kept: a bucket with versioning on needs a
+  lifecycle rule expiring non-current versions (S3 `NoncurrentVersionExpiration`; GCS versioning
+  off, or a lifecycle `Delete` of non-current versions), or versioning off. A tenant shredded by
+  its KEK destroyed in the KMS needs no rule: every version of every cell object of it is wrapped
+  by that KEK. The README says it for operators.
 
 ## Decisions
 
@@ -248,7 +257,7 @@ any format reads it before the rest: one of another format, newer or older, is r
 the branch is read or written. Every reader of a branch reads its record first: a
 writer taking it, a host attaching it, the collector, whose pass stops, deleting nothing in a
 bucket it can't read. Every framed object (segments, extents on their own, checkpoints, moves)
-ends with its frame's format, the last byte of its trailer's magic (`fxdaxob1`), which a reader of
+ends with its frame's format, the last byte of its trailer's magic (`fxdaxob2` since TASK-411.2), which a reader of
 an older frame names rather than calls corrupt. A lease goes with its branch's record.
 
 **Kinds of record** *(added 2026-11-03, TASK-160.14).* A record's flags say together one of six
@@ -284,13 +293,15 @@ its own, or raw where that does not shrink it, at offsets in the object that are
   segments (below);
 - then, as in every object that holds data (segments, extents of their own, compaction's moves,
   checkpoints), a table of each part's stored offset and length, the CRC32C of its stored bytes,
-  and its encoding, and a trailer: the lengths of the data, of the parts stored and of the
-  footer, the CRCs of the footer and of the table, and a magic number.
+  its encoding, and its AES-GCM tag (zeros in the clear), and a trailer: the lengths of the data,
+  of the parts stored and of the footer, the footer's CRC, the object's seal (in the clear, or
+  sealed under which branch's DEK of which generation, from which salt), the MACs of the footer
+  and of the table, the table's CRC, and a magic number (doc-16; FORMAT 2, TASK-411.2).
 
 A reader finds the footer and the table with one ranged GET of the object's end (two if they are
 longer than 4 KiB). A host fetching extents fetches whole parts, each with one ranged GET of its
 stored bytes, checks each against its CRC, then decompresses it (Reading). Incompressible data
-costs its table, 17 bytes a part, and nothing more. *Implemented differently
+costs its table, 33 bytes a part, and nothing more. *Implemented differently
 from the first plan, of per-extent CRCs per 64 KiB in the footer: CRCs of the object's parts move
 with nothing (compaction recomputes them for what it copies, from data it checked), need no entry
 per extent in checkpoints, and match what a host fetches.*
@@ -619,6 +630,17 @@ the host's part cache, fetching what it lacks.
   its directory goes; its host crashing part way leaves a directory with no store, which deleting
   finishes, and a fork that stands or never was, as the bucket has it. This replaced `copy_store`,
   which forked by copying every file, and then local lineage, a record in the parent's store.
+- **Keys** *(fxdax, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of a sealed branch into
+  another cell, as every fork a host makes is, asks before anything is made for what its child
+  inherits (`Remote::inheriting`): the keys its parent's store holds and a KEK for the child's
+  cell from the host's pool, no KMS call; refused (`EACCES`, `ENOTSUP`) it makes nothing. Once
+  the child's record is made, its host makes the child's cell with that KEK, create-only, and
+  gives the record the child's first DEK and the inherited ones rewrapped under the KEK, by a
+  conditional update, before the child's directory is made; a failure there fails the fork, which
+  is deleted as any. The record stays create-only and the same whoever writes it (its keys come
+  after, by its child's host or first writer). The parent's checkpoint at the fork point
+  (References, below) is authenticated under the parent's DEK by whoever writes it: its writer,
+  its deletion under the host's KMS, a failed fork's claim likewise.
 
 ## Points
 
@@ -647,6 +669,12 @@ The steps of a fork of point P to child C:
    than P, and the record doesn't say P is shared (`Error::NotShared`, `EACCES`; TASK-395.7). The
    read is made then whatever the rule that checks for deletion says.
 3. C's record, updated with a condition: no longer being made. Only then does the fork succeed.
+4. fxdax (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
+   makes is: C's cell, made with a KEK of the host's pool, and C's record given its keys by a
+   conditional update: its DEK and those it inherits, from the host's copy of P, rewrapped under
+   that KEK (doc-16). A point keeps no key; its copies read under its origin's cell's. Asked for
+   before step 1, from the copy's keys, a fork whose keys the host can't give (its origin's tenant
+   heard revoked, C's tenant with no KEK) makes nothing.
 
 **What keeps C's data.** C needs just what P does. A pass that finds P live keeps that; so does one
 that finds C. The danger is a pass that finds neither, or takes P for deleted with C unseen:
@@ -691,7 +719,9 @@ says it (another's is corrupt), and only the trusted control API sets it, at the
 (ForkStore's `shared`, after the point is made) or later (SharePoint, `fxdaxctl share`), and clears
 it (`unshare`). The check is step 2's read, which every fork of a point makes, on any host, so that
 unsharing stops the forks whose reads come after, and those made stand. A fork refused leaves C's
-record being made, which its host deletes, as for a point deleted. No tenant is special: tenant 0's
+record being made, which its host deletes, as for a point deleted. *(TASK-411.4)* A clone keeps the keys it inherits
+rewrapped under its own cell's KEK, so that the point's tenant shredding its KEK stops new clones
+(no copy of the point opens) and breaks none made. No tenant is special: tenant 0's
 points are shared or not as any other's. Forks of branches with writers into another tenant's cell
 (a public base forked into a tenant's directory) are not checked yet (TASK-395.9).
 
@@ -766,7 +796,8 @@ listing (Passes that skip, below).
 `fxdax-gc` is the only thing that deletes; writers only add. A live branch is one whose record says
 so, whether or not a host holds it, which only hosts know: `fxdax-gc URL --branches --held FILE`
 lists those no host holds, FILE naming what they do, and `fxdax-gc URL --delete-branch ID` deletes
-one for the next pass to reclaim.
+one for the next pass to reclaim (a sealed one whose fork into another cell it records, the child
+unrecorded, under `FXDAX_KMS`'s KMS, failing partway without one: doc-16, TASK-411.14).
 
 **Decided with the user (2026-11-13, TASK-395):** the collector may be **conservative**, reclaiming
 late and wasting space for a time; **the unit of collection is the cell**, not the tenant, so that a
@@ -1118,7 +1149,13 @@ The rest of a pass, unchanged within the cell:
 - **Compaction** of objects whose live extents are under a fraction of their data: segments no
   recovery reads, and moves. Their live extents go to the object's moves, data and map in one
   object, written whole, so there is never compaction output without its map, and no orphan of it.
-  A reader that finds an object gone reads its moves.
+  A reader that finds an object gone reads its moves. *(TASK-411.6)* An object of a sealed cell
+  (doc-16) is read under its branch's DEK and its moves sealed under the same key, the generation
+  its trailer names, with a salt of their own: a pass with something sealed to compact unwraps the
+  cell's KEK through `fxdax-gc`'s KMS (`FXDAX_KMS`), once for the pass; marking, and passes
+  compacting nothing sealed, ask it nothing. The KEK not to be had (the tenant's KEK revoked or
+  destroyed, no KMS), the pass compacts what is in the clear and leaves the rest, counted in its
+  report (`locked`, `uncompacted`), deleting as ever.
 - **Deletion** of what is listed and not needed:
   - segments a checkpoint covers that hold no live extent, or were compacted a grace period ago;
     never a live branch's segments at or past its end, which may be uploaded and not yet in it,
@@ -1139,18 +1176,33 @@ The rest of a pass, unchanged within the cell:
 **Time** (the grace period, by the store's clock) only spares readers that just looked an extent up
 a round trip; correctness does not depend on it.
 
-**The model's bounds** (`scripts/check-tla.sh`; on a laptop, the new models and mutations under five
-minutes each, BucketForks 14 minutes (17 before cells), BucketOverlap 14 (7 before), BucketStrays 18
-(one cell, unchanged), BucketTakeovers near two hours): the models of before, with a cell each for
-two branches (`CellEach`, every fork, point and clone across cells, as hosts make them) and the
-root's cell shared with branch 2 for three (`Pair`, forks within a cell and across), passes of any
-cell; `BucketCells`, a root, its child and grandchild in three cells, any deleted, three passes of
-any cells one after another, retiring down the chain; `BucketCellsPoints`, a point of the root
-restored to a third cell, point and root deleted, two passes of any cells at once. Passes of
-different cells overlap where a model has "overlap" (BucketOverlap, BucketCellsPoints). Invariant
-`ReferencesStand`: every live branch forked from another cell, and every clone, has its reference.
-The existing rules' mutations keep one cell (`OneCell`), the whole-bucket pass they were written
-against.
+**The model's bounds** (`scripts/check-tla.sh`; on a laptop, every model and mutation of the default
+run under ten minutes): the models of before, with a cell each for two branches (`CellEach`,
+every fork, point and clone across cells, as hosts make them) and the root's cell shared with
+branch 2 for three (`Pair`, forks within a cell and across), passes of any cell; `BucketCells`, a
+root, its child and grandchild in three cells, any deleted, three passes of any cells one after
+another, retiring down the chain; `BucketCellsPoints`, a point of the root restored to a third
+cell, point and root deleted, two passes of any cells at once. Passes of different cells overlap
+where a model has "overlap" (BucketOverlap, BucketCellsPoints). Invariant `ReferencesStand`: every
+live branch forked from another cell, and every clone, has its reference. The existing rules'
+mutations keep one cell (`OneCell`), the whole-bucket pass they were written against.
+
+*Split models (TASK-405, 2026-11-14).* Four models took 14 minutes to hours whole: BucketForks
+(27 million states), BucketOverlap (12.6 million), BucketStrays (36 million) and BucketTakeovers
+(over 200 million, unfinished on ubu1 at 16 GB). Each is now split into parts, each the same
+configuration with constants that fix choices every behaviour makes at most once (Bucket.tla's
+splits): the pattern of the takings' hosts (`Takers`), the step of the first pass as each taking or
+commit happens (`TakePhases`, `CommitPhases`), the takings before each commit (`CommitTakes`), the
+ID of the one fork's child (`ForkTo`), the cells of the passes (`PassCells`). Every behaviour of the
+whole is some part's, so nothing the whole checked goes unchecked; `check-tla.sh cover` shows it
+on each model made small, every state the whole reaches one some part reaches, and a full run
+checks it. BucketForks is 6 parts (its pass's cell, and the takings before it), BucketOverlap 5
+(the point's cell, and the passes'), BucketStrays 20 (the third writer on the first's host or the
+second's, the pass's step as each writer takes the branch, and, the pass late, the takings before
+each commit), each part under eight minutes on a laptop (more while other runs load it); parts cost
+more in all than the whole did (a part checks again the states before its choice).
+BucketTakeovers, the hunt for a fourth way to lose a commit, which found none, is a deep model,
+which the default run skips: its 72 parts, each in minutes, take hours in all (`check-tla.sh deep`).
 
 **Watching before deleting** *(added 2026-11-08, TASK-264).* Two passes delete nothing, for an
 operator to see what the collector would do before trusting it with a bucket:
@@ -1160,12 +1212,13 @@ operator to see what the collector would do before trusting it with a bucket:
   deletes; it reads the lease's epoch as it starts instead, and says it was fenced if a pass took
   the lease before it ended, what it read being possibly older than that pass's deletes. Nor does it
   write what giving up on forks writes (a fork of a deleted point being made, a failed fork's
-  claim): it takes them as given up on. It compacts nothing, and prints each object a pass would
+  claim): it takes them as given up on. It compacts nothing, asking the KMS nothing, and prints each object a pass would
   delete, then each it would compact by its listed size, `KEY KIND SIZE delete|compact`, and their
   counts and bytes. It **undercounts**: what a pass compacts it deletes a grace period after, which
   a dry run never finds doomed. With `--compact-below 0`, a pass deletes exactly what it lists.
 - `fxdax-gc URL --mark-only [--every S] [--grace S] [--compact-below F]` is a pass in every respect
-  but deleting: it compacts as one does (the compacted originals are the keys most worth watching,
+  but deleting: it compacts as one does, sealed cells under their keys through the KMS
+  (TASK-411.6) (the compacted originals are the keys most worth watching,
   TASK-175), and instead of deleting writes `<C>gc/marks/<epoch>`, the doomed objects of its cell as
   listed. *Decided:* it **takes `<C>gc/lease`** (step 1). Its marks are ordered by the epoch, each
   pass's its own and later than every pass's before, so readers and the next mark-only pass find the
@@ -1262,6 +1315,20 @@ read changed. What a pass reads outside the prefix, case by case:
   children's records read, in their cells), or a branch's recovery lost and nothing lost after all
   (its record read again, and its point's).
 - *Time*: only for the grace period, which what is deferred carries.
+- *The KMS* (TASK-411.6, TASK-411.13): a pass that left sealed objects uncompacted, their cell's
+  KEK refused or no KMS given, went by something outside the cell. It records its digest as any
+  pass does, and how many it left (`Passed::uncompacted`); a pass after it whose listing has that
+  digest skips only while the tenant's KEK is still not to be had, and goes in full, compacting,
+  once it is. Whether it is, a sweep asks the KMS once a tenant, for all of the tenant's cells
+  (`collector::Heard`: a wrap of a key of no use, which the KMS makes only with the tenant's KEK,
+  and refuses as it refuses an unwrap when that KEK is revoked or destroyed, or the KMS fails);
+  without a KMS it is not, nothing asked. So a revoked tenant's idle cells cost a sweep three
+  requests each, as any idle cell, and one KMS call for all of them; a skipping pass reports what
+  is left (`locked`, `uncompacted`), and fxdax-gc counts it in the sweep's line and metrics, not on
+  a line of its own. Deciding by the KMS this way is as safe as by the cell: only compaction goes
+  by the KEK, and a skip compacts nothing; what the recorded pass would delete went by the cell
+  alone. A KMS that wraps for the tenant but unwraps not the cell's KEK (another than the one that
+  wrapped it) has the cell passed in full each sweep, and left so, as before.
 
 A pass that skips makes the recorded pass's deletes, late: what the model's pass may do, slow, its
 deletes coming any time after its reads while no other pass took the lease. Passes that took it

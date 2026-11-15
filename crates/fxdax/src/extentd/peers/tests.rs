@@ -40,7 +40,8 @@ fn asked(bucket: &Bucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
         use extent_remote::bucket::Bucket as _;
         bucket.get(&location.key).await.unwrap().bytes
     });
-    let (_, stored) = extent_frame::Parts::of(&object).unwrap().part(part).unwrap();
+    let parts = extent_frame::Parts::of(&object, &extent_frame::NoKeys).unwrap();
+    let stored = parts.part(part).unwrap().stored;
     let bytes = object[stored.range().start as usize..stored.range().end as usize].to_vec();
     (Asked { key: location.key.clone(), part, stored }, bytes)
 }

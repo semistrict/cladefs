@@ -582,14 +582,17 @@ fn attached<T>(
 
 /// How the daemon's stores' uploaders keep their branches in their buckets: with this host's
 /// placement's token, for a copy never placed; the host's cache of the bucket's objects; and the
-/// upload interval ([`upload_interval`]).
+/// upload interval ([`upload_interval`]). fxdax: and what holds the parts their segments pack as
+/// they fill, which the daemon's memory governor lets go of first (`memory::held_parts`,
+/// TASK-400).
 fn keeping() -> Result<extent_store::upload::Options, Errno> {
     let token = crate::remote::host_token().map_err(|err| {
         log::error!("extentd: {err}");
         Errno::EINVAL
     })?;
     let (cache, interval) = (remote_cache()?, upload_interval());
-    Ok(extent_store::upload::Options { cache, token, interval, ..Default::default() })
+    let held = Some(super::memory::held_parts().clone());
+    Ok(extent_store::upload::Options { cache, held, token, interval, ..Default::default() })
 }
 
 /// How long the stores' durable commits wait at most before they upload: the uploader's default;
@@ -1387,10 +1390,23 @@ fn daemon_line() -> String {
         format!("framing_read_bytes={framing_read}"),
         format!("seen_ahead_bytes={seen_ahead}"),
     ];
+    // fxdax: and the parts their segments packed as they filled, held until their framings, and
+    // those the governor let go of (TASK-400).
+    let parts = super::memory::held_parts().counts();
+    let held = [
+        format!("held_parts_bytes={}", parts.bytes),
+        format!("held_parts_peak_bytes={}", parts.peak),
+        format!("held_parts_held_bytes={}", parts.held),
+        format!("held_parts_taken_bytes={}", parts.taken),
+        format!("held_parts_evicted_bytes={}", parts.evicted),
+        format!("held_parts_evicted={}", parts.evicted_parts),
+        format!("held_parts_late={}", parts.late_parts),
+        format!("held_parts_skipped={}", parts.skipped_parts),
+    ];
     let io = process_io().map(|(name, bytes)| format!("io_{name}={bytes}"));
     format!(
         "daemon: {} durable_lag_count={} durable_lag_max_us={} durable_lag_p50_ms={} \
-         durable_lag_p99_ms={} durable_lag_within_50ms={} {} {} {} {} {}",
+         durable_lag_p99_ms={} durable_lag_within_50ms={} {} {} {} {} {} {}",
         named.join(" "),
         lags.count,
         lags.max_us,
@@ -1401,6 +1417,7 @@ fn daemon_line() -> String {
         timed.join(" "),
         written.join(" "),
         once.join(" "),
+        held.join(" "),
         io.join(" ")
     )
 }

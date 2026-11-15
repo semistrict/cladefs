@@ -21,7 +21,7 @@ use super::io::{Done, Io, IoFile, Op};
 use super::kept::Kept;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
-use extent_store::{Aligned, Description, HostDir, HostFile, Part, Store};
+use extent_store::{Aligned, Description, HostDir, HostFile, Part, SECTOR, Store};
 use std::path::Path;
 use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
@@ -132,22 +132,35 @@ impl ImageDevice {
         Ok(read.unwrap_or_else(|| Aligned::new(len)))
     }
 
-    /// Writes `data` at `offset` in `file`, from a buffer of the I/O's own, as `read_file` reads.
+    /// Writes `data`, the bytes of `write`, to its file, from a buffer of the I/O's own, as
+    /// `read_file` reads. fxdax: as the file stores them, encrypted once if the store is sealed
+    /// (`Write::stored`, TASK-411.5); a write stopping short is written again from the last whole
+    /// sector it wrote, so that what is written again is whole sectors of the same bytes.
     async fn write_file(
         &self,
-        file: &Arc<HostFile>,
+        write: &extent_store::Write<'_, HostDir>,
         data: BufferRef<'_>,
-        offset: u64,
     ) -> Result<(), Error> {
+        let mut owned = Aligned::new(data.len());
+        data.copy_to_slice(owned.as_mut_slice());
+        let stored = write.stored(owned)?;
+        let bytes = stored.bytes.as_slice();
         let mut done = 0;
-        while done < data.len() {
-            let at = offset + done as u64;
-            let mut owned = Aligned::new(data.len() - done);
-            data.subslice(done..).copy_to_slice(owned.as_mut_slice());
+        while done < bytes.len() {
+            let at = stored.offset + done as u64;
+            let mut owned = Aligned::new(bytes.len() - done);
+            owned.as_mut_slice().copy_from_slice(&bytes[done..]);
             let op = Op::Write { data: owned, offset: at };
-            match self.io.run(file.clone() as IoFile, op).await.result {
+            match self.io.run(stored.file.clone() as IoFile, op).await.result {
                 Ok(0) => bail!("the image's file took nothing at {at:#x}"),
-                Ok(transferred) => done += transferred,
+                Ok(transferred) if transferred == bytes.len() - done => done = bytes.len(),
+                Ok(transferred) => {
+                    let sectors = (done + transferred) / SECTOR as usize * SECTOR as usize;
+                    if sectors == done {
+                        bail!("the image's file took {transferred} bytes at {at:#x}: no sector");
+                    }
+                    done = sectors;
+                }
                 Err(err) => return Err(Error::new(err).context(format!("I/O at {at:#x}"))),
             }
         }
@@ -212,18 +225,24 @@ impl Device for ImageDevice {
                 // (`File::read_cached`, TASK-91.17): such a read writes back first what it reads
                 // that is dirty yet, which is slower, not other bytes. This device is an
                 // in-process image's, which imports, host tools and tests use; guests' reads are
-                // extentd's, through the store's.
+                // extentd's, through the store's. fxdax: the sectors they are in, decrypted, if the
+                // store is sealed (TASK-411.5).
                 Part::Data { file, offset, len, .. } => {
-                    let len = len as usize;
-                    let read = self.read_file(&file, len, len, offset).await?;
-                    buffer.reborrow().subslice_mut(at..at + len).copy_from_slice(read.as_slice());
+                    let range = file.read_range(offset, len);
+                    let read_len = (range.end - range.start) as usize;
+                    let mut read =
+                        self.read_file(file.file(), read_len, read_len, range.start).await?;
+                    file.decrypt(range.start, read.as_mut_slice());
+                    let (skip, len) = ((offset - range.start) as usize, len as usize);
+                    let part = &read.as_slice()[skip..skip + len];
+                    buffer.reborrow().subslice_mut(at..at + len).copy_from_slice(part);
                     at += len;
                 }
                 // Its stored bytes, in whole blocks, to check and unpack.
                 Part::Packed { part, skip, len } => {
                     let range = part.read_range();
                     let read_len = (range.end - range.start) as usize;
-                    let needed = part.stored.len as usize;
+                    let needed = part.stored().len as usize;
                     let stored = self.read_file(&part.file, read_len, needed, range.start).await?;
                     let bytes = self.store.unpack(&part, stored)?;
                     let (skip, len) = (skip as usize, len as usize);
@@ -273,7 +292,7 @@ impl Device for ImageDevice {
             let store = self.store.clone();
             unblock(move || store.wait_until_writes_resume()).await?;
         };
-        self.write_file(write.file(), buffer, write.offset()).await?;
+        self.write_file(&write, buffer).await?;
         write.finish();
         Ok(())
     }
@@ -422,7 +441,8 @@ mod tests {
                 let path =
                     image.join(format!("extents/{:016x}/{:016x}", BRANCH.id, extent.sequence));
                 let mut bytes = std::fs::read(&path).unwrap();
-                let stored = extent_frame::Parts::of(&bytes).unwrap().stored[3];
+                let stored =
+                    extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[3];
                 assert_eq!(stored.encoding, *encoding);
                 bytes[(stored.offset + stored.len / 2) as usize] ^= 0x10;
                 std::fs::write(&path, bytes).unwrap();
@@ -554,6 +574,64 @@ mod tests {
             assert!(device.read(extent(260), 0, buffer.as_mut()).await.is_err());
         });
         assert_eq!(device.store.info().unwrap().used, (MIB + 2 * BLOCK as usize) as u64);
+    }
+
+    /// fxdax: an image of a sealed cell (TASK-411.5): its device writes extents' data, in its open
+    /// segment's raw file and a large extent's own, by I/O of its own, encrypted
+    /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
+    /// of the image holds them in the clear at any of those points.
+    #[test]
+    fn sealed_images_hold_no_plaintext() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+        kms.create(5).unwrap();
+        crate::remote::set_kms(Arc::new(kms)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("image");
+        let cell = crate::host_store::new_cell(5);
+        let made = (64 * MIB as u64, crate::host_store::BranchOf::New(cell), true);
+        let keeping = crate::host_store::keeping().unwrap();
+        let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
+        assert!(device.store.keys().sealing().is_some());
+        let branch = device.branch();
+        let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
+        let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);
+        let large_data = crate::test_data::noise(2, 5 * MIB);
+        let in_the_clear = || {
+            let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
+            let mut files = vec![dir.path().to_path_buf()];
+            let mut held = Vec::new();
+            while let Some(at) = files.pop() {
+                if at.is_dir() {
+                    files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
+                    continue;
+                }
+                let bytes = std::fs::read(&at).unwrap();
+                if bytes.windows(64).any(|window| pieces.contains(&window)) {
+                    held.push(at.display().to_string());
+                }
+            }
+            held
+        };
+        let reads = |device: &ImageDevice| {
+            block_on(async {
+                assert!(read(device, small, 0, small_data.len()).await == small_data);
+                assert!(read(device, large, 0, large_data.len()).await == large_data);
+            })
+        };
+        block_on(async {
+            write(&device, small, 0, &small_data).await;
+            write(&device, large, 0, &large_data).await;
+        });
+        reads(&device);
+        assert_eq!(in_the_clear(), Vec::<String>::new(), "written");
+        block_on(device.flush()).unwrap();
+        reads(&device);
+        assert_eq!(in_the_clear(), Vec::<String>::new(), "flushed");
+        drop(device);
+        let device = ImageDevice::open(&image, Default::default()).unwrap();
+        reads(&device);
+        assert_eq!(in_the_clear(), Vec::<String>::new(), "reopened");
     }
 
     /// Freeing an extent gives back the capacity it took.

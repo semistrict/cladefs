@@ -41,13 +41,49 @@ fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
+    reads_in_place_and_survives_reopening("plain");
+}
+
+/// TASK-411.7 (TASK-411's AC #3, sqlite volumes, Linux): a database on a store of a sealed cell
+/// the daemon serves, its tenant's KEK in the host's KMS (the common tenant's, whose cells the
+/// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
+/// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
+/// clear.
+#[test]
+fn a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening() {
+    let keys = tempfile::tempdir().unwrap();
+    let kms = keys.path().join("kms");
+    extent_keys::kms::LocalKms::open(&kms).unwrap().create(0).unwrap();
+    // The daemon's KMS, as a host's is named: SAFETY: before this process starts any other thread.
+    unsafe { std::env::set_var("FXDAX_KMS", format!("local://{}", kms.display())) };
+    assert_eq!(reads_in_place_and_survives_reopening("sealed"), Vec::<String>::new());
+}
+
+/// Data that compresses not, which a file holding it in the clear holds as it is.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state as u8
+        })
+        .collect()
+}
+
+/// A database on a store the daemon serves, written, read in place, closed and opened again, its
+/// VFSs named after `name`: returns the files of the store's directory that hold a row of
+/// [`noise`] it wrote in the clear.
+fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let (_sockets, socket) = serve();
     let store = dir.path().join("store");
+    let marker = noise(4096);
 
     for round in 0..2i64 {
         let volume = daemon::open(&socket, &store, 1 << 30, 1 << 30, Options::default()).unwrap();
-        let vfs = format!("fxdax-daemon-{round}");
+        let vfs = format!("fxdax-daemon-{name}-{round}");
         let registration = register(&vfs, volume.clone()).unwrap();
         let connection =
             Connection::open_with_flags_and_vfs("app.db", OpenFlags::default(), vfs.as_str())
@@ -68,21 +104,39 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
                 .execute("UPDATE t SET v = ?2 WHERE k = ?1", params![k, vec![9u8; 300]])
                 .unwrap();
         }
+        connection
+            .execute("INSERT OR REPLACE INTO t VALUES (?1, ?2)", params![5000, marker])
+            .unwrap();
         let before = volume.fetched();
         let check: String =
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0)).unwrap();
         assert_eq!(check, "ok");
         let (count, nines): (i64, i64) = connection
-            .query_row("SELECT count(*), sum(v = ?1) FROM t", params![vec![9u8; 300]], |row| {
-                Ok((row.get(0)?, row.get(1)?))
-            })
+            .query_row(
+                "SELECT count(*), sum(v = ?1) FROM t WHERE k < 5000",
+                params![vec![9u8; 300]],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!((count, nines), (2000, 286));
+        let read: Vec<u8> =
+            connection.query_row("SELECT v FROM t WHERE k = 5000", [], |row| row.get(0)).unwrap();
+        assert!(read == marker, "the row of noise reads back otherwise");
         assert!(volume.fetched() > before + 100, "{} pages fetched", volume.fetched() - before);
         drop(connection);
         drop(registration);
         volume.close().unwrap();
     }
+    let mut found = Vec::new();
+    let mut paths = vec![store];
+    while let Some(at) = paths.pop() {
+        if at.is_dir() {
+            paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+        } else if std::fs::read(&at).unwrap().windows(64).any(|window| window == &marker[..64]) {
+            found.push(at.display().to_string());
+        }
+    }
+    found
 }
 
 /// A volume on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
@@ -192,7 +246,8 @@ fn a_database_is_fenced_with_its_cell() {
     // Another host's, placed later.
     let objects = std::sync::Arc::new(objects);
     runtime.block_on(async {
-        let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), false, None).await.unwrap();
+        let (held, _) =
+            cell::hold(&*objects, ours.cell, (2, 2), (false, None), None).await.unwrap();
         // Its writer fences the branch (TASK-371).
         drop(extent_remote::Writer::open(objects.clone(), ours, 0x22, held.epoch).await.unwrap());
     });

@@ -67,6 +67,19 @@
 //! checkpoints, after which the moves go too, unless a state's way to its extents still goes through
 //! them.
 //!
+//! fxdax: marking reads metadata alone, which is in the clear in a sealed cell too, holding no key;
+//! compacting copies extents out of objects' data, sealed there, so a pass compacting one unwraps
+//! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
+//! branches' DEKs from their records; and seals each one's moves under the key it was sealed under,
+//! with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting nothing
+//! sealed asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
+//! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, compacts what
+//! is in the clear, and leaves what is sealed, saying so ([`Report::locked`]): a revoked tenant's
+//! compaction stops, its garbage still goes. It records its listing's digest as any pass does, and
+//! what it left ([`Passed::uncompacted`]): a pass after it, the cell unchanged, skips the cell while
+//! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
+//! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
+//!
 //! A branch's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
 //! writer made, landing after the writer recovered the branch (one it took the branch from, which
@@ -100,13 +113,17 @@
 //! compacting it, a grace period after, and what references it would retire.
 
 use crate::bucket::{self, Bucket, ByteRange, Created, Meta, Version};
-use crate::layout::{self, Branch, Cell, Kind, Location, Marked, Marks, Moves, Origin};
+use crate::keys::{self, CellKeys, Ring};
+use crate::layout::{self, Branch, Cell, Frame, Kind, Location, Marked, Marks, Moves, Origin};
 use crate::moves::{Moved, MovesMaps};
 use crate::passed::{self, Decided, Deferred, GcLease, Listed, Passed, Taken, Usage};
 use crate::record::{self, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
+use extent_frame::{Keys as _, Seal};
+use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
+use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use storage_device::ExtentId;
@@ -171,6 +188,15 @@ pub struct Report {
     /// fxdax: the passes that skipped their cells, each unchanged since its last pass, deleting
     /// only what that pass deferred (TASK-395.6).
     pub skipped: usize,
+    /// fxdax: the passes that left objects sealed uncompacted, their cell's KEK not to be had: the
+    /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
+    /// having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and deleted
+    /// what no live branch needs, warning of the cell and why. And those that skipped a cell a
+    /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
+    pub locked: usize,
+    /// fxdax: the objects sealed that those passes would have compacted, or the pass before a
+    /// skipping one would have.
+    pub uncompacted: usize,
 }
 
 impl std::ops::AddAssign for Report {
@@ -181,6 +207,8 @@ impl std::ops::AddAssign for Report {
         self.deleted_bytes += other.deleted_bytes;
         self.compacted_bytes += other.compacted_bytes;
         self.skipped += other.skipped;
+        self.locked += other.locked;
+        self.uncompacted += other.uncompacted;
     }
 }
 
@@ -243,6 +271,50 @@ pub struct Collector {
     options: Options,
     /// fxdax: how its passes hold their cells (TASK-395.5).
     holding: Holding,
+    /// fxdax: the KMS its passes unwrap their cells' KEKs through, to compact what is sealed
+    /// (TASK-411.6): each pass by a [`keys::Kms`] of its own, so that nothing unwrapped outlives
+    /// the pass, and a tenant's KEK revoked stops the next. None: they compact only what is in the
+    /// clear.
+    kms: Option<kms::Shared>,
+    /// fxdax: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
+    /// its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
+    /// [`Collector::collect`] (TASK-411.13).
+    heard: Option<Arc<Heard>>,
+}
+
+/// fxdax: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
+/// whether each is to be had, asked once, however many of its passes ask. What a pass goes by over
+/// a cell unchanged since a pass that left objects sealed uncompacted, its cell's KEK not to be had
+/// ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked tenant's
+/// idle cells cost a sweep a lease and a listing each, and the KMS one call for all of them; and
+/// going over it in full, compacting them, once it is. The KMS is asked by a wrap of a key of no
+/// use, which it makes only with the tenant's KEK, revoked, destroyed or failing refusing it as
+/// they refuse an unwrap; a KMS that wraps but unwraps not the cell's KEK (another than the one
+/// that wrapped it) has the cell passed in full, and left so, each sweep, as before. Without a
+/// KMS, none is: the cell is skipped, asking nothing.
+#[derive(Default)]
+pub struct Heard {
+    asked: std::sync::Mutex<BTreeMap<u64, Shared<BoxFuture<'static, bool>>>>,
+}
+
+impl Heard {
+    pub fn new() -> Arc<Self> {
+        Arc::default()
+    }
+
+    /// Whether `tenant`'s KEK is to be had, as `kms` says, asked once.
+    async fn to_be_had(&self, kms: Option<&kms::Shared>, tenant: u64) -> bool {
+        let Some(kms) = kms else { return false };
+        let asking = (self.asked.lock().unwrap().entry(tenant))
+            .or_insert_with(|| {
+                let kms = kms.clone();
+                async move { kms.wrap_dyn(tenant, &Secret::random()).await.is_ok() }
+                    .boxed()
+                    .shared()
+            })
+            .clone();
+        asking.await
+    }
 }
 
 /// fxdax: what a pass over a cell keeps as it reads it, and drops with it.
@@ -250,12 +322,12 @@ pub struct Collector {
 struct Remembered {
     /// The records read, by their keys, with the versions they were read at.
     records: BTreeMap<String, (String, Record)>,
-    lengths: Lengths,
+    trailers: Trailers,
 }
 
 impl Collector {
     pub fn new(options: Options) -> Self {
-        Self { options, holding: Holding::default() }
+        Self { options, holding: Holding::default(), kms: None, heard: None }
     }
 
     /// fxdax: one whose passes hold their cells as `holding` says (TASK-395.5).
@@ -263,17 +335,33 @@ impl Collector {
         Self { holding, ..self }
     }
 
+    /// fxdax: one whose passes compact objects sealed under their cells' keys, unwrapped through
+    /// `kms`, if given (TASK-411.6): a pass unwraps its cell's KEK only if it compacts an object
+    /// sealed, once for all of them; marking, dry runs and passes compacting nothing sealed ask
+    /// it nothing.
+    pub fn kms(self, kms: Option<kms::Shared>) -> Self {
+        Self { kms, ..self }
+    }
+
+    /// fxdax: one whose passes share `heard`, what they heard of their tenants' KEKs, with the
+    /// other passes of their sweep (TASK-411.13): the KMS asked once a tenant for all of them.
+    pub fn heard(self, heard: Arc<Heard>) -> Self {
+        Self { heard: Some(heard), ..self }
+    }
+
     /// fxdax: a pass over every cell of `bucket`, one after another, as `holder`, which must differ
     /// from every other pass's over each ([`Collector::collect_cell`]): the cells found by
     /// delimiter listings, a page at a time ([`crate::cell::listed`]). A pass that fails stops none
     /// of the others; the first error is returned once all ran, what they did then unsaid. A cell
-    /// another pass holds it leaves ([`Error::Left`]), as no failure.
+    /// another pass holds it leaves ([`Error::Left`]), as no failure. fxdax: its passes share what
+    /// they heard of their tenants' KEKs ([`Heard`]).
     pub async fn collect(&mut self, bucket: &impl Bucket, holder: u64) -> Result<Report, Error> {
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
         let mut report = Report::default();
         let mut failed = None;
+        let heard = self.heard.clone().unwrap_or_default();
         while let Some(cell) = cells.next().await {
-            match self.collect_cell(bucket, cell, holder).await {
+            match self.collect_hearing(bucket, cell, holder, &heard).await {
                 Ok(done) => report += done,
                 Err(Error::Left(_)) => {}
                 Err(error) => drop(failed.get_or_insert(error)),
@@ -296,11 +384,24 @@ impl Collector {
         cell: Cell,
         holder: u64,
     ) -> Result<Report, Error> {
+        let heard = self.heard.clone().unwrap_or_default();
+        self.collect_hearing(bucket, cell, holder, &heard).await
+    }
+
+    /// fxdax: one pass over `cell`, as [`Collector::collect_cell`] says, hearing of its tenant's
+    /// KEK by `heard`.
+    async fn collect_hearing(
+        &self,
+        bucket: &impl Bucket,
+        cell: Cell,
+        holder: u64,
+        heard: &Heard,
+    ) -> Result<Report, Error> {
         let Some(mut taken) = self.take(bucket, cell, holder).await? else {
             return Ok(Report::default());
         };
         let recorded = taken.passed.take();
-        let collected = self.collect_held(bucket, cell, &taken, recorded).await;
+        let collected = self.collect_held(bucket, cell, &taken, recorded, heard).await;
         let ended = match &collected {
             Ok((_, passed)) => PassEnd::Through(passed.clone()),
             Err(_) => PassEnd::Failed,
@@ -310,17 +411,21 @@ impl Collector {
     }
 
     /// fxdax: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
-    /// end recorded, `recorded`: what it did, and what it records, if anything.
+    /// end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
+    /// that left objects sealed uncompacted skips the cell only while its tenant's KEK is still not
+    /// to be had, as `heard` says (TASK-411.13).
     async fn collect_held(
         &self,
         bucket: &impl Bucket,
         cell: Cell,
         taken: &Taken,
         recorded: Option<Passed>,
+        heard: &Heard,
     ) -> Result<(Report, Option<Passed>), Error> {
         let listed = first_listing(bucket, cell).await;
         if let Some(listed) = &listed
             && let Some(passed) = recorded.filter(|passed| passed.holds_for(listed, &self.options))
+            && (passed.uncompacted == 0 || !heard.to_be_had(self.kms.as_ref(), cell.tenant).await)
         {
             return self.skip(bucket, cell, taken, passed, listed).await;
         }
@@ -333,8 +438,9 @@ impl Collector {
         if !self.renew(bucket, cell, taken).await? {
             return Ok((report, None));
         }
+        let kms = self.kms.as_ref();
         let compacted =
-            pass.compact(bucket, &self.options, &mut remembered.lengths, &mut report).await?;
+            pass.compact(bucket, &self.options, &mut remembered.trailers, kms, &mut report).await?;
         let (doomed, deferred) = pass.fates(bucket, &self.options).await?;
         // A pass a later one took the lease from stops.
         if !self.holds(bucket, cell, taken).await? {
@@ -359,8 +465,10 @@ impl Collector {
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
         compacted.iter().for_each(|(key, size)| usage.add(key, *size));
         let decided = Decided::by(&self.options);
-        let listing = pass.recording.digest;
-        Ok((report, Some(Passed { listing, decided, deferred, usage })))
+        // fxdax: what it left sealed uncompacted went by its KMS, outside the cell: recorded, so
+        // that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
+        let (listing, uncompacted) = (pass.recording.digest, report.uncompacted as u64);
+        Ok((report, Some(Passed { listing, decided, deferred, usage, uncompacted })))
     }
 
     /// fxdax: a pass over `cell`, holding its lease as `taken` says, whose listing, `listed`, is
@@ -373,6 +481,7 @@ impl Collector {
     /// were marked, and one a writer whose read of the child's record came before writes again
     /// after, the pass over its parent's cell deletes (TASK-395.14). An unchanged dead cell costs
     /// a pass its lease and its listing. What it records: nothing new, if it deleted nothing.
+    /// fxdax: it says what that pass left sealed uncompacted, as left still (TASK-411.13).
     async fn skip(
         &self,
         bucket: &impl Bucket,
@@ -381,7 +490,9 @@ impl Collector {
         passed: Passed,
         listed: &Listed,
     ) -> Result<(Report, Option<Passed>), Error> {
-        let skipped = Report { skipped: 1, ..Report::default() };
+        let uncompacted = passed.uncompacted as usize;
+        let locked = usize::from(uncompacted > 0);
+        let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
         let now = bucket.now();
         let (due, deferred): (Vec<Deferred>, Vec<Deferred>) =
             passed.deferred.iter().cloned().partition(|deferred| deferred.due <= now);
@@ -522,7 +633,8 @@ impl Collector {
         if !self.renew(bucket, cell, taken).await? {
             return Ok(Marking::default());
         }
-        pass.compact(bucket, &self.options, &mut remembered.lengths, &mut report).await?;
+        let (trailers, kms) = (&mut remembered.trailers, self.kms.as_ref());
+        pass.compact(bucket, &self.options, trailers, kms, &mut report).await?;
         let doomed = pass.doomed(bucket, &self.options).await?;
         if !self.holds(bucket, cell, taken).await? {
             return Ok(Marking { report, ..Marking::default() });
@@ -556,8 +668,8 @@ impl Collector {
             return Ok(DryRun { fenced: true, ..DryRun::default() });
         };
         let doomed = pass.doomed(bucket, &self.options).await?.into_iter().cloned().collect();
-        let compactable = pass.compactable(bucket, &self.options, &mut remembered.lengths).await?;
-        let compactable = compactable.into_iter().map(|(meta, _)| meta.clone()).collect();
+        let compactable = pass.compactable(bucket, &self.options, &mut remembered.trailers).await?;
+        let compactable = compactable.into_iter().map(|object| object.meta.clone()).collect();
         let mut retired = pass.retired();
         retired.extend(pass.recording.stale.iter().cloned());
         Ok(DryRun { doomed, compactable, retired, fenced: fenced(bucket, cell, epoch).await? })
@@ -638,7 +750,7 @@ impl Remembered {
             None => passed::list(bucket, cell).await,
         };
         let Listed { objects, digest, usage, stale } = listed;
-        self.lengths.retain(&objects);
+        self.trailers.retain(&objects);
         let recording = Recording { digest: settled.then_some(digest), usage, stale };
         Ok(Some(Pass::new(bucket, cell, objects, records, live, referenced, recording).await?))
     }
@@ -697,13 +809,10 @@ impl Remembered {
                 Some(listed) => listed,
                 None => bucket::list(bucket, &layout::records(cell)).await,
             };
-            let listed = (listing.into_iter())
-                .filter_map(|meta| match layout::kind(&meta.key) {
-                    Kind::Record { branch } if !records.contains_key(&branch) => {
-                        Some((branch, meta))
-                    }
-                    _ => None,
-                });
+            let listed = (listing.into_iter()).filter_map(|meta| match layout::kind(&meta.key) {
+                Kind::Record { branch } if !records.contains_key(&branch) => Some((branch, meta)),
+                _ => None,
+            });
             let known = &self.records;
             let reads = futures::stream::iter(listed)
                 .map(|(branch, meta)| async move {
@@ -716,7 +825,7 @@ impl Remembered {
             for (branch, read, key) in reads {
                 let Some((version, record)) = read? else { continue };
                 match version {
-                    Some(version) => self.records.insert(key, (version, record)),
+                    Some(version) => self.records.insert(key, (version, record.clone())),
                     None => self.records.remove(&key),
                 };
                 records.insert(branch, record);
@@ -858,7 +967,7 @@ async fn abandon(
         }
         let record = match writes {
             Writes::Some => branch::abandon(bucket, child).await?,
-            Writes::None => Record { deleted: true, ..records[&child] },
+            Writes::None => Record { deleted: true, ..records[&child].clone() },
         };
         records.insert(child, record);
     }
@@ -884,7 +993,7 @@ async fn read_record(
         && let Some((version, record)) = known.get(&meta.key)
         && version == listed
     {
-        return Ok(Some((Some(version.clone()), *record)));
+        return Ok(Some((Some(version.clone()), record.clone())));
     }
     let Some(object) = bucket::get(bucket, &meta.key).await else { return Ok(None) };
     Ok(Some((object.meta.version.e_tag, Record::decode(branch, &object.bytes)?)))
@@ -1345,23 +1454,23 @@ fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) ->
     (used as f64) < options.compact_below * len as f64
 }
 
-/// The lengths of the data of the objects a pass may compact, as their trailers say, by their keys,
-/// with the versions and sizes they were listed at: read once each, as they never change, and
-/// forgotten once they are gone. The live extents of an object are measured against its data,
-/// which its listed size, compressed (TASK-29), may be far below: before, a mostly dead segment
-/// whose data compressed was never compacted (TASK-293).
+/// The trailers of the objects a pass may compact, by their keys, with the versions and sizes they
+/// were listed at: read once each, as they never change, and forgotten once they are gone. The live
+/// extents of an object are measured against its data, as its trailer says, which its listed size,
+/// compressed (TASK-29), may be far below: before, a mostly dead segment whose data compressed was
+/// never compacted (TASK-293). fxdax: and its trailer's seal says whether compacting it needs its
+/// key, read keyless (TASK-411.6).
 #[derive(Default)]
-struct Lengths(BTreeMap<String, (Version, u64, u64)>);
+struct Trailers(BTreeMap<String, (Version, u64, Frame)>);
 
-impl Lengths {
-    /// The length of the data of the object `meta` lists, if it is still there.
-    fn known(&self, meta: &Meta) -> Option<u64> {
-        let (version, size, len) = self.0.get(&meta.key)?;
-        (*version == meta.version && *size == meta.size).then_some(*len)
+impl Trailers {
+    /// The frame of the object `meta` lists, as its trailer says, if it is still there.
+    fn known(&self, meta: &Meta) -> Option<&Frame> {
+        let (version, size, frame) = self.0.get(&meta.key)?;
+        (*version == meta.version && *size == meta.size).then_some(frame)
     }
 
-    /// Learns the lengths of the data of the objects `metas` list, those not known yet, from their
-    /// trailers, many at once.
+    /// Learns the trailers of the objects `metas` list, those not known yet, many at once.
     async fn learn(&mut self, bucket: &impl Bucket, metas: &[&Meta]) -> Result<(), Error> {
         // The reads' futures made first, as in `bucket::delete_all`.
         let unknown: Vec<&Meta> =
@@ -1371,9 +1480,9 @@ impl Lengths {
             .buffer_unordered(TRAILERS_AT_ONCE)
             .collect::<Vec<_>>()
             .await;
-        for (meta, len) in reads {
-            if let Some(len) = len? {
-                self.0.insert(meta.key.clone(), (meta.version.clone(), meta.size, len));
+        for (meta, frame) in reads {
+            if let Some(frame) = frame? {
+                self.0.insert(meta.key.clone(), (meta.version.clone(), meta.size, frame));
             }
         }
         Ok(())
@@ -1387,21 +1496,21 @@ impl Lengths {
     }
 }
 
-/// `meta`, and the length of the data of the object it lists ([`trailer_len`]).
+/// `meta`, and the frame of the object it lists ([`trailer`]).
 async fn learned<'a>(
     bucket: &impl Bucket,
     meta: &'a Meta,
-) -> (&'a Meta, Result<Option<u64>, Error>) {
-    (meta, trailer_len(bucket, meta).await)
+) -> (&'a Meta, Result<Option<Frame>, Error>) {
+    (meta, trailer(bucket, meta).await)
 }
 
-/// The length of the data of the object `meta` lists, as its trailer says, if it is still there.
-async fn trailer_len(bucket: &impl Bucket, meta: &Meta) -> Result<Option<u64>, Error> {
+/// The frame of the object `meta` lists, as its trailer says, if it is still there.
+async fn trailer(bucket: &impl Bucket, meta: &Meta) -> Result<Option<Frame>, Error> {
     let range = ByteRange::Suffix(layout::TRAILER);
     let Some(trailer) = bucket::get_range(bucket, &meta.key, range).await? else {
         return Ok(None);
     };
-    let frame = layout::Frame::of_trailer(&trailer)?;
+    let frame = Frame::of_trailer(&trailer)?;
     if frame.size() != meta.size {
         let (key, size) = (&meta.key, meta.size);
         return Err(Error::Corrupt(format!(
@@ -1409,20 +1518,39 @@ async fn trailer_len(bucket: &impl Bucket, meta: &Meta) -> Result<Option<u64>, E
             frame.size()
         )));
     }
-    Ok(Some(frame.data_len))
+    Ok(Some(frame))
+}
+
+/// An object a pass compacts ([`Pass::compactable`]): as listed, its live extents, and how it is
+/// sealed, as its trailer says.
+struct Compactable<'a> {
+    meta: &'a Meta,
+    extents: &'a BTreeMap<ExtentId, Location>,
+    seal: Seal,
 }
 
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves, unless it
-/// is gone. The moves' key and size, if it did: another pass's, if they stood there first.
+/// is gone. The moves' key and size, if it did: another pass's, if they stood there first. fxdax:
+/// it reads the object under `ring`'s keys of its branch, refusing one in the clear of a branch
+/// sealed, and seals its moves under the key the object was sealed under, the DEK of the same
+/// generation, with a salt of their own (TASK-411.6): every reader following the moves read the
+/// object under that key, where a store opened before a newer generation was added holds none of
+/// it. An object in the clear's moves are in the clear.
 async fn compact_object(
     bucket: &impl Bucket,
     key: &str,
     extents: &BTreeMap<ExtentId, Location>,
+    ring: &Ring,
 ) -> Result<Option<(String, u64)>, Error> {
     let moves = layout::moves(key)?;
     let Some(object) = bucket::get(bucket, key).await else { return Ok(None) };
+    let keys = keys::of_key(ring, key);
     // Its data, checked: compacting copies none that is corrupt under new CRCs.
-    let object_data = layout::data(&object.bytes)?;
+    let object_data = layout::data_under(&object.bytes, &keys).map_err(|err| err.reading(key))?;
+    let sealing = match Frame::of(&object.bytes)?.seal.keyed() {
+        Some((id, _)) => Some((keys.dek(id).ok_or(Error::NoKey(id))?, id)),
+        None => None,
+    };
     let mut data = Vec::new();
     let mut entries = Vec::new();
     for (&extent, location) in extents {
@@ -1435,7 +1563,8 @@ async fn compact_object(
         data.extend_from_slice(bytes);
     }
     // Another pass's moves of it, if there are some, stand.
-    let bytes = layout::with_footer(&data, &Moves { extents: entries });
+    let footer = Moves { of: key.to_owned(), extents: entries };
+    let bytes = layout::with_footer_under(&data, &footer, sealing);
     let size = match bucket::create(bucket, &moves, bytes.clone()).await {
         Created::Created => bytes.len() as u64,
         Created::Exists(stood) => stood.meta.size,
@@ -1443,15 +1572,17 @@ async fn compact_object(
     Ok(Some((moves, size)))
 }
 
-/// fxdax: compacts the object `meta` lists, as [`compact_object`] does: its moves' key and size,
-/// and the object's size as listed, if it did. A function of its own, not a closure's future, so that a
-/// pass's future is seen to be `Send` (TASK-395.15: a sweep spawning its passes).
+/// fxdax: compacts the object `compactable` is, under `ring`, as [`compact_object`] does: its
+/// moves' key and size, and the object's size as listed, if it did. A function of its own, not a
+/// closure's future, so that a pass's future is seen to be `Send` (TASK-395.15: a sweep spawning
+/// its passes).
 async fn compact_listed(
     bucket: &impl Bucket,
-    meta: &Meta,
-    extents: &BTreeMap<ExtentId, Location>,
+    compactable: &Compactable<'_>,
+    ring: &Ring,
 ) -> Result<Option<((String, u64), u64)>, Error> {
-    let moves = compact_object(bucket, &meta.key, extents).await?;
+    let Compactable { meta, extents, .. } = compactable;
+    let moves = compact_object(bucket, &meta.key, extents, ring).await?;
     Ok(moves.map(|moves| (moves, meta.size)))
 }
 
@@ -1585,15 +1716,15 @@ impl Pass {
         Ok(false)
     }
 
-    /// The objects mostly freed, as the lengths of their data say ([`Lengths`]): those
-    /// [`Pass::compact`] compacts. With the live extents of each, which take less than `options`'
-    /// fraction of it.
+    /// The objects mostly freed, as the lengths of their data in their trailers say
+    /// ([`Trailers`]): those [`Pass::compact`] compacts, each with its live extents, which take
+    /// less than `options`' fraction of it, and its seal.
     async fn compactable(
         &self,
         bucket: &impl Bucket,
         options: &Options,
-        lengths: &mut Lengths,
-    ) -> Result<Vec<(&Meta, &BTreeMap<ExtentId, Location>)>, Error> {
+        trailers: &mut Trailers,
+    ) -> Result<Vec<Compactable<'_>>, Error> {
         let mut ours = Vec::new();
         for (key, extents) in &self.named {
             let collectable = match layout::kind(key) {
@@ -1607,12 +1738,19 @@ impl Pass {
                 ours.push((&self.objects[key], extents));
             }
         }
-        lengths.learn(bucket, &ours.iter().map(|(meta, _)| *meta).collect::<Vec<_>>()).await?;
-        // Those gone since they were listed, whose lengths it could not learn, are not compacted.
-        ours.retain(|(meta, extents)| {
-            lengths.known(meta).is_some_and(|len| below(extents, options, len))
-        });
-        Ok(ours)
+        trailers.learn(bucket, &ours.iter().map(|(meta, _)| *meta).collect::<Vec<_>>()).await?;
+        // Those gone since they were listed, whose trailers it could not read, are not compacted.
+        Ok((ours.into_iter())
+            .filter_map(|(meta, extents)| {
+                let frame = trailers.known(meta)?;
+                let seal = frame.seal;
+                below(extents, options, frame.data_len).then_some(Compactable {
+                    meta,
+                    extents,
+                    seal,
+                })
+            })
+            .collect())
     }
 
     /// Compacts the objects mostly freed: copies the live extents of each to its moves.
@@ -1621,18 +1759,22 @@ impl Pass {
     /// is compacted only where no moves of it were listed, and moves only where they were, never
     /// both of one way. They all end before the pass works out what goes, as one at a time: what
     /// goes is of the listing before, which none of their moves is in. The moves' keys and sizes.
+    /// fxdax: those sealed under their branches' DEKs, unwrapped under the cell's KEK through
+    /// `kms` once for the pass, and only if one is to be compacted ([`Pass::compacting`],
+    /// TASK-411.6).
     async fn compact(
         &self,
         bucket: &impl Bucket,
         options: &Options,
-        lengths: &mut Lengths,
+        trailers: &mut Trailers,
+        kms: Option<&kms::Shared>,
         report: &mut Report,
     ) -> Result<Vec<(String, u64)>, Error> {
-        let compactable = self.compactable(bucket, options, lengths).await?;
+        let mut compactable = self.compactable(bucket, options, trailers).await?;
+        let ring = self.compacting(bucket, kms, &mut compactable, report).await?;
         // The compactions' futures made first, as in `bucket::delete_all`.
-        let compactions: Vec<_> = (compactable.into_iter())
-            .map(|(meta, extents)| compact_listed(bucket, meta, extents))
-            .collect();
+        let compactions: Vec<_> =
+            compactable.iter().map(|object| compact_listed(bucket, object, &ring)).collect();
         let compactions = futures::stream::iter(compactions).buffer_unordered(COMPACTIONS_AT_ONCE);
         let mut compactions = std::pin::pin!(compactions);
         let mut compacted = Vec::new();
@@ -1644,6 +1786,52 @@ impl Pass {
             }
         }
         Ok(compacted)
+    }
+
+    /// fxdax: the keys `compactable`'s objects are compacted under ([`keys::compacting`],
+    /// TASK-411.6): which of their branches are sealed, as the pass's records of them say, whose
+    /// objects in the clear are refused; and, if any of the objects is sealed, those branches' DEKs,
+    /// unwrapped under the cell's KEK by a [`keys::Kms`] of this pass's over `kms`, each generation
+    /// of the KEK once: the pass's one call of the KMS, however many objects it compacts. None of
+    /// them sealed, it asks nothing. The KEK not to be had, `kms` refusing it (a tenant's KEK
+    /// revoked or destroyed, the KMS failing) or none given, the objects sealed are left
+    /// uncompacted, counted in `report` and warned of, and the pass goes on with those in the clear.
+    async fn compacting(
+        &self,
+        bucket: &impl Bucket,
+        kms: Option<&kms::Shared>,
+        compactable: &mut Vec<Compactable<'_>>,
+        report: &mut Report,
+    ) -> Result<Arc<Ring>, Error> {
+        let branches: BTreeSet<u64> =
+            compactable.iter().filter_map(|object| keys::branch_of(&object.meta.key)).collect();
+        let records: Vec<(Branch, &Record)> = (self.records.iter())
+            .filter(|(branch, _)| branches.contains(&branch.id))
+            .map(|(&branch, record)| (branch, record))
+            .collect();
+        let sealed = compactable.iter().filter(|object| object.seal.keyed().is_some()).count();
+        if sealed == 0 {
+            return keys::compacting(records, None).await;
+        }
+        let cell = self.cell;
+        let kms = kms.map(|kms| keys::Kms::new(kms.clone()));
+        let cell_keys = match crate::cell::read(bucket, cell).await? {
+            Some(object) => CellKeys::of(cell, &object, kms),
+            None => CellKeys::none(cell, kms),
+        };
+        match keys::compacting(records.iter().copied(), Some(&cell_keys)).await {
+            Err(Error::Kms(why)) => {
+                log::warn!(
+                    cell:%, why:%;
+                    "fxdax-gc: cell {cell}: {sealed} objects sealed left uncompacted: {why}"
+                );
+                report.locked += 1;
+                report.uncompacted += sealed;
+                compactable.retain(|object| object.seal.keyed().is_none());
+                keys::compacting(records, None).await
+            }
+            ring => ring,
+        }
     }
 
     /// What goes: everything listed that the live branches and the fork points kept do not need, in
@@ -1766,10 +1954,12 @@ mod tests {
     use crate::bucket::{ByteRange, Created, Error as BucketError, Object, PutMode, Version};
     use crate::layout::test_branch;
     use crate::layout::{Child, child};
-    use crate::store::Store;
+    use crate::store::{Request, Store};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;
-    use futures::FutureExt as _;
+    use extent_frame::KeyId;
+    use extent_keys::kms::LocalKms;
+    use extent_keys::testing::Counted;
     use futures::executor::block_on;
     use object_store::memory::InMemory;
     use std::future::Future;
@@ -2002,7 +2192,8 @@ mod tests {
                 commit(&writer, Commit { tag: 2, frees: vec![freed], ..Commit::default() }).await;
                 writer.checkpoint().await.unwrap();
                 let mut bytes = bucket::get(&*bucket, &segment).await.unwrap().bytes;
-                let stored = extent_frame::Parts::of(&bytes).unwrap().stored[0];
+                let stored =
+                    extent_frame::Parts::of(&bytes, &extent_frame::NoKeys).unwrap().stored[0];
                 let encoding = match compressible {
                     true => extent_frame::Encoding::Zstd,
                     false => extent_frame::Encoding::Raw,
@@ -2312,7 +2503,14 @@ mod tests {
         branch::delete(&*bucket, test_branch(1), 11, u64::MAX).await.unwrap();
         collect(&*bucket, 1, &KEEP).await.unwrap();
         assert!(!keys(&*bucket).await.contains(&layout::lease(test_branch(1))));
-        let taken = Writer::open_recovered(bucket.clone(), record, before, 12, 0).await;
+        let taken = Writer::open_recovered(
+            bucket.clone(),
+            record,
+            before,
+            (12, 0),
+            crate::keys::Ring::clear(),
+        )
+        .await;
         assert_eq!(taken.err(), Some(Error::Deleted));
         assert_eq!(
             branch::lease_epoch(&*bucket, &layout::lease(test_branch(1))).await,
@@ -3901,6 +4099,40 @@ mod tests {
         })
     }
 
+    /// TASK-411.2: compacting an object sealed under a key the ring given doesn't hold copies none
+    /// of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
+    /// compacts under its cell's keys, TASK-411.6, or leaves it); its twin in the clear is
+    /// compacted, its live extent copied to its moves.
+    #[test]
+    fn objects_sealed_are_not_compacted_without_their_keys() {
+        let id = extent_frame::KeyId { branch: 1, generation: 0 };
+        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
+        let key = layout::segment(test_branch(1), 0);
+        let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
+        let live = ExtentId::new(1, 2);
+        let extents =
+            BTreeMap::from([(live, Location { key: key.clone(), offset: 4096, len: 4096 })]);
+        let footer = layout::encode(&());
+        block_on(async {
+            let sealed = Direct(SimBucket::new());
+            let object = extent_frame::framed(&data, &footer, Some((&dek, id)));
+            assert!(matches!(bucket::create(&sealed, &key, object).await, Created::Created));
+            let before = held(&sealed).await;
+            let compacted = compact_object(&sealed, &key, &extents, &Ring::clear()).await;
+            assert_eq!(compacted, Err(Error::NoKey(id)));
+            assert_eq!(held(&sealed).await, before);
+
+            let clear = Direct(SimBucket::new());
+            let object = extent_frame::framed(&data, &footer, None);
+            assert!(matches!(bucket::create(&clear, &key, object).await, Created::Created));
+            let compacted = compact_object(&clear, &key, &extents, &Ring::clear()).await;
+            let moves = layout::moves(&key).unwrap();
+            let bytes = bucket::get(&clear, &moves).await.unwrap().bytes;
+            assert_eq!(compacted, Ok(Some((moves, bytes.len() as u64))));
+            assert_eq!(layout::data(&bytes).unwrap(), &data[4096..8192]);
+        });
+    }
+
     /// A live branch whose recovery finds what it needs gone fails the pass, which deletes
     /// nothing; one deleted meanwhile is live no longer, and the pass goes on.
     #[test]
@@ -4665,13 +4897,13 @@ mod tests {
             asked.into_iter().filter(|asked| asked.starts_with("list")).collect()
         };
         let listed = |cell: Cell, checkpoints: &[u64]| -> Vec<String> {
-            let mut listed = vec![
-                format!("list {}", cell.prefix()),
-                format!("list {}", layout::records(cell)),
-            ];
-            listed.extend(checkpoints.iter().map(|&id| {
-                format!("list {}", layout::checkpoints(Branch { cell, id }))
-            }));
+            let mut listed =
+                vec![format!("list {}", cell.prefix()), format!("list {}", layout::records(cell))];
+            listed.extend(
+                checkpoints
+                    .iter()
+                    .map(|&id| format!("list {}", layout::checkpoints(Branch { cell, id }))),
+            );
             listed.push(format!("list {}", layout::records(cell)));
             listed.push(format!("list-delimited {}", layout::references(cell)));
             listed
@@ -5639,5 +5871,426 @@ mod tests {
             assert!(!usage.kinds.contains_key("segment"), "{usage:?}");
         });
     }
-}
 
+    /// TASK-411.6: what the tests of compacting sealed cells share: a bucket; a KMS holding the KEK
+    /// of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of branch 1 of the cell,
+    /// sealed, its record's DEK wrapped under the cell's KEK, holding the ring its store holds.
+    struct Sealed {
+        bucket: Arc<Store>,
+        counted: Arc<Counted<LocalKms>>,
+        kms: kms::Shared,
+        writer: Writer<Store>,
+        ring: Arc<Ring>,
+        /// The cell's keys, as its maker holds them.
+        cell: CellKeys,
+        _dir: tempfile::TempDir,
+    }
+
+    /// The segments [`Sealed::mostly_freed`] writes.
+    const SEALED_SEGMENTS: u64 = 3;
+
+    impl Sealed {
+        /// The cell made by a host with a KEK it wrapped, its branch 1 given a DEK by its writer,
+        /// as `extent_store` makes them; the KMS's calls since counted from none.
+        async fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let local = LocalKms::open(dir.path().join("kms")).unwrap();
+            local.create(layout::TEST_CELL.tenant).unwrap();
+            let counted = Arc::new(Counted::new(local));
+            let kms: kms::Shared = counted.clone();
+            let host = keys::Kms::new(kms.clone());
+            let bucket = store();
+            let kek = keys::new_cell_kek(Some(&host), layout::TEST_CELL.tenant).await.unwrap();
+            let making = (true, kek.as_ref().map(|(_, kek)| kek));
+            let volume = crate::cell::Volume { branch: 1, kind: crate::cell::Kind::Fxfs };
+            let (_, object) =
+                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(("a", volume)))
+                    .await
+                    .unwrap();
+            assert_eq!(object.keks.len(), 1);
+            let cell = keys::held(Some(&host), layout::TEST_CELL, object, kek);
+            let branch = test_branch(1);
+            branch::create(&*bucket, branch, 0).await.unwrap();
+            let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
+            let record = keys::with_dek(&*bucket, &cell, branch, record).await.unwrap();
+            let ring = keys::ring(&*bucket, &cell, branch, &record, true).await.unwrap();
+            let writer =
+                Writer::open_keyed(bucket.clone(), branch, (10, 0), ring.clone()).await.unwrap();
+            counted.reset();
+            Self { bucket, counted, kms, writer, ring, cell, _dir: dir }
+        }
+
+        /// The KMS's wraps and unwraps, since [`Sealed::new`] or the last reset.
+        fn calls(&self) -> (u64, u64) {
+            (self.counted.wraps(), self.counted.unwraps())
+        }
+
+        /// A collector of `options` unwrapping through the KMS.
+        fn collector(&self, options: Options) -> Collector {
+            Collector::new(options).kms(Some(self.kms.clone()))
+        }
+
+        /// `commit`, in a segment of its own sealed under the branch's DEK, uploaded and
+        /// acknowledged.
+        async fn commit(&self, commit: Commit) {
+            let objects = Batch::from(commit).close(&mut self.writer.chain());
+            let seq = self.writer.add_segment(objects.frame_under(self.ring.sealing())).unwrap();
+            self.writer.upload(seq).await.unwrap();
+            self.writer.acknowledge().await.unwrap();
+        }
+
+        /// [`SEALED_SEGMENTS`] segments, each of an extent kept, of [`kept`]'s data, and a larger one
+        /// freed after, then a checkpoint past them: what a pass compacting below a half compacts.
+        /// The extents kept, each with its segment's key.
+        async fn mostly_freed(&self) -> Vec<(ExtentId, String)> {
+            let (mut kept_at, mut frees) = (Vec::new(), Vec::new());
+            for n in 0..SEALED_SEGMENTS {
+                let first = self.writer.chain().next_sequence();
+                let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
+                let extents = vec![(small, kept(n)), (large, vec![b'f'; 20_000])];
+                self.commit(Commit { tag: n + 1, extents, ..Commit::default() }).await;
+                kept_at.push((small, self.writer.location(small).unwrap().key));
+                frees.push(large);
+            }
+            self.commit(Commit { tag: SEALED_SEGMENTS + 1, frees, ..Commit::default() }).await;
+            self.writer.checkpoint().await.unwrap();
+            kept_at
+        }
+
+        /// A commit more, of an extent of its own, and a checkpoint of it: where the writer names
+        /// the extents the collector moved from then on.
+        async fn checkpointed(&self) {
+            let extent = ExtentId::new(1, self.writer.chain().next_sequence());
+            let extents = vec![(extent, b"more".to_vec())];
+            self.commit(Commit { tag: SEALED_SEGMENTS + 2, extents, ..Commit::default() }).await;
+            self.writer.checkpoint().await.unwrap();
+        }
+    }
+
+    /// The data of the extent kept in segment `n` of [`Sealed::mostly_freed`]'s: of no bytes
+    /// repeated, so that a window of it is found nowhere else.
+    fn kept(n: u64) -> Vec<u8> {
+        let mut state = (n + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
+        (0..4096)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    /// `extent`'s data at `location`, read by a host's fetcher holding `ring`, as a host serving
+    /// the branch's store holds its keys; none, if `ring` is clear.
+    async fn read_holding(
+        bucket: &Arc<Store>,
+        ring: &Arc<Ring>,
+        extent: ExtentId,
+        location: &Location,
+    ) -> Result<Vec<u8>, Error> {
+        let memory = crate::fetch::Memory::new();
+        let _held = memory.keys().hold(ring.clone());
+        let budget = crate::fetch::Budget::new(crate::fetch::Limits::UNBOUNDED);
+        let fetcher = crate::fetch::Fetcher::new(bucket.clone(), budget, memory.clone(), None);
+        let demand = crate::fetch::Priority::Demand;
+        fetcher.read(extent, location, 0, location.len, demand).await
+    }
+
+    /// The seal of the object at `key`, as its trailer says.
+    async fn seal_at(bucket: &impl Bucket, key: &str) -> Seal {
+        let bytes = bucket::get(bucket, key).await.unwrap().bytes;
+        Frame::of(&bytes).unwrap().seal
+    }
+
+    /// TASK-411.6, AC #1, #2: a pass compacting a sealed cell's objects mostly freed unwraps the
+    /// cell's KEK through the KMS once for them all, and seals each one's moves under the DEK its
+    /// segment was sealed under, of the same generation, with a salt of their own, holding none of
+    /// their data in the clear. A reader holding the branch's keys reads the extents moved, from
+    /// where their writer named them, their segments gone, and from the moves its next checkpoint
+    /// names; one holding none reads none of them. Passes that compact nothing (none below their
+    /// fraction, or nothing left to compact) and dry runs ask the KMS nothing.
+    #[test]
+    fn sealed_cells_are_compacted_under_their_keys_unwrapped_once_a_pass() {
+        block_on(async {
+            let sealed = Sealed::new().await;
+            let kept_at = sealed.mostly_freed().await;
+            let dek = KeyId { branch: 1, generation: keys::FIRST };
+            let compacting = Options { compact_below: 0.5, grace: 0 };
+
+            // Marking alone, compacting nothing, and a dry run: no call.
+            let report = sealed.collector(KEEP).collect(&*sealed.bucket, 1).await.unwrap();
+            assert_eq!((report.compacted, report.locked), (0, 0));
+            let dry = sealed.collector(compacting);
+            let dry = dry.dry_run_cell(&*sealed.bucket, layout::TEST_CELL).await.unwrap();
+            assert_eq!(dry.compactable.len(), SEALED_SEGMENTS as usize);
+            assert_eq!(sealed.calls(), (0, 0));
+
+            // Compacting them: one unwrap for the three.
+            let mut collector = sealed.collector(compacting);
+            let report = collector.collect(&*sealed.bucket, 2).await.unwrap();
+            assert_eq!(
+                (report.compacted, report.locked, report.uncompacted),
+                (SEALED_SEGMENTS as usize, 0, 0)
+            );
+            assert_eq!(sealed.calls(), (0, 1));
+            let objects = held(&*sealed.bucket).await;
+            for (n, (_, segment)) in kept_at.iter().enumerate() {
+                let moves = layout::moves(segment).unwrap();
+                let (Seal::Sealed { key, salt }, Seal::Sealed { key: of, salt: of_salt }) = (
+                    seal_at(&*sealed.bucket, &moves).await,
+                    seal_at(&*sealed.bucket, segment).await,
+                ) else {
+                    panic!("{moves} or {segment} not sealed");
+                };
+                assert_eq!((key, of), (dek, dek));
+                assert_ne!(salt, of_salt);
+                let data = kept(n as u64);
+                for (meta, bytes) in &objects {
+                    let found = bytes.windows(64).any(|window| window == &data[..64]);
+                    assert!(!found, "{} holds extent {n}'s data in the clear", meta.key);
+                }
+            }
+
+            // The next deletes the segments compacted, compacting nothing: no call more.
+            let report = collector.collect(&*sealed.bucket, 3).await.unwrap();
+            assert_eq!((report.compacted, report.locked), (0, 0));
+            let left = keys(&*sealed.bucket).await;
+            assert!(kept_at.iter().all(|(_, segment)| !left.contains(segment)), "{left:?}");
+            assert_eq!(sealed.calls(), (0, 1));
+
+            // Read where their writer named them, followed to their moves; then where its next
+            // checkpoint names them.
+            for (n, (extent, segment)) in kept_at.iter().enumerate() {
+                let at = sealed.writer.location(*extent).unwrap();
+                assert_eq!((at.key.as_str(), at.len), (segment.as_str(), 4096));
+                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                assert_eq!(read, Ok(kept(n as u64)));
+                let keyless = read_holding(&sealed.bucket, &Ring::clear(), *extent, &at).await;
+                assert_eq!(keyless, Err(Error::NoKey(dek)));
+            }
+            sealed.checkpointed().await;
+            for (n, (extent, segment)) in kept_at.iter().enumerate() {
+                let at = sealed.writer.location(*extent).unwrap();
+                assert_eq!(at.key, layout::moves(segment).unwrap());
+                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                assert_eq!(read, Ok(kept(n as u64)));
+            }
+            assert_eq!(sealed.calls(), (0, 1));
+        });
+    }
+
+    /// TASK-411.6: an object sealed under a DEK's generation older than its record's newest is
+    /// compacted to moves sealed under its own: a store opened before the newer was added, which
+    /// holds none of it, reads the extents moved.
+    #[test]
+    fn moves_are_sealed_under_the_generation_their_objects_were() {
+        block_on(async {
+            let sealed = Sealed::new().await;
+            let kept_at = sealed.mostly_freed().await;
+            let branch = test_branch(1);
+            let added = keys::add_generation(&*sealed.bucket, &sealed.cell, branch).await.unwrap();
+            assert_eq!(added, keys::FIRST + 1);
+            assert_eq!(sealed.ring.generations(1), [keys::FIRST]);
+            let mut collector = sealed.collector(Options { compact_below: 0.5, grace: 0 });
+            let report = collector.collect(&*sealed.bucket, 1).await.unwrap();
+            assert_eq!(report.compacted, SEALED_SEGMENTS as usize);
+            collector.collect(&*sealed.bucket, 2).await.unwrap();
+            for (n, (extent, segment)) in kept_at.iter().enumerate() {
+                let moves = layout::moves(segment).unwrap();
+                let seal = seal_at(&*sealed.bucket, &moves).await;
+                let first = KeyId { branch: 1, generation: keys::FIRST };
+                assert!(matches!(seal, Seal::Sealed { key, .. } if key == first), "{seal:?}");
+                let at = sealed.writer.location(*extent).unwrap();
+                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                assert_eq!(read, Ok(kept(n as u64)));
+            }
+        });
+    }
+
+    /// TASK-411.6, AC #1's twin: a cell in the clear is compacted as before, its moves in the
+    /// clear, by a collector holding a KMS it asks nothing.
+    #[test]
+    fn cells_in_the_clear_are_compacted_asking_the_kms_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let counted = Arc::new(Counted::new(LocalKms::open(dir.path().join("kms")).unwrap()));
+        let kms: kms::Shared = counted.clone();
+        let bucket = SimBucket::new();
+        let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
+        let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 }).kms(Some(kms));
+        let (report, _) = bucket.served(collector.collect(&*bucket, 1));
+        let report = report.unwrap();
+        assert_eq!((report.compacted, report.locked), (SEGMENTS as usize, 0));
+        assert_eq!((counted.wraps(), counted.unwraps()), (0, 0));
+        for segment in &segments {
+            let moves = layout::moves(segment).unwrap();
+            let (seal, _) = bucket.served(seal_at(&*bucket, &moves));
+            assert_eq!(seal, Seal::Clear, "{moves}");
+        }
+    }
+
+    /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
+    /// what no live branch needs, but compacts none of what is sealed, saying so in its report, as
+    /// one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records its
+    /// listing's digest and what it left, so that a pass after it, the cell unchanged, skips it,
+    /// asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still not to
+    /// be had (no call at all without a KMS), saying what is left; a write to the cell has the next
+    /// go over it in full; and the KEK given back, the next compacts.
+    #[test]
+    fn cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted() {
+        block_on(async {
+            let sealed = Sealed::new().await;
+            let kept_at = sealed.mostly_freed().await;
+            let compacting = Options { compact_below: 0.5, grace: 0 };
+            let locked = |report: Report| (report.compacted, report.locked, report.uncompacted);
+            let segments = SEALED_SEGMENTS as usize;
+            // A pass's report, and the requests it made, by kind.
+            let bucket = &sealed.bucket;
+            let pass = |collector: Collector, holder| async move {
+                let mut collector = collector;
+                let before = bucket.stats().requests;
+                let report = collector.collect_cell(&**bucket, layout::TEST_CELL, holder);
+                let report = report.await.unwrap();
+                let after = bucket.stats().requests;
+                let made = (Request::ALL.into_iter())
+                    .filter_map(|request| {
+                        let made = after[request as usize] - before[request as usize];
+                        (made > 0).then_some((request, made))
+                    })
+                    .collect::<Vec<_>>();
+                (report, made)
+            };
+            let idle = vec![(Request::Get, 1), (Request::List, 1), (Request::Update, 1)];
+
+            // No KMS: no call, the sealed left.
+            let before = keys(&*sealed.bucket).await;
+            let (report, _) = pass(Collector::new(compacting), 1).await;
+            assert_eq!(locked(report), (0, 1, segments));
+            assert_eq!(sealed.calls(), (0, 0));
+            let after = keys(&*sealed.bucket).await;
+            assert_eq!(report.deleted, before.len() - after.len());
+            assert_eq!(report.deleted, 1);
+            assert!(after.iter().all(|key| !matches!(layout::kind(key), Kind::Moves { .. })));
+            // The next in full, the cell changed by what went; then skipped, asking nothing more.
+            let (report, made) = pass(Collector::new(compacting), 2).await;
+            assert_eq!((locked(report), report.skipped, report.deleted), ((0, 1, segments), 0, 0));
+            assert!(made.len() > idle.len(), "{made:?}");
+            let (report, made) = pass(Collector::new(compacting), 3).await;
+            let skipped =
+                Report { skipped: 1, locked: 1, uncompacted: segments, ..Report::default() };
+            assert_eq!((report, made), (skipped, idle.clone()));
+            assert_eq!(sealed.calls(), (0, 0));
+
+            // Revoked: skipped still, each pass asking the KMS one wrap, refused.
+            sealed.counted.inner().revoke(layout::TEST_CELL.tenant).unwrap();
+            for holder in [4, 5] {
+                let (report, made) = pass(sealed.collector(compacting), holder).await;
+                assert_eq!((report, made), (skipped, idle.clone()));
+            }
+            assert_eq!(sealed.calls(), (2, 0));
+            assert_eq!(keys(&*sealed.bucket).await, after);
+            // Written to: in full, its unwrap refused, left again, deleting what the write left
+            // behind; the next in full too, the cell changed by that; then skipped again.
+            sealed.checkpointed().await;
+            let full = |report: Report| (locked(report), report.skipped, report.deleted);
+            let (report, made) = pass(sealed.collector(compacting), 6).await;
+            assert_eq!(full(report), ((0, 1, segments), 0, 1));
+            assert!(made.len() > idle.len(), "{made:?}");
+            let (report, _) = pass(sealed.collector(compacting), 7).await;
+            assert_eq!(full(report), ((0, 1, segments), 0, 0));
+            assert_eq!(sealed.calls(), (2, 2));
+            let (report, made) = pass(sealed.collector(compacting), 8).await;
+            assert_eq!((report, made), (skipped, idle.clone()));
+            assert_eq!(sealed.calls(), (3, 2));
+
+            // Given back: the KMS wraps, the cell gone over in full, compacted.
+            sealed.counted.inner().unrevoke(layout::TEST_CELL.tenant).unwrap();
+            let (report, _) = pass(sealed.collector(compacting), 9).await;
+            assert_eq!(full(report), ((segments, 0, 0), 0, 0));
+            assert_eq!(sealed.calls(), (4, 3));
+            for (n, (extent, _)) in kept_at.iter().enumerate() {
+                let at = sealed.writer.location(*extent).unwrap();
+                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                assert_eq!(read, Ok(kept(n as u64)));
+            }
+            // Compacted, the next deletes what was, recording nothing left; then skipped, asking
+            // the KMS nothing.
+            let (report, _) = pass(sealed.collector(compacting), 10).await;
+            assert_eq!(full(report), ((0, 0, 0), 0, segments));
+            let (report, _) = pass(sealed.collector(compacting), 11).await;
+            assert_eq!(full(report), ((0, 0, 0), 0, 0));
+            let (report, made) = pass(sealed.collector(compacting), 12).await;
+            assert_eq!((report, made), (Report { skipped: 1, ..Report::default() }, idle));
+            assert_eq!(sealed.calls(), (4, 3));
+        });
+    }
+
+    /// TASK-411.13: what a sweep's passes heard of a tenant's KEK, asked of the KMS once however
+    /// many ask, each tenant apart; none without a KMS.
+    #[test]
+    fn tenants_keks_are_asked_for_once_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalKms::open(dir.path().join("kms")).unwrap();
+        local.create(1).unwrap();
+        local.create(2).unwrap();
+        local.revoke(2).unwrap();
+        let counted = Arc::new(Counted::new(local));
+        let kms: kms::Shared = counted.clone();
+        let heard = Heard::new();
+        let asked = |tenant| block_on(heard.to_be_had(Some(&kms), tenant));
+        assert_eq!(
+            [asked(1), asked(1), asked(2), asked(2), asked(3)],
+            [true, true, false, false, false]
+        );
+        assert_eq!((counted.wraps(), counted.unwraps()), (3, 0));
+        assert!(!block_on(Heard::new().to_be_had(None, 1)));
+        assert_eq!(counted.wraps(), 3);
+    }
+
+    /// TASK-411.6, AC #4: the moves of a sealed object, copied whole to the key of another's moves
+    /// of its branch, are refused there, by readers holding the branch's keys and by those holding
+    /// none: their footer, which its MAC covers, names the object they are the moves of
+    /// (TASK-411.3). Their footer made to name the other, framed anew in the clear, which needs no
+    /// key, is a downgrade, refused by readers holding the keys.
+    #[test]
+    fn sealed_moves_copied_to_another_key_of_their_branch_are_refused() {
+        block_on(async {
+            let sealed = Sealed::new().await;
+            let kept_at = sealed.mostly_freed().await;
+            let mut collector = sealed.collector(Options { compact_below: 0.5, grace: 0 });
+            collector.collect(&*sealed.bucket, 1).await.unwrap();
+            collector.collect(&*sealed.bucket, 2).await.unwrap();
+            sealed.checkpointed().await;
+            let [(_, of_one), (other, of_other), ..] = &kept_at[..] else { panic!() };
+            let (moves_one, moves_other) =
+                (layout::moves(of_one).unwrap(), layout::moves(of_other).unwrap());
+            let at = sealed.writer.location(*other).unwrap();
+            assert_eq!(at.key, moves_other);
+            let read = read_holding(&sealed.bucket, &sealed.ring, *other, &at).await;
+            assert_eq!(read, Ok(kept(1)));
+
+            let copied = bucket::get(&*sealed.bucket, &moves_one).await.unwrap().bytes;
+            let put = sealed.bucket.put(&moves_other, copied.clone().into(), PutMode::Overwrite);
+            put.await.unwrap();
+            let refused = Error::Corrupt(format!("{moves_other} holds the moves of {of_one}"));
+            for ring in [sealed.ring.clone(), Ring::clear()] {
+                let read = read_holding(&sealed.bucket, &ring, *other, &at).await;
+                assert_eq!(read, Err(refused.clone()));
+            }
+
+            // Made to name the other and its extent, framed in the clear.
+            let view = keys::of_key(&sealed.ring, &moves_one);
+            let data = layout::data_under(&copied, &view).unwrap();
+            let mut footer: Moves = layout::footer_under(&copied, &view).unwrap();
+            assert_eq!(footer.of, *of_one);
+            footer.of = of_other.clone();
+            for (extent, to) in &mut footer.extents {
+                (*extent, to.key) = (*other, moves_other.clone());
+            }
+            let forged = layout::with_footer(&data, &footer);
+            sealed.bucket.put(&moves_other, forged.into(), PutMode::Overwrite).await.unwrap();
+            let read = read_holding(&sealed.bucket, &sealed.ring, *other, &at).await;
+            assert_eq!(read, Err(Error::Downgrade(moves_other.clone())));
+        });
+    }
+}

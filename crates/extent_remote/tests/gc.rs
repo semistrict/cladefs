@@ -347,8 +347,8 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let (did, slowest) = said.split_at(said.find("fxdax-gc: took").unwrap());
     assert_eq!(
         did,
-        "fxdax-gc: cell 1/1: deleted 2 (396 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\nfxdax-gc: deleted 2 (396 bytes), compacted 0 (0 bytes), retired 0 \
+        "fxdax-gc: cell 1/1: deleted 2 (630 bytes), compacted 0 (0 bytes), retired 0 references, \
+         in T s; requests: R\nfxdax-gc: deleted 2 (630 bytes), compacted 0 (0 bytes), retired 0 \
          references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\n"
     );
@@ -449,6 +449,101 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(lines(&gc(&[&url, "--usage", "--tenant", "b"])), tenant_b);
     let after = futures::executor::block_on(bucket.list("")).unwrap();
     assert_eq!(after, listed);
+}
+
+/// TASK-411.14: `--delete-branch` of a sealed branch whose fork into another cell has no record
+/// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
+/// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
+/// the KMS `FXDAX_KMS` names. Without one, it fails, naming the tenant and what it needs, the
+/// branch left as a deletion stopped partway: its record not deleted, the child unrecorded; run
+/// again with one, it finishes.
+#[test]
+fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms() {
+    use extent_frame::{Frame, KeyId, Seal};
+    use extent_keys::kms::LocalKms;
+    use extent_remote::batch::{Batch, Commit};
+    use extent_remote::layout::{self, Branch, Cell, Child, Origin};
+    use extent_remote::store::Store;
+    use extent_remote::{Bucket as _, Writer, branch, cell, keys};
+    use futures::executor::block_on;
+    use std::sync::Arc;
+    use storage_device::ExtentId;
+
+    let dir = tempfile::tempdir().unwrap();
+    let files = dir.path().join("bucket");
+    std::fs::create_dir(&files).unwrap();
+    let url = url::Url::from_directory_path(&files).unwrap().to_string();
+    let kms_dir = dir.path().join("kms");
+    let local = Arc::new(LocalKms::open(&kms_dir).unwrap());
+    local.create(1).unwrap();
+    let parent = test_branch(1);
+    let child = Branch { cell: Cell { tenant: 1, id: 2 }, id: 9 };
+    let at = block_on(async {
+        let bucket = Arc::new(Store::from_url(&url).unwrap());
+        let shared: extent_keys::kms::Shared = local.clone();
+        let host = keys::Kms::new(shared);
+        let kek = keys::new_cell_kek(Some(&host), 1).await.unwrap();
+        let making = (true, kek.as_ref().map(|(_, kek)| kek));
+        let (_, object) = cell::hold(&*bucket, parent.cell, (5, 5), making, None).await.unwrap();
+        let cell_keys = keys::held(Some(&host), parent.cell, object, kek);
+        branch::create(&*bucket, parent, 0).await.unwrap();
+        let record = branch::record(&*bucket, parent).await.unwrap().unwrap();
+        let record = keys::with_dek(&*bucket, &cell_keys, parent, record).await.unwrap();
+        let ring = keys::ring(&*bucket, &cell_keys, parent, &record, true).await.unwrap();
+        let writer = Writer::open_keyed(bucket.clone(), parent, (10, 1), ring.clone());
+        let writer = writer.await.unwrap();
+        let extent = ExtentId::new(1, writer.chain().next_sequence());
+        let written =
+            Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
+        let written = Batch::from(written).close(&mut writer.chain());
+        let seq = writer.add_segment(written.frame_under(ring.sealing())).unwrap();
+        writer.upload(seq).await.unwrap();
+        writer.acknowledge().await.unwrap();
+        // The fork's segment uploaded; its writer dies before it records the child.
+        let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
+        let forked = Child { branch: child, owner: 0x109, point: false };
+        let forking = forking.fork(forked, &mut writer.chain());
+        let at = writer.add_segment(forking.frame_under(ring.sealing())).unwrap();
+        writer.upload(at).await.unwrap();
+        at
+    });
+    let bucket = Store::from_url(&url).unwrap();
+    let record = |branch| block_on(branch::record(&bucket, branch)).unwrap();
+    let checkpoints = || {
+        let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.cell.prefix())));
+        listed.unwrap().into_iter().map(|meta| meta.key).collect::<Vec<_>>()
+    };
+    assert_eq!(record(child), None);
+    let delete = |kms: Option<&std::path::Path>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fxdax-gc"));
+        command.args([url.as_str(), "--delete-branch", "1/1/1"]).env_remove("FXDAX_KMS");
+        if let Some(kms) = kms {
+            command.env("FXDAX_KMS", format!("local://{}", kms.display()));
+        }
+        command.output().unwrap()
+    };
+
+    let out = delete(None);
+    let refused = "deleting branch 1/1/1: tenant 1: cell 1/1 is encrypted, and this host has no \
+                   KMS: fxdax-gc reads it from FXDAX_KMS, which names none; the deletion stopped \
+                   partway: run it again with FXDAX_KMS to finish it";
+    assert_eq!(String::from_utf8_lossy(&out.stderr), format!("Error: {refused:?}\n"));
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(record(parent).map(|record| record.deleted), Some(false));
+    assert_eq!(record(child), None);
+    assert_eq!(checkpoints(), Vec::<String>::new());
+
+    let out = delete(Some(&kms_dir));
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    assert!(out.status.success());
+    assert_eq!(record(parent).map(|record| record.deleted), Some(true));
+    assert_eq!(record(child).and_then(|record| record.origin()), Some(Origin { parent, at }));
+    let checkpoint = layout::checkpoint(parent, at);
+    assert_eq!(checkpoints(), std::slice::from_ref(&checkpoint));
+    let bytes = block_on(bucket.get(&checkpoint)).unwrap().bytes;
+    let seal = Frame::of(&bytes).unwrap().seal;
+    let Seal::Authenticated { key, .. } = seal else { panic!("{checkpoint}: {seal:?}") };
+    assert_eq!(key, KeyId { branch: 1, generation: keys::FIRST });
 }
 
 #[test]

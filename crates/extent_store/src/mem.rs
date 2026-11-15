@@ -210,6 +210,20 @@ impl MemDir {
         fs.failed_on.is_some() && fs.failed_on != fs.limited_on
     }
 
+    /// fxdax: every file in it, by its path, with what it holds now, durable or not: what tests
+    /// search for bytes that must be in no file of a host's (TASK-411.9).
+    pub fn files(&self) -> Vec<(String, Vec<u8>)> {
+        let fs = self.fs.lock().unwrap();
+        let mut files = Vec::new();
+        for (dir, entries) in &fs.dirs {
+            for (name, inode) in entries {
+                let path = if dir.is_empty() { name.clone() } else { format!("{dir}/{name}") };
+                files.push((path, fs.inodes[inode].data.clone()));
+            }
+        }
+        files
+    }
+
     /// The directory as a crash would leave it: what was durable, and any of what happened since,
     /// chosen at random by an RNG seeded with `seed`. See the module docs.
     pub fn crash(&self, seed: u64) -> MemDir {

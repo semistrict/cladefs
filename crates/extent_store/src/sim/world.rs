@@ -155,8 +155,6 @@ impl Default for Profile {
     }
 }
 
-/// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
-/// of a few extents close, full, between commits.
 /// fxdax: the simulation's branch `id`: the one volume of a cell of its own, as a store made alone,
 /// or a fork, is (TASK-364).
 fn sim_branch(id: u64) -> extent_remote::layout::Branch {
@@ -164,7 +162,10 @@ fn sim_branch(id: u64) -> extent_remote::layout::Branch {
     extent_remote::layout::Branch { cell, id }
 }
 
-const BLOCK: u64 = 512;
+/// The block size of the hosts' stores: small, so that a few blocks make an extent, and segments
+/// of a few extents close, full, between commits. fxdax: a sector of an open segment, the least
+/// it takes (`segments::SECTOR`, TASK-411.8); 512 bytes before.
+const BLOCK: u64 = crate::segments::SECTOR;
 
 /// How the hosts' stores keep their branches: in segments of a few extents, those of three blocks
 /// or more in objects of their own. No segment closes for its age, which the store's clock, not
@@ -288,12 +289,17 @@ struct Host {
     /// (`extent_store::upload`): a few at once, so that uploads wait for each other's to be done,
     /// and are woken as they are (TASK-149.32).
     uploads: Arc<Budget>,
+    /// What holds the parts its stores pack as their segments fill, which they share, as a
+    /// daemon's do (`crate::held`, TASK-400).
+    held: Arc<crate::HeldParts>,
 }
 
 impl Default for Host {
     fn default() -> Self {
         let limits = Limits { requests: UPLOADS_AT_ONCE, bytes: u64::MAX };
-        Self { disks: HashMap::new(), sessions: BTreeMap::new(), uploads: Budget::new(limits) }
+        let (disks, sessions) = (HashMap::new(), BTreeMap::new());
+        let held = crate::HeldParts::new();
+        Self { disks, sessions, uploads: Budget::new(limits), held }
     }
 }
 
@@ -874,6 +880,7 @@ impl World {
             max_lag: u64::MAX,
             max_lag_bytes: u64::MAX,
             cache: None,
+            held: Some(self.hosts[host].held.clone()),
             token,
             checkpoint_every: upload::CHECKPOINT_EVERY,
             // The interval closes a segment filled at once, as the first full one closed between
@@ -1928,6 +1935,9 @@ impl World {
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
+            // Its cells are in the clear: nothing is left sealed (TASK-411.6).
+            locked: 0,
+            uncompacted: 0,
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}
