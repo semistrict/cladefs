@@ -161,7 +161,8 @@ fn weights(change: impl FnOnce(&mut Weights)) -> Profile {
 }
 
 /// `SIM_SEEDS` seeds (1 by default) from `SIM_SEED` of one profile, as `SIM_PROFILE` says, with
-/// the rules `SIM_OFF` names (separated by commas) off, to debug them.
+/// the rules `SIM_OFF` names (separated by commas) off, to debug them; with `SIM_JOURNAL` set, each
+/// seed's requests of the bucket printed first, in order, as they took effect.
 #[test]
 #[ignore = "debugs one seed (SIM_SEED, SIM_PROFILE, SIM_OFF): the sim part runs the soaks"]
 fn one() {
@@ -236,6 +237,13 @@ fn one() {
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
+    if std::env::var_os("SIM_JOURNAL").is_some() {
+        for seed in seed..seed + count {
+            for (at, asked) in replay(seed, profile).0.iter().enumerate() {
+                println!("seed {seed} request {at}: {asked}");
+            }
+        }
+    }
     holds(profile, seed..seed + count);
 }
 

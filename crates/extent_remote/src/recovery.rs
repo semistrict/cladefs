@@ -816,22 +816,25 @@ fn state_at<'a, B: Bucket>(
         let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
             return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
         };
-        // fxdax: a fork point's a pass keeps for the forks to other cells: the checkpoint at it,
-        // which they read by its key alone, kept whatever this reads, as it may be a later
-        // writer's, of another key (TASK-407).
-        if kept {
-            touched.insert(layout::checkpoint(branch, at, epoch));
-        }
-        if branch.cell != from {
+        // fxdax: a fork point's a pass keeps for the forks to other cells is read as they read
+        // it, by the key of its checkpoint alone, if there is one: a later writer's checkpoint at
+        // the segment, at its own key, may name the extents along other moves, of other passes,
+        // than the forks follow from it (TASK-407, TASK-407.1). None yet, no fork read it: the
+        // newest checkpoint up to there, as whoever writes it reads it.
+        if branch.cell != from || kept {
             let key = layout::checkpoint(branch, at, epoch);
-            let Some(state) = checkpoints.read_key(&key, branch).await? else {
-                return Err(Attempt::Failed(Error::Lost(key)));
-            };
-            if state.through != Some(at) {
-                return Err(Attempt::Failed(Error::Corrupt(format!("{key} holds another state"))));
+            match checkpoints.read_key(&key, branch).await? {
+                Some(state) if state.through != Some(at) => {
+                    let corrupt = Error::Corrupt(format!("{key} holds another state"));
+                    return Err(Attempt::Failed(corrupt));
+                }
+                Some(state) => {
+                    touched.insert(key);
+                    return Ok(state);
+                }
+                None if kept => {}
+                None => return Err(Attempt::Failed(Error::Lost(key))),
             }
-            touched.insert(key);
-            return Ok(state);
         }
         let listed = checkpoints.list(branch, kept.then_some(at)).await;
         let mut state = match newest_to(&listed, at) {

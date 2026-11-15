@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 22:58'
-updated_date: '2026-11-15 02:22'
+updated_date: '2026-11-15 05:50'
 labels: []
 dependencies: []
 parent_task_id: TASK-407
@@ -25,7 +25,7 @@ collector::compact_object GETs the source object, then creates moves/<source> cr
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 specs/bucket models compaction's create landing after its pass's step, and a mutation keying moves by source alone finds a key written twice
-- [ ] #2 Moves keys carry the pass's epoch; readers and take_moves find them by listing the source's moves
+- [x] #2 Moves keys carry the pass's epoch; readers and take_moves find them by listing the source's moves
 <!-- AC:END -->
 
 ## Definition of Done
@@ -39,4 +39,6 @@ collector::compact_object GETs the source object, then creates moves/<source> cr
 
 <!-- SECTION:NOTES:BEGIN -->
 Spec: moves keyed by [b, s, e, way of passes], creates in flight (GcLand, create-only), readers and the collector find moves by listing; NoMovesByPass finds a key written twice in 1 s (4 passes). Code to do.
+
+Code pushed c8344a37a: moves keys <C>moves/<rest>/<epoch> (layout::moves(key, pass), moves_of, moves_under; Kind::Moves names its pass); fetch lists an object's moves and follows the latest pass's holding the extent; MovesMaps merges in pass order; collector keeps every pass's moves its ways reach. Tests passes_creating_moves_late_create_them_at_keys_of_their_own / _need_moves_by_pass (a stalled pass's create after later passes compacted and deleted: key never written vs written twice with the rule off). macOS gate: clippy + workspace 2493/2493.
 <!-- SECTION:NOTES:END -->

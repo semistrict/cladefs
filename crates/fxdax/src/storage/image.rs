@@ -346,13 +346,16 @@ mod tests {
     const MIB: usize = 1 << 20;
     const BRANCH: crate::Branch = extent_remote::layout::test_branch(7);
 
-    /// A device on a new image holding `capacity` bytes, in a new directory, and the image.
-    fn device(capacity: u64) -> (ImageDevice, PathBuf, tempfile::TempDir) {
+    /// A new directory, a device on a new image in it holding `capacity` bytes, and the image: in
+    /// that order, so that a test's bindings of them drop the device before the directory, as a
+    /// pass of its bucket's collector may run as it drops, which waits for it, and which would
+    /// retry for ever the requests of a bucket gone (TASK-428).
+    fn device(capacity: u64) -> (tempfile::TempDir, ImageDevice, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
         let made = (capacity, crate::host_store::BranchOf::Named(BRANCH), true);
         let keeping = crate::host_store::keeping().unwrap();
-        (ImageDevice::create(&image, made, keeping, Default::default()).unwrap(), image, dir)
+        (dir, ImageDevice::create(&image, made, keeping, Default::default()).unwrap(), image)
     }
 
     fn extent(sequence: u64) -> ExtentId {
@@ -384,7 +387,7 @@ mod tests {
 
     #[test]
     fn reads_what_was_written() {
-        let (device, _, _dir) = device(64 * MIB as u64);
+        let (_dir, device, _) = device(64 * MIB as u64);
         assert_eq!(device.block_count(), 64 * MIB as u64 / BLOCK as u64);
         assert_eq!(device.branch(), BRANCH.id);
         block_on(async {
@@ -425,7 +428,7 @@ mod tests {
     /// rather than giving another byte; its other parts read as written (TASK-153.11).
     #[test]
     fn flipped_bytes_fail_reads() {
-        let (device, image, _dir) = device(64 * MIB as u64);
+        let (_dir, device, image) = device(64 * MIB as u64);
         block_on(async {
             // Large enough to be stored on their own, in five parts: compressed, and raw.
             let contents = [
@@ -466,7 +469,7 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
     fn writes_held_back_by_a_commit_leave_the_executor_running() {
-        let (device, _, _dir) = device(16 * MIB as u64);
+        let (_dir, device, _) = device(16 * MIB as u64);
         let store = device.store.clone();
         let device = Arc::new(device);
         let executor = crate::executor::Executor::new(1);
@@ -507,7 +510,7 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_methods, reason = "a write in progress, as a commit waits for")]
     fn writes_held_back_by_a_commit_leave_their_own_task_running() {
-        let (device, _, _dir) = device(16 * MIB as u64);
+        let (_dir, device, _) = device(16 * MIB as u64);
         let store = device.store.clone();
         let device = Arc::new(device);
         let executor = crate::executor::Executor::new(1);
@@ -554,7 +557,7 @@ mod tests {
     /// An image holds what was flushed when it is opened again, and what wasn't is gone.
     #[test]
     fn extents_survive_reopening() {
-        let (device, image, _dir) = device(16 * MIB as u64);
+        let (_dir, device, image) = device(16 * MIB as u64);
         block_on(async {
             write(&device, extent(3), 0, &pattern(0, MIB)).await;
             write(&device, extent(259), 0, &pattern(1, 2 * BLOCK as usize)).await;
@@ -637,7 +640,7 @@ mod tests {
     /// Freeing an extent gives back the capacity it took.
     #[test]
     fn frees_make_room() {
-        let (device, _, _dir) = device(4 * MIB as u64);
+        let (_dir, device, _) = device(4 * MIB as u64);
         block_on(async {
             write(&device, extent(1), 0, &pattern(0, 3 * MIB)).await;
             device.flush().await.unwrap();
@@ -657,7 +660,7 @@ mod tests {
     /// The root is set durably, and kept across opening the image again.
     #[test]
     fn roots() {
-        let (device, image, _dir) = device(MIB as u64);
+        let (_dir, device, image) = device(MIB as u64);
         block_on(async {
             assert_eq!(device.root().await.unwrap(), Vec::<u8>::new());
             write(&device, extent(1), 0, &pattern(0, BLOCK as usize)).await;

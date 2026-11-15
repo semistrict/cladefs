@@ -4407,9 +4407,11 @@ mod tests {
     }
 
     /// What a fork to another cell reads of what it inherited, its parent having freed it,
-    /// checkpointed and been deleted, sweeps having run until they did nothing more.
+    /// checkpointed and been deleted, sweeps having run until they did nothing more: read by a
+    /// reader of another host's, whose bucket kept none of what it read decoded (TASK-407).
     async fn read_forked_from_a_deleted_parent() -> Result<Vec<u8>, Error> {
-        let bucket = store();
+        let objects: Arc<InMemory> = Arc::new(InMemory::new());
+        let bucket = Arc::new(Store::new(objects.clone(), ""));
         let (parent, child) = (celled(1, 1), celled(2, 2));
         branch::create(&*bucket, parent, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
@@ -4420,7 +4422,7 @@ mod tests {
         drop(writer);
         branch::delete(&*bucket, parent, 20, 0).await.unwrap();
         sweep(&*bucket).await?;
-        read_inherited(&bucket, child, extent).await
+        read_inherited(&Arc::new(Store::new(objects, "")), child, extent).await
     }
 
     /// TASK-395.3, TASK-395.4: a chain of forks across cells, a root's, its child's, its
