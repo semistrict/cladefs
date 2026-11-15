@@ -19,9 +19,10 @@
 #
 # CASES is how many cases the test tries of each mutant (CLADEFS_HOSTILE_CASES), unshrunk. Each
 # mutant's log is kept in $CLADEFS_MUTANTS_LOGS (default: a new directory, which it names). The tree
-# has the mutant in it while it runs. Each patch applies as it is, with no fuzz: one that needs any
-# has drifted from the code it changes. --check runs nothing: it applies and reverses each patch in
-# a copy of what it changes, in a second, as CI does. A patch that doesn't apply fails either.
+# has the mutant in it while it runs, and as it was when it ends, stopped or not. Each patch applies
+# as it is, with no fuzz: one that needs any has drifted from the code it changes. --check runs
+# nothing: it applies and reverses each patch in a copy of what it changes, in a second, as CI does.
+# A patch that doesn't apply fails either.
 
 set -u -o pipefail
 cd "$(dirname "$0")/../.."
@@ -48,7 +49,8 @@ if [[ ${#names[@]} == 0 ]]; then
     done
 fi
 
-# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses.
+# patch_round_trip (scripts/lib/patches.sh): whether a patch is well formed, applies and reverses;
+# patch_run, a command run with it in the tree.
 source scripts/lib/patches.sh
 
 broken=0
@@ -75,22 +77,19 @@ for name in "${names[@]}"; do
         failed=1
         continue
     fi
-    patch -s -F0 -p1 < "$patch"
     log=$logs/$name.log
     began=$SECONDS
     if [[ $killer == scripts/* ]]; then
         read -ra script <<< "$killer"
-        "${script[@]}" > "$log" 2>&1
+        patch_run "$patch" "$log" "${script[@]}"
         status=$?
         # A run that failed exits 1, as a test that failed exits 100.
         case $status in 1) status=100 ;; 100) status=2 ;; esac
     else
-        CLADEFS_HOSTILE_CASES=$cases PROPTEST_MAX_SHRINK_ITERS=0 \
-            cargo nextest run -p cladefs --lib --no-fail-fast --run-ignored all -E "test(=$killer)" \
-            > "$log" 2>&1
+        patch_run "$patch" "$log" env CLADEFS_HOSTILE_CASES="$cases" PROPTEST_MAX_SHRINK_ITERS=0 \
+            cargo nextest run -p cladefs --lib --no-fail-fast --run-ignored all -E "test(=$killer)"
         status=$?
     fi
-    patch -s -F0 -R -p1 < "$patch" || { echo "$name: its patch doesn't reverse: the tree has it" >&2; exit 1; }
     case $status in
         0) fate=MISSED; failed=1 ;;
         # What failed: proptest's reason, an allocation past the heap's bound, a signal, an
