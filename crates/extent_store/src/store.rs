@@ -495,15 +495,18 @@ impl<D: Dir> Framer<D> {
     /// its segment fills, as [`Framer::see_here`] does (TASK-400).
     fn see<'a>(
         &'a self,
-        state: Locked<'a, D::File>,
+        mut state: Locked<'a, D::File>,
         number: SegmentId,
         part: u64,
     ) -> Locked<'a, D::File> {
         let Some((raw, look)) = Self::to_see(&state, number) else { return state };
+        state.framing.looking = true;
         drop(state);
         let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
+        state.framing.looking = false;
+        self.idle.notify_all();
         state
     }
 
@@ -2551,6 +2554,19 @@ impl<D: Dir> Store<D> {
         match framing.iter().find_map(|&number| state.segments.framing_failure(number)) {
             Some(error) => bail!("framing a segment: {error}"),
             None => Ok(()),
+        }
+    }
+
+    /// fxdax: waits, holding no lock, until no look ahead at a part written whole is queued or
+    /// reading it ([`Store::see_ahead`]): the framer reads each, as its segment fills, beside what
+    /// wrote it and after, whatever comes next (TASK-400). What measures the directory's I/O across
+    /// an operation, as a test does, counts the operation's alone then, for none is queued but by
+    /// writes (TASK-423). Packing a part looked at ahead, on the threads packing ahead, reads no
+    /// file, and may run on.
+    pub fn wait_looked_ahead(&self) {
+        let mut state = self.lock();
+        while state.framing.looks_ahead() {
+            state = state.wait(&self.idle);
         }
     }
 

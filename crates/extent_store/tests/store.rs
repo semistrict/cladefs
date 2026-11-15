@@ -3469,6 +3469,10 @@ fn extents_written_in_runs_seal_where_they_are() {
     let second = in_flight(&store, extent(2), MAX_IO as u64, &data(2)[MAX_IO..]);
     second.finish();
     first.finish();
+    // fxdax: the commit's I/O alone: not the framer's reads of the parts written whole, looking at
+    // them ahead as the segment fills, which the writes queued, and which may land in the commit
+    // otherwise (TASK-400, TASK-423).
+    store.wait_looked_ahead();
     let before = dir.io();
     store.commit_ordered(None).unwrap();
     let sealed = dir.io();

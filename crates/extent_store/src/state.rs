@@ -121,6 +121,9 @@ impl extent_remote::recovery::Places for Lengths {
 pub(crate) struct Framing<F> {
     pub queue: std::collections::VecDeque<Job<F>>,
     pub running: bool,
+    /// fxdax: whether the framer's thread reads a part looked at ahead, holding no lock
+    /// (`Framer::see`, TASK-423).
+    pub looking: bool,
     pub written: Vec<(SegmentId, Arc<Framed<F>>)>,
     pub since: Option<Instant>,
     pub syncing: bool,
@@ -136,11 +139,17 @@ pub(crate) enum Job<F> {
 impl<F> Default for Framing<F> {
     fn default() -> Self {
         let queue = std::collections::VecDeque::new();
-        Self { queue, running: false, written: Vec::new(), since: None, syncing: false }
+        let written = Vec::new();
+        Self { queue, running: false, looking: false, written, since: None, syncing: false }
     }
 }
 
 impl<F> Framing<F> {
+    /// fxdax: whether a look ahead is queued, or reading its part ([`Framing::looking`]).
+    pub fn looks_ahead(&self) -> bool {
+        self.looking || self.queue.iter().any(|job| matches!(job, Job::See(..)))
+    }
+
     /// fxdax: segment `number`'s framing wrote `framed`, to be made durable.
     pub fn wrote(&mut self, number: SegmentId, framed: Arc<Framed<F>>) {
         self.written.push((number, framed));
