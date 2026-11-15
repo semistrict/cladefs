@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 14:55'
-updated_date: '2026-11-15 11:37'
+updated_date: '2026-11-15 14:26'
 labels:
   - testing
 dependencies: []
@@ -33,3 +33,9 @@ Seen on ubu1 2026-11-10 (reported by the TASK-310 session): /tmp, a 14 GB tmpfs,
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15 (claude, TASK-397): scripts/bench-rounds.sh's runs now take test-e2e.sh's own bucket, on /dev/shm, where they had one on disk in their results: a round killed (its memory limit, a cancel) leaves its bucket there, memory held past the job, as fxjob removes the job's TMPDIR alone. ubu1 held 7 such directories of 2026-11-10 to 11-13 today, all empty.
+<!-- SECTION:NOTES:END -->
