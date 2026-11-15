@@ -40,9 +40,10 @@ pub(crate) struct Sealer {
 }
 
 impl Sealer {
-    /// The sealer of a new raw file, under `dek`, which `key` names, from a salt drawn now.
+    /// The sealer of a new raw file, under `dek`, which `key` names, from a salt drawn now
+    /// ([`crate::sync::salt`]).
     pub fn new(dek: &Secret, key: KeyId) -> Self {
-        Self::of(dek, key, Salt::random())
+        Self::of(dek, key, crate::sync::salt())
     }
 
     /// The sealer of a raw file encrypted under `dek`, which `key` names, from `salt`.

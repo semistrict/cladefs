@@ -9,9 +9,28 @@
 //!
 //! And the rules the store's concurrency relies on, which those tests turn off one at a time to
 //! see a test fail: a test that never fails proves nothing.
+//!
+//! cladefs: and the salts of its raw files ([`salt`]): the system's, or Shuttle's, seeded.
 
 #[cfg(feature = "shuttle")]
 pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard};
+
+/// cladefs: the salt of a new raw file (`raw::Sealer::new`, TASK-411.5): drawn from the system's
+/// generator; under Shuttle, from its generator, seeded as its schedule is, so that a test's run
+/// is a function of its seed (tests/shuttle/crash.rs). What a crash leaves of a raw file unwritten,
+/// a page the cache held dirty, reads as the decryption of zeros under the file's key, as unlike
+/// from one salt to another as noise: its framed segment, uploaded, holds it, unreferenced.
+pub(crate) fn salt() -> extent_keys::Salt {
+    #[cfg(feature = "shuttle")]
+    {
+        use shuttle::rand::RngCore as _;
+        let mut salt = [0; extent_keys::SALT_LEN];
+        shuttle::rand::thread_rng().fill_bytes(&mut salt);
+        extent_keys::Salt(salt)
+    }
+    #[cfg(not(feature = "shuttle"))]
+    extent_keys::Salt::random()
+}
 use std::sync::Arc;
 #[cfg(not(feature = "shuttle"))]
 pub(crate) use std::sync::{Condvar, Mutex, MutexGuard};
