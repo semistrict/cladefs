@@ -3,9 +3,11 @@ id: TASK-411.10
 title: >-
   Plaintext tenants on a host with a KMS cost one KMS wrap call per store
   opening: the KMS's no-such-tenant answer is not cached
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-14 23:22'
+updated_date: '2026-11-15 00:53'
 labels: []
 dependencies:
   - TASK-411.3
@@ -23,8 +25,8 @@ TASK-411.3: a cell chooses encryption iff a KMS is configured and the tenant has
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A host opening several stores of a tenant with no KEK makes at most one KMS call for it within a bounded time: a test counts calls (testing::Counted)
-- [ ] #2 A tenant given a KEK later gets encrypted new cells within that bound, documented in doc-16
+- [x] #1 A host opening several stores of a tenant with no KEK makes at most one KMS call for it within a bounded time: a test counts calls (testing::Counted)
+- [x] #2 A tenant given a KEK later gets encrypted new cells within that bound, documented in doc-16
 <!-- AC:END -->
 
 ## Definition of Done
@@ -33,3 +35,21 @@ TASK-411.3: a cell chooses encryption iff a KMS is configured and the tenant has
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. keys::Kms keeps the tenants the KMS said have no KEK (NoSuchTenant on a wrap: new_kek's, or a pool refill's), with when it said so, believed for keys::KEKLESS_FOR (60 s): new_kek answers None (the cell in the clear) without a call meanwhile; any answer of the KMS for the tenant forgets it (Kms::answered). Clock: tokio::time::Instant, so tests advance a paused clock.
+2. Test (extent_remote keys::tests): Counted, several new_cell_kek for a kekless tenant -> 1 wrap; KEK created in the KMS -> still None within the bound, no call; clock advanced past it -> Some (encrypted), and the next ask goes on pooled/wrap as before.
+3. Test (extent_store upload::encrypted): a host opening three stores of a kekless tenant, new cells and reopenings -> (1, 0) calls.
+4. Docs: keys.rs module/Kms docs; doc-16 'The KMS and how a cell chooses' gains the bound and why; concurrent first openings may each ask (no shared probe: a wrap's KEK is the cell's own).
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Branch t3/cache-tenant-keys-gc (from 979ecd28f). The brief called this TASK-411.11; its text and ACs are this task's (411.11, pruning old cell KEK generations, untouched).
+keys::Kms.kekless: tenant -> tokio::time::Instant of the NoSuchTenant heard (new_kek's inline wrap, or a pool refill's fill). Kms::new_kek: pooled KEK first; then kekless within KEKLESS_FOR (60 s) -> Ok(None), no call; else wrap. Kms::answered (any Ok of the KMS for the tenant) forgets it. tokio's Instant so tests drive a paused clock; outside a runtime it is std's.
+Bound 60 s: the cost of a plaintext tenant drops from a round trip per store opening to one per host per minute (openings are what call: every opening of a store whose record has no DEK asks new_cell_kek in case it makes the cell); the price is that a tenant given a KEK gets sealed new cells within 60 s, cells made in the clear meanwhile staying clear for good (a cell's sealing is chosen at making). A minute is short beside onboarding a tenant's BYOK and long beside a zygote's burst of restores. Not shared between concurrent first askers: a wrap's KEK belongs to the cell it makes, so a shared probe would need a second wrap anyway; a burst asks once per concurrent opening, then nothing for 60 s.
+Tests: extent_remote keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while (paused current-thread runtime: 3 asks -> 1 wrap; KEK created, advance 59 s -> None, no call; +1 s -> Some, generation 1, 2 wraps; next take wraps as before); extent_store upload::encrypted::cells_of_tenants_with_no_kek_are_in_the_clear extended (host opens a second volume of the cell, a volume of a new cell, the first again: calls stay (1, 0); another host asks once: (2, 0)). Both pass.
+<!-- SECTION:NOTES:END -->

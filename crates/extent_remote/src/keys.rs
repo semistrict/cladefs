@@ -14,7 +14,8 @@
 //! it keeps in a pool for the cells it makes: none is unwrapped then. A cell is made encrypted iff
 //! the host has a KMS and the cell's tenant has a KEK there ([`Kms::new_kek`]); a tenant with
 //! none has cells in the clear, and any other refusal of the KMS fails the making, naming the
-//! tenant (a revoked one makes no cell, in the clear least of all).
+//! tenant (a revoked one makes no cell, in the clear least of all). That a tenant has none is
+//! believed for [`KEKLESS_FOR`], asking nothing more meanwhile (TASK-411.10).
 //!
 //! **Opening a store** gives every writer and reader of it a [`Ring`]: its branch's DEKs, every
 //! generation of them, and its ancestors', unwrapped under the cell's KEK ([`ring`]); and which of
@@ -64,6 +65,8 @@ use futures::future::{BoxFuture, FutureExt as _, Shared};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+use tokio::time::Instant;
 
 /// A generation of a cell's KEK, wrapped by its tenant's KEK in the KMS: what the cell's object
 /// keeps of it.
@@ -464,10 +467,17 @@ struct Pools {
     eras: HashMap<u64, u64>,
 }
 
+/// How long a host believes the KMS that a tenant has no KEK, its cells made in the clear, asking
+/// it nothing for the tenant meanwhile (TASK-411.10): so that a host opening its stores, each
+/// asking for a KEK should its cell be made, calls the KMS once a minute at most, and a tenant
+/// given a KEK has its cells made sealed from a minute on at most. Its cells made before stay in
+/// the clear (doc-16, The KMS and how a cell chooses).
+pub const KEKLESS_FOR: Duration = Duration::from_secs(60);
+
 /// A host's KMS, and what it keeps of what it asked it: each cell's KEKs, by the taking of the cell
 /// its object names, unwrapped once for all of it ([`CellKeys`]); a pool of new cell KEKs a tenant,
-/// wrapped by their tenants' KEKs ahead of the cells made with them; and the tenants whose KEKs it
-/// last heard are revoked or destroyed.
+/// wrapped by their tenants' KEKs ahead of the cells made with them; the tenants whose KEKs it
+/// last heard are revoked or destroyed; and those it heard have none ([`KEKLESS_FOR`]).
 pub struct Kms {
     kms: kms::Shared,
     /// Each cell's KEKs unwrapped, by generation, and the taking they were unwrapped for: a
@@ -481,6 +491,9 @@ pub struct Kms {
     /// The tenants whose KEKs are revoked or destroyed, as last heard, and how it was said: until
     /// the KMS answers a call for one again ([`Kms::revoked`]).
     refused: Mutex<HashMap<u64, String>>,
+    /// The tenants the KMS said have no KEK, and when: believed for [`KEKLESS_FOR`] from then,
+    /// until it answers a call for one.
+    kekless: Mutex<HashMap<u64, Instant>>,
 }
 
 /// The error of a KMS's refusal, naming its tenant.
@@ -512,6 +525,7 @@ impl Kms {
             pools: Mutex::default(),
             pooling,
             refused: Mutex::default(),
+            kekless: Mutex::default(),
         })
     }
 
@@ -532,9 +546,29 @@ impl Kms {
         answer
     }
 
-    /// The KMS answered a call for `tenant`: its KEK is not refused, whatever was heard before.
+    /// The KMS answered a call for `tenant`: its KEK is not refused, nor missing, whatever was
+    /// heard before.
     fn answered(&self, tenant: u64) {
         self.refused.lock().unwrap().remove(&tenant);
+        self.kekless.lock().unwrap().remove(&tenant);
+    }
+
+    /// The KMS said `tenant` has no KEK: believed for [`KEKLESS_FOR`] from now.
+    fn has_no_kek(&self, tenant: u64) {
+        self.kekless.lock().unwrap().insert(tenant, Instant::now());
+    }
+
+    /// Whether the KMS said `tenant` has no KEK, less than [`KEKLESS_FOR`] ago.
+    fn kekless(&self, tenant: u64) -> bool {
+        let mut kekless = self.kekless.lock().unwrap();
+        match kekless.get(&tenant) {
+            Some(heard) if heard.elapsed() < KEKLESS_FOR => true,
+            Some(_) => {
+                kekless.remove(&tenant);
+                false
+            }
+            None => false,
+        }
     }
 
     /// `tenant`'s KEK is revoked or destroyed, as `why` says: the KMS said so, or the control API
@@ -558,9 +592,11 @@ impl Kms {
     }
 
     /// A new KEK for a cell of `tenant`'s, and it wrapped by the tenant's KEK, from the pool, or
-    /// wrapped by the KMS now: none if the tenant has no KEK there, its cells in the clear. Any
-    /// other refusal fails it, naming the tenant: a tenant whose KEK is revoked makes no cell. A
-    /// take leaving the pool low refills it, off this path ([`Pooling`]).
+    /// wrapped by the KMS now: none if the tenant has no KEK there, its cells in the clear, which
+    /// is believed for [`KEKLESS_FOR`], no call made for it meanwhile. Any other refusal fails it,
+    /// naming the tenant: a tenant whose KEK is revoked makes no cell. A take leaving the pool low
+    /// refills it, off this path ([`Pooling`]). Takes asking at once, before the KMS has said, ask
+    /// it each: a KEK wrapped is the one cell's it makes, which no other take may share.
     pub async fn new_kek(
         self: &Arc<Self>,
         tenant: u64,
@@ -571,13 +607,19 @@ impl Kms {
             self.refill(tenant);
             return Ok(Some(kek));
         }
+        if self.kekless(tenant) {
+            return Ok(None);
+        }
         let kek = Secret::random();
         match self.heard(tenant, self.kms.wrap_dyn(tenant, &kek).await) {
             Ok(wrapped) => {
                 self.refill(tenant);
                 Ok(Some((Arc::new(kek), wrapped)))
             }
-            Err(kms::Error::NoSuchTenant { .. }) => Ok(None),
+            Err(kms::Error::NoSuchTenant { .. }) => {
+                self.has_no_kek(tenant);
+                Ok(None)
+            }
             Err(error) => Err(refused(error)),
         }
     }
@@ -632,8 +674,9 @@ impl Kms {
 
     /// Wraps `batch` new KEKs of `tenant`'s at once, into its pool of era `era`: dropped since, they
     /// go with it. A refusal saying the tenant's KEK is revoked or destroyed drops its pool
-    /// ([`Kms::heard`]); a tenant with no KEK, of cells in the clear, gets none; any other refusal
-    /// is logged, the next take refilling it again.
+    /// ([`Kms::heard`]); a tenant with no KEK, of cells in the clear, gets none, which is believed
+    /// for [`KEKLESS_FOR`] ([`Kms::new_kek`]); any other refusal is logged, the next take
+    /// refilling it again.
     async fn fill(self: Arc<Self>, tenant: u64, era: u64, batch: usize) {
         let wraps = (0..batch).map(|_| {
             let kms = self.kms.clone();
@@ -653,7 +696,7 @@ impl Kms {
         }
         match failed {
             Some(error) if revokes(&error) => self.revoked(tenant, error.to_string()),
-            Some(kms::Error::NoSuchTenant { .. }) => {}
+            Some(kms::Error::NoSuchTenant { .. }) => self.has_no_kek(tenant),
             Some(error) => log::warn!("fxdax: refilling tenant {tenant}'s pool of KEKs: {error}"),
             None => self.answered(tenant),
         }
@@ -1594,6 +1637,35 @@ mod tests {
         let taken = runtime.block_on(inheriting(Some(&kms), &source, test_branch(7), child));
         assert_eq!(kms.in_pool(2), 0);
         drop(taken);
+    }
+
+    /// TASK-411.10: a tenant the KMS says has no KEK is believed to have none for
+    /// [`KEKLESS_FOR`]: its cells made in the clear, one wrap asked of the KMS however many are,
+    /// the KEK given it meanwhile heard of only then; from then on its cells are made sealed.
+    #[test]
+    fn tenants_without_a_kek_are_asked_for_one_once_a_while() {
+        let (_dir, counted, kms) = kms();
+        let runtime =
+            tokio::runtime::Builder::new_current_thread().enable_all().start_paused(true).build();
+        let runtime = runtime.unwrap();
+        let tenant = 2;
+        let new = || runtime.block_on(new_cell_kek(Some(&kms), tenant)).unwrap();
+        for _ in 0..3 {
+            assert!(new().is_none());
+        }
+        assert_eq!((counted.wraps(), counted.unwraps()), (1, 0));
+        // Given a KEK: its cells still made in the clear until the bound, asking nothing.
+        counted.inner().create(tenant).unwrap();
+        runtime.block_on(tokio::time::advance(KEKLESS_FOR - Duration::from_secs(1)));
+        assert!(new().is_none());
+        assert_eq!(counted.wraps(), 1);
+        runtime.block_on(tokio::time::advance(Duration::from_secs(1)));
+        let (_, kek) = new().unwrap();
+        assert_eq!(kek.generation, FIRST);
+        assert_eq!(counted.wraps(), 2);
+        // Its pool takes on from here as any tenant's.
+        assert!(new().is_some());
+        assert_eq!(counted.wraps(), 3);
     }
 
     /// A cell made by the host, held by `holder`, of a KEK of `kms`'s pool, and its keys.

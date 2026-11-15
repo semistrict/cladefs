@@ -361,6 +361,20 @@ fn cells_of_tenants_with_no_kek_are_in_the_clear() {
     assert_eq!(read(&world, &host, &store, ExtentId::new(branch.id, 1), 4096), Ok(data));
     // The tenant's KEK asked for once, which it has not.
     assert_eq!(world.calls(), (1, 0));
+    // TASK-411.10: its other stores opened by the host, a volume of the cell, one of a new cell,
+    // and the first again, ask nothing more: the answer is believed for `keys::KEKLESS_FOR`.
+    drop((store, remote));
+    let other = Branch { id: 8, ..branch };
+    let elsewhere = Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 2 }, id: 9 };
+    let dirs = [made(other, "b"), made(elsewhere, "a"), dir.crash(0)];
+    for dir in &dirs {
+        let (store, _remote) = open_on(&world, &host, dir).unwrap();
+        assert!(store.keys().is_empty());
+    }
+    assert_eq!(world.calls(), (1, 0));
+    // Another host asks once itself.
+    open_on(&world, &world.host(6), &made(Branch { id: 10, ..elsewhere }, "b")).unwrap();
+    assert_eq!(world.calls(), (2, 0));
 }
 
 /// AC #3: a store whose tenant's KEK is revoked opens on no host taking its cell, the error naming

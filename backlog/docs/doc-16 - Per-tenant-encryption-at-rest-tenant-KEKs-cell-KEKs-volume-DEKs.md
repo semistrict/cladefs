@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 00:23'
+updated_date: '2026-11-15 00:52'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -174,6 +174,17 @@ dropped with its pool, never written out unwrapped.
   other refusal (revoked, destroyed, unreachable, a bad `FXDAX_KMS`) fails the making, so that no
   cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
+  *(TASK-411.10)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
+  that heard it (`keys::Kms::new_kek`, or a pool's refill), asking the KMS nothing for that tenant
+  meanwhile: every opening of a store whose record has no DEK asks for a KEK in case it makes the
+  cell, so a host opening a plaintext tenant's stores made one wrap call per opening; now one a
+  minute at most (openings asking at once, before the first answer, ask each: a wrapped KEK is one
+  cell's alone). The cost: a tenant given a KEK has new cells made sealed within 60 s, not at once;
+  cells made in the clear before stay so (a cell's sealing is chosen as it is made). Give a tenant
+  its KEK a minute before making the cells it wants sealed. Any answer of the KMS for the tenant
+  forgets it had none. `extent_remote` `keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while`
+  (paused clock) and `extent_store` `upload::encrypted::cells_of_tenants_with_no_kek_are_in_the_clear`
+  count the calls.
 - **Taking a cell** unwraps its KEK once per taking (`keys::Kms`, keyed by cell, generation and
   the taking's epoch and holder; a writer's recovery, which reads before it holds the cell,
   predicts the taking it makes, `CellKeys::to_hold`), however many volumes open: a test counts one
