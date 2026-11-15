@@ -984,7 +984,8 @@ fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
 /// its open segment's raw file, its log and a large extent's raw file among them, written,
 /// committed, or framed; reads of the extents, open, sealed in the open segment or in a file of
 /// their own, and framed, give it back. Its clear twin's raw files hold it as written, and its
-/// logs are headed as before (`wal::LOG_MAGIC`).
+/// logs are headed as before (`wal::LOG_MAGIC`). TASK-411.15: [`crate::on_disk`], holding no key,
+/// finds none of the sealed store's framed files and logs in the clear, and its twin's all so.
 #[test]
 fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
     for sealed in [true, false] {
@@ -1035,8 +1036,20 @@ fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
         for (path, log) in logs {
             assert_eq!(&log[..8], magic, "{path}");
         }
+        // TASK-411.15: and so a reader holding no key tells, by their trailers and headers.
+        let on_disk = crate::on_disk(&dir).unwrap().unwrap();
+        assert_eq!(on_disk.bucket.as_deref(), Some("memory:///encrypted"));
+        assert_eq!(on_disk.branch, branch);
+        let clear: BTreeSet<&str> = on_disk.clear.iter().map(|file| file.what).collect();
+        let expected = match sealed {
+            true => BTreeSet::new(),
+            false => BTreeSet::from(["a framed extent", "a framed segment", "a segment's log"]),
+        };
+        assert_eq!(clear, expected, "sealed {sealed}: {on_disk:?}");
+        assert!(on_disk.read >= 3, "sealed {sealed}: {on_disk:?}");
         remote.cut_short()();
     }
+    assert_eq!(crate::on_disk(&MemDir::new()).unwrap(), None, "no store");
 }
 
 /// TASK-400 in a sealed store (TASK-411.5): a sealed store's segment that compresses has none of

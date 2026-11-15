@@ -3763,6 +3763,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "extent_frame",
+ "extent_keys",
  "extent_remote",
  "extent_store",
  "follower_history",
