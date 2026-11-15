@@ -4,10 +4,11 @@
 # found in the LICENSE file.
 
 # Run clippy's rules (clippy.toml), the test suite, the simulation of the bucket's protocol, the concurrency
-# tests under Shuttle, the scripts' tests (scripts/tests) and the mutant runners' checks, the Go
-# client's (go/), and on Linux the guest tests' own tests (guest/tests, both halves) and the VMM's
-# own that cladefs adds to (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh):
-# what CI runs, a part a job.
+# tests under Shuttle and the models of memory orderings under loom, the scripts' tests
+# (scripts/tests) and the mutant runners' checks, the Go client's (go/), and on Linux the guest
+# tests' own tests (guest/tests, both halves) and the VMM's own that cladefs adds to
+# (vendor/firecracker, built as cladefs builds it: scripts/firecracker-cargo.sh): what CI runs, a
+# part a job.
 # Arguments are passed to the suite's and the simulation's `cargo nextest run`. CLADEFS_TEST_PARTS
 # names the parts to run, separated by spaces (default: all of clippy, workspace, sim, shuttle,
 # scripts, go, and guest and firecracker on Linux).
@@ -47,6 +48,8 @@ if part clippy; then
         -A clippy::all -D clippy::disallowed_methods -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p extent_store -p physmem -p cladefs \
         -p follower -p follower_sim --features shuttle --tests -- -A clippy::all -D warnings
+    cargo clippy --manifest-path "$root/Cargo.toml" -p physmem -p cladefs -p virtio_extent \
+        --features loom --tests -- -A clippy::all -D warnings
 fi
 # The simulation of extent_remote's protocol over extent_store's stores (TASK-88): its profiles'
 # soaks, and its rules' seed searches, each until a seed with the rule off finds what the rule
@@ -77,6 +80,12 @@ if part shuttle; then
     cargo nextest run --manifest-path "$root/Cargo.toml" -p follower --features shuttle
     # The followers' simulation: Fxfs as writer and followers on an extent store (TASK-42.1).
     cargo nextest run --manifest-path "$root/Cargo.toml" -p follower_sim --features shuttle
+    # The protocols of atomics under loom, each crate's `loom` feature, whose every interleaving
+    # and weak ordering Shuttle, seeing every atomic as SeqCst, can't run (docs/memory-ordering.md,
+    # TASK-444.2).
+    for crate in cladefs virtio_extent physmem; do
+        cargo nextest run --manifest-path "$root/Cargo.toml" -p "$crate" --features loom --lib loom::
+    done
 fi
 # The scripts' own tests, and that each hand mutant's patch or edits apply as they are: one that
 # stopped applying would test nothing (guest/sim's need a kernel tree, so are CI's guest-sim job's,
@@ -91,6 +100,7 @@ if part scripts; then
     "$root/crates/fxfs-sim-diff/mutants.sh" --check
     "$root/crates/cladefs/mutants.sh" --check
     "$root/crates/extent_remote/mutants.sh" --check
+    "$root/scripts/loom-mutants.sh" --check
     "$root/scripts/guest-mutants-host.py" --check
     # Firecracker's lock as Cargo resolves it with cladefs's crates, which only Linux builds: a
     # dependency added to them went unnoticed on macOS (TASK-395).

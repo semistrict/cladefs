@@ -1,0 +1,15 @@
+# An answer's clearing of its ask releases nothing of its own: equivalent, as the capacity's store
+# after it, releasing, publishes it to a read that acquires the capacity (Resizing::known).
+# Fate: equivalent: stronger than needed, a site of AtomVChecker's third class (docs/memory-ordering.md)
+# Killer: virtio_extent notices::loom::capacities_taken_are_read_with_their_asks_answered
+--- a/crates/virtio_extent/src/notices.rs
++++ b/crates/virtio_extent/src/notices.rs
+@@ -117,7 +117,7 @@ impl Resizing {
+         if self.asked.load(Ordering::Acquire) != capacity {
+             return;
+         }
+-        self.asked.store(0, Ordering::Release);
++        self.asked.store(0, Ordering::Relaxed);
+         if took {
+             // Releasing the ask cleared with it ([`Resizing::known`]).
+             self.capacity.store(capacity, Ordering::Release);

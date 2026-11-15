@@ -1029,7 +1029,8 @@ mod tests {
     fn contents_are_written_a_run_of_data_at_a_time() {
         let runs = |data: &[u8]| data_runs(data).collect::<Vec<_>>();
         assert_eq!(runs(&vec![0x5a; CHUNK]), [0..CHUNK]);
-        assert_eq!(runs(&vec![0; CHUNK]), []);
+        // Typed: regex-automata, which the `loom` feature brings in, compares ranges with spans.
+        assert_eq!(runs(&vec![0; CHUNK]), [] as [std::ops::Range<usize>; 0]);
         // Data in blocks 1 and 2, 5, and the short last one.
         let mut chunk = vec![0; 8 * HOLE + 100];
         for at in [HOLE, 3 * HOLE - 1, 5 * HOLE + 7, 8 * HOLE + 99] {

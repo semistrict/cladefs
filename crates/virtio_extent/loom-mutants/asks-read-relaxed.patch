@@ -1,0 +1,15 @@
+# The driver's read of the ask acquires nothing of its own: equivalent, as Resizing::known reads it
+# after an acquiring read of the capacity, which coherence then keeps it from reading before.
+# Fate: equivalent: stronger than needed, a site of AtomVChecker's third class (docs/memory-ordering.md)
+# Killer: virtio_extent notices::loom::capacities_taken_are_read_with_their_asks_answered
+--- a/crates/virtio_extent/src/notices.rs
++++ b/crates/virtio_extent/src/notices.rs
+@@ -71,7 +71,7 @@ impl Resizing {
+ 
+     /// The capacity the guest is asked to shrink to, 0 if none.
+     pub fn asked(&self) -> u64 {
+-        self.asked.load(Ordering::Acquire)
++        self.asked.load(Ordering::Relaxed)
+     }
+ 
+     /// The capacity, then the shrink asked, as the driver reads them

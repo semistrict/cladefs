@@ -9,11 +9,19 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+# Its notices' atomics and locks on loom's (`sync`), whose model then runs every interleaving of
+# their models' threads under the orderings each access asks for (docs/memory-ordering.md,
+# TASK-444.2). Only for those models, as loom's atomics work only in one:
+# `cargo nextest run -p virtio_extent --features loom --lib loom::`.
+loom = ["dep:loom"]
+
 [dependencies]
 futures.workspace = true
 cladefs = { path = "../cladefs" }
 libc.workspace = true
 log.workspace = true
+loom = { workspace = true, optional = true }
 serde.workspace = true
 thiserror.workspace = true
 zerocopy.workspace = true

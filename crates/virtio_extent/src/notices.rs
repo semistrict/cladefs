@@ -9,8 +9,10 @@
 //! ([`ConfigInterrupt`]); the configuration space reads the values as they are
 //! ([`Device::read_config`](crate::Device::read_config)).
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use crate::sync::Mutex;
+use crate::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use log::error;
 
@@ -72,6 +74,16 @@ impl Resizing {
         self.asked.load(Ordering::Acquire)
     }
 
+    /// The capacity, then the shrink asked, as the driver reads them
+    /// ([`Device::read_config`](crate::Device::read_config)): in that order, so that a capacity an
+    /// answer took is read with the ask it answered gone, as [`Resizing::answered`] clears the
+    /// ask before it releases the capacity, which this acquires before it reads the ask.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn known(&self) -> (u64, u64) {
+        let capacity = self.capacity();
+        (capacity, self.asked())
+    }
+
     /// The store's capacity is `capacity` bytes, as it opens, before the guest is told anything.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn opened(&self, capacity: u64) {
@@ -107,6 +119,7 @@ impl Resizing {
         }
         self.asked.store(0, Ordering::Release);
         if took {
+            // Releasing the ask cleared with it ([`Resizing::known`]).
             self.capacity.store(capacity, Ordering::Release);
         }
     }
@@ -299,5 +312,30 @@ pub(crate) mod tests {
         following.committed(5);
         assert_eq!(following.latest(), 5);
         assert_eq!(interrupt.0.load(Ordering::Relaxed), 2);
+    }
+}
+
+/// The notices under loom, its every interleaving of their threads and weak orderings.
+#[cfg(all(test, feature = "loom"))]
+mod loom {
+    use super::*;
+
+    /// What the driver reads of a shrink the guest answered, as the guest answers it: the capacity
+    /// it took with the ask gone, never with the ask still there, which would have it shrink
+    /// again to where it is (TASK-79.41's answers).
+    #[test]
+    fn capacities_taken_are_read_with_their_asks_answered() {
+        ::loom::model(|| {
+            let resizing = ::loom::sync::Arc::new(Resizing::default());
+            resizing.opened(8);
+            resizing.changed(6, true);
+            let answering = ::loom::thread::spawn({
+                let resizing = resizing.clone();
+                move || resizing.answered(6, true)
+            });
+            let (capacity, asked) = resizing.known();
+            answering.join().unwrap();
+            assert_ne!((capacity, asked), (6, 6), "the capacity taken read with its ask");
+        });
     }
 }

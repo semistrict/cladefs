@@ -38,6 +38,7 @@ pub mod persist;
 pub mod protocol;
 mod requests;
 mod store;
+mod sync;
 #[cfg(target_os = "linux")]
 mod window;
 #[cfg(target_os = "linux")]
