@@ -11,22 +11,22 @@
 # Killer: scripts/sandboxes.sh short
 --- a/crates/extent_store/src/segments.rs
 +++ b/crates/extent_store/src/segments.rs
-@@ -1376,6 +1376,7 @@ fn frame_segment<D: Dir>(
-     // data (TASK-411.2, TASK-411.3).
+@@ -1389,6 +1389,7 @@ fn frame_segment<D: Dir>(
      let mut packer = extent_frame::Packer::new(sealing);
-     let in_place_maybe = quiet && len > 0 && packer.key().is_none();
+     let clear = raw.clear().filter(|_| packer.key().is_none());
+     let in_place_maybe = quiet && len > 0 && clear.is_some();
 +    let in_place_maybe = false && in_place_maybe;
      let parts = framing::read(&**raw, len, in_place_maybe)?;
      timing.took(framing_phase::READ);
      // fxdax: in place at once if a sample of its parts says compressing them saves too little,
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -2083,10 +2083,6 @@ impl<D: Dir> Store<D> {
+@@ -2111,10 +2111,6 @@ impl<D: Dir> Store<D> {
              raw.read_cached(buf, at)?;
              let end = packer.end();
              let packed = packer.push(buf);
 -            // As they are, where they are, as those before.
--            if framed.is_none() && end == at && packed[..] == buf[..] {
+-            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
 -                continue;
 -            }
              let file = match &mut framed {
