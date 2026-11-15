@@ -4,10 +4,11 @@ title: >-
   rename-to-cladefs.sh --backlog garbled the docs' titles: YAML quoting doubled
   ('''TASK-26.1 ...'''), doc-17's folded title became '>-' and its file 'doc-17
   - untitled.md'; CI's guide job fails on it
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:39'
-updated_date: '2026-11-15 13:39'
+updated_date: '2026-11-15 13:42'
 labels:
   - backlog
   - ci

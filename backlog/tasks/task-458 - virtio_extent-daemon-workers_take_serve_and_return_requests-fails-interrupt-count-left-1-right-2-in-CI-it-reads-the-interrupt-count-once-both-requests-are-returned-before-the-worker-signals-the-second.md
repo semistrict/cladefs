@@ -4,9 +4,11 @@ title: >-
   virtio_extent::daemon workers_take_serve_and_return_requests fails 'interrupt
   count left 1, right 2' in CI: it reads the interrupt count once both requests
   are returned, before the worker signals the second
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:37'
+updated_date: '2026-11-15 13:42'
 labels:
   - testing
   - flake
