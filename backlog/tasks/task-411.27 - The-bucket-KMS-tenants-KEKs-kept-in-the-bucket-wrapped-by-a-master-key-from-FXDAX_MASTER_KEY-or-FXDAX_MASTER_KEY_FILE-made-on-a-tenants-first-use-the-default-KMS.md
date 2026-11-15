@@ -7,6 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 11:09'
+updated_date: '2026-11-15 11:09'
 labels: []
 dependencies: []
 documentation:
@@ -22,7 +23,7 @@ ordinal: 823000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The user's decisions (2026-11-15): when no FXDAX_KMS is configured, the default is not plaintext but a simple KMS keeping every tenant's KEK in object storage itself, encrypted with one master key given in an environment variable or a file. A tenant's KEK is made on its first use (no setup per tenant). Several master keys may be given for rotation: the newest wraps, any unwraps. A host with neither FXDAX_KMS nor a master key refuses to start (TASK-411.27 switches the defaults and removes plaintext). Shredding a tenant is deleting its KEK object (the bucket-versioning caveat of a cell shred, doc-16).
+The user's decisions (2026-11-15): when no FXDAX_KMS is configured, the default is not plaintext but a simple KMS keeping every tenant's KEK in object storage itself, encrypted with one master key given in an environment variable or a file. A tenant's KEK is made on its first use (no setup per tenant). Several master keys may be given for rotation: the newest wraps, any unwraps. A host with neither FXDAX_KMS nor a master key refuses to start (TASK-411.28 switches the defaults and removes plaintext). Shredding a tenant is deleting its KEK object (the bucket-versioning caveat of a cell shred, doc-16).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
