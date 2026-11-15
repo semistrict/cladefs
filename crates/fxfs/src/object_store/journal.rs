@@ -20,7 +20,8 @@
 // within a block that doesn't verify, where upstream's reader panics (TASK-149.23). How far the
 // journal is written, flushed, synced and zeroed is one value (`JournalPosition`, position.rs),
 // which checks the orders between them as each changes, where upstream's `Inner` has a field for
-// each (TASK-160.25).
+// each (TASK-160.25). With the `journal_trace` feature, a journal given a trace records its steps
+// for specs/journal's trace validation (`trace`, TASK-444.1).
 
 //! The journal is implemented as an ever extending file which contains variable length records
 //! that describe mutations to be applied to various objects.  The journal file consists of
@@ -41,6 +42,8 @@ mod checksum_list;
 mod position;
 mod reader;
 pub mod super_block;
+#[cfg(feature = "journal_trace")]
+pub mod trace;
 mod writer;
 
 use crate::checksum::{Checksum, Checksums};
@@ -70,6 +73,8 @@ use crate::object_store::transaction::{
     AllocatorMutation, LockKey, Mutation, MutationV63, ObjectMutationIterator, ObjectStoreMutation,
     Options, TRANSACTION_MAX_JOURNAL_USAGE, Transaction, lock_keys,
 };
+#[cfg(feature = "journal_trace")]
+use crate::object_store::transaction::TxnMutation;
 use crate::object_store::{
     AssocObj, AttributeId, DataObjectHandle, Extent, HandleOptions, HandleOwner, INVALID_OBJECT_ID,
     Item, ItemRef, NewChildStoreOptions, ObjectStore, ReservedId,
@@ -100,6 +105,17 @@ use storage_units::BlockSize;
 
 // The journal file is written to in blocks of this size.
 pub const BLOCK_SIZE: BlockSize = BlockSize::SIZE_4KIB;
+
+/// fxdax: records the step `$event` makes, if `$journal` is traced (`trace`, TASK-444.1); nothing
+/// without the `journal_trace` feature, `$event` not evaluated.
+macro_rules! traced {
+    ($journal:expr, $event:expr) => {
+        #[cfg(feature = "journal_trace")]
+        if let Some(trace) = &$journal.traced {
+            trace.push($event);
+        }
+    };
+}
 
 // The journal file is extended by this amount when necessary.
 const CHUNK_SIZE: u64 = 131_072;
@@ -258,6 +274,14 @@ impl SerializedRecords {
     }
 }
 
+/// fxdax: a super-block's objects' offsets, by object ID, for the journal's trace.
+#[cfg(feature = "journal_trace")]
+fn traced_offsets(offsets: &HashMap<u64, u64>) -> Vec<(u64, u64)> {
+    let mut offsets: Vec<_> = offsets.iter().map(|(&object_id, &offset)| (object_id, offset)).collect();
+    offsets.sort_unstable();
+    offsets
+}
+
 pub(super) fn journal_handle_options() -> HandleOptions {
     HandleOptions { skip_journal_checks: true, ..Default::default() }
 }
@@ -289,6 +313,10 @@ pub struct Journal {
 
     // fxdax: what it waited for and did, as `stats` says.
     stats: JournalStats,
+
+    // fxdax: where its steps are recorded, if anywhere (`JournalOptions::trace`).
+    #[cfg(feature = "journal_trace")]
+    traced: Option<Arc<trace::JournalTrace>>,
 }
 
 /// fxdax: how often, and how long, transactions waited for the journal's space, which compactions
@@ -300,6 +328,20 @@ pub struct JournalStats {
     pub space_wait_ns: AtomicU64,
     pub compactions: AtomicU64,
     pub compaction_ns: AtomicU64,
+}
+
+/// fxdax: the slot that writing a super-block takes, which one holder at a time has, as
+/// `Inner::compaction_running` says: compactions (the flush task's, and those forced), format's
+/// super-blocks, and the one recording the journal's tail (`write_super_block` takes it). Two
+/// written at once recorded each other's work unfinished, and left a crash no super-block to mount
+/// from (TASK-149.5), or saved the older last (TASK-444.1.1). Dropped, it lets the next have it.
+pub(crate) struct SuperBlockSlot<'a>(&'a Journal);
+
+impl Drop for SuperBlockSlot<'_> {
+    fn drop(&mut self) {
+        self.0.inner.lock().compaction_running = false;
+        self.0.reclaim_event.notify(usize::MAX);
+    }
 }
 
 struct Inner {
@@ -411,6 +453,11 @@ pub struct JournalOptions {
     /// fxdax: how much the journal's file is extended by at a time: a test's sequence too short
     /// to write 128 KiB of it extends it all the same.
     pub chunk_size: u64,
+
+    /// fxdax: where the journal records its steps, for specs/journal's trace validation
+    /// (TASK-444.1).
+    #[cfg(feature = "journal_trace")]
+    pub trace: Option<Arc<trace::JournalTrace>>,
 }
 
 /// fxdax: the flush task writes the journal once this much of it is buffered, or once the oldest
@@ -430,6 +477,8 @@ impl Default for JournalOptions {
             chunk_size: CHUNK_SIZE,
             barriers_enabled: false,
             lazy_flush: None,
+            #[cfg(feature = "journal_trace")]
+            trace: None,
         }
     }
 }
@@ -572,6 +621,8 @@ impl Journal {
             reclaim_event: Event::new(),
             follower: Mutex::new(None),
             stats: JournalStats::default(),
+            #[cfg(feature = "journal_trace")]
+            traced: options.trace,
         }
     }
 
@@ -923,6 +974,12 @@ impl Journal {
             }
         }
 
+        // fxdax: the end of the last transaction replay applies, for the journal's trace.
+        #[cfg(feature = "journal_trace")]
+        let replayed_to = transactions
+            .last()
+            .map_or(super_block.journal_checkpoint.file_offset, |transaction| transaction.end_offset);
+
         // Now we can open the root store.
         let root_store = ObjectStore::open(&root_parent, super_block.root_store_object_id, None)
             .await
@@ -1057,6 +1114,15 @@ impl Journal {
             .await
             .context("Failed to complete replay for object manager")?;
 
+        traced!(
+            self,
+            trace::Event::Replayed {
+                checkpoint: super_block.super_block_journal_file_offset,
+                offsets: traced_offsets(&super_block.journal_file_offsets),
+                end: replayed_to,
+                offsets_after: self.objects.traced_offsets(),
+            }
+        );
         info!(checkpoint = last_checkpoint.file_offset, discarded_to; "replay complete");
         Ok(())
     }
@@ -1631,11 +1697,31 @@ impl Journal {
     }
 
     pub async fn init_superblocks(&self) -> Result<(), Error> {
+        // fxdax: holding the slot, as the flush task, already running, may start a compaction
+        // meanwhile, which wrote its super-block between these, the older committed last
+        // (TASK-444.1.1).
+        let slot = self.super_block_slot().await;
         // Overwrite both superblocks.
         for _ in 0..2 {
-            self.write_super_block().await?;
+            self.write_super_block(&slot).await?;
         }
         Ok(())
+    }
+
+    /// fxdax: waits for the slot that writing a super-block takes ([`SuperBlockSlot`]), and takes
+    /// it.
+    pub(crate) async fn super_block_slot(&self) -> SuperBlockSlot<'_> {
+        loop {
+            debug_assert_not_too_long!({
+                let mut inner = self.inner.lock();
+                if !inner.compaction_running {
+                    inner.compaction_running = true;
+                    break;
+                }
+                self.reclaim_event.listen()
+            });
+        }
+        SuperBlockSlot(self)
     }
 
     /// Takes a snapshot of all journaled transactions which affect |object_id| since its last
@@ -1813,6 +1899,34 @@ impl Journal {
         Ok(further)
     }
 
+    /// fxdax: what `transaction` is of the journal's trace, `trace` (TASK-444.1): the objects it
+    /// mutates, and whose flush it begins or ends, or nothing, if it has none of these. The root
+    /// parent store's mutations are of no object whose offsets the journal keeps. Deleting a volume
+    /// is recorded as what the trace's spec has no action for.
+    #[cfg(feature = "journal_trace")]
+    fn traced_transaction(
+        &self,
+        trace: &trace::JournalTrace,
+        transaction: &Transaction<'_>,
+    ) -> Option<(Vec<u64>, Option<u64>, Option<u64>)> {
+        let root_parent = self.objects.root_parent_store_object_id();
+        let (mut mutated, mut begin, mut end_flush) = (Vec::new(), None, None);
+        for TxnMutation { object_id, mutation, .. } in transaction.mutations() {
+            match mutation {
+                Mutation::BeginFlush => begin = Some(*object_id),
+                Mutation::EndFlush => end_flush = Some(*object_id),
+                Mutation::DeleteVolume => {
+                    trace.push(trace::Event::Unsupported(format!("volume {object_id} deleted")))
+                }
+                _ if *object_id == root_parent => {}
+                _ => mutated.push(*object_id),
+            }
+        }
+        mutated.dedup();
+        (!mutated.is_empty() || begin.is_some() || end_flush.is_some())
+            .then_some((mutated, begin, end_flush))
+    }
+
     /// Writes the records pending before the next transaction's.
     fn write_pending_records(inner: &mut Inner) -> Result<(), Error> {
         // If this is the first write after a RESET, we need to output version first.
@@ -1851,8 +1965,8 @@ impl Journal {
     }
 
     /// Flushes previous writes to the device and then writes out a new super-block.
-    /// Callers must ensure that we do not make concurrent calls.
-    pub(crate) async fn write_super_block(&self) -> Result<(), Error> {
+    /// Callers must ensure that we do not make concurrent calls. fxdax: which `_slot` ensures.
+    pub(crate) async fn write_super_block(&self, _slot: &SuperBlockSlot<'_>) -> Result<(), Error> {
         let root_parent_store = self.objects.root_parent_store();
 
         // We need to flush previous writes to the device since the new super-block we are writing
@@ -1872,6 +1986,7 @@ impl Journal {
             {
                 let _write_guard = self.writer_mutex.lock();
                 (checkpoint, borrowed) = self.pad_to_block()?;
+                traced!(self, trace::Event::Pad { checkpoint: checkpoint.file_offset });
                 old_layers = super_block::compact_root_parent(&*root_parent_store)?;
                 // fxdax: as of `checkpoint`, which is flushed below. Read after that flush, they
                 // said objects were flushed to where the journal wasn't yet, as commits go on
@@ -1883,7 +1998,16 @@ impl Journal {
             self.flush_device(checkpoint.file_offset, false)
                 .await
                 .context("flush failed when writing superblock")?;
+            traced!(self, trace::Event::Flush { durable: self.inner.lock().position.durable() });
         }
+        // fxdax: a mutant's, for the trace validation's check that it rejects one (TASK-444.1):
+        // the offsets read after the flush, as before TASK-149.5's fix.
+        #[cfg(feature = "journal_trace")]
+        let (journal_file_offsets, min_checkpoint) =
+            match self.traced.as_ref().is_some_and(|trace| trace.offsets_after_flush()) {
+                true => self.objects.journal_file_offsets(),
+                false => (journal_file_offsets, min_checkpoint),
+            };
 
         new_super_block_header = self.inner.lock().super_block_header.clone();
 
@@ -1903,6 +2027,13 @@ impl Journal {
                 old_layers,
             )
             .await?;
+        traced!(
+            self,
+            trace::Event::Save {
+                checkpoint: new_super_block_header.super_block_journal_file_offset,
+                offsets: traced_offsets(&new_super_block_header.journal_file_offsets),
+            }
+        );
         {
             let mut inner = self.inner.lock();
             let start = new_super_block_header.journal_checkpoint.file_offset;
@@ -2023,6 +2154,7 @@ impl Journal {
             // message is purely advisory (it reduces the number of checksums we have to verify
             // during replay), it doesn't matter if it isn't written.
             self.inner.lock().position.device_flushed(checkpoint_offset, flush);
+            traced!(self, trace::Event::Durable { durable: self.inner.lock().position.durable() });
 
             let allocator = self.objects.allocator();
             if self.inner.lock().tail_unrecorded {
@@ -2199,6 +2331,9 @@ impl Journal {
         let serialized = self.serialize_records(transaction);
         let checkpoint_before;
         let checkpoint_after;
+        // fxdax: what the transaction is of the journal's trace, if traced.
+        #[cfg(feature = "journal_trace")]
+        let traced = self.traced.as_ref().map(|trace| self.traced_transaction(trace, transaction));
         {
             let _guard = self.writer_mutex.lock();
             checkpoint_before = {
@@ -2258,6 +2393,18 @@ impl Journal {
 
                 inner.writer.journal_file_checkpoint()
             };
+            #[cfg(feature = "journal_trace")]
+            if let Some((trace, Some((mutated, begin, end_flush)))) = self.traced.as_ref().zip(traced)
+            {
+                trace.push(trace::Event::Commit {
+                    start: checkpoint_before.file_offset,
+                    end: checkpoint_after.file_offset,
+                    mutated,
+                    begin,
+                    end_flush,
+                    offsets: self.objects.traced_offsets(),
+                });
+            }
         }
         self.objects.did_commit_transaction(
             transaction,
@@ -2347,8 +2494,9 @@ impl Journal {
                         && inner.image_builder_mode.is_none()
                         && self.should_compact(&inner, journal_bytes)
                     {
-                        compact_fut = Some(Box::pin(self.compact()));
+                        // fxdax: the compaction holds the slot that writing a super-block takes.
                         inner.compaction_running = true;
+                        compact_fut = Some(Box::pin(self.compact_holding(SuperBlockSlot(&self))));
                     }
                     inner.flush_waker = Some(ctx.waker().clone());
                 }
@@ -2370,8 +2518,8 @@ impl Journal {
                         if let Err(e) = result {
                             inner.terminate(Some(e.context("Compaction error")));
                         }
+                        // fxdax: whose slot, dropped with it, said it no longer runs.
                         compact_fut = None;
-                        inner.compaction_running = false;
                         self.reclaim_event.notify(usize::MAX);
                         pending = false;
                         fxfs_trace::counter!(
@@ -2454,6 +2602,7 @@ impl Journal {
             waker.wake();
         }
         inner.position.flushed(range, barrier_after_last_write);
+        traced!(self, trace::Event::Durable { durable: inner.position.durable() });
         Ok(())
     }
 
@@ -2516,8 +2665,13 @@ impl Journal {
         }
     }
 
+    /// fxdax: compacts, holding `slot` until done (the flush task's compactions).
+    async fn compact_holding(&self, slot: SuperBlockSlot<'_>) -> Result<(), Error> {
+        self.compact(&slot).await
+    }
+
     #[trace]
-    async fn compact(&self) -> Result<(), Error> {
+    async fn compact(&self, slot: &SuperBlockSlot<'_>) -> Result<(), Error> {
         assert!(
             self.inner.lock().image_builder_mode.is_none(),
             "compact called in image builder mode"
@@ -2545,7 +2699,7 @@ impl Journal {
             .await
             .context("Failed to flush objects")?;
         self.inner.lock().super_block_header.earliest_version = earliest_version;
-        self.write_super_block().await.context("Failed to write superblock")?;
+        self.write_super_block(slot).await.context("Failed to write superblock")?;
         if trace {
             info!("J: end compaction");
         }
@@ -2581,24 +2735,13 @@ impl Journal {
         // fxdax: after the flush task's, if one runs, and in its way: two at once wrote super-blocks
         // at once (see `write_super_block`), recording each other's work unfinished: two of them
         // left a crash no super-block to mount from.
-        loop {
-            debug_assert_not_too_long!({
-                let mut inner = self.inner.lock();
-                if !inner.compaction_running {
-                    inner.compaction_running = true;
-                    break;
-                }
-                self.reclaim_event.listen()
-            });
-        }
+        let slot = self.super_block_slot().await;
         self.inner.lock().forced_compaction = true;
+        // Dropped before the slot.
         scopeguard::defer! {
-            let mut inner = self.inner.lock();
-            inner.forced_compaction = false;
-            inner.compaction_running = false;
-            self.reclaim_event.notify(usize::MAX);
+            self.inner.lock().forced_compaction = false;
         }
-        self.compact().await
+        self.compact(&slot).await
     }
 
     pub async fn stop_compactions(&self) {

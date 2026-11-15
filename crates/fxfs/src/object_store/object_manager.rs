@@ -734,6 +734,27 @@ impl ObjectManager {
         (offsets, min_checkpoint.cloned())
     }
 
+    /// fxdax: each object's offsets in the journal, by object ID, for its trace (`journal::trace`,
+    /// TASK-444.1).
+    #[cfg(feature = "journal_trace")]
+    pub(crate) fn traced_offsets(&self) -> Vec<super::journal::trace::ObjectOffsets> {
+        let inner = self.inner.read();
+        let mut offsets: Vec<_> = inner
+            .journal_checkpoints
+            .iter()
+            .map(|(&object_id, checkpoints)| {
+                let (old, cur) = match checkpoints {
+                    Checkpoints::Current(cur) => (None, Some(cur.file_offset)),
+                    Checkpoints::Old(old) => (Some(old.file_offset), None),
+                    Checkpoints::Both(old, cur) => (Some(old.file_offset), Some(cur.file_offset)),
+                };
+                super::journal::trace::ObjectOffsets { object_id, old, cur }
+            })
+            .collect();
+        offsets.sort_unstable_by_key(|offsets| offsets.object_id);
+        offsets
+    }
+
     /// Returns the checkpoint into the journal that the object depends on, or None if the object
     /// has no journaled updates.
     pub fn journal_checkpoint(&self, object_id: u64) -> Option<JournalCheckpoint> {

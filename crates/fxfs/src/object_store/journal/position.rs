@@ -117,6 +117,13 @@ impl JournalPosition {
         self.flushed_offset
     }
 
+    /// How far the journal is durable: as far as a flush of the device made it, or a barrier after
+    /// its write (for the journal's trace, TASK-444.1).
+    #[cfg(feature = "journal_trace")]
+    pub fn durable(&self) -> u64 {
+        self.device_flushed_end.max(self.barrier_written)
+    }
+
     /// Where a replay would find the journal ending.
     pub fn valid_to(&self) -> u64 {
         self.valid_to

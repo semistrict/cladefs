@@ -869,9 +869,11 @@ impl FxFilesystem {
 
     /// fxdax: writes a super-block recording the journal's new extents
     /// ([`FxFilesystem::renew_journal_tail`]). It waits for the frees the last flush let die,
-    /// which commit: so commits must go on.
+    /// which commit: so commits must go on. And for any compaction, whose super-block it may not
+    /// write beside.
     pub async fn record_journal_tail(&self) -> Result<(), Error> {
-        self.journal.write_super_block().await
+        let slot = self.journal.super_block_slot().await;
+        self.journal.write_super_block(&slot).await
     }
 
     #[trace]
