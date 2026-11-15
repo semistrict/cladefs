@@ -1,11 +1,11 @@
 ---
 id: TASK-407.4
 title: 'Code: readers key on the object key alone; the versioned paths go'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 01:25'
-updated_date: '2026-11-15 09:44'
+updated_date: '2026-11-15 10:00'
 labels: []
 dependencies: []
 parent_task_id: TASK-407
@@ -26,9 +26,9 @@ With keys written once (TASK-407), remove: the read by the footer over the index
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Notes
@@ -36,3 +36,9 @@ With keys written once (TASK-407), remove: the read by the footer over the index
 <!-- SECTION:NOTES:BEGIN -->
 Pushed 1d91b8705 (fetcher, cache, peers, proto, Go client). macOS: clippy + workspace 2488/2488, go part, scripts part. Linux compile checked on ubu1; ubu1 workspace run pending.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Readers key on the object key alone (1d91b8705): CRC failures are Corrupt, no re-read by a tail fetched anew; an object not naming its extent is corrupt; Flown, recent parts, the part cache and peers key on (key, part); peer.proto's stored fields reserved, Go client regenerated; the recreated-key tests replaced (approved). Verified: ubu1 480962251: workspace 2786/2787 (TASK-315's ZFS page-cache test alone); macOS gate, go and scripts parts passing.
+<!-- SECTION:FINAL_SUMMARY:END -->

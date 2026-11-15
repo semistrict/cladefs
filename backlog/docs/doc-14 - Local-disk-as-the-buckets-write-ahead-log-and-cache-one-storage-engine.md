@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-15 00:23'
+updated_date: '2026-11-15 09:48'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -178,8 +178,9 @@ the commits in turn.
 ## Opening a store
 
 1. Read `store`: the branch, the bucket, the token.
-2. **Take the lease** with the token (`Writer::open`): recover the branch, fence its end. A point
-   takes none: its state is recovered and never changes.
+2. **Take the branch's head** with the token (`Writer::open`; its lease, and a fence at its end,
+   until TASK-407): recover the branch from what the head names. A point takes none: its state is
+   recovered and never changes.
 3. **Close the open segment** if one was left: its data and the whole records of its log (up to the
    first torn one) give its contents; it is framed from its raw file, as `close_left_open` does now,
    and stamped by the new chain. Writes after the last durable commit are dropped, as now.
@@ -187,20 +188,24 @@ the commits in turn.
    known, and frames nothing: the segment keeps its raw file and log until `Recovering::open`,
    holding the store's keys (doc-16), frames it first of all, sealed if the branch is.
 4. **Put the WAL after the branch's end** (`extent_remote::wal::rebase`, new), by commits, as the
-   branch is after the fence (`wal_after_fence`: the fence may have applied the WAL's own segments,
-   landed since recovery found the end). The WAL keeps its **base**, the commit its first segment
+   head the writer took names it (`Taken`; until TASK-407, as the branch was after the fence,
+   `wal_after_fence`, which might have applied the WAL's own segments landed since recovery found
+   the end). The WAL keeps its **base**, the commit its first segment
    was stamped over (the branch's last commit then), rewritten as its prefix is acknowledged:
    - if the branch's last commit is one of the WAL's, the WAL's segments to it are in the branch:
      acknowledged now, dropped from the WAL, into the cache;
    - if the branch's last commit is that one, or the WAL's base, the rest are restamped on the new
-     chain after the fence (`wal_follows`) (their data parts unchanged; a new tail; their own
+     chain after the head's end (`wal_follows`) (their data parts unchanged; a new tail; their own
      extents at the new writer's keys), and upload as any closed segment;
    - otherwise another writer's commits moved the branch on: the WAL **diverged**, the store refuses to open
      (`extent_remote::Error::Diverged`, `ESTALE`) until `fxdaxctl take` drops its WAL, losing what
      the guest was never promised (doc-7, Recovery on the same host). An empty WAL never diverges:
      opening a store directory of an empty WAL is how a branch is taken, here or on any host.
    Restamping writes each new file and syncs it before removing the old; a WAL holding both after a
-   crash keeps the one stamped last, by their footers' epochs.
+   crash keeps the one stamped last, by their footers' epochs. *Revised 2026-11-15 (TASK-407):* the
+   store restamps its footers in memory alone, as its writer uploads them; the rebase goes by
+   commits, and keeps the trailing segments holding only forks the branch holds
+   (`Taken::forks`).
 
    *Changed 2026-11-05 (TASK-165.2), found by the TLA+ spec (model BucketWal's bounds with
    checkpoints):* this step went by segments first: the WAL segments whose footers recovery read
@@ -216,8 +221,8 @@ the commits in turn.
    fork stamps the base it was stamped over, as one with commits does.
 
    *Implemented 2026-11-05 (TASK-165.5):* `extent_remote::Wal::rebase` takes what the writer found
-   at the branch's end (`Writer::fenced`: its last commit as recovery found it and after the fence,
-   and its chain) and places the WAL's segments by the guest's last commit through each, its base
+   at the branch's end (`Writer::fenced` then, `Writer::taken` since TASK-407: the head it took,
+   its last commit, the forks it holds, and its chain) and places the WAL's segments by the guest's last commit through each, its base
    for none: a segment holding no commit, a fork's alone, is placed by the commit before it, and of
    the places the branch's last commit matches the last is taken as landed (a fork whose segment
    did not land, never acknowledged, is lost, rather than made twice). The WAL's base is then the
@@ -282,7 +287,7 @@ fetcher.
 | Point | a fork to a point | a fork to a point (the record says `point`) |
 | Open a child | local layers over the parent's index | opening a store: recovery of the child from the bucket, the parent's state at the fork read from the parent's checkpoint and footers, then flattened into the child's own state, O(extents) (Decisions) |
 | A fork failing | disclaim, `fail_fork`, `unfork` (`delete_branch`), handle deletion | `ChildTaken`: nothing made, nothing to delete. Failing once its commit was made (its upload or the child's directory failing): `Remote::unfork`, which stays, deleting the fork's alone, `branch::delete_fork(bucket, child, forked, owner, holder, token)`, so a segment landing late gives the child a deleted record; the directory goes |
-| A host crashing mid-fork | claim files, markers, `take_parent` | the fork is in the WAL; it lands and is recorded by the next writer (the fork stands, as `forks_whose_answers_are_lost_stand` already expects), or the disk is lost and it never was |
+| A host crashing mid-fork | claim files, markers, `take_parent` | the fork is in the WAL; once its segment is named by the branch's head, the next writer records it (the fork stands, as `forks_whose_host_crashed_stand_once_their_heads_swap_lands` expects); a segment that landed and no head named never is the branch's (TASK-407), nor is a fork in it; or the disk is lost and it never was |
 | Delete | `delete_host` (claims, handles, lineage), `branch::delete` | `branch::delete` with the token, then the directory |
 | Place | `fence-<branch>` | the token in `store` |
 | Resize | the local record's capacity | a commit setting the capacity (format change) |
