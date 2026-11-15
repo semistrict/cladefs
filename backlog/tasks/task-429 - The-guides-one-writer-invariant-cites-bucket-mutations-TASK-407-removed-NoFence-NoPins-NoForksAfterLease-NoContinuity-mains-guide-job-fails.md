@@ -3,9 +3,11 @@ id: TASK-429
 title: >-
   The guide's one-writer invariant cites bucket mutations TASK-407 removed
   (NoFence, NoPins*, NoForksAfterLease, NoContinuity): main's guide job fails
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 09:26'
+updated_date: '2026-11-15 09:44'
 labels:
   - bug
   - guide
@@ -26,3 +28,9 @@ Main's CI guide job fails since 1875ee2a2 (TASK-407: keys written once, commits 
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in 264cc3a37: the one-writer card's claim and why rewritten for the head (a commit is the branch's once the writer's conditional swap of the head names it; a takeover swaps it to the next epoch; the old writer's keys name its epoch); evidence NoHeadSwap, NoEpochKeys, NoTokens, NoCollectorEpochs; anchors acknowledge's note and a new head_swap (head.rs 'pub async fn swap('); the bucket layer's role text. guide: pnpm generate, node tools/check.ts ('63 anchors, 12 invariants, 11 traces: all match the repo'), tsc clean.
+<!-- SECTION:NOTES:END -->
