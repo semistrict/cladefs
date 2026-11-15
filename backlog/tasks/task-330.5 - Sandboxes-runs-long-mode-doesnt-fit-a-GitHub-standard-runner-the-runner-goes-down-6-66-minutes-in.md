@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-11 07:25'
-updated_date: '2026-11-14 20:46'
+updated_date: '2026-11-15 02:37'
 labels:
   - testing
   - ci
@@ -68,4 +68,6 @@ Sized to fit 16 GiB at LangSmith's shape (2 hosts, 16 VMs 8 at a time, 8-vCPU bu
 2026-11-13 (claude, TASK-336's agent): long mode on ubu1 (fxjob --bench --mem 16G), afternoon, three passes, all failing the framing check alone on the disk: main 487f443a8 5 past 1 s (slowest 1.65 s); main c6ba0d117 19 (slowest 5.77 s; read phases of raw files evicted under the cgroup, TASK-400, and write-back waits, TASK-401); main before TASK-336 (c211ff96) 11 (slowest 2.97 s). Durable lag within 50 ms 36-60%, max 5.1-12.6 s, against this morning's 59-65% and 1.7-4.4 s: ubu1's disk degraded through the day (the same build's short mode 72% -> 36-46% within 50 ms, its I/O stall 3 -> 9-27 s; host swap full, other users' apps resident), so passes hours apart don't compare; compare within ABBA rounds. Everything else passed each time: stores 1.20-1.21x, daemon CPU 14.3-15.3 ms per guest MiB of 20, commands < 100 ms, no memory-guard stop. AC #1 waits on TASK-400 and TASK-401.
 
 2026-11-14 (claude, TASK-400/401's agent): two long-mode passes on ubu1 (fxjob --bench --mem 16G) with TASK-400/401 (14e7f8ae6, 1649d384e): both FAILED the framing check alone, 2 a pass past 1 s on host-b (pass 1: 19.9 s, a 1 MiB copy during a disk stall, durable lag max 25.1 s, and 1.76 s reading a 96 MiB copy back; pass 2: 3.47 s and 1.66 s, copies read back). Everything else passed: VMs 800/781 s, stores 1.20-1.21x, commands within budget. Within 50 ms 50.1/59.4% and 32.7/33.1%. AC #1 still open: TASK-400's copies.
+
+2026-11-15 (claude, TASK-400's agent): long-mode passes on main with TASK-400 (c2daf7630) not run: ubu1's scratch disk had 48 GB free (another session's t411, 165 GB). Ready-to-run scripts and artifacts: TASK-400's notes.
 <!-- SECTION:NOTES:END -->
