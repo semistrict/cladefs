@@ -48,8 +48,9 @@
 //!   stores share what holds the parts they pack as their segments fill, as a daemon's do
 //!   (TASK-400), which `FXDAX_BENCH_EVICT` (0) has let go of every part before each closing, as a
 //!   governor short of memory would: what it held, took and let go of, the process's CPU time, and
-//!   how long the writes and commits took, which the looks ahead run behind. Sealed stores hold
-//!   none (TASK-411.5).
+//!   how long the writes and commits took, which the looks ahead run behind; and the bytes the
+//!   stores wrote, raw and framed, and the segments framed in place. fxdax: sealed stores look
+//!   ahead, hold and frame in place as clear ones do (TASK-411.23, TASK-421).
 //! - `writes`: N MiB (256) written to a store's open segments as extents of `FXDAX_BENCH_EXTENT`
 //!   KiB (1024), in a directory of the host's (`FXDAX_BENCH_DIR`, or a temporary one), read back
 //!   while open, then committed: MiB/s of the writes, of the reads, and how long the commit took
@@ -57,7 +58,8 @@
 //!
 //! fxdax: `FXDAX_BENCH_SEALED` set to `1` has `framing` and `writes` open their stores as a host
 //! with a KMS opens a sealed cell's, through their uploaders, to a bucket in memory: their raw
-//! files encrypted, AES-256-XTS by sector, their segments framed sealed, AES-256-GCM; set to `0`,
+//! files encrypted, AES-256-XTS by sector, their segments framed sealed, in place their raw files'
+//! sectors, tagged, or in a copy AES-256-GCM (TASK-411.23); set to `0`,
 //! opened alike, in the clear, of a tenant with no KEK in the KMS, its twin; unset, as before, with
 //! no uploader (TASK-411.5).
 //!
@@ -529,6 +531,7 @@ fn framing(segments: u64) {
         other => panic!("FXDAX_BENCH_DATA is {other:?}"),
     };
     let before = extent_store::timings();
+    let written = (extent_store::written(), extent_store::segments_framed_in_place());
     let started = Instant::now();
     std::thread::scope(|scope| {
         for store in 0..stores {
@@ -626,6 +629,17 @@ fn framing(segments: u64) {
         mib(held.taken),
         mib(held.evicted),
         held.evicted_parts
+    );
+    let (after_written, in_place) = (extent_store::written(), extent_store::segments_framed_in_place());
+    let (raw, framed) =
+        (after_written.raw - written.0.raw, after_written.framed - written.0.framed);
+    println!(
+        "  written: {:.1} MiB raw, {:.1} MiB framed, {:.2} times the data; {} of {count} framed in \
+         place",
+        mib(raw),
+        mib(framed),
+        (raw + framed) as f64 / raw.max(1) as f64,
+        in_place - written.1,
     );
     let writing = writing.into_inner().unwrap();
     println!(

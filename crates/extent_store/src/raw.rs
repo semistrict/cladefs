@@ -13,12 +13,15 @@
 //! are in its log's header, which is MACed, as its records are, under another subkey of the same
 //! DEK and salt (`wal::LogHeader`); a large extent's raw file never outlives its process (opening
 //! a store removes those left), so its salt is kept in memory alone.
+//!
+//! fxdax: the file's key is an object's ([`extent_frame::ObjectKey::sectors`], TASK-411.23): a
+//! sealed raw file framed in place is an object of its sectors as they are, its trailer naming the
+//! DEK and the salt, each part tagged under another subkey of them ([`RawFile::sectors`]).
 
 use crate::dir::File;
 use crate::framed::Aligned;
-use extent_frame::{KeyId, Salt, Secret};
+use extent_frame::{KeyId, ObjectKey, Salt, Secret};
 use extent_keys::MAC_LEN;
-use extent_keys::xts::Xts;
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -28,11 +31,12 @@ use std::sync::Arc;
 pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 
 /// fxdax: how a sealed store's raw file is encrypted, and its log authenticated: under subkeys of
-/// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5).
+/// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
+/// the key of the object the file is once framed in place (TASK-411.23).
 pub(crate) struct Sealer {
     pub key: KeyId,
     pub salt: Salt,
-    xts: Xts,
+    sectors: Arc<ObjectKey>,
     mac: Secret,
 }
 
@@ -44,8 +48,8 @@ impl Sealer {
 
     /// The sealer of a raw file encrypted under `dek`, which `key` names, from `salt`.
     pub fn of(dek: &Secret, key: KeyId, salt: Salt) -> Self {
-        let xts = Xts::derive(dek, &salt, b"fxdax raw file");
-        Self { key, salt, xts, mac: dek.derive(&salt, &[b"fxdax raw file log mac"]) }
+        let sectors = Arc::new(ObjectKey::sectors(dek, key, salt));
+        Self { key, salt, sectors, mac: dek.derive(&salt, &[b"fxdax raw file log mac"]) }
     }
 
     /// The MAC of `bytes`, of the file's log, at `at` in it: so that none is taken for another's,
@@ -61,12 +65,12 @@ impl Sealer {
 
     /// Encrypts `sectors` in place, whole sectors at `at`, a multiple of [`SECTOR`], in the file.
     fn encrypt(&self, at: u64, sectors: &mut [u8]) {
-        self.xts.encrypt(at / SECTOR, sectors);
+        self.sectors.encrypt_sectors(at / SECTOR, sectors);
     }
 
     /// Decrypts `sectors` in place, as [`Sealer::encrypt`] encrypted them.
     pub fn decrypt(&self, at: u64, sectors: &mut [u8]) {
-        self.xts.decrypt(at / SECTOR, sectors);
+        self.sectors.decrypt_sectors(at / SECTOR, sectors);
     }
 }
 
@@ -88,10 +92,11 @@ pub struct RawFile<F> {
 }
 
 impl<F> RawFile<F> {
-    /// The file, if it is in the clear: what a framing in place writes the tail of its frame into
-    /// (TASK-310), which a sealed one never is, its sectors not the sealed object's bytes.
-    pub(crate) fn clear(&self) -> Option<&Arc<F>> {
-        self.sealer.is_none().then_some(&self.file)
+    /// fxdax: its sectors' key, if it is sealed: the key of the object it is once framed in place,
+    /// its parts its sectors as they are, each tagged under it ([`extent_frame::Packer::in_place`],
+    /// TASK-411.23). None in the clear.
+    pub(crate) fn sectors(&self) -> Option<&Arc<ObjectKey>> {
+        self.sealer.as_ref().map(|sealer| &sealer.sectors)
     }
 }
 
@@ -104,7 +109,8 @@ impl<F: File> RawFile<F> {
     /// The file as it stores the bytes, encrypted if sealed: for a reader of them as stored, as a
     /// log's records hold them (`wal::LogRecord`), syncs and writing back; and for an I/O of a
     /// caller's own, of bytes [`RawFile::read_range`] and [`RawFile::decrypt`] read, or that
-    /// [`crate::Write::stored`] gives. Never for writing anything else.
+    /// [`crate::Write::stored`] gives. Never for writing anything else, but a framing in place's
+    /// tail, past its data (TASK-310), in the clear, as any object's is (TASK-411.23).
     pub fn file(&self) -> &Arc<F> {
         &self.file
     }

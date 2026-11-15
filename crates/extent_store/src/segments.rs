@@ -133,10 +133,8 @@ struct Segment<F> {
 impl<F> Segment<F> {
     fn new(phase: Phase<F>, live: u64) -> Self {
         let (len, size, writers, pending) = (0, 0, 0, 0);
-        // fxdax: a sealed raw file's parts no look ahead sees: their bytes in it are XTS
-        // ciphertext, and its framing, never in place (TASK-411.5), reads them all anyway.
-        let sealed = matches!(&phase, Phase::Open { raw, .. } if raw.clear().is_none());
-        let ahead = (!sealed).then(Ahead::default);
+        // fxdax: looked at ahead, sealed or not (TASK-411.23, TASK-421).
+        let ahead = Some(Ahead::default());
         Self {
             phase,
             len,
@@ -485,8 +483,7 @@ impl<F: File> Segments<F> {
 
     /// fxdax: segment `number`'s raw file, to look at a part of ahead of its framing, if its
     /// framing is yet to take its parts' looks (TASK-400); and the look at its parts seen so far,
-    /// which says whether to pack the next ahead too ([`framing::see`]). fxdax: never a sealed
-    /// segment's, which has no looks ahead (`Segment::new`, TASK-411.5).
+    /// which says whether to pack the next ahead too ([`framing::see`]).
     pub fn see(&self, number: SegmentId) -> Option<(Arc<RawFile<F>>, Look)> {
         let segment = self.tracked.get(&number)?;
         let look = segment.ahead.as_ref()?.look;
@@ -1526,12 +1523,12 @@ impl Ahead {
 /// writers waiting behind it, on a disk VMs share. Or else in a file of its own, as before. Its
 /// parts looked at `ahead`, as it filled ([`Segments::take_seen`]), it reads only to frame it in a
 /// copy, and not those packed then, held still (TASK-400). fxdax: sealed, if `sealing` gives a
-/// DEK, its branch's newest, never in place, as a sealed object's bytes are never its data
-/// (TASK-411.3); nor is a sealed raw file's, which holds them encrypted otherwise, AES-256-XTS by
-/// sector: framing it in place would write every byte of it again anyway, and a crash part way
-/// would leave a file neither raw nor framed (TASK-411.5). So no look ahead sees a sealed segment's
-/// parts, nor packs and holds them (`Segment::new`): `ahead` is empty for one, and its framing reads
-/// every part through its raw file, decrypting, then packs and seals it.
+/// DEK, its branch's newest: in a copy, its parts compressed and sealed with AES-GCM (TASK-411.3);
+/// in place as in the clear, its raw file, sealed, AES-256-XTS by sector, the object of its
+/// sectors as they are, each part tagged ([`extent_frame::Seal::Sectors`], TASK-411.23). Framed in
+/// a copy, a sealed segment wrote every byte twice, the guests' writes 1.9 times over on
+/// fxfs-guest-sandboxes against 1.16 in the clear. Its parts looked at ahead are seen as stored,
+/// and held packed in the clear until its framing seals them ([`framing`], TASK-421).
 fn frame_segment<D: Dir>(
     dir: &D,
     path: &str,
@@ -1547,8 +1544,13 @@ fn frame_segment<D: Dir>(
     // fxdax: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
     // data (TASK-411.2, TASK-411.3).
     let mut packer = extent_frame::Packer::new(sealing);
-    let clear = raw.clear().filter(|_| packer.key().is_none());
-    let in_place_maybe = quiet && len > 0 && clear.is_some();
+    // fxdax: in place, its raw file sealed as its object would be in a copy: in the clear, or
+    // sealed, whole sectors (TASK-411.23).
+    let sectors = raw.sectors();
+    let in_place_maybe = quiet
+        && len > 0
+        && sectors.is_some() == packer.key().is_some()
+        && (sectors.is_none() || len.is_multiple_of(SECTOR));
     let mut parts = framing::read(&**raw, len, in_place_maybe, ahead)?;
     // fxdax: in place at once if a look at its parts says compressing them saves too little,
     // compressing no more of them: compressing every part to tell was most of what framings took
@@ -1579,10 +1581,10 @@ fn frame_segment<D: Dir>(
     let in_place =
         sampled || (in_place_maybe && packer.end() > len - len / framing::IN_PLACE_SAVING);
     if (in_place && !packer.raw()) || sampled {
-        packer = extent_frame::Packer::new(None);
+        packer = extent_frame::Packer::in_place(sectors.cloned());
         let raw_parts = parts.iter().zip(0..).map(|(read, part)| {
-            let part_len = (len - part * PART).min(PART);
-            (part_len, read.seen.crc)
+            debug_assert_eq!(read.seen.part.len, (len - part * PART).min(PART), "part {part}");
+            read.seen.part
         });
         packer.push_raw_parts(raw_parts);
     }
@@ -1590,9 +1592,9 @@ fn frame_segment<D: Dir>(
     let end = packer.end();
     let (tail, parts) = packer.finish_parts(footer);
     timing.took(framing_phase::COMPRESS);
-    let framed = match (in_place, clear) {
-        (true, Some(raw)) => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
-        _ => None,
+    let framed = match in_place {
+        true => frame_in_place(dir, (raw_path, raw.file()), path, end, &tail)?,
+        false => None,
     };
     let how = How { in_place: framed.is_some(), len, read, held };
     let framed = match framed {
@@ -1645,7 +1647,8 @@ fn write_framed<F: File>(file: &F, bytes: &[u8], offset: u64) -> io::Result<()> 
 }
 
 /// fxdax: frames a segment's data, `raw`, its raw file at `raw_path`, its parts stored raw, in
-/// place ([`frame_segment`]): `tail` appended at `end`, the end of its data, which the making
+/// place ([`frame_segment`]), the file as it stores them, sealed or not: `tail` appended at `end`,
+/// the end of its data, in the clear as any object's tail is (TASK-411.23), which the making
 /// durable after writes back (TASK-401: written back here, a tail of a few KiB waited 1.5 s
 /// behind the disk's queue); and the file linked at `path`, its framed file's. Its
 /// raw path goes once the commits its footer names are durable, as a raw file does
@@ -2284,47 +2287,136 @@ mod tests {
         assert_eq!(data(&mut segments, &dir, segment(0)), raw_data, "framed as it was written");
     }
 
-    /// fxdax: TASK-400 in a sealed store (TASK-411.5): no look ahead sees a sealed segment's
-    /// parts, written whole or appended, nor packs and holds them, though they compress: their
-    /// bytes in its raw file are XTS ciphertext, and its framing, never in place, reads them all,
-    /// decrypted, packing and sealing them in a copy.
-    #[test]
-    fn sealed_segments_parts_are_neither_seen_nor_held_ahead() {
-        let dir = MemDir::new();
-        create_branch_dirs(&dir, BRANCH.id).unwrap();
+    /// The segments of a sealed branch, under `dek`, with none closed, and its keys.
+    fn sealed_opened(dir: &MemDir, dek: [u8; 32]) -> (Segments<MemFile>, Arc<Ring>) {
+        create_branch_dirs(dir, BRANCH.id).unwrap();
         let chain = Chain::new(BRANCH, 0, 0, 0);
-        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
-        let keys = Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
+        let keys =
+            Ring::sealing_for_tests(BRANCH.id, 1, extent_frame::Secret::from_bytes(&dek), []);
         let tracked = (BRANCH.id, BTreeMap::new());
-        let mut segments =
-            Segments::open(&dir, tracked, (0, 0, chain), (64, keys.clone())).unwrap();
-        // Letters at random, sixteen of them, which compress: a clear store packs and holds them.
-        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        let words = (0..3 * PART / 8).map(|_| {
+        let segments = Segments::open(dir, tracked, (0, 0, chain), (64, keys.clone())).unwrap();
+        (segments, keys)
+    }
+
+    /// `len` bytes of xorshift64's, from `seed`: noise, or, if `text`, letters at random, sixteen
+    /// of them, which compress by about half.
+    fn bytes_of(seed: u64, len: u64, text: bool) -> Vec<u8> {
+        let mut state = (seed + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        let words = (0..len / 8).map(|_| {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
             state
         });
-        let text: Vec<u8> = words.flat_map(u64::to_le_bytes).map(|byte| b'a' + byte % 16).collect();
+        let noise = words.flat_map(u64::to_le_bytes);
+        noise.map(|byte| if text { b'a' + byte % 16 } else { byte }).collect()
+    }
+
+    /// Whether any file of `dir` holds a sector's first 32 bytes of `data`, in the clear.
+    fn in_the_clear(dir: &MemDir, data: &[u8]) -> Vec<String> {
+        let pieces: std::collections::HashSet<&[u8]> =
+            data.chunks(SECTOR as usize).map(|sector| &sector[..32]).collect();
+        (dir.files().into_iter())
+            .filter(|(_, bytes)| bytes.windows(32).any(|window| pieces.contains(window)))
+            .map(|(path, _)| path)
+            .collect()
+    }
+
+    /// fxdax: TASK-400 in a sealed store (TASK-411.23, TASK-421): a sealed segment's parts that
+    /// compress, written whole or appended, are looked at ahead, packed and held, in the clear, in
+    /// memory; its framing in a copy reads none of them back, and seals them under its object's
+    /// key, the bytes it framed opening to its data under the branch's key. No file holds its
+    /// data in the clear.
+    #[test]
+    fn sealed_segments_parts_are_held_ahead_and_sealed_framing() {
+        let dir = MemDir::new();
+        let (mut segments, keys) = sealed_opened(&dir, [3; 32]);
+        let text = bytes_of(1, 3 * PART, true);
         let (number, file, at) = segments.reserve(2 * PART).unwrap();
         file.write_at(&text[..2 * PART as usize], at).unwrap();
         segments.held(number, (at, 2 * PART));
         let (file, at) = segments.append(PART).unwrap();
         file.write_at(&text[2 * PART as usize..], at).unwrap();
         segments.appended(number, at, PART);
-        assert_eq!(segments.take_seeing(), [], "no part of a sealed segment to look at");
-        assert!(segments.see(number).is_none());
+        let seeing = segments.take_seeing();
+        assert_eq!(seeing, [(number, 0), (number, 1), (number, 2)]);
+        let held = HeldParts::new();
+        look_ahead(&mut segments, &held, seeing);
+        let holding = held.bytes();
+        assert!(holding > PART && holding < 2 * PART, "compressed, held: {holding}");
         let unframed = segments.close(&dir, 1, 0).unwrap();
         let ahead = segments.take_seen(number);
-        assert!(ahead.is_empty(), "nothing seen, nor held");
+        assert_eq!(
+            ahead.iter().map(|looked| looked.as_ref().unwrap().held.is_some()).collect::<Vec<_>>(),
+            [true; 3]
+        );
         let before = (framing_reads().0, segments_framed_in_place());
         let framed = unframed.frame(&dir, ahead).unwrap();
-        assert_eq!(framing_reads().0 - before.0, 3 * PART, "its parts all read");
+        assert_eq!(framing_reads().0 - before.0, 0, "none read back");
         assert_eq!(segments_framed_in_place() - before.1, 0, "framed in a copy");
+        assert_eq!(held.bytes(), 0, "taken");
         let object = read_whole(&*framed.file).unwrap();
         assert!(object.len() < 2 * PART as usize, "compressed: {} bytes", object.len());
+        let seal = extent_frame::Frame::of(&object).unwrap().seal;
+        assert!(
+            matches!(seal, extent_frame::Seal::Sealed { key, .. } if key == KeyId { branch: BRANCH.id, generation: 1 }),
+            "{seal:?}"
+        );
         assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), text);
+        assert_eq!(in_the_clear(&dir, &text), Vec::<String>::new());
+    }
+
+    /// fxdax: TASK-411.23: a sealed segment of noise is framed in place as a clear one is (TASK-310,
+    /// TASK-400): its parts seen ahead as stored, the last alone read, its raw file its framed file,
+    /// nothing of its data written again but its tail; the object of its raw file's XTS sectors,
+    /// under the raw file's DEK and salt, which opens to its data under the branch's key, to none
+    /// without it, and holds none of it in the clear.
+    #[test]
+    fn sealed_segments_of_noise_are_framed_in_place() {
+        let dir = MemDir::new();
+        let (mut segments, keys) = sealed_opened(&dir, [4; 32]);
+        let noise = bytes_of(2, 3 * PART + BLOCK, false);
+        let (number, file, at) = segments.reserve(3 * PART).unwrap();
+        file.write_at(&noise[..3 * PART as usize], at).unwrap();
+        segments.held(number, (at, 3 * PART));
+        let (number, file, at) = segments.reserve(BLOCK).unwrap();
+        file.write_at(&noise[3 * PART as usize..], at).unwrap();
+        segments.held(number, (at, BLOCK));
+        let raw = file.file().clone();
+        let salt = file.sectors().unwrap().salt();
+        let held = HeldParts::new();
+        let seeing = segments.take_seeing();
+        look_ahead(&mut segments, &held, seeing);
+        assert_eq!(held.bytes(), 0, "noise, held not");
+        let unframed = segments.close(&dir, 1, 0).unwrap();
+        let seen = segments.take_seen(number);
+        let before = (framing_reads().0, segments_framed_in_place(), crate::written().framed);
+        let framed = unframed.frame(&dir, seen).unwrap();
+        assert_eq!(framing_reads().0 - before.0, BLOCK, "the last part alone read");
+        assert_eq!(segments_framed_in_place() - before.1, 1, "framed in place");
+        assert!(Arc::ptr_eq(&framed.file, &raw), "its raw file, its framed file");
+        let object = read_whole(&*framed.file).unwrap();
+        let tail = object.len() as u64 - noise.len() as u64;
+        assert_eq!(crate::written().framed - before.2, tail, "its tail alone written");
+        let frame = extent_frame::Frame::of(&object).unwrap();
+        let key = KeyId { branch: BRANCH.id, generation: 1 };
+        assert_eq!(frame.seal, extent_frame::Seal::Sectors { key, salt });
+        assert_eq!(extent_frame::data(&object, &keys.of(BRANCH.id)).unwrap(), noise);
+        let locked = extent_frame::data(&object, &extent_frame::NoKeys);
+        assert_eq!(locked, Err(extent_frame::Error::NoKey(key)));
+        assert_eq!(in_the_clear(&dir, &noise), Vec::<String>::new());
+        make_durable(&dir, BRANCH.id, (&[(number, framed.clone())], false), Instant::now())
+            .unwrap();
+        segments.framed(number, framed);
+        let Source::Framed(read) = segments.source(&dir, number).unwrap() else { panic!() };
+        let parts = &read.parts;
+        let at = PART + 5;
+        let range = parts.read(at..at + 100, |range| {
+            let mut bytes = vec![0; (range.end - range.start) as usize];
+            read.file.read_at(&mut bytes, range.start).unwrap();
+            Ok::<_, extent_frame::Error>(bytes)
+        });
+        assert_eq!(range.unwrap(), &noise[at as usize..at as usize + 100]);
     }
 
     /// Footers are stamped by the writer's chain the segments opened with, numbered on from it,

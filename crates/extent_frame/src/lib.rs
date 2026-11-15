@@ -41,13 +41,27 @@
 //! fxdax: a reader of a branch whose objects are sealed refuses one in the clear ([`Keys::sealed`],
 //! [`Error::Clear`], TASK-411.3): its trailer's seal is not authenticated, and one who can write the
 //! bucket could otherwise zero an object's seal, MACs and tags, and have it read as its branch's.
+//!
+//! fxdax: an object framed in place from a sealed store's raw file ([`Seal::Sectors`],
+//! TASK-411.23): every part stored raw, as its raw file holds it, AES-256-XTS a sector at a time
+//! ([`SECTOR`]), the sector's place in the object its tweak, under the raw file's own key, which the
+//! trailer names the DEK and salt of ([`ObjectKey::sectors`]); each part tagged, its tag the
+//! entry's, with HMAC-SHA256 truncated to 16 bytes ([`Secret::tag`]) under another subkey of the
+//! same DEK and salt, of its index, encoding and lengths and its stored bytes: encrypt-then-MAC, so
+//! that a reader holding the key checks a part before it decrypts it, and one holding none checks
+//! its CRC, as for any object. Framing a segment or a large extent in place so writes none of its
+//! data again, sealed as in the clear (TASK-310). Such an object's parts are all raw and whole
+//! sectors; one that compresses is framed in a copy, sealed with AES-GCM as above: no object mixes
+//! the two.
 
 pub mod segment;
 pub mod spent;
 pub mod table;
 
+pub use extent_keys::xts::SECTOR;
 pub use extent_keys::{KeyId, Salt, Secret};
 
+use extent_keys::xts::Xts;
 use extent_keys::{Aead, MAC_LEN, SALT_LEN, TAG_LEN};
 use std::collections::HashMap;
 use std::ops::Range;
@@ -60,6 +74,10 @@ pub const PART: u64 = 1 << 20;
 /// Parts are stored at multiples of this, so that a host reads them bypassing its page cache.
 pub const ALIGN: u64 = 4096;
 
+// fxdax: a part of an object of a raw file's sectors begins at one (TASK-411.23); and a part is
+// whole sectors.
+const _: () = assert!(ALIGN.is_multiple_of(SECTOR as u64) && PART.is_multiple_of(SECTOR as u64));
+
 /// The bytes of the table for each part: its offset, stored length, CRC32C and encoding, and its
 /// AES-256-GCM tag, zeros in an object in the clear. fxdax: one size for both kinds of object
 /// (TASK-411.2), so that where a table is, and how a reader of a suffix finds it, never depends on
@@ -70,8 +88,9 @@ pub const ENTRY: u64 = 8 + 4 + 4 + 1 + TAG_LEN as u64;
 /// A sealed part's AES-256-GCM tag, which its table's entry holds: zeros in the clear.
 type Tag = [u8; TAG_LEN];
 
-/// The bytes of a trailer's [`Seal`]: its kind, a byte, 0 in the clear, 1 sealed; the branch and
-/// generation of the DEK its subkeys came from; and its salt. Zeros but for its kind in the clear.
+/// The bytes of a trailer's [`Seal`]: its kind, a byte, 0 in the clear, 1 sealed, 2 authenticated,
+/// 3 a raw file's sectors; the branch and generation of the DEK its subkeys came from; and its
+/// salt. Zeros but for its kind in the clear.
 const SEAL_LEN: usize = 1 + 8 + 4 + SALT_LEN;
 
 /// Where each piece of a trailer is in it.
@@ -221,6 +240,11 @@ pub enum Seal {
     /// checkpoints, which a reader holding no key reads, checked against their CRCs, as the
     /// collector does, and one holding the key checks against their tags and MACs.
     Authenticated { key: KeyId, salt: Salt },
+    /// fxdax: framed in place from a sealed store's raw file (TASK-411.23): its parts stored raw,
+    /// its raw file's AES-256-XTS sectors, under the subkeys of the DEK `key` names and `salt`, the
+    /// raw file's, each tagged with a truncated HMAC-SHA256 of them; its footer and table
+    /// authenticated as a sealed object's are.
+    Sectors { key: KeyId, salt: Salt },
 }
 
 impl Seal {
@@ -228,17 +252,21 @@ impl Seal {
     pub fn keyed(&self) -> Option<(KeyId, Salt)> {
         match *self {
             Self::Clear => None,
-            Self::Sealed { key, salt } | Self::Authenticated { key, salt } => Some((key, salt)),
+            Self::Sealed { key, salt }
+            | Self::Authenticated { key, salt }
+            | Self::Sectors { key, salt } => Some((key, salt)),
         }
     }
 }
 
 /// fxdax: how a writer frames an object under its branch's DEK, the key it names (TASK-411.3):
-/// its parts sealed, as data is, or authenticated alone, as metadata the collector reads is.
+/// its parts sealed, as data is, or authenticated alone, as metadata the collector reads is; or
+/// left where a raw file holds them, its XTS sectors, tagged (TASK-411.23).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyed {
     Sealed,
     Authenticated,
+    Sectors,
 }
 
 /// What HKDF derives an object's subkey that seals its parts with, as its info.
@@ -247,24 +275,70 @@ const PARTS_INFO: &[u8] = b"fxdax frame parts";
 /// What HKDF derives an object's subkey that authenticates its footer and table with, as its info.
 const MAC_INFO: &[u8] = b"fxdax frame mac";
 
+/// fxdax: what HKDF derives a raw file's XTS subkeys with, as their info's first piece
+/// ([`Xts::derive`], TASK-411.5): an object of the file's sectors' parts' too (TASK-411.23).
+const RAW_FILE_INFO: &[u8] = b"fxdax raw file";
+
+/// fxdax: what HKDF derives the subkey that tags the parts of an object of a raw file's sectors
+/// with, as its info (TASK-411.23).
+const RAW_PART_TAG_INFO: &[u8] = b"fxdax raw part tag";
+
 /// fxdax: an object's subkeys, derived from its DEK and its salt (TASK-411.2): one that seals and
 /// opens its parts, and one that authenticates its footer and table. A packer draws a salt of its
 /// own for each object it packs ([`Packer::new`]), so that no two objects' parts are sealed under
 /// one subkey, as nonces, the parts' indices, repeat across objects. Shared by the threads that
-/// pack an object's parts ([`PartPacker::pack`]) and by its readers.
+/// pack an object's parts ([`PartPacker::pack`]) and by its readers. fxdax: of an object of a raw
+/// file's sectors, the raw file's own, from the salt drawn for it, which encrypts the file as it is
+/// written and tags its parts as it is framed in place ([`ObjectKey::sectors`], TASK-411.23).
 pub struct ObjectKey {
     id: KeyId,
     salt: Salt,
-    /// fxdax: whether its parts are sealed, or authenticated alone (TASK-411.3).
+    /// fxdax: whether its parts are sealed, or authenticated alone (TASK-411.3); or a raw file's
+    /// sectors (TASK-411.23).
     keyed: Keyed,
-    parts: Aead,
+    parts: PartKey,
     mac: Secret,
+}
+
+/// fxdax: what an object's parts are sealed, tagged or encrypted under, as it is keyed.
+enum PartKey {
+    /// AES-256-GCM: its parts sealed, or tagged alone (TASK-411.2, TASK-411.3).
+    Aead(Aead),
+    /// AES-256-XTS by sector, and HMAC-SHA256 tagging each part's ciphertext (TASK-411.23): its
+    /// two key schedules boxed, so that a key of the other kind takes none of their room.
+    Sectors { xts: Box<Xts>, tag: Secret },
 }
 
 impl ObjectKey {
     fn new(dek: &Secret, id: KeyId, salt: Salt, keyed: Keyed) -> Self {
-        let parts = Aead::new(&dek.derive(&salt, &[PARTS_INFO]));
+        let parts = match keyed {
+            Keyed::Sealed | Keyed::Authenticated => {
+                PartKey::Aead(Aead::new(&dek.derive(&salt, &[PARTS_INFO])))
+            }
+            Keyed::Sectors => PartKey::Sectors {
+                xts: Box::new(Xts::derive(dek, &salt, RAW_FILE_INFO)),
+                tag: dek.derive(&salt, &[RAW_PART_TAG_INFO]),
+            },
+        };
         Self { id, salt, keyed, parts, mac: dek.derive(&salt, &[MAC_INFO]) }
+    }
+
+    /// fxdax: the key of a sealed store's raw file, under `dek`, which `id` names, from `salt`,
+    /// drawn for the file (TASK-411.5): its sectors encrypted with AES-256-XTS
+    /// ([`ObjectKey::encrypt_sectors`]); and, framed in place, the key of the object it is
+    /// ([`Packer::in_place`], [`Seal::Sectors`], TASK-411.23).
+    pub fn sectors(dek: &Secret, id: KeyId, salt: Salt) -> Self {
+        Self::new(dek, id, salt, Keyed::Sectors)
+    }
+
+    /// fxdax: which DEK it came from.
+    pub fn id(&self) -> KeyId {
+        self.id
+    }
+
+    /// fxdax: the salt it came from.
+    pub fn salt(&self) -> Salt {
+        self.salt
     }
 
     fn seal(&self) -> Seal {
@@ -272,12 +346,73 @@ impl ObjectKey {
         match self.keyed {
             Keyed::Sealed => Seal::Sealed { key, salt },
             Keyed::Authenticated => Seal::Authenticated { key, salt },
+            Keyed::Sectors => Seal::Sectors { key, salt },
         }
     }
 
-    /// fxdax: whether its parts are sealed, not authenticated alone.
+    /// fxdax: whether its parts are sealed with AES-GCM, not authenticated alone, nor a raw
+    /// file's sectors.
     fn seals(&self) -> bool {
         self.keyed == Keyed::Sealed
+    }
+
+    /// fxdax: its AES-256-GCM key, of an object sealed or authenticated.
+    fn aead(&self) -> &Aead {
+        match &self.parts {
+            PartKey::Aead(aead) => aead,
+            PartKey::Sectors { .. } => {
+                unreachable!("a raw file's sectors are under no AES-GCM key")
+            }
+        }
+    }
+
+    /// fxdax: its XTS key, and the subkey tagging its parts, of a raw file's sectors.
+    fn sectors_keys(&self) -> (&Xts, &Secret) {
+        match &self.parts {
+            PartKey::Sectors { xts, tag } => (xts, tag),
+            PartKey::Aead(_) => unreachable!("an object sealed with AES-GCM has no sectors"),
+        }
+    }
+
+    /// fxdax: encrypts `sectors` in place, whole sectors ([`SECTOR`]) of its raw file, the first
+    /// of them the file's sector `first` (TASK-411.5).
+    pub fn encrypt_sectors(&self, first: u64, sectors: &mut [u8]) {
+        self.sectors_keys().0.encrypt(first, sectors);
+    }
+
+    /// fxdax: decrypts `sectors` in place, as [`ObjectKey::encrypt_sectors`] encrypted them.
+    pub fn decrypt_sectors(&self, first: u64, sectors: &mut [u8]) {
+        self.sectors_keys().0.decrypt(first, sectors);
+    }
+
+    /// fxdax: the tag of `stored`, the stored bytes of part `index`, of a raw file's sectors: its
+    /// associated data, as a sealed part's, then its bytes, under its tagging subkey
+    /// ([`Secret::tag`], TASK-411.23).
+    fn tag_sectors(&self, index: u64, stored: &[u8]) -> Tag {
+        let len = stored.len() as u64;
+        let aad = Self::aad(index, Encoding::Raw, stored.len(), len);
+        self.sectors_keys().1.tag(&[&aad, stored])
+    }
+
+    /// fxdax: opens in place `bytes`, the stored bytes of part `index`, of a raw file's sectors,
+    /// stored at `offset` in its object, given its tag: checked against its tag, then decrypted,
+    /// its sectors numbered by their places in the object (TASK-411.23).
+    fn open_sectors(
+        &self,
+        index: u64,
+        offset: u64,
+        bytes: &mut [u8],
+        tag: &Tag,
+    ) -> Result<(), Corrupt> {
+        let len = bytes.len() as u64;
+        let aad = Self::aad(index, Encoding::Raw, bytes.len(), len);
+        let (xts, tagging) = self.sectors_keys();
+        tagging.verify_tag(&[&aad, bytes], tag).map_err(|_| corrupt("part, by its tag"))?;
+        if !offset.is_multiple_of(SECTOR as u64) || !len.is_multiple_of(SECTOR as u64) {
+            return Err(corrupt("part of sectors, not whole sectors"));
+        }
+        xts.decrypt(offset / SECTOR as u64, bytes);
+        Ok(())
     }
 
     /// The associated data of part `index` of `len` bytes, stored `encoding`, its stored bytes
@@ -295,7 +430,7 @@ impl ObjectKey {
     /// Seals `bytes` in place, part `index`, of `len` bytes, packed `encoding`: its tag.
     fn seal_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &mut [u8]) -> Tag {
         let aad = Self::aad(index, encoding, bytes.len(), len);
-        self.parts.seal(index, &aad, bytes)
+        self.aead().seal(index, &aad, bytes)
     }
 
     /// fxdax: the tag of `bytes`, part `index`, of `len` bytes, packed `encoding`, authenticated
@@ -303,7 +438,7 @@ impl ObjectKey {
     /// (TASK-411.3).
     fn tag_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &[u8]) -> Tag {
         let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
-        self.parts.seal(index, &aad, &mut [])
+        self.aead().seal(index, &aad, &mut [])
     }
 
     /// fxdax: checks `bytes` against `tag`, what [`ObjectKey::tag_part`] gave them.
@@ -316,7 +451,7 @@ impl ObjectKey {
         tag: &Tag,
     ) -> Result<(), Corrupt> {
         let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
-        (self.parts.open(index, &aad, &mut [], tag)).map_err(|_| corrupt("part, by its tag"))
+        (self.aead().open(index, &aad, &mut [], tag)).map_err(|_| corrupt("part, by its tag"))
     }
 
     /// Opens in place what [`ObjectKey::seal_part`] sealed, given its tag.
@@ -329,7 +464,7 @@ impl ObjectKey {
         tag: &Tag,
     ) -> Result<(), Corrupt> {
         let aad = Self::aad(index, encoding, bytes.len(), len);
-        (self.parts.open(index, &aad, bytes, tag)).map_err(|_| corrupt("part, by its tag"))
+        (self.aead().open(index, &aad, bytes, tag)).map_err(|_| corrupt("part, by its tag"))
     }
 }
 
@@ -363,8 +498,15 @@ impl Opening {
         Ok(match seal {
             Seal::Clear if keys.sealed() => return Err(Error::Clear),
             Seal::Clear => Self::Clear,
-            Seal::Sealed { key, salt } => match keys.dek(key) {
-                Some(dek) => Self::Open(Arc::new(ObjectKey::new(dek, key, salt, Keyed::Sealed))),
+            // fxdax: a raw file's sectors as a sealed object's parts (TASK-411.23).
+            Seal::Sealed { key, salt } | Seal::Sectors { key, salt } => match keys.dek(key) {
+                Some(dek) => {
+                    let keyed = match seal {
+                        Seal::Sectors { .. } => Keyed::Sectors,
+                        _ => Keyed::Sealed,
+                    };
+                    Self::Open(Arc::new(ObjectKey::new(dek, key, salt, keyed)))
+                }
                 None => Self::Locked(key),
             },
             Seal::Authenticated { key, salt } => match keys.dek(key) {
@@ -494,18 +636,20 @@ impl Part {
 
     /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is sealed; fxdax:
     /// checks them against its tag, if it is authenticated under a key its reader holds
-    /// (TASK-411.3).
+    /// (TASK-411.3); checks them against its tag and decrypts them, if a raw file's sectors
+    /// (TASK-411.23).
     fn open_in_place(&self, bytes: &mut [u8]) -> Result<(), Error> {
         let (index, encoding) = (self.index, self.stored.encoding);
         match &self.opening {
             Opening::Clear | Opening::Unchecked(_) => Ok(()),
             Opening::Locked(key) => Err(Error::NoKey(*key)),
-            Opening::Open(key) if key.seals() => {
-                Ok(key.open_part(index, encoding, self.len(), bytes, &self.tag)?)
-            }
-            Opening::Open(key) => {
-                Ok(key.check_part(index, encoding, self.len(), bytes, &self.tag)?)
-            }
+            Opening::Open(key) => Ok(match key.keyed {
+                Keyed::Sealed => key.open_part(index, encoding, self.len(), bytes, &self.tag),
+                Keyed::Authenticated => {
+                    key.check_part(index, encoding, self.len(), bytes, &self.tag)
+                }
+                Keyed::Sectors => key.open_sectors(index, self.stored.offset, bytes, &self.tag),
+            }?),
         }
     }
 
@@ -538,7 +682,7 @@ impl Part {
                 decode(encoding, checked, &mut out)?
             }
             // fxdax: checked where it is, then unpacked (TASK-411.3).
-            (Opening::Open(key), encoding) if !key.seals() => {
+            (Opening::Open(key), encoding) if key.keyed == Keyed::Authenticated => {
                 key.check_part(self.index, encoding, self.len(), checked, &self.tag)?;
                 decode(encoding, checked, &mut out)?;
             }
@@ -620,6 +764,40 @@ impl PackedPart {
             stored.shrink_to_fit();
         }
     }
+
+    /// fxdax: it, packed in the clear, of `len` bytes of data, `stored` its bytes as stored then
+    /// ([`PackedPart::stored_bytes`], or the part's own), sealed under `key`, its object's: as
+    /// [`PartPacker::pack`] packs the part under `key`, byte for byte. What a sealed store's
+    /// framing in a copy makes of a part packed ahead and held in memory, in the clear, as the
+    /// extent cache holds data, sealed only once its framing draws its object's key (TASK-421).
+    pub fn sealed(&self, len: u64, stored: &[u8], key: &ObjectKey) -> PackedPart {
+        assert_eq!(self.keyed, None, "a part packed in the clear");
+        assert!(key.seals(), "sealed under a sealed object's key");
+        let mut bytes = stored.to_vec();
+        let tag = key.seal_part(self.index, self.encoding, len, &mut bytes);
+        let crc = crc(&bytes);
+        let (index, encoding, keyed) = (self.index, self.encoding, Some(Keyed::Sealed));
+        PackedPart { index, encoding, stored: Some(bytes), crc, tag, keyed }
+    }
+}
+
+/// fxdax: a part of an object framed in place, stored raw where its data was written (TASK-310):
+/// its bytes, the CRC32C of its stored bytes, and its tag, of a raw file's sectors, zeros in the
+/// clear (TASK-411.23).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RawPart {
+    pub len: u64,
+    pub crc: u32,
+    pub tag: [u8; TAG_LEN],
+}
+
+impl RawPart {
+    /// Part `index` of an object framed in place, `stored` its stored bytes: in the clear, or, if
+    /// `key` gives a raw file's sectors key, its XTS sectors, tagged ([`ObjectKey::sectors`]).
+    pub fn of(index: u64, stored: &[u8], key: Option<&ObjectKey>) -> Self {
+        let tag = key.map_or([0; TAG_LEN], |key| key.tag_sectors(index, stored));
+        Self { len: stored.len() as u64, crc: crc(stored), tag }
+    }
 }
 
 /// fxdax: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that a
@@ -651,17 +829,18 @@ impl PartPacker {
             self.compressor.as_mut().and_then(|compressor| pack_part(part, compressor));
         let encoding = if compressed.is_some() { Encoding::Zstd } else { Encoding::Raw };
         let len = part.len() as u64;
-        let (stored, tag) = match key {
+        let (stored, tag) = match key.map(|key| (key, key.keyed)) {
             None => (compressed, [0; TAG_LEN]),
-            Some(key) if key.seals() => {
+            Some((key, Keyed::Sealed)) => {
                 let mut stored = compressed.unwrap_or_else(|| part.to_vec());
                 let tag = key.seal_part(index, encoding, len, &mut stored);
                 (Some(stored), tag)
             }
-            Some(key) => {
+            Some((key, Keyed::Authenticated)) => {
                 let tag = key.tag_part(index, encoding, len, compressed.as_deref().unwrap_or(part));
                 (compressed, tag)
             }
+            Some((_, Keyed::Sectors)) => unreachable!("a raw file's sectors are framed in place"),
         };
         let crc = crc(stored.as_deref().unwrap_or(part));
         PackedPart { index, encoding, stored, crc, tag, keyed: key.map(|key| key.keyed) }
@@ -714,7 +893,7 @@ pub struct Packer {
     /// The bytes of the object so far.
     end: u64,
     /// fxdax: its subkeys, if it is sealed (TASK-411.2).
-    key: Option<ObjectKey>,
+    key: Option<Arc<ObjectKey>>,
 }
 
 impl Packer {
@@ -728,7 +907,19 @@ impl Packer {
     /// how, `keyed` under subkeys of the DEK from a salt drawn for it alone: sealed, or
     /// authenticated alone (TASK-411.3).
     pub fn keyed(keyed: Option<(&Secret, KeyId, Keyed)>) -> Self {
-        let key = keyed.map(|(dek, id, keyed)| ObjectKey::new(dek, id, Salt::random(), keyed));
+        let key = keyed.map(|(dek, id, keyed)| {
+            assert_ne!(keyed, Keyed::Sectors, "a raw file's sectors are framed in place");
+            Arc::new(ObjectKey::new(dek, id, Salt::random(), keyed))
+        });
+        Self { stored: Vec::new(), tags: Vec::new(), data_len: 0, end: 0, key }
+    }
+
+    /// fxdax: a packer of an object framed in place, its parts raw ([`Packer::push_raw_parts`]),
+    /// from a raw file in the clear, or a sealed store's, whose sectors `key` encrypted
+    /// ([`ObjectKey::sectors`]): the object's parts are those sectors, as they are (TASK-411.23).
+    pub fn in_place(key: Option<Arc<ObjectKey>>) -> Self {
+        let sectors = key.as_ref().is_none_or(|key| key.keyed == Keyed::Sectors);
+        assert!(sectors, "framed in place under a raw file's sectors key");
         Self { stored: Vec::new(), tags: Vec::new(), data_len: 0, end: 0, key }
     }
 
@@ -740,12 +931,12 @@ impl Packer {
     /// fxdax: its subkeys, if it is sealed: what the threads that pack its parts seal them under
     /// ([`PartPacker::pack`], TASK-411.2).
     pub fn key(&self) -> Option<&ObjectKey> {
-        self.key.as_ref()
+        self.key.as_deref()
     }
 
     /// fxdax: how the object is sealed, as its trailer will say (TASK-411.2).
     pub fn seal(&self) -> Seal {
-        self.key.as_ref().map_or(Seal::Clear, ObjectKey::seal)
+        self.key.as_deref().map_or(Seal::Clear, ObjectKey::seal)
     }
 
     /// fxdax: the index of the object's next part (TASK-411.2).
@@ -756,28 +947,49 @@ impl Packer {
     /// fxdax: whether every part so far is stored raw, none compressing, in the clear: the
     /// object's bytes so far are its data then, as they are (TASK-310).
     pub fn raw(&self) -> bool {
-        self.key.is_none() && self.stored.iter().all(|stored| stored.encoding == Encoding::Raw)
+        self.key.is_none() && self.stored_raw()
     }
 
-    /// fxdax: packs `data`, the object's first parts, each stored raw, compressing none, as
-    /// [`Packer::push`] stores those that don't compress: the object's bytes are `data` itself, as
-    /// it is, where it is, which this doesn't return (TASK-310). Whole parts, but for the last. An
-    /// object in the clear's alone: a sealed one's bytes are never its data.
-    pub fn push_raw(&mut self, data: &[u8]) {
-        let parts = data.chunks(PART as usize);
-        self.push_raw_parts(parts.map(|part| (part.len() as u64, crc(part))));
+    /// fxdax: whether every part so far is stored raw, none compressing, sealed or not: what an
+    /// object framed in place holds, raw (TASK-411.23).
+    pub fn stored_raw(&self) -> bool {
+        self.stored.iter().all(|stored| stored.encoding == Encoding::Raw)
     }
 
-    /// fxdax: [`Packer::push_raw`], of parts given by their lengths and CRCs, as a store reads and
-    /// checksums them on threads of its own (TASK-336).
-    pub fn push_raw_parts(&mut self, parts: impl IntoIterator<Item = (u64, u32)>) {
+    /// fxdax: packs `stored`, the object's first parts as stored, each raw, compressing none, as
+    /// [`Packer::push`] stores those that don't compress: the object's bytes are `stored` itself,
+    /// as it is, where it is, which this doesn't return (TASK-310). Whole parts, but for the last.
+    /// Of an object framed in place ([`Packer::in_place`]): in the clear, its data; of a raw
+    /// file's sectors, their ciphertext, each part tagged (TASK-411.23).
+    pub fn push_raw(&mut self, stored: &[u8]) {
+        let (first, key) = (self.next_part(), self.raw_key());
+        let parts = (stored.chunks(PART as usize).zip(first..))
+            .map(|(part, index)| RawPart::of(index, part, key))
+            .collect::<Vec<_>>();
+        self.push_raw_parts(parts);
+    }
+
+    /// fxdax: its key, of an object framed in place, raw: none in the clear, or a raw file's
+    /// sectors key ([`Packer::in_place`]).
+    fn raw_key(&self) -> Option<&ObjectKey> {
+        let key = self.key();
+        let raw = key.is_none_or(|key| key.keyed == Keyed::Sectors);
+        assert!(raw, "a sealed object's bytes are not its data");
+        key
+    }
+
+    /// fxdax: [`Packer::push_raw`], of parts given by their lengths, CRCs and tags
+    /// ([`RawPart::of`]), as a store reads and checksums them on threads of its own (TASK-336).
+    pub fn push_raw_parts(&mut self, parts: impl IntoIterator<Item = RawPart>) {
         assert_eq!(self.end, 0, "raw parts first");
-        assert!(self.key.is_none(), "a sealed object's bytes are not its data");
-        for (len, crc) in parts {
+        let sectors = self.raw_key().is_some();
+        for RawPart { len, crc, tag } in parts {
             assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
+            let whole = !sectors || len.is_multiple_of(SECTOR as u64);
+            assert!(whole, "a part of a raw file's sectors, {len} bytes, is whole sectors");
             let offset = self.end;
             self.stored.push(Stored { offset, len, crc, encoding: Encoding::Raw });
-            self.tags.push([0; TAG_LEN]);
+            self.tags.push(tag);
             self.data_len += len;
             self.end += len;
         }
@@ -787,7 +999,7 @@ impl Packer {
     /// object's next bytes, which follow those returned before.
     pub fn push(&mut self, data: &[u8]) -> Vec<u8> {
         let mut bytes = Vec::new();
-        let packed = pack_parts(data, self.next_part(), self.key.as_ref());
+        let packed = pack_parts(data, self.next_part(), self.key());
         for (part, packed) in data.chunks(PART as usize).zip(packed) {
             self.push_part(&mut bytes, part, &packed);
         }
@@ -842,9 +1054,9 @@ impl Packer {
     /// (TASK-411.2).
     pub fn finish_parts(self, footer: &[u8]) -> (Vec<u8>, Parts) {
         let table = Table { stored: &self.stored, tags: &self.tags };
-        let tail = tail(table, self.data_len, self.end, footer, self.key.as_ref());
+        let tail = tail(table, self.data_len, self.end, footer, self.key.as_deref());
         let frame = Frame::of_trailer(&tail).expect("a trailer as packed");
-        let opening = self.key.map_or(Opening::Clear, |key| Opening::Open(Arc::new(key)));
+        let opening = self.key.map_or(Opening::Clear, Opening::Open);
         (tail, Parts { frame, stored: self.stored, tags: self.tags, opening })
     }
 }
@@ -883,6 +1095,7 @@ fn tail(
         seal[0] = match key.keyed {
             Keyed::Sealed => 1,
             Keyed::Authenticated => 2,
+            Keyed::Sectors => 3,
         };
         seal[1..9].copy_from_slice(&key.id.branch.to_le_bytes());
         seal[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
@@ -996,12 +1209,13 @@ impl Frame {
         match seal[0] {
             0 if seal[1..].iter().all(|&byte| byte == 0) => Ok(Seal::Clear),
             0 => Err(corrupt("trailer: a seal in the clear naming a key")),
-            kind @ (1 | 2) => {
+            kind @ 1..=3 => {
                 let key = KeyId { branch: u64_at(seal, 1), generation: u32_at(seal, 9) };
                 let salt = Salt(seal[13..].try_into().unwrap());
                 Ok(match kind {
                     1 => Seal::Sealed { key, salt },
-                    _ => Seal::Authenticated { key, salt },
+                    2 => Seal::Authenticated { key, salt },
+                    _ => Seal::Sectors { key, salt },
                 })
             }
             kind => Err(corrupt(format_args!("trailer: a seal of kind {kind}"))),
@@ -1112,6 +1326,16 @@ impl Frame {
                 Encoding::Raw => entry_stored.len == len,
                 Encoding::Zstd => entry_stored.len > 0 && entry_stored.len < len,
             };
+            // fxdax: a raw file's sectors, whole, as they are (TASK-411.23).
+            let sectors = match self.seal {
+                Seal::Sectors { .. } => {
+                    encoding == Encoding::Raw && entry_stored.len.is_multiple_of(SECTOR as u64)
+                }
+                _ => true,
+            };
+            if !sectors {
+                return Err(corrupt(format_args!("part {part}, not whole sectors of a raw file")));
+            }
             if !fits
                 || !entry_stored.offset.is_multiple_of(ALIGN)
                 || entry_stored.offset < end
@@ -1281,7 +1505,8 @@ mod tests {
     /// A packer of an object sealed under [`dek`] with `salt`, as no packer outside the tests is:
     /// so that two pack alike.
     fn sealed_with(salt: Salt) -> Packer {
-        Packer { key: Some(ObjectKey::new(&dek(), ID, salt, Keyed::Sealed)), ..Packer::new(None) }
+        let key = Some(Arc::new(ObjectKey::new(&dek(), ID, salt, Keyed::Sealed)));
+        Packer { key, ..Packer::new(None) }
     }
 
     /// Recomputes the CRCs of `bytes`, an object's, its footer's and its table's, as one who
@@ -1344,7 +1569,11 @@ mod tests {
         raw.push_raw(&data);
         let mut given = Packer::new(None);
         let parts = data.chunks(PART as usize);
-        given.push_raw_parts(parts.map(|part| (part.len() as u64, crc(part))));
+        given.push_raw_parts(parts.map(|part| RawPart {
+            len: part.len() as u64,
+            crc: crc(part),
+            tag: [0; TAG_LEN],
+        }));
         assert_eq!(given.finish(b"footer"), raw.finish(b"footer"));
     }
 
@@ -1765,6 +1994,201 @@ mod tests {
         assert_eq!(super::data(&another, &keys).unwrap(), data);
     }
 
+    /// The key of a raw file of [`dek`]'s, from `salt`, as a sealed store's (TASK-411.5).
+    fn raw_file_key(salt: Salt) -> Arc<ObjectKey> {
+        Arc::new(ObjectKey::sectors(&dek(), ID, salt))
+    }
+
+    /// The bytes of a sealed raw file holding `data`, whole sectors, under `key`, then its tail,
+    /// framed in place, as a sealed store frames a segment or a large extent (TASK-411.23).
+    fn sectors_of(data: &[u8], footer: &[u8], key: &Arc<ObjectKey>) -> Vec<u8> {
+        let mut bytes = data.to_vec();
+        key.encrypt_sectors(0, &mut bytes);
+        let mut packer = Packer::in_place(Some(key.clone()));
+        packer.push_raw(&bytes);
+        assert_eq!(packer.end(), bytes.len() as u64, "its data where it is");
+        bytes.extend(packer.finish(footer));
+        bytes
+    }
+
+    /// TASK-411.23: an object framed in place from a sealed raw file is the raw file's sectors as
+    /// AES-256-XTS encrypted them under the raw file's key, `Xts::derive(dek, salt, "fxdax raw
+    /// file")`, the sector's place its tweak, then its tail: its trailer names the DEK and the raw
+    /// file's salt; it holds none of its data; it reads back under its key, whole, by parts, by
+    /// ranges, and restamped; one holding no key checks it, as the collector does, and reads none
+    /// of it; under another DEK of the same name it is refused by its MAC. Its parts are all raw,
+    /// as long as in the clear.
+    #[test]
+    fn objects_of_raw_files_sectors_read_under_their_key_alone() {
+        // Three whole parts, then one of eight sectors.
+        let data = random(3 * PART + 8 * SECTOR as u64);
+        let salt = Salt([4; SALT_LEN]);
+        let key = raw_file_key(salt);
+        let bytes = sectors_of(&data, b"footer", &key);
+        let mut raw = data.clone();
+        Xts::derive(&dek(), &salt, b"fxdax raw file").encrypt(0, &mut raw);
+        assert!(bytes[..data.len()] == raw[..], "the raw file's sectors, as they are");
+        for sector in data.chunks(SECTOR) {
+            assert!(!holds(&bytes, &sector[..32]), "no plaintext");
+        }
+        let keys = holding(dek());
+        let parts = Parts::of(&bytes, &keys).unwrap();
+        assert_eq!(parts.frame.seal, Seal::Sectors { key: ID, salt });
+        assert!(parts.opens());
+        let lens: Vec<(Encoding, u64)> =
+            parts.stored.iter().map(|stored| (stored.encoding, stored.len)).collect();
+        let raw_part = (Encoding::Raw, PART);
+        assert_eq!(lens, [raw_part, raw_part, raw_part, (Encoding::Raw, 8 * SECTOR as u64)]);
+        assert_eq!(
+            bytes.len() as u64,
+            data.len() as u64 + parts.frame.tail().end - parts.frame.tail().start
+        );
+        assert_eq!(super::data(&bytes, &keys).unwrap(), data);
+        assert_eq!(footer(&bytes, &keys).unwrap(), b"footer");
+        for index in 0..parts.frame.parts() {
+            let part = parts.part(index).unwrap();
+            assert!(!part.as_is(), "part {index}: ciphertext");
+            let expected = &data[part.place.start as usize..part.place.end as usize];
+            let stored = &bytes[part.stored.offset as usize..];
+            assert_eq!(part.unpack(stored).unwrap(), expected, "part {index}");
+            let mut opened = stored[..part.stored.len as usize].to_vec();
+            assert_eq!(part.open(&mut opened).unwrap(), expected, "part {index}, opened in place");
+        }
+        let read = parts.read(PART - 3..3 * PART + 5, |range| {
+            Ok::<_, Error>(bytes[range.start as usize..range.end as usize].to_vec())
+        });
+        assert_eq!(read.unwrap(), &data[PART as usize - 3..3 * PART as usize + 5]);
+        // Its writer reads it as a reader holding its key does.
+        let mut packer = Packer::in_place(Some(key.clone()));
+        packer.push_raw(&raw);
+        assert_eq!(packer.finish_parts(b"footer").1, parts);
+        // Restamped under its key, its parts as they are.
+        let restamped = restamp(&bytes, b"another", &keys).unwrap();
+        assert!(restamped[..data.len()] == bytes[..data.len()]);
+        assert_eq!(super::data(&restamped, &keys).unwrap(), data);
+        assert_eq!(footer(&restamped, &keys).unwrap(), b"another");
+        assert_eq!(restamp(&bytes, b"another", &NoKeys), Err(Error::NoKey(ID)));
+
+        // Holding no key: checked by CRCs, read by none.
+        assert_eq!(check(&bytes), Ok(()));
+        let locked = Parts::of(&bytes, &NoKeys).unwrap();
+        assert!(!locked.opens());
+        assert_eq!(super::data(&bytes, &NoKeys), Err(Error::NoKey(ID)));
+        assert_eq!(footer(&bytes, &NoKeys).unwrap(), b"footer");
+        // Under another DEK of its name.
+        let other = holding(Secret::from_bytes(&[1; extent_keys::KEY_LEN]));
+        let by_mac = Corrupt("an object's table, by its MAC".into());
+        assert_eq!(corrupt_of(super::data(&bytes, &other)), Err(by_mac));
+    }
+
+    /// TASK-411.23: a part of an object of a raw file's sectors changed, its CRC made to match, is
+    /// refused by its tag before it is decrypted; so is one under another tag, at another index,
+    /// or of another raw file of the same data and DEK (another salt); its table changed is refused
+    /// by its MAC, which is what binds a part's place, its sectors' tweaks: read at another place,
+    /// a part decrypts to other bytes. A table saying a part of sectors is compressed, or not whole
+    /// sectors, is corrupt, for a reader holding no key too.
+    #[test]
+    fn parts_of_raw_files_sectors_changed_or_moved_fail() {
+        let data = random(3 * PART);
+        let keys = holding(dek());
+        let bytes = sectors_of(&data, b"footer", &raw_file_key(Salt([5; SALT_LEN])));
+        let parts = Parts::of(&bytes, &keys).unwrap();
+        let by_crc = Error::Corrupt(Corrupt("an object's part, by its CRC".into()));
+        let by_tag = Error::Corrupt(Corrupt("an object's part, by its tag".into()));
+        let by_mac = Corrupt("an object's table, by its MAC".into());
+        let stored = |part: &Part, bytes: &[u8]| {
+            bytes[part.stored.range().start as usize..part.stored.range().end as usize].to_vec()
+        };
+        let part = parts.part(1).unwrap();
+
+        // A byte flipped: by its CRC; its CRC made to match: by its tag.
+        let mut flipped = stored(&part, &bytes);
+        flipped[1000] ^= 1;
+        assert_eq!(part.unpack(&flipped), Err(by_crc.clone()));
+        let matching =
+            Part { stored: Stored { crc: crc(&flipped), ..part.stored }, ..part.clone() };
+        assert_eq!(matching.unpack(&flipped), Err(by_tag.clone()));
+        assert_eq!(matching.open(&mut flipped.clone()), Err(by_tag.clone()));
+        let mut tampered = bytes.clone();
+        tampered[part.stored.offset as usize + 1000] ^= 1;
+        assert_eq!(super::data(&tampered, &keys), Err(by_crc));
+        tampered[entry(&parts.frame, 1) + 12..][..4].copy_from_slice(&crc(&flipped).to_le_bytes());
+        recrc(&mut tampered);
+        assert_eq!(super::data(&tampered, &keys), Err(by_mac.clone().into()));
+
+        // Its tag flipped.
+        let mut tag = part.tag;
+        tag[15] ^= 1;
+        assert_eq!(
+            Part { tag, ..part.clone() }.unpack(&stored(&part, &bytes)),
+            Err(by_tag.clone())
+        );
+        // Part 2 at index 1, its tag with it; or at part 1's place, its index its own.
+        let other = parts.part(2).unwrap();
+        let moved = Part { index: 1, place: part.place.clone(), ..other.clone() };
+        assert_eq!(moved.unpack(&stored(&other, &bytes)), Err(by_tag.clone()));
+        let elsewhere =
+            Part { stored: Stored { offset: part.stored.offset, ..other.stored }, ..other.clone() };
+        let decrypted = elsewhere.unpack(&stored(&other, &bytes)).unwrap();
+        assert!(decrypted[..] != data[2 * PART as usize..], "another tweak, other bytes");
+        // Part 1 of another raw file of the same data and DEK, of another salt, its tag with it.
+        let another = sectors_of(&data, b"footer", &raw_file_key(Salt([6; SALT_LEN])));
+        let theirs = Parts::of(&another, &keys).unwrap().part(1).unwrap();
+        let transplanted = Part { opening: part.opening.clone(), ..theirs.clone() };
+        assert_eq!(transplanted.unpack(&stored(&theirs, &another)), Err(by_tag));
+
+        // A part said compressed, or of a length not whole sectors.
+        let compressed = {
+            let mut changed = bytes.clone();
+            changed[entry(&parts.frame, 0) + 16] = 1;
+            changed[entry(&parts.frame, 0) + 8..][..4]
+                .copy_from_slice(&(PART as u32 - 1).to_le_bytes());
+            recrc(&mut changed);
+            changed
+        };
+        let not_sectors =
+            Err(Corrupt("an object's part 0, not whole sectors of a raw file".into()));
+        assert_eq!(corrupt_of(Parts::of(&compressed, &NoKeys)).map(|_| ()), not_sectors);
+        let short = sectors_of(&data[..PART as usize], b"", &raw_file_key(Salt([7; SALT_LEN])));
+        let mut cut = short.clone();
+        let frame = Frame::of(&short).unwrap();
+        // Data of a part less 512 bytes: its entry's length and the trailer's data length.
+        let trailer = cut.len() - TRAILER as usize;
+        cut[entry(&frame, 0) + 8..][..4].copy_from_slice(&(PART as u32 - 512).to_le_bytes());
+        cut[trailer + at::DATA_LEN..][..8].copy_from_slice(&(PART - 512).to_le_bytes());
+        recrc(&mut cut);
+        assert_eq!(corrupt_of(Parts::of(&cut, &NoKeys)).map(|_| ()), not_sectors);
+        // As they were, each reads.
+        assert_eq!(super::data(&bytes, &keys).unwrap(), data);
+        assert_eq!(super::data(&another, &keys).unwrap(), data);
+    }
+
+    /// TASK-421: a part packed in the clear, as a store holds one packed ahead, sealed under an
+    /// object's key, is the part packed under that key, byte for byte, compressed or raw.
+    #[test]
+    fn parts_packed_in_the_clear_seal_as_parts_packed_sealed() {
+        let salt = Salt([8; SALT_LEN]);
+        let sealing = sealed_with(salt);
+        let key = sealing.key().unwrap();
+        let mut packer = PartPacker::new();
+        for (index, part) in [pattern(PART), random(PART), random(5000)].iter().enumerate() {
+            let index = index as u64;
+            let clear = packer.pack(index, part, None);
+            let stored = clear.stored(part).to_vec();
+            let sealed = clear.sealed(part.len() as u64, &stored, key);
+            assert_eq!(sealed, packer.pack(index, part, Some(key)), "part {index}");
+        }
+    }
+
+    /// TASK-411.23: an object framed in place under a key other than a raw file's is no such
+    /// object.
+    #[test]
+    #[should_panic(expected = "framed in place under a raw file's sectors key")]
+    fn objects_framed_in_place_under_aes_gcm_keys_are_refused() {
+        let key = Arc::new(ObjectKey::new(&dek(), ID, Salt([3; SALT_LEN]), Keyed::Sealed));
+        Packer::in_place(Some(key));
+    }
+
     /// TASK-411.2: a sealed object's footer, table or trailer changed, their CRCs made to match,
     /// as one holding no key would: its readers holding its key refuse it, by its MAC; one holding
     /// none reads it, as the collector would, as doc-16 accepts. Its plaintext twin's readers read
@@ -1988,7 +2412,7 @@ mod tests {
             corrupt_of(Parts::of(&changed, &NoKeys).map(|_| ()))
         };
         let corrupt = |what: &str| Err(Corrupt(format!("an object's {what}")));
-        assert_eq!(refused(trailer + at::SEAL, 3), corrupt("trailer: a seal of kind 3"));
+        assert_eq!(refused(trailer + at::SEAL, 4), corrupt("trailer: a seal of kind 4"));
         assert_eq!(
             refused(trailer + at::SEAL + 3, 1),
             corrupt("trailer: a seal in the clear naming a key")
