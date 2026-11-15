@@ -35,14 +35,22 @@ import sys
 from pathlib import Path
 
 
+def measured(directories):
+    """What `directories`' rounds measured: each result of each round's cases (bench-*.json), with
+    its case, the report's backend."""
+    for directory in directories:
+        for path in sorted(Path(directory).glob("bench-*.json")):
+            report = json.loads(path.read_text())
+            for result in report["results"]:
+                yield report.get("backend", path.stem), result
+
+
 def pooled(directories):
     """Each workload's values across `directories`' results, and its unit and direction."""
     values, kinds = {}, {}
-    for directory in directories:
-        for path in sorted(Path(directory).glob("bench-*.json")):
-            for result in json.loads(path.read_text())["results"]:
-                values.setdefault(result["workload"], []).extend(result["values"])
-                kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
+    for _, result in measured(directories):
+        values.setdefault(result["workload"], []).extend(result["values"])
+        kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
     return values, kinds
 
 
@@ -50,13 +58,9 @@ def by_case(directories):
     """Each case's workloads' values across `directories`' results, by (case, workload), the case
     its backend, and each workload's unit and direction."""
     values, kinds = {}, {}
-    for directory in directories:
-        for path in sorted(Path(directory).glob("bench-*.json")):
-            report = json.loads(path.read_text())
-            case = report.get("backend", path.stem)
-            for result in report["results"]:
-                values.setdefault((case, result["workload"]), []).extend(result["values"])
-                kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
+    for case, result in measured(directories):
+        values.setdefault((case, result["workload"]), []).extend(result["values"])
+        kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
     return values, kinds
 
 
@@ -124,12 +128,10 @@ def table(a_name, a_dirs, b_name, b_dirs):
                 f"{described(b[workload]) if workload in b else '-'} | - | - |"
             )
             continue
-        a_median, b_median = statistics.median(a[workload]), statistics.median(b[workload])
-        slower = a_median / b_median if higher_is_better else b_median / a_median
-        overlap = max(min(a[workload]), min(b[workload])) <= min(max(a[workload]), max(b[workload]))
         lines.append(
             f"| {workload} | {unit} | {described(a[workload])} | {described(b[workload])} | "
-            f"{slower:.2f}× | {'yes' if overlap else 'no'} |"
+            f"{slower(a[workload], b[workload], higher_is_better):.2f}× | "
+            f"{'yes' if overlap(a[workload], b[workload]) else 'no'} |"
         )
     return "\n".join(lines)
 

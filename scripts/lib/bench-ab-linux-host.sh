@@ -162,26 +162,25 @@ if [[ $phase == build ]]; then
     exit 0
 fi
 
-# Runs side SIDE's round ROUND, with its name and its environment's words.
+# Runs side SIDE's round ROUND, with its name and its environment's words, its results in
+# RESULTS/NAME-rROUND.
 round() {
-    local side=$1 round=$2 name
-    local -a env
+    local side=$1 round=$2 name out
+    local -a env command
     if [[ $side == a ]]; then name=$a_name env=(${a_env[@]+"${a_env[@]}"}); else
         name=$b_name env=(${b_env[@]+"${b_env[@]}"}); fi
-    set -- ${env[@]+"${env[@]}"}
-    echo "Round $round: $name" >&2
+    out=$results/$name-r$round
+    env+=("CLADEFS_E2E_PREBUILT=$work/ab-artifacts-$side"
+        "CLADEFS_GUEST_KERNEL=$work/ab-artifacts-$side/vmlinux")
     if [[ $suite == qualify ]]; then
-        env "$@" CLADEFS_E2E_PREBUILT="$work/ab-artifacts-$side" CLADEFS_E2E_HARNESS="$harness" \
-            CLADEFS_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
-            "$tools/scripts/qualify.sh" "$results/$name-r$round" > "$results/$name-r$round.md" \
-            2> "$results/$name-r$round.log"
-        return
+        env+=("CLADEFS_E2E_HARNESS=$harness")
+        command=("$tools/scripts/qualify.sh" "$out")
+    else
+        env+=("CLADEFS_E2E_ROOT=${trees[$side]}" "CLADEFS_BENCH_RESULTS=$out")
+        command=("$tools/scripts/bench.sh" "$iterations")
     fi
-    env "$@" CLADEFS_E2E_ROOT="${trees[$side]}" CLADEFS_E2E_PREBUILT="$work/ab-artifacts-$side" \
-        CLADEFS_GUEST_KERNEL="$work/ab-artifacts-$side/vmlinux" \
-        CLADEFS_BENCH_RESULTS="$results/$name-r$round" \
-        "$tools/scripts/bench.sh" "$iterations" > "$results/$name-r$round.md" \
-        2> "$results/$name-r$round.log"
+    echo "Round $round: $name" >&2
+    env "${env[@]}" "${command[@]}" > "$out.md" 2> "$out.log"
 }
 
 # A round of the qualification one of whose parts didn't run (qualify.sh's 3) ends the A/B there:
