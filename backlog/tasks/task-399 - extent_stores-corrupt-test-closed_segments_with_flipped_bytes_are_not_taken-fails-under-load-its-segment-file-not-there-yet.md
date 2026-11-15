@@ -3,9 +3,11 @@ id: TASK-399
 title: >-
   extent_store's corrupt test closed_segments_with_flipped_bytes_are_not_taken
   fails under load: its segment file not there yet
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-13 14:04'
+updated_date: '2026-11-15 21:45'
 labels:
   - bug
   - tests
@@ -22,12 +24,18 @@ Seen once on macOS (2026-11-13, TASK-395 batch, the workspace's tests running be
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The test waits on what makes the file exist, or the store names no place whose file isn't there
+- [x] #1 The test waits on what makes the file exist, or the store names no place whose file isn't there
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15, coordinator: failed main's CI run 43762655434 (464e6e201) the same way. Cause: flush returns before make_durable renames framing-N to N; stored() opens N. Fix: wait_idle() (TASK-463) before stored(). Proof: segments::making_durable fail point at sleep(300): old test FAILS, fixed PASSES; 60 runs under load 0 failures; extent_store 291/291 on the Mac.
+<!-- SECTION:NOTES:END -->
