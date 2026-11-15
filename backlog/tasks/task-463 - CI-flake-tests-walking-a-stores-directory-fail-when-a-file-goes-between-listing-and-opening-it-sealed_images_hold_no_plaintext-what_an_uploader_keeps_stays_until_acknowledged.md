@@ -4,11 +4,11 @@ title: >-
   CI flake: tests walking a store's directory fail when a file goes between
   listing and opening it (sealed_images_hold_no_plaintext,
   what_an_uploader_keeps_stays_until_acknowledged)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 19:02'
-updated_date: '2026-11-15 20:12'
+updated_date: '2026-11-15 20:58'
 labels:
   - test
   - flaky
@@ -36,7 +36,7 @@ The store removes files in the background (cleaning, write-back, framing) while 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -60,10 +60,12 @@ Forced window (temporary tests, fail point segments::making_durable held, releas
 Mac natural rate unfixed: image 0/240 under load. Fixed: 300/300 each under load (16 parallel + 6 CPU hogs), 0 failures.
 
 ubu1 (247a2a85, fxjob, own target): nextest --stress-count 200 --retries 0 --test-threads 4, both tests each iteration: 200/200 iterations, 400 passes, 0 failures (456 s, beside other jobs). Swept and touched tests on Linux (control, fuse_mount, fuse, sqlite_extents daemon and image, testing::, shredded/sealed, extent_store's store binary): 175/175 passed; clippy -D warnings clean on Linux and the Mac. Mac workspace (scripts/test.sh workspace part, --retries 0): 2500/2500 passed. scripts/upstream-changes.py --check passes (nothing upstream touched). Other walks swept and left as they are: encrypted.rs's (MemDir snapshots, and a part cache written synchronously), extents.rs's bucket walk and remote.rs's store-file reads (after commits that wait for their uploads), kept.rs bucket_bytes, storage.rs allocated, gc.rs walk (closed or synchronous); segment_data skips framing- names and opens only names never removed in the background.
+
+2026-11-15, coordinator: main's CI run 43758893191 on a252cb53f (has 880a20f59): test (workspace) and macos (workspace) green; that run's other failures are TASK-433.5's and TASK-443.2's (filed separately).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Cause: the store's durable thread renames framing-N to N (segments::make_durable) after a commit or uploader closing; data_files and the image test's walk listed framing-N and then opened it after the rename (NotFound). Fix: Store::wait_idle (no framing, durability rename, log preparation or look-ahead running); data_files waits for it; the image test quiesces (uploader wait_uploaded, store idle, collector pass) before each walk. New cladefs::testing walker replaces seven copies: files_holding (strict) for still dirs; files_holding_beside (walks again until a pass reads all it listed, keeping every pass's finds) for live-daemon tests (control.rs, sqlite daemon.rs). Verified: a fail point holding the rename, released between listing and opening, fails both tests as in CI without the fix and passes with it; Mac 300/300 each under load; ubu1 200/200 stress iterations with --retries 0.
+Store::wait_idle() waits out framings, renames, log preparations and look-aheads; data_files and the image's plaintext test wait for it (and for uploads acknowledged and the collector's pass) before walking, and a walk still fails on a file gone, so nothing is skipped quietly. cladefs::testing's files_holding (strict) and files_holding_beside (re-walks a live daemon's files until one pass reads all it listed) replace seven copies of the walk. Verified: fail-point-forced rename between listing and opening fails both tests without the fix and passes with it; 300 runs each under load on the Mac, 400 on ubu1 with no retries, 0 failures; main's CI workspace jobs green on Linux and macOS (run 43758893191).
 <!-- SECTION:FINAL_SUMMARY:END -->
