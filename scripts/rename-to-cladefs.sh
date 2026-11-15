@@ -95,13 +95,20 @@ def renamed(text):
 def backlog(*args):
     return subprocess.run(["backlog", *args], capture_output=True, text=True, check=True).stdout
 
-# Docs: a title in the front matter, the body after it.
+# Docs: their titles as the CLI reads them (the front matter's YAML may quote or fold one), each
+# changed only if it says the old name; the body after the front matter.
+titles = dict(line.split(" - ", 1) for line in backlog("doc", "list", "--plain").splitlines()
+              if line.startswith("doc-"))
 for path in sorted(glob.glob("backlog/docs/doc-*.md")):
-    _, front, body = open(path).read().split("---\n", 2)
-    meta = dict(line.split(": ", 1) for line in front.splitlines() if ": " in line)
-    title = meta["title"]
-    if renamed(title) != title or renamed(body) != body:
-        backlog("doc", "update", meta["id"], "--title", renamed(title), "--content", renamed(body))
+    doc = os.path.basename(path).split(" - ", 1)[0]
+    body = open(path).read().split("---\n", 2)[2]
+    args = []
+    if renamed(titles[doc]) != titles[doc]:
+        args += ["--title", renamed(titles[doc])]
+    if renamed(body) != body:
+        args += ["--content", renamed(body)]
+    if args:
+        backlog("doc", "update", doc, *args)
 
 # Open tasks, but the rename's own, which names both.
 listed = json.loads(backlog("task", "list", "--exclude-status", "Done", "--json"))["tasks"]
