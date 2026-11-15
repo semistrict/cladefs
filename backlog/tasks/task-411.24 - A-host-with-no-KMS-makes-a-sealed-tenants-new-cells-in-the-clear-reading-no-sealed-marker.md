@@ -6,10 +6,11 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 09:42'
+updated_date: '2026-11-15 10:06'
 labels: []
 dependencies: []
 parent_task_id: TASK-411
-priority: medium
+priority: high
 type: bug
 ordinal: 819000
 ---
