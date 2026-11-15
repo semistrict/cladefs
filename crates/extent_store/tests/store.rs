@@ -2823,8 +2823,12 @@ fn dead_space_the_uploader_lets_go_takes_none_of_the_room() {
 }
 
 /// cladefs: the bytes the branch's files of extents' data take of the host's disk: its segments',
-/// open and closed, and its extents' own files and raw files (TASK-79.89).
-fn data_files(dir: &MemDir) -> u64 {
+/// open and closed, and its extents' own files and raw files (TASK-79.89), in `dir`, `store`'s.
+/// Once the store is idle (TASK-463): a framing made durable behind a commit renamed its segment's
+/// framed file its own between this listing it and opening it, which failed `NotFound` (CI run
+/// 43729753505).
+fn data_files(store: &Store<MemDir>, dir: &MemDir) -> u64 {
+    store.wait_idle().unwrap();
     let mut bytes = 0;
     for kind in ["segments", "open-segments", "extents", "open-extents"] {
         for name in dir.list(&of(kind, BRANCH.id)).unwrap() {
@@ -2876,7 +2880,7 @@ fn acknowledged_segments_leave_a_churning_guests_files() {
             store.acknowledged(closed.number).unwrap();
         }
         settled(&store);
-        assert_eq!(data_files(&dir), 0, "the files after cycle {cycle}");
+        assert_eq!(data_files(&store, &dir), 0, "the files after cycle {cycle}");
     }
     for sequence in live {
         let place = store.place(extent(sequence)).unwrap();
@@ -2913,12 +2917,12 @@ fn uploader_lagging(acknowledges: bool) -> u64 {
             }
         }
     }
-    let files = data_files(&dir);
+    let files = data_files(&store, &dir);
     for closed in store.closed(usize::MAX).unwrap() {
         store.acknowledged(closed.number).unwrap();
     }
     store.commit(None).unwrap();
-    assert_eq!(data_files(&dir), 0);
+    assert_eq!(data_files(&store, &dir), 0);
     files
 }
 
