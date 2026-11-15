@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 09:48'
+updated_date: '2026-11-15 10:07'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -472,7 +472,10 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
 - **What it costs.** A durable commit is two round trips one after the other, the segment's create
   and the head's swap; before, its create alone, the fencing (TASK-371, which had taken a third
   away). A take is the head's read and swap, then the recovery's reads, all of them at once, as
-  their keys are known. TASK-407.5 measures what a guest's sync pays for it.
+  their keys are known. *Measured on ubu1 (TASK-407.5, 2026-11-15,
+  docs/measurements/durable-commits-under-the-head-2026-11-15.md):* a guest's sync-loop round
+  through the daemon, at 25 ms a request, about 60 ms under the head against about 33 ms before:
+  one round trip more, a sync loop of about 17 a second where it was 30.
 - **Startup** probes that the store honours conditional creates and updates, and refuses to run if
   not.
 
