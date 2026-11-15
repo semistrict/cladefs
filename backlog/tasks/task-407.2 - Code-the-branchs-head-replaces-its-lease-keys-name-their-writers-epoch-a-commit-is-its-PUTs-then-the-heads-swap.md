@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 01:25'
-updated_date: '2026-11-15 03:58'
+updated_date: '2026-11-15 05:15'
 labels: []
 dependencies: []
 parent_task_id: TASK-407
@@ -38,4 +38,6 @@ Implements specs/bucket's head (TASK-407, commit 471b009b1 and after): layout's 
 
 <!-- SECTION:NOTES:BEGIN -->
 Coded (commits 76ddbcd37, 83f62ed06 and the fxdax one after): head replaces lease; segment/checkpoint keys epoch-first (front-coding); FORMAT 10; Footer/Chain lose 'after'; WAL rebase by commits plus held fork-only segments (store restamps in memory only), spec aligned. Behaviour changes in fxdax tests: a fork whose segment landed but whose head swap did not never stands (its deletion writes the child's record deleted from the first, Kind::Fork); orphans arise only after the swap (Dies at writer::acknowledged); a durable commit is create + update (2 round trips); a take reads the head once and swaps it, no listing, its recovery re-read of the head dropped (only the taken head's segments are read). doc-14 'forks stand once their segment lands' to update under 407.4/407.5.
+
+Pushed to main 0a00dd6dc (squashed 1875ee2a2, merged with main's TASK-411 as 82974c2ea: FORMAT 11, rings threaded through recover_from/recover_on/the writer/deletion). macOS gate: clippy + workspace 2490/2490. extent_store sim (dev profile): every holds profile passes after the fork-point fix (the pass keeps checkpoint(parent, at, epoch_of(at)), which cross-cell children read by key; test fork_points_to_other_cells_keep_their_checkpoints_past_later_writers); three needed-rule searches find no seed: TASK-424. Pending: ubu1 Linux run, Shuttle, TASK-424.
 <!-- SECTION:NOTES:END -->
