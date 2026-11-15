@@ -20,7 +20,9 @@ mod gcp;
 mod local;
 mod names;
 mod openbao;
+mod real;
 
+pub use gcp::TOKEN_VAR as GCP_TOKEN_VAR;
 pub use local::{KekVersion, LOCAL_WRAPPED_LEN, LocalKms};
 pub use names::KeyNames;
 

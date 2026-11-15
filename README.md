@@ -384,7 +384,7 @@ cloud bucket. fxdaxctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 **Encryption and shredding** (backlog doc-16). With `FXDAX_KMS` naming the
-host's KMS (`local:///DIR` for now), the cells of a tenant whose KEK it holds
+host's KMS (`local:///DIR`, or `gcp-kms://`, below), the cells of a tenant whose KEK it holds
 are sealed: the bucket, the stores' directories and the part cache hold their
 data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
 every host (`fxdaxctl forget-tenant-keys TENANT`, the control API's
@@ -402,6 +402,21 @@ old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
 versioning off needs nothing. A host told either fences the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
 a fenced store's own keys stay in memory until its VM process closes it.
+
+**Google Cloud KMS** (backlog doc-16, Real KMSes). With
+`FXDAX_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=fxdax-tenant-{tenant}`,
+each tenant's KEK is the key `fxdax-tenant-<tenant in hex>` in that key ring
+(symmetric, purpose `ENCRYPT_DECRYPT`), a wrap its `:encrypt`, bound to the
+tenant as associated data. A tenant bringing its own key, in a project of its
+own, is named in a file given as `&keys=FILE`, a line `TENANT
+projects/P2/locations/L2/keyRings/R2/cryptoKeys/K` each. Each tenant grants
+the hosts' service account `roles/cloudkms.cryptoKeyEncrypterDecrypter` on its
+key alone; taking the role away, or disabling the key's versions, revokes it;
+destroying them shreds the tenant. Hosts authenticate with Application Default
+Credentials, as for `gs://` buckets (`GOOGLE_APPLICATION_CREDENTIALS`, or the
+metadata server); `FXDAX_KMS_GCP_TOKEN`, an access token, is for development.
+A tenant that rotates its key keeps its old versions enabled: cells made
+before stay wrapped under them (TASK-411.21).
 
 ### `vendor/firecracker`: the VMM
 

@@ -2488,6 +2488,61 @@ mod tests {
         assert_eq!(found.unwrap().unwrap(), None);
     }
 
+    /// TASK-411.18: a store of a tenant whose KEK is a key in Google Cloud KMS, `FXDAX_KMS` naming
+    /// it as a host is configured (`gcp-kms://...`): its cell made sealed, its KEK wrapped by the
+    /// tenant's key, which unwraps it to the KEK its branch's DEK is wrapped under; written, read
+    /// back, opened again and forked into a sealed cell. Skipped, saying why, without an access
+    /// token (`extent_keys::testing::gcp`).
+    #[test]
+    fn sealed_stores_open_through_google_cloud_kms() {
+        let test = "sealed_stores_open_through_google_cloud_kms";
+        let Some(admin) = extent_keys::testing::gcp::Admin::from_env(test) else { return };
+        let url = admin.url("fxdax-test-{tenant}", None);
+        extent_store::upload::block_on(admin.key("fxdax-test-5")).unwrap();
+        // SAFETY: nextest runs each test in a process of its own, this one's other threads not
+        // reading the environment yet.
+        unsafe { std::env::set_var("FXDAX_KMS", &url) };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store");
+        let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
+        let (dek, _) = store.store.keys().sealing().map(|(dek, id)| (*dek.expose(), id)).unwrap();
+        let a = id(&store, 1);
+        let data = crate::test_data::noise(1, 2 * BLOCK);
+        write(&store, a, 0, &data).unwrap();
+        store.commit(Some(b"root")).unwrap();
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
+
+        let branch = store.branch();
+        let bucket = store.bucket().clone();
+        let cell = extent_store::upload::block_on(extent_remote::cell::read(&*bucket, branch.cell));
+        let cell = cell.unwrap().unwrap().unwrap();
+        let [kek] = &cell.keks[..] else { panic!("{:?}", cell.keks) };
+        assert!(kek.wrapped.0.starts_with(b"fxkr\x01\x07gcp-kms"), "{:?}", kek.wrapped);
+        let kms = extent_keys::kms::from_url(&url).unwrap();
+        let unwrapped = extent_store::upload::block_on(kms.unwrap_dyn(5, &kek.wrapped)).unwrap();
+        let unwrapped = unwrapped.unwrap();
+        let record =
+            extent_store::upload::block_on(extent_remote::branch::record(&*bucket, branch));
+        let record = record.unwrap().unwrap().unwrap();
+        let wrapped_dek = extent_remote::keys::unwrap_dek(&unwrapped, branch, &record.deks[0]);
+        assert_eq!(wrapped_dek.unwrap().expose(), &dek);
+        let other = extent_store::upload::block_on(kms.unwrap_dyn(6, &kek.wrapped)).unwrap();
+        assert_eq!(
+            other.map(drop).unwrap_err().to_string(),
+            "tenant 6: not authentic: a wrapped key, wrapped under another key"
+        );
+
+        drop(store);
+        let store = ExtentStore::open(&path).unwrap();
+        assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
+        let child = host_store::fork_child(store.branch());
+        store.fork_to(dir.path().join("fork"), child).unwrap();
+        let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
+        assert!(!fork.store.keys().is_empty());
+        assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data));
+    }
+
     /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base
     /// read before reads nothing from the store. Past an extent's end, zeros, as the store reads.
     #[test]

@@ -675,10 +675,17 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "aws-lc-rs",
+ "base64 0.22.1",
+ "crc-fast",
+ "object_store",
+ "reqwest",
  "serde",
+ "serde_json",
  "storage_ptr_slice",
  "storage_xts",
  "thiserror",
+ "tokio",
+ "url",
  "zerocopy",
  "zeroize",
 ]
