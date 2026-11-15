@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 15:22'
+updated_date: '2026-11-15 15:24'
 labels: []
 dependencies: []
 parent_task_id: TASK-149
@@ -31,3 +32,9 @@ Seen by TASK-444.2's ubu1 run t4442c (2026-11-15, revision 35128bd67, main's 9da
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fix in 31c9ad944: review-change.sh took its root from git rev-parse --show-toplevel; it now takes it from its own path. Verified on the Mac: the three tests on a copy of scripts/ and .claude/ outside any repository fail with the old script (3 failures) and pass with the new; they pass in the checkout too. AC #1 waits on the next ubu1 run of the scripts part. Blind spot: scripts tests run only in git checkouts (Mac, CI clones); ubu1 run trees are the one place that is not. Looked around: the other scripts using rev-parse --show-toplevel (rename-to-cladefs.sh, build-commit.sh) passed on ubu1 in t4442c.
+<!-- SECTION:NOTES:END -->
