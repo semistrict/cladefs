@@ -3,11 +3,11 @@ id: TASK-417
 title: >-
   The extent device as a crate (virtio_extent): its VMM-independent half shared
   with libmachine, the Firecracker fork moved onto it, vm-memory 0.18
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-14 21:47'
-updated_date: '2026-11-15 01:25'
+updated_date: '2026-11-15 04:08'
 labels:
   - task
 dependencies: []
@@ -23,13 +23,13 @@ libmachine (a Rust library VMM, KVM in-process, Python bindings) hosts fxdax's e
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A crate in this repo holds the protocol (wire structs, flags, features, ConfigSpace, VIRTIO_EXTENT_VERSION and its check), request handling (Buffers built from guest-memory segments in descriptor order, Reader/Writer, handle and the serve dispatch, per-type stats), the notices behind a trait the VMM implements, the DAX window logic behind a trait for what only the VMM can do (reserve guest-physical addresses, add and remove a memory slot) plus PrefaultGuestMemory, and the snapshot state as plain serializable values with doc-4's freeze/point/fork protocol; no Firecracker or KVM-binding type in its public API, no Firecracker crate among its dependencies
-- [ ] #2 The crate builds and tests on its own, with unit tests of request handling over fake guest memory and a fake store (on macOS too), besides the request tests against a real daemon
-- [ ] #3 The Firecracker fork uses the crate, its extent module reduced to the adapter (transport, queues, BAR, memory slot, KVM_PRE_FAULT_MEMORY, threads, snapshot embedding and the version refusal), with no behaviour or protocol change: VIRTIO_EXTENT_VERSION stays 1 and a snapshot's extent state serializes as before
-- [ ] #4 The fork is on vm-memory 0.18, as a general fix at its series' base, and every commit of the series builds both ways (scripts/firecracker-series-check.sh)
-- [ ] #5 fxdax's guest cases and the Linux workspace suite pass on ubu1 against the new fork, the snapshot and DAX cases among them
-- [ ] #6 The crate has a README listing the adapter's obligations; doc-4 says the device is virtio-PCI only (no MMIO since TASK-273)
-- [ ] #7 The fxdax commit to pin is sent back for libmachine's TASK-18
+- [x] #1 A crate in this repo holds the protocol (wire structs, flags, features, ConfigSpace, VIRTIO_EXTENT_VERSION and its check), request handling (Buffers built from guest-memory segments in descriptor order, Reader/Writer, handle and the serve dispatch, per-type stats), the notices behind a trait the VMM implements, the DAX window logic behind a trait for what only the VMM can do (reserve guest-physical addresses, add and remove a memory slot) plus PrefaultGuestMemory, and the snapshot state as plain serializable values with doc-4's freeze/point/fork protocol; no Firecracker or KVM-binding type in its public API, no Firecracker crate among its dependencies
+- [x] #2 The crate builds and tests on its own, with unit tests of request handling over fake guest memory and a fake store (on macOS too), besides the request tests against a real daemon
+- [x] #3 The Firecracker fork uses the crate, its extent module reduced to the adapter (transport, queues, BAR, memory slot, KVM_PRE_FAULT_MEMORY, threads, snapshot embedding and the version refusal), with no behaviour or protocol change: VIRTIO_EXTENT_VERSION stays 1 and a snapshot's extent state serializes as before
+- [x] #4 The fork is on vm-memory 0.18, as a general fix at its series' base, and every commit of the series builds both ways (scripts/firecracker-series-check.sh)
+- [x] #5 fxdax's guest cases and the Linux workspace suite pass on ubu1 against the new fork, the snapshot and DAX cases among them
+- [x] #6 The crate has a README listing the adapter's obligations; doc-4 says the device is virtio-PCI only (no MMIO since TASK-273)
+- [x] #7 The fxdax commit to pin is sent back for libmachine's TASK-18
 <!-- AC:END -->
 
 ## Definition of Done
@@ -58,4 +58,12 @@ Written: crates/virtio_extent (protocol, config, notices, buffers, store, reques
 ubu1 r t417a (8fea07c16, fork e7c0a413e): workspace 2698/2698 and the other workspace parts pass; default guest suite passes (DAX, crash, docker, pgbench, extent-guest-other-version); firecracker part 19/19 extent + 31/31 KVM; crate 42/42 on Linux. snapshots_serialize_as_before passes: a snapshot taken before restores after. Next: snapshot/migrate/suspend/follow guest cases (t417b), then the series check.
 
 ubu1 t417c: fxfs-guest-snapshot, -snapshot-dax, -snapshot-volumes(-dax), -suspend-dax, -follow-dax, -follow-remount-dax pass; fxfs-guest-migrate-dax fails, as on main (TASK-419). User chose (2026-11-14) the queue seam before landing: the crate owns the workers, pause/resume and reset behind a RequestQueue trait the VMM implements.
+
+Landed on main 7998d1f86, vendor/firecracker e27792aef (series fxdax-v1.16.1-r7). Evidence: crate 43/43 on Linux, 30/30 on macOS; fork clippy -D warnings, 18 extent + 31 KVM tests; series check 23/23 both ways; ubu1 t417a workspace 2698/2698 and default guest suite, t417f default suite + snapshot/suspend/follow cases 23/23 on the same tip tree; fxfs-guest-migrate-dax fails as on main (TASK-419). Final qualification t417g of the merged commit still running at the push (user: push after basic tests).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+crates/virtio_extent holds the extent device but its transport (protocol, Config, notices, request handling over a Store trait, the workers behind a RequestQueue trait, the DAX window behind WindowVm, Device, persist); the Firecracker fork is its adapter, on vm-memory 0.18, its series rewritten as fxdax-v1.16.1-r7 with every commit building both ways; snapshots serialize as before. Verified on ubu1 (workspace, guest suites, series check) and macOS. libmachine pins fxdax 7998d1f86.
+<!-- SECTION:FINAL_SUMMARY:END -->
