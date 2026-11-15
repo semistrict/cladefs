@@ -27,6 +27,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -982,9 +983,13 @@ dependencies = [
 name = "extent_keys"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "aws-lc-rs",
  "serde",
+ "storage_ptr_slice",
+ "storage_xts",
  "thiserror 2.0.21",
+ "zerocopy",
  "zeroize",
 ]
 
@@ -1026,6 +1031,7 @@ dependencies = [
  "bincode",
  "event-listener",
  "extent_frame",
+ "extent_keys",
  "extent_remote",
  "fail",
  "futures",

@@ -166,6 +166,7 @@ mod host;
 mod kept;
 mod layout;
 mod mem;
+mod raw;
 mod seals;
 mod segments;
 pub mod shared;
@@ -193,6 +194,7 @@ pub use host::{
 };
 pub use layout::{Description, Format, Place, Volume};
 pub use mem::{Io, MemDir, MemFile};
+pub use raw::{RawFile, SECTOR};
 pub use segments::{
     Unsectored, commits_spanning_segments, segment_closes, segments_framed_in_place,
 };

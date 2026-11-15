@@ -36,6 +36,10 @@ aes-gcm-siv = "0.12.0-rc.3"
 # AES-256-GCM, AES-KW, HKDF and HMAC for encryption at rest (aws/aws-lc-rs, ISC AND (Apache-2.0 OR
 # ISC); backlog doc-16). Already in the build through object_store and rustls.
 aws-lc-rs = "1.18.2"
+# aws-lc's own bindings, at the version aws-lc-rs builds (ISC AND Apache-2.0 AND MIT AND
+# BSD-3-Clause, and choices of those): for extent_keys' tests to check its AES-256-XTS against
+# aws-lc's, an implementation of its own (TASK-411.5). A dev-dependency alone.
+aws-lc-sys = "0.46.0"
 assert_matches = "1.5.0"
 async-trait = "0.1.92"
 base64 = "0.22.1"

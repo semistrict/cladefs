@@ -8,6 +8,8 @@
 //! of the stores it serves.
 
 use super::*;
+use crate::dir::read_file;
+use crate::layout::SegmentId;
 use crate::{Description, MemDir, RemoteData};
 use extent_frame::{KeyId, Secret};
 use extent_keys::kms::{Kms as _, LocalKms};
@@ -588,24 +590,23 @@ fn forks_and_points_within_a_sealed_cell_read_what_they_inherit() {
 }
 
 /// The paths of the files of `dir` that hold any of `data`'s sectors' first 32 bytes: data the
-/// store wrote, in the clear. fxdax: but for open segments' raw files and logs, and large extents'
-/// raw files, which hold it until TASK-411.5 encrypts them.
+/// store wrote, in the clear.
 fn clear_files(dir: &MemDir, data: &[u8]) -> Vec<String> {
-    let pieces: Vec<&[u8]> = data.chunks(4096).map(|sector| &sector[..32]).collect();
-    let raw = |path: &str| {
-        ["open-segments/", "logs/", "open-extents/"].iter().any(|kind| path.starts_with(kind))
-    };
+    let pieces: std::collections::HashSet<&[u8]> =
+        data.chunks(4096).map(|sector| &sector[..32]).collect();
     (dir.files().into_iter())
-        .filter(|(path, bytes)| !raw(path) && pieces.iter().any(|piece| holds(bytes, piece)))
+        .filter(|(_, bytes)| bytes.windows(32).any(|window| pieces.contains(window)))
         .map(|(path, _)| path)
         .collect()
 }
 
 /// TASK-411.9, AC #2: a sealed store crashed with its open segment holding a durable commit,
 /// which its next opening closes again, reopened with its directory failing after each of the
-/// opening's operations in turn, as a crash stops it, until one opens: no file of the directory
-/// holds the commit's data in the clear at any point of any of them; the store opened reads it,
-/// and its segment closed again is sealed, in its directory and in the bucket.
+/// opening's operations in turn, as a crash stops it, until one opens: no file of the directory,
+/// its open segment's raw file and log among them (TASK-411.5), holds the commit's data in the
+/// clear at any point of any of them; the store opened reads it, as it was before the crash
+/// (TASK-411.5, AC #3), and its segment closed again is sealed, in its directory and in the
+/// bucket.
 #[test]
 fn segments_closed_again_are_never_in_the_clear() {
     let world = World::new();
@@ -651,4 +652,176 @@ fn segments_closed_again_are_never_in_the_clear() {
         }
     }
     assert!(segments > 0);
+}
+
+/// The branch of a cell of a tenant with no KEK in the tests' KMS: in the clear.
+fn clear_branch() -> Branch {
+    Branch { cell: extent_remote::layout::Cell { tenant: 2, id: 1 }, id: 7 }
+}
+
+/// The bytes of the files of `dir` whose paths start with `kind`, by their paths.
+fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
+    dir.files().into_iter().filter(|(path, _)| path.starts_with(kind)).collect()
+}
+
+/// TASK-411.5, AC #1, #2, #4: what a sealed store's guest writes is in no file of its directory,
+/// its open segment's raw file, its log and a large extent's raw file among them, written,
+/// committed, or framed; reads of the extents, open, sealed in the open segment or in a file of
+/// their own, and framed, give it back. Its clear twin's raw files hold it as written, and its
+/// logs are headed as before (`wal::LOG_MAGIC`).
+#[test]
+fn sealed_stores_raw_files_and_logs_hold_no_plaintext() {
+    for sealed in [true, false] {
+        let world = World::new();
+        let host = world.host(5);
+        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let dir = made(branch, "a");
+        let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+        let (store, remote) = open_with(&world, &host, &dir, quiet).unwrap();
+        assert_eq!(store.keys().sealing().is_some(), sealed);
+        let (small, large) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
+        let small_data = noise(1, 8 * 4096);
+        let large_data = noise(2, crate::Options::default().large_extent as usize);
+        store.write(small, 0, &small_data).unwrap();
+        store.write(large, 0, &large_data).unwrap();
+        let check = |when: &str| {
+            for (extent, data) in [(small, &small_data), (large, &large_data)] {
+                let mut buf = vec![0; data.len()];
+                store.read(extent, 0, &mut buf).unwrap();
+                assert!(buf == **data, "{when}, sealed {sealed}: {extent:?} read back");
+            }
+            let mut found = clear_files(&dir, &small_data);
+            found.extend(clear_files(&dir, &large_data));
+            found
+        };
+        let found = check("written");
+        match sealed {
+            true => assert_eq!(found, Vec::<String>::new(), "written"),
+            false => {
+                for kind in ["open-segments/", "open-extents/"] {
+                    assert!(found.iter().any(|path| path.starts_with(kind)), "{kind}: {found:?}");
+                }
+                let [(_, raw)] = &files_of(&dir, "open-segments/")[..] else { panic!() };
+                assert_eq!(&raw[..small_data.len()], &small_data[..]);
+            }
+        }
+        store.commit(None).unwrap();
+        let found = check("committed");
+        assert_eq!(found.is_empty(), sealed, "committed: {found:?}");
+        store.close_segment().unwrap();
+        store.commit(None).unwrap();
+        store.closed(usize::MAX).unwrap();
+        let found = check("framed");
+        assert_eq!(found.is_empty(), sealed, "framed: {found:?}");
+        let magic = if sealed { crate::wal::SEALED_LOG_MAGIC } else { crate::wal::LOG_MAGIC };
+        let logs = files_of(&dir, "logs/");
+        assert!(!logs.is_empty());
+        for (path, log) in logs {
+            assert_eq!(&log[..8], magic, "{path}");
+        }
+        remote.cut_short()();
+    }
+}
+
+/// TASK-411.5, AC #5: a write's bytes, as a caller writing them by an I/O of its own takes them
+/// ([`crate::Write::stored`]), are encrypted for the file it names, at the offset it names, and
+/// read back as written; a write of a sealed store's large extent that is not whole sectors is
+/// refused (TASK-411.8 refuses such writes to segments, sealed or not), its clear twin's taken.
+#[test]
+fn writes_stored_by_callers_are_sealed_and_large_extents_take_whole_sectors() {
+    for sealed in [true, false] {
+        let world = World::new();
+        let host = world.host(5);
+        let branch = if sealed { test_branch(7) } else { clear_branch() };
+        let dir = MemDir::new();
+        let description = Description { block_size: 512, capacity: 1 << 30, branch };
+        let volume = crate::Volume { name: "a".into(), kind: cell::Kind::Fxfs };
+        Store::make(&dir, description, Some("memory:///encrypted"), Some(volume)).unwrap();
+        let (store, remote) = open_on(&world, &host, &dir).unwrap();
+        let extent = ExtentId::new(branch.id, 1);
+        let data = noise(3, 4 * 4096);
+        let write = store.begin_write(extent, 0, data.len() as u64).unwrap();
+        let mut bytes = crate::Aligned::new(data.len());
+        bytes.as_mut_slice().copy_from_slice(&data);
+        let stored = write.stored(bytes).unwrap();
+        assert_eq!(stored.bytes.as_slice() == &data[..], !sealed);
+        stored.file.write_at(stored.bytes.as_slice(), stored.offset).unwrap();
+        write.finish();
+        let mut buf = vec![0; data.len()];
+        store.read(extent, 0, &mut buf).unwrap();
+        assert!(buf == data, "sealed {sealed}: read back");
+        assert_eq!(clear_files(&dir, &data).is_empty(), sealed);
+        let large = crate::Options::default().large_extent;
+        let written = store.write(ExtentId::new(branch.id, 2), large, &data[..512]);
+        match sealed {
+            true => assert_eq!(
+                written.unwrap_err().downcast::<crate::Unsectored>().unwrap(),
+                crate::Unsectored { offset: large, len: 512 }
+            ),
+            false => written.unwrap(),
+        }
+        remote.cut_short()();
+    }
+}
+
+/// TASK-411.5: a sealed store's segment's log whose header, or a record, someone who can write the
+/// host's disk changed, each record's hash made anew so that recovery, holding no key, takes it,
+/// is refused as the store opens holding its keys, naming the segment, before anything is framed
+/// from it.
+#[test]
+fn sealed_logs_changed_are_refused() {
+    let world = World::new();
+    let host = world.host(5);
+    let branch = test_branch(7);
+    let dir = made(branch, "a");
+    let quiet = Options { interval: Duration::from_secs(3600), ..Options::default() };
+    let extent = ExtentId::new(branch.id, 1);
+    let crashed = {
+        let (store, remote) = open_with(&world, &host, &dir, quiet.clone()).unwrap();
+        store.write(extent, 0, &noise(1, 4096)).unwrap();
+        store.commit(None).unwrap();
+        let crashed = dir.crash(0);
+        remote.cut_short()();
+        crashed
+    };
+    let segment = SegmentId { branch: branch.id, number: 0 };
+    let path = crate::layout::log_path(segment);
+    let log = read_file(&crashed.open(&path, false).unwrap()).unwrap();
+    let header = crate::wal::LogHeader::of(&log, segment).unwrap();
+    // A record's payload changed, its MAC kept, its hash made anew: the last byte of the run it
+    // holds (`wal::Runs::Held`), which recovery writes into the raw data as it is.
+    let changed_record = {
+        let at = crate::wal::LOG_RECORDS as usize;
+        let len = u32::from_le_bytes(log[at..at + 4].try_into().unwrap()) as usize;
+        let mut payload = log[at + 12..at + 12 + len].to_vec();
+        payload[len - extent_keys::MAC_LEN - 1] ^= 1;
+        let mut log = log.clone();
+        let framed = crate::layout::frame_salted(&payload, header.salt);
+        log[at..at + framed.len()].copy_from_slice(&framed);
+        log
+    };
+    // The header's DEK generation changed, or its salt.
+    let changed_header = |at: usize| {
+        let mut log = log.clone();
+        log[at] ^= 1;
+        log
+    };
+    let (generation, salt) = (8 + 3 * 8 + 8, 8 + 3 * 8 + 8 + 4);
+    for (changed, refusal) in [
+        (changed_record, "its record at 4096 is not authentic"),
+        (changed_header(salt), "its header is not authentic"),
+        (
+            changed_header(generation),
+            "is sealed under KeyId { branch: 7, generation: 0 }, which the store holds not",
+        ),
+    ] {
+        let attempt = crashed.crash(0);
+        attempt.open(&path, false).unwrap().write_at(&changed, 0).unwrap();
+        // Recovery holds no key, and takes the log as it is.
+        assert_eq!(Store::recover(attempt.clone()).unwrap().branch(), branch);
+        let refused = open_with(&world, &host, &attempt, quiet.clone()).map(drop).unwrap_err();
+        assert!(format!("{refused:#}").contains(refusal), "{refused:#}");
+        let segments = files_of(&attempt, "segments/");
+        assert_eq!(segments, Vec::new(), "framed from a log changed");
+    }
 }

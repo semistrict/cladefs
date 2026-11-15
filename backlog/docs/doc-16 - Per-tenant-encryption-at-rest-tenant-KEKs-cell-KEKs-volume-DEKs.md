@@ -3,11 +3,11 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-14 23:48'
+updated_date: '2026-11-15 00:23'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
-Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2) and TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**) are implemented.
+Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.9 (recovery frames nothing before keys) and TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**) are implemented.
 
 ## Goals
 
@@ -89,7 +89,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   DEK, so that shredding covers hosts' disks without counting on their disk encryption. Its pieces
   are read back by offset until the segment is framed, so it needs a length-preserving, random-access
   cipher: AES-256-XTS per 4 KiB sector (the workspace has `storage_xts`), tweak the sector, key
-  derived from the DEK and the segment's salt (`wal::log_salt` exists already). *(found
+  derived from the DEK and a salt of the file's own, kept in its log's header (TASK-411.5, below). *(found
   2026-11-14)* Every write reaching it is whole sectors, so XTS needs no read-modify-write: with an
   assert that each length given `Segments::reserve` and `Segments::append` is a multiple of 4096,
   every test of `extent_store`, `sqlite_extents` and `fxdax` on macOS passed (574) but the 62 of
@@ -205,6 +205,49 @@ dropped with its pool, never written out unwrapped.
   `drop_wal` removes them durably. (TASK-411.3 framed it in the clear and resealed it as the store
   opened, its data on the host's disk in the clear meanwhile, and for good if the host died
   between; `wal::reseal` and `Dir::replace` went.)
-- **Not yet:** open segments and large extents' raw files are in the clear until sealed
-  (TASK-411.5); collector compaction of sealed objects (TASK-411.6); forks across cells
-  (TASK-411.4).
+- **Not yet:** collector compaction of sealed objects (TASK-411.6); forks across cells
+  (TASK-411.4). (Open segments' and large extents' raw files: TASK-411.5, below.)
+
+## What TASK-411.5 made
+
+- **The cipher.** `extent_keys::xts::Xts`: AES-256-XTS (IEEE 1619-2007, no ciphertext stealing),
+  Fuchsia's `storage_xts` over RustCrypto's `aes` (key schedules zeroed on drop), as aws-lc-rs has
+  none. Checked against IEEE 1619's vectors 10 and 11 (as aws-lc's `xts_test.cc` carries them) and
+  against aws-lc's own `EVP_aes_256_xts` on random keys and 4 KiB sectors (a dev-dependency on
+  `aws-lc-sys`, at the version aws-lc-rs builds).
+- **Raw files.** `extent_store::RawFile`: a sealed store's (its ring seals, `Ring::sealing`) open
+  segments' and large extents' raw files are encrypted a sector at a time (`SECTOR`, 4096), the
+  sector's place in the file its tweak (the data unit number), under
+  `Xts::derive(dek, salt, "fxdax raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
+  of the branch's newest DEK and a salt drawn for the file. Writes are whole sectors (TASK-411.8;
+  a sealed store refuses writes to large extents that are not, `Unsectored`, as it always refused
+  them to segments), encrypted through a buffer; reads decrypt the sectors they are in. A large
+  extent's raw file keeps its salt in memory alone: an opening removes those left. A clear store's
+  raw files are as they were, byte for byte.
+- **Logs.** A sealed store's segment's log is headed `FXLOG\0\0\x03` (`wal::SEALED_LOG_MAGIC`):
+  after the clear header's fields (record salt, branch, number), the DEK's branch (u64) and
+  generation (u32) and the raw file's 32-byte salt, then an HMAC-SHA256 of the header so far under
+  `dek.derive(salt, ["fxdax raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
+  followed by an HMAC of its offset in the log (u64) and the payload, inside the salted hash's
+  frame. The runs a record holds or checksums (`Runs::Held`, `Runs::Checked`) are the raw file's
+  stored bytes, encrypted: recovery, holding no key, works on stored bytes as before (salted
+  hashes, CRCs). A clear store's logs are as they were (`FXLOG\0\0\x02`).
+- **Recovery.** The segments recovery closes again are framed at `Recovering::open`
+  (`Recovered::close`, TASK-411.9): the log's header MAC and every record's MAC checked under the
+  DEK and salt it names (a log changed, or under a DEK the ring lacks, refuses the opening, naming
+  the segment), the raw data decrypted, then sealed into FORMAT 2 parts.
+- **Framing.** Closing a segment reads its raw file through `RawFile` (decrypting) and seals it, as
+  TASK-411.3 did. **Sealed stores never frame in place** (segments nor large extents): a sealed
+  object's bytes are AES-GCM parts and tags, not the XTS sectors the raw file holds, so framing in
+  place would write every byte again anyway, and a crash part way would leave a file neither raw
+  nor framed. `RawFile::clear` hands the inner file to in-place framing only in the clear.
+- **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
+  `Write::stored` gives a caller doing its own I/O (fxdax's image device) the file, the offset and
+  the bytes encrypted, which it writes again from the last whole sector written after a short
+  write. `Part::Data` carries the `RawFile`: such a reader reads `RawFile::read_range` and
+  decrypts it (`RawFile::decrypt`).
+- **Cost, macOS (Apple M5 Pro, 15 CPUs, `store-bench`, release, 2026-11-14).** Writes into open segments, 1 MiB extents:
+  1.8-1.9 GB/s sealed against 2.8-3.6 GB/s in the clear; reads of them while open 1.6-1.7 against
+  2.3-2.7 GB/s; 4 KiB extents 195 against 209 MiB/s. Framing 32 MiB segments, four stores at once:
+  text 66-76 ms each in the clear, 70-72 ms sealed; noise 39-41 ms in the clear (in place), 83-85 ms
+  sealed (in a copy). Linux to be measured.

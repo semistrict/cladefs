@@ -43,7 +43,7 @@
 use extent_frame::segment::{Chain, Child, Footer};
 use extent_remote::wal::Fenced;
 use extent_store::{
-    Description, Dir, File as _, MemDir, Opening, Options, RemoteData, Rules, Store, set_rules,
+    Description, Dir, MemDir, Opening, Options, RemoteData, Rules, Store, set_rules,
 };
 use shuttle::scheduler::{PctScheduler, RandomScheduler, ReplayScheduler};
 use shuttle::sync::Mutex;
@@ -645,7 +645,7 @@ fn freeing_during_a_write() {
             let data = pattern(1, 4 * BLOCK);
             let write = store.begin_write(extent(1), 0, data.len() as u64).unwrap();
             begun.store(true, Ordering::SeqCst);
-            write.file().write_at(&data, write.offset()).unwrap();
+            write.write(&data, 0).unwrap();
             write.finish();
         })
     };
@@ -743,7 +743,7 @@ fn failing_during_a_commit() {
         let (store, begun, failed) = (store.clone(), begun.clone(), failed.clone());
         thread::spawn(move || {
             let write = store.begin_write(extent(2), 0, BLOCK as u64).unwrap();
-            write.file().write_at(&pattern(2, BLOCK), write.offset()).unwrap();
+            write.write(&pattern(2, BLOCK), 0).unwrap();
             begun.store(true, Ordering::SeqCst);
             while !failed.load(Ordering::SeqCst) {
                 thread::yield_now();
@@ -800,7 +800,7 @@ fn closing_during_a_commit() {
         let (store, begun, closed) = (store.clone(), begun.clone(), closed.clone());
         thread::spawn(move || {
             let write = store.begin_write(extent(1), 0, BLOCK as u64).unwrap();
-            write.file().write_at(&pattern(1, BLOCK), write.offset()).unwrap();
+            write.write(&pattern(1, BLOCK), 0).unwrap();
             begun.store(true, Ordering::SeqCst);
             while !closed.load(Ordering::SeqCst) {
                 thread::yield_now();

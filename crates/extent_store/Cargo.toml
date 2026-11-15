@@ -11,6 +11,8 @@ anyhow.workspace = true
 bincode.workspace = true
 event-listener.workspace = true
 extent_frame.workspace = true
+# fxdax: AES-256-XTS, which a sealed store's raw files are encrypted with (TASK-411.5).
+extent_keys.workspace = true
 extent_remote.workspace = true
 fail = "0.5.1"
 futures.workspace = true

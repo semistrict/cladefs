@@ -8,7 +8,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-14 23:22'
-updated_date: '2026-11-14 23:52'
+updated_date: '2026-11-15 00:34'
 labels: []
 dependencies:
   - TASK-411.3
@@ -27,14 +27,14 @@ TASK-411.3: WAL recovery runs before the store's ring of keys is built, so a seg
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 No framed file of a sealed branch is ever written in the clear: recovery has the store's keys before it frames, or frames nothing until it has them
-- [ ] #2 A test crashes a sealed store with a segment to close again and finds no plaintext of its data in any file of the store's directory at any point of its reopening
+- [x] #2 A test crashes a sealed store with a segment to close again and finds no plaintext of its data in any file of the store's directory at any point of its reopening
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -54,4 +54,12 @@ Chose 'frames nothing until it has the keys' over 'keys before recovery': gettin
 wal::recover keeps its decisions and removals as they were; a segment it closes again gets its footer (closed_again: folded, stamped provisionally, as close_again did) and an entry in Recovered::closing (its kept records); its raw file and log stay. Recovered::close (first thing in Recovering::open) re-reads log and raw data, checks the records are still those kept, frames sealed under keys.sealing() or clear (bytes as before), syncs each, syncs segments/, then removes raw files and logs. Deferring is idempotent: the directory is as close_again's crash point left it, which recovery already handles (later segments settled meanwhile keep their footers; the next recovery finds the closing torn again). drop_wal removes closings' raw files and logs durably (else a later recovery would close commits fxdaxctl take dropped again). wal::reseal and Dir::replace (its only user) removed. The opening reads a closing's raw file twice (recovery, then framing): raw_files_are_read_through_the_page_cache expects 15 blocks, not 14; kept rather than holding a segment's data in memory across the uploader's bucket round trips.
 Tests: wal::tests::segments_closed_again_are_framed_under_the_keys_alone (no framed file after recover, raw/log kept, recovered again same; close with a sealing ring frames sealed, raw/log gone); upload::encrypted::segments_closed_again_are_never_in_the_clear (sealed store crashed with a durable commit in its open segment; reopened with MemDir::fail_after(n) for every n until it opens; MemDir::files() searched after each: no plaintext; reads back; bucket segments sealed). Verified it fails if close frames in the clear. Until TASK-411.5 it skips open-segments/, logs/, open-extents/.
 Runs (macOS): extent_store all but sim 215/215 (crash tests included); shuttle 37/37; sim::one SIM_SEEDS=10 everything, crashes, wals, forked_wals pass; fxdax sealed/reopen/crash/recover filter 11/11. clippy: no warnings in changed lines.
+
+AC #2 completed with TASK-411.5: segments_closed_again_are_never_in_the_clear now searches every file of the store's directory, open segments' raw files and logs included (the exclusion went once they are encrypted); verified it fails with raw files left unsealed. Final runs with TASK-411.5: 963/963 crate tests, 37/37 shuttle, 10-seed sim sample over 10 profiles, all pass on macOS.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+WAL recovery frames nothing: a segment it closes again keeps its raw file and log (Recovered::closing, footer computed as before) and is framed at Recovering::open, first, under the store's ring (sealed if it seals, byte-identical clear otherwise), then its raw file and log go; drop_wal removes closings durably; wal::reseal and Dir::replace removed. So no framed file of a sealed branch is ever written in the clear. Verified by wal unit tests, a crash test reopening a sealed store under fail_after at every operation with no plaintext in any file of its directory (after TASK-411.5 encrypted raw files and logs), and the full macOS crate, shuttle and sim runs.
+<!-- SECTION:FINAL_SUMMARY:END -->

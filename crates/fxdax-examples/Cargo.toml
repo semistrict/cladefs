@@ -15,6 +15,8 @@ publish = false
 anyhow.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
+# store-bench's stores opened as a host with a KMS opens them, sealed or not (TASK-411.5).
+extent_remote.workspace = true
 extent_store.workspace = true
 # fxfs-metabench's attributes, as Fxfs's API takes them.
 fidl-fuchsia-io.workspace = true
@@ -23,8 +25,10 @@ futures.workspace = true
 fxdax = { path = "../fxdax", features = ["testing"] }
 fxfs.workspace = true
 libc.workspace = true
+object_store.workspace = true
 storage_device.workspace = true
 tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

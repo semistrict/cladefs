@@ -45,6 +45,16 @@
 //!   (TASK-336). The data is `FXDAX_BENCH_DATA`'s: `text`, of sixteen letters at random, which
 //!   compresses about by half, as a build's files do, slower than a filesystem's structures (the
 //!   default); `noise`, which doesn't compress, framed in place; or `half`, one of each.
+//! - `writes`: N MiB (256) written to a store's open segments as extents of `FXDAX_BENCH_EXTENT`
+//!   KiB (1024), in a directory of the host's (`FXDAX_BENCH_DIR`, or a temporary one), read back
+//!   while open, then committed: MiB/s of the writes, of the reads, and how long the commit took
+//!   (TASK-411.5).
+//!
+//! fxdax: `FXDAX_BENCH_SEALED` set to `1` has `framing` and `writes` open their stores as a host
+//! with a KMS opens a sealed cell's, through their uploaders, to a bucket in memory: their raw
+//! files encrypted, AES-256-XTS by sector, their segments framed sealed, AES-256-GCM; set to `0`,
+//! opened alike, in the clear, of a tenant with no KEK in the KMS, its twin; unset, as before, with
+//! no uploader (TASK-411.5).
 //!
 //! The stores of all but `close-now`, `burst` and `durable` are in memory ([`MemDir`]), so that
 //! what is timed is the store's own work.
@@ -356,17 +366,137 @@ fn nice(nice: i32) {
     panic!("nice {nice} on Linux alone");
 }
 
+/// fxdax: a host with a KMS, whose stores' uploaders keep their branches in a bucket in memory, a
+/// runtime of their own, to open stores sealed or in the clear as `FXDAX_BENCH_SEALED` says
+/// ([`Host::from_env`], TASK-411.5).
+struct Host {
+    sealed: bool,
+    runtime: tokio::runtime::Runtime,
+    bucket: Arc<extent_remote::store::Store>,
+    upload: extent_store::upload::Runtime,
+    _kms: tempfile::TempDir,
+}
+
+impl Host {
+    /// The tenant whose KEK the host's KMS keeps: its cells are sealed.
+    const SEALED: u64 = 1;
+    /// A tenant with no KEK there: its cells are in the clear.
+    const CLEAR: u64 = 2;
+
+    /// A host if `FXDAX_BENCH_SEALED` is set: its stores sealed if it is `1`.
+    fn from_env() -> Option<Self> {
+        let sealed = std::env::var("FXDAX_BENCH_SEALED").ok()?;
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let objects = Arc::new(object_store::memory::InMemory::new());
+        let bucket = Arc::new(extent_remote::store::Store::new(objects, ""));
+        let kms = tempfile::tempdir().unwrap();
+        let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
+        local.create(Self::SEALED).unwrap();
+        let keys = extent_remote::keys::Host {
+            kms: Some(extent_remote::keys::Kms::new(Arc::new(local))),
+            ring: extent_remote::fetch::Memory::new().keys().clone(),
+        };
+        let uploads = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);
+        let upload =
+            extent_store::upload::Runtime { handle: runtime.handle().clone(), uploads, keys };
+        Some(Self { sealed: sealed == "1", runtime, bucket, upload, _kms: kms })
+    }
+
+    /// The store in `dir`, made, of branch `id` of the host's cell, sealed or not, opened through
+    /// its uploader, which closes no segment between commits.
+    fn open(
+        &self,
+        dir: HostDir,
+        id: u64,
+        options: Options,
+    ) -> (Arc<Store<HostDir>>, extent_store::upload::Remote<HostDir>) {
+        let tenant = if self.sealed { Self::SEALED } else { Self::CLEAR };
+        let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
+        let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
+        let kind = extent_remote::cell::Kind::Fxfs;
+        let volume = extent_store::Volume { name: format!("v{id}"), kind };
+        Store::make(&dir, description, Some("memory:///bench"), Some(volume)).unwrap();
+        let recovering = Store::recover_unmade(dir).unwrap();
+        let interval = Duration::from_secs(3600);
+        let uploading = extent_store::upload::Options { interval, ..Default::default() };
+        let holding = (id, uploading);
+        let bucket = self.bucket.clone();
+        let _entered = self.runtime.enter();
+        let (store, remote) =
+            extent_store::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
+        store.made().unwrap();
+        assert_eq!(store.keys().sealing().is_some(), self.sealed);
+        (store, remote)
+    }
+}
+
+/// fxdax: a temporary directory in `FXDAX_BENCH_DIR`, if set.
+fn temp_dir() -> tempfile::TempDir {
+    match std::env::var_os("FXDAX_BENCH_DIR") {
+        Some(dir) => tempfile::tempdir_in(dir),
+        None => tempfile::tempdir(),
+    }
+    .unwrap()
+}
+
+/// fxdax: `mib` MiB written to a store's open segments as extents of `FXDAX_BENCH_EXTENT` KiB, read
+/// back while open, then committed (TASK-411.5).
+fn writes(mib: u64) {
+    const MIB: u64 = 1 << 20;
+    let extent_kib = env("EXTENT", 1024u64);
+    let host = Host::from_env();
+    let temp = temp_dir();
+    let dir = HostDir::new(temp.path(), true).unwrap();
+    // Segments close at commits alone.
+    let options = Options { segment_size: 1 << 30, ..Options::default() };
+    let (store, _remote) = match &host {
+        Some(host) => {
+            let (store, remote) = host.open(dir, 1, options);
+            (store, Some(remote))
+        }
+        None => (Arc::new(create(dir, options)), None),
+    };
+    let len = (extent_kib << 10) as usize;
+    let count = mib * MIB / len as u64;
+    let bytes = noise(1, len);
+    let started = Instant::now();
+    for sequence in 0..count {
+        store.write(extent(sequence), 0, &bytes).unwrap();
+    }
+    let written = started.elapsed();
+    let mut buf = vec![0; len];
+    let started = Instant::now();
+    for sequence in 0..count {
+        store.read(extent(sequence), 0, &mut buf).unwrap();
+    }
+    let read = started.elapsed();
+    assert!(buf == bytes);
+    let started = Instant::now();
+    store.commit(None).unwrap();
+    let committed = started.elapsed();
+    let kind = match &host {
+        Some(host) if host.sealed => "sealed",
+        Some(_) => "clear, through an uploader",
+        None => "clear",
+    };
+    let rate = |elapsed: Duration| (count * len as u64) as f64 / MIB as f64 / elapsed.as_secs_f64();
+    println!(
+        "{kind}: {count} extents of {extent_kib} KiB: writes {:.0} MiB/s, reads while open {:.0} \
+         MiB/s; the commit {:.1} ms",
+        rate(written),
+        rate(read),
+        committed.as_secs_f64() * 1e3
+    );
+}
+
 fn framing(segments: u64) {
     const MIB: usize = 1 << 20;
     const SEGMENT: u64 = 32;
     let (stores, hogs, cpus) = (env("STORES", 4u64), env("HOGS", 0usize), env("CPUS", 0usize));
     let (hog_nice, kind) = (env("HOG_NICE", 0i32), env("DATA", "text".to_owned()));
     run_on(cpus);
-    let temp = match std::env::var_os("FXDAX_BENCH_DIR") {
-        Some(dir) => tempfile::tempdir_in(dir),
-        None => tempfile::tempdir(),
-    };
-    let temp = temp.unwrap();
+    let temp = temp_dir();
+    let host = Host::from_env();
     let done = Arc::new(AtomicBool::new(false));
     let hogging: Vec<_> = (0..hogs)
         .map(|_| {
@@ -390,16 +520,24 @@ fn framing(segments: u64) {
     let started = Instant::now();
     std::thread::scope(|scope| {
         for store in 0..stores {
-            let (temp, bytes) = (temp.path().join(format!("{store}")), &bytes);
+            let (temp, bytes, host) = (temp.path().join(format!("{store}")), &bytes, &host);
             scope.spawn(move || {
                 std::fs::create_dir(&temp).unwrap();
                 // Segments close between commits alone, a commit after each 32 MiB.
                 let options = Options { segment_size: 1 << 30, ..Options::default() };
-                let store = create(HostDir::new(&temp, true).unwrap(), options);
-                let mut sequence = 0;
+                let dir = HostDir::new(&temp, true).unwrap();
+                let (store, _remote) = match host {
+                    Some(host) => {
+                        let (store, remote) = host.open(dir, store + 1, options);
+                        (store, Some(remote))
+                    }
+                    None => (Arc::new(create(dir, options)), None),
+                };
+                let (branch, mut sequence) = (store.description().branch.id, 0);
                 for _ in 0..segments / stores {
                     for _ in 0..SEGMENT {
-                        store.write(extent(sequence), 0, &bytes(sequence)).unwrap();
+                        let extent = ExtentId::new(branch, sequence);
+                        store.write(extent, 0, &bytes(sequence)).unwrap();
                         sequence += 1;
                     }
                     store.close_segment().unwrap();
@@ -433,9 +571,14 @@ fn framing(segments: u64) {
         sum.us[phase] -= before;
     }
     sum.runnable_us -= before.framings.sum.runnable_us;
+    let sealed = match &host {
+        Some(host) if host.sealed => ", sealed",
+        Some(_) => ", in the clear through uploaders",
+        None => "",
+    };
     println!(
-        "{count} framings of {SEGMENT} MiB, {stores} stores at once, {hogs} spinning threads at \
-         nice {hog_nice}, on {} CPUs, in {:.1} s",
+        "{count} framings of {SEGMENT} MiB{sealed}, {stores} stores at once, {hogs} spinning \
+         threads at nice {hog_nice}, on {} CPUs, in {:.1} s",
         if cpus == 0 { "all".to_owned() } else { cpus.to_string() },
         elapsed.as_secs_f64()
     );
@@ -455,9 +598,11 @@ fn main() {
         Some("burst") => burst(n(256)),
         Some("durable") => durable(n(2)),
         Some("framing") => framing(n(64)),
+        Some("writes") => writes(n(256)),
         _ => {
             eprintln!(
-                "usage: store-bench lagging-view|segments|close-now|burst|durable|framing [N]"
+                "usage: store-bench lagging-view|segments|close-now|burst|durable|framing|writes \
+                 [N]"
             );
             std::process::exit(2);
         }

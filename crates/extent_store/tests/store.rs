@@ -2915,7 +2915,7 @@ fn in_flight<'a>(
     data: &[u8],
 ) -> extent_store::Write<'a, MemDir> {
     let write = store.begin_write(extent, offset, data.len() as u64).unwrap();
-    write.file().write_at(data, write.offset()).unwrap();
+    write.write(data, 0).unwrap();
     write
 }
 

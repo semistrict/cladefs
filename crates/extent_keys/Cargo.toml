@@ -8,13 +8,20 @@ license.workspace = true
 publish = false
 
 [dependencies]
+# fxdax: AES-256-XTS for raw files, which aws-lc-rs has not (TASK-411.5): Fuchsia's storage_xts
+# (BSD-3-Clause) over RustCrypto's aes (MIT OR Apache-2.0), its key schedules zeroed on drop.
+aes = { workspace = true, features = ["zeroize"] }
 aws-lc-rs.workspace = true
 serde.workspace = true
+storage_ptr_slice.workspace = true
+storage_xts.workspace = true
 thiserror.workspace = true
+zerocopy.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 assert_matches.workspace = true
+aws-lc-sys.workspace = true
 futures.workspace = true
 tempfile.workspace = true
 
