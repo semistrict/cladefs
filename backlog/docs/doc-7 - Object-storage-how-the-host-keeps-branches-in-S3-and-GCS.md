@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 00:21'
+updated_date: '2026-11-15 01:00'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -1290,10 +1290,20 @@ read changed. What a pass reads outside the prefix, case by case:
   children's records read, in their cells), or a branch's recovery lost and nothing lost after all
   (its record read again, and its point's).
 - *Time*: only for the grace period, which what is deferred carries.
-- *The KMS* (TASK-411.6): a pass that left sealed objects uncompacted, their cell's KEK refused or
-  no KMS given, went by something outside the cell, and records no digest: the next goes in full,
-  and compacts once the KEK is to be had. A revoked tenant's idle cells cost a pass in full each
-  sweep for as long as it stays revoked.
+- *The KMS* (TASK-411.6, TASK-411.13): a pass that left sealed objects uncompacted, their cell's
+  KEK refused or no KMS given, went by something outside the cell. It records its digest as any
+  pass does, and how many it left (`Passed::uncompacted`); a pass after it whose listing has that
+  digest skips only while the tenant's KEK is still not to be had, and goes in full, compacting,
+  once it is. Whether it is, a sweep asks the KMS once a tenant, for all of the tenant's cells
+  (`collector::Heard`: a wrap of a key of no use, which the KMS makes only with the tenant's KEK,
+  and refuses as it refuses an unwrap when that KEK is revoked or destroyed, or the KMS fails);
+  without a KMS it is not, nothing asked. So a revoked tenant's idle cells cost a sweep three
+  requests each, as any idle cell, and one KMS call for all of them; a skipping pass reports what
+  is left (`locked`, `uncompacted`), and fxdax-gc counts it in the sweep's line and metrics, not on
+  a line of its own. Deciding by the KMS this way is as safe as by the cell: only compaction goes
+  by the KEK, and a skip compacts nothing; what the recorded pass would delete went by the cell
+  alone. A KMS that wraps for the tenant but unwraps not the cell's KEK (another than the one that
+  wrapped it) has the cell passed in full each sweep, and left so, as before.
 
 A pass that skips makes the recorded pass's deletes, late: what the model's pass may do, slow, its
 deletes coming any time after its reads while no other pass took the lease. Passes that took it

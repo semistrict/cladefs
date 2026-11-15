@@ -34,8 +34,10 @@
 //! by the KMS `FXDAX_KMS` names, as for every fxdax process (`local:///DIR`; one it names that
 //! can't be had stops fxdax-gc at once), and only by a pass compacting something sealed. With none,
 //! or its tenant's KEK revoked or destroyed, a pass marks and deletes as ever but leaves what is
-//! sealed uncompacted, warning of the cell and why, and its line says so; the cell is passed over in
-//! full again next time, compacted once its KEK is to be had.
+//! sealed uncompacted, warning of the cell and why, and its line says so. Passes after it skip the
+//! cell, unchanged, while its tenant's KEK is still not to be had, which a sweep asks the KMS once
+//! a tenant (TASK-411.13), saying nothing of it but in the sweep's lines; once it is, the next
+//! passes over it in full and compacts.
 //!
 //! Each sweep says on standard error, a line for each pass that deleted, compacted or retired
 //! something, or failed, what it did, in how long, and the requests it made of each kind; then two
@@ -484,13 +486,19 @@ fn requests_text(requests: &Requests) -> String {
 }
 
 /// What a pass that deleted, compacted or retired something, or failed, says of `passed`: none
-/// for one that did nothing, skipping its cell or not, or left its cell to another. A mark-only
-/// pass says what it marked whatever it did.
+/// for one that did nothing, skipping its cell or not, or left its cell to another; nor for one
+/// skipping a cell whose pass before left objects sealed uncompacted, which it leaves so, its KEK
+/// still not to be had: that pass said so, and the sweep's line counts it (TASK-411.13). A
+/// mark-only pass says what it marked whatever it did.
 fn passed_line(passed: &Ran) -> Option<String> {
     let Ran { cell, outcome, requests, took } = passed;
     let tail = format!("in {:.3} s; requests: {}", took.as_secs_f64(), requests_text(requests));
+    let idle = |report: &Report| match report.skipped {
+        0 => Report { skipped: 0, ..*report } == Report::default(),
+        _ => Report { skipped: 0, locked: 0, uncompacted: 0, ..*report } == Report::default(),
+    };
     match outcome {
-        Outcome::Collected(report) if Report { skipped: 0, ..*report } == Report::default() => None,
+        Outcome::Collected(report) if idle(report) => None,
         // One that skipped its cell, unchanged since its last pass, deleting what that one
         // deferred, or retiring again what it retired (TASK-395.6).
         Outcome::Collected(report) if report.skipped > 0 => {
@@ -1324,6 +1332,9 @@ mod tests {
         assert_eq!(passed_line(&passed(Outcome::Collected(Report::default()))), None);
         let skipped = Report { skipped: 1, ..Report::default() };
         assert_eq!(passed_line(&passed(Outcome::Collected(skipped))), None);
+        // TASK-411.13: one skipping a cell left locked, leaving it so, says nothing either.
+        let still = Report { skipped: 1, locked: 1, uncompacted: 3, ..Report::default() };
+        assert_eq!(passed_line(&passed(Outcome::Collected(still))), None);
         assert_eq!(passed_line(&passed(Outcome::Left(extent_remote::Left::Held))), None);
     }
 

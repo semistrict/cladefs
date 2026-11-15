@@ -75,7 +75,10 @@
 //! sealed asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
 //! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, compacts what
 //! is in the clear, and leaves what is sealed, saying so ([`Report::locked`]): a revoked tenant's
-//! compaction stops, its garbage still goes.
+//! compaction stops, its garbage still goes. It records its listing's digest as any pass does, and
+//! what it left ([`Passed::uncompacted`]): a pass after it, the cell unchanged, skips the cell while
+//! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
+//! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
 //!
 //! A branch's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
@@ -118,8 +121,9 @@ use crate::record::{self, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
 use extent_frame::{Keys as _, Seal};
-use extent_keys::kms;
+use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
+use futures::future::{BoxFuture, FutureExt as _, Shared};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use storage_device::ExtentId;
@@ -187,9 +191,11 @@ pub struct Report {
     /// fxdax: the passes that left objects sealed uncompacted, their cell's KEK not to be had: the
     /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
     /// having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and deleted
-    /// what no live branch needs, warning of the cell and why.
+    /// what no live branch needs, warning of the cell and why. And those that skipped a cell a
+    /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
-    /// fxdax: the objects sealed that those passes would have compacted.
+    /// fxdax: the objects sealed that those passes would have compacted, or the pass before a
+    /// skipping one would have.
     pub uncompacted: usize,
 }
 
@@ -270,6 +276,45 @@ pub struct Collector {
     /// the pass, and a tenant's KEK revoked stops the next. None: they compact only what is in the
     /// clear.
     kms: Option<kms::Shared>,
+    /// fxdax: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
+    /// its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
+    /// [`Collector::collect`] (TASK-411.13).
+    heard: Option<Arc<Heard>>,
+}
+
+/// fxdax: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
+/// whether each is to be had, asked once, however many of its passes ask. What a pass goes by over
+/// a cell unchanged since a pass that left objects sealed uncompacted, its cell's KEK not to be had
+/// ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked tenant's
+/// idle cells cost a sweep a lease and a listing each, and the KMS one call for all of them; and
+/// going over it in full, compacting them, once it is. The KMS is asked by a wrap of a key of no
+/// use, which it makes only with the tenant's KEK, revoked, destroyed or failing refusing it as
+/// they refuse an unwrap; a KMS that wraps but unwraps not the cell's KEK (another than the one
+/// that wrapped it) has the cell passed in full, and left so, each sweep, as before. Without a
+/// KMS, none is: the cell is skipped, asking nothing.
+#[derive(Default)]
+pub struct Heard {
+    asked: std::sync::Mutex<BTreeMap<u64, Shared<BoxFuture<'static, bool>>>>,
+}
+
+impl Heard {
+    pub fn new() -> Arc<Self> {
+        Arc::default()
+    }
+
+    /// Whether `tenant`'s KEK is to be had, as `kms` says, asked once.
+    async fn to_be_had(&self, kms: Option<&kms::Shared>, tenant: u64) -> bool {
+        let Some(kms) = kms else { return false };
+        let asking = (self.asked.lock().unwrap().entry(tenant))
+            .or_insert_with(|| {
+                let kms = kms.clone();
+                async move { kms.wrap_dyn(tenant, &Secret::random()).await.is_ok() }
+                    .boxed()
+                    .shared()
+            })
+            .clone();
+        asking.await
+    }
 }
 
 /// fxdax: what a pass over a cell keeps as it reads it, and drops with it.
@@ -282,7 +327,7 @@ struct Remembered {
 
 impl Collector {
     pub fn new(options: Options) -> Self {
-        Self { options, holding: Holding::default(), kms: None }
+        Self { options, holding: Holding::default(), kms: None, heard: None }
     }
 
     /// fxdax: one whose passes hold their cells as `holding` says (TASK-395.5).
@@ -298,17 +343,25 @@ impl Collector {
         Self { kms, ..self }
     }
 
+    /// fxdax: one whose passes share `heard`, what they heard of their tenants' KEKs, with the
+    /// other passes of their sweep (TASK-411.13): the KMS asked once a tenant for all of them.
+    pub fn heard(self, heard: Arc<Heard>) -> Self {
+        Self { heard: Some(heard), ..self }
+    }
+
     /// fxdax: a pass over every cell of `bucket`, one after another, as `holder`, which must differ
     /// from every other pass's over each ([`Collector::collect_cell`]): the cells found by
     /// delimiter listings, a page at a time ([`crate::cell::listed`]). A pass that fails stops none
     /// of the others; the first error is returned once all ran, what they did then unsaid. A cell
-    /// another pass holds it leaves ([`Error::Left`]), as no failure.
+    /// another pass holds it leaves ([`Error::Left`]), as no failure. fxdax: its passes share what
+    /// they heard of their tenants' KEKs ([`Heard`]).
     pub async fn collect(&mut self, bucket: &impl Bucket, holder: u64) -> Result<Report, Error> {
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
         let mut report = Report::default();
         let mut failed = None;
+        let heard = self.heard.clone().unwrap_or_else(Heard::new);
         while let Some(cell) = cells.next().await {
-            match self.collect_cell(bucket, cell, holder).await {
+            match self.collect_hearing(bucket, cell, holder, &heard).await {
                 Ok(done) => report += done,
                 Err(Error::Left(_)) => {}
                 Err(error) => drop(failed.get_or_insert(error)),
@@ -331,11 +384,24 @@ impl Collector {
         cell: Cell,
         holder: u64,
     ) -> Result<Report, Error> {
+        let heard = self.heard.clone().unwrap_or_else(Heard::new);
+        self.collect_hearing(bucket, cell, holder, &heard).await
+    }
+
+    /// fxdax: one pass over `cell`, as [`Collector::collect_cell`] says, hearing of its tenant's
+    /// KEK by `heard`.
+    async fn collect_hearing(
+        &self,
+        bucket: &impl Bucket,
+        cell: Cell,
+        holder: u64,
+        heard: &Heard,
+    ) -> Result<Report, Error> {
         let Some(mut taken) = self.take(bucket, cell, holder).await? else {
             return Ok(Report::default());
         };
         let recorded = taken.passed.take();
-        let collected = self.collect_held(bucket, cell, &taken, recorded).await;
+        let collected = self.collect_held(bucket, cell, &taken, recorded, heard).await;
         let ended = match &collected {
             Ok((_, passed)) => PassEnd::Through(passed.clone()),
             Err(_) => PassEnd::Failed,
@@ -345,17 +411,21 @@ impl Collector {
     }
 
     /// fxdax: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
-    /// end recorded, `recorded`: what it did, and what it records, if anything.
+    /// end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
+    /// that left objects sealed uncompacted skips the cell only while its tenant's KEK is still not
+    /// to be had, as `heard` says (TASK-411.13).
     async fn collect_held(
         &self,
         bucket: &impl Bucket,
         cell: Cell,
         taken: &Taken,
         recorded: Option<Passed>,
+        heard: &Heard,
     ) -> Result<(Report, Option<Passed>), Error> {
         let listed = first_listing(bucket, cell).await;
         if let Some(listed) = &listed
             && let Some(passed) = recorded.filter(|passed| passed.holds_for(listed, &self.options))
+            && (passed.uncompacted == 0 || !heard.to_be_had(self.kms.as_ref(), cell.tenant).await)
         {
             return self.skip(bucket, cell, taken, passed, listed).await;
         }
@@ -395,10 +465,10 @@ impl Collector {
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
         compacted.iter().for_each(|(key, size)| usage.add(key, *size));
         let decided = Decided::by(&self.options);
-        // fxdax: a pass that left objects sealed uncompacted went by its KMS, outside the cell: the
-        // next goes in full, compacting them if the KEK is to be had then (TASK-411.6).
-        let listing = pass.recording.digest.filter(|_| report.locked == 0);
-        Ok((report, Some(Passed { listing, decided, deferred, usage })))
+        // fxdax: what it left sealed uncompacted went by its KMS, outside the cell: recorded, so
+        // that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
+        let (listing, uncompacted) = (pass.recording.digest, report.uncompacted as u64);
+        Ok((report, Some(Passed { listing, decided, deferred, usage, uncompacted })))
     }
 
     /// fxdax: a pass over `cell`, holding its lease as `taken` says, whose listing, `listed`, is
@@ -411,6 +481,7 @@ impl Collector {
     /// were marked, and one a writer whose read of the child's record came before writes again
     /// after, the pass over its parent's cell deletes (TASK-395.14). An unchanged dead cell costs
     /// a pass its lease and its listing. What it records: nothing new, if it deleted nothing.
+    /// fxdax: it says what that pass left sealed uncompacted, as left still (TASK-411.13).
     async fn skip(
         &self,
         bucket: &impl Bucket,
@@ -419,7 +490,9 @@ impl Collector {
         passed: Passed,
         listed: &Listed,
     ) -> Result<(Report, Option<Passed>), Error> {
-        let skipped = Report { skipped: 1, ..Report::default() };
+        let uncompacted = passed.uncompacted as usize;
+        let locked = usize::from(uncompacted > 0);
+        let skipped = Report { skipped: 1, locked, uncompacted, ..Report::default() };
         let now = bucket.now();
         let (due, deferred): (Vec<Deferred>, Vec<Deferred>) =
             passed.deferred.iter().cloned().partition(|deferred| deferred.due <= now);
@@ -1881,13 +1954,12 @@ mod tests {
     use crate::bucket::{ByteRange, Created, Error as BucketError, Object, PutMode, Version};
     use crate::layout::test_branch;
     use crate::layout::{Child, child};
-    use crate::store::Store;
+    use crate::store::{Request, Store};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;
     use extent_frame::KeyId;
     use extent_keys::kms::LocalKms;
     use extent_keys::testing::Counted;
-    use futures::FutureExt as _;
     use futures::executor::block_on;
     use object_store::memory::InMemory;
     use std::future::Future;
@@ -6059,9 +6131,11 @@ mod tests {
 
     /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
     /// what no live branch needs, but compacts none of what is sealed, saying so in its report, as
-    /// one of a collector with no KMS does, which asks none; and records nothing to skip the cell
-    /// by, as what it left went by the KMS, not the cell: the next pass goes over it in full,
-    /// compacting once the KEK is given back.
+    /// one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records its
+    /// listing's digest and what it left, so that a pass after it, the cell unchanged, skips it,
+    /// asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still not to
+    /// be had (no call at all without a KMS), saying what is left; a write to the cell has the next
+    /// go over it in full; and the KEK given back, the next compacts.
     #[test]
     fn cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted() {
         block_on(async {
@@ -6070,38 +6144,107 @@ mod tests {
             let compacting = Options { compact_below: 0.5, grace: 0 };
             let locked = |report: Report| (report.compacted, report.locked, report.uncompacted);
             let segments = SEALED_SEGMENTS as usize;
+            // A pass's report, and the requests it made, by kind.
+            let bucket = &sealed.bucket;
+            let pass = |collector: Collector, holder| async move {
+                let mut collector = collector;
+                let before = bucket.stats().requests;
+                let report = collector.collect_cell(&**bucket, layout::TEST_CELL, holder);
+                let report = report.await.unwrap();
+                let after = bucket.stats().requests;
+                let made = (Request::ALL.into_iter())
+                    .filter_map(|request| {
+                        let made = after[request as usize] - before[request as usize];
+                        (made > 0).then_some((request, made))
+                    })
+                    .collect::<Vec<_>>();
+                (report, made)
+            };
+            let idle = vec![(Request::Get, 1), (Request::List, 1), (Request::Update, 1)];
 
             // No KMS: no call, the sealed left.
             let before = keys(&*sealed.bucket).await;
-            let report = Collector::new(compacting).collect(&*sealed.bucket, 1).await.unwrap();
+            let (report, _) = pass(Collector::new(compacting), 1).await;
             assert_eq!(locked(report), (0, 1, segments));
             assert_eq!(sealed.calls(), (0, 0));
             let after = keys(&*sealed.bucket).await;
             assert_eq!(report.deleted, before.len() - after.len());
             assert_eq!(report.deleted, 1);
             assert!(after.iter().all(|key| !matches!(layout::kind(key), Kind::Moves { .. })));
+            // The next in full, the cell changed by what went; then skipped, asking nothing more.
+            let (report, made) = pass(Collector::new(compacting), 2).await;
+            assert_eq!((locked(report), report.skipped, report.deleted), ((0, 1, segments), 0, 0));
+            assert!(made.len() > idle.len(), "{made:?}");
+            let (report, made) = pass(Collector::new(compacting), 3).await;
+            let skipped =
+                Report { skipped: 1, locked: 1, uncompacted: segments, ..Report::default() };
+            assert_eq!((report, made), (skipped, idle.clone()));
+            assert_eq!(sealed.calls(), (0, 0));
 
-            // Revoked: one call a pass, refused; nothing compacted, every pass in full.
+            // Revoked: skipped still, each pass asking the KMS one wrap, refused.
             sealed.counted.inner().revoke(layout::TEST_CELL.tenant).unwrap();
-            let mut collector = sealed.collector(compacting);
-            for holder in [2, 3] {
-                let report = collector.collect(&*sealed.bucket, holder).await.unwrap();
-                assert_eq!(locked(report), (0, 1, segments));
-                assert_eq!((report.skipped, report.deleted), (0, 0));
+            for holder in [4, 5] {
+                let (report, made) = pass(sealed.collector(compacting), holder).await;
+                assert_eq!((report, made), (skipped, idle.clone()));
             }
-            assert_eq!(sealed.calls(), (0, 2));
+            assert_eq!(sealed.calls(), (2, 0));
             assert_eq!(keys(&*sealed.bucket).await, after);
+            // Written to: in full, its unwrap refused, left again, deleting what the write left
+            // behind; the next in full too, the cell changed by that; then skipped again.
+            sealed.checkpointed().await;
+            let full = |report: Report| (locked(report), report.skipped, report.deleted);
+            let (report, made) = pass(sealed.collector(compacting), 6).await;
+            assert_eq!(full(report), ((0, 1, segments), 0, 1));
+            assert!(made.len() > idle.len(), "{made:?}");
+            let (report, _) = pass(sealed.collector(compacting), 7).await;
+            assert_eq!(full(report), ((0, 1, segments), 0, 0));
+            assert_eq!(sealed.calls(), (2, 2));
+            let (report, made) = pass(sealed.collector(compacting), 8).await;
+            assert_eq!((report, made), (skipped, idle.clone()));
+            assert_eq!(sealed.calls(), (3, 2));
 
-            // Given back: compacted.
+            // Given back: the KMS wraps, the cell gone over in full, compacted.
             sealed.counted.inner().unrevoke(layout::TEST_CELL.tenant).unwrap();
-            let report = collector.collect(&*sealed.bucket, 4).await.unwrap();
-            assert_eq!(locked(report), (segments, 0, 0));
+            let (report, _) = pass(sealed.collector(compacting), 9).await;
+            assert_eq!(full(report), ((segments, 0, 0), 0, 0));
+            assert_eq!(sealed.calls(), (4, 3));
             for (n, (extent, _)) in kept_at.iter().enumerate() {
                 let at = sealed.writer.location(*extent).unwrap();
                 let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
             }
+            // Compacted, the next deletes what was, recording nothing left; then skipped, asking
+            // the KMS nothing.
+            let (report, _) = pass(sealed.collector(compacting), 10).await;
+            assert_eq!(full(report), ((0, 0, 0), 0, segments));
+            let (report, _) = pass(sealed.collector(compacting), 11).await;
+            assert_eq!(full(report), ((0, 0, 0), 0, 0));
+            let (report, made) = pass(sealed.collector(compacting), 12).await;
+            assert_eq!((report, made), (Report { skipped: 1, ..Report::default() }, idle));
+            assert_eq!(sealed.calls(), (4, 3));
         });
+    }
+
+    /// TASK-411.13: what a sweep's passes heard of a tenant's KEK, asked of the KMS once however
+    /// many ask, each tenant apart; none without a KMS.
+    #[test]
+    fn tenants_keks_are_asked_for_once_a_sweep() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = LocalKms::open(dir.path().join("kms")).unwrap();
+        local.create(1).unwrap();
+        local.create(2).unwrap();
+        local.revoke(2).unwrap();
+        let counted = Arc::new(Counted::new(local));
+        let kms: kms::Shared = counted.clone();
+        let heard = Heard::new();
+        let asked = |tenant| block_on(heard.to_be_had(Some(&kms), tenant));
+        assert_eq!(
+            [asked(1), asked(1), asked(2), asked(2), asked(3)],
+            [true, true, false, false, false]
+        );
+        assert_eq!((counted.wraps(), counted.unwraps()), (3, 0));
+        assert!(!block_on(Heard::new().to_be_had(None, 1)));
+        assert_eq!(counted.wraps(), 3);
     }
 
     /// TASK-411.6, AC #4: the moves of a sealed object, copied whole to the key of another's moves

@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 00:52'
+updated_date: '2026-11-15 01:00'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -245,8 +245,12 @@ dropped with its pool, never written out unwrapped.
   the KMS failing), or the collector having no KMS: the pass still marks, compacts what is in the
   clear, and deletes what no live branch needs, leaving the sealed uncompacted; it counts them in
   its report (`Report::locked`, the passes, `Report::uncompacted`, the objects), warns naming the
-  cell and the KMS's refusal, and records no digest (what it left went by the KMS, outside the
-  cell's listing), so the next pass goes over the cell in full and compacts once the KEK is back.
+  cell and the KMS's refusal. *(TASK-411.13)* It records its listing's digest and how many it left
+  (`passed::Passed::uncompacted`); a pass after it, the cell unchanged, skips the cell (its lease
+  and one listing) while the tenant's KEK is still not to be had, which a sweep asks the KMS once a
+  tenant for all its cells (`collector::Heard`, a wrap of a key of no use; none without a KMS), and
+  goes over it in full, compacting, once it is, or once the cell changes. (TASK-411.6 recorded no
+  digest: every pass over a revoked tenant's idle cells went in full.)
   `fxdax-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
   their cell's KEK`) and in `--metrics` (`fxdax_gc_sweep_objects{action="uncompacted"}`,
   `fxdax_gc_sweep_locked_cells`).

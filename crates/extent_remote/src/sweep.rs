@@ -26,7 +26,7 @@
 
 use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Object, Page};
 use crate::bucket::{PutMode, Version};
-use crate::collector::{Collector, Holding, Marking, Options, Report};
+use crate::collector::{Collector, Heard, Holding, Marking, Options, Report};
 use crate::layout::Cell;
 use crate::store::Request;
 use crate::{Error, Left};
@@ -65,7 +65,8 @@ pub struct Sweep {
     /// runtime of one thread).
     pub spawned: bool,
     /// fxdax: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
-    /// any ([`Collector::kms`], TASK-411.6).
+    /// any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not to
+    /// be had at a pass before is now ([`Heard`], TASK-411.13).
     pub kms: Option<extent_keys::kms::Shared>,
 }
 
@@ -220,12 +221,15 @@ impl Sweep {
         let started = Instant::now();
         // What another pass did after this, it leaves be.
         let since = bucket.now();
+        // fxdax: what its passes hear of their tenants' KEKs, the KMS asked once a tenant
+        // (TASK-411.13).
+        let heard = Heard::new();
         let mut swept = Swept::default();
         // The cells taken only as `buffer_unordered` has room for another pass: a page of them
         // listed as the passes before it end.
         let passes = cells.map(|cell| {
-            let (sweep, bucket) = (self.clone(), bucket.clone());
-            let pass = async move { sweep.pass(&bucket, cell, since).await };
+            let (sweep, bucket, heard) = (self.clone(), bucket.clone(), heard.clone());
+            let pass = async move { sweep.pass(&bucket, cell, since, heard).await };
             match self.spawned {
                 false => pass.boxed(),
                 true => {
@@ -249,11 +253,19 @@ impl Sweep {
         swept
     }
 
-    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own.
-    async fn pass<B: Bucket>(&self, bucket: &Arc<B>, cell: Cell, since: u64) -> Ran {
+    /// A pass over `cell`, of a sweep that began at `since`, as a holder of its own, hearing of
+    /// its tenant's KEK by `heard`, the sweep's.
+    async fn pass<B: Bucket>(
+        &self,
+        bucket: &Arc<B>,
+        cell: Cell,
+        since: u64,
+        heard: Arc<Heard>,
+    ) -> Ran {
         let counted = Counted::new(bucket.clone());
         let holding = Holding { lease: self.lease, since: Some(since) };
-        let mut collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
+        let collector = Collector::new(self.options).holding(holding).kms(self.kms.clone());
+        let mut collector = collector.heard(heard);
         let holder = rand::random();
         let started = Instant::now();
         let outcome = match self.mode {
