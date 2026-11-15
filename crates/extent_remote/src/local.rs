@@ -5,7 +5,7 @@
 //! fxdax's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14), for
 //! development, tests and images: objects are files under a directory, as `object_store`'s
 //! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates branches rely
-//! on (doc-7, Fencing), which `LocalFileSystem` refuses.
+//! on (doc-7, The head), which `LocalFileSystem` refuses.
 //!
 //! What replaces or removes an object, an update, an overwrite, a delete, a copy or a rename, holds
 //! the lock of the object's directory, an exclusive `flock` of one of [`LOCKS`] files in the

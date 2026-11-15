@@ -36,13 +36,12 @@
 //! child's store is made only then, opening it recovering the child from the bucket. A fork that
 //! fails before is deleted in the bucket, as the fork's alone ([`Remote::unfork`]).
 //!
-//! A writer displaced, an earlier writer's segment found where its next goes, landed late past its
-//! fence (`extent_remote::Error::Displaced`), has the uploader take the branch again, the guest
-//! kept (doc-7, Fencing; TASK-204): a writer of a lease of its own, the store's write-ahead log put
-//! after the branch's end ([`Store::rebase`]), as opening the store does. Every other failure of
-//! its writer's stops the uploader for good, and the commits waiting for uploads fail with it from
-//! then on: its writer fenced, by a later writer, its branch deleted, or the log diverged, another
-//! writer's commits past it. Only opening the store anew takes the branch again then.
+//! A failure of its writer's stops the uploader for good, and the commits waiting for uploads fail
+//! with it from then on: its writer fenced, its swap of the branch's head refused as a later writer
+//! took it, its branch deleted, or the log diverged, another writer's commits past it. Only opening
+//! the store anew takes the branch again then. (Until TASK-407, a writer displaced, an earlier
+//! writer's segment landed late where its next went, took the branch again, TASK-204: no segment
+//! lands where another's goes now, each at a key of its writer's epoch; doc-7, The head.)
 
 use crate::{Dir, DirHold, File, HeldParts, Opening, Recovering, Store, read_object};
 use event_listener::{Event, Listener as _};
@@ -151,7 +150,7 @@ pub fn delete_branch(
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Failure {
     /// What object storage's protocol found of the branch, as `extent_remote` says it: another
-    /// writer took it (`Fenced`, `Displaced`), it was deleted, a later placement holds it
+    /// writer took it (`Fenced`), it was deleted, a later placement holds it
     /// (`Stale`, TASK-39.7), another writer's commits moved it on from the store's write-ahead log
     /// (`Diverged`), another branch has a fork's child's ID (`IdTaken`, TASK-79.82), or what it
     /// needs is gone or corrupt.
@@ -273,7 +272,7 @@ pub fn open<D: Dir>(
     UPLOADERS.send_modify(|running| *running += 1);
     // A task, not a thread of its own (TASK-34).
     runtime.handle.spawn(async move {
-        // Its conditional writes checked before any is relied on (doc-7, Fencing).
+        // Its conditional writes checked before any is relied on (doc-7, The head).
         match uploads.probed(holder).await {
             Ok(()) => uploader.run(recovering, store_options, uploads, holder, started).await,
             Err(err) => started.send(Err(Failure::msg(err))).unwrap(),

@@ -4,7 +4,7 @@
 
 //! A bucket of S3 or GCS, or of anything else the `object_store` crate reaches, under a prefix.
 //!
-//! Branches rely on conditional writes (doc-7, Fencing): a create where an object is must fail,
+//! Branches rely on conditional writes (doc-7, The head): a create where an object is must fail,
 //! and an update of a version that is not the object's. `object_store` sends S3's `If-None-Match`
 //! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a store honours them
 //! before anything relies on it, once for each store ([`Store::probed`]).
@@ -548,7 +548,7 @@ impl Store {
 
     /// Checks that it honours the conditional writes branches rely on ([`probe`]), with an object
     /// of `nonce`'s, unless it found it does before: a host's stores share their bucket, which it
-    /// checks once, at their first attach, not at each (doc-7, Fencing).
+    /// checks once, at their first attach, not at each (doc-7, The head).
     pub async fn probed(&self, nonce: u64) -> Result<(), String> {
         if !self.honoured.load(Ordering::Relaxed) {
             probe(self, nonce).await?;

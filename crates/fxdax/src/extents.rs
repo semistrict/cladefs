@@ -77,7 +77,7 @@ pub struct ExtentInfo {
     /// (TASK-165.9).
     pub next_sequence: u64,
     /// fxdax: the lowest sequence number the guest may mint from: its writer's range's start, with
-    /// a remote (doc-7, Fencing), past which the store need hold nothing.
+    /// a remote (doc-7, The head), past which the store need hold nothing.
     pub sequence_floor: u64,
 }
 
@@ -1146,7 +1146,7 @@ impl ExtentStore {
     /// What the store holds (`INFO`).
     pub fn info(&self) -> Result<ExtentInfo> {
         let info = self.store.info().map_err(errno)?;
-        // fxdax: from its writer's range, with a remote (doc-7, Fencing).
+        // fxdax: from its writer's range, with a remote (doc-7, The head).
         let floor = self.remote.as_ref().map_or(0, extent_store::upload::Remote::next_sequence);
         Ok(ExtentInfo {
             capacity: info.capacity,
@@ -2236,14 +2236,13 @@ mod tests {
     }
 
     /// Each of the uploader's failures has its errno, as doc-4 and doc-7 have them: a branch this
-    /// writer lost, to an earlier writer's segment too, is EROFS, not EIO (TASK-160.12).
+    /// writer lost is EROFS, not EIO (TASK-160.12).
     #[test]
     fn each_uploader_failure_has_its_errno() {
         use extent_remote::Error;
         use extent_store::upload::Failure;
         let cases = [
             (Failure::Remote(Error::Fenced), Errno::EROFS),
-            (Failure::Remote(Error::Displaced), Errno::EROFS),
             (Failure::Remote(Error::Deleted), Errno::EROFS),
             (Failure::Remote(Error::Point), Errno::EROFS),
             (Failure::Remote(Error::Stale), Errno::ESTALE),

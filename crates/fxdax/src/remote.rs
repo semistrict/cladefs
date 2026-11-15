@@ -84,7 +84,7 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
     use extent_remote::Error;
     match failure {
-        Failure::Remote(Error::Fenced | Error::Displaced | Error::Deleted | Error::Point) => {
+        Failure::Remote(Error::Fenced | Error::Deleted | Error::Point) => {
             Some(Errno::EROFS)
         }
         Failure::Remote(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
