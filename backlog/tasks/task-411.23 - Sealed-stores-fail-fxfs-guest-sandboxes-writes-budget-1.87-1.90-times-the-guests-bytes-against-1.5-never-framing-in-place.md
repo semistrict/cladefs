@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 05:57'
+updated_date: '2026-11-15 09:46'
 labels:
   - performance
   - encryption
@@ -37,3 +38,9 @@ Found by TASK-411.15 (ubu1, 2026-11-15, prebuilt artifacts of 04d5b312, scripts/
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The user's decision (2026-11-15): frame in place sealed. Incompressible ('raw') parts of a sealed object keep the raw file's XTS sectors as they are, authenticated by an HMAC tag (encrypt-then-MAC), so in-place framing works sealed exactly as in the clear; compressible parts are compressed and GCM-sealed into a copy as now. A frame format change (no migration needed).
+<!-- SECTION:NOTES:END -->
