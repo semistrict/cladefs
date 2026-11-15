@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 01:23'
+updated_date: '2026-11-15 02:18'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -386,6 +386,15 @@ dropped with its pool, never written out unwrapped.
   object's bytes are AES-GCM parts and tags, not the XTS sectors the raw file holds, so framing in
   place would write every byte again anyway, and a crash part way would leave a file neither raw
   nor framed. `RawFile::clear` hands the inner file to in-place framing only in the clear.
+  Nor does a look ahead (TASK-400, merged from main) see a sealed segment's parts as it fills:
+  its bytes in the raw file are XTS ciphertext, and a framing in a copy reads every part anyway,
+  so `Segment::new` gives a sealed open segment no `Ahead`, nothing is queued for the framer
+  (`Job::See`), and its framing reads all its parts through `RawFile`, decrypting
+  (`sealed_segments_parts_are_not_seen_ahead`). A clear store's looks ahead are main's: through
+  `RawFile`, the clear file's bytes as they are, their CRCs and looks those its in-place framing
+  writes. TASK-401's writing back holds for sealed framed files as for clear copies: the framing
+  writes its copy to the page cache, `make_durable` writes it back a MiB at a time before it
+  syncs it, and the uploader reads it through the cache (`read_object`).
 - **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
   `Write::stored` gives a caller doing its own I/O (fxdax's image device) the file, the offset and
   the bytes encrypted, which it writes again from the last whole sector written after a short
