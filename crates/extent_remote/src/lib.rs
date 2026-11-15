@@ -141,12 +141,13 @@ pub enum Error {
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
-    /// fxdax: `branch` inherits from `from`, of another cell, whose objects are sealed under its
-    /// own cell's key, which `branch`'s doesn't hold: forks into other cells rewrap the DEKs they
-    /// inherit under the child's cell KEK, which TASK-411.4 makes; until then, none is made.
+    /// fxdax: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
+    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them, or its cell
+    /// is in the clear, which keeps no key, as no sealed data goes into the clear. A fork so is
+    /// refused before anything of it is made (`keys::inheriting`).
     #[error(
-        "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed: \
-         forks across cells of sealed branches are not made yet (TASK-411.4)"
+        "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed, \
+         and its record holds not their keys"
     )]
     Inherited { branch: layout::Branch, from: layout::Branch },
     /// The branch's record says its objects are of another format than this one's, newer or

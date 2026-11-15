@@ -161,6 +161,28 @@ pub async fn create(
     Ok(Held { cell, epoch: 1, holder })
 }
 
+/// fxdax: makes `cell`, of no volumes, its KEK `kek`, as `holder` makes it, held by no placement
+/// (token 0), so that any placement takes it (TASK-411.4): what a fork into a new cell makes as it
+/// gives its child its keys, before the child's store opens, wherever it does. Returns the cell's
+/// object, and whether this made it: one there already, another's, is left as it is.
+pub async fn make(
+    bucket: &impl Bucket,
+    cell: Cell,
+    holder: u64,
+    kek: &Kek,
+) -> Result<(Object, bool), Error> {
+    let object = Object::made(holder, 0, Some(kek.clone()));
+    change(bucket, cell, Start::Create, |found| match found {
+        None => Ok(Step::Write(object.clone(), (object.clone(), true))),
+        // Ours, landed though its answer was lost, its bytes this making's alone.
+        Some(found) => {
+            let ours = found == object;
+            Ok(Step::Stop((found, ours)))
+        }
+    })
+    .await
+}
+
 /// Takes `cell` for `holder`, of the placement of `token`, at the epoch after its last taking's:
 /// refused if it has no object ([`Error::NoCell`]), if it was deleted ([`Error::Deleted`]), or if
 /// a placement of a higher token holds it ([`Error::Stale`]).

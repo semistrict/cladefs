@@ -955,21 +955,29 @@ fn state_at<'a, B: Bucket>(
 /// segments after: the state any reader finds there, its extents named where they were sealed,
 /// never further along their moves than a reader names them. One there stands, any writer's.
 /// [`Error::Lost`] if the state there is gone: no reader recovers a fork from there either.
+///
+/// fxdax: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
+/// writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in the
+/// clear (TASK-411.4). Asked for only if it is to be written.
 pub(crate) async fn checkpoint_at(
     bucket: &impl Bucket,
     branch: Branch,
     at: u64,
+    keys: crate::keys::Parents<'_>,
 ) -> Result<(), Error> {
     let key = layout::checkpoint(branch, at);
     let listed = bucket::list(bucket, &layout::checkpoints(branch)).await;
     if listed.iter().any(|meta| meta.key == key) {
         return Ok(());
     }
+    let keys = keys.ring(bucket, branch).await?;
+    debug_assert!(keys.sealing().is_none_or(|(_, id)| id.branch == branch.id));
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
         match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell, false).await {
             Ok(state) => {
-                bucket::create(bucket, &key, crate::checkpoint::encode(&*state)).await;
+                let checkpoint = crate::checkpoint::encode_under(&state, keys.sealing());
+                bucket::create(bucket, &key, checkpoint).await;
                 return Ok(());
             }
             Err(Attempt::Restart) => {}

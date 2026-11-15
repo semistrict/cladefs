@@ -14,9 +14,9 @@ use super::fork_faults::{self, Leftover, MISHAPS, commit, host, options};
 use super::tests::{Gated, Mishap, kept_in, naming, reopened, restart};
 use crate::faults::RESTORE_STEPS;
 use crate::{Errno, ExtentId, ExtentStore, StoreRole};
+use extent_remote::branch;
 use extent_remote::layout::{self, Kind};
 use extent_remote::store::Store as Bucket;
-use extent_remote::{branch, recover};
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -73,23 +73,47 @@ fn copy_at(host: usize, disk: &Path) -> PathBuf {
     disk.join(if host == 0 { "point" } else { "parent" })
 }
 
-/// The bytes the point's extents hold, as `bucket` has them for the fork `child`.
+/// The bytes the point's extents hold, as `bucket` has them for the fork `child`: read under the
+/// keys its record keeps, its cell's KEK unwrapped by the host's KMS, if it has one
+/// (TASK-411.4).
 fn in_bucket(
     bucket: &Arc<Bucket>,
     child: crate::Branch,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
         let record = branch::record(&**bucket, child).await.map_err(|err| err.to_string())?;
-        let origin = record.ok_or("no record")?.origin();
-        let state = recover(&**bucket, child, origin).await.map_err(|err| err.to_string())?.state;
+        let record = record.ok_or("no record")?;
+        let origin = record.origin();
+        let kms = crate::remote::kms();
+        let keys = extent_remote::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
+        let keys = keys.map_err(|err| err.to_string())?;
+        let recovering = extent_remote::recovery::recover_under(&**bucket, child, origin, &keys);
+        let state = recovering.await.map_err(|err| err.to_string())?.state;
+        let memory = extent_remote::fetch::Memory::new();
+        let _held = memory.keys().hold(keys);
+        let budget = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);
+        let fetcher = extent_remote::fetch::Fetcher::new(bucket.clone(), budget, memory, None);
         let mut read = Vec::new();
         for (extent, location) in &state.extents {
-            let bytes = extent_remote::read(bucket, *extent, location).await;
+            let demand = extent_remote::fetch::Priority::Demand;
+            let bytes = fetcher.read(*extent, location, 0, location.len, demand).await;
             let extent = ExtentId { branch: extent.branch, sequence: extent.sequence };
             read.push((extent, bytes.map_err(|err| err.to_string())?));
         }
         Ok(read)
     })
+}
+
+/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS, if it
+/// has one: what the deletion records of a sealed branch's forks to other cells is sealed
+/// (TASK-411.4).
+async fn operator_delete(
+    bucket: &Arc<Bucket>,
+    branch: crate::Branch,
+    holder: u64,
+) -> Result<(), extent_remote::Error> {
+    let kms = crate::remote::kms();
+    branch::delete_under(&**bucket, branch, holder, u64::MAX, kms.as_ref()).await
 }
 
 impl Hosts {
@@ -240,8 +264,7 @@ impl Hosts {
                     let bucket = bucket.clone();
                     deleted.store(true, Ordering::SeqCst);
                     let deleting = std::thread::spawn(move || {
-                        block_on(branch::delete(&*bucket, point, rand::random(), u64::MAX))
-                            .unwrap();
+                        block_on(operator_delete(&bucket, point, rand::random())).unwrap();
                         Self::collect(&bucket, "the point deleted");
                     });
                     deleting.join().unwrap();
@@ -347,7 +370,7 @@ impl Hosts {
         if !orphans.is_empty() {
             assert!(!told, "{case}: a restore made left orphans: {orphans:x?}");
             assert_eq!(orphans, [child], "{case}: orphans");
-            let deleted = block_on(branch::delete(&*self.bucket, child, rand::random(), u64::MAX));
+            let deleted = block_on(operator_delete(&self.bucket, child, rand::random()));
             assert_eq!(deleted, Ok(()), "{case}: deleting the orphan");
             Self::collect(&self.bucket, case);
         }
@@ -374,7 +397,7 @@ impl Hosts {
         self.copies.clear();
         if !deleted {
             let holder = rand::random();
-            let gone = block_on(branch::delete(&*self.bucket, self.point, holder, u64::MAX));
+            let gone = block_on(operator_delete(&self.bucket, self.point, holder));
             assert_eq!(gone, Ok(()), "{case}");
         }
         Self::collect(&self.bucket, case);
@@ -391,7 +414,7 @@ impl Hosts {
         let source = self.source.take().unwrap();
         let branch = source.branch();
         drop(source);
-        let gone = block_on(branch::delete(&*self.bucket, branch, rand::random(), u64::MAX));
+        let gone = block_on(operator_delete(&self.bucket, branch, rand::random()));
         assert_eq!(gone, Ok(()), "{case}");
         Self::collect(&self.bucket, case);
         let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
@@ -555,4 +578,54 @@ fn each_write_of_a_restore_going_wrong() {
         let mishaps = mishaps.clone();
         mishaps.into_iter().flat_map(move |mishap| on_each_host(Fault::Write(write, mishap)))
     }));
+}
+
+/// TASK-411.4: the host's KMS holding the common tenant's KEK, which every store, point and
+/// restore here is of: their cells sealed, each restore's child keeping the keys it inherits
+/// rewrapped under its own cell's KEK. Returns what keeps the KMS's directory.
+fn sealed() -> tempfile::TempDir {
+    let keys = tempfile::tempdir().unwrap();
+    let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+    kms.create(crate::host_store::NO_TENANT).unwrap();
+    crate::remote::set_kms(Arc::new(kms)).unwrap();
+    keys
+}
+
+/// TASK-411.4: `restores_with_nothing_going_wrong`, sealed: every restore's child keeps the keys
+/// it inherits, and reads, as what must hold checks.
+#[test]
+fn sealed_restores_with_nothing_going_wrong() {
+    host();
+    let _kms = sealed();
+    let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted)));
+    assert_eq!(restored, vec![Ok(()); HOSTS]);
+    let hosts = Hosts::new();
+    let copy = hosts.copies[1].as_ref().unwrap();
+    let child = crate::host_store::new_alone();
+    copy.fork_to(hosts.disks[1].join("child"), child).unwrap();
+    let record = block_on(branch::record(&*hosts.bucket, child)).unwrap().unwrap();
+    let source = hosts.source.as_ref().unwrap().branch();
+    let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
+    assert_eq!((record.deks.len(), inherited), (1, vec![source]));
+}
+
+/// TASK-411.4: `restores_failing_at_each_step_on_each_host`, sealed.
+#[test]
+fn sealed_restores_failing_at_each_step_on_each_host() {
+    host();
+    let _kms = sealed();
+    let cases = RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Fails(step)));
+    let cases: Vec<_> = cases.collect();
+    let restored = all(cases.clone());
+    let made = cases.iter().zip(&restored).filter(|(_, result)| result.is_ok());
+    assert_eq!(made.count(), 0, "restores made though a step of them failed");
+}
+
+/// TASK-411.4: `hosts_dying_at_each_step_of_a_restore`, sealed: what a host dying in the middle
+/// of a sealed restore leaves, its child's keys given or not, breaks nothing.
+#[test]
+fn sealed_hosts_dying_at_each_step_of_a_restore() {
+    host();
+    let _kms = sealed();
+    all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step))));
 }

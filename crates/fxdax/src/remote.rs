@@ -95,7 +95,8 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // fxdax: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
         Failure::Remote(Error::Kms(_)) => Some(Errno::EACCES),
-        // fxdax: a fork across cells of a sealed branch, which TASK-411.4 makes.
+        // fxdax: a sealed branch inherited by one whose record can't hold its keys: a fork of
+        // it into a cell in the clear (TASK-411.4).
         Failure::Remote(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
@@ -137,16 +138,22 @@ pub fn kms() -> Option<Arc<keys::Kms>> {
                 log::error!("fxdax: FXDAX_KMS: {why}");
                 Arc::new(Unreached(why))
             });
-            Some(keys::Kms::new(kms))
+            Some(host_kms(kms))
         }
         _ => None,
     })
     .clone()
 }
 
+/// fxdax: the host's over `kms`: its pools of new cell KEKs refilled in batches on the uploaders'
+/// runtime, off the paths of forks, which take from them (TASK-411.4).
+fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::Kms> {
+    keys::Kms::pooled(kms, keys::Pooling::on(RUNTIME.handle().clone()))
+}
+
 /// fxdax: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Some(keys::Kms::new(kms))).map_err(|_| "the host's KMS is set already".to_owned())
+    KMS.set(Some(host_kms(kms))).map_err(|_| "the host's KMS is set already".to_owned())
 }
 
 /// fxdax: the host's KMS ([`kms`]).
@@ -2450,6 +2457,74 @@ mod tests {
         let mut data = vec![0; BLOCK];
         theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
+    }
+
+    /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
+    /// host's KMS: the point's clone into the other tenant's cell keeps the DEK it inherits
+    /// rewrapped under its own cell's KEK. The point deleted, the collector run (compacting
+    /// nothing: compaction of sealed objects is TASK-411.6's), and the point's tenant's KEK
+    /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
+    /// no more.
+    #[test]
+    fn sealed_points_fork_into_other_tenants_cells_while_shared() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        for tenant in [1, 2] {
+            kms.create(tenant).unwrap();
+        }
+        crate::remote::set_kms(kms.clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        let source = dir.path().join("source");
+        let source = kept_in(&source, (1 << 30, Some(of(1))), &bucket, idle()).unwrap();
+        let extent = write(&source, 1, &pattern(1, BLOCK));
+        source.commit(Some(b"base")).unwrap();
+        let path = dir.path().join("point");
+        source.point_to(&path, crate::host_store::fork_child(source.branch())).unwrap();
+        source.free(extent).unwrap();
+        source.commit(Some(b"later")).unwrap();
+        let delete = |path: &std::path::Path| {
+            crate::host_store::delete(path, Some(&bucket), crate::host_store::token).unwrap()
+        };
+        let point = reopened(&path, idle()).unwrap();
+        let fork = |name: &str, tenant| {
+            let to = dir.path().join(name);
+            let forked = point.fork_to(&to, of(tenant)).map_err(|err| err.errno());
+            (forked, to.exists())
+        };
+        assert_eq!(fork("refused", 2), (Err(Some(crate::Errno::EACCES)), false));
+        assert_eq!(fork("ours", 1), (Ok(()), true));
+        ExtentStore::share(&path, true).unwrap();
+        assert_eq!(fork("theirs", 2), (Ok(()), true));
+        let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
+        let record = futures::executor::block_on(branch::record(&*bucket, theirs.branch()));
+        let record = record.unwrap().unwrap();
+        let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
+        assert_eq!((record.deks.len(), inherited), (1, vec![source.branch()]));
+        drop(theirs);
+
+        drop(point);
+        delete(&dir.path().join("ours"));
+        delete(&path);
+        let options = extent_remote::collector::Options { compact_below: 0.0, grace: 0 };
+        for holder in 1..=2 {
+            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            futures::executor::block_on(pass).unwrap();
+        }
+        kms.destroy(1).unwrap();
+        crate::remote::kms().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
+        crate::cache::evict_least_used(None, |_| false);
+        let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
+        assert_eq!(theirs.root().unwrap(), b"base");
+        let mut data = vec![0; BLOCK];
+        theirs.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]).unwrap();
+        assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
+        let refused = source.fork_to(dir.path().join("after"), of(1)).map_err(|err| err.errno());
+        assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
     }
 
     /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the

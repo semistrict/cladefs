@@ -79,20 +79,6 @@ pub(crate) fn may_fork_into(
     Err(Error::new(anyhow::Error::new(Errno::EACCES).context(refused)))
 }
 
-/// fxdax: whether `store` may fork to `child`: `ENOTSUP` if it holds keys, its branch or an ancestor
-/// of it sealed, and `child` is of another cell (TASK-411.3). Its DEKs, wrapped under its own cell's
-/// KEK, the child's cell doesn't hold: forks into other cells rewrap them under the child's cell
-/// KEK, which TASK-411.4 makes. Until then, refused before anything is made, rather than make a
-/// child that reads nothing it inherits.
-pub(crate) fn sealed_fork_into(store: &Store<HostDir>, child: Branch) -> Result<(), Error> {
-    let parent = store.description().branch;
-    if child.cell == parent.cell || store.keys().is_empty() {
-        return Ok(());
-    }
-    let refused = extent_remote::Error::Inherited { branch: child, from: parent };
-    Err(Error::new(anyhow::Error::new(Errno::ENOTSUP).context(refused.to_string())))
-}
-
 /// A new branch of `cell`, of `bucket`: its ID one no other branch of the bucket has, nor will
 /// (`extent_remote::objectid`), so that stores made apart, and the forks of one, mint extent IDs
 /// of their own (backlog doc-4), which a host's cache of extents keys them by (TASK-364).
@@ -415,6 +401,12 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// tenant's cell than the point, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
 /// made, unless the store is the common tenant's ([`may_fork_into`], TASK-395.9).
+///
+/// fxdax: a fork of a sealed store into another cell, as every fork here is, gives its child the
+/// keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
+/// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
+/// `ENOTSUP` if the child's tenant has no KEK, its cell in the clear, `EACCES` if the host heard a
+/// tenant whose keys it inherits, or the child's, revoked or destroyed.
 pub(crate) fn fork<H>(
     store: &Store<HostDir>,
     remote: &Remote<HostDir>,
@@ -424,14 +416,14 @@ pub(crate) fn fork<H>(
     held: H,
 ) -> Result<(), Error> {
     may_fork_into(store.description().branch, remote, child.branch.cell)?;
-    sealed_fork_into(store, child.branch)?;
+    let inheriting = remote.inheriting(child)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
         }
         _ => Error::new(anyhow::Error::new(err).context(format!("creating {}", path.display()))),
     })?;
-    let forked = fork_in(store, remote, path, child, prepare, held);
+    let forked = fork_in(store, remote, path, (child, inheriting), prepare, held);
     if forked.is_err() {
         // Leave nothing half made behind.
         let _ = std::fs::remove_dir_all(path);
@@ -444,7 +436,7 @@ fn fork_in<H>(
     store: &Store<HostDir>,
     remote: &Remote<HostDir>,
     path: &Path,
-    child: Child,
+    (child, inheriting): (Child, Option<extent_remote::keys::Inheriting>),
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
@@ -466,13 +458,13 @@ fn fork_in<H>(
     let made = match remote.is_point() {
         true => {
             drop(held);
-            remote.forked(0, child).map_err(failed)
+            remote.forked(0, child, inheriting).map_err(failed)
         }
         false => {
             let committed = store.commit_fork(child);
             drop(held);
             match committed {
-                Ok(epoch) => remote.forked(epoch, child).map_err(failed),
+                Ok(epoch) => remote.forked(epoch, child, inheriting).map_err(failed),
                 Err(err) if err.downcast_ref::<extent_store::ForkCommitted>().is_some() => {
                     Err(err.context(format!("forking to branch {branch}")))
                 }
@@ -545,7 +537,8 @@ pub(crate) fn delete(
         Some(bucket) => {
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
-            extent_store::upload::delete_branch(bucket, branch, token)
+            let kms = crate::remote::kms();
+            extent_store::upload::delete_branch(bucket, branch, token, kms.as_ref())
         }
         None => Ok(()),
     })

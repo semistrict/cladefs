@@ -3,10 +3,11 @@ id: TASK-411.4
 title: >-
   Forks into another cell rewrap inherited DEKs under the child cell KEK; shared
   points across tenants
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-14 18:34'
-updated_date: '2026-11-14 23:22'
+updated_date: '2026-11-14 23:35'
 labels: []
 dependencies:
   - TASK-411.3
@@ -41,6 +42,21 @@ A child reads its parents' objects under their DEKs. Rewrapping them under the c
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Format: Record gains inherited: Vec<keys::Inherited { branch, dek }> (layout FORMAT 10 extended, no bump: unreleased, main is at 7): each ancestor branch of another cell whose objects the branch reads, each generation, its DEK wrapped by the record's own cell KEK (generation named) with AES-KW under HKDF(cell KEK, 'fxdax inherited dek wrap' || holder place || ancestor place || generation). Given with the branch's own first DEK, in one conditional update: a record with DEKs holds all it inherits from other cells (given), complete.
+2. keys::ring: one walk of the origins. A given record: own DEKs + inherited + same-cell ancestors' records; a sealed ancestor of another cell it holds not: Error::Inherited (no other cell's KEK ever needed). An ungiven record (a point, a fork's child before its keys, a clear cell): crosses into an ancestor's cell, reading its object and unwrapping its KEK (cached per taking), adding its DEKs and inherited; a writer's ring of a clear cell crossing a sealed ancestor is refused (sealed data is never inherited into the clear).
+3. Ring keeps each DEK's branch (places); keys::inherit(source ring, child, child KEK) rewraps every DEK of branches outside the child's cell. with_dek gives own DEK + inherited (source: the ungiven ring) - the fallback for any child not given at its fork. rotate rewraps inherited too; add_generation keeps them.
+4. Fork path (extent_store Remote): inheriting(child) before anything is made (before commit_fork / fork_point): source = the store's own ring in memory; nothing for a clear source or a same-cell child (plaintext forks unchanged: no request more); refused if the KMS refused a tenant of the source (Kms::revoked marks), or the child's tenant has no KEK (Inherited), or its KEK is refused; takes a cell KEK from the pool (given back on drop if unused). forked(epoch, child, inheriting): once the child's record exists, makes the child's cell with that KEK (create-only, token 0, so any placement takes it), the host's Kms keeping the KEK for its first taking (no unwrap at the child's opening), then gives the child's record its DEK and inherited by a conditional update. A failure fails the fork, which fxdax unforks.
+5. Kms pool: Kms::pooled(kms, Pooling{low, batch, handle}) refills a tenant's pool in batches on the host runtime off the fork's path, after a take leaves it low and as a sealed store of the tenant opens; Kms::filled awaits a refill. Kms::revoked(tenant) (any Revoked/Destroyed answer, or the control API) drops the pool and the tenant's cached unwraps and marks it refused until a KMS call for it succeeds; new_kek then asks the KMS, refused. fxdax remote::kms() uses the pool.
+6. fxdax host_store::fork: remote.inheriting before create_dir/commit (replaces sealed_fork_into); errno: Inherited ENOTSUP, Kms EACCES.
+7. Crashes mid-fork: before the record nothing changes; record but no keys: deleting the unmade directory deletes the child, and any opener gives keys itself (with_dek, crossing once); cell made, keys not given: a keyed cell of no volume stays, as cells do. specs/bucket: records' keys and cells change nothing it models (state what and why).
+8. Tests: extent_remote keys (inherited wrap bound to place; ring modes; given ring refuses uncovered; rotation rewraps inherited). extent_store encrypted: fork into another cell (same tenant, and cross-tenant shared point) reads every inherited extent; parent tenant destroyed (LocalKms::destroy), child reopened on a new host reads all; grandchild across three cells; point fork refused before any record when the host cannot unwrap (opening the point) and when the origin tenant is marked revoked; zero KMS calls on the fork with a filled pool (Counted) and refill afterwards; revoked/destroyed tenant pool dropped, next fork into a new cell refused before any record; restore/shared-point encrypted variants in fxdax where they exist; plaintext twins unchanged.
+9. Fork latency: an example (fxdax-examples fork-bench) timing forks in the clear and sealed over an in-memory bucket, with and without a per-request delay; numbers in notes.
+10. doc-16/doc-7 updated; nextest narrow then the full crate set + sim sample; clippy, fmt.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

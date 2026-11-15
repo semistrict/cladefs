@@ -2394,14 +2394,17 @@ mod tests {
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`FXDAX_KMS`, set here as
     /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
-    /// wrote in its bucket; read back, by a follower, and opened again; a fork of it into another
-    /// cell refused (`ENOTSUP`, TASK-411.4), nothing made; a store of a tenant with no KEK there
-    /// in the clear, forking as before.
+    /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
+    /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
+    /// inherits; the store, the common tenant's, forks into no cell of a tenant with no KEK, in the
+    /// clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
+    /// forking as before.
     #[test]
-    fn sealed_stores_serve_follow_reopen_and_fork_into_no_other_cell() {
+    fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
+        kms.create(host_store::NO_TENANT).unwrap();
         crate::remote::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -2431,11 +2434,16 @@ mod tests {
             }
         }
         assert!(objects > 3, "{objects} objects");
-        let refused =
-            store.fork_to(dir.path().join("fork"), host_store::fork_child(store.branch()));
-        let refused = refused.unwrap_err();
-        assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        assert!(!dir.path().join("fork").exists());
+        let child = host_store::fork_child(store.branch());
+        store.fork_to(dir.path().join("fork"), child).unwrap();
+        let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
+        assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data.clone()));
+        let record =
+            extent_store::upload::block_on(extent_remote::branch::record(&**fork.bucket(), child));
+        let record = record.unwrap().unwrap().unwrap();
+        let inherited: Vec<_> = record.inherited.iter().map(|had| had.branch).collect();
+        assert_eq!((record.deks.len(), inherited), (1, vec![store.branch()]));
+        drop(fork);
         drop(follower);
         let branch = store.branch();
         drop(Arc::into_inner(store).unwrap());
@@ -2452,6 +2460,23 @@ mod tests {
         clear.fork_to(dir.path().join("forked"), host_store::fork_child(clear.branch())).unwrap();
         let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
         assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+
+        // The common tenant's, sealed, into a cell of a tenant with no KEK.
+        let common = dir.path().join("common");
+        let common =
+            ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));
+        let common = common.unwrap();
+        assert!(!common.store.keys().is_empty());
+        write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
+        common.commit(None).unwrap();
+        let into =
+            crate::Branch { cell: host_store::new_cell(6), id: rand::random::<u64>().max(1) };
+        let refused = common.fork_to(dir.path().join("into-clear"), into).unwrap_err();
+        assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
+        assert!(!dir.path().join("into-clear").exists());
+        let found =
+            extent_store::upload::block_on(extent_remote::branch::record(&**common.bucket(), into));
+        assert_eq!(found.unwrap().unwrap(), None);
     }
 
     /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base

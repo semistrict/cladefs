@@ -558,7 +558,8 @@ impl<B: Bucket> Writer<B> {
             .map(|fork| async move {
                 let origin = Origin { parent: self.branch, at: fork.at };
                 let child = Child { branch: fork.child, owner: fork.owner, point: fork.point };
-                match branch::record_fork(&*self.bucket, child, origin).await {
+                let keys = crate::keys::Parents::Held(&self.keys);
+                match branch::record_fork_under(&*self.bucket, child, origin, keys).await {
                     Ok(()) => {}
                     Err(Error::IdTaken(child)) => drop(self.inner().refused.insert(child)),
                     Err(error) => return Err(error),
