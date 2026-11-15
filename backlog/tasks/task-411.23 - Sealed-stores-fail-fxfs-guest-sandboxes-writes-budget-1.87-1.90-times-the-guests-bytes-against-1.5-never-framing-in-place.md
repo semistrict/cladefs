@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 05:57'
-updated_date: '2026-11-15 09:55'
+updated_date: '2026-11-15 11:11'
 labels:
   - performance
   - encryption
@@ -30,13 +30,13 @@ Found by TASK-411.15 (ubu1, 2026-11-15, prebuilt artifacts of 04d5b312, scripts/
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 fxfs-guest-sandboxes passes sealed on ubu1 (scripts/sandboxes.sh short, then long under scripts/qualify.sh), its writes and framings checks holding, or its budgets for sealed stores changed with the measured reason
-- [ ] #2 Write amplification of sealed and clear stores measured side by side on the same build and recorded in doc-16
+- [x] #2 Write amplification of sealed and clear stores measured side by side on the same build and recorded in doc-16
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
+- [x] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
@@ -57,4 +57,14 @@ Found by TASK-411.15 (ubu1, 2026-11-15, prebuilt artifacts of 04d5b312, scripts/
 
 <!-- SECTION:NOTES:BEGIN -->
 The user's decision (2026-11-15): frame in place sealed. Incompressible ('raw') parts of a sealed object keep the raw file's XTS sectors as they are, authenticated by an HMAC tag (encrypt-then-MAC), so in-place framing works sealed exactly as in the clear; compressible parts are compressed and GCM-sealed into a copy as now. A frame format change (no migration needed).
+
+Implemented (02302b951, branch t3/sealed-in-place): extent_frame FORMAT 2 seal kind 3 Seal::Sectors (raw parts = the raw file's XTS sectors under its own key, trailer naming DEK + raw file salt; per-part tag = HMAC-SHA256/128 under dek.derive(salt, 'fxdax raw part tag') of aad||ciphertext; table entries unchanged). Raw files' Sealer holds ObjectKey::sectors (one derivation). frame_segment frames in place sealed exactly as in the clear; seal_own (large extents) likewise, single pass (a sealed extent whose raw prefix precedes a compressible part is framed anew whole by write_own). TASK-421 settled: sealed segments look ahead (CRC+tag of ciphertext, look at plaintext) and hold parts packed in the clear in memory, sealed at framing (PackedPart::sealed, byte-identical to packing under the key). Mac: six crates' suite 1044/1045 then the one failure (page-cache read count: seal_own read compressible large extents twice) fixed by the single-pass rewrite; extent_frame+extent_store re-run 277/277. Write amplification (extent_store upload::encrypted::sealed_stores_frame_in_place_writing_what_clear_stores_write): sealed raw/copied/framed/own bytes == clear, byte for byte. mutants: framed-in-copies and large-extents-framed-in-copies regenerated (22 checked, 0 broken). Filed TASK-434 (pre-existing: sampled in-place framing on a Dir without link writes a copy without data).
+
+Verification. Mac (Apple M5 Pro): cargo nextest -p extent_keys -p extent_frame -p extent_remote -p extent_store -p sqlite_extents -p fxdax (not extent_store sim::) 1045/1045 (extent_keys 70, extent_frame 37, extent_remote 318, extent_store 240, sqlite_extents 23, fxdax 357); shuttle (-p extent_store --features shuttle --test shuttle) 37/37; sim::one 10 seeds x 23 profiles pass; mutants.sh --check 22/0 broken; firecracker-cargo.sh --check, upstream-changes.py --check pass; clippy: no new warnings in touched code; fmt clean for touched crates (extent_remote/fxdax have pre-existing unformatted files, untouched). store-bench framing (release, 16 x 32 MiB, 4 stores): sealed == clear written: noise 1.00x (16/16 in place), half 1.25x, text 1.50x. ubu1 02302b95 scripts/sandboxes.sh short: SEALED case OK, ratio 1.21 (host-a 1.22, host-b 1.21; budget 1.5; was 1.90/1.87), in place 66/63 (was 0), slowest framings 111.0/129.2 ms (budget 1000; was 1093.9), over_budget 0; CLEAR twin same build (KMS without KEK) case OK 1.17 (1.17/1.18), in place 58/59, slowest 122.9/231.6 ms. sandboxes.sh exits 1 sealed because the run-end bucket check finds 3 tenant-0 cells of the run's first branches (not the case daemons') with no KEK: filed TASK-411.26. Long mode / qualify.sh not run (AC #1 open). DoD #1 Linux workspace nextest not run.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Sealed stores frame in place (the user's decision): extent_frame FORMAT 2 seal kind 3 (Seal::Sectors), parts = the sealed raw file's AES-256-XTS sectors as they are under the raw file's own key (trailer: DEK id + raw file salt), each tagged with HMAC-SHA256/128 of aad||ciphertext (encrypt-then-MAC, no nonce, so retagging is safe); footer/table MACed as before. Segments and large extents frame in place sealed exactly when clear ones do; no object mixes XTS and GCM parts. TASK-421 settled: sealed segments look ahead (CRC+tag of ciphertext, look at plaintext) and hold parts packed in the clear in memory, sealed under the framed object's key at framing. Write-once argument for XTS sectors and the composition in doc-16 (What TASK-411.23 made). Verified: Mac 1045/1045 + shuttle 37/37 + sim sample; sealed bytes written == clear byte for byte (extent_store test, store-bench); ubu1 sandboxes short sealed 1.21x (was 1.90x, budget 1.5), framings <= 129 ms, 66/63 in place; clear twin 1.17x. Open: AC #1 needs sandboxes.sh to exit 0 (TASK-411.26: three clear tenant-0 cells at the run's end) and the long mode under qualify.sh.
+<!-- SECTION:FINAL_SUMMARY:END -->

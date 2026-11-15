@@ -630,7 +630,8 @@ fn framing(segments: u64) {
         mib(held.evicted),
         held.evicted_parts
     );
-    let (after_written, in_place) = (extent_store::written(), extent_store::segments_framed_in_place());
+    let (after_written, in_place) =
+        (extent_store::written(), extent_store::segments_framed_in_place());
     let (raw, framed) =
         (after_written.raw - written.0.raw, after_written.framed - written.0.framed);
     println!(
