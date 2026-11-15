@@ -23,7 +23,7 @@ async-trait.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
 rand.workspace = true
-cladefs = { path = "../cladefs" }
+cladefs = { path = "../cladefs", features = ["testing"] }
 tempfile.workspace = true
 extent_remote.workspace = true
 tokio.workspace = true

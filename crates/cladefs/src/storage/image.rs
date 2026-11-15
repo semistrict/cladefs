@@ -589,7 +589,8 @@ mod tests {
     /// cladefs: an image of a sealed cell (TASK-411.5): its device writes extents' data, in its open
     /// segment's raw file and a large extent's own, by I/O of its own, encrypted
     /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
-    /// of the image holds them in the clear at any of those points.
+    /// of the image holds them in the clear at any of those points, each once the image does
+    /// nothing behind its device's callers ([`quiesced`]).
     #[test]
     fn sealed_images_hold_no_plaintext() {
         let keys = tempfile::tempdir().unwrap();
@@ -607,23 +608,12 @@ mod tests {
         let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);
         let large_data = crate::test_data::noise(2, 5 * MIB);
-        let in_the_clear = || {
+        let in_the_clear = |device: &ImageDevice| {
+            quiesced(device);
             // As on the disk, what the store's page cache holds written there first (TASK-433).
             extent_store::pages::shared().write_back_all().unwrap();
             let pieces = [&small_data[..64], &large_data[..64], &large_data[MIB..MIB + 64]];
-            let mut files = vec![dir.path().to_path_buf()];
-            let mut held = Vec::new();
-            while let Some(at) = files.pop() {
-                if at.is_dir() {
-                    files.extend(std::fs::read_dir(&at).unwrap().map(|e| e.unwrap().path()));
-                    continue;
-                }
-                let bytes = std::fs::read(&at).unwrap();
-                if bytes.windows(64).any(|window| pieces.contains(&window)) {
-                    held.push(at.display().to_string());
-                }
-            }
-            held
+            crate::testing::files_holding(dir.path(), &pieces)
         };
         let reads = |device: &ImageDevice| {
             block_on(async {
@@ -636,14 +626,29 @@ mod tests {
             write(&device, large, 0, &large_data).await;
         });
         reads(&device);
-        assert_eq!(in_the_clear(), Vec::<String>::new(), "written");
+        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "written");
         block_on(device.flush()).unwrap();
         reads(&device);
-        assert_eq!(in_the_clear(), Vec::<String>::new(), "flushed");
+        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "flushed");
         drop(device);
         let device = ImageDevice::open(&image, Default::default()).unwrap();
         reads(&device);
-        assert_eq!(in_the_clear(), Vec::<String>::new(), "reopened");
+        assert_eq!(in_the_clear(&device), Vec::<String>::new(), "reopened");
+    }
+
+    /// cladefs: `device`, once its image does nothing to its directory, nor to its bucket's,
+    /// behind its callers (TASK-463): its commits uploaded and acknowledged, the uploader's
+    /// closings for them framed and what the acknowledgements let go of gone; the store's own work
+    /// done, its framings made durable, their files renamed their own, and the next segment's log
+    /// prepared ([`Store::wait_idle`]); and the pass of the bucket's collector its commits started,
+    /// if one runs. Walked before, a file listed could go before it was read, `NotFound` (CI run
+    /// 43729753505).
+    fn quiesced(device: &ImageDevice) {
+        device.image.wait_uploaded().unwrap();
+        device.store.wait_idle().unwrap();
+        if let Some(collecting) = device.image.collecting() {
+            collecting.collected();
+        }
     }
 
     /// Freeing an extent gives back the capacity it took.

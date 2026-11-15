@@ -249,16 +249,7 @@ fn a_sealed_store_mounted_holds_nothing_in_the_clear() {
         assert!(contents(fs.root(), b"file").await == data, "reopened, read otherwise");
         fs.close().await.unwrap();
     });
-    let mut held = Vec::new();
-    let mut paths = vec![dir.path().to_path_buf()];
-    while let Some(at) = paths.pop() {
-        if at.is_dir() {
-            paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
-        } else if std::fs::read(&at).unwrap().windows(64).any(|window| window == &data[..64]) {
-            held.push(at.display().to_string());
-        }
-    }
-    assert_eq!(held, Vec::<String>::new());
+    assert_eq!(cladefs::testing::files_holding(dir.path(), &[&data[..64]]), Vec::<String>::new());
 }
 
 /// A child process, killed if the test ends while it runs.
