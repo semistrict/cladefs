@@ -3,11 +3,11 @@ id: TASK-330.5
 title: >-
   Sandboxes run's long mode runs on ubu1 by hand before each pin, not nightly in
   CI; it must finish there (it ran 2+ h unfinished)
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-11 07:25'
-updated_date: '2026-11-15 02:37'
+updated_date: '2026-11-15 05:07'
 labels:
   - testing
   - ci
@@ -25,15 +25,15 @@ TASK-330.1's .github/workflows/sandboxes.yml runs scripts/sandboxes.sh on GitHub
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 scripts/sandboxes.sh long finishes on ubu1 under fxjob --bench in about an hour at LangSmith's shape, and passes on main
+- [x] #1 scripts/sandboxes.sh long finishes on ubu1 under fxjob --bench in about an hour at LangSmith's shape, and passes on main
 - [x] #2 The README's testing section and TASK-330.4's pre-pin procedure say to run it on ubu1 before each pin; nightly.yml does not call it
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (GCE, scripts/test-gce.sh)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -70,4 +70,12 @@ Sized to fit 16 GiB at LangSmith's shape (2 hosts, 16 VMs 8 at a time, 8-vCPU bu
 2026-11-14 (claude, TASK-400/401's agent): two long-mode passes on ubu1 (fxjob --bench --mem 16G) with TASK-400/401 (14e7f8ae6, 1649d384e): both FAILED the framing check alone, 2 a pass past 1 s on host-b (pass 1: 19.9 s, a 1 MiB copy during a disk stall, durable lag max 25.1 s, and 1.76 s reading a 96 MiB copy back; pass 2: 3.47 s and 1.66 s, copies read back). Everything else passed: VMs 800/781 s, stores 1.20-1.21x, commands within budget. Within 50 ms 50.1/59.4% and 32.7/33.1%. AC #1 still open: TASK-400's copies.
 
 2026-11-15 (claude, TASK-400's agent): long-mode passes on main with TASK-400 (c2daf7630) not run: ubu1's scratch disk had 48 GB free (another session's t411, 165 GB). Ready-to-run scripts and artifacts: TASK-400's notes.
+
+Long mode on ubu1, main's code at 4f2a634d (TASK-400 c2daf7630, TASK-401 9c93d8d08, TASK-336 c6ba0d117), fxjob --bench --mem 16G, 2026-11-15 04:35-05:05 UTC, two passes back to back (scripts/qualify.sh, FXDAX_QUALIFY_SANDBOXES=long): both PASSED in ~15 min each (VMs ran 858 s). Framings over 1 s: 0 on every host of both passes (before: 2-19 a pass). Slowest framing host-a/b: pass 1 703/691 ms, pass 2 784/935 ms; slow framings (over 50 ms) 107/104 and 103/117 a host. Read phase: one framing past 0.5 s in all (pass 1 host-a, in place, 16.8 MiB read of 34.8 MiB, its parts packed too late: read 622 ms); maxima 622/200 and 130/343 ms. Held parts peak 71-117 MiB, 0 evicted; framing reads 2.45-2.69 GiB a daemon against 41.5-42.7 GiB looked at ahead. Stores wrote 1.20x the guests; budgets: cpu_per_guest_mib 13.9 ms (budget 20), max_anon 1,060 MiB, io_per_guest_byte 1.207. Host before pass 1: load 5.4, Dirty 453 MB, io some avg60 14%; before pass 2 load 51 (pass 1's VMs ending), io 36%; another session's e2e411 job queued, not running. Results /mnt/fxdax-scratch/t400-long/pass1, pass2.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+sandboxes.sh long runs on ubu1 by hand before each pin (README, TASK-330.4's procedure), not nightly; it finishes in ~15 min under fxjob --bench at LangSmith's shape (2 hosts, 16 VMs, 8 at a time, 16 GiB) and passes on main: two passes 2026-11-15, 0 framings over 1 s, after TASK-336/400/401. Main's CI green on Linux and macOS workspace with these changes (b4ac3d970, run 43668192071); upstream-changes.py --check passes (2026-11-15).
+<!-- SECTION:FINAL_SUMMARY:END -->
