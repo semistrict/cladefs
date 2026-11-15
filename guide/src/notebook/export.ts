@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -44,15 +44,15 @@ export function notebookText(progress: Progress, from: number, commit: string): 
   const entries = progress.notebook.slice(from);
   const of = <K extends Entry["kind"]>(...kinds: K[]) => entries.filter((e): e is Extract<Entry, { kind: K }> => kinds.includes(e.kind as K));
   const out: string[] = [
-    `# My fxdax Flight School notebook`,
+    `# My cladefs Flight School notebook`,
     "",
     `Exported ${new Date().toISOString().slice(0, 16).replace("T", " ")} UTC, from the guide (guide/) built at ${commit.slice(0, 9)}.` +
       (from > 0 ? ` These are my entries since my last export (${entries.length} of ${progress.notebook.length}).` : ""),
     "",
-    "I own the fxdax repo and I'm learning its code with the guide; I'm an experienced systems programmer, new to this codebase. Below is what I did in it and what I asked. Use it to see where I am:",
+    "I own the cladefs repo and I'm learning its code with the guide; I'm an experienced systems programmer, new to this codebase. Below is what I did in it and what I asked. Use it to see where I am:",
     "",
     "1. Answer my questions and respond to my notes from the code itself: read the files and snippets named, cite code by exact snippet (path plus text), never by line number.",
-    "2. Where I predicted wrong or my design differs from fxdax's, explain the mechanism I missed, and name the test, TLA+ mutation (specs/*/mutations) or mutant (guest/mutants) that shows it.",
+    "2. Where I predicted wrong or my design differs from cladefs's, explain the mechanism I missed, and name the test, TLA+ mutation (specs/*/mutations) or mutant (guest/mutants) that shows it.",
     "3. Then tell me what I should look at next, and ask me one question that checks I can predict the code's behaviour in a case the guide didn't show.",
   ];
 
@@ -71,7 +71,7 @@ export function notebookText(progress: Progress, from: number, commit: string): 
 
   const designs = of("design");
   if (designs.length) {
-    out.push("", "## My designs, written before I saw fxdax's", "");
+    out.push("", "## My designs, written before I saw cladefs's", "");
     for (const d of designs) out.push(`- ${where(d)}: ${d.prompt.trim()}`, "", quote(d.text), "");
   }
 

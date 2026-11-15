@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * The kernel's sort(), as lib/sort.c's: in place, not stable, with no scheduling point. An
  * insertion sort, not the kernel's heapsort, which orders what compares equal otherwise: dax.c

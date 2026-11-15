@@ -105,7 +105,7 @@ impl<S: ReadObjectHandle> CachingObjectHandle<S> {
         Self { source, chunks: Mutex::new(chunks), event: Event::new() }
     }
 
-    /// fxdax: as `new`, with `contents`, all of `source`'s, cached already: as a layer just written
+    /// cladefs: as `new`, with `contents`, all of `source`'s, cached already: as a layer just written
     /// is, which would otherwise be read back as soon as it is used.
     pub fn new_with_contents(source: S, contents: &[u8]) -> Self {
         let this = Self::new(source);
@@ -398,7 +398,7 @@ mod tests {
         }
     }
 
-    /// fxdax: contents given are cached already: reading them reads nothing from the source.
+    /// cladefs: contents given are cached already: reading them reads nothing from the source.
     #[fuchsia::test]
     async fn test_new_with_contents() {
         let device = Arc::new(FakeDevice::new(1024, 512));

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -19,8 +19,8 @@
 #
 #   scripts/mutants-followers.sh [PART...]   (default: views fxfs protocol history)
 #
-# Each part's report goes to $FXDAX_MUTANTS/followers-PART/mutants.out (default:
-# ~/.cache/fxdax/mutants): caught.txt, missed.txt, timeout.txt, unviable.txt. FXDAX_MUTANTS_JOBS
+# Each part's report goes to $CLADEFS_MUTANTS/followers-PART/mutants.out (default:
+# ~/.cache/cladefs/mutants): caught.txt, missed.txt, timeout.txt, unviable.txt. CLADEFS_MUTANTS_JOBS
 # mutants build and run at once (default 3). The parts run on macOS, in some 5 to 15 minutes each.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -28,8 +28,8 @@ parts=("$@")
 if (( ${#parts[@]} == 0 )); then
     parts=(views fxfs protocol history)
 fi
-out=${FXDAX_MUTANTS:-$HOME/.cache/fxdax/mutants}
-jobs=${FXDAX_MUTANTS_JOBS:-3}
+out=${CLADEFS_MUTANTS:-$HOME/.cache/cladefs/mutants}
+jobs=${CLADEFS_MUTANTS_JOBS:-3}
 command -v cargo-mutants > /dev/null || {
     echo "cargo-mutants is missing: cargo install cargo-mutants --locked" >&2
     exit 2

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14), for
+//! cladefs's own: a bucket on the host's filesystem (`file:///dir`, TASK-165.1, backlog doc-14), for
 //! development, tests and images: objects are files under a directory, as `object_store`'s
 //! [`LocalFileSystem`] keeps them, durably (`fsync` on), with the conditional updates branches rely
 //! on (doc-7, The head), which `LocalFileSystem` refuses.
@@ -18,12 +18,12 @@
 //! rename goes; one a later write reuses would need the same size and microsecond as the version
 //! named, the clock not going back.
 //!
-//! fxdax: a lock a directory's, not one the bucket's (TASK-395.15): an update holds its lock over
+//! cladefs: a lock a directory's, not one the bucket's (TASK-395.15): an update holds its lock over
 //! its `fsync`, and a collector's passes over many cells at once, each updating its cell's lease a
 //! few times, and deleting, waited for one another's on one lock, a sweep at 16 passes at once
 //! slower than at 4. Objects of one directory share their lock, so that a batch of deletes, mostly
 //! of a few directories, takes a few locks; objects of others mostly don't. Every process of a
-//! bucket must lock so: one of a build before, locking `.fxdax-lock` alone, excludes none of them.
+//! bucket must lock so: one of a build before, locking `.cladefs-lock` alone, excludes none of them.
 //!
 //! Deletes in a stream take each lock once for each [`DELETES_LOCKED`] of them ready at once, the
 //! objects under one lock deleted several at once under it, as `LocalFileSystem` deletes, and the
@@ -51,12 +51,12 @@ use std::sync::Arc;
 /// The start of the names of the files in a bucket's directory whose `flock`s are its locks, each
 /// followed by its number, two hexadecimal digits ([`lock_of`]). None is an object: listings leave
 /// them out.
-pub const LOCK: &str = ".fxdax-lock.";
+pub const LOCK: &str = ".cladefs-lock.";
 
 /// How many locks a bucket has, which the directories of its objects share ([`lock_of`]).
 pub const LOCKS: u8 = 64;
 
-/// fxdax: the lock of the objects of the directory of `location`'s (TASK-395.15): the name of its
+/// cladefs: the lock of the objects of the directory of `location`'s (TASK-395.15): the name of its
 /// file in the bucket's directory, by a hash of the directory's path, the same in every process
 /// and build (FNV-1a), so that each locks an object as the others do.
 pub fn lock_of(location: &str) -> String {
@@ -353,7 +353,7 @@ mod tests {
     fn objects_of_a_directory_share_their_lock() {
         let cell = "tenants/0000000000000001/cells/0000000000000002/";
         let lease = format!("{cell}gc/lease");
-        assert_eq!(lock_of(&lease), ".fxdax-lock.21");
+        assert_eq!(lock_of(&lease), ".cladefs-lock.21");
         let segment = |seq: u64| format!("{cell}segments/0000000000000001/{seq:016x}");
         assert_eq!(lock_of(&segment(1)), lock_of(&segment(2)));
         assert_eq!(lock_of("a"), lock_of("b"));

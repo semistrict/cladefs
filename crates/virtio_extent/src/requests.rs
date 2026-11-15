@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,12 +7,12 @@
 //! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! durable commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
-//! them, completing each request (`fxdax::extentd::spawn_on_replies`): no thread is woken between
+//! them, completing each request (`cladefs::extentd::spawn_on_replies`): no thread is woken between
 //! the reply and the guest's interrupt, nor waits for the store's I/O (TASK-41).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fxdax::{Commit, Errno};
+use cladefs::{Commit, Errno};
 use log::{error, info};
 
 use crate::buffers::{Buffers, Reader, Writer};
@@ -130,7 +130,7 @@ async fn serve<S: Store>(
             // A barrier before orders, without waiting for durability (doc-4); one after, with
             // WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either way.
             let mut barriers = write_barriers(flags).ok_or(Errno::EINVAL)?;
-            // fxdax: the root that commit sets, after the data (WRITE_ROOT).
+            // cladefs: the root that commit sets, after the data (WRITE_ROOT).
             let root;
             if flags & VIRTIO_EXTENT_WRITE_ROOT != 0 {
                 let len = u32::from_le(args.root_len);
@@ -149,7 +149,7 @@ async fn serve<S: Store>(
             }
             let id: ExtentIdLe = reader.obj()?;
             let mut extents = vec![id.into()];
-            // fxdax: the rest of a flush's dead extents, each freed as it would be alone, in one
+            // cladefs: the rest of a flush's dead extents, each freed as it would be alone, in one
             // request of the daemon's, not one each (TASK-92.13): the first error fails the
             // request, the extents before it freed (`F_FREE_MANY`); refused past `MAX_MANY_DATA`.
             if flags & VIRTIO_EXTENT_FREE_MANY != 0 {
@@ -166,7 +166,7 @@ async fn serve<S: Store>(
         }
         VIRTIO_EXTENT_T_MAP => {
             let args: MapArgs = reader.obj()?;
-            // fxdax: every map is read-only; a window that copies on write, a writer's, maps
+            // cladefs: every map is read-only; a window that copies on write, a writer's, maps
             // zeros, and a follower's none (backlog doc-13).
             let map_flags = VIRTIO_EXTENT_MAP_AHEAD
                 | if store.copies_on_write() { VIRTIO_EXTENT_MAP_ZEROS } else { 0 };
@@ -174,7 +174,7 @@ async fn serve<S: Store>(
                 return Err(Errno::EINVAL);
             }
             let mut maps = vec![(args, flags & map_flags)];
-            // fxdax: the rest of a chunk's pieces (`F_MAP_MANY`), each with its own flags; refused
+            // cladefs: the rest of a chunk's pieces (`F_MAP_MANY`), each with its own flags; refused
             // past `MAX_MANY_DATA`.
             if flags & VIRTIO_EXTENT_MAP_MANY != 0 {
                 if reader.available() > MAX_MANY_DATA {
@@ -190,7 +190,7 @@ async fn serve<S: Store>(
                 }
             }
             // Sent to the daemon at once, each as it would be alone: the first error fails the
-            // request, whichever others it mapped (`F_MAP_MANY`). fxdax: what the guest reads
+            // request, whichever others it mapped (`F_MAP_MANY`). cladefs: what the guest reads
             // next (`F_MAP_AHEAD`) is then mapped for it (TASK-112.1).
             futures::future::try_join_all(maps.iter().map(|(args, flags)| async move {
                 let (window_offset, len) =
@@ -214,7 +214,7 @@ async fn serve<S: Store>(
             store.unmap(u64::from_le(args.window_offset), u64::from_le(args.len)).await?;
             Ok(0)
         }
-        // fxdax: a window that copies on write's, a writer's (backlog doc-13), its arguments UNMAP's.
+        // cladefs: a window that copies on write's, a writer's (backlog doc-13), its arguments UNMAP's.
         VIRTIO_EXTENT_T_PRIVATE => {
             if flags != 0 || !store.copies_on_write() {
                 return Err(Errno::EINVAL);
@@ -256,7 +256,7 @@ async fn serve<S: Store>(
             Ok(returned)
         }
         VIRTIO_EXTENT_T_INFO => {
-            // fxdax: the whole of it, the branch too, which a driver without F_FREEZE had no room
+            // cladefs: the whole of it, the branch too, which a driver without F_FREEZE had no room
             // for, served before: a driver of this protocol has (TASK-141.3).
             if room < size_of::<Info>() {
                 return Err(Errno::EINVAL);
@@ -277,7 +277,7 @@ async fn serve<S: Store>(
             notices.set_frozen(flags & VIRTIO_EXTENT_FREEZE_FROZEN != 0);
             Ok(0)
         }
-        // fxdax: the guest's stats, which the daemon asked for (TASK-111.4).
+        // cladefs: the guest's stats, which the daemon asked for (TASK-111.4).
         VIRTIO_EXTENT_T_STATS => {
             let args: StatsArgs = reader.obj()?;
             if reader.available() > MAX_STATS {
@@ -296,7 +296,7 @@ async fn serve<S: Store>(
             store.resized(capacity, took).await?;
             Ok(0)
         }
-        // fxdax: a follower's (doc-4's F_READ_ONLY); a writer's store refuses them (EINVAL).
+        // cladefs: a follower's (doc-4's F_READ_ONLY); a writer's store refuses them (EINVAL).
         VIRTIO_EXTENT_T_ADVANCE => {
             if room < size_of::<Epoch>() {
                 return Err(Errno::EINVAL);
@@ -346,7 +346,7 @@ mod linux {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Instant;
 
-    use fxdax::RemoteExtentStore;
+    use cladefs::RemoteExtentStore;
     use log::error;
 
     use super::{Served, handle, type_of};
@@ -361,7 +361,7 @@ mod linux {
     pub struct Requests {
         store: Arc<RemoteExtentStore>,
         notices: Arc<Notices>,
-        /// fxdax: what it does with the guest's asks for durability (TASK-363).
+        /// cladefs: what it does with the guest's asks for durability (TASK-363).
         cache: CacheType,
         served: Served,
         /// The requests taken off the queue and not yet returned to the driver.
@@ -406,8 +406,8 @@ mod linux {
             *self.serving.lock().expect("Poisoned lock") += 1;
             let start = Instant::now();
             let header = buffers.as_ref().ok().and_then(Buffers::header);
-            // fxdax: served with the guest's number of it current, which the daemon's client's
-            // calls for it carry to the daemon's log (`fxdax::request`, TASK-260): 0, none, if
+            // cladefs: served with the guest's number of it current, which the daemon's client's
+            // calls for it carry to the daemon's log (`cladefs::request`, TASK-260): 0, none, if
             // unread.
             let unique = header.map_or(0, |header| u64::from_le(header.unique));
             let requests = self.clone();
@@ -430,7 +430,7 @@ mod linux {
                     requests.idle.notify_all();
                 }
             };
-            fxdax::extentd::spawn_on_replies(fxdax::request::guest_request(unique, served));
+            cladefs::extentd::spawn_on_replies(cladefs::request::guest_request(unique, served));
         }
 
         /// Waits until the requests taken are returned to the driver.
@@ -454,7 +454,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
-    use fxdax::{ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
+    use cladefs::{ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers};
     use zerocopy::{Immutable, IntoBytes};
 
     use super::*;
@@ -765,7 +765,7 @@ mod tests {
         assert_eq!(request(&store, &past, RESPONSE).1, errno(Errno::EINVAL));
     }
 
-    /// fxdax TASK-363: an Unsafe device's commits, and writes' commits, are ordered, whatever the
+    /// cladefs TASK-363: an Unsafe device's commits, and writes' commits, are ordered, whatever the
     /// driver asked.
     #[test]
     fn unsafe_devices_commit_ordered() {
@@ -881,7 +881,7 @@ mod tests {
         assert_eq!(request(&store, &many, RESPONSE).1, errno(Errno::EINVAL));
     }
 
-    /// fxdax: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the
+    /// cladefs: a FREE_MANY's or a MAP_MANY's data past MAX_MANY_DATA is refused, nothing done: the
     /// device lists what it names in its own memory, and a chain naming the same guest memory
     /// again and again names as much as it likes. Up to it, the request is served.
     #[test]
@@ -980,7 +980,7 @@ mod tests {
         assert_eq!(request(&store, &[0; 4], RESPONSE).1, errno(Errno::EINVAL));
     }
 
-    /// fxdax TASK-77: a guest's driver is untrusted: whatever a request says, of the types and
+    /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and
     /// flags it may name, of extents of its branch or another's, at offsets near the store's ends
     /// or at the ends of a u64, the device answers it, with a status, no more than the room it was
     /// given written. Seeded by proptest, which says the case if one fails.

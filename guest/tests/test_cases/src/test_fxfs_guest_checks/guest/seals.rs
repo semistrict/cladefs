@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -7,7 +7,7 @@
 
 use super::*;
 
-/// fxdax: has the kernel log what it traced of the DAX window's page at page frame `frame`, of
+/// cladefs: has the kernel log what it traced of the DAX window's page at page frame `frame`, of
 /// whichever pages of files (fxfs.dax_trace, TASK-124): where a mapping maps a page that isn't
 /// its file's.
 fn trace_dump_frame(frame: u64) {
@@ -17,7 +17,7 @@ fn trace_dump_frame(frame: u64) {
     }
 }
 
-/// fxdax: the page frame this process's page table maps `addr` to, if any
+/// cladefs: the page frame this process's page table maps `addr` to, if any
 /// (/proc/self/pagemap): which page of the DAX window a mapping of a file maps, the window's
 /// page frames in a row from its first.
 fn mapped_pfn(addr: usize) -> Option<u64> {
@@ -31,7 +31,7 @@ fn mapped_pfn(addr: usize) -> Option<u64> {
     (entry & PRESENT != 0).then_some(entry & PFN)
 }
 
-/// fxdax: dax_writes_ns adds up (TASK-146.2): what writes of a file's every kind of page spent
+/// cladefs: dax_writes_ns adds up (TASK-146.2): what writes of a file's every kind of page spent
 /// is in the parts /proc/fs/fxfs/<tag> says, the copy among them: a new step in the write would
 /// show as dax_write_other_ns. 45% of a pgbench's writes' time had no part to be in. Of a file
 /// read in from sealed extents, whose writes are the window's, copying on write (doc-13; a file
@@ -63,7 +63,7 @@ pub(super) fn test_write_times_add_up() {
     assert!(other < total / 10, "{other} ns of {total} are in no part of a write");
 }
 
-/// fxdax: writes of several of the device's requests each, written back as fsyncs elsewhere
+/// cladefs: writes of several of the device's requests each, written back as fsyncs elsewhere
 /// seal: the device applied a write in flight while a seal's barrier was on both sides of it,
 /// sealing the extent its first request opened, and the rest failed: "extent … is sealed", and
 /// EIO (TASK-91.1, the sandbox team's pgbench).
@@ -101,7 +101,7 @@ pub(super) fn test_writes_across_seals() {
     fs::remove_file(path("sealing")).unwrap();
 }
 
-/// fxdax: as a database's log: files written whole, then written again 8 KiB at a time, each
+/// cladefs: as a database's log: files written whole, then written again 8 KiB at a time, each
 /// write fdatasynced, by several threads at once, while another fsyncs: on DAX, a writable MAP
 /// of an extent the guest took for open was refused (EPERM) under pgbench (TASK-91.9). Each
 /// write reads back as written once fdatasynced, and each file, in the end, as its writes left
@@ -161,7 +161,7 @@ pub(super) fn test_log_writes() {
 /// write it back, and another file's seal, again and again. On writable DAX, as the pages
 /// moved, a write(2) in the device's gate invalidated their DAX entries, which a fault holding
 /// an entry must not wait for the gate with (the seal waits for the write(2), the write(2) for
-/// the fault): a deadlock, which the test's timeout catches. fxdax: with DAX, the file is read
+/// the fault): a deadlock, which the test's timeout catches. cladefs: with DAX, the file is read
 /// in from sealed extents (doc-13, TASK-164.3), and its fsyncs write back pages the stores and
 /// write(2)s dirty meanwhile, write-protecting them. Each byte has one owner, the write(2)s a
 /// page's first, the stores its second: after each of its rounds, the owner finds its byte as
@@ -291,7 +291,7 @@ pub(super) fn test_seal_race(dax: bool) {
     file.sync_all().unwrap();
 }
 
-/// fxdax: files written and fsynced, then truncated or removed at once, again and again
+/// cladefs: files written and fsynced, then truncated or removed at once, again and again
 /// (TASK-91.10). The filesystem stays whole: the last file reads back.
 pub(super) fn test_dropped_after_seals() {
     use std::os::unix::fs::FileExt;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The file model (TASK-149.18): what each file of a mount holds as the calls tasks made of it told
  * them, a byte at a time, as ztest's blocks know their tags. kernel/mount.c's system calls and

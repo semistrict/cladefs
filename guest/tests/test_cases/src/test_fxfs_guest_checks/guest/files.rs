@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -20,7 +20,7 @@ pub(super) fn test_mmap_write(dax: bool) {
         .open(path("dax-mapped"))
         .unwrap();
     file.set_len(MAPPED_SIZE as u64).unwrap();
-    // fxdax: a file created in the mount is a page-cache inode until read in again (doc-13,
+    // cladefs: a file created in the mount is a page-cache inode until read in again (doc-13,
     // TASK-164.3); read in, it maps its data from the window.
     assert!(!is_dax(&path("dax-mapped")), "dax-mapped, created here, is DAX");
 
@@ -306,7 +306,7 @@ pub(super) fn test_sparse() {
     file.sync_all().unwrap();
 }
 
-/// fxdax: st_blocks follows what a file holds, the inode in the cache all along, and an unlinked
+/// cladefs: st_blocks follows what a file holds, the inode in the cache all along, and an unlinked
 /// file's too (TASK-138).
 pub(super) fn test_blocks_follow_writes() {
     use std::os::unix::fs::MetadataExt;

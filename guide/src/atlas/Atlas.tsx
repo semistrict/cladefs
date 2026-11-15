@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -73,7 +73,7 @@ function Provenance() {
   if (!index) return <p className="muted">Loading the index…</p>;
   return (
     <div className="stats">
-      {(["fxdax", "ported", "fuchsia-changed", "fuchsia", "stand-in"] as Origin[]).map((o) => (
+      {(["cladefs", "ported", "fuchsia-changed", "fuchsia", "stand-in"] as Origin[]).map((o) => (
         <div key={o} className="stat">
           <b className={`o-${o} num`}>{(counts.symbols.get(o) ?? 0).toLocaleString()}</b>
           <span>
@@ -187,7 +187,7 @@ export function Atlas() {
         ) : (
           <p className="muted">
             Mark a layer or a claim “Fuzzy” or “No idea”, and the prompt appears here, naming those gaps with the files
-            and snippets to start from. Paste it into Claude Code in your fxdax checkout.
+            and snippets to start from. Paste it into Claude Code in your cladefs checkout.
           </p>
         )}
       </section>
@@ -195,7 +195,7 @@ export function Atlas() {
         <h2>Whose code it is</h2>
         <p className="muted">
           Nearly half the symbols are Fuchsia’s: Fxfs, its libraries, the runtime crates and the SDK’s zx types, copied
-          from the revision the root Cargo.toml records. A file fxdax changed says how in its leading comment; the index
+          from the revision the root Cargo.toml records. A file cladefs changed says how in its leading comment; the index
           labels each file so.
         </p>
         <Provenance />

@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the checks of copying on write (doc-13): private pages, their writeback, and rebinds
+//! cladefs: the checks of copying on write (doc-13): private pages, their writeback, and rebinds
 //! under loads and stores.
 
 use super::*;
 
-/// fxdax: a shared, writable mapping of `len` bytes of `file`, unmapped as it drops.
+/// cladefs: a shared, writable mapping of `len` bytes of `file`, unmapped as it drops.
 struct CowMapping {
     addr: *mut libc::c_void,
     len: usize,
@@ -37,13 +37,13 @@ impl CowMapping {
         assert_eq!(unsafe { libc::msync(self.addr, self.len, libc::MS_SYNC) }, 0);
     }
 
-    /// fxdax: mprotect of all of it to `prot`.
+    /// cladefs: mprotect of all of it to `prot`.
     fn protect(&self, prot: libc::c_int) {
         let protected = unsafe { libc::mprotect(self.addr, self.len, prot) };
         assert_eq!(protected, 0, "mprotect: {}", std::io::Error::last_os_error());
     }
 
-    /// fxdax: moves it (mremap), its page tables with it, to where a reservation of its size was.
+    /// cladefs: moves it (mremap), its page tables with it, to where a reservation of its size was.
     fn moved(&mut self) {
         let prot = libc::PROT_NONE;
         let flags = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS;
@@ -62,7 +62,7 @@ impl Drop for CowMapping {
     }
 }
 
-/// fxdax: has the budget's worker write back, seal and rebind every private page it can
+/// cladefs: has the budget's worker write back, seal and rebind every private page it can
 /// (fxfs.dax_rebind_now), and waits for it: until the rounds it served (dax_rebinds_done)
 /// reach the asks, as read after this one (dax_rebinds_asked). The write doesn't wait: a
 /// setter that did held the module parameters' lock through a rebind a pause point held.
@@ -76,7 +76,7 @@ fn cow_rebind_now() {
     }
 }
 
-/// fxdax: copying on write (doc-13, TASK-164.2), a file read in from sealed extents, DAX, stored
+/// cladefs: copying on write (doc-13, TASK-164.2), a file read in from sealed extents, DAX, stored
 /// to through a shared mapping and written with write(2): the bytes reach its new extents by
 /// writeback (msync, fsync), committed after them, and are there after a remount, which maps
 /// the file again from Fxfs. Fails if writeback wrote the extents' old pages (no copy from the
@@ -113,7 +113,7 @@ pub(super) fn test_cow_store_persists() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: a file of two chunks read in sealed, DAX, mapped shared, each chunk read through the
+/// cladefs: a file of two chunks read in sealed, DAX, mapped shared, each chunk read through the
 /// mapping 2 MiB at once, so that its window's pages are one large folio, then a store to the
 /// second page, which splits the first chunk's PMD, and the file read again, page by page: each
 /// page's PTE read-only but the one stored to, all of one folio (TASK-149.16, TASK-149.42).
@@ -175,7 +175,7 @@ impl SplitChunk {
     }
 }
 
-/// fxdax: copying on write (doc-13), a fork after a chunk mapped whole and split (SplitChunk): the
+/// cladefs: copying on write (doc-13), a fork after a chunk mapped whole and split (SplitChunk): the
 /// child's store to a page it only read faults, which makes the page private, as the parent's
 /// would (TASK-149.16). Fork copies a large folio's PTEs as one, all writable if any is (6.18's
 /// copy_present_ptes, FPB_MERGE_WRITE), of a mapping it copies at all: a VM_MIXEDMAP one, as
@@ -198,7 +198,7 @@ pub(super) fn test_cow_fork_after_a_split_pmd() {
     chunk.finish();
 }
 
-/// fxdax: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
+/// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
 /// made read-only (mprotect) and writable again: a store to a page only read faults, which makes
 /// the page private (TASK-149.42). mprotect batches a large folio's PTEs, their write bits alike,
 /// their dirty bits not (6.18's change_pte_range, FPB_RESPECT_WRITE, soft-dirty unset as the
@@ -213,7 +213,7 @@ pub(super) fn test_cow_mprotect_after_a_split_pmd() {
     chunk.finish();
 }
 
-/// fxdax: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
+/// cladefs: copying on write (doc-13), the mapping of a chunk mapped whole and split (SplitChunk)
 /// moved (mremap), its PTEs with it: a store to a page only read faults, which makes the page
 /// private (TASK-149.42). mremap moves a large folio's PTEs in batches whose write bits are alike
 /// (6.18's move_ptes, mremap_folio_pte_batch's FPB_RESPECT_WRITE), each batch set as its first
@@ -225,7 +225,7 @@ pub(super) fn test_cow_mremap_after_a_split_pmd() {
     chunk.finish();
 }
 
-/// fxdax: copying on write, per page (doc-13, the 400 GB case at small scale): of a large file
+/// cladefs: copying on write, per page (doc-13, the 400 GB case at small scale): of a large file
 /// read in from sealed extents, mapped shared, three pages stored to cost three private pages,
 /// and the rest stay mapped from the extents, shared, costing none, read as they were; written
 /// back, sealed and rebound, the three are private no more, and read as stored. Fails if the
@@ -263,7 +263,7 @@ pub(super) fn test_cow_unwritten_stay_shared() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: copying on write, a punch, a clone and a truncate of a file with dirty private pages,
+/// cladefs: copying on write, a punch, a clone and a truncate of a file with dirty private pages,
 /// stored through a mapping and written with write(2), none written back: the punched page
 /// reads as zeros and the others as stored; the clone, into a file created here (a page-cache
 /// inode beside the DAX one, TASK-164.3), has the stores; the truncate drops the dirty pages
@@ -329,7 +329,7 @@ pub(super) fn test_cow_dirty_truncate_punch_clone() {
     fs::remove_file(&clone).unwrap();
 }
 
-/// fxdax: copying on write, a writeback whose transaction fails once its bytes are written,
+/// cladefs: copying on write, a writeback whose transaction fails once its bytes are written,
 /// before it commits, as a crash between the two (fxfs.dax_fail_commits, Fxfs's FAIL_COMMITS):
 /// fsync says so (EIO), and the file holds its old data, all of it, never a mix of old and new
 /// pages, after a remount, which maps it again from what Fxfs committed; written again, it
@@ -361,7 +361,7 @@ pub(super) fn test_cow_commit_after_bytes() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: copying on write, a file created in the mount is a page-cache inode, its writes the
+/// cladefs: copying on write, a file created in the mount is a page-cache inode, its writes the
 /// page cache's (TASK-164.3): not DAX, costing no private page, until it is read in again,
 /// once a barrier has sealed its writes; written back and read in again before that barrier,
 /// it is a page-cache inode again, as the window would find its extents open. Fails if a
@@ -409,7 +409,7 @@ pub(super) fn test_cow_created_in_page_cache() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: copying on write (doc-13), a rebind paused before its MAP over a private page,
+/// cladefs: copying on write (doc-13), a rebind paused before its MAP over a private page,
 /// holding the file's semaphore for writing (Pauses::REBIND): a load through another process's
 /// PTE of the page reads what was stored there, and a store to it by a process with no PTE of
 /// it waits for the rebind, then lands, the page private again. The rebind rebinds that page
@@ -513,7 +513,7 @@ pub(super) fn test_rebind_against_loads_and_stores() {
     fs::remove_file(&name).unwrap();
 }
 
-/// fxdax: copying on write (doc-13), stores through a mapping and write(2)s to a file's pages,
+/// cladefs: copying on write (doc-13), stores through a mapping and write(2)s to a file's pages,
 /// one after another for two seconds, while the budget's worker writes back, seals and rebinds
 /// every private page it can every 10 ms (fxfs.dax_rebind_every, doc-13's stage 2): each reads
 /// back as stored, then and at the end, and the file evicted holds them all. Fails if a rebind

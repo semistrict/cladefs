@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -13,7 +13,7 @@
 use crate::window::{Contents, Run, Window};
 use crate::{Options, Volume};
 use anyhow::{Context as _, Error, ensure};
-use fxdax::{MappingContents, RemoteDevice, RemoteExtentStore, WindowMapping};
+use cladefs::{MappingContents, RemoteDevice, RemoteExtentStore, WindowMapping};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub fn open(
 ) -> Result<Arc<Volume>, Error> {
     // A SQLite volume of its cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
     // cell leave be, as no filesystem's.
-    let opened = fxdax::DaemonConnection::connect(socket)
+    let opened = cladefs::DaemonConnection::connect(socket)
         .and_then(|daemon| daemon.open_sqlite(store, capacity));
     let store = opened.map_err(Error::new).with_context(|| {
         format!("opening {} on the daemon at {}", store.display(), socket.display())
@@ -102,7 +102,7 @@ impl Window for DaemonWindow {
                 len: run.len,
                 contents: match run.contents {
                     Contents::Extent { extent, offset } => MappingContents::Extent {
-                        extent: fxdax::ExtentId {
+                        extent: cladefs::ExtentId {
                             branch: extent.branch,
                             sequence: extent.sequence,
                         },

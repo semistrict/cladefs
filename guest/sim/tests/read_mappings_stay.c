@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Two mappings of a page, as two processes running one binary have, loading it in turn: once each
  * has faulted it in, neither faults again, whatever part of the window the page is in. A read fault

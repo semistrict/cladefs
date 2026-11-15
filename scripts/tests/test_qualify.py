@@ -1,10 +1,10 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 """Tests of the qualification before a pin (TASK-330.4): scripts/qualify-budgets.py's summary of
 the daemons' budgets, scripts/bench-ab.py's report of what moved and what failed between a pin
-and a candidate, and what scripts/qualify.sh and scripts/test-e2e.sh's FXDAX_E2E_HARNESS refuse
+and a candidate, and what scripts/qualify.sh and scripts/test-e2e.sh's CLADEFS_E2E_HARNESS refuse
 before they run anything."""
 
 import contextlib
@@ -201,7 +201,7 @@ class NotRun(unittest.TestCase):
         results = Path(tempfile.mkdtemp())
         disk = "/dev/shm" if Path("/dev/shm").is_dir() else tempfile.mkdtemp()
         status, _, err = bash(f"{SCRIPTS / 'qualify.sh'} {results}",
-                              {"FXDAX_QUALIFY_SOAK_SECS": "0", "FXDAX_SANDBOX_DISK": disk})
+                              {"CLADEFS_QUALIFY_SOAK_SECS": "0", "CLADEFS_SANDBOX_DISK": disk})
         self.assertEqual(status, 3, err)
         self.assertIn(f"qualify: NOT RUN: sandboxes left no result (bench-fxfs-guest-sandboxes.json): "
                       f"see its log, {results}/sandboxes\n", err)
@@ -226,17 +226,17 @@ class Refusals(unittest.TestCase):
     def test_a_harness_goes_with_prebuilt_artifacts(self):
         results = tempfile.mkdtemp()
         status, _, err = bash(f"{SCRIPTS / 'test-e2e.sh'} fxfs-guest",
-                              {"FXDAX_E2E_RESULTS": results, "FXDAX_E2E_HARNESS": "/h"})
-        self.assertEqual((status, err), (2, "FXDAX_E2E_HARNESS goes with FXDAX_E2E_PREBUILT, "
+                              {"CLADEFS_E2E_RESULTS": results, "CLADEFS_E2E_HARNESS": "/h"})
+        self.assertEqual((status, err), (2, "CLADEFS_E2E_HARNESS goes with CLADEFS_E2E_PREBUILT, "
                                             "whose artifacts it drives\n"))
 
     def test_a_harness_of_no_artifacts_is_refused(self):
         prebuilt, harness = tempfile.mkdtemp(), tempfile.mkdtemp()
         (Path(prebuilt) / "artifacts.txt").write_text("seccomp real\n")
         status, _, err = bash(f"{SCRIPTS / 'test-e2e.sh'} fxfs-guest",
-                              {"FXDAX_E2E_RESULTS": tempfile.mkdtemp(),
-                               "FXDAX_E2E_PREBUILT": prebuilt, "FXDAX_E2E_HARNESS": harness})
-        self.assertEqual((status, err), (2, f"{harness} holds no artifacts (FXDAX_E2E_BUILD_ONLY "
+                              {"CLADEFS_E2E_RESULTS": tempfile.mkdtemp(),
+                               "CLADEFS_E2E_PREBUILT": prebuilt, "CLADEFS_E2E_HARNESS": harness})
+        self.assertEqual((status, err), (2, f"{harness} holds no artifacts (CLADEFS_E2E_BUILD_ONLY "
                                             "makes them)\n"))
 
     def test_the_daemons_sockets_are_short_whatever_the_results_path(self):
@@ -244,20 +244,20 @@ class Refusals(unittest.TestCase):
         test-e2e.sh's daemon exited at once, the sandboxes' run with it, on both sides of an A/B.
         Its sockets are in a directory of their own under /tmp: their paths' length is fixed."""
         text = (SCRIPTS / "test-e2e.sh").read_text()
-        self.assertIn('sockets=$(mktemp -d /tmp/fxdax-e2e-sockets.XXXXXX)', text)
+        self.assertIn('sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)', text)
         self.assertIn('socket="$sockets/extentd.sock"\ncontrol="$sockets/extentd.control"', text)
-        longest = len("/tmp/fxdax-e2e-sockets.XXXXXX/extentd.control")
+        longest = len("/tmp/cladefs-e2e-sockets.XXXXXX/extentd.control")
         self.assertLess(longest, 107)
         self.assertNotIn('"$results/extentd.sock"', text)
 
     def test_qualify_takes_a_sandboxes_mode_and_a_soaks_seconds(self):
         results = tempfile.mkdtemp()
         status, _, err = bash(f"{SCRIPTS / 'qualify.sh'} {results}",
-                              {"FXDAX_QUALIFY_SANDBOXES": "nightly"})
-        self.assertEqual((status, err), (2, "FXDAX_QUALIFY_SANDBOXES is short or long\n"))
+                              {"CLADEFS_QUALIFY_SANDBOXES": "nightly"})
+        self.assertEqual((status, err), (2, "CLADEFS_QUALIFY_SANDBOXES is short or long\n"))
         status, _, err = bash(f"{SCRIPTS / 'qualify.sh'} {results}",
-                              {"FXDAX_QUALIFY_SOAK_SECS": "30m"})
-        self.assertEqual((status, err), (2, "FXDAX_QUALIFY_SOAK_SECS is a count of seconds\n"))
+                              {"CLADEFS_QUALIFY_SOAK_SECS": "30m"})
+        self.assertEqual((status, err), (2, "CLADEFS_QUALIFY_SOAK_SECS is a count of seconds\n"))
 
     def test_qualify_refuses_an_earlier_runs_results(self):
         results = tempfile.mkdtemp()
@@ -267,8 +267,8 @@ class Refusals(unittest.TestCase):
                                             "new directory.\n"))
 
     def test_the_ab_takes_the_fs_bench_or_the_qualification(self):
-        status, _, err = bash(f"{SCRIPTS / 'bench-ab-host.sh'}", {"FXDAX_AB_SUITE": "soak"})
-        self.assertEqual((status, err), (2, "FXDAX_AB_SUITE is fs or qualify\n"))
+        status, _, err = bash(f"{SCRIPTS / 'bench-ab-host.sh'}", {"CLADEFS_AB_SUITE": "soak"})
+        self.assertEqual((status, err), (2, "CLADEFS_AB_SUITE is fs or qualify\n"))
 
 
 if __name__ == "__main__":

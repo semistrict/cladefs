@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/object_store/flush.rs`. fxdax snapshots (volume snapshots that
+// Fuchsia's `src/storage/fxfs/src/object_store/flush.rs`. cladefs snapshots (volume snapshots that
 // share their source's layers and extents) deviate from upstream here: compaction releases a
 // store's old layers by reference count, as snapshots share them, and tombstones only those no
 // store references. A follower's store (backlog doc-8) takes the layers its writer's flush wrote
@@ -32,7 +32,7 @@ use fxfs_crypto::UnwrappedKey;
 use std::sync::OnceLock;
 use std::sync::atomic::Ordering;
 
-/// fxdax: the largest layer a compaction keeps what it wrote of, cached (`KeptWriter`): as much
+/// cladefs: the largest layer a compaction keeps what it wrote of, cached (`KeptWriter`): as much
 /// as a few journals' worth of changes merged.
 const KEPT_LAYER_MAX: usize = 16 << 20;
 
@@ -212,7 +212,7 @@ impl ObjectStore {
                     .await?;
             (handle, None)
         };
-        // fxdax: keeping what it writes, which the new layer caches rather than reads back.
+        // cladefs: keeping what it writes, which the new layer caches rather than reads back.
         let kept = KeptContents::default();
         let writer = KeptWriter::new(
             DirectWriter::new(&new_object_tree_layer, txn_options).await,
@@ -246,7 +246,7 @@ impl ObjectStore {
             vec![layer_from_written_handle(new_object_tree_layer, unwrapped_key, &kept).await?];
         new_layers.extend(layers_to_keep.iter().map(|l| (*l).clone()));
 
-        // fxdax: those of the store's own, above its base layers.
+        // cladefs: those of the store's own, above its base layers.
         let own_layers = &new_layers[..new_layers.len() - base_layers];
         new_store_info.layers = Vec::new();
         for layer in own_layers {
@@ -257,7 +257,7 @@ impl ObjectStore {
 
         let reservation_update: ReservationUpdate; // Must live longer than end_transaction.
         let parent_store_object_id = self.parent_store.as_ref().unwrap().store_object_id();
-        // fxdax: the old layers are locked, as other stores (snapshots) may share them, and release
+        // cladefs: the old layers are locked, as other stores (snapshots) may share them, and release
         // them too.
         let old_layer_object_ids: Vec<u64> =
             old_layers.iter().filter_map(|layer| layer.handle().map(|h| h.object_id())).collect();
@@ -274,7 +274,7 @@ impl ObjectStore {
         parent_store.remove_from_graveyard(&mut end_transaction, new_object_tree_layer_object_id);
 
         // Release the existing layers we're compacting: those no other store shares move to the
-        // graveyard at the end. fxdax: a layer is shared by the stores a snapshot made, which hold
+        // graveyard at the end. cladefs: a layer is shared by the stores a snapshot made, which hold
         // references to it; upstream, a store's layers are its own, and all move to the graveyard.
         let mut released_layer_object_ids = Vec::new();
         for object_id in old_layer_object_ids {
@@ -515,7 +515,7 @@ impl ObjectStore {
         Ok(())
     }
 
-    /// fxdax: a follower's store (backlog doc-8) takes the layers its writer's flush wrote, once it
+    /// cladefs: a follower's store (backlog doc-8) takes the layers its writer's flush wrote, once it
     /// has applied the flush's last transaction (EndFlush), as the writer's store does as it
     /// commits it: those the StoreInfo the transaction wrote lists, which hold what the store's
     /// tree had sealed (BeginFlush). The mutable layer, which holds what came after, stays.

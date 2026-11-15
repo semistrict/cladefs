@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -14,7 +14,7 @@ use crate::protocol::{
     VIRTIO_EXTENT_F_WRITE_COMMIT,
 };
 
-/// fxdax: what the device does with the guest's asks for durability, as a block device's
+/// cladefs: what the device does with the guest's asks for durability, as a block device's
 /// `cache_type` does with its flushes (TASK-363). Firecracker's API names them as its block
 /// devices' `CacheType` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,8 +40,8 @@ pub enum ConfigError {
     InvalidDaxPrivateMax(u64),
 }
 
-/// An extent-store device: the store of extents that a guest running fxdax's Fxfs itself keeps
-/// its filesystem in (fxdax's backlog doc-4), which fxdax's extent daemon serves.
+/// An extent-store device: the store of extents that a guest running cladefs's Fxfs itself keeps
+/// its filesystem in (cladefs's backlog doc-4), which cladefs's extent daemon serves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -57,19 +57,19 @@ pub struct Config {
     /// files' data from: none without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_window_size: Option<u64>,
-    /// fxdax: the most private pages a writer's window holds, as it copies on write (doc-4's
-    /// `DAX`, fxdax's backlog doc-13), which fxdax's extent daemon reserves against the store's
+    /// cladefs: the most private pages a writer's window holds, as it copies on write (doc-4's
+    /// `DAX`, cladefs's backlog doc-13), which cladefs's extent daemon reserves against the store's
     /// tenant's memory as the guest activates the device: 1 GiB's pages without it, or the
     /// window's if fewer, whatever its size (TASK-227). A follower's window copies nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_private_max: Option<u64>,
-    /// The socket of fxdax's extent daemon, which serves the store.
+    /// The socket of cladefs's extent daemon, which serves the store.
     pub extentd_socket: String,
-    /// fxdax: whether the device follows the store, read-only, as another VM writes it (fxdax's
+    /// cladefs: whether the device follows the store, read-only, as another VM writes it (cladefs's
     /// backlog doc-8): the store must exist, and the guest mounts it read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
-    /// fxdax: what the device does with the guest's asks for durability, as a block device's
+    /// cladefs: what the device does with the guest's asks for durability, as a block device's
     /// `cache_type` does with its flushes (TASK-363): `Writeback`, the default, waits for each, the
     /// store's commits durable as the extent daemon makes them, uploaded; `Unsafe` answers them once
     /// ordered, as a block device's dropped flushes are, the daemon making them durable soon after,
@@ -100,9 +100,9 @@ impl Config {
         {
             return Err(ConfigError::InvalidDaxWindowSize(size));
         }
-        // fxdax: some of the window's pages, of a window (doc-13).
+        // cladefs: some of the window's pages, of a window (doc-13).
         if let Some(most) = self.dax_private_max {
-            let pages = self.dax_window_size.unwrap_or(0) / fxdax::pages::page_size();
+            let pages = self.dax_window_size.unwrap_or(0) / cladefs::pages::page_size();
             if most == 0 || most > pages {
                 return Err(ConfigError::InvalidDaxPrivateMax(most));
             }
@@ -136,17 +136,17 @@ impl Config {
     }
 }
 
-/// fxdax: the most private pages a writer's window of `len` bytes holds as it copies on write
+/// cladefs: the most private pages a writer's window of `len` bytes holds as it copies on write
 /// (backlog doc-13): `configured`, if given; otherwise [`PRIVATE_MAX_DEFAULT`]'s pages, or the
 /// window's if fewer, one at least (TASK-227; half its pages before, TASK-164.11).
 pub fn private_max(len: u64, configured: Option<u64>) -> u64 {
-    let pages = len / fxdax::pages::page_size();
+    let pages = len / cladefs::pages::page_size();
     configured
-        .unwrap_or_else(|| (PRIVATE_MAX_DEFAULT / fxdax::pages::page_size()).min(pages))
+        .unwrap_or_else(|| (PRIVATE_MAX_DEFAULT / cladefs::pages::page_size()).min(pages))
         .max(1)
 }
 
-/// fxdax: the bytes of private pages a writer's window holds at most unless configured
+/// cladefs: the bytes of private pages a writer's window holds at most unless configured
 /// (`dax_private_max`), whatever its size (TASK-227): enough for a forked pgbench's working set
 /// (GCE r804, forked-dax 0.91), which the daemon reserves against the tenant's memory.
 pub const PRIVATE_MAX_DEFAULT: u64 = 1 << 30;
@@ -169,7 +169,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a device's cache is Writeback unless its configuration says Unsafe (TASK-363).
+    /// cladefs: a device's cache is Writeback unless its configuration says Unsafe (TASK-363).
     #[test]
     fn caches_are_writeback_unless_unsafe() {
         let json =
@@ -215,8 +215,8 @@ mod tests {
             Config { dax_window_size: Some(0), ..config("a") }.validate(),
             Err(ConfigError::InvalidDaxWindowSize(0))
         );
-        // fxdax: some of the window's pages private at most, of a window.
-        let pages = (64 << 20) / fxdax::pages::page_size();
+        // cladefs: some of the window's pages private at most, of a window.
+        let pages = (64 << 20) / cladefs::pages::page_size();
         for most in [0, pages + 1] {
             let private = Config { dax_private_max: Some(most), ..config("a") };
             assert_eq!(private.validate(), Err(ConfigError::InvalidDaxPrivateMax(most)));
@@ -239,14 +239,14 @@ mod tests {
         assert_eq!(Config { dax_window_size: None, ..follower }.features(), 0b1000_0011_0000);
     }
 
-    /// fxdax TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
+    /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
     /// otherwise, whatever its size: the window is address space, as large as the data, and its
     /// private pages are memory, which the daemon reserves against the tenant's. Half a 64 GiB
     /// window's pages, as TASK-164.11's default had it, would have reserved 32 GiB a VM. A window
     /// smaller than the default holds as many as it has pages; one of a page, one.
     #[test]
     fn a_windows_private_pages_are_not_its_size() {
-        let page = fxdax::pages::page_size();
+        let page = cladefs::pages::page_size();
         let gib = (1 << 30) / page;
         assert_eq!(private_max(64 << 30, None), gib);
         assert_eq!(private_max(2 << 30, None), gib);

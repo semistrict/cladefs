@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // Checks of the guest kernel's own Fxfs (fxfs-guest-checks), against what
-// fxdax's own Fxfs on the host sees.
+// cladefs's own Fxfs on the host sees.
 //
-// The host creates an fxdax image, an extent store, which the VM gets as an
-// extent-store device, served by fxdax's extent daemon, and boots fxdax's
-// guest kernel (FXDAX_GUEST_KERNEL), which mounts it with its Fxfs;
+// The host creates an cladefs image, an extent store, which the VM gets as an
+// extent-store device, served by cladefs's extent daemon, and boots cladefs's
+// guest kernel (CLADEFS_GUEST_KERNEL), which mounts it with its Fxfs;
 // fxfs-guest-checks-dax with a DAX window, which Fxfs maps files' data from
 // (on hosts whose pages are 4 KiB, Fxfs's blocks). The guest checks whether
 // files are DAX-mapped, and exercises writes through mappings, regular writes
@@ -18,14 +18,14 @@
 pub struct TestFxfsGuestChecks {
     /// Whether the device has a DAX window, and the guest maps files into it.
     pub dax: bool,
-    /// fxdax: whether the guest's DAX code sleeps at the steps of its protocol where tasks race
+    /// cladefs: whether the guest's DAX code sleeps at the steps of its protocol where tasks race
     /// (fxfs.dax_delay_us), from the run's seed, widening the races' windows (TASK-119.3).
     #[cfg_attr(feature = "guest", allow(dead_code))]
     pub delay: bool,
-    /// fxdax: whether the DAX window is small, 32 MiB, as the checks' files fill it: ranges are
+    /// cladefs: whether the DAX window is small, 32 MiB, as the checks' files fill it: ranges are
     /// reclaimed under load (TASK-119.12).
     pub small_window: bool,
-    /// fxdax: whether the suite runs the checks made to fail ([`Suites::Failing`]) before the page
+    /// cladefs: whether the suite runs the checks made to fail ([`Suites::Failing`]) before the page
     /// cache's: one crashes, and one hangs in the kernel past its budget, which the guest ends
     /// (TASK-168). Each fails alone, by name, and the rest pass (TASK-160.30).
     pub overrun: bool,
@@ -37,13 +37,13 @@ pub const PAGE_CACHE_CHECKS: TestFxfsGuestChecks =
     TestFxfsGuestChecks { dax: false, delay: false, small_window: false, overrun: false };
 
 impl TestFxfsGuestChecks {
-    /// fxdax: the checks this suite runs, in their order, those of `only` alone, names separated
-    /// by commas, if it names any (FXDAX_CHECKS): each with its index in [`CHECKS`]. Fails on a
+    /// cladefs: the checks this suite runs, in their order, those of `only` alone, names separated
+    /// by commas, if it names any (CLADEFS_CHECKS): each with its index in [`CHECKS`]. Fails on a
     /// name no check has, which ran nothing and passed (TASK-160.30).
     pub(crate) fn checks(&self, only: &str) -> Result<Vec<(usize, &'static Check)>, String> {
         let only: Vec<&str> = only.split(',').filter(|name| !name.is_empty()).collect();
         if let Some(unknown) = only.iter().find(|name| !CHECKS.iter().any(|c| c.name == **name)) {
-            return Err(format!("FXDAX_CHECKS names {unknown:?}, which no check is called"));
+            return Err(format!("CLADEFS_CHECKS names {unknown:?}, which no check is called"));
         }
         let ours = |check: &Check| check.suites.have(self);
         let named = |check: &Check| only.is_empty() || only.contains(&check.name);
@@ -51,18 +51,18 @@ impl TestFxfsGuestChecks {
     }
 }
 
-/// fxdax: in the host's environment, what scales the checks' budgets besides the guest kernel and
+/// cladefs: in the host's environment, what scales the checks' budgets besides the guest kernel and
 /// storage, for a slower host; in the guest's, all that scales them, as the host has it.
-const SCALE: &str = "FXDAX_CHECKS_SCALE";
+const SCALE: &str = "CLADEFS_CHECKS_SCALE";
 
-/// fxdax: how much of a check's time the host may take, as a multiple of its budget: the guest's
+/// cladefs: how much of a check's time the host may take, as a multiple of its budget: the guest's
 /// clock leaves the host's time out of the budget, but for a [`HOST_SCALE`]th of it (`guest::run`'s
 /// `Clock`, TASK-263), which the suite's limit allows one check whole (`host`'s `timeout_secs`).
 /// On ubu1 a check's host time was 12.2 times its budget at most (append_writeback's 64
 /// fdatasyncs, 36.6 s of 3 s, its runs' directories on ZFS), and half that again.
 const HOST_SCALE: f64 = 18.0;
 
-/// fxdax: how a check's process ended, as the guest's log says after the check's time
+/// cladefs: how a check's process ended, as the guest's log says after the check's time
 /// (TASK-160.30).
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(feature = "host", allow(dead_code))]
@@ -91,7 +91,7 @@ impl std::fmt::Display for Ended {
     }
 }
 
-/// fxdax: which of the suites a check runs in.
+/// cladefs: which of the suites a check runs in.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Suites {
     All,
@@ -118,7 +118,7 @@ impl Suites {
     }
 }
 
-/// fxdax: a check of the guest's Fxfs: its name, which suites run it, and its budget, what it may
+/// cladefs: a check of the guest's Fxfs: its name, which suites run it, and its budget, what it may
 /// take of the guest's time on a release guest kernel on GCE's n2-standard-4: twice the most it
 /// took there, in any suite (GCE r560's page cache, r563's DAX), and 3 s at least, which the host
 /// scales for other kernels and storage (`host::TestFxfsGuestChecks::run`). The guest's time is
@@ -134,7 +134,7 @@ pub(crate) struct Check {
     pub(crate) budget: std::time::Duration,
 }
 
-/// fxdax: every check, in the order they run, a declaration of it: `name: suites, budget in
+/// cladefs: every check, in the order they run, a declaration of it: `name: suites, budget in
 /// seconds => body`, the body a function of the guest's, given its suite's fields in parentheses
 /// where it takes them, such as `test_mmap_write(dax)`, and, after a comma, the host's verify of
 /// what it left in the image, if it has one, a function of the host's (`host::Image`). Given to
@@ -254,7 +254,7 @@ macro_rules! checks {
     };
 }
 
-/// fxdax: [`checks`]'s table, the host's and the guest's.
+/// cladefs: [`checks`]'s table, the host's and the guest's.
 macro_rules! check_table {
     ($($name:ident: $suites:ident, $budget:literal => $body:ident $(($field:ident))?
         $(, $verify:ident)?;)*) => {
@@ -273,10 +273,10 @@ const MAPPED_SIZE: usize = CHUNK + (1 << 20);
 const HOST_CONTENT: &[u8] = b"written by the host\n";
 const WRITTEN: &[u8] = b"written through FUSE_WRITE\n";
 const EVICTED: &[u8] = b"written back when its inode is evicted\n";
-/// fxdax: random_ops's file, and its model's (TASK-119.2).
+/// cladefs: random_ops's file, and its model's (TASK-119.2).
 const RANDOM_OPS: &str = "random-ops";
 const RANDOM_OPS_MODEL: &str = "random-ops.model";
-/// fxdax: random_ops's operations, as it made them, each a line, which replay it (TASK-119.15).
+/// cladefs: random_ops's operations, as it made them, each a line, which replay it (TASK-119.15).
 const RANDOM_OPS_HISTORY: &str = "random-ops.history";
 /// What append_reserved_tail leaves, for the host to read.
 const APPEND_RESERVED: &str = "append-reserved";
@@ -285,7 +285,7 @@ const APPEND_RESERVED: &str = "append-reserved";
 fn append_reserved() -> Vec<u8> {
     (0..(256 << 10) + 100 + 3 * 4096).map(|at: usize| (at % 251) as u8).collect()
 }
-/// fxdax: torture's files, each with its model beside it, `<name>.model` (TASK-119.5).
+/// cladefs: torture's files, each with its model beside it, `<name>.model` (TASK-119.5).
 const TORTURE_FILES: usize = 4;
 fn torture(n: usize) -> String {
     format!("torture-{n}")
@@ -293,7 +293,7 @@ fn torture(n: usize) -> String {
 /// Size of the image, which is sparse.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const IMAGE_SIZE: u64 = 256 << 20;
-/// fxdax: the directory a coverage kernel's counts of fs/fxfs's sources `COVERED` are left in for
+/// cladefs: the directory a coverage kernel's counts of fs/fxfs's sources `COVERED` are left in for
 /// the host, as the guest's checks end (TASK-119.14).
 const COVERAGE: &str = "coverage";
 const COVERED: [&str; 3] = ["dax", "device", "super"];
@@ -405,7 +405,7 @@ mod tests {
         assert_eq!(Ended::Overran.to_string(), "still running after its budget: killed");
     }
 
-    /// FXDAX_CHECKS's checks run in the table's order, those of the suite alone.
+    /// CLADEFS_CHECKS's checks run in the table's order, those of the suite alone.
     #[test]
     fn named_checks_run_alone() {
         assert_eq!(names(&DAX, "enospc,sparse,window_held_killed"), ["sparse", "enospc"]);
@@ -418,7 +418,7 @@ mod tests {
     fn unknown_names_fail() {
         assert_eq!(
             DAX.checks("sparse,nope"),
-            Err("FXDAX_CHECKS names \"nope\", which no check is called".to_owned())
+            Err("CLADEFS_CHECKS names \"nope\", which no check is called".to_owned())
         );
     }
 

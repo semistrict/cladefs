@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a segment of the store's write-ahead log, for its uploader to upload ([`Closed`]).
+//! cladefs: a segment of the store's write-ahead log, for its uploader to upload ([`Closed`]).
 
 use crate::dir::File;
 use crate::framed::read_object;
@@ -11,7 +11,7 @@ use extent_frame::segment::Footer;
 use std::io;
 use std::sync::Arc;
 
-/// fxdax: a segment the store closed, for its uploader to upload: its footer, its file, framed,
+/// cladefs: a segment the store closed, for its uploader to upload: its footer, its file, framed,
 /// and the files of the extents stored on their own its footer names, by their keys; and whether
 /// its writer's chain stamped it anew after a takeover, which its framed file says not
 /// (TASK-165.9).
@@ -22,13 +22,13 @@ pub struct Closed<F> {
     pub file: Arc<F>,
     pub own: Vec<(String, Arc<F>)>,
     pub restamped: bool,
-    /// fxdax: the store's keys, which a sealed segment is restamped under (TASK-411.3).
+    /// cladefs: the store's keys, which a sealed segment is restamped under (TASK-411.3).
     pub keys: std::sync::Arc<extent_remote::keys::Ring>,
 }
 
 impl<F: File> Closed<F> {
     /// The segment's bytes: the object it is, checked ([`read_object`]), with its footer, stamped
-    /// anew if it was (`extent_frame::restamp`): fxdax: one sealed, its new footer and table
+    /// anew if it was (`extent_frame::restamp`): cladefs: one sealed, its new footer and table
     /// authenticated under its key, which restamping it needs, and fails without (TASK-411.2).
     pub fn bytes(&self) -> io::Result<Vec<u8>> {
         let object = read_object(&*self.file)?;
@@ -50,7 +50,7 @@ impl<F: File> Closed<F> {
     }
 
     /// The tag of the last commit it holds, which names the commit in object storage: each segment
-    /// the store closes names one, the last of its commits; fxdax: or the one it goes on with past
+    /// the store closes names one, the last of its commits; cladefs: or the one it goes on with past
     /// them, if any (TASK-92.41).
     pub fn tag(&self) -> u64 {
         let contents = &self.footer.contents;

@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -18,10 +18,10 @@ class DaxGate(unittest.TestCase):
     def test_suites_are_ones_test_host_takes(self):
         """What the gate hands test-host.sh to run, its suites by tag, test-host.sh takes: a newline
         among the cases it named once was refused, and the suites never ran."""
-        given = re.findall(r'FXDAX_E2E_TEST=("[^"]*"|\S+)', GATE.read_text())
+        given = re.findall(r'CLADEFS_E2E_TEST=("[^"]*"|\S+)', GATE.read_text())
         self.assertEqual([selection.strip('"') for selection in given],
                          ["--tag dax-gate", "fxfs-guest-pgbench-dax-forked"])
-        pattern = re.search(r"\[\[ \$\{FXDAX_E2E_TEST:-\} =~ (.+?) \]\] \|\|", TEST_HOST.read_text())
+        pattern = re.search(r"\[\[ \$\{CLADEFS_E2E_TEST:-\} =~ (.+?) \]\] \|\|", TEST_HOST.read_text())
         for selection in given:
             ran = subprocess.run(["bash", "-c", f'[[ $1 =~ {pattern.group(1)} ]]', "bash",
                                   selection.strip('"')])

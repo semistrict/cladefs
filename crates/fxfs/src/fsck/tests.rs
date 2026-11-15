@@ -303,7 +303,7 @@ async fn test_extra_allocation() {
             .new_transaction(lock_keys![], Options::default())
             .await
             .expect("new_transaction failed");
-        // fxdax: an allocation in an extent of its own.
+        // cladefs: an allocation in an extent of its own.
         fs.allocator()
             .mark_allocated(
                 &mut transaction,
@@ -325,7 +325,7 @@ async fn test_misaligned_allocation() {
 
     {
         let fs = test.filesystem();
-        // fxdax: into the allocator's mutable layer, as `test_malformed_allocation` does: replay
+        // cladefs: into the allocator's mutable layer, as `test_malformed_allocation` does: replay
         // refuses it of a journal, and layer files can't hold it.
         let item = Item::new(
             AllocatorKey::new(TEST_EXTENT, 1..fs.block_size().get()),
@@ -348,7 +348,7 @@ async fn test_malformed_allocation() {
     {
         let fs = test.filesystem();
         // We need to manually insert the record into the allocator's LSM tree directly, since the
-        // allocator code checks range validity. fxdax: into its mutable layer, as layer files can't
+        // allocator code checks range validity. cladefs: into its mutable layer, as layer files can't
         // hold it, whose keys' serialization rejects it.
         let item = Item::new(
             AllocatorKey::new(TEST_EXTENT, fs.block_size().get()..fs.block_size().get()),
@@ -611,7 +611,7 @@ async fn test_missing_allocation() {
 
     {
         let fs = test.filesystem();
-        // fxdax: the allocation of a file's data, which is an extent of its own.
+        // cladefs: the allocation of a file's data, which is an extent of its own.
         let root_store = fs.root_store();
         let root_directory = Directory::open(&root_store, root_store.root_directory_object_id())
             .await
@@ -647,7 +647,7 @@ async fn test_missing_allocation() {
     // since flushing or committing transactions might itself perform allocations, and it isn't that
     // important.
     test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    // fxdax: the allocator keeps the extent the allocation was in, which the tree no longer has.
+    // cladefs: the allocator keeps the extent the allocation was in, which the tree no longer has.
     assert_matches!(
         test.errors()[..],
         [
@@ -825,7 +825,7 @@ async fn test_misordered_layer_file() {
 
     let store_id = {
         let fs = test.filesystem();
-        // fxdax: on the filesystem's blocks, as what a layer holds must be to be read.
+        // cladefs: on the filesystem's blocks, as what a layer holds must be to be read.
         let bs = fs.block_size().get();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
@@ -863,7 +863,7 @@ async fn test_misordered_layer_file() {
     test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
         .await
         .expect_err("Fsck should fail");
-    // fxdax: a layer's keys out of order are refused as the layer is read (TASK-153.12).
+    // cladefs: a layer's keys out of order are refused as the layer is read (TASK-153.12).
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
@@ -873,7 +873,7 @@ async fn test_overlapping_keys_in_layer_file() {
 
     let store_id = {
         let fs = test.filesystem();
-        // fxdax: on the filesystem's blocks, as what a layer holds must be to be read.
+        // cladefs: on the filesystem's blocks, as what a layer holds must be to be read.
         let bs = fs.block_size().get();
         let root_volume = root_volume(fs.clone()).await.unwrap();
         let store = root_volume
@@ -915,7 +915,7 @@ async fn test_overlapping_keys_in_layer_file() {
     test.run(TestOptions { volume_store_id: Some(store_id), ..Default::default() })
         .await
         .expect_err("Fsck should fail");
-    // fxdax: a layer's keys overlapping are refused as the layer is read (TASK-153.12).
+    // cladefs: a layer's keys overlapping are refused as the layer is read (TASK-153.12).
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
@@ -925,7 +925,7 @@ async fn test_overlapping_keys_in_root_store_layer_file() {
 
     {
         let fs = test.filesystem();
-        // fxdax: on the filesystem's blocks, as what a layer holds must be to be read.
+        // cladefs: on the filesystem's blocks, as what a layer holds must be to be read.
         let bs = fs.block_size().get();
         install_items_in_store(
             &fs,
@@ -950,7 +950,7 @@ async fn test_overlapping_keys_in_root_store_layer_file() {
 
     test.remount().await.expect("Remount failed");
     test.run(TestOptions::default()).await.expect_err("Fsck should fail");
-    // fxdax: a layer's keys overlapping are refused as the layer is read (TASK-153.12).
+    // cladefs: a layer's keys overlapping are refused as the layer is read (TASK-153.12).
     assert_matches!(test.errors()[..], [FsckIssue::Fatal(FsckFatal::MalformedLayerFile(..))]);
 }
 
@@ -1159,7 +1159,7 @@ async fn test_conflicting_link_types() {
     );
 }
 
-// fxdax: a file's entries say what its POSIX mode says it is, a regular file or a special file, as
+// cladefs: a file's entries say what its POSIX mode says it is, a regular file or a special file, as
 // readdir takes their word for it (TASK-236): an entry saying otherwise is reported, a FIFO's that
 // says it is a regular file, and a regular file's that says it is a FIFO.
 #[fuchsia::test]
@@ -2353,7 +2353,7 @@ async fn test_file_length_mismatch() {
     );
 }
 
-/// fxdax: blocks past a file's end, to a 64 KiB boundary, are those appends through a DAX window
+/// cladefs: blocks past a file's end, to a 64 KiB boundary, are those appends through a DAX window
 /// reserve (TASK-133).
 #[fuchsia::test]
 async fn test_blocks_reserved_past_the_end() {
@@ -3987,7 +3987,7 @@ async fn test_empty_volume() {
         .expect("Fsck should succeed");
 }
 
-/// fxdax: a volume filled until it has no room, each way the guest's check 'enospc' fills it, and
+/// cladefs: a volume filled until it has no room, each way the guest's check 'enospc' fills it, and
 /// emptied again, passes fsck without warnings (TASK-82): a file written a MiB at a time, removed;
 /// files of a block; half of them removed, a file of every other block, then directories; the
 /// file truncated while full; and all of it removed.
@@ -4578,7 +4578,7 @@ async fn test_invalid_bloom_filter_for_allocator() {
             // of how the items are written to the persistent layer.
             let item_count = 3000;
             let mut items: Vec<Item<AllocatorKey, AllocatorValue>> = vec![];
-            // fxdax: on the filesystem's blocks, as what a layer holds must be to be read.
+            // cladefs: on the filesystem's blocks, as what a layer holds must be to be read.
             let bs = fs.block_size().get();
             for i in 0..item_count as u64 {
                 // The range per item needs to be disjoint to avoid them being merged.
@@ -4670,7 +4670,7 @@ async fn test_invalid_bloom_filter_for_volume() {
             // of how the items are written to the persistent layer.
             let item_count = 1000;
             let mut items: Vec<Item<ObjectKey, ObjectValue>> = vec![];
-            // fxdax: on the filesystem's blocks, as what a layer holds must be to be read.
+            // cladefs: on the filesystem's blocks, as what a layer holds must be to be read.
             let bs = fs.block_size().get();
             for i in 0..item_count as u64 {
                 // The range per item needs to be disjoint to avoid them being merged.
@@ -5264,7 +5264,7 @@ async fn test_illegal_key_in_root_store() {
     );
 }
 
-// fxdax: a check with the filesystem's lock finds nothing amiss while it compacts, as its flush
+// cladefs: a check with the filesystem's lock finds nothing amiss while it compacts, as its flush
 // task may at any time. Without the lock, a compaction's commits overtook a check, which found a
 // journal block missing from the allocator and another extra, or a layer file orphaned
 // (TASK-176): fsck without the lock is only for one whose commits the caller holds off.

@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -14,12 +14,12 @@ BASELINE = "ext4-virtio-blk"
 # The filesystems in the order they are shown in (`ordered`).
 ORDER = [
     BASELINE,
-    "fxdax-dax",
-    "fxdax-nodax",
+    "cladefs-dax",
+    "cladefs-nodax",
     "virtiofs-passthrough",
     "ext4-guest-kernel",
     # ext4 on a loop device over a local image file, and with the image's writes cached unsafely:
-    # the sandboxes' setup TASK-350 measures fxdax against.
+    # the sandboxes' setup TASK-350 measures cladefs against.
     "ext4-loop",
     "ext4-loop-unsafe",
     "ext4-pmem",
@@ -39,12 +39,12 @@ ORDER = [
     "ext4-pmem-fork",
 ]
 # What a filesystem compares with, in order of preference: the first of them a run measured. Unless
-# named here, ext4 on virtio-blk, which runs before fxdax left libkrun (TASK-40) compared every
+# named here, ext4 on virtio-blk, which runs before cladefs left libkrun (TASK-40) compared every
 # other filesystem with.
 BASELINES = {
     BASELINE: [],
     # The guest kernel's Fxfs with ext4 with DAX on writable pmem, booted on the same kernel,
-    # fxdax's guest kernel: storage as memory; or, if that wasn't measured, with ext4 on the same
+    # cladefs's guest kernel: storage as memory; or, if that wasn't measured, with ext4 on the same
     # kernel.
     "ext4-dax-pmem": ["ext4-pmem", "ext4-guest-kernel"],
     # ext4 on the same pmem without DAX, its files in the page cache (TASK-91.16).
@@ -61,7 +61,7 @@ BASELINES = {
     "fxfs-guest-dax-fork-cold": [],
     # A cold fork with its base's boot profile read ahead, against one with the base's data in memory.
     "fxfs-guest-dax-fork-profiled": ["fxfs-guest-dax-fork-warm"],
-    # Forks without fxdax's DAX: Fxfs through the page cache, and ext4 on copies of the base's image
+    # Forks without cladefs's DAX: Fxfs through the page cache, and ext4 on copies of the base's image
     # on virtio-pmem, with DAX, as a static DAX device's base layer, and without; each against a
     # warm fork with DAX (TASK-112.2).
     "fxfs-guest-fork-warm": ["fxfs-guest-dax-fork-warm"],

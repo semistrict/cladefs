@@ -1,9 +1,9 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
-// `fxdax-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
+// `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
 // stores: one OS mount, not one per store. Attach takes a cell of the mount's bucket, as its
 // holder, and every Fxfs volume of it into a store at DIR/TENANT/CELL/VOLUME, its lease with it,
 // each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and CELL in 16 hexadecimal digits as the
@@ -15,8 +15,8 @@
 // every caller may do everything.
 //
 // Errors are gRPC statuses whose code follows the errno the mount failed with, which the
-// `fxdax-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
-// control API has them (fxdax/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
+// `cladefs-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
+// control API has them (cladefs/extentd/v1/extentd.proto): ENOENT is NOT_FOUND, EEXIST
 // ALREADY_EXISTS, EACCES and EPERM PERMISSION_DENIED, EINVAL INVALID_ARGUMENT, ENOSPC
 // RESOURCE_EXHAUSTED, ETIMEDOUT DEADLINE_EXCEEDED, EBUSY, ESTALE, ENOTSUP and EROFS
 // FAILED_PRECONDITION, EIO and others INTERNAL.
@@ -32,7 +32,7 @@
 // versions:
 // 	protoc-gen-go v1.36.12
 // 	protoc        (unknown)
-// source: fxdax/mount/v1/mount.proto
+// source: cladefs/mount/v1/mount.proto
 
 package mountv1
 
@@ -66,7 +66,7 @@ type AttachRequest struct {
 
 func (x *AttachRequest) Reset() {
 	*x = AttachRequest{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[0]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -78,7 +78,7 @@ func (x *AttachRequest) String() string {
 func (*AttachRequest) ProtoMessage() {}
 
 func (x *AttachRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[0]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -91,7 +91,7 @@ func (x *AttachRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachRequest.ProtoReflect.Descriptor instead.
 func (*AttachRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{0}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *AttachRequest) GetTenant() uint64 {
@@ -128,7 +128,7 @@ type AttachResponse struct {
 
 func (x *AttachResponse) Reset() {
 	*x = AttachResponse{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[1]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -140,7 +140,7 @@ func (x *AttachResponse) String() string {
 func (*AttachResponse) ProtoMessage() {}
 
 func (x *AttachResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[1]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -153,7 +153,7 @@ func (x *AttachResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachResponse.ProtoReflect.Descriptor instead.
 func (*AttachResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{1}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *AttachResponse) GetCell() uint64 {
@@ -188,7 +188,7 @@ type CreateVolumeRequest struct {
 
 func (x *CreateVolumeRequest) Reset() {
 	*x = CreateVolumeRequest{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[2]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -200,7 +200,7 @@ func (x *CreateVolumeRequest) String() string {
 func (*CreateVolumeRequest) ProtoMessage() {}
 
 func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[2]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -213,7 +213,7 @@ func (x *CreateVolumeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeRequest.ProtoReflect.Descriptor instead.
 func (*CreateVolumeRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{2}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *CreateVolumeRequest) GetTenant() uint64 {
@@ -255,7 +255,7 @@ type CreateVolumeResponse struct {
 
 func (x *CreateVolumeResponse) Reset() {
 	*x = CreateVolumeResponse{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[3]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -267,7 +267,7 @@ func (x *CreateVolumeResponse) String() string {
 func (*CreateVolumeResponse) ProtoMessage() {}
 
 func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[3]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -280,7 +280,7 @@ func (x *CreateVolumeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreateVolumeResponse.ProtoReflect.Descriptor instead.
 func (*CreateVolumeResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{3}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *CreateVolumeResponse) GetBranch() uint64 {
@@ -306,7 +306,7 @@ type DetachRequest struct {
 
 func (x *DetachRequest) Reset() {
 	*x = DetachRequest{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[4]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -318,7 +318,7 @@ func (x *DetachRequest) String() string {
 func (*DetachRequest) ProtoMessage() {}
 
 func (x *DetachRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[4]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -331,7 +331,7 @@ func (x *DetachRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachRequest.ProtoReflect.Descriptor instead.
 func (*DetachRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{4}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *DetachRequest) GetTenant() uint64 {
@@ -364,7 +364,7 @@ type DetachResponse struct {
 
 func (x *DetachResponse) Reset() {
 	*x = DetachResponse{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[5]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -376,7 +376,7 @@ func (x *DetachResponse) String() string {
 func (*DetachResponse) ProtoMessage() {}
 
 func (x *DetachResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[5]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -389,7 +389,7 @@ func (x *DetachResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use DetachResponse.ProtoReflect.Descriptor instead.
 func (*DetachResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{5}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{5}
 }
 
 // No more than the call.
@@ -401,7 +401,7 @@ type ListRequest struct {
 
 func (x *ListRequest) Reset() {
 	*x = ListRequest{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[6]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -413,7 +413,7 @@ func (x *ListRequest) String() string {
 func (*ListRequest) ProtoMessage() {}
 
 func (x *ListRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[6]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -426,7 +426,7 @@ func (x *ListRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListRequest.ProtoReflect.Descriptor instead.
 func (*ListRequest) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{6}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{6}
 }
 
 // The cells attached.
@@ -440,7 +440,7 @@ type ListResponse struct {
 
 func (x *ListResponse) Reset() {
 	*x = ListResponse{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[7]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -452,7 +452,7 @@ func (x *ListResponse) String() string {
 func (*ListResponse) ProtoMessage() {}
 
 func (x *ListResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[7]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -465,7 +465,7 @@ func (x *ListResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ListResponse.ProtoReflect.Descriptor instead.
 func (*ListResponse) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{7}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ListResponse) GetCells() []*AttachedCell {
@@ -490,7 +490,7 @@ type AttachedCell struct {
 
 func (x *AttachedCell) Reset() {
 	*x = AttachedCell{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[8]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -502,7 +502,7 @@ func (x *AttachedCell) String() string {
 func (*AttachedCell) ProtoMessage() {}
 
 func (x *AttachedCell) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[8]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -515,7 +515,7 @@ func (x *AttachedCell) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AttachedCell.ProtoReflect.Descriptor instead.
 func (*AttachedCell) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{8}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *AttachedCell) GetTenant() uint64 {
@@ -554,7 +554,7 @@ type Volume struct {
 
 func (x *Volume) Reset() {
 	*x = Volume{}
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[9]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -566,7 +566,7 @@ func (x *Volume) String() string {
 func (*Volume) ProtoMessage() {}
 
 func (x *Volume) ProtoReflect() protoreflect.Message {
-	mi := &file_fxdax_mount_v1_mount_proto_msgTypes[9]
+	mi := &file_cladefs_mount_v1_mount_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -579,7 +579,7 @@ func (x *Volume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Volume.ProtoReflect.Descriptor instead.
 func (*Volume) Descriptor() ([]byte, []int) {
-	return file_fxdax_mount_v1_mount_proto_rawDescGZIP(), []int{9}
+	return file_cladefs_mount_v1_mount_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Volume) GetName() string {
@@ -603,19 +603,19 @@ func (x *Volume) GetDetaching() bool {
 	return false
 }
 
-var File_fxdax_mount_v1_mount_proto protoreflect.FileDescriptor
+var File_cladefs_mount_v1_mount_proto protoreflect.FileDescriptor
 
-const file_fxdax_mount_v1_mount_proto_rawDesc = "" +
+const file_cladefs_mount_v1_mount_proto_rawDesc = "" +
 	"\n" +
-	"\x1afxdax/mount/v1/mount.proto\x12\x0efxdax.mount.v1\"`\n" +
+	"\x1ccladefs/mount/v1/mount.proto\x12\x10cladefs.mount.v1\"`\n" +
 	"\rAttachRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x19\n" +
 	"\x05token\x18\x03 \x01(\x04H\x00R\x05token\x88\x01\x01B\b\n" +
-	"\x06_token\"V\n" +
+	"\x06_token\"X\n" +
 	"\x0eAttachResponse\x12\x12\n" +
-	"\x04cell\x18\x01 \x01(\x04R\x04cell\x120\n" +
-	"\avolumes\x18\x02 \x03(\v2\x16.fxdax.mount.v1.VolumeR\avolumes\"q\n" +
+	"\x04cell\x18\x01 \x01(\x04R\x04cell\x122\n" +
+	"\avolumes\x18\x02 \x03(\v2\x18.cladefs.mount.v1.VolumeR\avolumes\"q\n" +
 	"\x13CreateVolumeRequest\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x12\n" +
@@ -628,60 +628,60 @@ const file_fxdax_mount_v1_mount_proto_rawDesc = "" +
 	"\x04cell\x18\x02 \x01(\x04R\x04cell\x12\x14\n" +
 	"\x05force\x18\x03 \x01(\bR\x05force\"\x10\n" +
 	"\x0eDetachResponse\"\r\n" +
-	"\vListRequest\"B\n" +
-	"\fListResponse\x122\n" +
-	"\x05cells\x18\x01 \x03(\v2\x1c.fxdax.mount.v1.AttachedCellR\x05cells\"l\n" +
+	"\vListRequest\"D\n" +
+	"\fListResponse\x124\n" +
+	"\x05cells\x18\x01 \x03(\v2\x1e.cladefs.mount.v1.AttachedCellR\x05cells\"n\n" +
 	"\fAttachedCell\x12\x16\n" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x02 \x01(\x04R\x04cell\x120\n" +
-	"\avolumes\x18\x03 \x03(\v2\x16.fxdax.mount.v1.VolumeR\avolumes\"R\n" +
+	"\x04cell\x18\x02 \x01(\x04R\x04cell\x122\n" +
+	"\avolumes\x18\x03 \x03(\v2\x18.cladefs.mount.v1.VolumeR\avolumes\"R\n" +
 	"\x06Volume\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
 	"\x06branch\x18\x02 \x01(\x04R\x06branch\x12\x1c\n" +
-	"\tdetaching\x18\x03 \x01(\bR\tdetaching2\xb7\x02\n" +
-	"\x05Mount\x12G\n" +
-	"\x06Attach\x12\x1d.fxdax.mount.v1.AttachRequest\x1a\x1e.fxdax.mount.v1.AttachResponse\x12Y\n" +
-	"\fCreateVolume\x12#.fxdax.mount.v1.CreateVolumeRequest\x1a$.fxdax.mount.v1.CreateVolumeResponse\x12G\n" +
-	"\x06Detach\x12\x1d.fxdax.mount.v1.DetachRequest\x1a\x1e.fxdax.mount.v1.DetachResponse\x12A\n" +
-	"\x04List\x12\x1b.fxdax.mount.v1.ListRequest\x1a\x1c.fxdax.mount.v1.ListResponseB1Z/github.com/semistrict/fxdax/go/mount/v1;mountv1b\x06proto3"
+	"\tdetaching\x18\x03 \x01(\bR\tdetaching2\xc7\x02\n" +
+	"\x05Mount\x12K\n" +
+	"\x06Attach\x12\x1f.cladefs.mount.v1.AttachRequest\x1a .cladefs.mount.v1.AttachResponse\x12]\n" +
+	"\fCreateVolume\x12%.cladefs.mount.v1.CreateVolumeRequest\x1a&.cladefs.mount.v1.CreateVolumeResponse\x12K\n" +
+	"\x06Detach\x12\x1f.cladefs.mount.v1.DetachRequest\x1a .cladefs.mount.v1.DetachResponse\x12E\n" +
+	"\x04List\x12\x1d.cladefs.mount.v1.ListRequest\x1a\x1e.cladefs.mount.v1.ListResponseB3Z1github.com/semistrict/cladefs/go/mount/v1;mountv1b\x06proto3"
 
 var (
-	file_fxdax_mount_v1_mount_proto_rawDescOnce sync.Once
-	file_fxdax_mount_v1_mount_proto_rawDescData []byte
+	file_cladefs_mount_v1_mount_proto_rawDescOnce sync.Once
+	file_cladefs_mount_v1_mount_proto_rawDescData []byte
 )
 
-func file_fxdax_mount_v1_mount_proto_rawDescGZIP() []byte {
-	file_fxdax_mount_v1_mount_proto_rawDescOnce.Do(func() {
-		file_fxdax_mount_v1_mount_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_fxdax_mount_v1_mount_proto_rawDesc), len(file_fxdax_mount_v1_mount_proto_rawDesc)))
+func file_cladefs_mount_v1_mount_proto_rawDescGZIP() []byte {
+	file_cladefs_mount_v1_mount_proto_rawDescOnce.Do(func() {
+		file_cladefs_mount_v1_mount_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_cladefs_mount_v1_mount_proto_rawDesc), len(file_cladefs_mount_v1_mount_proto_rawDesc)))
 	})
-	return file_fxdax_mount_v1_mount_proto_rawDescData
+	return file_cladefs_mount_v1_mount_proto_rawDescData
 }
 
-var file_fxdax_mount_v1_mount_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
-var file_fxdax_mount_v1_mount_proto_goTypes = []any{
-	(*AttachRequest)(nil),        // 0: fxdax.mount.v1.AttachRequest
-	(*AttachResponse)(nil),       // 1: fxdax.mount.v1.AttachResponse
-	(*CreateVolumeRequest)(nil),  // 2: fxdax.mount.v1.CreateVolumeRequest
-	(*CreateVolumeResponse)(nil), // 3: fxdax.mount.v1.CreateVolumeResponse
-	(*DetachRequest)(nil),        // 4: fxdax.mount.v1.DetachRequest
-	(*DetachResponse)(nil),       // 5: fxdax.mount.v1.DetachResponse
-	(*ListRequest)(nil),          // 6: fxdax.mount.v1.ListRequest
-	(*ListResponse)(nil),         // 7: fxdax.mount.v1.ListResponse
-	(*AttachedCell)(nil),         // 8: fxdax.mount.v1.AttachedCell
-	(*Volume)(nil),               // 9: fxdax.mount.v1.Volume
+var file_cladefs_mount_v1_mount_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_cladefs_mount_v1_mount_proto_goTypes = []any{
+	(*AttachRequest)(nil),        // 0: cladefs.mount.v1.AttachRequest
+	(*AttachResponse)(nil),       // 1: cladefs.mount.v1.AttachResponse
+	(*CreateVolumeRequest)(nil),  // 2: cladefs.mount.v1.CreateVolumeRequest
+	(*CreateVolumeResponse)(nil), // 3: cladefs.mount.v1.CreateVolumeResponse
+	(*DetachRequest)(nil),        // 4: cladefs.mount.v1.DetachRequest
+	(*DetachResponse)(nil),       // 5: cladefs.mount.v1.DetachResponse
+	(*ListRequest)(nil),          // 6: cladefs.mount.v1.ListRequest
+	(*ListResponse)(nil),         // 7: cladefs.mount.v1.ListResponse
+	(*AttachedCell)(nil),         // 8: cladefs.mount.v1.AttachedCell
+	(*Volume)(nil),               // 9: cladefs.mount.v1.Volume
 }
-var file_fxdax_mount_v1_mount_proto_depIdxs = []int32{
-	9, // 0: fxdax.mount.v1.AttachResponse.volumes:type_name -> fxdax.mount.v1.Volume
-	8, // 1: fxdax.mount.v1.ListResponse.cells:type_name -> fxdax.mount.v1.AttachedCell
-	9, // 2: fxdax.mount.v1.AttachedCell.volumes:type_name -> fxdax.mount.v1.Volume
-	0, // 3: fxdax.mount.v1.Mount.Attach:input_type -> fxdax.mount.v1.AttachRequest
-	2, // 4: fxdax.mount.v1.Mount.CreateVolume:input_type -> fxdax.mount.v1.CreateVolumeRequest
-	4, // 5: fxdax.mount.v1.Mount.Detach:input_type -> fxdax.mount.v1.DetachRequest
-	6, // 6: fxdax.mount.v1.Mount.List:input_type -> fxdax.mount.v1.ListRequest
-	1, // 7: fxdax.mount.v1.Mount.Attach:output_type -> fxdax.mount.v1.AttachResponse
-	3, // 8: fxdax.mount.v1.Mount.CreateVolume:output_type -> fxdax.mount.v1.CreateVolumeResponse
-	5, // 9: fxdax.mount.v1.Mount.Detach:output_type -> fxdax.mount.v1.DetachResponse
-	7, // 10: fxdax.mount.v1.Mount.List:output_type -> fxdax.mount.v1.ListResponse
+var file_cladefs_mount_v1_mount_proto_depIdxs = []int32{
+	9, // 0: cladefs.mount.v1.AttachResponse.volumes:type_name -> cladefs.mount.v1.Volume
+	8, // 1: cladefs.mount.v1.ListResponse.cells:type_name -> cladefs.mount.v1.AttachedCell
+	9, // 2: cladefs.mount.v1.AttachedCell.volumes:type_name -> cladefs.mount.v1.Volume
+	0, // 3: cladefs.mount.v1.Mount.Attach:input_type -> cladefs.mount.v1.AttachRequest
+	2, // 4: cladefs.mount.v1.Mount.CreateVolume:input_type -> cladefs.mount.v1.CreateVolumeRequest
+	4, // 5: cladefs.mount.v1.Mount.Detach:input_type -> cladefs.mount.v1.DetachRequest
+	6, // 6: cladefs.mount.v1.Mount.List:input_type -> cladefs.mount.v1.ListRequest
+	1, // 7: cladefs.mount.v1.Mount.Attach:output_type -> cladefs.mount.v1.AttachResponse
+	3, // 8: cladefs.mount.v1.Mount.CreateVolume:output_type -> cladefs.mount.v1.CreateVolumeResponse
+	5, // 9: cladefs.mount.v1.Mount.Detach:output_type -> cladefs.mount.v1.DetachResponse
+	7, // 10: cladefs.mount.v1.Mount.List:output_type -> cladefs.mount.v1.ListResponse
 	7, // [7:11] is the sub-list for method output_type
 	3, // [3:7] is the sub-list for method input_type
 	3, // [3:3] is the sub-list for extension type_name
@@ -689,27 +689,27 @@ var file_fxdax_mount_v1_mount_proto_depIdxs = []int32{
 	0, // [0:3] is the sub-list for field type_name
 }
 
-func init() { file_fxdax_mount_v1_mount_proto_init() }
-func file_fxdax_mount_v1_mount_proto_init() {
-	if File_fxdax_mount_v1_mount_proto != nil {
+func init() { file_cladefs_mount_v1_mount_proto_init() }
+func file_cladefs_mount_v1_mount_proto_init() {
+	if File_cladefs_mount_v1_mount_proto != nil {
 		return
 	}
-	file_fxdax_mount_v1_mount_proto_msgTypes[0].OneofWrappers = []any{}
+	file_cladefs_mount_v1_mount_proto_msgTypes[0].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_fxdax_mount_v1_mount_proto_rawDesc), len(file_fxdax_mount_v1_mount_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_mount_v1_mount_proto_rawDesc), len(file_cladefs_mount_v1_mount_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_fxdax_mount_v1_mount_proto_goTypes,
-		DependencyIndexes: file_fxdax_mount_v1_mount_proto_depIdxs,
-		MessageInfos:      file_fxdax_mount_v1_mount_proto_msgTypes,
+		GoTypes:           file_cladefs_mount_v1_mount_proto_goTypes,
+		DependencyIndexes: file_cladefs_mount_v1_mount_proto_depIdxs,
+		MessageInfos:      file_cladefs_mount_v1_mount_proto_msgTypes,
 	}.Build()
-	File_fxdax_mount_v1_mount_proto = out.File
-	file_fxdax_mount_v1_mount_proto_goTypes = nil
-	file_fxdax_mount_v1_mount_proto_depIdxs = nil
+	File_cladefs_mount_v1_mount_proto = out.File
+	file_cladefs_mount_v1_mount_proto_goTypes = nil
+	file_cladefs_mount_v1_mount_proto_depIdxs = nil
 }

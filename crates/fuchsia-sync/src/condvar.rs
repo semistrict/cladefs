@@ -203,7 +203,7 @@ impl Futex {
     }
 }
 
-// fxdax's: under Shuttle (the `shuttle` feature, TASK-42.1), a futex of Shuttle's primitives, so
+// cladefs's: under Shuttle (the `shuttle` feature, TASK-42.1), a futex of Shuttle's primitives, so
 // that its scheduler chooses every interleaving of a wait with a notification. A wait checks the
 // value and sleeps holding the futex's lock, which a notification takes, so none is lost. Shuttle's
 // waits don't time out.
@@ -252,7 +252,7 @@ impl Futex {
     }
 }
 
-// fxdax's: the guest kernel's futexes (TASK-26.6), which its std has.
+// cladefs's: the guest kernel's futexes (TASK-26.6), which its std has.
 #[cfg(target_os = "none")]
 struct Futex(std::os::kernel::futex::Futex);
 

@@ -230,7 +230,7 @@ pub(crate) mod vdso_next {
             Ok(Self::from(unsafe { NullableHandle::from_raw(handle) }))
         }
 
-        /// fxdax: fails, as the guest kernel (TASK-26.6) has no syscalls, nor a dynamic linker to
+        /// cladefs: fails, as the guest kernel (TASK-26.6) has no syscalls, nor a dynamic linker to
         /// find them with.
         #[cfg(target_os = "none")]
         pub fn create(_options: IobSharedRegionOptions, _size: u64) -> Result<Self, Status> {

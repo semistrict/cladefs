@@ -5,7 +5,7 @@
 // Fuchsia's `src/storage/lib/storage_device/src/lib.rs`, without the block device and pinned
 // buffers, which need FIDL protocols and BTIs, and without `FileBackedDevice`, which upstream uses
 // for host tools and tests: it blocks its callers' threads, and trims by overwriting. Images are
-// fxdax's own device (crates/fxdax/src/storage/image.rs). A device is an extent store (backlog
+// cladefs's own device (crates/cladefs/src/storage/image.rs). A device is an extent store (backlog
 // doc-4): data lives in extents the filesystem names, which it frees whole (`Device::free`), in
 // place of trimming ranges of a block device; extent IDs are the device's branch and a sequence
 // number (`Device::branch`, `Device::next_sequence`). The root, the device's one mutable record,
@@ -90,7 +90,7 @@ pub trait Device: Send + Sync {
     /// Writes the contents of `buffer` to `extent` at `offset`. An extent is written once: from
     /// its first write until the next barrier (a flush, a write with `PRE_BARRIER`, or one with
     /// `POST_BARRIER`, which seals the extent it writes too), after which writing it fails with
-    /// `SealedExtent`. fxdax: a `POST_BARRIER` write's barrier sets the root to its options'
+    /// `SealedExtent`. cladefs: a `POST_BARRIER` write's barrier sets the root to its options'
     /// `root`, if given, as `commit_root` would.
     fn write<'a>(
         &'a self,
@@ -118,7 +118,7 @@ pub trait Device: Send + Sync {
     /// leave extents written whose references the filesystem lost.
     async fn next_sequence(&self) -> Result<u64, Error>;
 
-    /// fxdax: the lowest sequence number the filesystem may mint from: the device's branch may hold
+    /// cladefs: the lowest sequence number the filesystem may mint from: the device's branch may hold
     /// extents another writer minted below it that the device doesn't hold (backlog doc-7,
     /// Fencing). Minting starts past it, and past `next_sequence`, which alone bounds the extents
     /// the device holds.
@@ -130,7 +130,7 @@ pub trait Device: Send + Sync {
     /// does nothing.
     async fn free(&self, extent: ExtentId) -> Result<(), Error>;
 
-    /// fxdax: frees `extents`, as `free` frees each: in as few requests as the device takes, and
+    /// cladefs: frees `extents`, as `free` frees each: in as few requests as the device takes, and
     /// returns each's result, in order. By default, one `free` each, at once.
     async fn free_extents(&self, extents: &[ExtentId]) -> Vec<Result<(), Error>> {
         futures::future::join_all(extents.iter().map(|extent| self.free(*extent))).await
@@ -153,7 +153,7 @@ pub trait Device: Send + Sync {
     async fn root(&self) -> Result<Vec<u8>, Error>;
 
     /// Flushes the device, and then sets the root to `root`, durably: a barrier, after which the
-    /// root and everything written before it survive a crash. fxdax: a guest's extent-store device
+    /// root and everything written before it survive a crash. cladefs: a guest's extent-store device
     /// orders it only, as its other barriers, and makes it durable with the next durable commit,
     /// as doc-2 asks only of sync and unmount: a crash keeps the root and what came before it, or
     /// neither (doc-4, Ordering).
@@ -173,13 +173,13 @@ pub trait Device: Send + Sync {
     /// Returns whether the device is read-only.
     fn is_read_only(&self) -> bool;
 
-    /// fxdax: the IDs of the extents the device holds, in order. (Only implemented for testing
+    /// cladefs: the IDs of the extents the device holds, in order. (Only implemented for testing
     /// devices.)
     fn extents(&self) -> Vec<ExtentId> {
         unreachable!();
     }
 
-    /// fxdax: how far `extent` is written, the end of its furthest write, if the device holds it.
+    /// cladefs: how far `extent` is written, the end of its furthest write, if the device holds it.
     /// (Only implemented for testing devices.)
     fn extent_len(&self, _extent: ExtentId) -> Option<u64> {
         unreachable!();
@@ -196,7 +196,7 @@ pub trait Device: Send + Sync {
         bail!("Not supported");
     }
 
-    /// fxdax: moves a follower's device, which reads a store another writes as of one of its
+    /// cladefs: moves a follower's device, which reads a store another writes as of one of its
     /// commits (backlog doc-8), to the writer's latest commit. What it returns keeps what the
     /// previous commit held, which the filesystem may still be reading, until it is dropped: once
     /// the filesystem has followed the commits since, and pinned what it keeps of them.
@@ -204,14 +204,14 @@ pub trait Device: Send + Sync {
         bail!("Not a follower's device");
     }
 
-    /// fxdax: keeps `extent`, which a follower's device holds, whatever commit it advances to,
+    /// cladefs: keeps `extent`, which a follower's device holds, whatever commit it advances to,
     /// until unpinned: what a follower keeps of a file its writer deletes while it reads it. A
     /// request to the device, in a guest.
     async fn pin(&self, _extent: ExtentId) -> Result<(), Error> {
         bail!("Not a follower's device");
     }
 
-    /// fxdax: lets go of `extent`, pinned.
+    /// cladefs: lets go of `extent`, pinned.
     async fn unpin(&self, _extent: ExtentId) {}
 
     /// Discards random blocks since the last flush.
@@ -235,7 +235,7 @@ pub trait Device: Send + Sync {
     }
 }
 
-/// fxdax: what keeps a follower's device's previous commit (see [`Device::advance`]), until
+/// cladefs: what keeps a follower's device's previous commit (see [`Device::advance`]), until
 /// dropped.
 pub struct Previous {
     _keeps: Box<dyn Send + Sync>,

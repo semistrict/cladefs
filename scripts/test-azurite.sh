@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,22 +10,22 @@
 # tests (ignored in the workspace's run), and stop it. CI's object-stores job runs
 # it (TASK-149.20). Arguments are passed to cargo nextest.
 #
-# FXDAX_AZURITE_IMAGE names its image (by default Microsoft's,
+# CLADEFS_AZURITE_IMAGE names its image (by default Microsoft's,
 # mcr.microsoft.com/azure-storage/azurite, at the version tested).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-image="${FXDAX_AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:3.37.0}"
+image="${CLADEFS_AZURITE_IMAGE:-mcr.microsoft.com/azure-storage/azurite:3.37.0}"
 source "$root/scripts/lib/containers.sh"
 engine="$(container_engine)"
 
 # On the emulator's own port, which clients configured for the emulator reach (object_store's
 # AZURE_STORAGE_USE_EMULATOR names no other).
 port=10000
-# With FXDAX_AZURITE_DEBUG naming a directory, Azurite's debug log, of every request, goes there.
+# With CLADEFS_AZURITE_DEBUG naming a directory, Azurite's debug log, of every request, goes there.
 debug=()
-if [[ -n ${FXDAX_AZURITE_DEBUG:-} ]]; then
-    debug=(-v "$FXDAX_AZURITE_DEBUG:/debug")
+if [[ -n ${CLADEFS_AZURITE_DEBUG:-} ]]; then
+    debug=(-v "$CLADEFS_AZURITE_DEBUG:/debug")
 fi
 # Ready once it listens, inside the container, which it does once it has started, as its log says
 # (TASK-239: a probe from here, which the engine's port forwarding answers before Azurite does,
@@ -33,7 +33,7 @@ fi
 server="$(healthy_container "$engine" 'nc -z 127.0.0.1 10000' \
     -p "127.0.0.1:$port:10000" ${debug[@]+"${debug[@]}"} "$image" \
     azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --loose \
-    ${FXDAX_AZURITE_DEBUG:+--debug /debug/azurite.log})"
+    ${CLADEFS_AZURITE_DEBUG:+--debug /debug/azurite.log})"
 trap '"$engine" stop "$server" >/dev/null' EXIT
 
 # The emulator's account, whose key is public, and its endpoint.
@@ -44,7 +44,7 @@ export AZURE_STORAGE_USE_EMULATOR=true AZURE_STORAGE_ACCOUNT_NAME="$account"
 export AZURE_STORAGE_ACCOUNT_KEY="$key"
 
 # The container, made with a request signed as Shared Key authorization signs it.
-container=fxdax
+container=cladefs
 date="$(LC_ALL=C date -u '+%a, %d %b %Y %H:%M:%S GMT')"
 version=2021-08-06
 string="PUT\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:$date\nx-ms-version:$version\n/$account/$account/$container\nrestype:container"
@@ -53,5 +53,5 @@ signature="$(printf '%b' "$string" | openssl dgst -sha256 -mac HMAC -macopt "hex
 curl -fsS -X PUT -H "x-ms-date: $date" -H "x-ms-version: $version" -H 'Content-Length: 0' \
     -H "Authorization: SharedKey $account:$signature" "$endpoint/$container?restype=container"
 
-FXDAX_AZURE_URL="az://$container/test" cargo nextest run --manifest-path "$root/Cargo.toml" \
+CLADEFS_AZURE_URL="az://$container/test" cargo nextest run --manifest-path "$root/Cargo.toml" \
     -p extent_remote --run-ignored only -E 'test(/azurite/)' "$@"

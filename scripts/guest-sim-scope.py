@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Says how much of guest/sim CI runs: `full`, if what it tests changed since the base, else `smoke`.
@@ -13,7 +13,7 @@ built) or the simulator; otherwise a smoke run, and the nightly workflow runs th
 
 The base is what CI compares with: a pull request's base, a push's commit before it, or, if
 neither is given (a dispatch, a branch's first push), the merge-base with origin/main. One that
-isn't in the history, as after a force push, is full. FXDAX_GUEST_SIM, `full` or `smoke`, as a
+isn't in the history, as after a force push, is full. CLADEFS_GUEST_SIM, `full` or `smoke`, as a
 dispatch of CI may ask, says instead.
 
 Usage: scripts/guest-sim-scope.py [BASE [HEAD]]
@@ -58,7 +58,7 @@ def changed(base, head):
 
 
 def main(args):
-    asked = os.environ.get("FXDAX_GUEST_SIM", "")
+    asked = os.environ.get("CLADEFS_GUEST_SIM", "")
     if asked in ("full", "smoke"):
         print(asked)
         return 0

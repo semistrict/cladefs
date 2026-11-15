@@ -9,7 +9,7 @@ use std::fmt;
 pub trait ObjectCachePlaceholder<V: Value>: Send + Sync {
     /// Consumes itself in delivering the cache value for which the placeholder was reserved.
     /// Passing None for value should not be inserted into the cache, but interpreted as an
-    /// incomplete search. fxdax: `Value::DELETED_MARKER` says there is no value.
+    /// incomplete search. cladefs: `Value::DELETED_MARKER` says there is no value.
     fn complete(self: Box<Self>, value: Option<&V>);
 }
 
@@ -62,7 +62,7 @@ pub trait ObjectCache<K: Key, V: Value>: Send + Sync {
         0
     }
 
-    /// fxdax: removes up to `count` entries, those used least recently first, as a host's memory
+    /// cladefs: removes up to `count` entries, those used least recently first, as a host's memory
     /// pressure asks (the guest kernel's shrinkers), and returns how many it removed.
     fn shrink(&self, _count: usize) -> usize {
         0

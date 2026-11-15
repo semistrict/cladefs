@@ -1,6 +1,6 @@
 #!/bin/bash
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # Puts each past bug of ../mutants whose header names this simulator as its kernel (`Kernel: sim`,
 # ../mutants/README.md) into a copy of dax.c, pages.c, data.c, device.c, the model of Fxfs or

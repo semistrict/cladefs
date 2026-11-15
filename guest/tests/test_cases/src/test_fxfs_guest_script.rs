@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a script of operations on several files in a guest of its own, shrunk if it fails
+//! cladefs: a script of operations on several files in a guest of its own, shrunk if it fails
 //! (TASK-149.2): what fxfs-guest-checks' random_ops does to a file, across three, with clones
 //! between them and stores by forked children, each file checked against a model by the guest, and
 //! by the host's Fxfs as it reads them from the store. A failure says the seed, and the host boots
@@ -30,12 +30,12 @@ pub struct TestFxfsGuestScript {
     pub dax: bool,
     /// Whether the volume is small, and nearly full.
     pub full: bool,
-    /// fxdax: whether the VM is killed part way, and the files checked against what a kill may
+    /// cladefs: whether the VM is killed part way, and the files checked against what a kill may
     /// leave.
     pub killed: bool,
 }
 
-/// fxdax: what a killed run's guest says once it has done the operations before the kill, at which
+/// cladefs: what a killed run's guest says once it has done the operations before the kill, at which
 /// the host kills its VM process.
 #[cfg_attr(feature = "host", allow(dead_code))]
 const KILL_ME: &str = "kill me";
@@ -53,14 +53,14 @@ fn model(n: usize) -> String {
 mod host {
     use super::*;
 
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::script::{DROP_VAR, Failure, SEVERAL_FILES, kind};
     use crate::script_vm::{self, Replays};
     use crate::test_fxfs_guest_checks::host::seed;
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use futures::executor::block_on;
-    use fxdax::{Filesystem, Storage};
+    use cladefs::{Filesystem, Storage};
     use std::path::Path;
     use std::time::Duration;
 
@@ -77,7 +77,7 @@ mod host {
         })
     }
 
-    /// fxdax: how the killed run in `dir`, which said `stdout`, failed, if it did: as a run does, if
+    /// cladefs: how the killed run in `dir`, which said `stdout`, failed, if it did: as a run does, if
     /// it said so before the kill; or a file the store holds isn't what it may be after a kill
     /// before the script's operation the seed picks, of what the run's drops kept (TASK-149.2).
     fn killed_verdict(dir: &Path, stdout: &[u8]) -> Option<Failure> {
@@ -101,7 +101,7 @@ mod host {
             Some(Failure { op: Some(kill), kind: kind.to_owned(), what })
         };
         let fs =
-            Storage::open(dir.join("fxdax.img")).map_err(anyhow::Error::from).and_then(|storage| {
+            Storage::open(dir.join("cladefs.img")).map_err(anyhow::Error::from).and_then(|storage| {
                 block_on(async { Ok(Filesystem::mount(storage.check().await?).await?) })
             });
         let fs = match fs {
@@ -144,7 +144,7 @@ mod host {
             return Some(Failure { op: None, kind: kind::DIED.to_owned(), what });
         }
         let files: Vec<_> = (0..SEVERAL_FILES.files).map(|n| (file(n), model(n))).collect();
-        script_vm::stored_as_modelled(&dir.join("fxdax.img"), &files).or_else(|| {
+        script_vm::stored_as_modelled(&dir.join("cladefs.img"), &files).or_else(|| {
             crate::vm::complaints(&dir.join("console.txt")).err().map(|err| Failure {
                 op: None,
                 kind: kind::COMPLAINT.to_owned(),
@@ -153,17 +153,17 @@ mod host {
         })
     }
 
-    /// fxdax: a killed run's files checked as the host's Fxfs reads them from the store (TASK-149.2):
+    /// cladefs: a killed run's files checked as the host's Fxfs reads them from the store (TASK-149.2):
     /// what the operations before the kill left passes; a page no state of the file held fails,
     /// and so does a run that never said it was to be killed.
     #[test]
     fn a_killed_runs_files_are_checked_as_the_store_holds_them() {
-        use fxdax::Owner;
+        use cladefs::Owner;
         let killed = |files: &[Vec<u8>], seed: u64, output: &[u8]| {
             let dir = tempdir::TempDir::new("killed").unwrap();
             std::fs::write(dir.path().join("seed"), seed.to_string()).unwrap();
             std::fs::write(dir.path().join("console.txt"), b"").unwrap();
-            let image = dir.path().join("fxdax.img");
+            let image = dir.path().join("cladefs.img");
             block_on(async {
                 let fs = Filesystem::format(Storage::create(&image, IMAGE_SIZE)?).await?;
                 let owner = Owner { uid: 0, gid: 0 };
@@ -218,7 +218,7 @@ mod host {
 
     impl Test for TestFxfsGuestScript {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -226,21 +226,21 @@ mod host {
         }
 
         fn start_vm(self: Box<Self>, test_setup: TestSetup) -> anyhow::Result<()> {
-            let image = test_setup.tmp_dir.join("fxdax.img");
+            let image = test_setup.tmp_dir.join("cladefs.img");
             let size = if self.full { SMALL_IMAGE_SIZE } else { IMAGE_SIZE };
             create_image(&image, size)?;
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;
             vm.extent_store(
-                "fxdax",
+                "cladefs",
                 &image,
                 size,
                 if self.dax { crate::common::dax_window(WINDOW)? } else { 0 },
             )?;
             let seed = seed();
-            eprintln!("{}: seed {seed} (FXDAX_SEED={seed} replays it)", test_setup.test_case);
+            eprintln!("{}: seed {seed} (CLADEFS_SEED={seed} replays it)", test_setup.test_case);
             std::fs::write(test_setup.tmp_dir.join("seed"), seed.to_string())?;
-            // fxdax: what a replay drops, for the verdict of a killed run, which replays the model.
+            // cladefs: what a replay drops, for the verdict of a killed run, which replays the model.
             let drops = std::env::var(DROP_VAR).unwrap_or_default();
             std::fs::write(test_setup.tmp_dir.join("drops"), drops)?;
             if self.killed {
@@ -290,7 +290,7 @@ mod guest {
             let names: Vec<String> = (0..SEVERAL_FILES.files).map(|n| path(&file(n))).collect();
             let options = Options { full: self.full, partials: self.killed, ..Options::default() };
             let mut run = Run::new(&names, options);
-            // fxdax: on a DAX mount, the files read in again first, as a file the mount makes is
+            // cladefs: on a DAX mount, the files read in again first, as a file the mount makes is
             // the page cache's until then, copying on write (doc-13): the DAX cases looked at the
             // page cache alone, their files made here and never evicted (TASK-149.2).
             if self.dax {
@@ -311,7 +311,7 @@ mod guest {
                 script_run::fill(&path(BALLAST), LEFT);
             }
             if self.killed {
-                // fxdax: the operations before the kill, then the host's kill, waited for.
+                // cladefs: the operations before the kill, then the host's kill, waited for.
                 let kill = crate::script::kill_index(seed, len);
                 for (index, op) in script.iter().take_while(|(index, _)| *index < kill) {
                     if let Err(failure) = run.step(*index, op) {

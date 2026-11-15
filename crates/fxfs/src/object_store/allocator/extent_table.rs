@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own: the lives of the allocator's extents, from their minting to the seal of their
+//! cladefs's own: the lives of the allocator's extents, from their minting to the seal of their
 //! frees (backlog doc-4; the allocator's "Dead extents", "Shared extents" and "Orphaned extents").
 //!
 //! [`ExtentTable`] knows each extent the allocator minted or found in its tree, in one of these
@@ -811,7 +811,7 @@ impl ExtentTable {
         self.freeing.iter().map(|dead| dead.extent).collect()
     }
 
-    /// fxdax: the extents being freed, each with how it died, said for a log (TASK-121).
+    /// cladefs: the extents being freed, each with how it died, said for a log (TASK-121).
     pub(super) fn freeing_described(&self) -> Vec<(ExtentId, String)> {
         self.freeing.iter().map(|dead| (dead.extent, format!("{dead:?}"))).collect()
     }

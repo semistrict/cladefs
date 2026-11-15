@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 dax: a read of the page its entry names replaces nothing
 
 A filesystem says a read's pages are shared, as XFS does of reflinked
@@ -10,7 +10,7 @@ it, and replaced the entry with its like. Two processes reading a page
 then undid each other's mappings, one fault for each load, each taking
 the entry's lock and a TLB shootdown: a build's processes running one
 binary out of a filesystem's shared blocks stopped, their tasks queued
-on the entries of its hot pages (fxdax TASK-152). A read of the page its
+on the entries of its hot pages (cladefs TASK-152). A read of the page its
 entry names, or its PMD entry's row, leaves the entry and the page's
 other mappings alone, as an unshared read does. Writes still replace it:
 a CoW fault's dirty and TOWRITE marks go with the replacing.

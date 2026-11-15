@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: when a branch's commits are durable (see the crate's docs). Commits are ordered as they
+//! cladefs: when a branch's commits are durable (see the crate's docs). Commits are ordered as they
 //! are made, and a flush makes those ordered so far durable, in order, together
 //! ([`Store::flush`](crate::Store::flush)): it takes them first, and syncs what they wrote then,
 //! the store's state not locked meanwhile, so that commits go on behind it. The commits it took are
@@ -26,12 +26,12 @@ pub(crate) struct Durability<T> {
     /// The commits no flush has taken yet, oldest first: the last of those ordered. Those between
     /// them and the last durable, a flush has taken, and is making durable.
     queue: VecDeque<T>,
-    /// fxdax: when each commit not yet durable was ordered, oldest first: how long each waits to
+    /// cladefs: when each commit not yet durable was ordered, oldest first: how long each waits to
     /// be made durable, [`Lags`], is measured from then.
     ordered_at: VecDeque<std::time::Instant>,
 }
 
-/// fxdax: how long commits waited, from being ordered, which a daemon answers a guest's `COMMIT`
+/// cladefs: how long commits waited, from being ordered, which a daemon answers a guest's `COMMIT`
 /// on, until a flush made them durable, in this process: so many, the longest, and so many within
 /// each power of two of milliseconds, the first those within one (TASK-165.9: doc-2's requirement
 /// 11 bounds it, at 50 ms of extentd's turns).
@@ -39,7 +39,7 @@ pub(crate) struct Durability<T> {
 pub struct Lags {
     pub count: u64,
     pub max_us: u64,
-    /// fxdax: those within extentd's turn, 50 ms: doc-12's median holds while they are half of
+    /// cladefs: those within extentd's turn, 50 ms: doc-12's median holds while they are half of
     /// them at least (TASK-221).
     pub within_turn: u64,
     /// Bucket `i`: within 2^i ms (`i` 0: within 1 ms), the last all beyond.
@@ -86,7 +86,7 @@ impl Lags {
 static LAGS: std::sync::Mutex<Lags> =
     std::sync::Mutex::new(Lags { count: 0, max_us: 0, within_turn: 0, buckets: [0; LAG_BUCKETS] });
 
-/// fxdax: how long this process's stores' commits waited to be made durable ([`Lags`]).
+/// cladefs: how long this process's stores' commits waited to be made durable ([`Lags`]).
 pub fn durability_lags() -> Lags {
     *LAGS.lock().unwrap()
 }
@@ -154,7 +154,7 @@ impl<T> Durability<T> {
     }
 }
 
-/// fxdax: how many of a flush's files it syncs at once, and of its directories (TASK-92.42). One at
+/// cladefs: how many of a flush's files it syncs at once, and of its directories (TASK-92.42). One at
 /// a time, each sync waited for those before it, though none needs another. On macOS (APFS), where
 /// each was an `F_FULLFSYNC`, which std's `sync_all` is there, flushing the drive's cache too,
 /// store-bench's `burst`, whose commit seals 640 extents in files of their own, spent 2.0 s syncing
@@ -171,14 +171,14 @@ impl<T> Durability<T> {
 /// but the flush's own is on a thread the flush starts, of [`HELPERS`], which every flush shares.
 const AT_ONCE: usize = 16;
 
-/// fxdax: how many threads, beside the flushes' own, every flush of the process syncs on at once,
+/// cladefs: how many threads, beside the flushes' own, every flush of the process syncs on at once,
 /// at most (TASK-92.49): as many as one flush syncs on beside its own ([`AT_ONCE`]), which a flush
 /// alone gets, and flushes together share. Were they each flush's, the extent daemon's 32 threads
 /// of flushes would sync on as many as 512 threads at once, and its stores' commits wait behind as
 /// many syncs.
 const HELPERS: usize = AT_ONCE - 1;
 
-/// fxdax: how many of [`HELPERS`] sync now: the process's; with the `shuttle` feature, each Shuttle
+/// cladefs: how many of [`HELPERS`] sync now: the process's; with the `shuttle` feature, each Shuttle
 /// execution's own, so that how many helpers an execution's flushes get is of its own flushes
 /// alone, as the scheduler sees them, not another execution's run beside it in the process: a
 /// test's two runs of a round at once got helpers by each other's flushes, outside the scheduler,
@@ -200,7 +200,7 @@ fn helping() -> &'static std::sync::atomic::AtomicUsize {
     }
 }
 
-/// fxdax: some of [`HELPERS`], taken for a flush's syncs until dropped.
+/// cladefs: some of [`HELPERS`], taken for a flush's syncs until dropped.
 pub(crate) struct Helpers(usize);
 
 impl Helpers {
@@ -227,7 +227,7 @@ impl Drop for Helpers {
     }
 }
 
-/// fxdax: what [`Syncs::sync_files`] synced: so many files whose pages leave the host's page
+/// cladefs: what [`Syncs::sync_files`] synced: so many files whose pages leave the host's page
 /// cache, the extents stored on their own, and so many whose pages stay, segments' raw files; and
 /// how long the longest of each took.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -242,7 +242,7 @@ pub struct FileSyncs {
 /// directories whose entries they changed.
 pub(crate) struct Syncs<F> {
     files: Vec<Arc<F>>,
-    /// fxdax: those of them written and synced again and again, as the open segment's raw file
+    /// cladefs: those of them written and synced again and again, as the open segment's raw file
     /// is, which keep their pages in the host's page cache ([`File::sync_cached`]).
     cached: Vec<Arc<F>>,
     dirs: BTreeSet<String>,
@@ -260,18 +260,18 @@ impl<F: File> Syncs<F> {
         self.files.push(file);
     }
 
-    /// fxdax: syncs `file`, written and synced again and again, keeping its pages in the host's
+    /// cladefs: syncs `file`, written and synced again and again, keeping its pages in the host's
     /// page cache.
     pub fn cached(&mut self, file: Arc<F>) {
         self.cached.push(file);
     }
 
-    /// fxdax: whether it syncs extents stored on their own, whose data no commit's record checks.
+    /// cladefs: whether it syncs extents stored on their own, whose data no commit's record checks.
     pub fn holds_own(&self) -> bool {
         !self.files.is_empty()
     }
 
-    /// fxdax: whether it syncs any file, or any directory, beside a flush's records.
+    /// cladefs: whether it syncs any file, or any directory, beside a flush's records.
     pub fn holds_any(&self, files: bool) -> bool {
         (files && !(self.files.is_empty() && self.cached.is_empty())) || !self.dirs.is_empty()
     }
@@ -281,7 +281,7 @@ impl<F: File> Syncs<F> {
         self.dirs.insert(path);
     }
 
-    /// fxdax: syncs `files`, as [`Syncs::cached`] does each, once each, those it syncs already
+    /// cladefs: syncs `files`, as [`Syncs::cached`] does each, once each, those it syncs already
     /// left; and no more those nothing else holds: a segment's raw file, which its segment lets go
     /// of once framed, its framed file durable then, holding its data.
     pub fn carry(&mut self, files: Vec<Arc<F>>) {
@@ -293,7 +293,7 @@ impl<F: File> Syncs<F> {
         }
     }
 
-    /// fxdax: the files it syncs keeping their pages cached, which it syncs no more.
+    /// cladefs: the files it syncs keeping their pages cached, which it syncs no more.
     pub fn take_cached(&mut self) -> Vec<Arc<F>> {
         std::mem::take(&mut self.cached)
     }
@@ -306,14 +306,14 @@ impl<F: File> Syncs<F> {
     }
 
     /// Syncs them, in `dir`: each file once, however many commits wrote it, then the directories.
-    /// fxdax: [`AT_ONCE`] of the files at a time, then of the directories (TASK-92.42); one at a
+    /// cladefs: [`AT_ONCE`] of the files at a time, then of the directories (TASK-92.42); one at a
     /// time, if the directory's I/O is its callers' alone ([`Dir::concurrent`], TASK-79.79).
     pub fn sync<D: Dir<File = F>>(&self, dir: &D) -> Result<(), Error> {
         self.sync_files(dir)?;
         self.sync_dirs(dir)
     }
 
-    /// fxdax: syncs the files, as [`Syncs::sync`] does first; returns how many of each kind, and
+    /// cladefs: syncs the files, as [`Syncs::sync`] does first; returns how many of each kind, and
     /// how long the longest of each took (TASK-165.9).
     pub fn sync_files<D: Dir<File = F>>(&self, dir: &D) -> Result<FileSyncs, Error> {
         let sync: fn(&F) -> io::Result<()> = F::sync;
@@ -341,7 +341,7 @@ impl<F: File> Syncs<F> {
         })
     }
 
-    /// fxdax: syncs the directories, as [`Syncs::sync`] does after the files.
+    /// cladefs: syncs the directories, as [`Syncs::sync`] does after the files.
     pub fn sync_dirs<D: Dir<File = F>>(&self, dir: &D) -> Result<(), Error> {
         let dirs: Vec<&String> = self.dirs.iter().collect();
         let most = if dir.concurrent() { AT_ONCE } else { 1 };
@@ -362,7 +362,7 @@ impl<F: File> Syncs<F> {
     }
 }
 
-/// fxdax: `sync`s each of `items`, `most` at a time, on as many threads, the caller's one of them,
+/// cladefs: `sync`s each of `items`, `most` at a time, on as many threads, the caller's one of them,
 /// each taking the next as it is done with one; and returns once each is synced, or once one
 /// failed and those in flight returned, with that failure, logging any other. A failure empties the
 /// queue, so that no sync begins once it has, though other threads may take one before: what they
@@ -494,7 +494,7 @@ mod tests {
         assert!(dir.has_failed());
     }
 
-    /// fxdax: a flush's syncs under Shuttle (the `shuttle` feature), whose waits that can't end
+    /// cladefs: a flush's syncs under Shuttle (the `shuttle` feature), whose waits that can't end
     /// are deadlocks it reports, which only it can run:
     /// `cargo nextest run -p extent_store --features shuttle --lib shuttle_tests::` (TASK-92.42).
     #[cfg(feature = "shuttle")]
@@ -506,7 +506,7 @@ mod tests {
         use std::collections::BTreeMap;
         use std::io;
 
-        /// fxdax: each Shuttle execution has helpers of its own: one, holding every helper, leaves
+        /// cladefs: each Shuttle execution has helpers of its own: one, holding every helper, leaves
         /// another, run beside it in the process, as many as it asks for. Shared, an execution's
         /// helpers depended on another's flushes, outside the scheduler, and a test's two runs of a
         /// round at once diverged (crash::crashes_recover_prefixes_of_their_commits_concurrently,

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The extent-store device under fs/fxfs/device.c (doc-4): the driver's interface, with the host's
- * rules for the window (crates/fxdax's map), which copies on write (doc-13). A MAP is of an extent
+ * rules for the window (crates/cladefs's map), which copies on write (doc-13). A MAP is of an extent
  * the store holds, ENOENT if not, and maps zeros past its end; the window maps sealed extents and
  * zeros alone: a MAP of an open extent fails EPERM, which tests count, as Fxfs may take an extent
  * a seal forgot for sealed. MAP_ZEROS maps zeros. PRIVATE makes pages mapped read-only, a sealed

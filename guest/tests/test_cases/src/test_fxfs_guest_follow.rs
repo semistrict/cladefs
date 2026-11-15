@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Live read-only followers (fxdax's backlog doc-8, TASK-42.6): a VM follows a store another VM
+//! Live read-only followers (cladefs's backlog doc-8, TASK-42.6): a VM follows a store another VM
 //! writes, both running. The writer writes files and syncs; the follower mounts its store,
 //! read-only, and finds them, and keeps one open and another mapped. The writer then writes a new
 //! file, renames one, deletes the one the follower keeps open, and overwrites the one it maps, and
@@ -44,7 +44,7 @@ const PAGE: usize = 4096;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -77,7 +77,7 @@ mod host {
         } else {
             vm.extent_store("extents", store, CAPACITY, window)?;
         }
-        vm.env(&CString::new(format!("FXDAX_FOLLOW={role}"))?);
+        vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
         vm.vsock(uds);
         vm.spawn_api(root, &test_setup.test_case, role, &Vm::api_socket(role))
     }
@@ -123,7 +123,7 @@ mod host {
             // Short, as Unix sockets' paths must be.
             let uds = |role: &str| -> PathBuf {
                 std::env::temp_dir()
-                    .join(format!("fxdax-follow-{}-{role}.vsock", std::process::id()))
+                    .join(format!("cladefs-follow-{}-{role}.vsock", std::process::id()))
             };
             let listen = |role: &str| UnixListener::bind(format!("{}_{PORT}", uds(role).display()));
             let (writers, followers) = (listen("writer")?, listen("follower")?);
@@ -141,7 +141,7 @@ mod host {
             f.expect("seen")?;
             w.tell("done")?;
             w.expect("unmounted")?;
-            let extentd = std::env::var_os("FXDAX_EXTENTD").context("FXDAX_EXTENTD unset")?;
+            let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD unset")?;
             let control = crate::common::control(Path::new(&extentd))?;
             let before = control.committed(&store)?;
             w.tell("mount read-only")?;
@@ -156,7 +156,7 @@ mod host {
 
     impl Test for TestFxfsGuestFollow {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -456,7 +456,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             fs::create_dir_all(MNT).unwrap();
             mount();
-            match std::env::var("FXDAX_FOLLOW").unwrap().as_str() {
+            match std::env::var("CLADEFS_FOLLOW").unwrap().as_str() {
                 "writer" => writer(),
                 "follower" => follower(self.dax),
                 role => panic!("no role {role}"),

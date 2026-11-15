@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The process under the fake kernel: the one file built against libc rather than the shim.
  * Coroutines are ucontexts, told to ASan as it asks. The window is one mapping of address space,

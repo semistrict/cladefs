@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The VFS and page cache's calls dax.c and fs/dax.c make, rewritten for a DAX file alone, whose
  * mapping holds value entries, as mm/filemap.c, mm/truncate.c and mm/page-writeback.c treat them;

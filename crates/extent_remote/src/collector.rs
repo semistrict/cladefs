@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The collector (`fxdax-gc`): the only thing that deletes.
+//! The collector (`cladefs-gc`): the only thing that deletes.
 //!
-//! fxdax: it collects a cell at a time (doc-7, Garbage collection; TASK-395): a pass over a cell
+//! cladefs: it collects a cell at a time (doc-7, Garbage collection; TASK-395): a pass over a cell
 //! takes the cell's collector lease, lists the cell's prefix, and reads, compacts and deletes what
 //! is there alone, beside passes over other cells, which it neither fences nor waits for.
 //! Everything it decides by is under the cell's prefix: its branches' objects, their moves, its
@@ -15,7 +15,7 @@
 //! ([`crate::sweep`]); the cells are found by delimiter listings, a page at a time, listing none
 //! of their objects ([`crate::cell::listed`]).
 //!
-//! fxdax: a pass holds its cell by the cell's lease (`<C>gc/lease`, [`passed::GcLease`],
+//! cladefs: a pass holds its cell by the cell's lease (`<C>gc/lease`, [`passed::GcLease`],
 //! TASK-395.5) for as long as its collector's [`Holding`] says, renewing it as it goes and letting
 //! it go as it ends: another pass, of this process or another, finds the cell held and leaves it,
 //! as it leaves one whose last pass ended since its sweep began, without waiting ([`Error::Left`]).
@@ -35,7 +35,7 @@
 //! be uploaded and not yet in it. Segments go only once a checkpoint covers them, so that a reader
 //! that finds one missing knows, from the checkpoints, whether it is the branch's end.
 //!
-//! fxdax: a fork of a branch of the cell to a child in another cell is kept by the fork point: the
+//! cladefs: a fork of a branch of the cell to a child in another cell is kept by the fork point: the
 //! parent's whole state at the end of the segment it was forked at, the objects and moves holding
 //! the extents it names along their ways from where they were sealed, and what recovering it reads
 //! (TASK-395.4). It is kept while a reference names it, whatever the child frees of it since: the
@@ -67,7 +67,7 @@
 //! checkpoints, after which the moves go too, unless a state's way to its extents still goes through
 //! them.
 //!
-//! fxdax: marking reads metadata alone, which is in the clear in a sealed cell too, holding no key;
+//! cladefs: marking reads metadata alone, which is in the clear in a sealed cell too, holding no key;
 //! compacting copies extents out of objects' data, sealed there, so a pass compacting one unwraps
 //! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
 //! branches' DEKs from their records; and seals each one's moves under the key it was sealed under,
@@ -94,14 +94,14 @@
 //! together, their parent's state where they were forked, it reads once and takes once for them
 //! all; and a pass reads a record again only once it changed ([`Collector`], TASK-92.7).
 //!
-//! fxdax: a pass records in its cell's lease, as it ends, what the next pass goes by
+//! cladefs: a pass records in its cell's lease, as it ends, what the next pass goes by
 //! ([`crate::passed`], TASK-395.6, TASK-395.8): the digest of its listing of the cell, what it
 //! deferred to a grace period, and what the cell takes, by kind. A pass whose listing is the one
 //! recorded, of the same options, decides what the recorded pass did, everything it decides by
 //! being under the cell's prefix: it recovers nothing, and deletes only what was deferred, once due
 //! ([`Collector::collect_cell`]). An idle cell costs a pass its lease and one listing.
 //!
-//! fxdax: two passes delete nothing (TASK-264). A mark-only pass ([`Collector::mark_cell`]) is a
+//! cladefs: two passes delete nothing (TASK-264). A mark-only pass ([`Collector::mark_cell`]) is a
 //! pass in every respect but that: it takes the cell's lease and compacts, and writes what it would
 //! delete to a marks object of the cell's (`<C>gc/marks/<epoch>`, [`layout::Marks`]), which every
 //! reader of the cell warns of reaching ([`crate::marks`]), and which the next such pass compares
@@ -155,7 +155,7 @@ pub struct Options {
     pub grace: u64,
 }
 
-/// fxdax: how a collector's passes hold their cells (TASK-395.5): the default holds none, its
+/// cladefs: how a collector's passes hold their cells (TASK-395.5): the default holds none, its
 /// passes taking their cells whatever another holds, but a pass holding it for a time, as the
 /// tests' and the simulation's race, the later fencing the earlier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -176,25 +176,25 @@ pub struct Report {
     /// The objects of the cell it deleted.
     pub deleted: usize,
     pub compacted: usize,
-    /// fxdax: the references of the cell's deleted children it retired, under their parents' cells
+    /// cladefs: the references of the cell's deleted children it retired, under their parents' cells
     /// (TASK-395.4), once, whether there or not, as it can't tell without listing other cells; and
     /// those of its own it deleted, marked, written again since their retirements (TASK-395.13).
     pub retired: usize,
-    /// fxdax: the bytes of what it deleted, as listed (TASK-395.5).
+    /// cladefs: the bytes of what it deleted, as listed (TASK-395.5).
     pub deleted_bytes: u64,
-    /// fxdax: the bytes of what it compacted, as listed: what goes, a grace period after, of the
+    /// cladefs: the bytes of what it compacted, as listed: what goes, a grace period after, of the
     /// objects, less what their moves take.
     pub compacted_bytes: u64,
-    /// fxdax: the passes that skipped their cells, each unchanged since its last pass, deleting
+    /// cladefs: the passes that skipped their cells, each unchanged since its last pass, deleting
     /// only what that pass deferred (TASK-395.6).
     pub skipped: usize,
-    /// fxdax: the passes that left objects sealed uncompacted, their cell's KEK not to be had: the
+    /// cladefs: the passes that left objects sealed uncompacted, their cell's KEK not to be had: the
     /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
     /// having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and deleted
     /// what no live branch needs, warning of the cell and why. And those that skipped a cell a
     /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
-    /// fxdax: the objects sealed that those passes would have compacted, or the pass before a
+    /// cladefs: the objects sealed that those passes would have compacted, or the pass before a
     /// skipping one would have.
     pub uncompacted: usize,
 }
@@ -212,7 +212,7 @@ impl std::ops::AddAssign for Report {
     }
 }
 
-/// fxdax: what a mark-only pass over a cell did ([`Collector::mark_cell`]).
+/// cladefs: what a mark-only pass over a cell did ([`Collector::mark_cell`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Marking {
     /// What it compacted; it deleted nothing, and retired nothing.
@@ -225,7 +225,7 @@ pub struct Marking {
     pub resurrected: Vec<String>,
 }
 
-/// fxdax: what a dry run over a cell found ([`Collector::dry_run_cell`]).
+/// cladefs: what a dry run over a cell found ([`Collector::dry_run_cell`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DryRun {
     /// What a pass would delete, as listed, in the order of their keys; less what it would compact
@@ -251,7 +251,7 @@ pub async fn collect(
     Collector::new(*options).collect(bucket, holder).await
 }
 
-/// fxdax: one pass of the collector over `cell`, as `holder`, which must differ from every other
+/// cladefs: one pass of the collector over `cell`, as `holder`, which must differ from every other
 /// pass's over the cell: of a collector of its own, which remembers nothing of it.
 pub async fn collect_cell(
     bucket: &impl Bucket,
@@ -262,27 +262,27 @@ pub async fn collect_cell(
     Collector::new(*options).collect_cell(bucket, cell, holder).await
 }
 
-/// The collector. fxdax: it remembers nothing from one pass to the next (TASK-395.4): what a pass
+/// The collector. cladefs: it remembers nothing from one pass to the next (TASK-395.4): what a pass
 /// read of its cell goes with it, so that a sweep over millions of cells holds no more than the
 /// cells it is passing over. A pass reads a record again only once it changed, as it lists the
 /// records again (TASK-92.7). What is worth keeping across passes is under the cell's prefix, in
 /// its lease, which any collector process reads (TASK-395.6, [`crate::passed`]).
 pub struct Collector {
     options: Options,
-    /// fxdax: how its passes hold their cells (TASK-395.5).
+    /// cladefs: how its passes hold their cells (TASK-395.5).
     holding: Holding,
-    /// fxdax: the KMS its passes unwrap their cells' KEKs through, to compact what is sealed
+    /// cladefs: the KMS its passes unwrap their cells' KEKs through, to compact what is sealed
     /// (TASK-411.6): each pass by a [`keys::Kms`] of its own, so that nothing unwrapped outlives
     /// the pass, and a tenant's KEK revoked stops the next. None: they compact only what is in the
     /// clear.
     kms: Option<kms::Shared>,
-    /// fxdax: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
+    /// cladefs: what its passes heard of their cells' tenants' KEKs, shared with the other passes of
     /// its sweep, if given ([`Collector::heard`]); its own each pass otherwise, and each
     /// [`Collector::collect`] (TASK-411.13).
     heard: Option<Arc<Heard>>,
 }
 
-/// fxdax: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
+/// cladefs: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
 /// whether each is to be had, asked once, however many of its passes ask. What a pass goes by over
 /// a cell unchanged since a pass that left objects sealed uncompacted, its cell's KEK not to be had
 /// ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked tenant's
@@ -317,7 +317,7 @@ impl Heard {
     }
 }
 
-/// fxdax: what a pass over a cell keeps as it reads it, and drops with it.
+/// cladefs: what a pass over a cell keeps as it reads it, and drops with it.
 #[derive(Default)]
 struct Remembered {
     /// The records read, by their keys, with the versions they were read at.
@@ -330,12 +330,12 @@ impl Collector {
         Self { options, holding: Holding::default(), kms: None, heard: None }
     }
 
-    /// fxdax: one whose passes hold their cells as `holding` says (TASK-395.5).
+    /// cladefs: one whose passes hold their cells as `holding` says (TASK-395.5).
     pub fn holding(self, holding: Holding) -> Self {
         Self { holding, ..self }
     }
 
-    /// fxdax: one whose passes compact objects sealed under their cells' keys, unwrapped through
+    /// cladefs: one whose passes compact objects sealed under their cells' keys, unwrapped through
     /// `kms`, if given (TASK-411.6): a pass unwraps its cell's KEK only if it compacts an object
     /// sealed, once for all of them; marking, dry runs and passes compacting nothing sealed ask
     /// it nothing.
@@ -343,17 +343,17 @@ impl Collector {
         Self { kms, ..self }
     }
 
-    /// fxdax: one whose passes share `heard`, what they heard of their tenants' KEKs, with the
+    /// cladefs: one whose passes share `heard`, what they heard of their tenants' KEKs, with the
     /// other passes of their sweep (TASK-411.13): the KMS asked once a tenant for all of them.
     pub fn heard(self, heard: Arc<Heard>) -> Self {
         Self { heard: Some(heard), ..self }
     }
 
-    /// fxdax: a pass over every cell of `bucket`, one after another, as `holder`, which must differ
+    /// cladefs: a pass over every cell of `bucket`, one after another, as `holder`, which must differ
     /// from every other pass's over each ([`Collector::collect_cell`]): the cells found by
     /// delimiter listings, a page at a time ([`crate::cell::listed`]). A pass that fails stops none
     /// of the others; the first error is returned once all ran, what they did then unsaid. A cell
-    /// another pass holds it leaves ([`Error::Left`]), as no failure. fxdax: its passes share what
+    /// another pass holds it leaves ([`Error::Left`]), as no failure. cladefs: its passes share what
     /// they heard of their tenants' KEKs ([`Heard`]).
     pub async fn collect(&mut self, bucket: &impl Bucket, holder: u64) -> Result<Report, Error> {
         let mut cells = std::pin::pin!(crate::cell::listed(bucket));
@@ -370,7 +370,7 @@ impl Collector {
         failed.map_or(Ok(report), Err)
     }
 
-    /// fxdax: one pass over `cell`, as `holder`, which must differ from every other pass's over the
+    /// cladefs: one pass over `cell`, as `holder`, which must differ from every other pass's over the
     /// cell: [`Error::Left`] if it leaves the cell to another, as its lease says.
     ///
     /// It takes the cell's lease, reading what the last pass to end recorded there, and lists the
@@ -388,7 +388,7 @@ impl Collector {
         self.collect_hearing(bucket, cell, holder, &heard).await
     }
 
-    /// fxdax: one pass over `cell`, as [`Collector::collect_cell`] says, hearing of its tenant's
+    /// cladefs: one pass over `cell`, as [`Collector::collect_cell`] says, hearing of its tenant's
     /// KEK by `heard`.
     async fn collect_hearing(
         &self,
@@ -410,7 +410,7 @@ impl Collector {
         collected.map(|(report, _)| report)
     }
 
-    /// fxdax: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
+    /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
     /// end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
     /// that left objects sealed uncompacted skips the cell only while its tenant's KEK is still not
     /// to be had, as `heard` says (TASK-411.13).
@@ -465,13 +465,13 @@ impl Collector {
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
         compacted.iter().for_each(|(key, size)| usage.add(key, *size));
         let decided = Decided::by(&self.options);
-        // fxdax: what it left sealed uncompacted went by its KMS, outside the cell: recorded, so
+        // cladefs: what it left sealed uncompacted went by its KMS, outside the cell: recorded, so
         // that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
         let (listing, uncompacted) = (pass.recording.digest, report.uncompacted as u64);
         Ok((report, Some(Passed { listing, decided, deferred, usage, uncompacted })))
     }
 
-    /// fxdax: a pass over `cell`, holding its lease as `taken` says, whose listing, `listed`, is
+    /// cladefs: a pass over `cell`, holding its lease as `taken` says, whose listing, `listed`, is
     /// the one the last pass to end, which recorded `passed`, decided by (TASK-395.6): it decides
     /// as that one did, everything a pass decides by being under the cell's prefix (doc-7, Passes
     /// that skip), whatever process that pass was of. It recovers nothing, and deletes what that
@@ -481,7 +481,7 @@ impl Collector {
     /// were marked, and one a writer whose read of the child's record came before writes again
     /// after, the pass over its parent's cell deletes (TASK-395.14). An unchanged dead cell costs
     /// a pass its lease and its listing. What it records: nothing new, if it deleted nothing.
-    /// fxdax: it says what that pass left sealed uncompacted, as left still (TASK-411.13).
+    /// cladefs: it says what that pass left sealed uncompacted, as left still (TASK-411.13).
     async fn skip(
         &self,
         bucket: &impl Bucket,
@@ -515,7 +515,7 @@ impl Collector {
         Ok((report, Some(Passed { listing: None, deferred, usage, ..passed })))
     }
 
-    /// fxdax: takes `cell`'s lease for a pass of `holder`, holding it as the collector's
+    /// cladefs: takes `cell`'s lease for a pass of `holder`, holding it as the collector's
     /// [`Holding`] says, at the epoch after the last pass's, fencing that pass, if the cell has
     /// anything a pass goes by ([`passable`]): asked only where it has no lease yet, as a pass of
     /// this format that took one asked it then, and the format of a cell's objects never changes
@@ -535,7 +535,7 @@ impl Collector {
         passed::take(bucket, cell, found, holder, self.holding).await.map(Some)
     }
 
-    /// fxdax: whether the pass that took `cell`'s lease as `taken` says holds it still, renewing it
+    /// cladefs: whether the pass that took `cell`'s lease as `taken` says holds it still, renewing it
     /// for as long again as a pass holds it, if it does: what a pass checks before it deletes.
     async fn holds(&self, bucket: &impl Bucket, cell: Cell, taken: &Taken) -> Result<bool, Error> {
         match self.holding.lease {
@@ -544,7 +544,7 @@ impl Collector {
         }
     }
 
-    /// fxdax: renews `cell`'s lease for the pass that took it as `taken` says, for as long again as
+    /// cladefs: renews `cell`'s lease for the pass that took it as `taken` says, for as long again as
     /// a pass holds it, if it holds it still: whether it does. A collector holding cells for no
     /// time writes nothing, and goes on: it checks before it deletes ([`Collector::holds`]).
     async fn renew(&self, bucket: &impl Bucket, cell: Cell, taken: &Taken) -> Result<bool, Error> {
@@ -555,7 +555,7 @@ impl Collector {
         passed::change(bucket, cell, taken, |found| GcLease { until, ..found }).await
     }
 
-    /// fxdax: lets `cell`'s lease go, which the pass that took it as `taken` says holds, if it
+    /// cladefs: lets `cell`'s lease go, which the pass that took it as `taken` says holds, if it
     /// does, as the pass `ended`: recording what it went through to, if anything, in the same
     /// write. Other passes take the cell at once after it, and a sweep that began before a pass
     /// went through leaves the cell to it. A collector holding cells for no time writes only what a
@@ -585,7 +585,7 @@ impl Collector {
         passed::change(bucket, cell, taken, release).await.map(drop)
     }
 
-    /// fxdax: one mark-only pass over `cell`, as `holder`, which must differ from every other
+    /// cladefs: one mark-only pass over `cell`, as `holder`, which must differ from every other
     /// pass's over the cell: a pass but for deleting, which writes what it would delete to its
     /// marks instead (TASK-264), and retires no reference. It never skips its cell, nor records
     /// what it found: what it would delete it writes to its marks.
@@ -616,7 +616,7 @@ impl Collector {
         marked
     }
 
-    /// fxdax: a mark-only pass over `cell`, which holds its lease as `taken` says.
+    /// cladefs: a mark-only pass over `cell`, which holds its lease as `taken` says.
     async fn mark_held(
         &self,
         bucket: &impl Bucket,
@@ -650,7 +650,7 @@ impl Collector {
         Ok(Marking { report, marks: Some(marks), resurrected })
     }
 
-    /// fxdax: what a pass over `cell` would delete, writing nothing (TASK-264): not taking the
+    /// cladefs: what a pass over `cell` would delete, writing nothing (TASK-264): not taking the
     /// cell's collector lease, which would fence a pass that deletes, running meanwhile, out of its
     /// deletes. It compacts nothing, and so finds doomed none of what a pass would delete only once
     /// it compacted it, a grace period after: no more than a pass would delete, and less. What a
@@ -676,7 +676,7 @@ impl Collector {
     }
 }
 
-/// fxdax: how a pass over a cell ended, which its letting go of the cell's lease writes
+/// cladefs: how a pass over a cell ended, which its letting go of the cell's lease writes
 /// ([`Collector::release`]).
 enum PassEnd {
     /// It went through, deleting what it found to, recording this, if anything.
@@ -792,7 +792,7 @@ impl Remembered {
     /// listed: listed until a listing finds none of a branch not in `before`, the records the pass
     /// read before, nor any not read by the listings before it. A deleted branch's children got
     /// theirs before it was marked deleted, so listing them again after reading them finds those of
-    /// any it read deleted. fxdax: the first listing is `listed`, the pass's listing of the whole
+    /// any it read deleted. cladefs: the first listing is `listed`, the pass's listing of the whole
     /// cell, if it has one, taken before it read anything (TASK-395.16): a LIST less, as the model's
     /// pass reads its records as it lists its candidates (Bucket.tla, `GcStart`); the listings
     /// after are of the records alone.
@@ -844,7 +844,7 @@ impl Remembered {
     }
 }
 
-/// fxdax: whether a pass over `cell` has anything to go by, checked before it takes the cell's
+/// cladefs: whether a pass over `cell` has anything to go by, checked before it takes the cell's
 /// lease, which would be the cell's one object otherwise: the format of the cell's object, a GET,
 /// which a pass of another format refuses ([`Error::Format`]) before writing anything. A cell with
 /// none, its branches made without one, its first record's format; and, holding no record, whether
@@ -865,7 +865,7 @@ async fn passable(bucket: &impl Bucket, cell: Cell) -> Result<bool, Error> {
     Ok(!listing.objects.is_empty() || !listing.prefixes.is_empty())
 }
 
-/// fxdax: every object of `cell`, listed before a pass reads anything else of it, its candidates
+/// cladefs: every object of `cell`, listed before a pass reads anything else of it, its candidates
 /// (rule `candidates_first`). Without the rule, as a test shows it needed, none: the pass lists the
 /// cell after the states, and no pass skips by a listing ([`Collector::collect_cell`]).
 async fn first_listing(bucket: &impl Bucket, cell: Cell) -> Option<Listed> {
@@ -875,7 +875,7 @@ async fn first_listing(bucket: &impl Bucket, cell: Cell) -> Option<Listed> {
     }
 }
 
-/// fxdax: whether a pass writes to the bucket what giving up on forks needs: a dry run writes
+/// cladefs: whether a pass writes to the bucket what giving up on forks needs: a dry run writes
 /// nothing (TASK-264).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Writes {
@@ -883,7 +883,7 @@ enum Writes {
     None,
 }
 
-/// fxdax: the objects the newest marks of `cell` before those of `epoch` named, that `objects`,
+/// cladefs: the objects the newest marks of `cell` before those of `epoch` named, that `objects`,
 /// listed by the mark-only pass of `epoch`, holds still, the same objects, and that `doomed`, what
 /// it found no live branch needs, does not: each warned of, loudly. No correct fork or recovery
 /// reaches what no live branch reached, so each is a bug in the collector, which a pass deleting
@@ -912,7 +912,7 @@ async fn resurrected(
         Ok(marks) => marks,
         Err(error) => {
             let key = &object.meta.key;
-            log::warn!(key, error:%; "fxdax-gc: {key}, the marks before, unread: {error}");
+            log::warn!(key, error:%; "cladefs-gc: {key}, the marks before, unread: {error}");
             return Vec::new();
         }
     };
@@ -929,7 +929,7 @@ async fn resurrected(
         let (kind, before) = (layout::kind(key), marks.epoch);
         log::warn!(
             key, kind:?, marks = before, epoch;
-            "fxdax-gc: RESURRECTED {key}: the mark-only pass {before:x} found no live branch needs \
+            "cladefs-gc: RESURRECTED {key}: the mark-only pass {before:x} found no live branch needs \
              it, and the pass {epoch:x} finds one does: a bug in the collector, which deleting \
              would have lost it to"
         );
@@ -946,7 +946,7 @@ async fn fenced(bucket: &impl Bucket, cell: Cell, epoch: u64) -> Result<bool, Er
 
 /// Gives up on the forks being made of points that were deleted, as `records` say, which it says
 /// are deleted then, or made, if that came first ([`branch::abandon`]); without `writes`, takes them
-/// as deleted, writing nothing. fxdax: a point of another cell's than the pass's, it reads where it
+/// as deleted, writing nothing. cladefs: a point of another cell's than the pass's, it reads where it
 /// is.
 async fn abandon(
     bucket: &impl Bucket,
@@ -975,7 +975,7 @@ async fn abandon(
     Ok(())
 }
 
-/// fxdax: whether `point`, of another cell's, is gone: its record deleted, or none.
+/// cladefs: whether `point`, of another cell's, is gone: its record deleted, or none.
 async fn gone(bucket: &impl Bucket, point: Branch) -> Result<bool, Error> {
     Ok(branch::record(bucket, point).await?.is_none_or(|record| record.deleted))
 }
@@ -1000,7 +1000,7 @@ async fn read_record(
     Ok(Some((object.meta.version.e_tag, Record::decode(branch, &object.bytes)?)))
 }
 
-/// fxdax: the fork points the references under `cell` name, by delimiter listings: the parents
+/// cladefs: the fork points the references under `cell` name, by delimiter listings: the parents
 /// with references, then each one's fork points, none of their children (doc-7, The layout). Once:
 /// a listing's pages are read one after another, but what it shows is a fork point's prefix, not a
 /// reference, and a clone's reference and its point's own share it, `<C>refs/<origin>/<at>/`, the
@@ -1020,7 +1020,7 @@ async fn referenced(bucket: &impl Bucket, cell: Cell) -> BTreeSet<Origin> {
     points
 }
 
-/// fxdax: what keeps a fork point a pass keeps ([`keep_points`]).
+/// cladefs: what keeps a fork point a pass keeps ([`keep_points`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Points {
     /// A fork of a live branch's state to a child in another cell, which may have no reference
@@ -1032,7 +1032,7 @@ enum Points {
     Referred,
 }
 
-/// fxdax: keeps in `live` the states of the fork points `points` it keeps none of yet, each
+/// cladefs: keeps in `live` the states of the fork points `points` it keeps none of yet, each
 /// recovered once, however many forks name it, several at once ([`Live::keep_point`]): the
 /// extents each names, and what recovering it read (doc-7, A pass over a cell, step 5). Those of
 /// other cells are read there.
@@ -1068,7 +1068,7 @@ async fn keep_points(
     Ok(())
 }
 
-/// fxdax: a child the references of the fork point `origin` name that lives on it: its record not
+/// cladefs: a child the references of the fork point `origin` name that lives on it: its record not
 /// deleted, a fork's or a point's, naming `origin` as its origin. Its references listed, and their
 /// children's records read, in their cells: asked only of a fork point whose state is lost.
 async fn needing(bucket: &impl Bucket, origin: Origin) -> Result<Option<Branch>, Error> {
@@ -1150,7 +1150,7 @@ async fn recover_live(
             };
             // A child with a record is queued by it, as it says: one whose ID another branch took
             // as the fork was made has another origin than its parent's state says (TASK-79.82).
-            // fxdax: one of another cell's, its fork point kept, which its reference, if it has one
+            // cladefs: one of another cell's, its fork point kept, which its reference, if it has one
             // yet, keeps too: the child's cell's pass recovers it (TASK-395.4).
             for fork in &recovered.state.forks {
                 let origin = Origin { parent: branch, at: fork.at };
@@ -1176,7 +1176,7 @@ async fn recover_live(
 
 /// Whether recovering `branch` finding what it needs lost lost nothing, as its record, read again,
 /// says: deleted since it was read, what it needed may be gone; a failed fork's claim no writer
-/// has, which nothing ever read, given up on; fxdax: a fork of a point still being made, its point
+/// has, which nothing ever read, given up on; cladefs: a fork of a point still being made, its point
 /// deleted, given up on (TASK-395.4), unless it was made first, as [`abandon`] would have: the rule
 /// `collector_abandons` both. Gives up on them, writing their
 /// records so, if `writes` says so.
@@ -1226,13 +1226,13 @@ struct Live {
     /// The moves they name extents in whose writers may name them anywhere on their ways from
     /// where they were sealed ([`behind`]).
     behind: BTreeSet<String>,
-    /// fxdax: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
+    /// cladefs: whether each object [`Live::behind_at`] was asked of is moves, by its key: each
     /// key parsed once, not once an extent in it (TASK-395.12). Parsing them took most of a pass
     /// over a cell whose branch was forked at many points, each a state of every extent of it.
     moves: rustc_hash::FxHashMap<String, bool>,
-    /// fxdax: the fork points whose states it keeps, each once ([`Live::keep_point`]).
+    /// cladefs: the fork points whose states it keeps, each once ([`Live::keep_point`]).
     points: BTreeSet<Origin>,
-    /// fxdax: whether what it found went by more than the cell holds, which may change with nothing
+    /// cladefs: whether what it found went by more than the cell holds, which may change with nothing
     /// of the cell's changing: a recovery that found what it needs lost, and then nothing lost; a
     /// fork point found lost, its children's records read (TASK-395.6).
     unsettled: bool,
@@ -1341,7 +1341,7 @@ impl Live {
         }
     }
 
-    /// fxdax: keeps `state`, a fork point's, whole, for the forks of it to other cells, which
+    /// cladefs: keeps `state`, a fork point's, whole, for the forks of it to other cells, which
     /// `touched` was read to recover (TASK-395.4): the extents it names, along their ways from where
     /// they were sealed, as a child with no checkpoint of its own names them where it read them;
     /// and what recovering it read, through which such a child recovers, unless the rule that it is
@@ -1392,7 +1392,7 @@ fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) ->
 /// were listed at: read once each, as they never change, and forgotten once they are gone. The live
 /// extents of an object are measured against its data, as its trailer says, which its listed size,
 /// compressed (TASK-29), may be far below: before, a mostly dead segment whose data compressed was
-/// never compacted (TASK-293). fxdax: and its trailer's seal says whether compacting it needs its
+/// never compacted (TASK-293). cladefs: and its trailer's seal says whether compacting it needs its
 /// key, read keyless (TASK-411.6).
 #[derive(Default)]
 struct Trailers(BTreeMap<String, (Version, u64, Frame)>);
@@ -1465,7 +1465,7 @@ struct Compactable<'a> {
 
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
 /// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
-/// size, if it did: those there first, if the pass created them before. fxdax:
+/// size, if it did: those there first, if the pass created them before. cladefs:
 /// it reads the object under `ring`'s keys of its branch, refusing one in the clear of a branch
 /// sealed, and seals its moves under the key the object was sealed under, the DEK of the same
 /// generation, with a salt of their own (TASK-411.6): every reader following the moves read the
@@ -1507,7 +1507,7 @@ async fn compact_object(
     Ok(Some((moves, size)))
 }
 
-/// fxdax: compacts the object `compactable` is, under `ring`, by the pass of epoch `pass`, as
+/// cladefs: compacts the object `compactable` is, under `ring`, by the pass of epoch `pass`, as
 /// [`compact_object`] does: its
 /// moves' key and size, and the object's size as listed, if it did. A function of its own, not a
 /// closure's future, so that a pass's future is seen to be `Send` (TASK-395.15: a sweep spawning
@@ -1522,7 +1522,7 @@ async fn compact_listed(
     Ok(moves.map(|moves| (moves, meta.size)))
 }
 
-/// fxdax: the keys of the moves of the object at `key` that `objects`, a listing of its cell,
+/// cladefs: the keys of the moves of the object at `key` that `objects`, a listing of its cell,
 /// holds, every pass's, in the order of their passes (TASK-407.1).
 fn moves_listed<'a>(
     objects: &'a BTreeMap<String, Meta>,
@@ -1554,7 +1554,7 @@ impl Fate {
 /// the fork points it keeps need of them.
 struct Pass {
     cell: Cell,
-    /// fxdax: its epoch, its taking of the cell's collector lease, which its moves' keys name
+    /// cladefs: its epoch, its taking of the cell's collector lease, which its moves' keys name
     /// (TASK-407.1).
     epoch: u64,
     objects: BTreeMap<String, Meta>,
@@ -1570,13 +1570,13 @@ struct Pass {
     /// data moved on: from where the states name them, or, where a writer may name them before
     /// that, from where they were sealed.
     hops: BTreeSet<String>,
-    /// fxdax: the fork points the references under the cell name, as listed after the states.
+    /// cladefs: the fork points the references under the cell name, as listed after the states.
     referenced: BTreeSet<Origin>,
-    /// fxdax: what it records of its listing (TASK-395.6, TASK-395.8).
+    /// cladefs: what it records of its listing (TASK-395.6, TASK-395.8).
     recording: Recording,
 }
 
-/// fxdax: what a pass records of its listing of its cell, as it ends ([`Passed`]).
+/// cladefs: what a pass records of its listing of its cell, as it ends ([`Passed`]).
 struct Recording {
     /// The listing's digest, if what the pass decides goes by the cell alone, and the listing came
     /// before what it read ([`Passed::listing`]).
@@ -1594,7 +1594,13 @@ impl Pass {
     async fn new(
         bucket: &impl Bucket,
         (cell, epoch): (Cell, u64),
-        found: (BTreeMap<String, Meta>, BTreeMap<Branch, Record>, Live, BTreeSet<Origin>, Recording),
+        found: (
+            BTreeMap<String, Meta>,
+            BTreeMap<Branch, Record>,
+            Live,
+            BTreeSet<Origin>,
+            Recording,
+        ),
     ) -> Result<Self, Error> {
         let (objects, records, live, referenced, recording) = found;
         let Live { branches, touched, located, behind, .. } = live;
@@ -1613,7 +1619,7 @@ impl Pass {
         }
         // Each place once, however many branches name it, followed along its moves a hop at a
         // time: the moves the ways reach at a hop read at once, as the listing says which there
-        // are (TASK-395.5). fxdax: a place in another cell, and its moves, are no candidates of
+        // are (TASK-395.5). cladefs: a place in another cell, and its moves, are no candidates of
         // this one's, which its listing doesn't hold (TASK-395.4).
         let mut maps = MovesMaps::default();
         let mut ways: Vec<(ExtentId, Location)> = (located.iter())
@@ -1657,7 +1663,7 @@ impl Pass {
         })
     }
 
-    /// fxdax: whether the object of `kind`, which no live state names, a live branch's head may yet
+    /// cladefs: whether the object of `kind`, which no live state names, a live branch's head may yet
     /// name, by what its key declares ([`Ended::ahead`], TASK-407): by any of the branch's
     /// recoveries, of several origins (TASK-173).
     fn ahead(&self, kind: Kind<'_>) -> bool {
@@ -1711,7 +1717,7 @@ impl Pass {
     /// is compacted only where no moves of it were listed, and moves only where they were, never
     /// both of one way. They all end before the pass works out what goes, as one at a time: what
     /// goes is of the listing before, which none of their moves is in. The moves' keys and sizes.
-    /// fxdax: those sealed under their branches' DEKs, unwrapped under the cell's KEK through
+    /// cladefs: those sealed under their branches' DEKs, unwrapped under the cell's KEK through
     /// `kms` once for the pass, and only if one is to be compacted ([`Pass::compacting`],
     /// TASK-411.6).
     async fn compact(
@@ -1725,8 +1731,10 @@ impl Pass {
         let mut compactable = self.compactable(bucket, options, trailers).await?;
         let ring = self.compacting(bucket, kms, &mut compactable, report).await?;
         // The compactions' futures made first, as in `bucket::delete_all`.
-        let compactions: Vec<_> =
-            compactable.iter().map(|object| compact_listed(bucket, object, (&ring, self.epoch))).collect();
+        let compactions: Vec<_> = compactable
+            .iter()
+            .map(|object| compact_listed(bucket, object, (&ring, self.epoch)))
+            .collect();
         let compactions = futures::stream::iter(compactions).buffer_unordered(COMPACTIONS_AT_ONCE);
         let mut compactions = std::pin::pin!(compactions);
         let mut compacted = Vec::new();
@@ -1740,7 +1748,7 @@ impl Pass {
         Ok(compacted)
     }
 
-    /// fxdax: the keys `compactable`'s objects are compacted under ([`keys::compacting`],
+    /// cladefs: the keys `compactable`'s objects are compacted under ([`keys::compacting`],
     /// TASK-411.6): which of their branches are sealed, as the pass's records of them say, whose
     /// objects in the clear are refused; and, if any of the objects is sealed, those branches' DEKs,
     /// unwrapped under the cell's KEK by a [`keys::Kms`] of this pass's over `kms`, each generation
@@ -1775,7 +1783,7 @@ impl Pass {
             Err(Error::Kms(why)) => {
                 log::warn!(
                     cell:%, why:%;
-                    "fxdax-gc: cell {cell}: {sealed} objects sealed left uncompacted: {why}"
+                    "cladefs-gc: cell {cell}: {sealed} objects sealed left uncompacted: {why}"
                 );
                 report.locked += 1;
                 report.uncompacted += sealed;
@@ -1794,7 +1802,7 @@ impl Pass {
 
     /// What goes, as [`Pass::doomed`] says; and what would but that it was written too recently,
     /// or what it was compacted to was, with when it may go (TASK-395.6), in the order of its keys.
-    /// fxdax: a cell with no live branch and no reference, all of it but its records and its object,
+    /// cladefs: a cell with no live branch and no reference, all of it but its records and its object,
     /// and the collector's own, goes.
     async fn fates(
         &self,
@@ -1852,7 +1860,7 @@ impl Pass {
                 // The collector's own: its lease, and its marks, which a mark-only pass never
                 // deletes, and an operator removes (TASK-264); and references, which the passes of
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
-                // (TASK-395.13). fxdax: a cell's object, which says who holds it, stays as its
+                // (TASK-395.13). cladefs: a cell's object, which says who holds it, stays as its
                 // records do, and a block of object IDs taken for good (TASK-364).
                 Kind::GcLease { .. }
                 | Kind::Marks { .. }
@@ -1873,7 +1881,7 @@ impl Pass {
         Ok((doomed, deferred))
     }
 
-    /// fxdax: the references the pass retires, under other cells (doc-7, References; TASK-395.4):
+    /// cladefs: the references the pass retires, under other cells (doc-7, References; TASK-395.4):
     /// once its cell holds no live branch and no reference of its own, those of its deleted
     /// children of origins in other cells, each at the key its record's origin gives, never listed.
     /// Nothing anywhere then inherits from them: a fork of one of them in the cell would have a
@@ -2096,7 +2104,7 @@ mod tests {
         });
     }
 
-    /// fxdax: an object a byte was flipped in, in storage, is compacted to no moves, where its
+    /// cladefs: an object a byte was flipped in, in storage, is compacted to no moves, where its
     /// extents would be under CRCs of their own: the pass fails, and the object stays, as its
     /// extents' reads fail (TASK-153.11). In a part stored compressed, the kept extent's bytes
     /// compressing, and in one stored raw.
@@ -2146,9 +2154,7 @@ mod tests {
                 let corrupt = Error::Corrupt("an object's part, by its CRC".into());
                 assert_eq!(collect(&*bucket, 1, &compacting).await, Err(corrupt));
                 let after = keys(&*bucket).await;
-                assert!(
-                    after.contains(&segment) && moves_in(&after, &segment).is_none()
-                );
+                assert!(after.contains(&segment) && moves_in(&after, &segment).is_none());
                 let location = writer.location(kept).unwrap();
                 let read = crate::read(&bucket, kept, &location).await;
                 let corrupt = format!("part 0 of {segment}, by its CRC");
@@ -2200,7 +2206,8 @@ mod tests {
         before.checkpoint().await.unwrap();
         // The fork, freeing what makes the segment mostly freed.
         let forking = Batch::from(Commit { tag: 2, frees: vec![freed], ..Commit::default() });
-        let at = before.add_segment(forking.fork(child(fork), &mut before.chain()).frame()).unwrap();
+        let at =
+            before.add_segment(forking.fork(child(fork), &mut before.chain()).frame()).unwrap();
         before.upload(at).await.unwrap();
         before.acknowledge().await.unwrap();
         // The fork's writer recovers its parent's state at the fork, from the checkpoint before.
@@ -3229,7 +3236,10 @@ mod tests {
                     collect(&*going, 3, &now).await.unwrap();
                     collect(&*going, 4, &now).await.unwrap();
                     let left = keys(&*going).await;
-                    assert!(!left.contains(&segment) && moves(left.clone()).is_empty(), "{left:#?}");
+                    assert!(
+                        !left.contains(&segment) && moves(left.clone()).is_empty(),
+                        "{left:#?}"
+                    );
                 })
             });
             went.join().unwrap();
@@ -4209,7 +4219,7 @@ mod tests {
         assert_eq!(next.resurrected, [key.as_str()]);
         assert_eq!(next.marks.unwrap().marked, Vec::<Marked>::new());
         let resurrected = format!(
-            "WARN fxdax-gc: RESURRECTED {key}: the mark-only pass 1 found no live branch needs it, \
+            "WARN cladefs-gc: RESURRECTED {key}: the mark-only pass 1 found no live branch needs it, \
              and the pass 2 finds one does: a bug in the collector, which deleting would have lost \
              it to key={key} kind={kind:?} marks=1 epoch=2"
         );
@@ -4217,7 +4227,7 @@ mod tests {
         assert_eq!(warnings(), [tail, data, resurrected]);
     }
 
-    // fxdax: the collector per cell, and fork references (TASK-395.2, .3, .4).
+    // cladefs: the collector per cell, and fork references (TASK-395.2, .3, .4).
 
     /// Branch `id` of tenant 1's cell `cell`: each of these tests' branches a cell of its own, as
     /// hosts make them.
@@ -5388,7 +5398,7 @@ mod tests {
         });
     }
 
-    // fxdax: passes that skip cells unchanged since the last pass, and what passes record of the
+    // cladefs: passes that skip cells unchanged since the last pass, and what passes record of the
     // cells (TASK-395.6, TASK-395.8).
 
     /// The requests of a sweep, `asked`, as [`SimBucket::served`] gives them, by the cell of their

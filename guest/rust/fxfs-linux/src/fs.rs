@@ -1,13 +1,13 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 //! Fxfs on an extent-store device (`Filesystem`), and its volumes as the kernel mounts them, the one
-//! fxdax's images keep their files in by default, each served by object ID, which is the kernel's
+//! cladefs's images keep their files in by default, each served by object ID, which is the kernel's
 //! inode number within the volume, through Fxfs's POSIX layer (crates/fxfs-posix), whose VFS is the
 //! kernel's (`Guest`).
 //!
-//! fxdax: what only the guest has is here: its device's DAX, durability, resizes and freezes,
+//! cladefs: what only the guest has is here: its device's DAX, durability, resizes and freezes,
 //! and, on a follower's device, what follows the store's writer (`follow`, backlog doc-8).
 
 use crate::device::{Dax, DeviceStats, Durability, DurableGuard, ExtentDevice, Freezer, Resizer};
@@ -33,7 +33,7 @@ use storage_device::DeviceHolder;
 /// A volume of a filesystem, as the kernel mounts it.
 pub type Fxfs = fxfs_posix::Fxfs<Guest>;
 
-/// The volume fxdax's images keep a filesystem's files in (crates/fxdax's `VOLUME_NAME`), which a
+/// The volume cladefs's images keep a filesystem's files in (crates/cladefs's `VOLUME_NAME`), which a
 /// mount naming none mounts (fs/fxfs/fxfs.h's FXFS_DEFAULT_VOLUME).
 const VOLUME: &str = "default";
 
@@ -62,7 +62,7 @@ const CACHED_OBJECT_SIZE: u64 = 256;
 /// waiting 100 ms).
 const GRAVEYARD_BATCH_DELAY: Duration = Duration::from_millis(5);
 
-/// fxdax: what a shrink leaves free at least, beyond what the filesystem holds: room for its
+/// cladefs: what a shrink leaves free at least, beyond what the filesystem holds: room for its
 /// transactions' reservations, which removing a file takes too.
 const SHRINK_HEADROOM: u64 = 16 << 20;
 
@@ -70,25 +70,25 @@ const SHRINK_HEADROOM: u64 = 16 << 20;
 pub struct Filesystem {
     /// The filesystem, which `close` closes, after the last unmount.
     filesystem: OpenFxFilesystem,
-    /// fxdax: on a follower's device, the epoch of the commit it last advanced to, as it
+    /// cladefs: on a follower's device, the epoch of the commit it last advanced to, as it
     /// advances, and the commit its state is as of at the latest.
     follower: Option<(Arc<AtomicU64>, u64)>,
     dax: Dax,
     /// What makes the device's commits durable, for `sync`.
     durability: Durability,
-    /// fxdax: what the device's requests took, and what waited on its seals (`stats`).
+    /// cladefs: what the device's requests took, and what waited on its seals (`stats`).
     device_stats: Arc<DeviceStats>,
-    /// fxdax: fsyncs, and those another's sync covered, of all its volumes (`stats`).
+    /// cladefs: fsyncs, and those another's sync covered, of all its volumes (`stats`).
     sync_counts: Arc<SyncCounts>,
-    /// fxdax: what resizes the device, as the host resizes its store (`resize`).
+    /// cladefs: what resizes the device, as the host resizes its store (`resize`).
     resizer: Resizer,
-    /// fxdax: what freezes the device with the filesystem (`freeze`).
+    /// cladefs: what freezes the device with the filesystem (`freeze`).
     freezer: Freezer,
-    /// fxdax: while frozen, how far a thaw has got (`thaw`).
+    /// cladefs: while frozen, how far a thaw has got (`thaw`).
     frozen: Mutex<Option<Frozen>>,
 }
 
-/// fxdax: a frozen filesystem, as far as thawing it has got: each step of `Filesystem::thaw` taken
+/// cladefs: a frozen filesystem, as far as thawing it has got: each step of `Filesystem::thaw` taken
 /// once, the next thaw resuming at the one a failed thaw stopped at. Until the last is done, the
 /// filesystem is frozen, as the VFS keeps a superblock whose thaw failed (TASK-200).
 enum Frozen {
@@ -115,7 +115,7 @@ impl Frozen {
     }
 }
 
-/// fxdax: fault injection (TASK-200): the next thaw fails before its step this names (`Frozen::step`),
+/// cladefs: fault injection (TASK-200): the next thaw fails before its step this names (`Frozen::step`),
 /// which is 0 again then; 0, none.
 pub(crate) static FAIL_THAW_AT: AtomicU32 = AtomicU32::new(0);
 
@@ -123,7 +123,7 @@ pub(crate) static FAIL_THAW_AT: AtomicU32 = AtomicU32::new(0);
 /// the writer.
 pub struct Guest {
     filesystem: Arc<Filesystem>,
-    /// fxdax: on a follower's device, what follows its writer (doc-8).
+    /// cladefs: on a follower's device, what follows its writer (doc-8).
     following: Option<Following>,
 }
 
@@ -163,7 +163,7 @@ impl Platform for Guest {
 impl Filesystem {
     /// Opens the filesystem on `device`, sizing what it keeps in memory by the kernel's `memory`
     /// bytes. A device whose store holds nothing yet is formatted, with an empty default volume,
-    /// first. fxdax: read-only, if `read_only` or the device is a follower's.
+    /// first. cladefs: read-only, if `read_only` or the device is a follower's.
     pub async fn open(device: ExtentDevice, memory: u64, read_only: bool) -> Result<Self, Error> {
         let follows = device.follows();
         // Decided once, here: the filesystem owns it (`FxFilesystem::options`), whose volumes and
@@ -253,7 +253,7 @@ impl Filesystem {
         self.follower.is_some()
     }
 
-    /// fxdax: makes the volume `name`, over the base `manifest` describes (backlog doc-10), which
+    /// cladefs: makes the volume `name`, over the base `manifest` describes (backlog doc-10), which
     /// the device must read: one the host attached.
     pub async fn import(&self, name: &str, manifest: &[u8]) -> Result<(), Error> {
         ensure!(!self.read_only(), FxfsError::ReadOnlyFilesystem);
@@ -262,14 +262,14 @@ impl Filesystem {
         Ok(())
     }
 
-    /// fxdax: seals what is open, as the host asks: syncs the journal, which commits the device,
+    /// cladefs: seals what is open, as the host asks: syncs the journal, which commits the device,
     /// ordered, not durable, sealing every extent open. Another guest's writable MAP was refused
     /// for want of the memory they hold, which only their seal lets go of (TASK-153.15).
     pub async fn seal(&self) -> Result<(), Error> {
         self.filesystem.sync(SyncOptions { flush_device: true, ..Default::default() }).await
     }
 
-    /// fxdax: freezes the filesystem, each of whose volumes the VFS has synced and stopped the
+    /// cladefs: freezes the filesystem, each of whose volumes the VFS has synced and stopped the
     /// writers of (fsfreeze): holds its journal's compactions, syncs, holds its commits, journals
     /// what committed meanwhile, and closes the device to writes, frees and commits, sealing what
     /// is open: the point a snapshot of the VM is taken at, which nothing changes until it thaws
@@ -316,7 +316,7 @@ impl Filesystem {
         frozen
     }
 
-    /// fxdax: thaws the filesystem: tells the device, and takes its branch, which is a store's
+    /// cladefs: thaws the filesystem: tells the device, and takes its branch, which is a store's
     /// of its own in a VM restored from a snapshot taken frozen: the allocator mints extents of it,
     /// and the journal continues in new ones of it before anything else commits, which a
     /// super-block then records. Then it compacts again. A step that fails leaves it frozen at
@@ -339,7 +339,7 @@ impl Filesystem {
         Ok(())
     }
 
-    /// fxdax: the step of a thaw `frozen` is at, taken: what is frozen after it, if anything; or,
+    /// cladefs: the step of a thaw `frozen` is at, taken: what is frozen after it, if anything; or,
     /// failed, `frozen` as it was, and why.
     async fn thaw_step(&self, frozen: Frozen) -> Result<Option<Frozen>, (Frozen, Error)> {
         if FAIL_THAW_AT
@@ -380,7 +380,7 @@ impl Filesystem {
         }
     }
 
-    /// fxdax: takes the size the host resized the store to, as the device's configuration says,
+    /// cladefs: takes the size the host resized the store to, as the device's configuration says,
     /// while mounted: grows the device and the allocator; or, asked to shrink, shrinks them if the
     /// allocator holds no more than the smaller size, and answers whether it did.
     pub async fn resize(&self) -> Result<(), Error> {
@@ -421,7 +421,7 @@ impl Filesystem {
         self.dax.device()
     }
 
-    /// fxdax: what the filesystem waited on, and its device's requests took, as lines of a name and
+    /// cladefs: what the filesystem waited on, and its device's requests took, as lines of a name and
     /// a number: counts, and their nanoseconds, all told since it opened (TASK-91.7).
     pub fn stats(&self) -> String {
         use std::fmt::Write as _;
@@ -444,7 +444,7 @@ impl Filesystem {
             let _ = writeln!(out, "{name}_hist {}", timed.hist());
         }
         let _ = writeln!(out, "fsyncs {fsyncs}");
-        // fxdax: the volumes open, mounted or not yet closed (TASK-136.6).
+        // cladefs: the volumes open, mounted or not yet closed (TASK-136.6).
         let _ = writeln!(out, "volumes_open {}", self.filesystem.object_manager().open_volumes());
         let _ = writeln!(out, "fsyncs_coalesced {coalesced}");
         let counts = [
@@ -495,26 +495,26 @@ pub(crate) trait GuestFxfs: Sized {
     /// stays open.
     async fn unmount(self);
 
-    /// fxdax: a follower's batch.
+    /// cladefs: a follower's batch.
     async fn follow(&self) -> Result<(), Error>;
 
-    /// fxdax: holds the file `ino`, which the kernel opens, on a follower.
+    /// cladefs: holds the file `ino`, which the kernel opens, on a follower.
     async fn hold(&self, ino: u64) -> Result<(), Error>;
 
-    /// fxdax: lets go of the file `ino`, which the kernel closes.
+    /// cladefs: lets go of the file `ino`, which the kernel closes.
     fn release(&self, ino: u64);
 
-    /// fxdax: the attributes of `ino` as a follower's batch just left them, or none if it is gone.
+    /// cladefs: the attributes of `ino` as a follower's batch just left them, or none if it is gone.
     async fn attr_applied(&self, ino: u64) -> Result<Option<Attr>, Error>;
 
-    /// fxdax: what follows its writer, on a follower.
+    /// cladefs: what follows its writer, on a follower.
     fn following(&self) -> Option<&Following>;
 
-    /// fxdax: puts all the volume holds in one layer, so that the journal holds nothing of it, but
+    /// cladefs: puts all the volume holds in one layer, so that the journal holds nothing of it, but
     /// for what comes after (backlog doc-10, Publishing).
     async fn flush_volume(&self) -> Result<(), Error>;
 
-    /// fxdax: the volume's manifest, with its filesystem frozen: no compaction frees what it names
+    /// cladefs: the volume's manifest, with its filesystem frozen: no compaction frees what it names
     /// before a fork of the store holds it. `Unavailable` if the journal holds anything of it.
     async fn manifest(&self) -> Result<Vec<u8>, Error>;
 }
@@ -548,7 +548,7 @@ impl GuestFxfs for Fxfs {
         objects.store(self.volume_id()).ok_or(FxfsError::NotFound)?.manifest().await
     }
 
-    /// fxdax: a follower's batch: the writer's commits since those it applied, fetched; what the
+    /// cladefs: a follower's batch: the writer's commits since those it applied, fetched; what the
     /// kernel caches of what they change dropped, the commits applied, and the kernel's inodes
     /// settled, under the fill barrier; and the commit it was as of let go of.
     async fn follow(&self) -> Result<(), Error> {
@@ -557,7 +557,7 @@ impl GuestFxfs for Fxfs {
         Ok(())
     }
 
-    /// fxdax: holds the file `ino`, which the kernel opens, on a follower: one its writer deletes
+    /// cladefs: holds the file `ino`, which the kernel opens, on a follower: one its writer deletes
     /// reads as it was until the last close. One a batch deleted since the open looked it up, which
     /// a hold keeps nothing of, isn't held: NotFound, as an open racing a local unlink may fail.
     /// Under the fill barrier, which the open holds: no batch comes between the hold and the look.
@@ -572,14 +572,14 @@ impl GuestFxfs for Fxfs {
         Ok(())
     }
 
-    /// fxdax: lets go of the file `ino`, which the kernel closes.
+    /// cladefs: lets go of the file `ino`, which the kernel closes.
     fn release(&self, ino: u64) {
         if let Some(following) = self.following() {
             following.release(ino);
         }
     }
 
-    /// fxdax: the attributes of `ino` as a follower's batch just left them, read as it applies,
+    /// cladefs: the attributes of `ino` as a follower's batch just left them, read as it applies,
     /// or none if it is gone: read none, its inode would settle as gone (TASK-79.23).
     async fn attr_applied(&self, ino: u64) -> Result<Option<Attr>, Error> {
         match self.attr(ino).await {
@@ -597,7 +597,7 @@ impl GuestFxfs for Fxfs {
     }
 }
 
-/// fxdax: holds `filesystem`'s commits until the task returned is dropped.
+/// cladefs: holds `filesystem`'s commits until the task returned is dropped.
 async fn hold_commits(filesystem: &Arc<FxFilesystem>) -> Task<()> {
     let (held, holding) = futures::channel::oneshot::channel();
     let filesystem = filesystem.clone();

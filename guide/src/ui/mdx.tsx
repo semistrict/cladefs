@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -118,7 +118,7 @@ export function Design({ id, children }: { id: string; children: ReactNode }) {
                 record({ kind: "design", prompt: promptText.current?.innerText ?? id, text: draft.trim(), place: here() });
               }}
             >
-              Commit my design, then show fxdax’s
+              Commit my design, then show cladefs’s
             </button>
             <span className="muted" style={{ fontSize: "0.9rem" }}>
               A few lines are enough. Being wrong first is what makes the answer stick.
@@ -311,7 +311,7 @@ export function Transfer() {
                 <p className="done num">
                   Found in {elapsed(run.found - run.started)}: {run.picked}
                 </p>
-                <CodeRef path={task.answer.path} snippet={task.answer.snippet} note={task.answer.note} origin="fxdax" />
+                <CodeRef path={task.answer.path} snippet={task.answer.snippet} note={task.answer.note} origin="cladefs" />
               </>
             )}
           </div>

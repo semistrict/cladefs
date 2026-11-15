@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
- * The virtio extent-store device's driver (fxdax's backlog doc-4; include/linux/virtio_extent.h).
+ * The virtio extent-store device's driver (cladefs's backlog doc-4; include/linux/virtio_extent.h).
  *
  * Requests go to the device's request queues as descriptor chains, each CPU's to its own: the
  * header and arguments, the data the device reads, the data it writes, and the response. Many may
@@ -9,7 +9,7 @@
  * one's `done`. A submitter waits for room when
  * the queue is full. The DAX window, if the device has one, is memremapped, so that the guest's
  * Fxfs reads extents mapped into it in place: as pages of a dax_device, with FS_DAX, as
- * virtio_fs_setup_dax makes its cache window, which files map (fs/fxfs/dax.c). fxdax: without
+ * virtio_fs_setup_dax makes its cache window, which files map (fs/fxfs/dax.c). cladefs: without
  * FS_DAX, the driver takes no window: nothing would map it.
  */
 
@@ -36,13 +36,13 @@
 
 #include "selftest.h"
 
-/* A request queue (fxdax TASK-26.18.5). */
+/* A request queue (cladefs TASK-26.18.5). */
 struct vext_queue {
 	struct virtqueue *vq;
 	/* Serializes the queue's use. */
 	spinlock_t lock;
 	/*
-	 * fxdax: whether it takes no requests, as the device resets (vext_reset_prepare) until it
+	 * cladefs: whether it takes no requests, as the device resets (vext_reset_prepare) until it
 	 * finds its queues again: set, and read before a request is added, under `lock`, so that none
 	 * is added to a queue the reset goes on to let go of (TASK-201).
 	 */
@@ -52,17 +52,17 @@ struct vext_queue {
 	/* The requests it has taken. */
 	atomic64_t requests;
 	/*
-	 * fxdax: the callers polling it for their requests, while it has any of which the device
+	 * cladefs: the callers polling it for their requests, while it has any of which the device
 	 * signals no completions (vext_wait). Guarded by `lock`.
 	 */
 	unsigned int pollers;
 	/*
-	 * fxdax: its interrupts, and the requests it completed, which those callers did without one:
+	 * cladefs: its interrupts, and the requests it completed, which those callers did without one:
 	 * each interrupt costs exits to read and acknowledge it (TASK-91.15).
 	 */
 	atomic64_t interrupts, polled;
 	/*
-	 * fxdax: the requests completed on a CPU other than the one they were queued on: each wakes
+	 * cladefs: the requests completed on a CPU other than the one they were queued on: each wakes
 	 * its caller with an interrupt between CPUs, and finds its request in another's cache
 	 * (TASK-276).
 	 */
@@ -70,7 +70,7 @@ struct vext_queue {
 } ____cacheline_aligned_in_smp;
 
 /*
- * fxdax: the device's DAX window, its shared memory region, as the pages of a dax_device, which
+ * cladefs: the device's DAX window, its shared memory region, as the pages of a dax_device, which
  * mappings of files map (fs/fxfs/dax.c).
  *
  * Its struct pages are made a part at a time, as dax_direct_access first reaches a part
@@ -108,12 +108,12 @@ struct virtio_extent {
 	struct vext_queue *queues;
 	unsigned int nr_queues;
 	/*
-	 * fxdax: the queue each CPU's requests go to, by CPU: the one whose interrupt the transport
+	 * cladefs: the queue each CPU's requests go to, by CPU: the one whose interrupt the transport
 	 * made affine to it, so that they complete on it (vext_map_queues, TASK-276).
 	 */
 	unsigned int *cpu_queue;
 	struct vext_config config;
-	/* fxdax: its DAX window, if it has one (F_DAX, with FS_DAX). */
+	/* cladefs: its DAX window, if it has one (F_DAX, with FS_DAX). */
 	struct vext_window window;
 	atomic64_t unique;
 	/* The requests the device has taken, by type. */
@@ -121,7 +121,7 @@ struct virtio_extent {
 	/* The time the requests it has completed took, queued to completed, by type. */
 	atomic64_t request_ns[VIRTIO_EXTENT_T_LAST + 1];
 	/*
-	 * fxdax: the time it has had a request in flight, all told (busy_ns): the guest waiting for
+	 * cladefs: the time it has had a request in flight, all told (busy_ns): the guest waiting for
 	 * the host, which its checks' budgets leave out (TASK-263). The requests taken and not yet
 	 * completed, since when it has had one, and the time it had one before, under `busy_lock`,
 	 * which a queue's lock is taken before.
@@ -131,7 +131,7 @@ struct virtio_extent {
 	u64 busy_since;
 	u64 busy_ns;
 	/*
-	 * fxdax: the time recent requests of each type took, a moving average, to wait for one on
+	 * cladefs: the time recent requests of each type took, a moving average, to wait for one on
 	 * the CPU only if it takes less than that is worth (vext_wait).
 	 */
 	u64 recent_ns[VIRTIO_EXTENT_T_LAST + 1];
@@ -140,7 +140,7 @@ struct virtio_extent {
 	vext_config_changed_t changed;
 	void *changed_arg;
 	/*
-	 * fxdax: what answers the host's asks for the guest's stats (virtio_extent_set_stats), which
+	 * cladefs: what answers the host's asks for the guest's stats (virtio_extent_set_stats), which
 	 * `stats_lock` guards; the work answering them, from a configuration change; and the ask it
 	 * answered last (TASK-111.4).
 	 */
@@ -150,12 +150,12 @@ struct virtio_extent {
 	struct work_struct stats_work;
 	u64 stats_answered;
 	/*
-	 * fxdax: whether it is closed (virtio_extent_close), which `open_lock` guards: its queues are
+	 * cladefs: whether it is closed (virtio_extent_close), which `open_lock` guards: its queues are
 	 * then (`struct vext_queue`'s `closed`).
 	 */
 	struct mutex open_lock;
 	bool closed;
-	/* fxdax: those who found it and have yet to put it, whom unbinding it waits for. */
+	/* cladefs: those who found it and have yet to put it, whom unbinding it waits for. */
 	atomic_t users;
 	struct list_head node;
 };
@@ -163,7 +163,7 @@ struct virtio_extent {
 /* The bound devices. */
 static LIST_HEAD(devices);
 static DEFINE_MUTEX(devices_lock);
-/* fxdax: unbinding, for a device's `users` to go; not the device's, which then goes too. */
+/* cladefs: unbinding, for a device's `users` to go; not the device's, which then goes too. */
 static DECLARE_WAIT_QUEUE_HEAD(devices_unused);
 
 static struct virtio_extent *vext_find_bound(const char *tag)
@@ -183,7 +183,7 @@ static struct virtio_extent *vext_find_bound(const char *tag)
 }
 
 /*
- * fxdax: the device tagged `tag`, once probes in progress are done if none is bound yet: devices
+ * cladefs: the device tagged `tag`, once probes in progress are done if none is bound yet: devices
  * are probed asynchronously (vext_driver), so that the window's memmap, built as a device is
  * probed, a third of a fork's boot, overlaps the rest of the boot (TASK-92.8); a mount by tag
  * waits for its device's probe, as the kernel waits for probes before it mounts the root.
@@ -261,7 +261,7 @@ bool virtio_extent_read_only(struct virtio_extent *vext)
 }
 EXPORT_SYMBOL_GPL(virtio_extent_read_only);
 
-/* fxdax: whether the host asks the guest for its stats (F_STATS, TASK-111.4). */
+/* cladefs: whether the host asks the guest for its stats (F_STATS, TASK-111.4). */
 static bool vext_stats_asked(struct virtio_extent *vext)
 {
 	return virtio_has_feature(vext->vdev, VIRTIO_EXTENT_F_STATS);
@@ -371,7 +371,7 @@ static u32 vext_args_epoch(struct vext_request *req, u32 data_len, u32 root_len)
 	return sizeof(req->args.epoch);
 }
 
-/* fxdax: a STATS names the ask it answers (TASK-111.4). */
+/* cladefs: a STATS names the ask it answers (TASK-111.4). */
 static u32 vext_args_stats(struct vext_request *req, u32 data_len, u32 root_len)
 {
 	req->args.stats = (struct virtio_extent_stats) { .asked = cpu_to_le64(req->offset) };
@@ -382,7 +382,7 @@ static u32 vext_args_stats(struct vext_request *req, u32 data_len, u32 root_len)
 enum vext_way { VEXT_NO_DATA, VEXT_OUT, VEXT_IN };
 
 /*
- * fxdax: what a request of a type carries after its header, a row per type, its whole wire
+ * cladefs: what a request of a type carries after its header, a row per type, its whole wire
  * contract (TASK-160.7): its arguments, which `args` encodes, if it has any; its data, the
  * request's `data_len` bytes, which go `data`'s way, if the request has the flag `data_if`, or
  * always if that is 0; and a root after its data, the request's `root_len` bytes, if it has the
@@ -416,11 +416,11 @@ static const struct vext_type {
 	[VIRTIO_EXTENT_T_UNPIN] = { "unpin", vext_args_id },
 	/* 15 was writable DAX's SEALED: no type. */
 	[VIRTIO_EXTENT_T_PRIVATE] = { "private", vext_args_private, .writes = true },
-	/* fxdax: the guest's stats, its text, which a follower's device takes too (TASK-111.4). */
+	/* cladefs: the guest's stats, its text, which a follower's device takes too (TASK-111.4). */
 	[VIRTIO_EXTENT_T_STATS] = { "stats", vext_args_stats, VEXT_OUT },
 };
 
-/* fxdax: a request taken, in flight until vext_busy_end (`busy_ns`). */
+/* cladefs: a request taken, in flight until vext_busy_end (`busy_ns`). */
 static void vext_busy_begin(struct virtio_extent *vext)
 {
 	unsigned long flags;
@@ -431,7 +431,7 @@ static void vext_busy_begin(struct virtio_extent *vext)
 	spin_unlock_irqrestore(&vext->busy_lock, flags);
 }
 
-/* fxdax: a request completed, or let go of as the device reset. */
+/* cladefs: a request completed, or let go of as the device reset. */
 static void vext_busy_end(struct virtio_extent *vext)
 {
 	unsigned long flags;
@@ -468,7 +468,7 @@ int virtio_extent_submit(struct virtio_extent *vext, struct vext_request *req)
 
 	if (!type)
 		return -EINVAL;
-	/* fxdax: a follower's filesystem writes nothing: a write here is its bug (doc-8, testing 1). */
+	/* cladefs: a follower's filesystem writes nothing: a write here is its bug (doc-8, testing 1). */
 	if (WARN_ON_ONCE(type->writes && virtio_extent_read_only(vext)))
 		return -EROFS;
 	data_len = type->data && vext_has(req, type->data_if) ? req->data_len : 0;
@@ -527,7 +527,7 @@ int virtio_extent_submit(struct virtio_extent *vext, struct vext_request *req)
 		req->cpu = raw_smp_processor_id();
 		spin_lock_irqsave(&queue->lock, flags);
 		/*
-		 * fxdax: closed, as the device resets or is closed, it has no queues, or will not
+		 * cladefs: closed, as the device resets or is closed, it has no queues, or will not
 		 * once this is added: looked at once, without the lock, before, a request added after
 		 * went to a queue let go of, or that a reset device never completed (TASK-201).
 		 */
@@ -608,13 +608,13 @@ static unsigned int vext_signal(struct virtio_extent *vext, struct vext_queue *q
 /*
  * How long a caller waits for its request on the CPU before sleeping: a request's reply comes
  * back in tens to hundreds of microseconds, and sleeping costs halting the vCPU, which in a nested
- * VM exits to the outer host, and an interrupt to wake it. fxdax: only for requests of a type
+ * VM exits to the outer host, and an interrupt to wake it. cladefs: only for requests of a type
  * that recently took less (TASK-91.13): MAPs taking 260-490 us spun their 100 us for nothing,
  * a quarter to half of the guest's time.
  */
 #define VEXT_SPIN_NS (100 * NSEC_PER_USEC)
 /*
- * fxdax: how long a caller spins, and how recent requests must have taken for it to: nested
+ * cladefs: how long a caller spins, and how recent requests must have taken for it to: nested
  * virtualization takes a device's requests past VEXT_SPIN_NS, so none spins, and each pays a halt
  * and a wakeup (TASK-146.1).
  */
@@ -624,7 +624,7 @@ MODULE_PARM_DESC(spin_ns, "How long a caller polls for its request before it sle
 
 /*
  * Waits for `req`, whose completion is `done`: on the CPU first, if requests of its type
- * recently took less than vext_spin_ns, and no other task wants the CPU. fxdax: polling its
+ * recently took less than vext_spin_ns, and no other task wants the CPU. cladefs: polling its
  * queue meanwhile, of which the device signals no completions: each interrupt costs exits to
  * read and acknowledge it, which a request done in time saves (TASK-91.15).
  */
@@ -692,7 +692,7 @@ int virtio_extent_call(struct virtio_extent *vext, struct vext_request *req)
 EXPORT_SYMBOL_GPL(virtio_extent_call);
 
 /*
- * A queue's interrupt: completes the requests the device has of it. fxdax: and has the device
+ * A queue's interrupt: completes the requests the device has of it. cladefs: and has the device
  * signal it again, unless callers poll it (vext_wait).
  */
 static void vext_done(struct virtqueue *vq)
@@ -711,7 +711,7 @@ static void vext_done(struct virtqueue *vq)
 }
 
 /*
- * fxdax: whether the queues' interrupts are spread over the CPUs, each queue's affine to the CPUs
+ * cladefs: whether the queues' interrupts are spread over the CPUs, each queue's affine to the CPUs
  * whose requests go to it (vext_map_queues), and how many queues the driver uses at most, 0 for
  * as many as the device has: what an A/B of the queues' parallelism turns off, interleaved in one
  * build (TASK-276). Read as a device's queues are found.
@@ -724,7 +724,7 @@ module_param_named(max_queues, vext_max_queues, uint, 0444);
 MODULE_PARM_DESC(max_queues, "The most request queues the driver uses, 0 for the device's all");
 
 /*
- * fxdax: maps each CPU to the queue whose interrupt the transport made affine to it, as
+ * cladefs: maps each CPU to the queue whose interrupt the transport made affine to it, as
  * blk_mq_virtio_map_queues does (TASK-276): a request then completes on the CPU that queued it,
  * whose caller is woken there, rather than by an interrupt between CPUs, and finds its request in
  * its cache. Where the transport says no affinity of some queue (vectors shared, or none), the CPUs
@@ -754,7 +754,7 @@ static void vext_map_queues(struct virtio_extent *vext)
 
 /*
  * Finds the device's request queues, one for each CPU, up to as many as it has: one, if it says
- * none (num_request_queues is 1 at least). fxdax: their interrupts spread over the CPUs, each
+ * none (num_request_queues is 1 at least). cladefs: their interrupts spread over the CPUs, each
  * queue's affine to those its requests come from (vext_map_queues), the configuration's apart, as
  * virtio_blk has its queues' (TASK-276).
  */
@@ -769,7 +769,7 @@ static int vext_find_queues(struct virtio_extent *vext)
 	int err;
 
 	/*
-	 * fxdax: as it opens again, the same queues, their counts going on: their locks, which a
+	 * cladefs: as it opens again, the same queues, their counts going on: their locks, which a
 	 * request takes to find a queue closed, stay as they are (TASK-201).
 	 */
 	if (!vext->queues) {
@@ -817,7 +817,7 @@ out:
 }
 
 /*
- * Shows `counters`, one per request type, each on a line of its own after the type's name. fxdax:
+ * Shows `counters`, one per request type, each on a line of its own after the type's name. cladefs:
  * not the numbers no type has (vext_types).
  */
 static ssize_t request_counters_show(char *buf, atomic64_t *counters)
@@ -852,7 +852,7 @@ static ssize_t request_ns_show(struct device *dev, struct device_attribute *attr
 static DEVICE_ATTR_RO(request_ns);
 
 /*
- * fxdax: the `busy_ns` attribute: how long the device has had a request in flight, all told, the
+ * cladefs: the `busy_ns` attribute: how long the device has had a request in flight, all told, the
  * one in flight so far among it: the guest's time waiting for the host (TASK-263).
  */
 static ssize_t busy_ns_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -882,7 +882,7 @@ static ssize_t queues_show(struct device *dev, struct device_attribute *attr, ch
 static DEVICE_ATTR_RO(queues);
 
 /*
- * fxdax: the `completions` attribute: the queues' interrupts, and the requests their callers
+ * cladefs: the `completions` attribute: the queues' interrupts, and the requests their callers
  * completed polling them, without one (vext_wait), all told; and the requests completed on a CPU
  * other than their own (TASK-276).
  */
@@ -903,7 +903,7 @@ static ssize_t completions_show(struct device *dev, struct device_attribute *att
 static DEVICE_ATTR_RO(completions);
 
 /*
- * fxdax: the `window` attribute: the DAX window's length, 0 if the device has none, how much of it
+ * cladefs: the `window` attribute: the DAX window's length, 0 if the device has none, how much of it
  * has struct pages, and the time making them took (TASK-92.8).
  */
 static ssize_t window_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -929,7 +929,7 @@ static struct attribute *vext_attrs[] = {
 static const struct attribute_group vext_attr_group = { .attrs = vext_attrs };
 
 /*
- * fxdax: the protocol version this driver speaks (TASK-141.3): VIRTIO_EXTENT_VERSION. Another,
+ * cladefs: the protocol version this driver speaks (TASK-141.3): VIRTIO_EXTENT_VERSION. Another,
  * set for a test, has it refuse the device as it would a device of another version.
  */
 static uint vext_version = VIRTIO_EXTENT_VERSION;
@@ -937,7 +937,7 @@ module_param_named(version, vext_version, uint, 0444);
 MODULE_PARM_DESC(version, "The device protocol version this driver speaks: for tests alone");
 
 /*
- * fxdax: 0 if the device is of the protocol version this driver speaks (TASK-141.3); otherwise
+ * cladefs: 0 if the device is of the protocol version this driver speaks (TASK-141.3); otherwise
  * -EPROTONOSUPPORT, both versions logged. Read first, as nothing else of the configuration may
  * mean, in another version, what it does in this one.
  */
@@ -969,7 +969,7 @@ static void vext_read_config(struct virtio_extent *vext)
 	virtio_cread_le(vdev, struct virtio_extent_config, max_root, &config->max_root);
 	virtio_cread_le(vdev, struct virtio_extent_config, branch, &config->branch);
 	virtio_cread_le(vdev, struct virtio_extent_config, max_extent, &config->max_extent);
-	/* fxdax: set as the device opens, and never changed (doc-13). */
+	/* cladefs: set as the device opens, and never changed (doc-13). */
 	config->private_max = 0;
 	if (virtio_has_feature(vdev, VIRTIO_EXTENT_F_DAX))
 		virtio_cread_le(vdev, struct virtio_extent_config, private_max, &config->private_max);
@@ -1027,7 +1027,7 @@ static int vext_window_make(struct vext_window *window, u64 offset, u64 len)
 }
 
 /*
- * The window's memory at page `pgoff` of it, up to `nr_pages` of it, as virtio_fs's. fxdax: their
+ * The window's memory at page `pgoff` of it, up to `nr_pages` of it, as virtio_fs's. cladefs: their
  * struct pages made first, if they have none (TASK-92.8): the caller may sleep.
  */
 static long vext_dax_direct_access(struct dax_device *dax_dev, pgoff_t pgoff, long nr_pages,
@@ -1186,7 +1186,7 @@ static int vext_probe(struct virtio_device *vdev)
 					virtqueue_get_vring_size(vext->queues[0].vq) - 3);
 	virtio_device_ready(vdev);
 	/*
-	 * fxdax: the device activates as it takes DRIVER_OK, and asks for a reset if it can't: as it
+	 * cladefs: the device activates as it takes DRIVER_OK, and asks for a reset if it can't: as it
 	 * refuses a driver that didn't take every feature it offers (TASK-141.3). It serves nothing
 	 * then, which the driver would wait for for good.
 	 */
@@ -1278,7 +1278,7 @@ void virtio_extent_set_stats(struct virtio_extent *vext, vext_stats_t stats, voi
 EXPORT_SYMBOL_GPL(virtio_extent_set_stats);
 
 /*
- * fxdax: answers the host's latest ask for the guest's stats, if it hasn't (F_STATS, TASK-111.4):
+ * cladefs: answers the host's latest ask for the guest's stats, if it hasn't (F_STATS, TASK-111.4):
  * with what the filesystem says (virtio_extent_set_stats), or nothing. Answered once, failing or
  * not: the host asks again, which answers the asks before it too.
  */
@@ -1336,13 +1336,13 @@ static void vext_config_changed(struct virtio_device *vdev)
 	if (vext->changed)
 		vext->changed(vext->changed_arg);
 	spin_unlock_irqrestore(&vext->changed_lock, flags);
-	/* fxdax: an ask for the guest's stats, if it changed, the work finds (TASK-111.4). */
+	/* cladefs: an ask for the guest's stats, if it changed, the work finds (TASK-111.4). */
 	if (vext_stats_asked(vext))
 		schedule_work(&vext->stats_work);
 }
 
 /*
- * fxdax: closes its queues to requests, under each one's lock, which a request is added under
+ * cladefs: closes its queues to requests, under each one's lock, which a request is added under
  * (virtio_extent_submit): none is added after, and those waiting for room find them closed.
  */
 static void vext_close_queues(struct virtio_extent *vext)
@@ -1360,7 +1360,7 @@ static void vext_close_queues(struct virtio_extent *vext)
 }
 
 /*
- * fxdax: resets the device, and lets its queues go (virtio_extent_close): a filesystem that
+ * cladefs: resets the device, and lets its queues go (virtio_extent_close): a filesystem that
  * unmounted left only what no task waits for, its last let-go of commits, which fails. Its queues
  * closed first, then the stats work, which asks of the device whenever the host asks for stats,
  * done: its request in flight answered by the device, live still, and any after refused
@@ -1396,7 +1396,7 @@ static int vext_reset_prepare(struct virtio_device *vdev)
 	return 0;
 }
 
-/* fxdax: finds its queues again (virtio_extent_open): the core then sets DRIVER_OK. */
+/* cladefs: finds its queues again (virtio_extent_open): the core then sets DRIVER_OK. */
 static int vext_reset_done(struct virtio_device *vdev)
 {
 	return vext_find_queues(vdev->priv);
@@ -1448,11 +1448,11 @@ static void vext_remove(struct virtio_device *vdev)
 	list_del(&vext->node);
 	mutex_unlock(&devices_lock);
 	/*
-	 * fxdax: a filesystem goes on using the device, whose window it maps, and which goes with
+	 * cladefs: a filesystem goes on using the device, whose window it maps, and which goes with
 	 * this: unbinding waits for it to unmount, which needs requests to go on (TASK-79.48).
 	 */
 	wait_event_idle(devices_unused, !atomic_read(&vext->users));
-	/* fxdax: no ask for stats is answered from now on (TASK-111.4). */
+	/* cladefs: no ask for stats is answered from now on (TASK-111.4). */
 	cancel_work_sync(&vext->stats_work);
 	vext_selftest_remove(vdev);
 	sysfs_remove_group(&vdev->dev.kobj, &vext_attr_group);
@@ -1482,7 +1482,7 @@ static const unsigned int vext_features[] = {
 
 static struct virtio_driver vext_driver = {
 	.driver.name = "virtio_extent",
-	/* fxdax: its window's memmap built beside the rest of the boot (virtio_extent_find). */
+	/* cladefs: its window's memmap built beside the rest of the boot (virtio_extent_find). */
 	.driver.probe_type = PROBE_PREFER_ASYNCHRONOUS,
 	.id_table = vext_ids,
 	.feature_table = vext_features,

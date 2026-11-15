@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * Paths no seed of tests/interleave takes, each played out exactly: memory that ends part way
  * through a write, a write from the pages it writes, a writer killed, allocations and device
@@ -1346,7 +1346,7 @@ static void cow_private_failed(void)
 		cow_put(pages[i], round, mapped);
 	}
 	/*
-	 * fxdax: a PRIVATE the guest had no memory to ask for fails the write ENOMEM, as an
+	 * cladefs: a PRIVATE the guest had no memory to ask for fails the write ENOMEM, as an
 	 * allocation's failure does, not EIO, which says data is lost (GCE r698, TASK-44.15); one the
 	 * host refused for want of room, past private_max, the guest's count and the host's apart,
 	 * EIO (TASK-170). Neither dirties the page nor keeps room for it.
@@ -1371,7 +1371,7 @@ static void cow_private_failed(void)
 }
 
 /*
- * fxdax: that a writeback Fxfs finds no memory for (TASK-207) fails its fsync ENOMEM, Fxfs holding
+ * cladefs: that a writeback Fxfs finds no memory for (TASK-207) fails its fsync ENOMEM, Fxfs holding
  * the file as it was, and keeps its pages dirty, their room reserved again: a rebind, which maps
  * the file's sealed extents over its clean private pages, leaves them as written, as does a clone,
  * which takes the store's blocks, and the next fsync writes them. Clean, as an I/O error's, the

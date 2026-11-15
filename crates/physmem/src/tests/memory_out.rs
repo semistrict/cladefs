@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! Tests of memory out, lifted from fxdax's port of the Zircon kernel
+//! Tests of memory out, lifted from cladefs's port of the Zircon kernel
 //! (`vm::unittests::memory_out_unittest`, TASK-50.3, TASK-79.70): an allocation that finds no free
 //! page at all fails, as the node's failure, unless relief makes it room; and fails once relief
 //! makes none, rather than wait for ever.

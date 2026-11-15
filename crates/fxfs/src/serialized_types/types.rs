@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/serialized_types/types.rs`. fxdax deviates from upstream here:
+// Fuchsia's `src/storage/fxfs/src/serialized_types/types.rs`. cladefs deviates from upstream here:
 // it never migrates (AGENTS.md), so every format change is breaking, and the only version a mount
 // reads is the latest (`EARLIEST_SUPPORTED_VERSION` is `LATEST_VERSION`); the table lists no type a
 // version before the latest used. Version 60 locates data in extents of an extent store rather
@@ -63,7 +63,7 @@ pub const OLD_KEY_SERIALIZATION_VERSION: Version = Version { major: 57, minor: 0
 ///
 /// Also check the constant version numbers above for any code cleanup that can happen.
 ///
-/// fxdax: the latest, whatever it is: every change is breaking, as no format is migrated.
+/// cladefs: the latest, whatever it is: every change is breaking, as no format is migrated.
 pub const EARLIEST_SUPPORTED_VERSION: Version = LATEST_VERSION;
 
 // From this version forward, the journal encryption uses AES-256-XTS instead of Chacha20, as well

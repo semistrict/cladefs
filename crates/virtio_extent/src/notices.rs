@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -39,7 +39,7 @@ fn raise(interrupt: &Mutex<Option<Arc<dyn ConfigInterrupt>>>) -> bool {
     }
 }
 
-/// fxdax: what the device knows of its store's capacity, which the daemon changes
+/// cladefs: what the device knows of its store's capacity, which the daemon changes
 /// (`RemoteExtentStore::on_capacity`): the capacity, the shrink the guest is asked to take, if any
 /// (0 if none), and how the guest is told, once the driver activates the device. The daemon's
 /// changes and the guest's answers are made one at a time (`changing`), so that an answer to a
@@ -112,7 +112,7 @@ impl Resizing {
     }
 }
 
-/// fxdax: what a follower's device knows of its writer's commits (`VIRTIO_EXTENT_F_READ_ONLY`,
+/// cladefs: what a follower's device knows of its writer's commits (`VIRTIO_EXTENT_F_READ_ONLY`,
 /// `RemoteExtentStore::on_committed`): the latest commit's epoch, and how the guest is told, once
 /// the driver activates the device.
 #[derive(Default)]
@@ -149,7 +149,7 @@ impl Following {
     }
 }
 
-/// fxdax: the extent daemon's asks for the guest's stats (`VIRTIO_EXTENT_F_STATS`, TASK-111.4):
+/// cladefs: the extent daemon's asks for the guest's stats (`VIRTIO_EXTENT_F_STATS`, TASK-111.4):
 /// the latest, which the configuration's `stats_asked` says, and how the guest is told, while the
 /// driver that activated the device takes asks.
 #[derive(Default)]
@@ -195,7 +195,7 @@ impl StatsAsks {
     }
 }
 
-/// fxdax: what the device's guest and the daemon tell each other beside requests, which the
+/// cladefs: what the device's guest and the daemon tell each other beside requests, which the
 /// requests are served with: the store's capacity, whether the guest's filesystem is frozen
 /// (`VIRTIO_EXTENT_T_FREEZE`), as a snapshot needs it, and the daemon's asks for the guest's stats
 /// (`VIRTIO_EXTENT_F_STATS`).
@@ -235,7 +235,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// fxdax TASK-79.41: the guest's answer to a shrink it was asked to take, once a newer shrink
+    /// cladefs TASK-79.41: the guest's answer to a shrink it was asked to take, once a newer shrink
     /// was asked, is that of a shrink no longer asked: the newer stays asked, and the capacity is
     /// the daemon's; the answer to the shrink asked last takes it.
     #[test]
@@ -269,7 +269,7 @@ pub(crate) mod tests {
         assert_eq!((resizing.capacity(), resizing.asked()), (8, 0));
     }
 
-    /// fxdax TASK-111.4: the daemon's asks for the guest's stats reach the guest, the
+    /// cladefs TASK-111.4: the daemon's asks for the guest's stats reach the guest, the
     /// configuration's `stats_asked` and a configuration change, while the driver takes asks; while
     /// it doesn't, none is asked, for the store to answer at once.
     #[test]

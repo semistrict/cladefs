@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Followers' torture test (fxdax's backlog doc-8 testing 6, TASK-42.7), as Linux's rcutorture: a
+//! Followers' torture test (cladefs's backlog doc-8 testing 6, TASK-42.7), as Linux's rcutorture: a
 //! writer VM changes its filesystem for a while, syncing as it goes, and two follower VMs follow
 //! it, read-only, while their readers check what they read, each against what can be:
 //!
@@ -98,7 +98,7 @@ const BLOCK: usize = 4096;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, setup_rootfs};
+    use crate::common::{cladefs_guest_should_run, setup_rootfs};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::Context;
@@ -115,9 +115,9 @@ mod host {
     /// has to hold what its writer left, and its watchdog's report of where it is stuck.
     const HUNG_AFTER: std::time::Duration = std::time::Duration::from_secs(100);
 
-    /// How long the writer changes its filesystem: FXDAX_FOLLOW_SECONDS, for a soak; 20 by default.
+    /// How long the writer changes its filesystem: CLADEFS_FOLLOW_SECONDS, for a soak; 20 by default.
     fn seconds() -> u64 {
-        std::env::var("FXDAX_FOLLOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20)
+        std::env::var("CLADEFS_FOLLOW_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(20)
     }
 
     impl TestFxfsGuestFollowTorture {
@@ -139,8 +139,8 @@ mod host {
             } else {
                 vm.extent_store_following("extents", store, window)?;
             }
-            vm.env(&CString::new(format!("FXDAX_FOLLOW={role}"))?);
-            vm.env(&CString::new(format!("FXDAX_FOLLOW_SECONDS={}", seconds()))?);
+            vm.env(&CString::new(format!("CLADEFS_FOLLOW={role}"))?);
+            vm.env(&CString::new(format!("CLADEFS_FOLLOW_SECONDS={}", seconds()))?);
             // The windows the protocol closes, widened; or a mutant's, the rule closing it off.
             match self.mutant {
                 None => {
@@ -174,7 +174,7 @@ mod host {
             let store = dir.join("store");
             let uds = |role: &str| -> PathBuf {
                 std::env::temp_dir()
-                    .join(format!("fxdax-torture-{}-{role}.vsock", std::process::id()))
+                    .join(format!("cladefs-torture-{}-{role}.vsock", std::process::id()))
             };
             let history = Arc::new(Mutex::new(History::new()));
             let listener = UnixListener::bind(format!("{}_{PORT}", uds("writer").display()))?;
@@ -273,7 +273,7 @@ mod host {
         Ok(std::thread::spawn(move || {
             let control = match &store {
                 Some(_) => {
-                    let extentd = std::env::var_os("FXDAX_EXTENTD").expect("FXDAX_EXTENTD set");
+                    let extentd = std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD set");
                     Some(crate::common::control(Path::new(&extentd))?)
                 }
                 None => None,
@@ -367,7 +367,7 @@ mod host {
 
     impl Test for TestFxfsGuestFollowTorture {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {
@@ -446,7 +446,7 @@ mod guest {
     }
 
     fn seconds() -> u64 {
-        std::env::var("FXDAX_FOLLOW_SECONDS").unwrap().parse().unwrap()
+        std::env::var("CLADEFS_FOLLOW_SECONDS").unwrap().parse().unwrap()
     }
 
     fn mount() {
@@ -1198,7 +1198,7 @@ mod guest {
         fn in_guest(self: Box<Self>) {
             fs::create_dir_all(MNT).unwrap();
             mount();
-            match std::env::var("FXDAX_FOLLOW").unwrap().as_str() {
+            match std::env::var("CLADEFS_FOLLOW").unwrap().as_str() {
                 "writer" => writer(),
                 role => follower(role),
             }

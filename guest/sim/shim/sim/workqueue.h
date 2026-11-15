@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* Workqueues: each queued work runs in a simulated task of its own, unbound, as dax.c's do. */
 #ifndef _SIM_WORKQUEUE_H
 #define _SIM_WORKQUEUE_H

@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 """Checks that each of the repo's source files carries the license header its origin needs.
 
 - Code copied or adapted from Fuchsia keeps The Fuchsia Authors' copyright: a file that has it, or
   that cites a Fuchsia source in its leading comment, as scripts/upstream-changes.py finds them.
-- fxdax's own code, and its adaptations, carry The fxdax Authors' copyright.
+- cladefs's own code, and its adaptations, carry The cladefs Authors' copyright.
 - Either is under the license of the nearest LICENSE file above it: BSD-3-Clause at the root, as
-  Fuchsia is, MIT in crates/physmem, lifted from fxdax's port of the Zircon kernel, as Zircon is. The
+  Fuchsia is, MIT in crates/physmem, lifted from cladefs's port of the Zircon kernel, as Zircon is. The
   header says which, in Fuchsia's words.
 - guest/linux, built into the guest's Linux kernel, is GPL-2.0 OR BSD-3-Clause, and its patches to
-  the kernel GPL-2.0, as the kernel is: an SPDX line, then fxdax's copyright. So is guest/sim, which
+  the kernel GPL-2.0, as the kernel is: an SPDX line, then cladefs's copyright. So is guest/sim, which
   links with the kernel's sources to run guest/linux's, and crates/fxfs-sim-diff's shim of
   guest/sim's kernel, which builds guest/sim's model of Fxfs.
 - The parts of Rust's std imported into the guest's std (scripts/import-guest-std.py) keep Rust's
   copyright and its MIT OR Apache-2.0 license.
 - libkrun's test framework, which the guest tests' harness (guest/tests) came from, keeps
-  libkrun's copyright and its Apache-2.0 license (guest/tests/LICENSE.libkrun), with fxdax's
-  copyright for its changes; the test cases fxdax wrote there are fxdax's own.
+  libkrun's copyright and its Apache-2.0 license (guest/tests/LICENSE.libkrun), with cladefs's
+  copyright for its changes; the test cases cladefs wrote there are cladefs's own.
 
 Not checked: hand mutants' patches (`*/mutants/*.patch`), whose leading comment is the mutant's
 fields, which its runner reads (`# Killer:`, `# Kind:`): a mutant is a change to a file whose own
@@ -32,7 +32,7 @@ scripts/test.sh's scripts part runs this, as CI does.
 
 Usage: scripts/license-headers.py [--fix]
 
---fix   add the headers missing: fxdax's, and Fuchsia's to a file citing Fuchsia, of the year of the
+--fix   add the headers missing: cladefs's, and Fuchsia's to a file citing Fuchsia, of the year of the
         oldest copyright among the sources it cites, read from the Fuchsia checkout ($FUCHSIA, by
         default ~/src/fuchsia) at the revision the root Cargo.toml records
 """
@@ -51,7 +51,7 @@ upstream = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(upstream)
 
 FUCHSIA = re.compile(r"Copyright \d{4} The Fuchsia Authors")
-FXDAX = re.compile(r"Copyright \d{4} The fxdax Authors")
+CLADEFS = re.compile(r"Copyright \d{4} The cladefs Authors")
 RUST = re.compile(r"Copyright \(c\) The Rust Project Contributors")
 LIBKRUN = re.compile(r"Copyright The libkrun Authors")
 STYLE = {
@@ -67,7 +67,7 @@ BUILD_FILES = ("Makefile", "Kconfig")
 # Hand mutants' patches: changes to files whose headers cover them, their leading comments their
 # fields (the module's docs).
 MUTANT = re.compile(r"(^|/)mutants/[^/]+\.patch$")
-# Under the kernel's license as well as fxdax's: guest/linux's, and what runs it outside the kernel.
+# Under the kernel's license as well as cladefs's: guest/linux's, and what runs it outside the kernel.
 DUAL = ("guest/linux/", "guest/sim/", "crates/fxfs-sim-diff/shim/")
 
 
@@ -141,7 +141,7 @@ def needs(path, text):
         return ("libkrun", None)
     cited = path.startswith("crates/") and upstream.CITATION.findall(head)
     if not cited:
-        return ("fuchsia" if FUCHSIA.search(head) else "fxdax", style(path))
+        return ("fuchsia" if FUCHSIA.search(head) else "cladefs", style(path))
     if not checkout():
         # Which license, unknown without what it cites.
         return ("fuchsia", None)
@@ -159,8 +159,8 @@ def problems(path, text):
         spdx = SPDX.search(head)
         if not spdx or spdx.group(1) != detail:
             found.append(f"no SPDX-License-Identifier: {detail}")
-        if not FXDAX.search(head):
-            found.append("no copyright of The fxdax Authors")
+        if not CLADEFS.search(head):
+            found.append("no copyright of The cladefs Authors")
         return found
     if kind == "rust":
         spdx = SPDX.search(head)
@@ -171,8 +171,8 @@ def problems(path, text):
         spdx = SPDX.search(head)
         if not spdx or spdx.group(1) != "Apache-2.0":
             found.append("libkrun's, without SPDX-License-Identifier: Apache-2.0")
-        if not FXDAX.search(head):
-            found.append("libkrun's, without The fxdax Authors' copyright of its changes")
+        if not CLADEFS.search(head):
+            found.append("libkrun's, without The cladefs Authors' copyright of its changes")
         return found
     if kind == "fuchsia":
         if not FUCHSIA.search(head):
@@ -186,8 +186,8 @@ def problems(path, text):
         for other in upstream_copyrights(cited)[1] if cited else []:
             if other not in head:
                 found.append(f"cites Fuchsia sources of \"{other}\", without that copyright")
-    if kind == "fxdax" and not FXDAX.search(head):
-        found.append("no copyright of The fxdax Authors")
+    if kind == "cladefs" and not CLADEFS.search(head):
+        found.append("no copyright of The cladefs Authors")
     if not STYLE[detail].search(head):
         found.append(f"no {detail}-style license notice, as {why(path, kind, detail)}")
     other = "MIT" if detail == "BSD" else "BSD"
@@ -282,13 +282,13 @@ def missing(path, text):
     kind, detail = needs(path, text)
     prefix = marker(path)
     if kind == "spdx":
-        copyright = f"Copyright {created(path)} The fxdax Authors."
+        copyright = f"Copyright {created(path)} The cladefs Authors."
         spdx = f"SPDX-License-Identifier: {detail}"
         wrap = (lambda line: f"/* {line} */") if path.endswith(".h") else (
             lambda line: f"{prefix} {line}"
         )
         lines = [] if SPDX.search(head) else [wrap(spdx)]
-        return lines + ([] if FXDAX.search(head) else [wrap(copyright)]), []
+        return lines + ([] if CLADEFS.search(head) else [wrap(copyright)]), []
     if kind in ("rust", "libkrun"):
         return [], []
     if detail is None:
@@ -299,12 +299,12 @@ def missing(path, text):
         year, others, _ = upstream_copyrights(upstream.CITATION.findall(head))
         if not FUCHSIA.search(head):
             lines.append(f"{prefix} Copyright {year} The Fuchsia Authors.{reserved}")
-            # fxdax adapted what it cites, as it carries no header of Fuchsia's.
-            if not FXDAX.search(head):
-                lines.append(f"{prefix} Copyright {created(path)} The fxdax Authors.{reserved}")
+            # cladefs adapted what it cites, as it carries no header of Fuchsia's.
+            if not CLADEFS.search(head):
+                lines.append(f"{prefix} Copyright {created(path)} The cladefs Authors.{reserved}")
         lines += [f"{prefix} {other}" for other in others if other not in head]
-    elif not FXDAX.search(head):
-        lines.append(f"{prefix} Copyright {created(path)} The fxdax Authors.{reserved}")
+    elif not CLADEFS.search(head):
+        lines.append(f"{prefix} Copyright {created(path)} The cladefs Authors.{reserved}")
     return lines, [] if STYLE[detail].search(head) else notice(detail, prefix, path)
 
 

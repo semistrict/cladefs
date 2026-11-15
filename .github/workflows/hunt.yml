@@ -1,4 +1,4 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -103,10 +103,10 @@ jobs:
         shard: [0, 1, 2, 3]
     env:
       # 50 times the tests' own 96 and 120, a quarter a shard.
-      FXDAX_MODEL_CASES: 1200
-      FXDAX_CORRUPT_CASES: 1500
+      CLADEFS_MODEL_CASES: 1200
+      CLADEFS_CORRUPT_CASES: 1500
     steps:
-      # With vendor/firecracker: cargo resolves the whole workspace, and fxdax depends on its
+      # With vendor/firecracker: cargo resolves the whole workspace, and cladefs depends on its
       # seccompiler by path, so without it no package builds (TASK-282).
       - uses: actions/checkout@v7
         with:
@@ -132,8 +132,8 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           index=$(( (GITHUB_RUN_NUMBER - 1) * 4 + SHARD ))
-          export FXDAX_CORRUPT_SEED=$(( 120 + index * FXDAX_CORRUPT_CASES )) PROPTEST_RNG_SEED=$(( index + 1 ))
-          seeds="PROPTEST_RNG_SEED=$PROPTEST_RNG_SEED FXDAX_MODEL_CASES=$FXDAX_MODEL_CASES FXDAX_CORRUPT_SEED=$FXDAX_CORRUPT_SEED FXDAX_CORRUPT_CASES=$FXDAX_CORRUPT_CASES"
+          export CLADEFS_CORRUPT_SEED=$(( 120 + index * CLADEFS_CORRUPT_CASES )) PROPTEST_RNG_SEED=$(( index + 1 ))
+          seeds="PROPTEST_RNG_SEED=$PROPTEST_RNG_SEED CLADEFS_MODEL_CASES=$CLADEFS_MODEL_CASES CLADEFS_CORRUPT_SEED=$CLADEFS_CORRUPT_SEED CLADEFS_CORRUPT_CASES=$CLADEFS_CORRUPT_CASES"
           mkdir -p hunt
           status=0
           # What passing tests said too: a known panic, counted apart, says so only there.
@@ -142,7 +142,7 @@ jobs:
           cat hunt/nextest.log
           {
             echo "# At $GITHUB_SHA, each test that failed, again (a corruption case's seed alone, as"
-            echo "# its panic says, with FXDAX_CORRUPT_SEED=SEED FXDAX_CORRUPT_CASES=1 and --no-capture):"
+            echo "# its panic says, with CLADEFS_CORRUPT_SEED=SEED CLADEFS_CORRUPT_CASES=1 and --no-capture):"
             sed -nE 's/^ *FAIL \[.*\] (\([0-9]+\/[0-9]+\) )?fxfs-posix (.*)$/\2/p' hunt/nextest.log | sort -u |
               while read -r test; do
                 echo "$seeds cargo nextest run -p fxfs-posix -E 'test(=$test)'"
@@ -174,9 +174,9 @@ jobs:
       matrix:
         shard: [0, 1, 2, 3]
     env:
-      FXDAX_HOSTILE_CASES: 1920
+      CLADEFS_HOSTILE_CASES: 1920
     steps:
-      # With vendor/firecracker, whose seccompiler fxdax's tests build with (TASK-149.28).
+      # With vendor/firecracker, whose seccompiler cladefs's tests build with (TASK-149.28).
       - uses: actions/checkout@v7
         with:
           submodules: true
@@ -205,18 +205,18 @@ jobs:
           sudo chown "$USER" /mnt/tmp
           echo TMPDIR=/mnt/tmp >> "$GITHUB_ENV"
       - name: Build
-        run: cargo nextest run -p fxdax --lib --no-run
+        run: cargo nextest run -p cladefs --lib --no-run
       - name: The compromised VM process, at 160 times its cases
         env:
           SHARD: ${{ matrix.shard }}
         run: |
           export PROPTEST_RNG_SEED=$(( (GITHUB_RUN_NUMBER - 1) * 4 + SHARD + 1 ))
           test='extentd::tests::hostile::a_compromised_vm_process_harms_no_tenant_beside_it'
-          again="PROPTEST_RNG_SEED=$PROPTEST_RNG_SEED FXDAX_HOSTILE_CASES=$FXDAX_HOSTILE_CASES"
+          again="PROPTEST_RNG_SEED=$PROPTEST_RNG_SEED CLADEFS_HOSTILE_CASES=$CLADEFS_HOSTILE_CASES"
           mkdir -p hunt
-          echo "# At $GITHUB_SHA: $again cargo nextest run -p fxdax --lib -E 'test(=$test)'" > hunt/replay
+          echo "# At $GITHUB_SHA: $again cargo nextest run -p cladefs --lib -E 'test(=$test)'" > hunt/replay
           status=0
-          cargo nextest run -p fxdax --lib -E "test(=$test)" > hunt/nextest.log 2>&1 || status=$?
+          cargo nextest run -p cladefs --lib -E "test(=$test)" > hunt/nextest.log 2>&1 || status=$?
           # What failed alone: a failing case's output is its every connection's log.
           grep -E '^ *(PASS|FAIL|SIG[A-Z]+|ABORT|TIMEOUT) |Fail\(Reason|bytes held, of at most|Summary' \
             hunt/nextest.log | cut -c1-2000 || true
@@ -242,7 +242,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
-      FXDAX_SOAK_SECS: 1800
+      CLADEFS_SOAK_SECS: 1800
     steps:
       - uses: actions/checkout@v7
         with:
@@ -269,11 +269,11 @@ jobs:
           sudo chown "$USER" /mnt/tmp
           echo TMPDIR=/mnt/tmp >> "$GITHUB_ENV"
       - name: Build
-        run: cargo nextest run -p fxdax --lib --no-run
+        run: cargo nextest run -p cladefs --lib --no-run
       - name: The daemon against a degraded bucket, half an hour
         run: |
           mkdir -p hunt
-          cargo nextest run -p fxdax --lib --run-ignored all --no-capture \
+          cargo nextest run -p cladefs --lib --run-ignored all --no-capture \
             -E 'test(=extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound)' \
             > hunt/soak.log 2>&1 || status=$?
           grep -E '^soak: |panicked|PASS|FAIL' hunt/soak.log | tee -a "$GITHUB_STEP_SUMMARY" || true

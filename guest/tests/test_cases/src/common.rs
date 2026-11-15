@@ -1,5 +1,5 @@
 // Copyright The libkrun Authors.
-// Copyright 2026 The fxdax Authors: changed for fxdax's guest tests.
+// Copyright 2026 The cladefs Authors: changed for cladefs's guest tests.
 // SPDX-License-Identifier: Apache-2.0
 
 //! Common utilities used by multiple test
@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use crate::{ShouldRun, TestSetup};
 
 fn copy_guest_agent(dir: &Path) -> anyhow::Result<()> {
-    let path = std::env::var_os("FXDAX_GUEST_AGENT")
-        .context("FXDAX_GUEST_AGENT does not name the guest agent")?;
+    let path = std::env::var_os("CLADEFS_GUEST_AGENT")
+        .context("CLADEFS_GUEST_AGENT does not name the guest agent")?;
 
     let output_path = dir.join("guest-agent");
     fs::copy(path, output_path).context("Failed to copy executable into vm")?;
@@ -31,40 +31,40 @@ pub fn setup_rootfs(test_setup: &TestSetup) -> anyhow::Result<PathBuf> {
     Ok(root_dir)
 }
 
-/// Whether a test of fxdax's guest kernel's Fxfs runs: FXDAX_FIRECRACKER names the VMM, and
-/// FXDAX_GUEST_KERNEL the kernel, and FXDAX_EXTENTD the socket of the extent daemon that serves
-/// the device's store (as fxdax's scripts/test-e2e.sh has them).
-pub fn fxdax_guest_should_run() -> ShouldRun {
+/// Whether a test of cladefs's guest kernel's Fxfs runs: CLADEFS_FIRECRACKER names the VMM, and
+/// CLADEFS_GUEST_KERNEL the kernel, and CLADEFS_EXTENTD the socket of the extent daemon that serves
+/// the device's store (as cladefs's scripts/test-e2e.sh has them).
+pub fn cladefs_guest_should_run() -> ShouldRun {
     if !crate::vm::has_vmm() {
-        return ShouldRun::No("FXDAX_FIRECRACKER does not name fxdax's Firecracker");
+        return ShouldRun::No("CLADEFS_FIRECRACKER does not name cladefs's Firecracker");
     }
-    if std::env::var_os("FXDAX_GUEST_KERNEL").is_none() {
-        return ShouldRun::No("FXDAX_GUEST_KERNEL does not name a guest kernel");
+    if std::env::var_os("CLADEFS_GUEST_KERNEL").is_none() {
+        return ShouldRun::No("CLADEFS_GUEST_KERNEL does not name a guest kernel");
     }
-    if std::env::var_os("FXDAX_EXTENTD").is_none() {
-        return ShouldRun::No("FXDAX_EXTENTD does not name the extent daemon's socket");
+    if std::env::var_os("CLADEFS_EXTENTD").is_none() {
+        return ShouldRun::No("CLADEFS_EXTENTD does not name the extent daemon's socket");
     }
     ShouldRun::Yes
 }
 
-/// fxdax: how many times slower than a release one the guest kernel is, by its kind,
-/// FXDAX_GUEST_KERNEL_BUILD's, as scripts/lib/test-linux-host.sh built it (a release one if
+/// cladefs: how many times slower than a release one the guest kernel is, by its kind,
+/// CLADEFS_GUEST_KERNEL_BUILD's, as scripts/lib/test-linux-host.sh built it (a release one if
 /// unset): what a test's time limits scale by (TASK-168). The debug kernel's measured: its checks
 /// of a second or more took 1.37 times the release kernel's at most (GCE r561, r562 against r560,
 /// r563). The others' guessed, KASAN's from its outrunning the checks' 180 s where the release
 /// kernel took 140 s or so (TASK-44.8).
 pub fn guest_kernel_slowness() -> anyhow::Result<f64> {
-    match std::env::var("FXDAX_GUEST_KERNEL_BUILD").unwrap_or_default().as_str() {
+    match std::env::var("CLADEFS_GUEST_KERNEL_BUILD").unwrap_or_default().as_str() {
         "" | "release" => Ok(1.0),
         "debug" | "rust-checks" | "coverage" => Ok(1.5),
         "kasan" => Ok(4.0),
         kind => anyhow::bail!(
-            "FXDAX_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks, not {kind:?}"
+            "CLADEFS_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks, not {kind:?}"
         ),
     }
 }
 
-/// fxdax: says in the round's log what the daemon named `name` the test spawned ([`spawn_daemon`])
+/// cladefs: says in the round's log what the daemon named `name` the test spawned ([`spawn_daemon`])
 /// kept in its stats file, how long its commits waited to be made durable among it: a passing
 /// round's directory, and the file in it, doesn't outlive the run (TASK-165.9).
 pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
@@ -83,7 +83,7 @@ pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
     }
 }
 
-/// fxdax: the `daemon:` line of a daemon's stats file at `path`, its fields by name: what
+/// cladefs: the `daemon:` line of a daemon's stats file at `path`, its fields by name: what
 /// fxfs-guest-shared-disk and fxfs-guest-sandboxes report and check of their daemons' writes.
 pub fn daemon_stats(path: &Path) -> anyhow::Result<std::collections::BTreeMap<String, u64>> {
     let kept = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -96,7 +96,7 @@ pub fn daemon_stats(path: &Path) -> anyhow::Result<std::collections::BTreeMap<St
         .collect())
 }
 
-/// fxdax: what a process cost its host, as its kernel counts it, whatever the process says of
+/// cladefs: what a process cost its host, as its kernel counts it, whatever the process says of
 /// itself: what an A/B of two pins compares of their daemons, a pin's daemon from before it
 /// counted its own writes and memory among them (TASK-330.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -147,7 +147,7 @@ fn clock_ticks() -> f64 {
     (unsafe { nix::libc::sysconf(nix::libc::_SC_CLK_TCK) }) as f64
 }
 
-/// fxdax: the memory limit nearest this process in its cgroups (memory.max, its own cgroup's or
+/// cladefs: the memory limit nearest this process in its cgroups (memory.max, its own cgroup's or
 /// the nearest ancestor's that sets one), and what that cgroup holds now that reclaim can't take
 /// back (memory.stat's anon and shmem: no swap takes them): what the kernel's OOM killer goes by.
 /// None where no cgroup sets a limit.
@@ -180,7 +180,7 @@ fn unreclaimable(max: &str, stat: &str) -> Option<(u64, u64)> {
     Some((max, field("anon") + field("shmem")))
 }
 
-/// fxdax: the memory process `pid` holds now (/proc/PID/status's `VmRSS`), 0 if it says none.
+/// cladefs: the memory process `pid` holds now (/proc/PID/status's `VmRSS`), 0 if it says none.
 pub fn resident(pid: u32) -> u64 {
     let status = fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     let kib = status.lines().find_map(|line| line.strip_prefix("VmRSS:"));
@@ -188,10 +188,10 @@ pub fn resident(pid: u32) -> u64 {
         << 10
 }
 
-/// fxdax: a case's measurements, in the fs bench's shape (test_fs_bench.rs), which
+/// cladefs: a case's measurements, in the fs bench's shape (test_fs_bench.rs), which
 /// scripts/bench-ab.py compares two sides' rounds of (TASK-330.4): each a workload of one value
 /// a run, its unit and whether higher is better; and the checks the case failed, how many of each
-/// kind and what each said. [`Measured::save`] writes them to FXDAX_BENCH_RESULTS, if set, as
+/// kind and what each said. [`Measured::save`] writes them to CLADEFS_BENCH_RESULTS, if set, as
 /// `bench-CASE.json`.
 #[derive(serde::Serialize)]
 pub struct Measured {
@@ -254,16 +254,16 @@ impl Measured {
         self.lower(format!("{name}.cpu"), "s", costs.cpu_secs);
     }
 
-    /// Writes them to FXDAX_BENCH_RESULTS, if set.
+    /// Writes them to CLADEFS_BENCH_RESULTS, if set.
     pub fn save(&self) -> anyhow::Result<()> {
-        let Some(dir) = std::env::var_os("FXDAX_BENCH_RESULTS") else { return Ok(()) };
+        let Some(dir) = std::env::var_os("CLADEFS_BENCH_RESULTS") else { return Ok(()) };
         let path = Path::new(&dir).join(format!("bench-{}.json", self.case));
         let json = serde_json::to_string_pretty(self)?;
         fs::write(&path, json).with_context(|| format!("writing {}", path.display()))
     }
 }
 
-/// fxdax: fails unless the daemon named `name` the test spawned made half its stores' commits
+/// cladefs: fails unless the daemon named `name` the test spawned made half its stores' commits
 /// durable within extentd's turn, 50 ms, at least, as its stats file says: doc-12's median
 /// (`durable_lag_within_50ms`, TASK-221).
 pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Result<()> {
@@ -283,11 +283,11 @@ pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Resul
     Ok(())
 }
 
-/// fxdax: the most bytes a DAX window has, the extent daemon's (`extentd::wire::MAX_WINDOW`): what
+/// cladefs: the most bytes a DAX window has, the extent daemon's (`extentd::wire::MAX_WINDOW`): what
 /// it keeps for a window grows with the pages it maps, which it bounds so (TASK-150.3).
 pub const MAX_DAX_WINDOW: u64 = 64 << 30;
 
-/// fxdax: a case's DAX window: as large as the data, the host's memory, or `FXDAX_DAX_WINDOW_MIB`'s
+/// cladefs: a case's DAX window: as large as the data, the host's memory, or `CLADEFS_DAX_WINDOW_MIB`'s
 /// if set ([`Window::Large`]); or a small window's, whose cases check it fills
 /// ([`Window::Small`]), as fxfs-guest-checks-dax-small's, which a large one fails (TASK-227).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -296,17 +296,17 @@ pub enum Window {
     Small(u64),
 }
 
-/// fxdax: the bytes of a case's DAX window `window` asks for ([`Window`]): the window is address
+/// cladefs: the bytes of a case's DAX window `window` asks for ([`Window`]): the window is address
 /// space, not memory, the daemon's pages it maps one copy whatever the windows' sizes, as
 /// virtio-pmem maps a whole image; its guest makes struct pages for what it reaches alone
 /// (TASK-92.8), and its VM process keeps changes for those pages alone (TASK-227).
 pub fn dax_window(window: Window) -> anyhow::Result<u64> {
-    let given = std::env::var("FXDAX_DAX_WINDOW_MIB").ok();
+    let given = std::env::var("CLADEFS_DAX_WINDOW_MIB").ok();
     let meminfo = std::fs::read_to_string("/proc/meminfo")?;
     window_bytes(window, given.as_deref(), &meminfo)
 }
 
-/// fxdax: [`dax_window`]'s bytes, of `window`, `given` FXDAX_DAX_WINDOW_MIB's, and the host's
+/// cladefs: [`dax_window`]'s bytes, of `window`, `given` CLADEFS_DAX_WINDOW_MIB's, and the host's
 /// /proc/meminfo, `meminfo`: a large window's `given`'s, or the host's MemTotal, rounded down to a
 /// window's 2 MiB, at most [`MAX_DAX_WINDOW`].
 fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::Result<u64> {
@@ -314,7 +314,7 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
     match window {
         Window::Small(bytes) => Ok(bytes),
         Window::Large if let Some(mib) = given.filter(|mib| !mib.is_empty()) => {
-            Ok(mib.parse::<u64>().context("FXDAX_DAX_WINDOW_MIB")? << 20)
+            Ok(mib.parse::<u64>().context("CLADEFS_DAX_WINDOW_MIB")? << 20)
         }
         Window::Large => {
             let line = (meminfo.lines().find(|line| line.starts_with("MemTotal:")))
@@ -326,15 +326,15 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
     }
 }
 
-/// An extent daemon of the test's own, FXDAX_EXTENTD_BIN, serving at `socket`, and its control API
+/// An extent daemon of the test's own, CLADEFS_EXTENTD_BIN, serving at `socket`, and its control API
 /// beside it ([`control`]), once this returns, with `env` in its environment, and `memory` bytes of
 /// memory if given; otherwise, as production's, its memory a page cache of what of the host's is
 /// free (TASK-358). It logs to `<name>.log` in the test's directory.
-/// fxdax: it keeps what its stores read from their bucket in a part cache of its own,
+/// cladefs: it keeps what its stores read from their bucket in a part cache of its own,
 /// `<name>-cache` in the test's directory, as production's daemon keeps it on the host's disk
-/// (`FXDAX_EXTENTD_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
+/// (`CLADEFS_EXTENTD_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
 /// daemon at a time has a cache's directory (TASK-164.12). And it keeps what it did in
-/// `<name>-stats.txt` beside its log, unless `env` names a file (`FXDAX_EXTENTD_STATS`): what it
+/// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFS_EXTENTD_STATS`): what it
 /// downloaded against what it read, which the run's summary says (scripts/guest_results.py,
 /// TASK-165.12).
 pub fn spawn_daemon(
@@ -346,7 +346,7 @@ pub fn spawn_daemon(
 ) -> anyhow::Result<std::process::Child> {
     use std::time::{Duration, Instant};
 
-    let bin = std::env::var_os("FXDAX_EXTENTD_BIN").context("FXDAX_EXTENTD_BIN")?;
+    let bin = std::env::var_os("CLADEFS_EXTENTD_BIN").context("CLADEFS_EXTENTD_BIN")?;
     let log = fs::File::create(test_setup.tmp_dir.join(format!("{name}.log")))?;
     // A host keeps stores in a bucket, `env`'s or this process's, or a file bucket of its own in
     // the test's directory, as of placement 1, unless one is named. Not one in its memory: the
@@ -358,26 +358,26 @@ pub fn spawn_daemon(
             || std::env::var_os(var).is_some_and(|value| !value.is_empty())
     };
     let mut command = std::process::Command::new(bin);
-    command.arg(socket).env("FXDAX_EXTENTD_GRPC", socket.with_extension("control"));
+    command.arg(socket).env("CLADEFS_EXTENTD_GRPC", socket.with_extension("control"));
     if let Some(memory) = memory {
         command.arg(memory.to_string());
     }
-    if !named("FXDAX_EXTENTD_REMOTE") {
+    if !named("CLADEFS_EXTENTD_REMOTE") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));
-        command.env("FXDAX_EXTENTD_REMOTE", format!("file://{}/", bucket.display()));
+        command.env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()));
     }
-    if !named("FXDAX_EXTENTD_TOKEN") {
-        command.env("FXDAX_EXTENTD_TOKEN", "1");
+    if !named("CLADEFS_EXTENTD_TOKEN") {
+        command.env("CLADEFS_EXTENTD_TOKEN", "1");
     }
-    let given = env.iter().find(|(var, _)| *var == "FXDAX_EXTENTD_CACHE").map(|(_, value)| *value);
-    let ours = std::env::var_os("FXDAX_EXTENTD_CACHE");
+    let given = env.iter().find(|(var, _)| *var == "CLADEFS_EXTENTD_CACHE").map(|(_, value)| *value);
+    let ours = std::env::var_os("CLADEFS_EXTENTD_CACHE");
     if let Some(cache) = part_cache(given, ours.as_deref(), &test_setup.tmp_dir, name) {
         fs::create_dir_all(&cache)?;
-        command.env("FXDAX_EXTENTD_CACHE", cache);
+        command.env("CLADEFS_EXTENTD_CACHE", cache);
     }
-    let given = env.iter().any(|(var, _)| *var == "FXDAX_EXTENTD_STATS");
+    let given = env.iter().any(|(var, _)| *var == "CLADEFS_EXTENTD_STATS");
     if let Some(stats) = stats_file(given, &test_setup.tmp_dir, name) {
-        command.env("FXDAX_EXTENTD_STATS", stats);
+        command.env("CLADEFS_EXTENTD_STATS", stats);
     }
     let daemon = command.envs(env.iter().copied()).stderr(log).spawn()?;
     test_setup.register_cleanup_pid(daemon.id());
@@ -394,9 +394,9 @@ pub fn spawn_daemon(
     }
 }
 
-/// fxdax: the part cache a test's daemon `name` is given, in `dir`, the test's directory, as
-/// production's daemon keeps one on the host's disk (`FXDAX_EXTENTD_CACHE`, doc-7), unless
-/// `FXDAX_EXTENTD_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
+/// cladefs: the part cache a test's daemon `name` is given, in `dir`, the test's directory, as
+/// production's daemon keeps one on the host's disk (`CLADEFS_EXTENTD_CACHE`, doc-7), unless
+/// `CLADEFS_EXTENTD_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
 /// as it is, empty for none. Without one, a fork paged in what it inherited from the bucket a ranged
 /// GET at a time: forked-dax 0.304 in the perf gate, 0.849 with it (TASK-164.12, GCE r790, r792).
 fn part_cache(
@@ -408,7 +408,7 @@ fn part_cache(
     (given.is_none() && ours.is_none()).then(|| dir.join(format!("{name}-cache")))
 }
 
-/// fxdax: the stats file a test's daemon `name` keeps what it did in, `<name>-stats.txt` in `dir`,
+/// cladefs: the stats file a test's daemon `name` keeps what it did in, `<name>-stats.txt` in `dir`,
 /// the test's directory, beside its log, unless `env` names one (`given`): what the run's summary
 /// reads of each daemon, its downloads against its reads (scripts/guest_results.py, TASK-165.12).
 /// Not this process's, which scripts/test-e2e.sh's own daemon alone has, its file the run's.
@@ -417,14 +417,14 @@ fn stats_file(given: bool, dir: &Path, name: &str) -> Option<PathBuf> {
 }
 
 /// Gives the extent daemon's socket at `socket`, its user's alone (TASK-155), to the user of the
-/// jails Firecracker runs in, if it does: scripts/test-e2e.sh's FXDAX_FIRECRACKER_JAIL. Each
+/// jails Firecracker runs in, if it does: scripts/test-e2e.sh's CLADEFS_FIRECRACKER_JAIL. Each
 /// jailed Firecracker here uses the default tenant's socket, as production's use a tenant's.
 pub fn give_to_the_jail(socket: &Path) -> anyhow::Result<()> {
     let id = |name: &str| -> anyhow::Result<Option<u32>> {
         let Ok(value) = std::env::var(name) else { return Ok(None) };
         Ok(Some(value.parse().with_context(|| format!("{name} is not a number"))?))
     };
-    if let (Some(uid), Some(gid)) = (id("FXDAX_JAIL_UID")?, id("FXDAX_JAIL_GID")?) {
+    if let (Some(uid), Some(gid)) = (id("CLADEFS_JAIL_UID")?, id("CLADEFS_JAIL_GID")?) {
         std::os::unix::fs::chown(socket, Some(uid), Some(gid))
             .with_context(|| format!("giving {} to the jail's user", socket.display()))?;
     }
@@ -432,10 +432,10 @@ pub fn give_to_the_jail(socket: &Path) -> anyhow::Result<()> {
 }
 
 /// A client of the control API of the extent daemon whose VM socket is at `socket`: at its control
-/// socket, beside it, `<socket>.control` for `<socket>.sock`, as fxdax's scripts/test-e2e.sh and
+/// socket, beside it, `<socket>.control` for `<socket>.sock`, as cladefs's scripts/test-e2e.sh and
 /// [`spawn_daemon`] place it.
-pub fn control(socket: &Path) -> Result<fxdax::extentd::control::Client, fxdax::Error> {
-    fxdax::extentd::control::Client::connect(socket.with_extension("control"))
+pub fn control(socket: &Path) -> Result<cladefs::extentd::control::Client, cladefs::Error> {
+    cladefs::extentd::control::Client::connect(socket.with_extension("control"))
 }
 
 /// Copies the extent store at `from` to `to`, as [`copy_dir`] does, once no process has it open: its
@@ -488,8 +488,8 @@ mod tests {
         let io = "rchar: 10\nwchar: 20\nsyscr: 1\nsyscw: 2\nread_bytes: 4096\nwrite_bytes: 8192\n\
                   cancelled_write_bytes: 0\n";
         let status =
-            "Name:\tfxdax-extentd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
-        let stat = "42 (fxdax extentd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
+            "Name:\tcladefs-extentd\nVmPeak:\t  900 kB\nVmHWM:\t    512 kB\nVmRSS:\t 400 kB\n";
+        let stat = "42 (cladefs extentd) S 1 42 42 0 -1 4194560 100 0 0 0 250 50 0 0 20 0 9 0";
         let costs = ProcessCosts::parse(io, status, stat, 100.0).unwrap();
         assert_eq!(costs, ProcessCosts { disk_written: 8192, peak_rss: 512 << 10, cpu_secs: 3.0 });
         assert_eq!(
@@ -499,7 +499,7 @@ mod tests {
     }
 
     /// TASK-164.12: a test's daemon keeps a part cache of its own in the test's directory, as
-    /// production's does, unless FXDAX_EXTENTD_CACHE is said, by the daemon's environment or this
+    /// production's does, unless CLADEFS_EXTENTD_CACHE is said, by the daemon's environment or this
     /// process's, which it takes as it is, empty for none.
     #[test]
     fn daemons_keep_a_part_cache_unless_told_otherwise() {
@@ -515,7 +515,7 @@ mod tests {
     }
 
     /// TASK-227: a case's DAX window is the host's memory, rounded down to 2 MiB, at most a
-    /// window's 64 GiB, or FXDAX_DAX_WINDOW_MIB's, unless it is a small window's, which stays so:
+    /// window's 64 GiB, or CLADEFS_DAX_WINDOW_MIB's, unless it is a small window's, which stays so:
     /// fxfs-guest-checks-dax-small's window_filled failed in 64 GiB (GCE r886).
     #[test]
     fn windows_are_as_large_as_the_hosts_memory() {

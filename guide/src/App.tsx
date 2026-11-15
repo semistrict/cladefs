@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -127,7 +127,7 @@ export function App() {
       <header className="bar">
         <div className="bar-inner">
           <a href="#atlas" className="brand" style={{ textDecoration: "none", color: "inherit" }}>
-            fxdax <span>Flight School</span>
+            cladefs <span>Flight School</span>
           </a>
           <nav className="nav" aria-label="Views">
             {NAV.map(([id, label]) => (
@@ -153,7 +153,7 @@ export function App() {
               <span className="eyebrow">Index</span>
               <h1>Every symbol, Fuchsia’s included</h1>
               <p>
-                Functions, types, traits, modules, consts and statics of fxdax and of the Fuchsia code it copies, from
+                Functions, types, traits, modules, consts and statics of cladefs and of the Fuchsia code it copies, from
                 tree-sitter, with each one’s first doc sentence. Open one for its links: a search for its exact signature,
                 never a line number.
               </p>

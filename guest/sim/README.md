@@ -11,7 +11,7 @@ TASK-149.14. The workspace doesn't build it: `zloop.sh` runs it, in CI's `guest-
 On Linux, with clang and lld, against a tree of the guest's kernel: `scripts/build-guest-kernel.sh`
 leaves one, and `kernel-tree.sh <tree>` fetches what's needed of one, in seconds, with nothing built.
 Elsewhere, `linux.sh COMMAND` runs any of what follows in a container (Docker, `Dockerfile`'s
-image), with `KERNEL` and `BUILD` in its volume `fxdax-sim`: `./linux.sh ./zloop.sh`.
+image), with `KERNEL` and `BUILD` in its volume `cladefs-sim`: `./linux.sh ./zloop.sh`.
 
 ```
 make KERNEL=<tree> BUILD=<dir>
@@ -530,8 +530,8 @@ and shared blocks are alike; and no extent Fxfs says open does the model say sea
 have dax.c here MAP what a host refuses. Some sequences run an operation at one of the model's
 `sim_point`s, where its locks let one in, as this simulator's tasks interleave: a seal's COMMIT and
 end, writeback's copy, write, reply and commit. A workspace crate, CI's workspace part runs it, on
-Linux and macOS, 64 sequences in 15 seconds on a quiet laptop; `FXDAX_SIM_DIFF_CASES` asks for
-more, `FXDAX_SIM_DIFF_OPS` longer ones. Its `mutants.sh` runs it against each mutant of
+Linux and macOS, 64 sequences in 15 seconds on a quiet laptop; `CLADEFS_SIM_DIFF_CASES` asks for
+more, `CLADEFS_SIM_DIFF_OPS` longer ones. Its `mutants.sh` runs it against each mutant of
 `../mutants` that changes the model; those only it kills say `Kernel: model` and
 `Killer: fxfs-sim-diff TEST`.
 

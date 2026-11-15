@@ -297,7 +297,7 @@ impl<'a> KeyDeserializer<'a> {
     }
 }
 
-/// fxdax: a key that a block's base is above: `SerializeKey::serialize_key_with_base_into`.
+/// cladefs: a key that a block's base is above: `SerializeKey::serialize_key_with_base_into`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 #[error("A key is below its block's base")]
 pub struct KeyBelowBase;
@@ -327,7 +327,7 @@ pub trait SerializeKey: Sized {
     }
 
     /// Serializes this key directly into `buffer` with its length prefix and delta `base`
-    /// subtracted from the leading `u64`. fxdax: if it isn't below `base`, which what's being
+    /// subtracted from the leading `u64`. cladefs: if it isn't below `base`, which what's being
     /// compared or written may be, as an out of order key of a corrupt layer is: a delta is never
     /// negative, so no caller has to know that before calling.
     #[inline]
@@ -468,7 +468,7 @@ impl SerializeKey for std::ops::Range<u64> {
     }
 }
 
-/// fxdax: extent IDs sort by sequence number, then branch (see `storage_device::ExtentId`), which
+/// cladefs: extent IDs sort by sequence number, then branch (see `storage_device::ExtentId`), which
 /// a key holding one leads with.
 impl SerializeKey for storage_device::ExtentId {
     type Output<'a, B: Buffer + 'a> = KeySerializer<'a, B>;

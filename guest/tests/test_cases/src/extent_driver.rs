@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -29,7 +29,7 @@ pub fn bind(device: &str) {
     fs::write(format!("{DRIVER}/bind"), device).unwrap();
 }
 
-/// fxdax: the bound device's attribute `name`, if the driver is bound to one: a check may have
+/// cladefs: the bound device's attribute `name`, if the driver is bound to one: a check may have
 /// unbound it.
 pub fn attribute(name: &str) -> Option<String> {
     let entries = fs::read_dir(DRIVER).ok()?.filter_map(Result::ok);
@@ -38,7 +38,7 @@ pub fn attribute(name: &str) -> Option<String> {
     fs::read_to_string(devices.next()?.path().join(name)).ok()
 }
 
-/// fxdax: how long the bound device has had a request in flight, all told (`busy_ns`): the guest's
+/// cladefs: how long the bound device has had a request in flight, all told (`busy_ns`): the guest's
 /// time waiting for the host (TASK-263). From 0 at each bind.
 pub fn busy() -> Option<std::time::Duration> {
     let ns = attribute("busy_ns")?;

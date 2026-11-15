@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -10,12 +10,12 @@
 #
 # std, core and alloc are built for the target and laid out as a sysroot, which the probe is
 # built against, so that crates written for std use the kernel's. Everything lives in
-# $FXDAX_GUEST_STD_WORK (default: a new temporary directory), the build's log in probe.log. Needs
+# $CLADEFS_GUEST_STD_WORK (default: a new temporary directory), the build's log in probe.log. Needs
 # jq.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 target=${1:-aarch64-unknown-none-softfloat}
-work=${FXDAX_GUEST_STD_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/fxdax-std.XXXXXX")}
+work=${CLADEFS_GUEST_STD_WORK:-$(mktemp -d "${TMPDIR:-/tmp}/cladefs-std.XXXXXX")}
 mkdir -p "$work"
 work=$(cd "$work" && pwd)
 toolchain=$(sed -n 's/^channel = "\(.*\)"/\1/p' "$root/guest/rust/rust-toolchain.toml")

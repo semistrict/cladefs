@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /*
  * The VFS, faked at the level dax.c meets it: inodes, files and their mappings, kept by the sim's
  * own mount (kernel/vfs.c), and iov_iters over a kernel buffer or a task's simulated memory.

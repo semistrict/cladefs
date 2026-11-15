@@ -1,6 +1,6 @@
 ------------------------------ MODULE Bucket ------------------------------
 (***************************************************************************)
-(* Copyright 2026 The fxdax Authors. All rights reserved.                  *)
+(* Copyright 2026 The cladefs Authors. All rights reserved.                  *)
 (* Use of this source code is governed by a BSD-style license that can be  *)
 (* found in the LICENSE file.                                              *)
 (*                                                                         *)
@@ -41,7 +41,7 @@
 (* acknowledged, and the rest restamped after the head's end, if the       *)
 (* branch's last segment is the last of those, or the branch's last commit *)
 (* the commit the WAL started from; otherwise the WAL diverged, and is     *)
-(* dropped, as `fxdaxctl take` drops it. A commit is a segment of the WAL, *)
+(* dropped, as `cladefsctl take` drops it. A commit is a segment of the WAL, *)
 (* stamped by the chain; or, spanning segments (TASK-92.41), segments      *)
 (* going on with it, a run of it in each, then the one it ends in. Readers *)
 (* hold such runs until that one; writers acknowledge, and so heads name,  *)

@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
@@ -12,7 +12,7 @@
 //! range. Being shared memory, a page can also be mapped wherever another
 //! process maps its arena's object, as a physical page would be.
 //!
-//! fxdax: physical memory is in arenas, each a shared memory object of its own
+//! cladefs: physical memory is in arenas, each a shared memory object of its own
 //! (TASK-43), so that a process given one arena's object reaches that arena's
 //! pages alone: the extent daemon hands each tenant's VM processes their
 //! tenant's arena, and the default arena, which everything else's pages are
@@ -26,7 +26,7 @@
 //! and where each chunk is, which any thread may ask. What changes them is for
 //! the PMM's arenas alone.
 //!
-//! fxdax: a chunk an arena has is a host mapping of its own at most, as the
+//! cladefs: a chunk an arena has is a host mapping of its own at most, as the
 //! chunks next to it may be other arenas', or none's, and a host may limit the
 //! mappings a process makes, as Linux does (`vm.max_map_count`, TASK-79.37). So
 //! the physmap is no larger than the host maps the chunks of ([`max_size`]), and
@@ -70,11 +70,11 @@ struct ArenaObject {
 /// What no chunk is assigned to, in a chunk's entry of the chunk table.
 const UNASSIGNED: u64 = u64::MAX;
 
-/// fxdax: how many mappings the process keeps for itself beside the physmap's: its libraries', its
+/// cladefs: how many mappings the process keeps for itself beside the physmap's: its libraries', its
 /// threads' stacks', whatever else it maps.
 const MAPPINGS_RESERVED: u64 = 4096;
 
-/// fxdax: the most physical memory, in bytes, whose chunks the host maps (TASK-79.37), if it
+/// cladefs: the most physical memory, in bytes, whose chunks the host maps (TASK-79.37), if it
 /// limits the mappings a process makes ([`max_map_count`]; Linux's default if /proc doesn't say),
 /// [`MAPPINGS_RESERVED`] kept for the process's others, a chunk a mapping at most.
 pub fn max_size() -> Option<u64> {
@@ -82,10 +82,10 @@ pub fn max_size() -> Option<u64> {
     Some(max.saturating_sub(MAPPINGS_RESERVED) * CHUNK_SIZE as u64)
 }
 
-/// fxdax: Linux's `vm.max_map_count` unless raised.
+/// cladefs: Linux's `vm.max_map_count` unless raised.
 pub const DEFAULT_MAX_MAP_COUNT: u64 = 65_530;
 
-/// fxdax: how many mappings the host lets a process make, if it limits them, as Linux does:
+/// cladefs: how many mappings the host lets a process make, if it limits them, as Linux does:
 /// `vm.max_map_count` ([`DEFAULT_MAX_MAP_COUNT`] unless raised), which only /proc says; macOS
 /// does not. A process without /proc can't learn it, and fails: a VM process in its jail is told
 /// it by its daemon, which reads it here (TASK-172), as the default in its place would be wrong
@@ -109,7 +109,7 @@ pub struct PhysMemory {
     objects: RwLock<BTreeMap<ArenaId, ArenaObject>>,
     /// Each chunk's arena and slot, `arena << 32 | slot`, or `UNASSIGNED`.
     chunks: Box<[AtomicU64]>,
-    /// fxdax: where chunks to fault in go, to a thread of their own ([`PhysMemory::populate_later`]).
+    /// cladefs: where chunks to fault in go, to a thread of their own ([`PhysMemory::populate_later`]).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     populating: std::sync::Mutex<Option<std::sync::mpsc::Sender<usize>>>,
 }
@@ -120,7 +120,7 @@ unsafe impl Sync for PhysMemory {}
 
 /// Creates an anonymous shared memory object.
 ///
-/// fxdax: as the processes it is handed to may be hostile, a VM process escaped from its guest
+/// cladefs: as the processes it is handed to may be hostile, a VM process escaped from its guest
 /// (TASK-149.17): sealed against shrinking, which one handed it to write could otherwise do, its
 /// pages past the new end then faulting this process's own accesses (`SIGBUS`), the extent daemon
 /// and every tenant's VMs with it; and its owner's alone to open anew (0600, where a memfd is
@@ -130,7 +130,7 @@ unsafe impl Sync for PhysMemory {}
 fn create_shared_memory() -> OwnedFd {
     let flags = libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING;
     // SAFETY: The name is a valid C string.
-    let fd = unsafe { libc::memfd_create(c"fxdax-physical-memory".as_ptr(), flags) };
+    let fd = unsafe { libc::memfd_create(c"cladefs-physical-memory".as_ptr(), flags) };
     assert!(fd >= 0, "memfd_create: {}", std::io::Error::last_os_error());
     // SAFETY: `fd` was just created and is owned here.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
@@ -149,7 +149,7 @@ fn create_shared_memory() -> OwnedFd {
     use std::sync::atomic::AtomicU32;
     static NEXT: AtomicU32 = AtomicU32::new(0);
     // Names are limited to 31 bytes. The object is unlinked as soon as it is open.
-    let name = format!("/fxdax-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    let name = format!("/cladefs-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
     let name = std::ffi::CString::new(name).unwrap();
     // SAFETY: The name is a valid C string.
     let fd = unsafe {
@@ -197,7 +197,7 @@ impl ArenaObject {
     }
 }
 
-/// Sizes the shared memory object `fd` to `slots` chunks, at least. fxdax: it only grows, sealed
+/// Sizes the shared memory object `fd` to `slots` chunks, at least. cladefs: it only grows, sealed
 /// against shrinking on Linux ([`create_shared_memory`]): a process it was handed to, which may
 /// write it, may have grown it past that already, and may as it is grown here (TASK-149.17).
 fn resize(fd: &OwnedFd, slots: u64) {
@@ -227,7 +227,7 @@ fn resize(fd: &OwnedFd, slots: u64) {
 impl PhysMemory {
     /// Reserves `size` bytes of physical memory, a multiple of `CHUNK_SIZE`, which the default
     /// arena backs as it takes chunks. Pages are only committed by the host when first touched.
-    /// fxdax: no more than the host maps the chunks of ([`max_size`]).
+    /// cladefs: no more than the host maps the chunks of ([`max_size`]).
     pub fn new(size: usize) -> Self {
         assert!(size.is_multiple_of(CHUNK_SIZE), "physical memory is not whole chunks");
         assert!(

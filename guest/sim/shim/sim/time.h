@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
-/* Copyright 2026 The fxdax Authors. */
+/* Copyright 2026 The cladefs Authors. */
 /* The virtual clock, which runs only as tasks reach scheduling points or all of them sleep. */
 #ifndef _SIM_TIME_H
 #define _SIM_TIME_H

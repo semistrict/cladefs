@@ -363,7 +363,7 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
         let value = V::deserialize_from_version(self.buffer.by_ref(), self.layer.version)
             .map_err(|e| self.corruption_error(e))
             .context("Corrupt layer (value)")?;
-        // fxdax: the trust boundary of what a layer holds, which is what an image says: an item
+        // cladefs: the trust boundary of what a layer holds, which is what an image says: an item
         // that couldn't be is refused here, as it's read, so that what reads it after needn't ask
         // (`LayerKey::is_valid_item`, TASK-153.12). The block size is the store's, which its
         // layers are written in.
@@ -373,7 +373,7 @@ impl<K: Key, V: LayerValue, B: LayerBuffer> KeyOnlyIterator<'_, K, V, B> {
         Ok(Some(Item { key, value }))
     }
 
-    /// fxdax: what refuses an item no layer may hold (`take_item`), out of the way of what reads
+    /// cladefs: what refuses an item no layer may hold (`take_item`), out of the way of what reads
     /// one: no layer Fxfs writes holds one.
     #[cold]
     #[inline(never)]
@@ -537,7 +537,7 @@ impl<'iter, K: Key, V: LayerValue, B: LayerBuffer> Iterator<'iter, K, V, B> {
         Ok(Self { inner: seek_iterator, item })
     }
 
-    /// fxdax: takes the item the inner iterator advanced to, which comes after the last
+    /// cladefs: takes the item the inner iterator advanced to, which comes after the last
     /// (`follows`).
     fn take_next(&mut self) -> Result<(), Error> {
         let next = self.inner.take_item()?;
@@ -550,7 +550,7 @@ impl<'iter, K: Key, V: LayerValue, B: LayerBuffer> Iterator<'iter, K, V, B> {
         Ok(())
     }
 
-    /// fxdax: what refuses a key out of order (`take_next`), out of the way of what reads one.
+    /// cladefs: what refuses a key out of order (`take_next`), out of the way of what reads one.
     #[cold]
     #[inline(never)]
     fn out_of_order(&self, next: &K, last: &K) -> Error {
@@ -601,7 +601,7 @@ impl<'iter, K: Key, V: LayerValue> LayerIterator<K, V>
     }
 }
 
-/// fxdax: whether `next` may follow `last` in a layer, as a layer's keys do, each after the one
+/// cladefs: whether `next` may follow `last` in a layer, as a layer's keys do, each after the one
 /// before and overlapping none of them: what merges a layer trusts that, and fsck checks it
 /// (`check_layer_file_contents`). What a layer holds is what an image says, so they may not, which
 /// is refused as it's read (TASK-153.12).
@@ -687,7 +687,7 @@ async fn load_bloom_filter<K: FuzzyHash>(
     )?))
 }
 
-/// fxdax: where a layer's parts are, as its trailer and size say, which may be anything: the one
+/// cladefs: where a layer's parts are, as its trailer and size say, which may be anything: the one
 /// place that does sums with them, and so the one that has to check them.
 struct LayerLayout {
     data_size: u64,
@@ -809,7 +809,7 @@ impl<K: FuzzyHash> LayerData<K> {
                 .context("Failed to read layer info")?;
             let layer_info_len =
                 u64::from_le_bytes(buffer.subslice(bs - 8..bs).as_ptr_slice().read().unwrap());
-            // fxdax: the length is what the image says, which may be anything.
+            // cladefs: the length is what the image says, which may be anything.
             let layer_info_offset = (layer_info_len as usize)
                 .checked_add(std::mem::size_of::<u64>())
                 .and_then(|len| bs.checked_sub(len))
@@ -992,7 +992,7 @@ impl<K: Key, V: LayerValue> PersistentLayer<K, V> {
         Self::open_layer_with_contents(handle, None).await
     }
 
-    /// fxdax: as `open_layer`, with `contents`, all of the layer's, if given, cached already.
+    /// cladefs: as `open_layer`, with `contents`, all of the layer's, if given, cached already.
     async fn open_layer_with_contents(
         handle: Arc<dyn LayerObject>,
         contents: Option<Vec<u8>>,
@@ -1034,7 +1034,7 @@ impl<K: Key, V: LayerValue> PersistentLayer<K, V> {
         Self::open_handle_with_contents(handle, unwrapped_key, None).await
     }
 
-    /// fxdax: as `open_handle`, with `contents`, all of the layer's, if given, cached already,
+    /// cladefs: as `open_handle`, with `contents`, all of the layer's, if given, cached already,
     /// unless a pager serves the layer.
     async fn open_handle_with_contents(
         handle: DataObjectHandle<ObjectStore>,
@@ -1120,7 +1120,7 @@ pub async fn layer_from_handle<K: Key, V: LayerValue>(
     PersistentLayer::open_handle(handle, unwrapped_key).await
 }
 
-/// fxdax: as `layer_from_handle`, for a layer just written through `writer`, which kept what it
+/// cladefs: as `layer_from_handle`, for a layer just written through `writer`, which kept what it
 /// wrote: cached already, rather than read back as soon as the layer is used (as a compaction's
 /// layer is: a directory listed after a compaction read the layer's chunks back one by one).
 pub async fn layer_from_written_handle<K: Key, V: LayerValue>(
@@ -1131,7 +1131,7 @@ pub async fn layer_from_written_handle<K: Key, V: LayerValue>(
     PersistentLayer::open_handle_with_contents(handle, unwrapped_key, kept.take()).await
 }
 
-/// fxdax: what a `KeptWriter` wrote, once it completed, unless it wrote more than it keeps.
+/// cladefs: what a `KeptWriter` wrote, once it completed, unless it wrote more than it keeps.
 #[derive(Clone, Default)]
 pub struct KeptContents(Arc<std::sync::Mutex<Option<Vec<u8>>>>);
 
@@ -1141,7 +1141,7 @@ impl KeptContents {
     }
 }
 
-/// fxdax: a writer that keeps a copy of what it writes through `inner`, up to `limit` bytes,
+/// cladefs: a writer that keeps a copy of what it writes through `inner`, up to `limit` bytes,
 /// which it leaves in `kept` as it completes.
 pub struct KeptWriter<W> {
     inner: W,
@@ -1551,7 +1551,7 @@ impl<W: WriteBytes, K: Key, V: LayerValue> PersistentLayerWriter<W, K, V> {
         if self.version <= OLD_KEY_SERIALIZATION_VERSION {
             item.key.serialize_into(&mut self.buf)?;
         } else {
-            // fxdax: what's written comes from layers, in order only if they were: a key below its
+            // cladefs: what's written comes from layers, in order only if they were: a key below its
             // block's base is what a compaction of a corrupt one meets.
             let base = *self.block_keys.last().unwrap();
             item.key
@@ -1624,7 +1624,7 @@ impl<W: WriteBytes + Send, K: Key, V: LayerValue> LayerWriter<K, V>
     }
 }
 
-/// Logs a warning if this object is dropped and the contained value isn't 0. fxdax: without
+/// Logs a warning if this object is dropped and the contained value isn't 0. cladefs: without
 /// asserting, as upstream does: a compaction that fails, as one reading a corrupt layer does, drops
 /// its writer with items in it.
 #[repr(transparent)]
@@ -1651,7 +1651,7 @@ impl std::ops::DerefMut for LayerWriterBufItemCount {
     }
 }
 
-// fxdax: what the target of crates/fxfs/fuzz runs: a layer written as a writer would have written
+// cladefs: what the target of crates/fxfs/fuzz runs: a layer written as a writer would have written
 // it, changed, then opened and read, as a mount and a compaction read it.
 #[cfg(fuzz)]
 pub mod fuzz {
@@ -2039,7 +2039,7 @@ mod tests {
         assert!(iterator.get().is_none());
     }
 
-    /// fxdax: a small layer, as an object to change.
+    /// cladefs: a small layer, as an object to change.
     async fn written_layer() -> Arc<FakeObject> {
         let object = Arc::new(FakeObject::new());
         let handle = FakeObjectHandle::new_with_block_size(object.clone(), BlockSize::SIZE_4KIB);
@@ -2055,13 +2055,13 @@ mod tests {
         object
     }
 
-    /// fxdax: the layer `object` holds, if it opens.
+    /// cladefs: the layer `object` holds, if it opens.
     async fn open_layer(object: &Arc<FakeObject>) -> Result<(), Error> {
         let handle = FakeObjectHandle::new_with_block_size(object.clone(), BlockSize::SIZE_4KIB);
         PersistentLayer::<i32, i32>::open(handle).await.map(drop)
     }
 
-    /// fxdax: makes `layer_info` what `object` ends with.
+    /// cladefs: makes `layer_info` what `object` ends with.
     fn set_layer_info(object: &FakeObject, layer_info: &LayerInfo) {
         let mut serialized = Vec::new();
         layer_info.serialize_into(&mut serialized).expect("serializing");
@@ -2072,7 +2072,7 @@ mod tests {
         });
     }
 
-    /// fxdax: a layer's trailing length near the largest there is overflowed what it was added to.
+    /// cladefs: a layer's trailing length near the largest there is overflowed what it was added to.
     #[fuchsia::test]
     async fn test_layer_info_length_may_be_anything() {
         for length in [u64::MAX - 7, u64::MAX] {
@@ -2087,7 +2087,7 @@ mod tests {
         }
     }
 
-    /// fxdax: a layer's counts of blocks overflowed their sum, whose check they then passed.
+    /// cladefs: a layer's counts of blocks overflowed their sum, whose check they then passed.
     #[fuchsia::test]
     async fn test_layer_block_counts_may_be_anything() {
         let object = written_layer().await;
@@ -2103,7 +2103,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a layer's count of items is what the bloom filter of what compacts it is sized for.
+    /// cladefs: a layer's count of items is what the bloom filter of what compacts it is sized for.
     #[fuchsia::test]
     async fn test_layer_item_count_may_be_anything() {
         let object = written_layer().await;
@@ -2119,7 +2119,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a layer's size is how many chunks a caching handle has entries for: no more than
+    /// cladefs: a layer's size is how many chunks a caching handle has entries for: no more than
     /// the layer says it holds.
     #[fuchsia::test]
     async fn test_layer_no_longer_than_it_says() {
@@ -2143,7 +2143,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a bloom filter's count of hashes is how long each query takes.
+    /// cladefs: a bloom filter's count of hashes is how long each query takes.
     #[fuchsia::test]
     async fn test_layer_bloom_hashes_may_be_anything() {
         let object = written_layer().await;
@@ -2162,7 +2162,7 @@ mod tests {
         assert_eq!(error, Some(&FxfsError::Inconsistent));
     }
 
-    /// fxdax: a layer of `items`, as a writer would write them, in blocks of 4 KiB.
+    /// cladefs: a layer of `items`, as a writer would write them, in blocks of 4 KiB.
     async fn layer_of<K: Key, V: LayerValue>(items: &[Item<K, V>]) -> Arc<dyn Layer<K, V>> {
         let object = Arc::new(FakeObject::new());
         let handle = FakeObjectHandle::new_with_block_size(object.clone(), BlockSize::SIZE_4KIB);
@@ -2179,7 +2179,7 @@ mod tests {
         PersistentLayer::open(handle).await.expect("open failed")
     }
 
-    /// fxdax: a layer of `items` scans as far as `good` of them, then fails, Inconsistent: what a
+    /// cladefs: a layer of `items` scans as far as `good` of them, then fails, Inconsistent: what a
     /// layer holds is what an image says, and what no layer may hold is refused as it's read.
     async fn scan_until_refused<K: Key + PartialEq, V: LayerValue + PartialEq>(
         items: &[Item<K, V>],
@@ -2199,7 +2199,7 @@ mod tests {
         layer
     }
 
-    /// fxdax: as `scan_until_refused`, of an item no layer may hold, `items[good]`, which a seek
+    /// cladefs: as `scan_until_refused`, of an item no layer may hold, `items[good]`, which a seek
     /// to it is refused too.
     async fn read_until_refused<K: Key + PartialEq, V: LayerValue + PartialEq>(
         items: &[Item<K, V>],
@@ -2211,7 +2211,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: an item an object store's layer can't hold is refused as it's read: a layer's items
+    /// cladefs: an item an object store's layer can't hold is refused as it's read: a layer's items
     /// are what `Journal::validate_mutation` lets by, as a mutation of the journal's.
     #[fuchsia::test]
     async fn test_layer_items_are_checked_as_they_are_read() {
@@ -2261,7 +2261,7 @@ mod tests {
         }
     }
 
-    /// fxdax: an item an allocator's layer can't hold is refused as it's read, as of an object
+    /// cladefs: an item an allocator's layer can't hold is refused as it's read, as of an object
     /// store's.
     #[fuchsia::test]
     async fn test_allocator_layer_items_are_checked_as_they_are_read() {
@@ -2281,7 +2281,7 @@ mod tests {
         read_until_refused(&[item(0..4096, 5), item(4096..8192, 0)], 1).await;
     }
 
-    /// fxdax: a layer's keys come each after the one before, overlapping none: what merges it
+    /// cladefs: a layer's keys come each after the one before, overlapping none: what merges it
     /// trusts that, so a layer that says otherwise is refused as it's read.
     #[fuchsia::test]
     async fn test_layer_keys_out_of_order_are_refused_as_they_are_read() {
@@ -2297,7 +2297,7 @@ mod tests {
         assert_eq!(iterator.get(), Some(touching[1].as_item_ref()));
     }
 
-    /// fxdax: a compaction of a corrupt layer may write a key below the first of its block, which
+    /// cladefs: a compaction of a corrupt layer may write a key below the first of its block, which
     /// the writer's delta encoding has no way to write.
     #[fuchsia::test]
     async fn test_writer_refuses_keys_below_their_block() {
@@ -2311,7 +2311,7 @@ mod tests {
         assert!(FxfsError::Inconsistent.matches(&error), "{error:?}");
     }
 
-    /// fxdax: a writer dropped with items in it is no panic: a compaction that failed drops one.
+    /// cladefs: a writer dropped with items in it is no panic: a compaction that failed drops one.
     #[fuchsia::test]
     async fn test_writer_dropped_with_items() {
         let handle = FakeObjectHandle::new(Arc::new(FakeObject::new()));
@@ -2739,7 +2739,7 @@ mod tests {
         assert_eq!(item.key.0.start, target_val);
     }
 
-    /// fxdax: AllocatorKey, whose leading u64 changed in the older version, has no versions
+    /// cladefs: AllocatorKey, whose leading u64 changed in the older version, has no versions
     /// before 60, so TestKey stands in, whose leading u64 is its end.
     #[fuchsia::test]
     async fn test_older_version_seek() {
@@ -3148,7 +3148,7 @@ mod tests {
     }
 }
 
-/// fxdax: a `KeptWriter` keeps what it writes, or nothing once that is more than it keeps.
+/// cladefs: a `KeptWriter` keeps what it writes, or nothing once that is more than it keeps.
 #[cfg(test)]
 mod kept_writer_tests {
     use super::{KeptContents, KeptWriter};
@@ -3201,7 +3201,7 @@ mod kept_writer_tests {
     }
 }
 
-/// fxdax: what reading a layer of an object store's items costs, an item at a time and a seek at a
+/// cladefs: what reading a layer of an object store's items costs, an item at a time and a seek at a
 /// time, to compare a change to the read path with: in release, alone (TASK-153.12).
 /// `cargo nextest run --release -p fxfs --run-ignored only --no-capture layer_read_cost`
 #[cfg(test)]

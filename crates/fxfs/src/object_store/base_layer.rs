@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// fxdax's own: the layers a volume has of a base, a volume another filesystem wrote (backlog
+// cladefs's own: the layers a volume has of a base, a volume another filesystem wrote (backlog
 // doc-10). A base layer is no object of this filesystem: its store's information says where its
 // extents are, which the device reads through to the base, and the allocator never holds.
 

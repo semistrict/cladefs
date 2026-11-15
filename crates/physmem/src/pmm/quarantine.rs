@@ -1,10 +1,10 @@
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 //
 // Use of this source code is governed by a MIT-style
 // license that can be found in the LICENSE file or at
 // https://opensource.org/licenses/MIT
 
-//! fxdax's own: the quarantine of freed pages a hypervisor's second stage may map still
+//! cladefs's own: the quarantine of freed pages a hypervisor's second stage may map still
 //! (TASK-79.9). A window's second stage, as the extent daemon's connection to a VM process is,
 //! makes the window's changes as they are sent, after the sender made them, and they are sent with
 //! the sender's locks held, so it waits for none: a page whose mapping it took away is reached
@@ -28,13 +28,13 @@ use std::sync::OnceLock;
 /// dropped.
 pub struct Quarantined {
     frames: Vec<u32>,
-    /// fxdax: the arena relief's pass evicted them for, freed on its thread, which is owed them
+    /// cladefs: the arena relief's pass evicted them for, freed on its thread, which is owed them
     /// until they come back (`relief::relieving`, TASK-161).
     relieving: Option<ArenaId>,
 }
 
 impl Quarantined {
-    /// fxdax: `frames`' pages, freed, quarantined, as their arenas count them until they come back
+    /// cladefs: `frames`' pages, freed, quarantined, as their arenas count them until they come back
     /// (TASK-106), and the arena relief evicts them for, if it does, as it is owed them (TASK-161).
     fn new(frames: Vec<u32>) -> Self {
         let relieving = super::relief::relieving();

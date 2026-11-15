@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-// Fuchsia's `src/storage/fxfs/src/fsck/store_scanner.rs`. fxdax snapshots (volume snapshots that
+// Fuchsia's `src/storage/fxfs/src/fsck/store_scanner.rs`. cladefs snapshots (volume snapshots that
 // share their source's layers and extents) deviate from upstream here: a store's extents are its
 // data owner's except where frozen owners hold them or a base does (backlog doc-10), and a root
 // object (a shared layer) may be referenced by several stores' information.
@@ -32,12 +32,12 @@ use std::sync::Arc;
 use storage_device::ExtentId;
 use storage_units::BlockSize;
 
-/// fxdax: how far past a file's end, to the next boundary of this many bytes, appends through a
+/// cladefs: how far past a file's end, to the next boundary of this many bytes, appends through a
 /// DAX window reserve blocks ahead of their writes (the guest's FXFS_DAX_APPEND_SIZE, TASK-92.58),
 /// which a clean unmount leaves as a crash does (TASK-133).
 const APPEND_RESERVATION: u64 = 64 << 10;
 
-/// fxdax: where a file `size` bytes long may have blocks up to.
+/// cladefs: where a file `size` bytes long may have blocks up to.
 fn max_extent_end(bs: BlockSize, size: u64) -> u64 {
     // What a corrupt file's size may be.
     let reserved = size.checked_next_multiple_of(APPEND_RESERVATION).unwrap_or(u64::MAX);
@@ -99,7 +99,7 @@ struct ScannedFile {
     // If fsverity-enabled, contains the hash size.
     verified: VerifiedType,
     wrapping_key_id: Option<WrappingKeyId>,
-    // fxdax: what its entries say it is, as its POSIX mode says: a regular file, or a special file.
+    // cladefs: what its entries say it is, as its POSIX mode says: a regular file, or a special file.
     descriptor: ObjectDescriptor,
 }
 
@@ -163,9 +163,9 @@ struct ScannedStore<'a> {
     objects: BTreeMap<u64, ScannedObject>,
     root_objects: Vec<u64>,
     store_id: u64,
-    /// fxdax: the owner the store allocates under, which a snapshot may have changed.
+    /// cladefs: the owner the store allocates under, which a snapshot may have changed.
     data_owner: u64,
-    // fxdax: the branches of the extents of the store's base, if it has one (backlog doc-10).
+    // cladefs: the branches of the extents of the store's base, if it has one (backlog doc-10).
     base_branches: HashSet<u64>,
     is_root_store: bool,
     is_encrypted: bool,
@@ -239,7 +239,7 @@ impl<'a> ScannedStore<'a> {
                         if let Some(project_id) = project_id {
                             self.used_project_ids.insert(*project_id, key.object_id);
                             let entry = self.total_project_usages.entry(*project_id).or_default();
-                            // fxdax: the size is what an image says.
+                            // cladefs: the size is what an image says.
                             let allocated = i64::try_from(*allocated_size).unwrap_or(i64::MAX);
                             entry.0 = entry.0.saturating_add(allocated);
                             entry.1 += 1;
@@ -249,7 +249,7 @@ impl<'a> ScannedStore<'a> {
                             key_ids: HashMap::default(),
                             lazy_keys: false,
                         });
-                        // fxdax: a root object is referenced once by each of the root objects
+                        // cladefs: a root object is referenced once by each of the root objects
                         // listing it, as a layer file is by each store sharing it (snapshots).
                         let roots =
                             self.root_objects.iter().filter(|id| **id == key.object_id).count();
@@ -1062,7 +1062,7 @@ impl<'a> ScannedStore<'a> {
                 device_offset,
             ))?;
         }
-        // fxdax: the extent is the store's current data owner's, unless it is shared with other
+        // cladefs: the extent is the store's current data owner's, unless it is shared with other
         // stores (snapshots), which fsck checks no store for, or is its base's, which the allocator
         // doesn't hold.
         if !self.fsck.is_shared(&store_extent) && !self.base_branches.contains(&store_extent.branch)
@@ -1627,7 +1627,7 @@ pub(super) async fn scan_store(
                 if parents.is_empty() {
                     fsck.warning(FsckWarning::OrphanedObject(store_id, *object_id))?;
                 }
-                // fxdax: a root object may be one several times (a layer shared by snapshots),
+                // cladefs: a root object may be one several times (a layer shared by snapshots),
                 // but must have no other parents.
                 if parents.contains(&INVALID_OBJECT_ID)
                     && parents.iter().any(|oid| *oid != INVALID_OBJECT_ID)
@@ -1766,7 +1766,7 @@ mod tests {
     use super::max_extent_end;
     use storage_units::BlockSize;
 
-    /// fxdax: a file's size is what an image says.
+    /// cladefs: a file's size is what an image says.
     #[test]
     fn test_max_extent_end_of_any_size() {
         assert_eq!(max_extent_end(BlockSize::SIZE_4KIB, u64::MAX), u64::MAX);

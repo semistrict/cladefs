@@ -237,7 +237,7 @@ mod tests {
         });
     }
 
-    // fxdax: a task the scope gave its last guard, dropped before it is polled again while other
+    // cladefs: a task the scope gave its last guard, dropped before it is polled again while other
     // tasks remain, wakes what waits on the scope: Fxfs's unmount waits so on a volume's scope.
     #[test]
     fn task_dropped_with_last_guard_wakes_waiters() {

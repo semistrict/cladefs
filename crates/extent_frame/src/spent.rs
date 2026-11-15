@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: the sequence numbers of a branch's own extents freed once sealed, which it writes no
+//! cladefs: the sequence numbers of a branch's own extents freed once sealed, which it writes no
 //! more ([`Spent`], TASK-79.6). An extent's ID is its branch's to write once: what holds a sealed
 //! extent by its ID takes the same ID for the same data, as the lineage's forks and views do, the
 //! cache of extents a process's stores share, and object storage. A guest that freed one of its

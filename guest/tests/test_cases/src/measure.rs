@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what a VM costs its host's memory, measured when its guest asks (TASK-164.5). The guest
+//! cladefs: what a VM costs its host's memory, measured when its guest asks (TASK-164.5). The guest
 //! connects to the host over vsock, on [`PORT`], and says `measure PHASE NAME=VALUE...`, its own
 //! memory then; the host says, on its standard error, the test's log, the host's memory then, as
 //! `memory: vm=VM phase=PHASE NAME=VALUE...`, which scripts/pgbench-gate.py reads, and answers
@@ -20,11 +20,11 @@
 //! - `host_kvm_page_tables`: KVM's page tables for its guests, the host's (/proc/meminfo's
 //!   SecPageTables), which a DAX window's pages mapped take (TASK-227);
 //! - `extentd_pss`: the daemon process's share of its own;
-//! - `extentd_*`: some of the daemon's metrics (fxdax::extentd::metrics): the bytes its arenas
+//! - `extentd_*`: some of the daemon's metrics (cladefs::extentd::metrics): the bytes its arenas
 //!   hold, every tenant's extents' pages (`extentd_memory_bytes`), the pages the windows map, its
 //!   faults, and any gauge of private pages it keeps (copy-on-write DAX's, TASK-164.1);
 //! - `guest_*`: what the guest said of itself: its memory (/proc/meminfo), faults (/proc/vmstat),
-//!   and its Fxfs's counts of copy-on-write DAX's private pages (`guest_fxfs_*`); fxdax: how long
+//!   and its Fxfs's counts of copy-on-write DAX's private pages (`guest_fxfs_*`); cladefs: how long
 //!   its kernel took from its start to running init (`guest_boot_ns`, the kernel log's record of
 //!   it); the struct pages its kernel made after it booted, its DAX windows' (`guest_memmap`,
 //!   /proc/vmstat's nr_memmap_pages); and of its extent devices' DAX windows, their length, how
@@ -67,7 +67,7 @@ mod host {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    /// The daemon's metrics reported, by their names less `fxdax_extentd_`: besides them, any gauge
+    /// The daemon's metrics reported, by their names less `cladefs_extentd_`: besides them, any gauge
     /// of private pages.
     const REPORTED: [&str; 6] = [
         "memory_bytes",
@@ -78,7 +78,7 @@ mod host {
         "page_ins_total",
     ];
 
-    /// An address on the loopback for an extent daemon's metrics (FXDAX_EXTENTD_METRICS), free as
+    /// An address on the loopback for an extent daemon's metrics (CLADEFS_EXTENTD_METRICS), free as
     /// this returns.
     pub fn metrics_address() -> anyhow::Result<SocketAddr> {
         Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
@@ -173,7 +173,7 @@ mod host {
         Ok((body.lines())
             .filter_map(|line| {
                 let (name, value) = line.split_once(' ')?;
-                let name = name.strip_prefix("fxdax_extentd_")?;
+                let name = name.strip_prefix("cladefs_extentd_")?;
                 let reported = REPORTED.contains(&name) || name.contains("private");
                 if name.contains('{') || !reported {
                     return None;
@@ -205,7 +205,7 @@ mod host {
         /// The path of the vsock's Unix socket of the VM `name`, as [`Requests::new`] makes it:
         /// that of its port P is this with `_P` after it.
         pub fn uds_of(name: &str) -> PathBuf {
-            std::env::temp_dir().join(format!("fxdax-{}-{name}.vsock", std::process::id()))
+            std::env::temp_dir().join(format!("cladefs-{}-{name}.vsock", std::process::id()))
         }
 
         /// The path of the vsock's Unix socket, Firecracker's `uds_path`.
@@ -347,7 +347,7 @@ mod guest {
         for (name, value) in windows() {
             said.push(format!("guest_{name}={value}"));
         }
-        // fxdax: what its Fxfs counts of copy-on-write DAX's private pages, if it is mounted
+        // cladefs: what its Fxfs counts of copy-on-write DAX's private pages, if it is mounted
         // (/proc/fs/fxfs/<tag>, the first's).
         let stats = fs::read_dir("/proc/fs/fxfs").ok().and_then(|mut dir| dir.find_map(Result::ok));
         let stats = stats.and_then(|stats| fs::read_to_string(stats.path()).ok());

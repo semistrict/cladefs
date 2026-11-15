@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
 # Build the guest kernel with Fxfs in it (doc-2, TASK-26.1): Amazon Linux's 6.18 kernel, the
 # release below, configured as Firecracker's CI configures the 6.18 guests it supports (its
-# configurations, in guest/linux/configs, and its docs/kernel-policy.md), with fxdax's series of
+# configurations, in guest/linux/configs, and its docs/kernel-policy.md), with cladefs's series of
 # patches (guest/linux/patches) adding fs/fxfs and drivers/virtio_extent from guest/linux, and the
 # filesystem's Rust, which cargo builds from guest/rust, linked into fs/fxfs (TASK-39.6).
 #
@@ -13,19 +13,19 @@
 #
 # builds for this machine's architecture by default. It runs on Linux, natively; on macOS, run
 # it in Lima: scripts/lib/lima.sh build-guest-kernel.sh. The sources and the build live under
-# $FXDAX_GUEST_KERNEL_WORK (default: ~/fxdax-guest-kernel), and its out/<arch> gets the kernel
+# $CLADEFS_GUEST_KERNEL_WORK (default: ~/cladefs-guest-kernel), and its out/<arch> gets the kernel
 # (Image for arm64, vmlinux for x86-64, as Firecracker loads them) and what builds it elsewhere,
 # on the same release: patches/, the series (git am); libfxfs_linux.a, the Rust, for fs/fxfs; and
-# fxdax.config, fxdax's options over the configuration. FXDAX_GUEST_KERNEL_PROFILE (below) builds
-# one for profiling, FXDAX_GUEST_KERNEL_LOCK_STAT one counting locks' contention,
-# FXDAX_GUEST_KERNEL_DEBUG one checking its locking and races, FXDAX_GUEST_KERNEL_KASAN one checking
-# its memory accesses, FXDAX_GUEST_KERNEL_RUST_CHECKS one whose Rust checks itself.
-# FXDAX_GUEST_KERNEL_JOBS is make's jobs (default: the CPUs), fewer on a host others share (ubu1),
+# cladefs.config, cladefs's options over the configuration. CLADEFS_GUEST_KERNEL_PROFILE (below) builds
+# one for profiling, CLADEFS_GUEST_KERNEL_LOCK_STAT one counting locks' contention,
+# CLADEFS_GUEST_KERNEL_DEBUG one checking its locking and races, CLADEFS_GUEST_KERNEL_KASAN one checking
+# its memory accesses, CLADEFS_GUEST_KERNEL_RUST_CHECKS one whose Rust checks itself.
+# CLADEFS_GUEST_KERNEL_JOBS is make's jobs (default: the CPUs), fewer on a host others share (ubu1),
 # its Rust's cargo's CARGO_BUILD_JOBS's.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-work=${FXDAX_GUEST_KERNEL_WORK:-$HOME/fxdax-guest-kernel}
+work=${CLADEFS_GUEST_KERNEL_WORK:-$HOME/cladefs-guest-kernel}
 # The newest of Amazon Linux's 6.18 releases, as Firecracker's resources/rebuild.sh picks them.
 kernel_tag=kernel6.18-6.18.54-121.166.amzn2023
 kernel_series=6.18
@@ -55,13 +55,13 @@ fi
 out="$work/out/$arch"
 mkdir -p "$out"
 
-# fxdax's changes to the kernel, a commit each on its release: the series of guest/linux/patches,
+# cladefs's changes to the kernel, a commit each on its release: the series of guest/linux/patches,
 # each with the files of guest/linux it adds. The tree checks out the series' last commit, which
 # rewrites only the files that differ from what the tree has, so that a build after the first
 # rebuilds only what changed; and the series, as patches, goes to out/<arch>/patches, which a
 # kernel built elsewhere applies (git am) on the same release.
 kgit() { git -C "$src" "$@"; }
-export GIT_AUTHOR_NAME="The fxdax Authors" GIT_AUTHOR_EMAIL="fxdax@echophase.com"
+export GIT_AUTHOR_NAME="The cladefs Authors" GIT_AUTHOR_EMAIL="cladefs@echophase.com"
 export GIT_COMMITTER_NAME=$GIT_AUTHOR_NAME GIT_COMMITTER_EMAIL=$GIT_AUTHOR_EMAIL
 # The same series, the same commits.
 export GIT_AUTHOR_DATE="2026-10-17T00:00:00Z" GIT_COMMITTER_DATE="2026-10-17T00:00:00Z"
@@ -100,72 +100,72 @@ rm -f "$out"/patches/*.patch
 kgit format-patch -q --zero-commit --no-signature -o "$out/patches" "$kernel_tag..$series"
 
 # Firecracker's configuration of its 6.18 guests, its guests' and its CI's, as its
-# resources/rebuild.sh has them, and fxdax's options, the later overriding the earlier. fxdax.config
+# resources/rebuild.sh has them, and cladefs's options, the later overriding the earlier. cladefs.config
 # goes to out/<arch> too.
 awk 1 "$configs/microvm-kernel-ci-$guestarch-$kernel_series.config" "$configs/ci.config" \
-    "$configs/fxdax.config" > "$src/.config"
-cp "$configs/fxdax.config" "$out/"
-# With FXDAX_GUEST_KERNEL_PROFILE=1, an x86-64 kernel unwinds its stacks by frame pointers, which
+    "$configs/cladefs.config" > "$src/.config"
+cp "$configs/cladefs.config" "$out/"
+# With CLADEFS_GUEST_KERNEL_PROFILE=1, an x86-64 kernel unwinds its stacks by frame pointers, which
 # Fxfs's Rust keeps, so that perf's call graphs follow calls through it, not by guesses.
 # Frame pointers cost the kernel's own code a little, so a kernel measured has none: build one
-# for profiling with its own FXDAX_GUEST_KERNEL_WORK.
-if [[ $arch == x86_64 && ${FXDAX_GUEST_KERNEL_PROFILE:-} == 1 ]]; then
+# for profiling with its own CLADEFS_GUEST_KERNEL_WORK.
+if [[ $arch == x86_64 && ${CLADEFS_GUEST_KERNEL_PROFILE:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --disable UNWINDER_GUESS \
         --enable UNWINDER_FRAME_POINTER
 fi
-# fxdax: with FXDAX_GUEST_KERNEL_DEBUG=1, a kernel that checks its locking (lockdep, sleeping in
+# cladefs: with CLADEFS_GUEST_KERNEL_DEBUG=1, a kernel that checks its locking (lockdep, sleeping in
 # atomic context) and, with KCSAN, its data races, as the followers' torture test runs it
 # (TASK-42.7, doc-8 testing 6), and that fails allocations as a test asks, through debugfs
 # (failslab, fail_page_alloc: fxfs-guest-faults-dax, TASK-44.10): slow, so built with its own
-# FXDAX_GUEST_KERNEL_WORK.
-if [[ ${FXDAX_GUEST_KERNEL_DEBUG:-} == 1 ]]; then
+# CLADEFS_GUEST_KERNEL_WORK.
+if [[ ${CLADEFS_GUEST_KERNEL_DEBUG:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_KERNEL --enable PROVE_LOCKING \
         --enable DEBUG_ATOMIC_SLEEP --enable DEBUG_LIST --enable KCSAN --enable DEBUG_FS \
         --enable FAULT_INJECTION --enable FAILSLAB --enable FAIL_PAGE_ALLOC \
         --enable FAULT_INJECTION_DEBUG_FS --enable FAULT_INJECTION_STACKTRACE_FILTER
 fi
-# fxdax: with FXDAX_GUEST_KERNEL_KASAN=1, a kernel that checks its memory accesses (KASAN, and
+# cladefs: with CLADEFS_GUEST_KERNEL_KASAN=1, a kernel that checks its memory accesses (KASAN, and
 # KFENCE's sampled checks) and its locking, which KCSAN's can't be built with (TASK-44.8): slow,
-# so built with its own FXDAX_GUEST_KERNEL_WORK. Booted at its 64-bit entry, not PVH's, which
+# so built with its own CLADEFS_GUEST_KERNEL_WORK. Booted at its 64-bit entry, not PVH's, which
 # Firecracker takes a kernel's Xen note for: entered there, a KASAN kernel faulted before its
 # first line, the VM shut down within a millisecond (GCE r84, r253; it boots without, r256).
-if [[ ${FXDAX_GUEST_KERNEL_KASAN:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_KASAN:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_KERNEL --enable KASAN \
         --enable KASAN_GENERIC --enable KFENCE --enable PROVE_LOCKING --enable DEBUG_ATOMIC_SLEEP \
         --enable DEBUG_LIST --disable KCSAN --disable PVH
 fi
-# fxdax: with FXDAX_GUEST_KERNEL_LOCK_STAT=1, a kernel that counts each lock's contention, in
+# cladefs: with CLADEFS_GUEST_KERNEL_LOCK_STAT=1, a kernel that counts each lock's contention, in
 # /proc/lock_stat, which names a hot lock where a sampling profile can't see it, taken with
 # interrupts off (fxfs-guest-pgbench-locks, TASK-91.14): slow, so built with its own
-# FXDAX_GUEST_KERNEL_WORK.
-if [[ ${FXDAX_GUEST_KERNEL_LOCK_STAT:-} == 1 ]]; then
+# CLADEFS_GUEST_KERNEL_WORK.
+if [[ ${CLADEFS_GUEST_KERNEL_LOCK_STAT:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_KERNEL --enable LOCK_STAT
 fi
-# fxdax: with FXDAX_GUEST_KERNEL_COVERAGE=1, a kernel that counts what fs/fxfs runs (gcov, which
+# cladefs: with CLADEFS_GUEST_KERNEL_COVERAGE=1, a kernel that counts what fs/fxfs runs (gcov, which
 # fs/fxfs/Makefile asks of its C), for scripts/guest-coverage.py (TASK-119.14): built with its own
-# FXDAX_GUEST_KERNEL_WORK.
-if [[ ${FXDAX_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
+# CLADEFS_GUEST_KERNEL_WORK.
+if [[ ${CLADEFS_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_FS --enable GCOV_KERNEL
 fi
 make -C "$src" "${make_args[@]}" olddefconfig
-if [[ ${FXDAX_GUEST_KERNEL_LOCK_STAT:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_LOCK_STAT:-} == 1 ]]; then
     grep -q '^CONFIG_LOCK_STAT=y' "$src/.config" ||
         { echo "the lock_stat kernel has no CONFIG_LOCK_STAT" >&2; exit 1; }
 fi
-if [[ ${FXDAX_GUEST_KERNEL_DEBUG:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_DEBUG:-} == 1 ]]; then
     for option in PROVE_LOCKING DEBUG_ATOMIC_SLEEP KCSAN FAILSLAB FAIL_PAGE_ALLOC \
         FAULT_INJECTION_DEBUG_FS FAULT_INJECTION_STACKTRACE_FILTER; do
         grep -q "^CONFIG_$option=y" "$src/.config" ||
             { echo "the debug kernel has no CONFIG_$option" >&2; exit 1; }
     done
 fi
-if [[ ${FXDAX_GUEST_KERNEL_KASAN:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_KASAN:-} == 1 ]]; then
     for option in KASAN KFENCE PROVE_LOCKING; do
         grep -q "^CONFIG_$option=y" "$src/.config" ||
             { echo "the KASAN kernel has no CONFIG_$option" >&2; exit 1; }
     done
 fi
-if [[ ${FXDAX_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
     grep -q '^CONFIG_GCOV_KERNEL=y' "$src/.config" ||
         { echo "the coverage kernel has no CONFIG_GCOV_KERNEL" >&2; exit 1; }
 fi
@@ -173,21 +173,21 @@ grep -q '^CONFIG_FXFS_FS=y' "$src/.config"
 grep -q '^CONFIG_VIRTIO_EXTENT=y' "$src/.config"
 grep -q '^CONFIG_VIRTIO_PMEM=y' "$src/.config"
 grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' "$src/.config"
-# fxdax: fs/fxfs's tracepoints, in tracefs and for BPF (fxdax.config, TASK-44.16).
+# cladefs: fs/fxfs's tracepoints, in tracefs and for BPF (cladefs.config, TASK-44.16).
 grep -q '^CONFIG_FTRACE=y' "$src/.config"
 grep -q '^CONFIG_BPF_EVENTS=y' "$src/.config"
-# fxdax: an oops panics, and a panic resets the VM (fxdax.config, TASK-311).
+# cladefs: an oops panics, and a panic resets the VM (cladefs.config, TASK-311).
 grep -q '^CONFIG_PANIC_ON_OOPS=y' "$src/.config"
 grep -q '^CONFIG_PANIC_TIMEOUT=-1' "$src/.config"
 
 # The filesystem's Rust, against a sysroot whose std is the kernel's (guest/rust/std). With
-# FXDAX_GUEST_KERNEL_RUST_CHECKS=1, optimized, but with its debug assertions, and arithmetic that
+# CLADEFS_GUEST_KERNEL_RUST_CHECKS=1, optimized, but with its debug assertions, and arithmetic that
 # panics if it overflows: the release build's silence hid a transaction larger than it reserved
 # for, and a reservation computed from a subtraction that wrapped (TASK-149.1). Built with its own
-# FXDAX_GUEST_KERNEL_WORK. Both always set, false being the release profile's own: an empty array
+# CLADEFS_GUEST_KERNEL_WORK. Both always set, false being the release profile's own: an empty array
 # of them is unbound to macOS's bash 3.2 under `set -u`.
 rust_checks=false
-if [[ ${FXDAX_GUEST_KERNEL_RUST_CHECKS:-} == 1 ]]; then
+if [[ ${CLADEFS_GUEST_KERNEL_RUST_CHECKS:-} == 1 ]]; then
     rust_checks=true
 fi
 rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
@@ -206,10 +206,10 @@ nm -A --defined-only "$archive" 2>/dev/null |
     sort -u | while read -r member; do ar d "$archive" "$member"; done
 cp "$archive" "$out/"
 
-# fxdax: the commit the build is of, which the filesystem shows in /proc/fs/fxfs/build
+# cladefs: the commit the build is of, which the filesystem shows in /proc/fs/fxfs/build
 # (scripts/build-commit.sh, TASK-111.7).
 commit=$("$root/scripts/build-commit.sh")
-make -C "$src" "${make_args[@]}" -j"${FXDAX_GUEST_KERNEL_JOBS:-$(nproc)}" KBUILD_BUILD_USER=root KBUILD_BUILD_HOST=fxdax \
+make -C "$src" "${make_args[@]}" -j"${CLADEFS_GUEST_KERNEL_JOBS:-$(nproc)}" KBUILD_BUILD_USER=root KBUILD_BUILD_HOST=cladefs \
     FXFS_BUILD_COMMIT="$commit" "$make_target"
 # The kernel's own memcpy, which Rust calls, is in the kernel: not Rust's. nm's listing whole,
 # before grep reads it: errexit stops at nm failing, and nothing stops nm part way.

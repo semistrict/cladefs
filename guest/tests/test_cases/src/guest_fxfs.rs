@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: what the guest halves of the tests of the guest's Fxfs share (fxfs-guest's,
+//! cladefs: what the guest halves of the tests of the guest's Fxfs share (fxfs-guest's,
 //! fxfs-guest-checks'): evicting a file's inode, whether a file is DAX, what a mount counts, and
 //! files read in from sealed extents, as a base's are, whose writes copy on write in the window
 //! (doc-13).

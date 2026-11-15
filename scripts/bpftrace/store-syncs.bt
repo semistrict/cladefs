@@ -1,5 +1,5 @@
 #!/usr/bin/env bpftrace
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 //
@@ -11,7 +11,7 @@
 // threads are named: store framer, store durable, store opener; a flush's, extentd flush); a
 // histogram of each kind's, and each past 100 ms as it ends, with its thread, how many names the
 // file has (2: a segment framed in place, its raw file linked among framed ones) and its size.
-// fxdax: and of each kind's time, how much it waited for ext4's journal to commit
+// cladefs: and of each kind's time, how much it waited for ext4's journal to commit
 // (jbd2_log_wait_commit), which a sync of a file or directory with metadata to commit does,
 // behind every other file's data the commit writes first (data=ordered); and the lives of the
 // stores' logs: those made anew, spares taken as logs, logs kept as spares (TASK-369). And ext4's
@@ -33,7 +33,7 @@ BEGIN
 }
 
 fentry:vmlinux:ext4_sync_file
-/(strncmp(curtask->group_leader->comm, "fxdax-extentd", 13) == 0 ||
+/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
   strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0)/
 {
@@ -95,7 +95,7 @@ fexit:vmlinux:ext4_sync_file
 // The stores' logs (logs/<branch>/<n>, and spare-<n> beside them), by the extent daemons' own
 // relative paths: made anew; a spare taken as a segment's log; a segment's kept as a spare.
 tracepoint:syscalls:sys_enter_openat
-/(strncmp(curtask->group_leader->comm, "fxdax-extentd", 13) == 0 ||
+/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
   strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0) &&
  (args.flags & 0x40) != 0 && strcontains(str(args.filename), "logs/")/
@@ -104,7 +104,7 @@ tracepoint:syscalls:sys_enter_openat
 }
 
 tracepoint:syscalls:sys_enter_renameat2
-/(strncmp(curtask->group_leader->comm, "fxdax-extentd", 13) == 0 ||
+/(strncmp(curtask->group_leader->comm, "cladefs-extentd", 13) == 0 ||
   strncmp(curtask->group_leader->comm, "extentd", 7) == 0) &&
  ($# == 0 || strncmp(str(curtask->cgroups->dfl_cgrp->kn->__parent->name), str($1), 64) == 0) &&
  strcontains(str(args.oldname), "logs/")/

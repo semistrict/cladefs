@@ -40,7 +40,7 @@ Options:
 
 extent_store (13.2k lines: lineage, records, layers, ledger, index, cleaning, rebuild) and
 extent_remote (12.3k: records, forks, checkpoints, recovery, collector) each hold every branch,
-and crates/fxdax/src/remote.rs (4,215 lines) keeps them agreeing; since TASK-45 every store has a
+and crates/cladefs/src/remote.rs (4,215 lines) keeps them agreeing; since TASK-45 every store has a
 bucket. At least 13 bugs at that seam (79.4, 79.5, 79.20, 79.39, 79.71, 79.72, 79.77, 79.78,
 79.82, 79.85, 79.95, 150.1, 150.6); three footer replays (160.15); two cleaners; TASK-79.82
 "fixed" three times and a variant on 11-03.
@@ -60,7 +60,7 @@ protocol alone; one replay (`State::apply_contents`) and one recovery. specs/buc
 models the protocol with the WAL (TASK-165.2). Lines, at 9f81f6018 and on main 213504c4b, with
 unit tests: extent_store's `src` 13,315 to 11,259 (code alone 10,757 to 9,580), its `tests/` 7,779
 to 5,930; remote.rs 4,215 to 2,597 (code alone 1,687 to 178). The TASK-165.1-165.9 commits added
-6,466 lines to extent_store and removed 11,096, added 3,803 to fxdax and removed 4,839, and added
+6,466 lines to extent_store and removed 11,096, added 3,803 to cladefs and removed 4,839, and added
 4,073 to extent_remote (the file bucket, the WAL's rebase, the part cache kept across restarts) and
 removed 809: about 2.4k fewer in all, against the 7-8k estimated, as one recovery from the bucket
 and the WAL, crash-tested, is larger than guessed. TASK-165's notes have the counts by module and
@@ -97,7 +97,7 @@ doc-4 says barriers on (fxfs-linux fs.rs:155), the source of TASK-160.22's class
 26% of upstream (+14,010/-3,897 of 68,409 lines), its pin never moved since 10-10. Keep Fxfs (its
 LSM and objects fit extents; a new filesystem would have the same DAX problem); give journal
 blocks position-derived IDs; turn barriers on and drop data checksums once 1 is decided; declare
-allocator/journal/super_block fxdax-owned; merge upstream once to price drift.
+allocator/journal/super_block cladefs-owned; merge upstream once to price drift.
 
 ## 6. Scope
 
@@ -139,7 +139,7 @@ mutants, dead-ends, the perf gate.
    written pages. The switch is therefore per page, not per file: 1b (host copy-on-write with
    writeback allocation) or a guest-side per-page mix; the design doc decides. TASK-160.1, 160.3 and 160.6 are superseded; 160.2, 160.4 and 160.5 wait on it.
 2. **Local disk becomes the bucket's WAL and cache**, after the DAX work. TASK-165.
-3. **No radical spike:** improve fxdax as it is.
+3. **No radical spike:** improve cladefs as it is.
 4. **Scope:** multi-host points and shared git volumes continue; live followers and TASK-96's
    store layer are frozen (TASK-42.11, 92.30, 92.31, 96 at low priority).
 5. Density target: not yet asked.

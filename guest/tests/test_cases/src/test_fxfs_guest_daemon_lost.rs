@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -23,7 +23,7 @@ const PORT: u32 = 5053;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{fxdax_guest_should_run, give_to_the_jail, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, give_to_the_jail, setup_rootfs, spawn_daemon};
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use std::io::{BufRead, BufReader, Read};
@@ -33,7 +33,7 @@ mod host {
     use std::time::{Duration, Instant};
 
     const CAPACITY: u64 = 256 << 20;
-    /// What fxdax's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
+    /// What cladefs's Firecracker exits with when its daemon's connection ends (`ExtentdLost`).
     const EXTENTD_LOST: i32 = 158;
     /// How long a VM takes at most to exit once its daemon is gone.
     const BOUND: Duration = Duration::from_secs(10);
@@ -42,7 +42,7 @@ mod host {
     /// In the temporary directory, as a socket's path is short (SUN_LEN), and a test's directory,
     /// a round's of a soak, may not be.
     fn socket(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("fxdax-lost-{}-{name}", std::process::id()))
+        std::env::temp_dir().join(format!("cladefs-lost-{}-{name}", std::process::id()))
     }
 
     /// A VM, `name`, on its store, which `extentd` serves, with a DAX window, and its vsock at
@@ -138,7 +138,7 @@ mod host {
 
     impl Test for TestFxfsGuestDaemonLost {
         fn should_run(&self) -> ShouldRun {
-            fxdax_guest_should_run()
+            cladefs_guest_should_run()
         }
 
         fn timeout_secs(&self) -> u64 {

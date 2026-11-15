@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -52,7 +52,7 @@ use storage_device::{ExtentId, OtherBranch, SealedExtent};
 #[error("the extent store is full")]
 pub struct NoSpace;
 
-/// fxdax: the context of a fork's failure once its commit was made ([`Store::commit_fork`]): the
+/// cladefs: the context of a fork's failure once its commit was made ([`Store::commit_fork`]): the
 /// commit stands, the segment it ends naming the fork in its footer, which what keeps the branch's
 /// segments elsewhere, as an uploader does, may have taken, and whose fork it makes there, so that
 /// the child is to be deleted there as a fork made is (TASK-79.82).
@@ -63,7 +63,7 @@ pub struct ForkCommitted {
     pub child: Branch,
 }
 
-/// fxdax: the error of a fork whose child's ID is the branch's, or that of a branch whose extents
+/// cladefs: the error of a fork whose child's ID is the branch's, or that of a branch whose extents
 /// the branch holds: its child's extents' IDs would be theirs (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the fork's child {0} has the ID of its parent's or of a branch it inherits from")]
@@ -78,13 +78,13 @@ pub struct TooSmall {
     pub held: u64,
 }
 
-/// fxdax: the error of a write, or an opening, of an extent of the store's branch that the branch
+/// cladefs: the error of a write, or an opening, of an extent of the store's branch that the branch
 /// sealed and freed (TASK-79.6): an extent's ID is its branch's to write once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0:?} was written before: an extent's ID is written once")]
 pub struct Spent(pub ExtentId);
 
-/// fxdax: the error of a read of an extent the store holds whose data is in the bucket, at
+/// cladefs: the error of a read of an extent the store holds whose data is in the bucket, at
 /// `location` ([`Store::adopt`]): what the store's user reads it from.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{extent:?}'s data is in the bucket, at {location:?}")]
@@ -118,7 +118,7 @@ pub struct Options {
     /// memory, whatever its writer asks (TASK-79.2).
     pub max_extent: u64,
     /// The size past which a segment takes no more extents: the next commit closes it, and starts
-    /// another. fxdax: between commits it takes writes up to `max_extent` past it, then they go to
+    /// another. cladefs: between commits it takes writes up to `max_extent` past it, then they go to
     /// another, so that no segment holds more than both together (TASK-79.2).
     pub segment_size: u64,
     /// The age past which a segment holding extents' data takes no more: the next commit closes it.
@@ -128,20 +128,20 @@ pub struct Options {
     pub large_extent: u64,
     /// How many segments' files the store keeps open between reads.
     pub open_files: usize,
-    /// fxdax: how long a view ([`Store::view`]) may lag behind the commits after its own before
+    /// cladefs: how long a view ([`Store::view`]) may lag behind the commits after its own before
     /// it is cut off, if it may not lag for ever.
     pub view_lag: Option<Duration>,
-    /// fxdax: how many bytes of frees views may keep, past which the oldest is cut off, if any
+    /// cladefs: how many bytes of frees views may keep, past which the oldest is cut off, if any
     /// limit.
     pub view_kept_bytes: Option<u64>,
-    /// fxdax: the most bytes of runs a flush's commits seal for their records to hold them, and
+    /// cladefs: the most bytes of runs a flush's commits seal for their records to hold them, and
     /// the flush to sync its logs alone (`wal::LogRecord`, TASK-301): what a guest's journal, or
     /// a database's transaction, commits at a time, not a bulk load's.
     pub held_most: u64,
 }
 
 impl Options {
-    /// fxdax: the most bytes of data a segment holds: `segment_size`, and a write more, of
+    /// cladefs: the most bytes of data a segment holds: `segment_size`, and a write more, of
     /// `max_extent` at most, before writes go to another. A closed segment is read, framed and
     /// uploaded whole, so that this bounds what each takes of memory, however much is written
     /// between commits (TASK-79.2).
@@ -175,13 +175,13 @@ pub struct Info {
     /// The bytes it can still take.
     pub available: u64,
     /// One more than the highest sequence number of the store's branch's extents, freed or not
-    /// since it opened; and, as it opened, of those it held. fxdax: those freed before, the
+    /// since it opened; and, as it opened, of those it held. cladefs: those freed before, the
     /// writer's floor is past, each opening's writer minting past its own (doc-7, The head).
     pub next_sequence: u64,
-    /// fxdax: of the bytes its extents hold, those of the extents its branch wrote, rather than
+    /// cladefs: of the bytes its extents hold, those of the extents its branch wrote, rather than
     /// inherited from the branches it was forked from, which may share them still (TASK-49).
     pub own: u64,
-    /// fxdax: those of the extents it inherited from the branches it was forked from.
+    /// cladefs: those of the extents it inherited from the branches it was forked from.
     pub inherited: u64,
 }
 
@@ -198,13 +198,13 @@ pub struct Usage {
     /// The bytes the branch's segments' files and the extents' own files take: closed segments and
     /// sealed extents compressed (`extent_frame`).
     pub disk_bytes: u64,
-    /// fxdax: the bytes of extents freed whose data stays, for the uploader or views.
+    /// cladefs: the bytes of extents freed whose data stays, for the uploader or views.
     pub kept_bytes: u64,
-    /// fxdax: those of them views keep, which count as used ([`Info::used`]).
+    /// cladefs: those of them views keep, which count as used ([`Info::used`]).
     pub kept_for_views: u64,
 }
 
-/// fxdax: a store's directory, taken and claimed for its opening, until it closes.
+/// cladefs: a store's directory, taken and claimed for its opening, until it closes.
 type Opened<D> = Option<(Claim<D>, Arc<Taken<D>>)>;
 
 /// An extent store, open. See the crate's docs.
@@ -213,13 +213,13 @@ pub struct Store<D: Dir> {
     dir: Arc<D>,
     block_size: u32,
     branch: Branch,
-    /// fxdax: the IDs of the branches whose extents it held as it opened, its own among them: no
+    /// cladefs: the IDs of the branches whose extents it held as it opened, its own among them: no
     /// fork's child takes one, as an extent's ID names its branch by its ID alone, and branches
     /// are unique by theirs only within their cells (TASK-364).
     lineage: BTreeSet<u64>,
-    /// fxdax: the volume of its branch's cell it is, if its description names one (TASK-364).
+    /// cladefs: the volume of its branch's cell it is, if its description names one (TASK-364).
     volume: Option<Volume>,
-    /// fxdax: the URL of the bucket its branch is kept in, if its description names one.
+    /// cladefs: the URL of the bucket its branch is kept in, if its description names one.
     bucket: Option<String>,
     /// Its directory, taken for this process ([`Dir::take`]), and claimed for its opening
     /// ([`Dir::claim`]): closing it lets go of both, but of the taking what holds it still
@@ -228,7 +228,7 @@ pub struct Store<D: Dir> {
     /// The parts of its files read lately, unpacked.
     unpacked: Unpacked,
     options: Options,
-    /// fxdax: shared with the framings of its segments, each of which ends itself in it, on a
+    /// cladefs: shared with the framings of its segments, each of which ends itself in it, on a
     /// thread of its own (TASK-153.8).
     state: Arc<SharedLock<Mutex<State<D::File>>>>,
     /// Held by a commit.
@@ -236,25 +236,25 @@ pub struct Store<D: Dir> {
     /// When its commits are durable: those ordered that no flush has taken yet, oldest first, for
     /// [`Store::flush`] to make durable, and the last that is.
     durability: SharedLock<Mutex<Durability<Pending<D::File>>>>,
-    /// Held by a flush: commits become durable in order. fxdax: and the logs flushes append
+    /// Held by a flush: commits become durable in order. cladefs: and the logs flushes append
     /// records to, of the open segment, and of those closed since whose commits wait (TASK-165.9).
     flushing: SharedLock<Mutex<Logs<D::File>>>,
-    /// fxdax: the base of its write-ahead log, written as segments are acknowledged, before their
+    /// cladefs: the base of its write-ahead log, written as segments are acknowledged, before their
     /// files leave (TASK-165.9).
     base: SharedLock<Mutex<BaseFile>>,
-    /// fxdax: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
+    /// cladefs: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
     /// of the store's goes into it (TASK-165.8).
     cache: Option<Arc<Cache>>,
-    /// fxdax: what holds the parts of its segments packed as they fill, until their framings: the
+    /// cladefs: what holds the parts of its segments packed as they fill, until their framings: the
     /// process's stores', or its own ([`Opening::held`], TASK-400).
     held: Arc<HeldParts>,
     /// Notified when the open segment has no write in progress, and when it closed: what
-    /// [`Store::close_now`] and the writes it holds up wait for; fxdax: and as each framing of a
+    /// [`Store::close_now`] and the writes it holds up wait for; cladefs: and as each framing of a
     /// segment ends, which flushes, the uploader, forks and the branch's closing wait for.
     idle: Arc<Condvar>,
-    /// fxdax: its views, which followers read it through ([`Store::view`]).
+    /// cladefs: its views, which followers read it through ([`Store::view`]).
     views: Arc<Views>,
-    /// fxdax: its keys, which its segments and extents stored on their own are sealed and read
+    /// cladefs: its keys, which its segments and extents stored on their own are sealed and read
     /// under (TASK-411.3).
     keys: Arc<Ring>,
 }
@@ -268,7 +268,7 @@ impl<D: Dir> Drop for Taken<D> {
     }
 }
 
-/// fxdax: a store's directory, claimed for its opening in this process ([`Dir::claim`]): let go of
+/// cladefs: a store's directory, claimed for its opening in this process ([`Dir::claim`]): let go of
 /// once dropped.
 struct Claim<D: Dir>(Arc<D>);
 
@@ -278,7 +278,7 @@ impl<D: Dir> Drop for Claim<D> {
     }
 }
 
-/// fxdax: a hold of a store's directory, taken for this process until it is dropped
+/// cladefs: a hold of a store's directory, taken for this process until it is dropped
 /// ([`Store::hold_dir`]).
 pub struct DirHold<D: Dir> {
     _taken: Arc<Taken<D>>,
@@ -288,26 +288,26 @@ pub struct DirHold<D: Dir> {
 struct Pending<F> {
     /// The files whose data it refers to, and the directories whose entries changed, to sync.
     syncs: Syncs<F>,
-    /// fxdax: its contents, and the segment whose log its record is to be appended to, the one it
+    /// cladefs: its contents, and the segment whose log its record is to be appended to, the one it
     /// was made in, open, or closed since (TASK-165.9): recorded by its flush, with the runs it
-    /// sealed checksummed ([`LogRecord`], TASK-301). fxdax: one for each segment it spans, in
+    /// sealed checksummed ([`LogRecord`], TASK-301). cladefs: one for each segment it spans, in
     /// their order: what it goes on with past each filled since the last commit, in that one's
     /// log, then the rest, in the open segment's, where it ends (TASK-92.41).
     records: Vec<(SegmentId, Contents)>,
     /// The files of the branch's alone it made unreferenced ([`Unreferenced::doomed`]): they go
     /// once it is durable.
     doomed: Vec<String>,
-    /// fxdax: the files of the segments acknowledged in the bucket it let go of, with their keys
+    /// cladefs: the files of the segments acknowledged in the bucket it let go of, with their keys
     /// there if they are the objects there: they leave for the host's cache with its flush
     /// (TASK-165.8).
     leaving: Vec<(String, Option<String>)>,
-    /// fxdax: the segments opened whose raw files' and logs' entries its syncs make durable
+    /// cladefs: the segments opened whose raw files' and logs' entries its syncs make durable
     /// (`Segments::take_syncs`, TASK-369).
     entries: BTreeSet<SegmentId>,
 }
 
-/// fxdax: the logs a flush appends commits' records to, by their segments ([`Store::flush`]).
-/// fxdax: what flushes keep between them: the logs they append commits' records to, by their
+/// cladefs: the logs a flush appends commits' records to, by their segments ([`Store::flush`]).
+/// cladefs: what flushes keep between them: the logs they append commits' records to, by their
 /// segments, and the raw files a flush holding its commits' runs left unsynced, which the next
 /// flush syncing data syncs too (TASK-301): a commit that seals nothing, as one setting the
 /// capacity, takes a raw file's sync, which a later commit's data written to it needs.
@@ -318,7 +318,7 @@ struct Logs<F> {
 
 /// A write in progress (see [`Store::begin_write`]): its data goes to its file, by
 /// [`Write::write`], or by a caller's own I/O of what [`Write::stored`] gives. Dropping it before
-/// it is finished abandons it. fxdax: no caller writes its file otherwise: a sealed store's raw
+/// it is finished abandons it. cladefs: no caller writes its file otherwise: a sealed store's raw
 /// files are encrypted, a sector at a time, as they write them (TASK-411.5).
 pub struct Write<'a, D: Dir> {
     store: &'a Store<D>,
@@ -338,7 +338,7 @@ pub struct Write<'a, D: Dir> {
 
 impl<D: Dir> Write<'_, D> {
     /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is
-    /// sealed, whole sectors then, as what the store takes is (TASK-411.8). fxdax: refused past
+    /// sealed, whole sectors then, as what the store takes is (TASK-411.8). cladefs: refused past
     /// the write's end.
     pub fn write(&self, data: &[u8], at: u64) -> Result<(), Error> {
         let len = data.len() as u64;
@@ -346,7 +346,7 @@ impl<D: Dir> Write<'_, D> {
         Ok(self.file.write_at(data, self.offset + at)?)
     }
 
-    /// fxdax: `data`, the whole write's bytes, as its file is to store them, for a caller writing
+    /// cladefs: `data`, the whole write's bytes, as its file is to store them, for a caller writing
     /// them by an I/O of its own, as an image's device does: encrypted in place if the store is
     /// sealed (TASK-411.5). They go to the file it names, at the offset it names; written in whole
     /// sectors if a write of them stops short, from the last whole sector written, they are what
@@ -361,9 +361,9 @@ impl<D: Dir> Write<'_, D> {
     /// it.
     pub fn finish(mut self) {
         self.finished = true;
-        // fxdax: counted (TASK-310).
+        // cladefs: counted (TASK-310).
         written::wrote(written::Kind::Raw, self.len as usize);
-        // fxdax: what was written to the open segment, its writing back begun once a MiB or more
+        // cladefs: what was written to the open segment, its writing back begun once a MiB or more
         // waits, and waited for once more than WRITTEN_BEHIND_MOST is begun: holding no lock
         // (TASK-221). Failing, it is the flush's sync that fails.
         let Some(Behind { raw, begin: (offset, len), wait }) = self.store.finish_write(&self)
@@ -381,7 +381,7 @@ impl<D: Dir> Write<'_, D> {
     }
 }
 
-/// fxdax: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
+/// cladefs: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
 /// in `file`, encrypted if the store is sealed.
 pub struct Stored<'a, F> {
     pub file: &'a Arc<F>,
@@ -413,7 +413,7 @@ fn place_of(entry: &Extent) -> Place {
     }
 }
 
-/// fxdax: ends the framing of segment `number`, `framed` saying how ([`Store::frame_behind`]), in
+/// cladefs: ends the framing of segment `number`, `framed` saying how ([`Store::frame_behind`]), in
 /// `state`: the segment is read from its framed file from now on, durable, its raw file going once
 /// the commits its footer names are durable; or its framing failed, writing the framed file or
 /// making it durable, and the store with it, as it is ahead of its files.
@@ -433,7 +433,7 @@ fn framing_ended<F: File>(
     }
 }
 
-/// fxdax: what a store's segments are framed with, behind what closed them
+/// cladefs: what a store's segments are framed with, behind what closed them
 /// ([`Store::frame_behind`]): its directory, its state, which each framing ends itself in, and
 /// what is notified as one does. A framer frames the segments closed, one after another, in the
 /// order they closed, each written as it goes (`Unframed::frame`), and hands it to be made durable;
@@ -473,7 +473,7 @@ impl<D: Dir> Framer<D> {
                 }
                 Job::Frame(unframed) => unframed,
             };
-            // fxdax: none once the store failed, a segment before it among what failed, saying so
+            // cladefs: none once the store failed, a segment before it among what failed, saying so
             // (TASK-165.9).
             let whole = state.standing.whole();
             let number = unframed.number();
@@ -491,7 +491,7 @@ impl<D: Dir> Framer<D> {
         state.framing.running = false;
     }
 
-    /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding no lock, as
+    /// cladefs: looks ahead at part `part` of segment `number`, written whole, holding no lock, as
     /// its segment fills, as [`Framer::see_here`] does (TASK-400).
     fn see<'a>(
         &'a self,
@@ -510,7 +510,7 @@ impl<D: Dir> Framer<D> {
         state
     }
 
-    /// fxdax: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
+    /// cladefs: looks ahead at part `part` of segment `number`, written whole, holding `state`: for
     /// its framing, which reads it no more if it frames the segment in place, nor if it holds it
     /// packed, which this has it do if the segment looks as if it will be framed in a copy; unless
     /// its framing took its parts' looks already, or the store failed, or closed (TASK-400).
@@ -521,19 +521,19 @@ impl<D: Dir> Framer<D> {
         }
     }
 
-    /// fxdax: segment `number`'s raw file, if a look ahead at a part of it is for anything
+    /// cladefs: segment `number`'s raw file, if a look ahead at a part of it is for anything
     /// ([`Framer::see_here`]), and the look at its parts seen so far.
     fn to_see(state: &State<D::File>, number: SegmentId) -> Option<(Arc<RawFile<D::File>>, Look)> {
         let open = state.standing.whole().is_ok() && !state.standing.is_closed();
         open.then(|| state.segments.see(number)).flatten()
     }
 
-    /// fxdax: a look ahead at part `part` of a segment, in its raw file `raw`, whose parts seen
+    /// cladefs: a look ahead at part `part` of a segment, in its raw file `raw`, whose parts seen
     /// before it look as `look` says ([`framing::look_ahead`]): what it saw, and the part held, if
     /// it is to be packed: by the threads packing ahead, at the host's lowest priority, held
     /// pending until then ([`framing::pack_ahead`]); here and now, on a directory whose I/O is its
     /// callers' alone, as the store's tests' are, and in the Shuttle tests, whose schedule no
-    /// thread of the store's runs outside of. fxdax: of a clear raw file alone: a sealed segment's
+    /// thread of the store's runs outside of. cladefs: of a clear raw file alone: a sealed segment's
     /// parts are never looked at ahead, nor packed nor held in the clear (TASK-411.5).
     fn look(
         &self,
@@ -555,7 +555,7 @@ impl<D: Dir> Framer<D> {
         Ok((seen, held))
     }
 
-    /// fxdax: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or to,
+    /// cladefs: a look ahead at part `part` of segment `number` saw `seen`, holding the part, or to,
     /// if it is to be packed, or failed: its framing reads the part itself then, which fails as it
     /// may.
     fn saw(
@@ -589,7 +589,7 @@ impl<D: Dir> Framer<D> {
         };
         state.segments.written(number, framed.clone());
         state.framing.wrote(number, framed);
-        // fxdax: the uploader, which takes it now (TASK-384).
+        // cladefs: the uploader, which takes it now (TASK-384).
         self.idle.notify_all();
         if std::mem::replace(&mut state.framing.syncing, true) {
             return false;
@@ -681,7 +681,7 @@ impl<D: Dir> Framer<D> {
     }
 }
 
-/// fxdax: makes the entries of `branch`'s raw files and logs durable in `dir`, those of the next
+/// cladefs: makes the entries of `branch`'s raw files and logs durable in `dir`, those of the next
 /// segment's, placed ahead of it, among them, off its commits (TASK-384): returns whether it did,
 /// a flush syncing them otherwise, as it syncs those of a segment opened unplaced.
 fn sync_entries<D: Dir>(dir: &D, branch: u64) -> bool {
@@ -698,7 +698,7 @@ fn sync_entries<D: Dir>(dir: &D, branch: u64) -> bool {
     }
 }
 
-/// fxdax: removes the spare log `spare` names, if any, one the branch keeps no more
+/// cladefs: removes the spare log `spare` names, if any, one the branch keeps no more
 /// (`Segments::prepared`, TASK-333).
 fn remove_spare<D: Dir>(dir: &D, spare: Option<SegmentId>) {
     let Some(spare) = spare else { return };
@@ -710,22 +710,22 @@ fn remove_spare<D: Dir>(dir: &D, spare: Option<SegmentId>) {
     }
 }
 
-/// fxdax: the file a store's directory holds until its maker made it whole, which opening it
+/// cladefs: the file a store's directory holds until its maker made it whole, which opening it
 /// refuses ([`Unmade`]): written before its description, removed once whole ([`Store::made`]), as
 /// an import fills it, so that a maker dying part way leaves no store that opens (TASK-196).
 pub(crate) const UNMADE: &str = "unmade";
 
-/// fxdax: the error of opening a store whose maker never made it whole ([`UNMADE`], TASK-196).
+/// cladefs: the error of opening a store whose maker never made it whole ([`UNMADE`], TASK-196).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the store was never made whole: its maker stopped part way")]
 pub struct Unmade;
 
-/// fxdax: what the bucket holds of the branch a store opens (doc-14, Opening a store;
+/// cladefs: what the bucket holds of the branch a store opens (doc-14, Opening a store;
 /// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
 /// found taking it ([`extent_remote::Taken`]), the head, which the store's write-ahead log is put after,
 /// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
-/// one, which what the bucket acknowledged of the store's goes into. fxdax: and the store's keys,
+/// one, which what the bucket acknowledged of the store's goes into. cladefs: and the store's keys,
 /// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
 /// sealed and read under (`extent_remote::keys`, TASK-411.3): none, in the clear. And what holds
 /// the parts of its segments packed as they fill, which the process's stores share, so that what
@@ -752,7 +752,7 @@ impl Opening {
     }
 }
 
-/// fxdax: a store's directory, taken for this process and claimed for its opening, its write-ahead
+/// cladefs: a store's directory, taken for this process and claimed for its opening, its write-ahead
 /// log recovered from it ([`Store::recover`]), to be opened as what the bucket holds of its branch
 /// says ([`Recovering::open`]): its branch's writer takes the lease meanwhile, and recovers it.
 pub struct Recovering<D: Dir> {
@@ -779,7 +779,7 @@ impl<D: Dir> Recovering<D> {
         self.file.token
     }
 
-    /// fxdax: the volume of its branch's cell it is, if its description names one (TASK-364).
+    /// cladefs: the volume of its branch's cell it is, if its description names one (TASK-364).
     pub fn volume(&self) -> Option<&Volume> {
         self.file.volume.as_ref()
     }
@@ -790,7 +790,7 @@ impl<D: Dir> Recovering<D> {
         self.wal.base
     }
 
-    /// fxdax: whether `commit`, a branch's last, is its write-ahead log's base or one of its
+    /// cladefs: whether `commit`, a branch's last, is its write-ahead log's base or one of its
     /// commits: a branch whose last commit is never moved on from the log, which then diverged
     /// not ([`extent_remote::Error::Diverged`], TASK-345).
     pub fn holds_commit(&self, commit: Option<u64>) -> bool {
@@ -817,7 +817,7 @@ impl<D: Dir> Recovering<D> {
         self.wal().rebase(taken).is_ok()
     }
 
-    /// Drops its write-ahead log, the commits it holds never acknowledged lost: what `fxdaxctl
+    /// Drops its write-ahead log, the commits it holds never acknowledged lost: what `cladefsctl
     /// take` does of a store whose log diverged (doc-14, Opening a store). Its base goes with it:
     /// an empty log follows any branch. Durably, before the store opens past it: a crash after
     /// brings none of it back, whose commits the branch moved on from, to upload after the store's
@@ -825,7 +825,7 @@ impl<D: Dir> Recovering<D> {
     pub fn drop_wal(&mut self) -> Result<(), Error> {
         let dir = &*self.dir;
         let branch = self.file.branch;
-        // fxdax: those closed again, not framed, their raw files and logs going (TASK-411.9).
+        // cladefs: those closed again, not framed, their raw files and logs going (TASK-411.9).
         self.wal.drop_closing(dir, branch)?;
         for (footer, number) in std::mem::take(&mut self.wal.segments) {
             let segment = SegmentId { branch: branch.id, number };
@@ -864,10 +864,10 @@ impl<D: Dir> Recovering<D> {
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
         let Opening { state, taken: found, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
-        // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
+        // cladefs: the segments its recovery closed again framed, first, under its keys, as nothing
         // before them is (TASK-411.9).
         recovered.close(&*dir, branch, &keys)?;
-        // fxdax: what the bucket acknowledged goes into the host's cache by a rename, which can't
+        // cladefs: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
         if let (Some(cache), Some(here)) = (&cache, dir.host_path("")) {
@@ -931,7 +931,7 @@ impl<D: Dir> Recovering<D> {
             replay.apply_contents(footer.seq, footer.epoch, &footer.contents);
             named_own.extend(footer.own().map(|(extent, _)| extent));
         }
-        // fxdax: a log ends with no commit unended (`wal::recover`, TASK-92.41).
+        // cladefs: a log ends with no commit unended (`wal::recover`, TASK-92.41).
         ensure!(replay.begun.is_none(), "branch {branch}'s log ends inside a commit");
         let head = wal.head().or(replay.last_commit);
         let epoch = head.map_or(0, epoch_of);
@@ -979,7 +979,7 @@ impl<D: Dir> Recovering<D> {
         let opened = (epoch, recovered.next, chain);
         let files = (options.open_files, keys.clone());
         let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, files)?;
-        // fxdax: the sealed extents in each, read in the bucket once it is acknowledged there
+        // cladefs: the sealed extents in each, read in the bucket once it is acknowledged there
         // (TASK-165.8).
         for (extent, entry) in &extents {
             segments.place(*extent, &entry.data);
@@ -992,7 +992,7 @@ impl<D: Dir> Recovering<D> {
             queued.push(Queued::new(*number, footer.clone(), restamped, bytes));
         }
         let mut uncommitted = Uncommitted::default();
-        // fxdax: a branch saying no capacity has the store's, which its next commit sets in it
+        // cladefs: a branch saying no capacity has the store's, which its next commit sets in it
         // (TASK-165.3).
         if restate {
             uncommitted.resize(capacity);
@@ -1065,7 +1065,7 @@ impl<D: Dir> Recovering<D> {
     }
 }
 
-/// fxdax: a branch's extents as a replay of the footers of its write-ahead log places them over
+/// cladefs: a branch's extents as a replay of the footers of its write-ahead log places them over
 /// the bucket's ([`Recovering::open`]): sealed in one run of a segment of the log, which
 /// `segments` holds by its key in the bucket, or in files of their own. By the run's key, not the
 /// segment applied: a commit spanning segments seals its runs in those before (TASK-92.41).
@@ -1092,14 +1092,14 @@ impl Places for Local {
     }
 }
 
-/// fxdax: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
+/// cladefs: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
 /// so that one copied to another's key is refused (`extent_remote::layout::own_extent`,
 /// TASK-411.3).
 fn own_footer(extent: ExtentId) -> Vec<u8> {
     extent_remote::layout::encode(&extent)
 }
 
-/// fxdax: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
+/// cladefs: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
 /// bucket at their keys, if given: into the host's cache, `cache`, if it takes them, the file
 /// renamed; or removed (TASK-165.8). What fails to leave is logged, and removed, the bucket
 /// holding it.
@@ -1124,7 +1124,7 @@ fn leave<D: Dir>(dir: &D, cache: Option<&Cache>, leaving: Vec<(String, Option<St
 }
 
 impl<D: Dir> Store<D> {
-    /// fxdax: makes a new store's directory in `dir`, which holds no store, as `description`
+    /// cladefs: makes a new store's directory in `dir`, which holds no store, as `description`
     /// describes, its description naming `bucket`, the URL of the bucket its branch is kept in,
     /// if given ([`Store::bucket`]), and `volume`, the volume of its branch's cell it is, if given
     /// ([`Store::volume`], TASK-364); unmade until its maker says it is whole ([`Store::made`]).
@@ -1164,7 +1164,7 @@ impl<D: Dir> Store<D> {
         made
     }
 
-    /// fxdax: the store is whole, as its maker made it: the file saying it is not goes, durably
+    /// cladefs: the store is whole, as its maker made it: the file saying it is not goes, durably
     /// ([`UNMADE`], TASK-196). Its next openings open it.
     pub fn made(&self) -> Result<(), Error> {
         match self.dir.remove(UNMADE) {
@@ -1175,7 +1175,7 @@ impl<D: Dir> Store<D> {
         Ok(self.dir.barrier()?)
     }
 
-    /// fxdax: makes a new store in `dir` as [`Store::make`] does, whole, kept nowhere, and opens
+    /// cladefs: makes a new store in `dir` as [`Store::make`] does, whole, kept nowhere, and opens
     /// it: one whose branch the bucket holds nothing of ([`Opening::new`]), as the store's own
     /// tests' are.
     pub fn create(dir: D, description: Description, options: Options) -> Result<Self, Error> {
@@ -1185,7 +1185,7 @@ impl<D: Dir> Store<D> {
         Ok(store)
     }
 
-    /// fxdax: opens the store in `dir`, whose branch the bucket holds nothing of
+    /// cladefs: opens the store in `dir`, whose branch the bucket holds nothing of
     /// ([`Opening::new`]), as the store's own tests' is: refused if its write-ahead log had
     /// anything acknowledged.
     pub fn open(dir: D, options: Options) -> Result<Self, Error> {
@@ -1225,7 +1225,7 @@ impl<D: Dir> Store<D> {
         Ok(Recovering { dir, taken, claim, file, wal })
     }
 
-    /// fxdax: the sequence numbers of the branch's own extents it freed once sealed, which it
+    /// cladefs: the sequence numbers of the branch's own extents it freed once sealed, which it
     /// writes no more ([`Spent`], TASK-79.6).
     pub fn spent(&self) -> Result<extent_frame::spent::Spent, Error> {
         Ok(self.state()?.spent.clone())
@@ -1248,25 +1248,25 @@ impl<D: Dir> Store<D> {
         Ok(extents)
     }
 
-    /// fxdax: the URL of the bucket its branch is kept in, as its description names it: every
+    /// cladefs: the URL of the bucket its branch is kept in, as its description names it: every
     /// store in a host's directory names one ([`crate::create_host`]); none, one of memory's
     /// (TASK-165.6).
     pub fn bucket(&self) -> Option<&str> {
         self.bucket.as_deref()
     }
 
-    /// fxdax: the volume of its branch's cell it is, as its description names it (TASK-364).
+    /// cladefs: the volume of its branch's cell it is, as its description names it (TASK-364).
     pub fn volume(&self) -> Option<&Volume> {
         self.volume.as_ref()
     }
 
-    /// fxdax: its keys, its branch's and its ancestors' DEKs, which it seals and reads under
+    /// cladefs: its keys, its branch's and its ancestors' DEKs, which it seals and reads under
     /// (TASK-411.3): empty, in the clear.
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
     }
 
-    /// fxdax: holds the store's directory taken for this process until what it returns is dropped,
+    /// cladefs: holds the store's directory taken for this process until what it returns is dropped,
     /// as the store open does: for what outlives the store's closing and still writes in the
     /// directory, as its uploader does as it stops (TASK-129). Fails once it is closed.
     pub fn hold_dir(&self) -> Result<DirHold<D>, Error> {
@@ -1276,7 +1276,7 @@ impl<D: Dir> Store<D> {
         Ok(DirHold { _taken: taken.clone() })
     }
 
-    /// fxdax: commits, durably, a commit whose segment's footer names `child`, a fork of the
+    /// cladefs: commits, durably, a commit whose segment's footer names `child`, a fork of the
     /// branch, which its owner and whether it is a point say (doc-7, Forks): the fork is made where
     /// the branch's segments go, as they go, and nowhere here (TASK-165.7). Its segment closes at
     /// the commit. Returns the commit's epoch. One that fails once its commit was made fails with
@@ -1303,7 +1303,7 @@ impl<D: Dir> Store<D> {
         &self.dir
     }
 
-    /// fxdax: what holds the parts of its segments packed as they fill ([`Opening::held`],
+    /// cladefs: what holds the parts of its segments packed as they fill ([`Opening::held`],
     /// TASK-400).
     pub fn held_parts(&self) -> &Arc<HeldParts> {
         &self.held
@@ -1352,7 +1352,7 @@ impl<D: Dir> Store<D> {
         drop(flushing);
         let mut state = self.lock();
         if !state.standing.is_closed() {
-            // fxdax: once no segment is being framed, whatever closed it, a commit no flush took
+            // cladefs: once no segment is being framed, whatever closed it, a commit no flush took
             // or one that failed among them, which another store, opening the branch, would frame
             // again meanwhile from its raw file (TASK-41.1, TASK-79.99): each framing ends itself,
             // and the segments say which are running (TASK-153.8). The opening keeps their framed
@@ -1360,7 +1360,7 @@ impl<D: Dir> Store<D> {
             if rules().close_waits_for_framings {
                 state = self.framed(state);
             }
-            // fxdax: and for the next segment's log being prepared, which writes a spare's header
+            // cladefs: and for the next segment's log being prepared, which writes a spare's header
             // and room: a store opening the branch again meanwhile, taking the spare as a log, would
             // have its header written over, another segment's, its records then none of its own
             // (TASK-333, the Shuttle rounds closing after a failed framing).
@@ -1438,7 +1438,7 @@ impl<D: Dir> Store<D> {
         self.begin_write_locked(state, extent, offset, len)
     }
 
-    /// fxdax: begins a write as [`Store::begin_write`] does, or, while a commit, or a closing
+    /// cladefs: begins a write as [`Store::begin_write`] does, or, while a commit, or a closing
     /// between commits, holds writes back, returns `None` at once rather than wait on the
     /// caller's thread (TASK-98): an executor's thread waiting there may be the one the writes in
     /// progress need to end, as futures of the same task, and the commit waits for them for
@@ -1460,7 +1460,7 @@ impl<D: Dir> Store<D> {
         self.begin_write_locked(state, extent, offset, len).map(Some)
     }
 
-    /// fxdax: waits, blocking the calling thread, until no commit, nor closing between commits,
+    /// cladefs: waits, blocking the calling thread, until no commit, nor closing between commits,
     /// holds writes back ([`Store::try_begin_write`]).
     pub fn wait_until_writes_resume(&self) {
         let mut state = self.lock();
@@ -1469,7 +1469,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: fails unless `extent`, the branch's, whose life in `state` is `life`, may be opened,
+    /// cladefs: fails unless `extent`, the branch's, whose life in `state` is `life`, may be opened,
     /// as a write opens it: unless it is open, or never sealed by the branch, held or freed
     /// ([`Spent`], TASK-79.6). One kept, freed, is spent if it was the branch's own.
     fn check_opens(state: &State<D::File>, life: &Life<'_>, extent: ExtentId) -> Result<(), Error> {
@@ -1501,7 +1501,7 @@ impl<D: Dir> Store<D> {
                 Some(placement) => matches!(placement, Placement::Segment),
                 None => end < self.options.large_extent,
             };
-            // fxdax: what it writes over, in a segment, takes room too (TASK-79.2), as the writes
+            // cladefs: what it writes over, in a segment, takes room too (TASK-79.2), as the writes
             // that finished left the extent: not its holes (TASK-160.16).
             let overwrites = match current.map(|entry| &entry.data) {
                 Some(Data::Pieces(pieces)) if to_segment => covered(pieces, offset, end),
@@ -1509,8 +1509,8 @@ impl<D: Dir> Store<D> {
             };
             (grows, to_segment, overwrites)
         };
-        // fxdax: whole sectors, which the open segment takes, and its seal, copying it whole from
-        // its start, appends there (TASK-411.8): refused before the extent opens. fxdax: and which
+        // cladefs: whole sectors, which the open segment takes, and its seal, copying it whole from
+        // its start, appends there (TASK-411.8): refused before the extent opens. cladefs: and which
         // a sealed store's large extents' raw files take, encrypted a sector at a time
         // (TASK-411.5).
         if to_segment || self.keys.sealing().is_some() {
@@ -1556,11 +1556,11 @@ impl<D: Dir> Store<D> {
         })
     }
 
-    /// The raw file of `extent`, not open, made for its writes until it is sealed. fxdax: one left
+    /// The raw file of `extent`, not open, made for its writes until it is sealed. cladefs: one left
     /// at its path holds nothing the extent does, as no open extent's writes go to it: a free's, of
     /// the extent while it was open, which the next commit's flush removes. It makes way, so that
     /// the extent may be written anew before that flush (TASK-79.5).
-    /// fxdax: sealed, if the store is, under its branch's newest DEK, from a salt of its own kept
+    /// cladefs: sealed, if the store is, under its branch's newest DEK, from a salt of its own kept
     /// in memory alone, as the file never outlives the process: an opening removes those left
     /// (TASK-411.5).
     fn create_raw(&self, extent: ExtentId) -> Result<RawFile<D::File>, Error> {
@@ -1575,7 +1575,7 @@ impl<D: Dir> Store<D> {
         Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, sealer))
     }
 
-    /// fxdax: makes room in the open segment for a write of `len` bytes, if it has none: writes
+    /// cladefs: makes room in the open segment for a write of `len` bytes, if it has none: writes
     /// go to the next (TASK-79.2). The open segment, full, takes no more, and waits for the next
     /// commit, which seals in place what is one run in it and closes it (`Segments::fill`,
     /// TASK-92.41): holding the state alone, so that the write waits neither for a commit in
@@ -1591,23 +1591,23 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: what frames the store's segments, and prepares its next segment's log, off its
+    /// cladefs: what frames the store's segments, and prepares its next segment's log, off its
     /// commits ([`Framer`]).
     fn framer(&self) -> Framer<D> {
         let (dir, state, idle) = (self.dir.clone(), self.state.clone(), self.idle.clone());
         Framer { dir, branch: self.branch.id, state, idle, held: self.held.clone() }
     }
 
-    /// fxdax: prepares the log of the segment after the open one, off the state lock, on a thread
+    /// cladefs: prepares the log of the segment after the open one, off the state lock, on a thread
     /// of its own, unless it is or is being (`Segments::to_prepare`, TASK-333): the segment's
     /// opening takes it, syncing nothing, where it wrote and synced its header holding the state
     /// lock, every write and read of the store, and its flushes, waiting 0.1-1.4 s behind the
-    /// host's journal on a disk VMs share. fxdax: placed there under its name, beside the
+    /// host's journal on a disk VMs share. cladefs: placed there under its name, beside the
     /// segment's raw file, holding the state, then their entries made durable, holding nothing
     /// (`Segments::prepared`, TASK-384): the commits made in the segment, opened, then wait for no
     /// sync of the directories of raw files and logs, which each segment's opening cost the next
     /// flush, a commit of the host's journal a durable commit waited for. Here, holding it, as
-    /// before, if the directory does one thing at a time, or the host refuses the thread. fxdax:
+    /// before, if the directory does one thing at a time, or the host refuses the thread. cladefs:
     /// the segment opened meanwhile, as a commit filling it opens it, the preparation goes on with
     /// the next's (`Preparing::Again`, `Segments::placed_synced`), as no other began meanwhile:
     /// ended, it left the next segment nothing prepared, as `Store::prepared` finds it, until a
@@ -1662,7 +1662,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: the number of the next segment, if its raw file and log are there, under their
+    /// cladefs: the number of the next segment, if its raw file and log are there, under their
     /// names, ahead of it, its preparation's ([`Store::prepare_next`], TASK-384): what reads the
     /// directory beside the store, as a test does, finds them holding nothing, as an opening
     /// would, which removes them.
@@ -1670,7 +1670,7 @@ impl<D: Dir> Store<D> {
         self.lock().segments.placed().map(|segment| segment.number)
     }
 
-    /// fxdax: waits for the preparation of the next segment's log to end, if one runs
+    /// cladefs: waits for the preparation of the next segment's log to end, if one runs
     /// ([`Store::prepare_next`]): its raw file and log there, under their names, their entries
     /// durable, until the segment opens, as what counts the store's files counts them (TASK-333,
     /// TASK-384).
@@ -1718,7 +1718,7 @@ impl<D: Dir> Store<D> {
                     extent_offset: write.extent_offset,
                     len: write.len,
                 };
-                // fxdax: what the extent held of where it wrote: not its holes, which writes past
+                // cladefs: what the extent held of where it wrote: not its holes, which writes past
                 // its end grew it by, and which it writes over nothing in (TASK-160.16).
                 let over = covered(pieces, write.extent_offset, end);
                 add_piece(pieces, piece);
@@ -1746,7 +1746,7 @@ impl<D: Dir> Store<D> {
     }
 
     /// `write` is done, and holds nothing: abandoned, or to an extent freed since it began. What it
-    /// wrote to a segment, if anything, is dead space; fxdax: which its writer wasted, until the
+    /// wrote to a segment, if anything, is dead space; cladefs: which its writer wasted, until the
     /// next commit (TASK-79.2).
     fn drop_write(&self, state: &mut State<D::File>, write: &Write<'_, D>) {
         state.space.unreserve(write.grows);
@@ -1879,14 +1879,14 @@ impl<D: Dir> Store<D> {
             state.unreferenced.doomed.push(open_extent_path(extent));
         }
         let Some(entry) = state.extents.remove(&extent) else { return Ok(()) };
-        // fxdax: sealed, the branch's own is written no more (TASK-79.6).
+        // cladefs: sealed, the branch's own is written no more (TASK-79.6).
         if placement.is_none() && extent.branch == self.branch.id {
             state.spent.insert(extent.sequence);
         }
         state.space.removed(entry.len, extent.branch == self.branch.id);
         state.uncommitted.push(Change::Free(extent));
         // A sealed one's data stays until the uploader has what it needs of it, and until the
-        // commit that frees it decides whether views keep it. fxdax: an open one's goes at once:
+        // commit that frees it decides whether views keep it. cladefs: an open one's goes at once:
         // no commit held it, so that no reader needs it, and what it took of segments is dead
         // space, counted so (TASK-79.2). Of a file of its own it has none, which its seal would
         // have made, but its raw file, which goes with the next commit: nothing else of it to let
@@ -1895,7 +1895,7 @@ impl<D: Dir> Store<D> {
         // (TASK-79.2).
         if placement.is_none() {
             state.segments.displace(extent, &entry.data);
-            // fxdax: for the bucket, until the commit that frees it is acknowledged there, as the
+            // cladefs: for the bucket, until the commit that frees it is acknowledged there, as the
             // segment holding its seal is by then (TASK-165.9).
             let uploader = rules().keep_frees;
             let freed = state.epoch + 1;
@@ -1915,7 +1915,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for views,
+    /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, held, or freed and kept: for views,
     /// or for the bucket, until the commit that freed it is acknowledged there (TASK-165.9).
     pub fn read_kept(&self, extent: ExtentId, offset: u64, buf: &mut [u8]) -> Result<(), Error> {
         self.read_into_entry(extent, offset, buf, Reader::Kept)
@@ -1929,7 +1929,7 @@ impl<D: Dir> Store<D> {
         self.flush()
     }
 
-    /// fxdax: commits as [`Store::commit`] does, but without waiting for durability: a barrier,
+    /// cladefs: commits as [`Store::commit`] does, but without waiting for durability: a barrier,
     /// which orders what came before it before what comes after, and seals the extents written
     /// before it. A crash keeps a prefix of the commits, which [`Store::flush`] makes durable in
     /// order: doc-4's `COMMIT` without `COMMIT_DURABLE`.
@@ -1958,7 +1958,7 @@ impl<D: Dir> Store<D> {
 
     /// The steps of the next commit, which sets `root`, if any, in their order: each takes what
     /// those before it leave.
-    /// fxdax: its seal, and what it writes of it, each in a span of its own, `commit.seal` and
+    /// cladefs: its seal, and what it writes of it, each in a span of its own, `commit.seal` and
     /// `commit.write` (`extent_remote::trace`, TASK-258).
     fn commit_in(&self, state: &mut State<D::File>, root: Option<&[u8]>) -> Result<(), Error> {
         let epoch = state.epoch + 1;
@@ -1981,7 +1981,7 @@ impl<D: Dir> Store<D> {
     ) -> Result<(), Error> {
         self.publish(state, epoch, root, sealing);
         let (changes, capacity) = (state.uncommitted.take(), state.uncommitted.take_capacity());
-        // The open segment's footer records them, before the segment closes; fxdax: and its log,
+        // The open segment's footer records them, before the segment closes; cladefs: and its log,
         // unless it closes with them (TASK-165.9).
         let changed = (root, capacity);
         let records =
@@ -1992,7 +1992,7 @@ impl<D: Dir> Store<D> {
         self.committed(state, epoch, records)
     }
 
-    /// fxdax: what follows commit `epoch`, whose contents are `records`, by the segments it spans,
+    /// cladefs: what follows commit `epoch`, whose contents are `records`, by the segments it spans,
     /// in the state: the segments filled since the last commit closed and framed, which it sealed
     /// in, the open segment closed if it is due, the segments it let go of, and what its flush
     /// makes durable, queued.
@@ -2002,10 +2002,10 @@ impl<D: Dir> Store<D> {
         epoch: u64,
         records: Vec<(SegmentId, Contents)>,
     ) -> Result<(), Error> {
-        // fxdax: with the rule off, the segments the last commit closed are framed only now, by a
+        // cladefs: with the rule off, the segments the last commit closed are framed only now, by a
         // commit that may never come (TASK-150.2).
         let mut closed = std::mem::take(&mut state.deferred);
-        // fxdax: those filled since the last commit, in the order they filled, before the open
+        // cladefs: those filled since the last commit, in the order they filled, before the open
         // one, as the chain stamps them (TASK-92.41).
         for unframed in state.segments.close_full(epoch, state.next_sequence) {
             self.enqueue(state, &unframed);
@@ -2014,7 +2014,7 @@ impl<D: Dir> Store<D> {
                 false => state.deferred.push(unframed),
             }
         }
-        // fxdax: framed together, made durable together once framed (TASK-310), whether or not
+        // cladefs: framed together, made durable together once framed (TASK-310), whether or not
         // the open segment's closing fails.
         let due = self.close_if_due(state, epoch).map(|due| closed.extend(due));
         self.frame_behind(state, closed);
@@ -2038,7 +2038,7 @@ impl<D: Dir> Store<D> {
     }
 
     /// Seals the extents open, as a commit does, each in one run, or a file of its own if large
-    /// (doc-7, Segments), and returns them; fxdax: saying on `span` how many, and the bytes it
+    /// (doc-7, Segments), and returns them; cladefs: saying on `span` how many, and the bytes it
     /// copied.
     fn seal_open(
         &self,
@@ -2046,10 +2046,10 @@ impl<D: Dir> Store<D> {
         span: &trace::Span,
     ) -> Result<Vec<ExtentId>, Error> {
         let sealing = state.uncommitted.open_extents();
-        // fxdax: what sealing copied, which the commit's flush syncs: said once past 8 MiB, which
+        // cladefs: what sealing copied, which the commit's flush syncs: said once past 8 MiB, which
         // the flush of extentd's turn writes at once (TASK-221).
         let (mut copies, mut copied, mut largest) = (0, 0, 0);
-        // fxdax: why it copies what it copies, with FXDAX_SEAL_STATS set (TASK-92.41).
+        // cladefs: why it copies what it copies, with CLADEFS_SEAL_STATS set (TASK-92.41).
         let mut why = seals::enabled().then(seals::Sealing::default);
         for &extent in &sealing {
             if let Some(why) = &mut why
@@ -2080,7 +2080,7 @@ impl<D: Dir> Store<D> {
         Ok(sealing)
     }
 
-    /// fxdax: why sealing `extent` copies it, or not, its length and how many pieces it is in;
+    /// cladefs: why sealing `extent` copies it, or not, its length and how many pieces it is in;
     /// none if sealing does nothing with it (TASK-92.41).
     fn why_sealed(
         &self,
@@ -2137,13 +2137,13 @@ impl<D: Dir> Store<D> {
     }
 
     /// Seals `extent`, which a commit seals, in one run in the open segment, or in a file of its
-    /// own, framed, if it is large, copying its data there unless it is. fxdax: or where it is, if
+    /// own, framed, if it is large, copying its data there unless it is. cladefs: or where it is, if
     /// one run of a segment filled since the last commit, which the commit goes on with
     /// (`Segments::fill`, TASK-92.41); a copy past the open segment's room filling it, and going in
     /// the next. Returns the bytes it copied, if it copied them.
     fn seal(&self, state: &mut State<D::File>, extent: ExtentId) -> Result<u64, Error> {
         let Some(entry) = state.extents.get(&extent).cloned() else {
-            // fxdax: opened by a write abandoned, none since: its raw file, if it has one, holds
+            // cladefs: opened by a write abandoned, none since: its raw file, if it has one, holds
             // nothing, and goes now, as the commit waited for the writes in progress; not with the
             // commit's flush, which the extent's next write, making another, may come before
             // (TASK-79.5). Opening the store removes it, failing here.
@@ -2193,7 +2193,7 @@ impl<D: Dir> Store<D> {
             state.uncommitted.push(Change::MoveOwn { extent });
             Data::Own
         } else {
-            // fxdax: in the next, the open one full, which the commit goes on with past it.
+            // cladefs: in the next, the open one full, which the commit goes on with past it.
             if !state.segments.fits(entry.len, self.options.segment_limit()) {
                 state.segments.fill(&*self.dir, state.epoch)?;
                 self.prepare_next(state);
@@ -2214,7 +2214,7 @@ impl<D: Dir> Store<D> {
         Ok(entry.len)
     }
 
-    /// fxdax: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its own
+    /// cladefs: seals `extent`, open in `raw`, a raw file of its own, of its `len` bytes, in its own
     /// file, framed: in place, if none of its parts compresses, as an object of such parts holds
     /// them as they are, where they are (`extent_frame::Packer`), its raw file that file then, its
     /// tail appended, renamed; or else in a file of its own, as [`Store::write_own`] frames one,
@@ -2231,7 +2231,7 @@ impl<D: Dir> Store<D> {
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
-        // fxdax: sealed, no part's packed bytes are its data, and it is framed in a copy
+        // cladefs: sealed, no part's packed bytes are its data, and it is framed in a copy
         // (TASK-411.2, TASK-411.3); its raw file's are not either, encrypted (TASK-411.5).
         let mut packer = extent_frame::Packer::new(self.keys.sealing());
         let clear = raw.clear().filter(|_| packer.key().is_none()).cloned();
@@ -2325,7 +2325,7 @@ impl<D: Dir> Store<D> {
         Ok(unframed)
     }
 
-    /// fxdax: `unframed`, a segment just closed, is a segment of the write-ahead log from now on,
+    /// cladefs: `unframed`, a segment just closed, is a segment of the write-ahead log from now on,
     /// until acknowledged (TASK-165.9), holding the bytes of its data framed, and of the extents
     /// stored on their own its footer names.
     fn enqueue(&self, state: &mut State<D::File>, unframed: &Unframed<D::File>) {
@@ -2343,7 +2343,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: closes the open segment now, between commits, once no write is in progress in it,
+    /// cladefs: closes the open segment now, between commits, once no write is in progress in it,
     /// if commits made since it opened, or forks: for its uploader to upload what the commits made
     /// so far without waiting for the next. Writes wait for the closing alone: it is framed, and
     /// made durable, by a framing that ends itself, as a commit's closing is
@@ -2356,7 +2356,7 @@ impl<D: Dir> Store<D> {
         self.close_now_unless(false)
     }
 
-    /// fxdax: closes as [`Store::close_now`] does, unless the guest is filling the segment it would
+    /// cladefs: closes as [`Store::close_now`] does, unless the guest is filling the segment it would
     /// close (`Segments::filling`): its next commit seals in place what is one run in it, where
     /// closed now that commit copies all it wrote since out of it (TASK-92.41). What an uploader's
     /// interval does; a commit waiting for its upload closes it whatever it holds. Returns whether
@@ -2365,7 +2365,7 @@ impl<D: Dir> Store<D> {
         self.close_now_unless(true)
     }
 
-    /// fxdax: closes as [`Store::close_now`] does, `unless_filling` as
+    /// cladefs: closes as [`Store::close_now`] does, `unless_filling` as
     /// [`Store::close_now_unless_filling`] does, for the uploader: until its framing wrote its
     /// framed file, which it uploads, not until the framing made it durable, which its raw file
     /// and log stand for meanwhile, until the commits its footer names are (TASK-384). A durable
@@ -2378,7 +2378,7 @@ impl<D: Dir> Store<D> {
         Ok(true)
     }
 
-    /// fxdax: [`Store::close_now`], unless `filling` and the guest is filling the segment.
+    /// cladefs: [`Store::close_now`], unless `filling` and the guest is filling the segment.
     fn close_now_unless(&self, filling: bool) -> Result<bool, Error> {
         let Some(number) = self.close_between_commits(filling)? else { return Ok(false) };
         let mut state = self.lock();
@@ -2391,9 +2391,9 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: closes the open segment, between commits, as [`Store::close_now`] does, framing it
+    /// cladefs: closes the open segment, between commits, as [`Store::close_now`] does, framing it
     /// behind, and returns it: none if no commit came since it opened, nor fork, or the branch is
-    /// closed. fxdax: or the first segment filled since the last commit, holding commits, which
+    /// closed. cladefs: or the first segment filled since the last commit, holding commits, which
     /// would wait for the next otherwise (`Segments::fill`, TASK-92.41).
     fn close_between_commits(&self, unless_filling: bool) -> Result<Option<SegmentId>, Error> {
         let _committing = self.committing.with(Mutex::lock);
@@ -2408,7 +2408,7 @@ impl<D: Dir> Store<D> {
         let mut state = state.hold_writes_while(&self.idle, |state| {
             rules().close_waits_for_writers && state.segments.closing_writers() > 0
         })?;
-        // fxdax: and closed while it waited, as before (TASK-83).
+        // cladefs: and closed while it waited, as before (TASK-83).
         if state.standing.is_closed() {
             return Ok(None);
         }
@@ -2427,7 +2427,7 @@ impl<D: Dir> Store<D> {
         Ok(Some(number))
     }
 
-    /// fxdax: frames `closed`, segments just closed, which `state` holds, off what closed them:
+    /// cladefs: frames `closed`, segments just closed, which `state` holds, off what closed them:
     /// a commit, a write finding no room, a closing between commits or a fork's commit, alike. Its
     /// framing writes it ([`Unframed::frame`]) and makes it durable, with the segments framed
     /// meanwhile (`segments::make_durable`, TASK-310), then ends itself, holding the state: the
@@ -2447,7 +2447,7 @@ impl<D: Dir> Store<D> {
         state: &mut State<D::File>,
         closed: impl IntoIterator<Item = Unframed<D::File>>,
     ) {
-        // fxdax: one framer at a time, in the order the segments closed (`wal`'s docs,
+        // cladefs: one framer at a time, in the order the segments closed (`wal`'s docs,
         // TASK-165.9); each segment made durable once framed, with those framed meanwhile, by
         // another thread ([`Framer`], TASK-310).
         for unframed in closed {
@@ -2457,7 +2457,7 @@ impl<D: Dir> Store<D> {
         self.run_framer(state);
     }
 
-    /// fxdax: has the framer look ahead at the parts of segments written whole since it last did,
+    /// cladefs: has the framer look ahead at the parts of segments written whole since it last did,
     /// as they fill, behind the framings queued before them, as it frames them
     /// ([`Store::frame_behind`]): its framings in place read them no more (TASK-400). A segment's
     /// framing read all of its data back as it closed, seconds after its guest wrote it, from the
@@ -2473,7 +2473,7 @@ impl<D: Dir> Store<D> {
         self.run_framer(state);
     }
 
-    /// fxdax: runs the framer, if none runs and it has work queued ([`Store::frame_behind`]).
+    /// cladefs: runs the framer, if none runs and it has work queued ([`Store::frame_behind`]).
     fn run_framer(&self, state: &mut State<D::File>) {
         if state.framing.queue.is_empty() || std::mem::replace(&mut state.framing.running, true) {
             return;
@@ -2488,7 +2488,7 @@ impl<D: Dir> Store<D> {
         framer.frame_here(state);
     }
 
-    /// fxdax: removes the files at `paths`, as nothing refers to them: logging what it can't,
+    /// cladefs: removes the files at `paths`, as nothing refers to them: logging what it can't,
     /// which opening the store removes.
     fn remove(&self, paths: impl IntoIterator<Item = String>) {
         for path in paths {
@@ -2500,7 +2500,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: the numbers of the branch's segments being framed behind what closed them
+    /// cladefs: the numbers of the branch's segments being framed behind what closed them
     /// ([`Store::frame_behind`]): their framed files, in the store's directory already, are whole
     /// only once their framings end, their raw files holding their data meanwhile. What reads the
     /// directory beside the store, as a test does, reads no other framed file (TASK-189).
@@ -2511,7 +2511,7 @@ impl<D: Dir> Store<D> {
         ours.map(|segment| segment.number).collect()
     }
 
-    /// fxdax: the last commit whose segments the uploader may take: the last durable. A segment of
+    /// cladefs: the last commit whose segments the uploader may take: the last durable. A segment of
     /// commits a crash may lose here, acknowledged in the bucket, would leave the branch past the
     /// write-ahead log the store opens with, which its opening reads as diverged (`ESTALE`), the
     /// commits its own (TASK-165.9). The uploader flushes before it takes them, but for commits
@@ -2520,7 +2520,7 @@ impl<D: Dir> Store<D> {
         self.durability.with(Mutex::lock).durable()
     }
 
-    /// fxdax: waits, holding no lock, for the framings of segment `number` and those before it to
+    /// cladefs: waits, holding no lock, for the framings of segment `number` and those before it to
     /// end, their framed files durable, which the uploader waits for no more before it uploads
     /// them (TASK-384): fails if one failed.
     fn wait_framed_through(&self, number: u64) -> Result<(), Error> {
@@ -2537,7 +2537,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: waits, holding no lock, for every framing running to end, its framed file durable,
+    /// cladefs: waits, holding no lock, for every framing running to end, its framed file durable,
     /// or failed, which it fails then: what reads the directory beside the store, as a test does,
     /// finds the segments framed then named their own, their raw files and logs going with the next
     /// flush, if their commits are durable. The uploader waits for no more than their framed files
@@ -2557,7 +2557,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: waits, holding no lock, until no look ahead at a part written whole is queued or
+    /// cladefs: waits, holding no lock, until no look ahead at a part written whole is queued or
     /// reading it ([`Store::see_ahead`]): the framer reads each, as its segment fills, beside what
     /// wrote it and after, whatever comes next (TASK-400). What measures the directory's I/O across
     /// an operation, as a test does, counts the operation's alone then, for none is queued but by
@@ -2570,7 +2570,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: `state`, once no segment is being framed ([`Store::frame_behind`]), which it let go
+    /// cladefs: `state`, once no segment is being framed ([`Store::frame_behind`]), which it let go
     /// of meanwhile.
     fn framed<'a>(&self, mut state: Locked<'a, D::File>) -> Locked<'a, D::File> {
         while !state.segments.framings().is_empty() {
@@ -2579,12 +2579,12 @@ impl<D: Dir> Store<D> {
         state
     }
 
-    /// fxdax: the segments of the write-ahead log not yet taken, oldest first, `limit` of them at
+    /// cladefs: the segments of the write-ahead log not yet taken, oldest first, `limit` of them at
     /// most, for the uploader, which has them until it says they are acknowledged
     /// ([`Store::acknowledged`]): the rest it takes later, their files not opened meanwhile. Only
     /// those whose commits are durable ([`Store::uploadable`]). Those being framed it waits for,
     /// holding no lock: each framing ends itself, whatever comes next, which may be nothing, as
-    /// after a write that closed one for want of room (TASK-150.2, TASK-153.8). fxdax: until it
+    /// after a write that closed one for want of room (TASK-150.2, TASK-153.8). cladefs: until it
     /// wrote their framed files, not until it made them durable, which their raw files and logs
     /// stand for meanwhile, until the commits their footers name are (TASK-384).
     pub fn closed(&self, limit: usize) -> Result<Vec<Closed<D::File>>, Error> {
@@ -2592,7 +2592,7 @@ impl<D: Dir> Store<D> {
         self.wait_for_writings(framing)?;
         let mut state = self.state()?;
         let state = &mut *state;
-        // fxdax: and framed: its framed file is what is uploaded.
+        // cladefs: and framed: its framed file is what is uploaded.
         let segments = &state.segments;
         let writing = |number| segments.is_writing(SegmentId { branch: self.branch.id, number });
         let taken: Vec<(u64, Footer, bool)> = (state.wal.take(self.uploadable(), writing, limit))
@@ -2614,7 +2614,7 @@ impl<D: Dir> Store<D> {
         Ok(closed)
     }
 
-    /// fxdax: the extents `moved` says the collector moved, from where to where, as the uploader's
+    /// cladefs: the extents `moved` says the collector moved, from where to where, as the uploader's
     /// writer names them where they went before its checkpoint lands (`Writer::following`): those
     /// the store reads in the bucket, held or kept, are named there too, if it names them on their
     /// way there, so that it names none further back than the writer's newest checkpoint, from
@@ -2625,7 +2625,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: segment `number`, which [`Store::closed`] gave, the first of the write-ahead log, is
+    /// cladefs: segment `number`, which [`Store::closed`] gave, the first of the write-ahead log, is
     /// acknowledged in the bucket: the extents sealed in it, and those stored on their own its
     /// footer names, are read there from now on ([`RemoteData`]), and their files leave the store
     /// for the host's cache, or go: the extents' own files, and the segment's, once no extent's
@@ -2633,7 +2633,7 @@ impl<D: Dir> Store<D> {
     /// log's base, its last commit from now on, is durable first, so that the store opened again
     /// puts what is left of the log after the branch (TASK-165.9).
     ///
-    /// fxdax: once its framing ended, its framed file durable, which its upload waited for no
+    /// cladefs: once its framing ended, its framed file durable, which its upload waited for no
     /// more, but for its framed file written (TASK-384): its upload and the syncs making it
     /// durable here go on at once, the bucket's round trip mostly the longer; and once it is
     /// acknowledged, its files leave as before, its framed file named its own, into the host's
@@ -2658,7 +2658,7 @@ impl<D: Dir> Store<D> {
         let (leaving, raw) = {
             let mut state = self.state()?;
             let state = &mut *state;
-            // fxdax: those whose acknowledgements are whole, of a commit spanning segments all
+            // cladefs: those whose acknowledgements are whole, of a commit spanning segments all
             // once its last is acknowledged (`Queue::acknowledge`, TASK-338).
             let whole = state.wal.acknowledge(number).expect("the first, as found");
             for queued in &whole {
@@ -2676,7 +2676,7 @@ impl<D: Dir> Store<D> {
             // Those no extent's data is in here any more leave now.
             let reaped = state.segments.reap().into_iter();
             leaving.extend(reaped.map(|(number, key)| (segment_path(number), key)));
-            // fxdax: and the raw files and logs of the segments framed whose commits are durable,
+            // cladefs: and the raw files and logs of the segments framed whose commits are durable,
             // as those acknowledged are, which no flush may come to remove (TASK-165.9).
             let raw = state.segments.raw(self.durability.with(Mutex::lock).durable());
             (leaving, raw)
@@ -2686,20 +2686,20 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: makes the commits ordered so far durable, in order, as few syncs as they need
+    /// cladefs: makes the commits ordered so far durable, in order, as few syncs as they need
     /// together: their data, then their records in the logs of the segments they were made in,
     /// then the files they made unreferenced go; and the raw files and logs of the segments framed
     /// whose commits are durable. It waits for no framing (TASK-165.9).
     ///
-    /// fxdax: in a span of its own, `store.flush` (`extent_remote::trace`, TASK-258): a durable
+    /// cladefs: in a span of its own, `store.flush` (`extent_remote::trace`, TASK-258): a durable
     /// commit's, or of the commits ordered before, which a daemon's turn makes durable.
     pub fn flush(&self) -> Result<(), Error> {
         let span = trace::Span::start("store.flush");
         span.set_branch(self.branch);
         span.run(|| {
-            // fxdax: timed, phase by phase (TASK-165.9).
+            // cladefs: timed, phase by phase (TASK-165.9).
             let asked = Instant::now();
-            // fxdax: and its waits to run (TASK-336).
+            // cladefs: and its waits to run (TASK-336).
             let waits = Waits::start();
             let mut logs = self.flushing.with(Mutex::lock);
             let mut timed = Flush::default();
@@ -2728,12 +2728,12 @@ impl<D: Dir> Store<D> {
                     return Err(error);
                 }
                 self.durability.with(Mutex::lock).finish(last);
-                // fxdax: the entries of the segments opened its syncs made durable: no making of
+                // cladefs: the entries of the segments opened its syncs made durable: no making of
                 // them durable syncs them again (TASK-369).
                 let entries =
                     commits.iter().flat_map(|pending| &pending.entries).copied().collect();
                 self.lock().segments.entries_synced(&entries);
-                // The files the commits let go of go, once they are durable; fxdax: those of the
+                // The files the commits let go of go, once they are durable; cladefs: those of the
                 // bucket's, into the host's cache (TASK-165.8).
                 let started = Instant::now();
                 let mut leaving = Vec::new();
@@ -2746,13 +2746,13 @@ impl<D: Dir> Store<D> {
                 last
             }
         };
-        // fxdax: and the raw files and logs of the segments framed, whose footers name commits
+        // cladefs: and the raw files and logs of the segments framed, whose footers name commits
         // durable now (TASK-153.8).
         let started = Instant::now();
         let raw = self.state()?.segments.raw(durable);
         self.remove_raw(raw);
         timed.phases.took(flush::RAW, started);
-        // fxdax: and the next segment's log prepared, ahead of its opening (TASK-333): by a flush
+        // cladefs: and the next segment's log prepared, ahead of its opening (TASK-333): by a flush
         // that made commits durable, a store that writes, not as a store opens. A store never
         // written to, as a fork's that only reads, takes none: every fork a daemon served took
         // the next segment's log, and a file held open (serves_hundreds_of_forks_of_a_base).
@@ -2762,7 +2762,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: removes the raw files and logs of `raw`, segments framed, whose framed files, and
+    /// cladefs: removes the raw files and logs of `raw`, segments framed, whose framed files, and
     /// their entries, an opening reads their commits from now: their framings made them durable
     /// before they ended (`segments::make_durable`), so that it syncs nothing, a flush's syncs
     /// waiting behind the host's disk enough (TASK-310). A log the branch wants as a spare is
@@ -2793,10 +2793,10 @@ impl<D: Dir> Store<D> {
 
     /// Makes `commits`, a flush's, durable, in order: their data, and their records in the logs
     /// of the segments they were made in, open, or closed since; but for the files they made
-    /// unreferenced. fxdax: it waits for no framing, those of segments the uploader closes between
+    /// unreferenced. cladefs: it waits for no framing, those of segments the uploader closes between
     /// commits among them, which held up the turns a daemon makes its guests' commits durable in
     /// (TASK-165.9): an opening closes a segment whose framed file isn't whole again from its log.
-    /// fxdax: in one sync's time, not two (TASK-301, [`LogRecord`]): commits that sealed little
+    /// cladefs: in one sync's time, not two (TASK-301, [`LogRecord`]): commits that sealed little
     /// (`Options::held_most`) hold their runs in their records, and only the logs are synced, as a
     /// database's write-ahead log is; others' records check their runs, synced at once with them.
     /// Data first, then records, if the commits stored extents on their own, which no record
@@ -2853,7 +2853,7 @@ impl<D: Dir> Store<D> {
             self.dir.barrier()?;
             timed.phases.took(flush::LOGS, recorded);
         }
-        // fxdax: the logs of segments whose logs went: no commit made in them is still to come.
+        // cladefs: the logs of segments whose logs went: no commit made in them is still to come.
         // Those of segments closed since stay, with where their records end, which their files'
         // sizes don't say of spares (TASK-301): a flush may yet append commits made in them before
         // they closed, as one taking those ordered as the uploader closed the segment does.
@@ -2862,7 +2862,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: runs `first`, and `then`, at once, `then` on a thread of its own, one of the helpers
+    /// cladefs: runs `first`, and `then`, at once, `then` on a thread of its own, one of the helpers
     /// every flush of the process shares (`durability::HELPERS`); or in turn, on this thread, if
     /// none is free, the directory does one thing at a time, or the host refuses the thread. Not
     /// at once under Shuttle, which fails an execution that ends with a scoped thread not run, as
@@ -2891,9 +2891,9 @@ impl<D: Dir> Store<D> {
         })
     }
 
-    /// fxdax: the records of `commits`, a flush's, by the segments they were made in, in order:
+    /// cladefs: the records of `commits`, a flush's, by the segments they were made in, in order:
     /// each the commit's contents, and what `runs` says of the runs it sealed ([`LogRecord`]);
-    /// fxdax: of a commit spanning segments, one in each, in their order (TASK-92.41).
+    /// cladefs: of a commit spanning segments, one in each, in their order (TASK-92.41).
     fn records(
         &self,
         commits: &[Pending<D::File>],
@@ -2922,7 +2922,7 @@ impl<D: Dir> Store<D> {
         Ok(records)
     }
 
-    /// fxdax: appends `records` to the logs of their segments, each segment's at once, and syncs
+    /// cladefs: appends `records` to the logs of their segments, each segment's at once, and syncs
     /// them.
     fn append_records(
         &self,
@@ -2941,7 +2941,7 @@ impl<D: Dir> Store<D> {
                     vacant.insert(SegmentLog::new(log.file, log.salt, log.sealer))
                 }
             };
-            // Salted as its log's (`wal::LOG_MAGIC`); fxdax: MACed, if sealed (TASK-411.5).
+            // Salted as its log's (`wal::LOG_MAGIC`); cladefs: MACed, if sealed (TASK-411.5).
             let appended = records[at..at + run].iter().map(|(_, record)| record);
             log.append(appended).context("appending commits' records")?;
             at += run;
@@ -2949,7 +2949,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// fxdax: waits, holding no lock, for the framings of `segments` to write their framed files,
+    /// cladefs: waits, holding no lock, for the framings of `segments` to write their framed files,
     /// or end, each of which ends itself ([`Store::frame_behind`]): fails if one failed. Not for
     /// them to make the framed files durable, which the uploader waits for no more (TASK-384).
     fn wait_for_writings(
@@ -2967,7 +2967,7 @@ impl<D: Dir> Store<D> {
         }
     }
 
-    /// fxdax: whether commits ordered are not durable yet, which [`Store::flush`] makes durable:
+    /// cladefs: whether commits ordered are not durable yet, which [`Store::flush`] makes durable:
     /// waiting for a flush to take them, or taken by one in flight, which a flush waits for. Those
     /// taken counted not, a daemon's turn finding none took commits for durable that weren't,
     /// a flush of the uploader's in flight (TASK-165.9).
@@ -3002,7 +3002,7 @@ impl<D: Dir> Store<D> {
         self.write_with(extent, offset, data.len() as u64, data.len(), fill)
     }
 
-    /// fxdax: writes `len` bytes at `offset` in `extent`, as [`Store::write`] does, one write, but
+    /// cladefs: writes `len` bytes at `offset` in `extent`, as [`Store::write`] does, one write, but
     /// `piece` bytes at a time at most, each of which `fill(at, buf)` fills with the bytes at `at`
     /// of them: so that what a write holds of memory is a piece, whatever its length, which a VM
     /// process names (TASK-149.17). Its pieces are whole sectors, one at least, as what reaches
@@ -3029,7 +3029,7 @@ impl<D: Dir> Store<D> {
         Ok(())
     }
 
-    /// Sets the most bytes the branch's extents may hold, durably: fxdax: a commit of its own,
+    /// Sets the most bytes the branch's extents may hold, durably: cladefs: a commit of its own,
     /// which seals nothing, and takes none of what changed since the last commit, the next's, so
     /// that the extents a guest has open stay open (TASK-165.9); ordered with the others, as its
     /// segment's footer says (TASK-165.3). It may grow it, or shrink it no lower than what the
@@ -3057,7 +3057,7 @@ impl<D: Dir> Store<D> {
         self.flush()
     }
 
-    /// fxdax: the bytes of its write-ahead log not yet acknowledged in the bucket, those the open
+    /// cladefs: the bytes of its write-ahead log not yet acknowledged in the bucket, those the open
     /// segment's commits sealed included: what the uploader's lag bounds (TASK-165.9).
     pub fn wal_bytes(&self) -> Result<u64, Error> {
         let state = self.state()?;
@@ -3088,7 +3088,7 @@ impl<D: Dir> Store<D> {
         })
     }
 
-    /// fxdax: the bytes of frees views keep, which count as used ([`Usage::kept_for_views`]):
+    /// cladefs: the bytes of frees views keep, which count as used ([`Usage::kept_for_views`]):
     /// found as [`Store::info`] finds what it says, at once, without [`Store::usage`]'s walk of
     /// every extent the branch holds, its base's with them, which holds the state meanwhile
     /// (TASK-92.17).
@@ -3096,30 +3096,30 @@ impl<D: Dir> Store<D> {
         Ok(self.state()?.kept.for_views())
     }
 
-    /// fxdax: a view of the branch as of its latest commit, which a follower reads through
+    /// cladefs: a view of the branch as of its latest commit, which a follower reads through
     /// ([`Store::read_view`]) while the writer goes on. It waits for no commit.
     pub fn view(&self) -> View {
         self.views.open()
     }
 
-    /// fxdax: waits at most `timeout` for a commit after the commit of `epoch`, returning the
+    /// cladefs: waits at most `timeout` for a commit after the commit of `epoch`, returning the
     /// latest commit's epoch, if one came: what tells the branch's followers.
     pub fn newer(&self, epoch: u64, timeout: Duration) -> Option<u64> {
         self.views.newer(epoch, timeout)
     }
 
-    /// fxdax: what the branch's live views are: how many, how far behind (TASK-42.7).
+    /// cladefs: what the branch's live views are: how many, how far behind (TASK-42.7).
     pub fn view_stats(&self) -> crate::ViewStats {
         self.views.stats()
     }
 
-    /// fxdax: cuts the branch's views off: their reads, advances and pins fail with
+    /// cladefs: cuts the branch's views off: their reads, advances and pins fail with
     /// [`CutOff`](crate::CutOff), and the commits after keep nothing for them.
     pub fn cut_views(&self) {
         self.views.cut_all()
     }
 
-    /// fxdax: reads `buf.len()` bytes at `offset` in `extent`, which `view`, of this branch, holds:
+    /// cladefs: reads `buf.len()` bytes at `offset` in `extent`, which `view`, of this branch, holds:
     /// held still, or freed since and kept. Fails with [`CutOff`](crate::CutOff) if the view was
     /// cut off, and with `NoExtent` if its commit doesn't hold `extent`: one open, or sealed by a
     /// later commit. So a follower's journal replay, which reads the journal on until it finds
@@ -3135,7 +3135,7 @@ impl<D: Dir> Store<D> {
         self.read_into_entry(extent, offset, buf, self.view_reader(view, extent))
     }
 
-    /// fxdax: where the `len` bytes at `offset` in `extent`, which `view` holds, are, as
+    /// cladefs: where the `len` bytes at `offset` in `extent`, which `view` holds, are, as
     /// [`Store::locate`] says.
     pub fn locate_view(
         &self,
@@ -3148,7 +3148,7 @@ impl<D: Dir> Store<D> {
         self.locate_entry(extent, offset, len, self.view_reader(view, extent))
     }
 
-    /// fxdax: `extent`'s length, as of `view`'s commit, or as `view` pins it. Fails as
+    /// cladefs: `extent`'s length, as of `view`'s commit, or as `view` pins it. Fails as
     /// [`Store::read_view`] does.
     pub fn view_extent(&self, view: &View, extent: ExtentId) -> Result<u64, Error> {
         self.views.check(view)?;
@@ -3170,7 +3170,7 @@ impl<D: Dir> Store<D> {
         Ok(life.held().map(|entry| (entry.len, open)))
     }
 
-    /// fxdax: whether an extent is open: written since the last commit, which seals it.
+    /// cladefs: whether an extent is open: written since the last commit, which seals it.
     pub fn has_open(&self) -> Result<bool, Error> {
         Ok(self.state()?.uncommitted.has_open())
     }
@@ -3194,7 +3194,7 @@ impl<D: Dir> Store<D> {
 /// [`Store::seal_own`]).
 const OWN_CHUNK: u64 = 16 * extent_frame::PART;
 
-/// fxdax: copies the first `len` bytes of `from`, a raw file, into `to`, where they are, so many
+/// cladefs: copies the first `len` bytes of `from`, a raw file, into `to`, where they are, so many
 /// at a time: the parts of an extent framed in place before the first that compressed
 /// ([`Store::seal_own`], TASK-310).
 fn copy_range<F: File>(from: &RawFile<F>, to: &F, len: u64) -> Result<(), Error> {
@@ -3234,7 +3234,7 @@ fn remove_unheld<D: Dir>(
     Ok(())
 }
 
-// fxdax: commits only ordered are made durable before the store goes, which would otherwise
+// cladefs: commits only ordered are made durable before the store goes, which would otherwise
 // lose them though nothing crashed.
 impl<D: Dir> Drop for Store<D> {
     fn drop(&mut self) {
@@ -3244,7 +3244,7 @@ impl<D: Dir> Drop for Store<D> {
     }
 }
 
-/// fxdax: the bytes of `start..end` of an extent that `pieces` hold: what a write there writes
+/// cladefs: the bytes of `start..end` of an extent that `pieces` hold: what a write there writes
 /// over, in segments (TASK-79.2, TASK-160.16).
 pub(crate) fn covered(pieces: &[Piece], start: u64, end: u64) -> u64 {
     let spans = paint(pieces, start, end).into_iter();
@@ -3312,7 +3312,7 @@ mod tests {
     mod shuttle_tests {
         use super::*;
 
-        /// fxdax: opening, advancing, pinning and dropping a view take none of the locks a commit
+        /// cladefs: opening, advancing, pinning and dropping a view take none of the locks a commit
         /// holds, so a follower never waits for the writer: under Shuttle, whose waits that can't
         /// end are deadlocks it reports, they complete while this thread holds both.
         #[test]
@@ -3338,7 +3338,7 @@ mod tests {
             });
         }
 
-        /// fxdax: a segment a commit closes while the host refuses threads is framed on the
+        /// cladefs: a segment a commit closes while the host refuses threads is framed on the
         /// committing thread, rather than panic, as `thread::spawn` does, through the locks the
         /// commit holds, which every later call would find poisoned: the commit goes on, and its
         /// flush, which syncs on its own thread too, and the store's next commits; and the branch,
@@ -3382,7 +3382,7 @@ mod tests {
         }
     }
 
-    /// fxdax: what commits sealed is recorded for the views older than them alone: commits no
+    /// cladefs: what commits sealed is recorded for the views older than them alone: commits no
     /// view follows record none, and a view's records go once it does.
     #[test]
     fn sealed_records_are_for_views() {
@@ -3412,7 +3412,7 @@ mod tests {
         assert!(!sealed_after(4, 3));
     }
 
-    /// fxdax: a count drifted from what it counts, as a change that missed it leaves it, is found
+    /// cladefs: a count drifted from what it counts, as a change that missed it leaves it, is found
     /// as the state is next let go, by any call: here the bytes its extents hold (TASK-160.16).
     #[test]
     #[should_panic(expected = "the bytes the extents hold")]

@@ -1,8 +1,8 @@
-# Copyright 2026 The fxdax Authors. All rights reserved.
+# Copyright 2026 The cladefs Authors. All rights reserved.
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/lib/host.sh, which the drivers that run fxdax on a Linux host of one's own
+"""Tests of scripts/lib/host.sh, which the drivers that run cladefs on a Linux host of one's own
 source, of its host's half, scripts/lib/host-remote.sh, and of the drivers.
 
 host_command builds the command a run's job runs its host script with, and the environment it
@@ -31,16 +31,16 @@ FAKE_SSH = Path(__file__).resolve().with_name("fake_ssh.py")
 HOST_HOME = "/host/home"
 # The variables that stay here (host_env_local), in its order.
 KEPT = [
-    "FXDAX_DOCKER_STATIC",
-    "FXDAX_BUSYBOX",
-    "FXDAX_FIRECRACKER_SECCOMP_FILTER",
-    "FXDAX_FIRECRACKER_JAILER",
-    "FXDAX_EXTENTD_GRPC",
-    "FXDAX_EXTENTD_STATS",
-    "FXDAX_EXTENTD_METRICS",
-    "FXDAX_EXTENTD_ROOTS",
-    "FXDAX_EXTENTD_TENANTS",
-    "FXDAX_BENCH_RESULTS",
+    "CLADEFS_DOCKER_STATIC",
+    "CLADEFS_BUSYBOX",
+    "CLADEFS_FIRECRACKER_SECCOMP_FILTER",
+    "CLADEFS_FIRECRACKER_JAILER",
+    "CLADEFS_EXTENTD_GRPC",
+    "CLADEFS_EXTENTD_STATS",
+    "CLADEFS_EXTENTD_METRICS",
+    "CLADEFS_EXTENTD_ROOTS",
+    "CLADEFS_EXTENTD_TENANTS",
+    "CLADEFS_BENCH_RESULTS",
 ]
 # The run host_command's tests name, and its directory on the host.
 RUN = "run-x"
@@ -57,11 +57,11 @@ BASE = [
     "GIT_CONFIG_COUNT=1",
     "GIT_CONFIG_KEY_0=safe.directory",
     "GIT_CONFIG_VALUE_0=*",
-    "FXDAX_HOST_IN_PLACE=1",
-    "FXDAX_GUEST_KERNEL_JOBS=4",
-    "FXDAX_HOST_KERNELS=/mnt/fxdax-scratch/fxdax-host/kernels",
-    "FXDAX_HOST_PROVISIONED=1",
-    f"FXDAX_HOST_WORK={DIR}/work",
+    "CLADEFS_HOST_IN_PLACE=1",
+    "CLADEFS_GUEST_KERNEL_JOBS=4",
+    "CLADEFS_HOST_KERNELS=/mnt/fxdax-scratch/fxdax-host/kernels",
+    "CLADEFS_HOST_PROVISIONED=1",
+    f"CLADEFS_HOST_WORK={DIR}/work",
 ]
 # What follows the environment: the host script and its arguments.
 COMMAND = [
@@ -111,15 +111,15 @@ class HostCommand(unittest.TestCase):
         self.assertEqual(
             self.host_command(
                 {
-                    "FXDAX_FOLLOW_SECONDS": "600",
-                    "FXDAX_PJDFSTEST_TESTS": "chmod chown",
-                    "FXDAX_BENCH_WATCHDOG_SECS": "900",
-                    "FXDAX_ZSTD_LEVEL": "3",
-                    "FXDAX_BENCH_PGBENCH_SCALE": "50",
-                    "FXDAX_REMOTE_LATENCY_MS": "25",
+                    "CLADEFS_FOLLOW_SECONDS": "600",
+                    "CLADEFS_PJDFSTEST_TESTS": "chmod chown",
+                    "CLADEFS_BENCH_WATCHDOG_SECS": "900",
+                    "CLADEFS_ZSTD_LEVEL": "3",
+                    "CLADEFS_BENCH_PGBENCH_SCALE": "50",
+                    "CLADEFS_REMOTE_LATENCY_MS": "25",
                     "PJDFSTEST_COMMIT": "85a8aea9",
                     # A driver's own, which does nothing there.
-                    "FXDAX_HOST_RUN": "r1040",
+                    "CLADEFS_HOST_RUN": "r1040",
                     "OTHER": "stays",
                 },
                 "test-linux-host.sh",
@@ -129,13 +129,13 @@ class HostCommand(unittest.TestCase):
             (
                 ["nice", "-n", "19"],
                 sorted(BASE + [
-                    "FXDAX_BENCH_PGBENCH_SCALE=50",
-                    "FXDAX_BENCH_WATCHDOG_SECS=900",
-                    "FXDAX_FOLLOW_SECONDS=600",
-                    "FXDAX_HOST_RUN=r1040",
-                    "FXDAX_PJDFSTEST_TESTS=chmod chown",
-                    "FXDAX_REMOTE_LATENCY_MS=25",
-                    "FXDAX_ZSTD_LEVEL=3",
+                    "CLADEFS_BENCH_PGBENCH_SCALE=50",
+                    "CLADEFS_BENCH_WATCHDOG_SECS=900",
+                    "CLADEFS_FOLLOW_SECONDS=600",
+                    "CLADEFS_HOST_RUN=r1040",
+                    "CLADEFS_PJDFSTEST_TESTS=chmod chown",
+                    "CLADEFS_REMOTE_LATENCY_MS=25",
+                    "CLADEFS_ZSTD_LEVEL=3",
                     "PJDFSTEST_COMMIT=85a8aea9",
                 ]),
                 COMMAND + ["fxfs-guest fxfs-guest-dax", "a"],
@@ -147,18 +147,18 @@ class HostCommand(unittest.TestCase):
         # Knobs for the host: where its stores keep their branches, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
-            "FXDAX_EXTENTD_REMOTE": "s3://bucket/prefix",
-            "FXDAX_S3_URL": "s3://bucket/test",
-            "FXDAX_EXTENTD_CACHE": "/cache",
-            "FXDAX_FIRECRACKER": "/laptop/firecracker",
+            "CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix",
+            "CLADEFS_S3_URL": "s3://bucket/test",
+            "CLADEFS_EXTENTD_CACHE": "/cache",
+            "CLADEFS_FIRECRACKER": "/laptop/firecracker",
         }
         self.assertEqual(
             self.host_command({**here, **host}, "test-linux-host.sh")[1],
             sorted(BASE + [
-                "FXDAX_EXTENTD_CACHE=/cache",
-                "FXDAX_EXTENTD_REMOTE=s3://bucket/prefix",
-                "FXDAX_FIRECRACKER=/laptop/firecracker",
-                "FXDAX_S3_URL=s3://bucket/test",
+                "CLADEFS_EXTENTD_CACHE=/cache",
+                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix",
+                "CLADEFS_FIRECRACKER=/laptop/firecracker",
+                "CLADEFS_S3_URL=s3://bucket/test",
             ]),
         )
 
@@ -178,51 +178,51 @@ class HostCommand(unittest.TestCase):
                 ]
                 for path in (Path(parent, file) for file in files):
                     if path.suffix in [".rs", ".sh", ".py"] and path != HOST:
-                        read.update(re.findall(r"\bFXDAX_\w+", path.read_text(errors="replace")))
+                        read.update(re.findall(r"\bCLADEFS_\w+", path.read_text(errors="replace")))
         self.assertEqual([name for name in KEPT if name not in read], [])
 
     def test_empty_values_are_not_sent(self):
-        empty = {"FXDAX_ZSTD_LEVEL": "", "FXDAX_BENCH_PERF": ""}
+        empty = {"CLADEFS_ZSTD_LEVEL": "", "CLADEFS_BENCH_PERF": ""}
         self.assertEqual(self.host_command(empty, "test-linux-host.sh")[1:], (sorted(BASE), COMMAND))
 
     def test_values_arrive_as_they_are(self):
         note = "a 'quoted' \"note\": $HOME, `id`, \\back\\slashes\\, *?, ×\nand a line"
         self.assertEqual(
-            self.host_command({"FXDAX_BENCH_NOTE": note}, "test-linux-host.sh", note)[1:],
-            (sorted(BASE + [f"FXDAX_BENCH_NOTE={note}"]), COMMAND + [note]),
+            self.host_command({"CLADEFS_BENCH_NOTE": note}, "test-linux-host.sh", note)[1:],
+            (sorted(BASE + [f"CLADEFS_BENCH_NOTE={note}"]), COMMAND + [note]),
         )
 
     def test_the_guest_kernel_is_the_copy_on_the_host(self):
         self.assertEqual(
-            self.host_command({"FXDAX_GUEST_KERNEL": "/laptop/vmlinux"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"FXDAX_GUEST_KERNEL={DIR}/guest-kernel"]),
+            self.host_command({"CLADEFS_GUEST_KERNEL": "/laptop/vmlinux"}, "test-linux-host.sh")[1],
+            sorted(BASE + [f"CLADEFS_GUEST_KERNEL={DIR}/guest-kernel"]),
         )
 
     def test_a_path_in_home_is_in_the_hosts(self):
         self.assertEqual(
-            self.host_command({"FXDAX_EXTENTD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"FXDAX_EXTENTD_CACHE={HOST_HOME}/cache"]),
+            self.host_command({"CLADEFS_EXTENTD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
+            sorted(BASE + [f"CLADEFS_EXTENTD_CACHE={HOST_HOME}/cache"]),
         )
 
     def test_the_callers_values_replace_this_machines(self):
         self.assertEqual(
             self.host_command(
-                {"FXDAX_EXTENTD_REMOTE": "s3://bucket/prefix", "FXDAX_ZSTD_LEVEL": "3",
+                {"CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
                  # The run's own, which no caller's replaces.
-                 "FXDAX_HOST_WORK": "/laptop/work"},
-                "FXDAX_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
-                "FXDAX_MIGRATE_BUNDLE=~/run-x/bundle",
+                 "CLADEFS_HOST_WORK": "/laptop/work"},
+                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                "CLADEFS_MIGRATE_BUNDLE=~/run-x/bundle",
                 # Empty, unset there.
-                "FXDAX_ZSTD_LEVEL=",
+                "CLADEFS_ZSTD_LEVEL=",
                 "test-linux-host.sh",
-                "FXDAX_NOT=an argument",
+                "CLADEFS_NOT=an argument",
             )[1:],
             (
                 sorted(BASE + [
-                    "FXDAX_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
-                    f"FXDAX_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
+                    "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                    f"CLADEFS_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
                 ]),
-                COMMAND + ["FXDAX_NOT=an argument"],
+                COMMAND + ["CLADEFS_NOT=an argument"],
             ),
         )
 
@@ -231,28 +231,28 @@ class HostCommand(unittest.TestCase):
 
     def test_the_builds_jobs_and_niceness_are_the_callers(self):
         nice, sent, _ = self.host_command(
-            {"FXDAX_HOST_JOBS": "2", "FXDAX_HOST_NICE": "5", "FXDAX_GUEST_KERNEL_JOBS": "3"},
+            {"CLADEFS_HOST_JOBS": "2", "CLADEFS_HOST_NICE": "5", "CLADEFS_GUEST_KERNEL_JOBS": "3"},
             "test-linux-host.sh")
         self.assertEqual(nice, ["nice", "-n", "5"])
         self.assertIn("CARGO_BUILD_JOBS=2", sent)
         self.assertIn("NEXTEST_TEST_THREADS=2", sent)
         # The kernel's jobs the caller's, as it named them.
-        self.assertIn("FXDAX_GUEST_KERNEL_JOBS=3", sent)
-        self.assertNotIn("FXDAX_GUEST_KERNEL_JOBS=2", sent)
+        self.assertIn("CLADEFS_GUEST_KERNEL_JOBS=3", sent)
+        self.assertNotIn("CLADEFS_GUEST_KERNEL_JOBS=2", sent)
 
     def test_a_measurement_runs_at_its_own_niceness(self):
-        # Its builds' niceness is its script's (bench-ab-linux-host.sh's FXDAX_AB_BUILD_NICE).
+        # Its builds' niceness is its script's (bench-ab-linux-host.sh's CLADEFS_AB_BUILD_NICE).
         self.assertEqual(
             self.host_command({}, "test-linux-host.sh", preamble="host_bench=1; ")[0], [])
 
     def test_the_limit_is_the_callers(self):
         self.assertEqual(
-            self.host_command({"FXDAX_HOST_LIMIT": "30m"}, "test-linux-host.sh")[2][:4],
+            self.host_command({"CLADEFS_HOST_LIMIT": "30m"}, "test-linux-host.sh")[2][:4],
             ["timeout", "--signal=TERM", "--kill-after=30s", "30m"])
 
 
 # A host script, as the tests' hosts have every one of them: says how it was run, its arguments
-# and the variables it was given, in RESULTS/ran.txt; and does as FXDAX_FAKE_HOST says: fail;
+# and the variables it was given, in RESULTS/ran.txt; and does as CLADEFS_FAKE_HOST says: fail;
 # block until it is ended (signal.pause); or a phase of a migration, the source's leaving its
 # snapshot in the bundle, the target's taking it from there.
 FAKE_HOST_SCRIPT = f"""#!/bin/bash
@@ -262,18 +262,18 @@ shift 2
 {{
     echo "$(basename "$0") $*"
     echo "source $source"
-    env | grep -E '^(FXDAX_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
+    env | grep -E '^(CLADEFS_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
 }} > "$results/ran.txt"
 echo "ran $(basename "$0") $*"
-case ${{FXDAX_FAKE_HOST:-}} in
+case ${{CLADEFS_FAKE_HOST:-}} in
     fail) exit 3 ;;
     wait) exec {shlex.quote(sys.executable)} -c 'import signal; signal.pause()' ;;
     migrate)
-        if [[ $FXDAX_MIGRATE_PHASE == source ]]; then
-            mkdir -p "$FXDAX_MIGRATE_BUNDLE"
-            echo "a VM, from $source" > "$FXDAX_MIGRATE_BUNDLE/snapshot"
+        if [[ $CLADEFS_MIGRATE_PHASE == source ]]; then
+            mkdir -p "$CLADEFS_MIGRATE_BUNDLE"
+            echo "a VM, from $source" > "$CLADEFS_MIGRATE_BUNDLE/snapshot"
         else
-            cat "$FXDAX_MIGRATE_BUNDLE/snapshot"
+            cat "$CLADEFS_MIGRATE_BUNDLE/snapshot"
         fi
         ;;
 esac
@@ -292,9 +292,9 @@ IDENTITY = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NA
 
 class Fleet:
     """Hosts of fake_ssh.py's, as `state` (fake_ssh.py) has them, in a temporary directory: an
-    origin, a checkout of fxdax whose vendor/firecracker is a submodule, its scripts the drivers
+    origin, a checkout of cladefs whose vendor/firecracker is a submodule, its scripts the drivers
     and FAKE_HOST_SCRIPT; ubu1, a host whose home's src/fxdax is a clone of it; and the scratch
-    directory runs are made in on the hosts (FXDAX_HOST_SCRATCH)."""
+    directory runs are made in on the hosts (CLADEFS_HOST_SCRATCH)."""
 
     def __init__(self, state=None):
         # As git names it, its links resolved (macOS's /var); removed with the fleet.
@@ -315,12 +315,12 @@ class Fleet:
             "PATH": f"{self.directory / 'bin'}:/usr/bin:/bin",
             "HOME": str(self.directory),
             "FAKE_SSH": str(self.directory),
-            "FXDAX_HOST_SCRATCH": str(self.scratch),
+            "CLADEFS_HOST_SCRATCH": str(self.scratch),
             **IDENTITY,
         }
         self.firecracker = self.commit(self.directory / "firecracker", {"README": "firecracker\n"})
         self.origin = self.directory / "origin"
-        files = {"README": "fxdax\n", ".gitignore": "/docs/measurements/\n"}
+        files = {"README": "cladefs\n", ".gitignore": "/docs/measurements/\n"}
         files.update({f"scripts/lib/{name}-linux-host.sh": FAKE_HOST_SCRIPT for name in HOST_SCRIPTS})
         self.commit(self.origin, files)
         for name in DRIVERS:
@@ -330,7 +330,7 @@ class Fleet:
         self.git(self.origin, "submodule", "add", "-q", str(self.directory / "firecracker"),
                  "vendor/firecracker")
         self.git(self.origin, "add", ".")
-        self.git(self.origin, "commit", "-q", "-m", "fxdax")
+        self.git(self.origin, "commit", "-q", "-m", "cladefs")
         self.clone = self.home("ubu1") / "src" / "fxdax"
         self.git(self.directory, "clone", "-q", str(self.origin), str(self.clone))
 
@@ -433,7 +433,7 @@ class RunNames(unittest.TestCase):
     def test_a_run_is_named_for_its_number_and_once(self):
         fleet = Fleet()
         status, output, errors = fleet.drive('echo "$host_run"; echo "$host_dir"',
-                                             environment={"FXDAX_HOST_RUN": "r1040"})
+                                             environment={"CLADEFS_HOST_RUN": "r1040"})
         self.assertEqual((status, errors), (0, ""))
         run, directory = output.splitlines()
         self.assertRegex(run, r"^run-r1040-\d{8}T\d{6}Z-[0-9a-f]{8}$")
@@ -441,11 +441,11 @@ class RunNames(unittest.TestCase):
 
     def test_a_host_and_a_run_number_are_named_as_they_may_be(self):
         fleet = Fleet()
-        self.assertEqual(fleet.drive("true", environment={"FXDAX_HOST": "a host"}),
-                         (2, "", "FXDAX_HOST names a host, as ssh does: a host\n"))
+        self.assertEqual(fleet.drive("true", environment={"CLADEFS_HOST": "a host"}),
+                         (2, "", "CLADEFS_HOST names a host, as ssh does: a host\n"))
         self.assertEqual(
-            fleet.drive("true", environment={"FXDAX_HOST_RUN": "R1"}),
-            (2, "", "FXDAX_HOST_RUN names a run in lower-case letters and digits, such as r1040\n"))
+            fleet.drive("true", environment={"CLADEFS_HOST_RUN": "R1"}),
+            (2, "", "CLADEFS_HOST_RUN names a run in lower-case letters and digits, such as r1040\n"))
 
 
 class Runs(unittest.TestCase):
@@ -472,7 +472,7 @@ class Runs(unittest.TestCase):
 
     def test_a_run_whose_job_fails_leaves_nothing(self):
         fleet = Fleet()
-        status, out, _ = fleet.drive(RAN, environment={"FXDAX_FAKE_HOST": "fail"})
+        status, out, _ = fleet.drive(RAN, environment={"CLADEFS_FAKE_HOST": "fail"})
         self.assertEqual((status, out), (0, "status 3\n"))
         self.assertEqual((fleet.directory / "results" / "remote.log").read_text(),
                          "ran test-linux-host.sh a b\n")
@@ -509,22 +509,22 @@ class Runs(unittest.TestCase):
         self.assertEqual(
             fleet.drive(RAN),
             (2, "", f"{fleet.origin} changes what it tracks, which would not run: commit and push "
-                    "it, or name a commit with FXDAX_HOST_COMMIT.\n"))
+                    "it, or name a commit with CLADEFS_HOST_COMMIT.\n"))
         self.assertEqual(fleet.calls(), [])
         # Unless the commit is named: then that runs.
         older = fleet.head()
-        status, out, _ = fleet.drive(RAN, environment={"FXDAX_HOST_COMMIT": older})
+        status, out, _ = fleet.drive(RAN, environment={"CLADEFS_HOST_COMMIT": older})
         self.assertEqual((status, out), (0, "status 0\n"))
 
     def test_a_named_commit_is_the_one_run(self):
         fleet = Fleet()
         older = fleet.head()
         fleet.commit(fleet.origin, {"README": "newer\n"})
-        self.assertEqual(fleet.drive(RAN, environment={"FXDAX_HOST_COMMIT": "HEAD~"})[:2],
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_COMMIT": "HEAD~"})[:2],
                          (0, "status 0\n"))
         self.assertEqual((fleet.directory / "results" / "source.txt").read_text().splitlines()[0],
                          f"revision {older}")
-        self.assertEqual(fleet.drive(RAN, environment={"FXDAX_HOST_COMMIT": "nowhere"}),
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_COMMIT": "nowhere"}),
                          (2, "", f"nowhere: no commit of {fleet.origin}'s\n"))
 
     def test_two_runs_at_once_keep_apart(self):
@@ -574,8 +574,8 @@ class Runs(unittest.TestCase):
                             ("1", "--name RUN --bench --mem 8G -- bash")]:
             with self.subTest(bench=bench):
                 fleet = Fleet()
-                memory = {} if bench == "0" else {"FXDAX_HOST_MEM": "8G"}
-                status, _, _ = fleet.drive(RAN, environment={"FXDAX_HOST_BENCH": bench, **memory})
+                memory = {} if bench == "0" else {"CLADEFS_HOST_MEM": "8G"}
+                status, _, _ = fleet.drive(RAN, environment={"CLADEFS_HOST_BENCH": bench, **memory})
                 self.assertEqual(status, 0)
                 run = (fleet.directory / "results" / "run.txt").read_text().split()[1]
                 calls = (fleet.home("ubu1") / "fxjob-calls").read_text()
@@ -617,8 +617,8 @@ class Source(unittest.TestCase):
 
     def test_a_patch_is_applied_and_recorded(self):
         patch = Path(tempfile.mkdtemp()) / "mutant.patch"
-        patch.write_text("--- a/README\n+++ b/README\n@@ -1 +1 @@\n-fxdax\n+mutated\n")
-        fleet, directory = self.worktree("", {"FXDAX_HOST_PATCH": str(patch)})
+        patch.write_text("--- a/README\n+++ b/README\n@@ -1 +1 @@\n-cladefs\n+mutated\n")
+        fleet, directory = self.worktree("", {"CLADEFS_HOST_PATCH": str(patch)})
         tree = directory / "tree"
         self.assertEqual((tree / "README").read_text(), "mutated\n")
         self.assertEqual((tree / "source-revision.txt").read_text(), f"{fleet.head()}-dirty\n")
@@ -631,7 +631,7 @@ class Source(unittest.TestCase):
     def test_a_guest_kernel_is_copied_and_recorded(self):
         kernel = Path(tempfile.mkdtemp()) / "vmlinux"
         kernel.write_bytes(b"a kernel")
-        fleet, directory = self.worktree("", {"FXDAX_GUEST_KERNEL": str(kernel)})
+        fleet, directory = self.worktree("", {"CLADEFS_GUEST_KERNEL": str(kernel)})
         self.assertEqual((directory / "guest-kernel").read_bytes(), b"a kernel")
         digest = subprocess.run(["shasum", "-a", "256", kernel], capture_output=True, text=True,
                                 check=True).stdout.split()[0]
@@ -647,7 +647,7 @@ class Source(unittest.TestCase):
             'host_start base=HEAD~ same=HEAD; echo "$host_dir"; trap - EXIT')
         self.assertEqual((status, errors), (0, ""))
         directory = Path(out.strip())
-        self.assertEqual((directory / "trees" / "base" / "README").read_text(), "fxdax\n")
+        self.assertEqual((directory / "trees" / "base" / "README").read_text(), "cladefs\n")
         self.assertEqual((directory / "trees" / "same" / "README").read_text(), "newer\n")
         for label, commit in [("base", older), ("same", newer)]:
             self.assertEqual(
@@ -664,7 +664,7 @@ class Source(unittest.TestCase):
         fleet.git(fleet.origin, "update-index", "--cacheinfo", f"160000,{missing},vendor/firecracker")
         fleet.git(fleet.origin, "commit", "-q", "-m", "a firecracker of nowhere")
         # The origin's own checkout of it the earlier one, which the commit names.
-        status, out, errors = fleet.drive(RAN, environment={"FXDAX_HOST_COMMIT": "HEAD"})
+        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_HOST_COMMIT": "HEAD"})
         # git's status.
         self.assertEqual((status, out), (128, ""))
         self.assertIn(missing, errors)
@@ -674,7 +674,7 @@ class Source(unittest.TestCase):
         kernel = Path(tempfile.mkdtemp()) / "vmlinux"
         kernel.write_bytes(b"a kernel")
         fleet = Fleet({"calls": [{"fail": 1}]})
-        status, out, _ = fleet.drive(RAN, environment={"FXDAX_GUEST_KERNEL": str(kernel)})
+        status, out, _ = fleet.drive(RAN, environment={"CLADEFS_GUEST_KERNEL": str(kernel)})
         self.assertEqual((status, out), (1, ""))
         self.assertEqual(fleet.calls(), ["ubu1 mkdir", "ubu1 bash -s -- clean"])
 
@@ -706,7 +706,7 @@ class Jobs(unittest.TestCase):
                                               "ubu1 bash -s -- clean"])
 
     def test_a_job_keeps_its_pid_and_is_waited_for(self):
-        status, out, _, _ = self.started({}, environment={"FXDAX_FAKE_HOST": "fail"})
+        status, out, _, _ = self.started({}, environment={"CLADEFS_FAKE_HOST": "fail"})
         self.assertEqual((status, out), (0, "ran test-linux-host.sh \nstatus 3\nkept\nended\n"))
 
     def test_a_job_whose_launching_connection_dropped_is_waited_for(self):
@@ -804,20 +804,20 @@ class Resume(unittest.TestCase):
         self.assertEqual(fleet.runs(), [])
 
     def test_a_running_job_is_cancelled(self):
-        fleet, run = self.left({"FXDAX_FAKE_HOST": "wait"})
+        fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
         status, out, errors = fleet.run_driver("test-host.sh", "cancel", run)
         self.assertEqual((status, out, errors), (0, "", f"Ended {run} on ubu1.\n"))
         self.assertEqual((fleet.runs(), fleet.worktrees()), ([], []))
 
     def test_a_running_jobs_run_is_not_removed(self):
-        fleet, run = self.left({"FXDAX_FAKE_HOST": "wait"})
+        fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
         status, _, errors = fleet.drive(f'host_name {run}; host_side clean "$host_dir" "$host_repo"')
         self.assertEqual((status, errors), (1, f"clean: a job runs in {fleet.scratch}/{run}\n"))
         self.assertEqual(fleet.run_driver("test-host.sh", "cancel", run)[0], 0)
 
     def test_only_a_run_is_resumed(self):
         fleet = Fleet()
-        self.assertEqual(fleet.run_driver("test-host.sh", "resume", "fxdax-test-x", "results"),
+        self.assertEqual(fleet.run_driver("test-host.sh", "resume", "cladefs-test-x", "results"),
                          (2, "", "Name the run, run-...\n"))
         self.assertEqual(fleet.run_driver("test-host.sh", "resume", "run-x"),
                          (2, "", f"Usage: {fleet.origin}/scripts/test-host.sh resume RUN RESULTS\n"))
@@ -826,12 +826,12 @@ class Resume(unittest.TestCase):
 class Reap(unittest.TestCase):
     """host-remote.sh's reap: what is left of a job's scope once it ends, root's processes among
     it, which the user's systemd manager can't kill. Here processes of this machine's, and a
-    directory of processes (FXDAX_HOST_PROC) whose cgroup files place them, a process's entry
+    directory of processes (CLADEFS_HOST_PROC) whose cgroup files place them, a process's entry
     gone as sudo's kill kills it, as /proc's goes."""
 
     SUDO = """#!/bin/bash
 [[ $1 == kill ]] || exit 3
-for pid in "${@:3}"; do rm -r "$FXDAX_HOST_PROC/$pid"; done
+for pid in "${@:3}"; do rm -r "$CLADEFS_HOST_PROC/$pid"; done
 exec "$@"
 """
 
@@ -852,7 +852,7 @@ exec "$@"
         done = subprocess.run(
             ["/bin/bash", SCRIPTS / "lib" / "host-remote.sh", "reap", "run-x"],
             env={"PATH": f"{directory / 'bin'}:/usr/bin:/bin",
-                 "FXDAX_HOST_PROC": str(directory / "proc")},
+                 "CLADEFS_HOST_PROC": str(directory / "proc")},
             capture_output=True, text=True)
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         for process, scope in processes.items():
@@ -869,8 +869,8 @@ class Names(unittest.TestCase):
     # Each driver's results directory, before the time, and its own settings.
     DRIVERS = {
         "bench-host.sh": ("ubu1-fs-bench", {}),
-        "bench-ab-host.sh": ("ubu1-fs-bench-ab", {"FXDAX_AB_A": "a=HEAD", "FXDAX_AB_B": "b=same"}),
-        "gets-host.sh": ("ubu1-gets", {"FXDAX_GETS_URL": "file:///tmp/gets/"}),
+        "bench-ab-host.sh": ("ubu1-fs-bench-ab", {"CLADEFS_AB_A": "a=HEAD", "CLADEFS_AB_B": "b=same"}),
+        "gets-host.sh": ("ubu1-gets", {"CLADEFS_GETS_URL": "file:///tmp/gets/"}),
         "mutants-host.sh": ("ubu1-mutants", {}),
         "gc-sweep-host.sh": ("ubu1-gc-sweep", {}),
     }
@@ -898,13 +898,13 @@ class Drivers(unittest.TestCase):
         results = fleet.directory / "tested"
         status, _, errors = fleet.run_driver(
             "test-host.sh", str(results),
-            environment={"FXDAX_E2E_TEST": "fxfs-guest --tag dax-gate",
-                         "FXDAX_EXTENTD_REMOTE": "s3://bucket/p"})
+            environment={"CLADEFS_E2E_TEST": "fxfs-guest --tag dax-gate",
+                         "CLADEFS_EXTENTD_REMOTE": "s3://bucket/p"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
         self.assertEqual(ran[0], "test-linux-host.sh fxfs-guest --tag dax-gate")
         run = (results / "run.txt").read_text().split()[1]
-        self.assertIn(f"FXDAX_EXTENTD_REMOTE=s3://bucket/p/{run}", ran)
+        self.assertIn(f"CLADEFS_EXTENTD_REMOTE=s3://bucket/p/{run}", ran)
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
         self.assertEqual(fleet.runs(), [])
 
@@ -912,7 +912,7 @@ class Drivers(unittest.TestCase):
         fleet = Fleet()
         results = fleet.directory / "origin" / "docs" / "measurements" / "ubu1-fs-bench-x"
         status, _, errors = fleet.run_driver("bench-host.sh", str(results),
-                                             environment={"FXDAX_BENCH_NOTE": "a note"})
+                                             environment={"CLADEFS_BENCH_NOTE": "a note"})
         self.assertEqual(status, 0, errors)
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0], "bench-linux-host.sh 3")
         self.assertIn("--bench", (fleet.home("ubu1") / "fxjob-calls").read_text())
@@ -927,8 +927,8 @@ class Drivers(unittest.TestCase):
         results = fleet.directory / "ab"
         status, _, errors = fleet.run_driver(
             "bench-ab-host.sh", str(results),
-            environment={"FXDAX_AB_A": "base=HEAD~", "FXDAX_AB_B": "change=HEAD",
-                         "FXDAX_AB_ROUNDS": "2"})
+            environment={"CLADEFS_AB_A": "base=HEAD~", "CLADEFS_AB_B": "change=HEAD",
+                         "CLADEFS_AB_ROUNDS": "2"})
         self.assertEqual(status, 0, errors)
         run = (results / "run.txt").read_text().split()[1]
         trees = f"{fleet.scratch}/{run}/trees"
@@ -936,9 +936,9 @@ class Drivers(unittest.TestCase):
                          f"bench-ab-linux-host.sh {trees}/base {trees}/change 2 base change")
         self.assertEqual((results / "base" / "source.txt").read_text().splitlines()[0],
                          f"revision {base}")
-        self.assertIn("FXDAX_AB_BUILD_NICE=19", (results / "ran.txt").read_text().splitlines())
+        self.assertIn("CLADEFS_AB_BUILD_NICE=19", (results / "ran.txt").read_text().splitlines())
         # Its sides built as work, then its rounds alone measured, jobs of one run.
-        self.assertIn("FXDAX_AB_PHASE=rounds", (results / "ran.txt").read_text().splitlines())
+        self.assertIn("CLADEFS_AB_PHASE=rounds", (results / "ran.txt").read_text().splitlines())
         calls = (fleet.home("ubu1") / "fxjob-calls").read_text().splitlines()
         self.assertEqual([("--bench" in call, f"--name {run}" in call) for call in calls],
                          [(False, True), (True, True)])
@@ -946,7 +946,7 @@ class Drivers(unittest.TestCase):
         # B the same tree: A's, built once.
         status, _, errors = fleet.run_driver(
             "bench-ab-host.sh", str(fleet.directory / "same"),
-            environment={"FXDAX_AB_A": "base=HEAD", "FXDAX_AB_B": "knob=same"})
+            environment={"CLADEFS_AB_A": "base=HEAD", "CLADEFS_AB_B": "knob=same"})
         self.assertEqual(status, 0, errors)
         self.assertRegex((fleet.directory / "same" / "ran.txt").read_text().splitlines()[0],
                          r"^bench-ab-linux-host.sh \S+/trees/base same 3 base knob$")
@@ -960,7 +960,7 @@ class Drivers(unittest.TestCase):
         ]:
             with self.subTest(a=a, b=b):
                 status, _, errors = fleet.run_driver("bench-ab-host.sh", "results",
-                                                     environment={"FXDAX_AB_A": a, "FXDAX_AB_B": b})
+                                                     environment={"CLADEFS_AB_A": a, "CLADEFS_AB_B": b})
                 self.assertEqual((status, errors), (2, said))
 
     def test_gets_puts_its_object_under_the_runs_prefix(self):
@@ -968,25 +968,25 @@ class Drivers(unittest.TestCase):
         results = fleet.directory / "gets"
         status, _, errors = fleet.run_driver(
             "gets-host.sh", str(results),
-            environment={"FXDAX_GETS_URL": "file:///scratch/gets/", "FXDAX_GETS_MIB": "16",
-                         "FXDAX_GETS_SECS": "1"})
+            environment={"CLADEFS_GETS_URL": "file:///scratch/gets/", "CLADEFS_GETS_MIB": "16",
+                         "CLADEFS_GETS_SECS": "1"})
         self.assertEqual(status, 0, errors)
         run = (results / "run.txt").read_text().split()[1]
         self.assertEqual((results / "ran.txt").read_text().splitlines()[0],
                          f"gets-linux-host.sh file:///scratch/gets/{run} 16 1")
-        self.assertEqual(fleet.run_driver("gets-host.sh", environment={"FXDAX_GETS_URL": "a b"}),
-                         (2, "", "FXDAX_GETS_URL is a URL, as s3://bucket/prefix\n"))
+        self.assertEqual(fleet.run_driver("gets-host.sh", environment={"CLADEFS_GETS_URL": "a b"}),
+                         (2, "", "CLADEFS_GETS_URL is a URL, as s3://bucket/prefix\n"))
 
     def test_mutants_sweep_the_crates_asked(self):
         fleet = Fleet()
         results = fleet.directory / "mutants"
         status, _, errors = fleet.run_driver(
             "mutants-host.sh", str(results),
-            environment={"FXDAX_MUTANTS_CRATES": "extent_store fxdax", "FXDAX_MUTANTS_SHARD": "1/4"})
+            environment={"CLADEFS_MUTANTS_CRATES": "extent_store cladefs", "CLADEFS_MUTANTS_SHARD": "1/4"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
-        self.assertEqual(ran[0], "mutants-linux-host.sh extent_store fxdax")
-        self.assertIn("FXDAX_MUTANTS_SHARD=1/4", ran)
+        self.assertEqual(ran[0], "mutants-linux-host.sh extent_store cladefs")
+        self.assertIn("CLADEFS_MUTANTS_SHARD=1/4", ran)
 
     def test_fork_times_each_commit(self):
         fleet = Fleet()
@@ -1005,15 +1005,15 @@ class Drivers(unittest.TestCase):
         fleet = Fleet()
         results = fleet.directory / "gc"
         status, _, errors = fleet.run_driver(
-            "gc-sweep-host.sh", str(results), environment={"FXDAX_GC_AT_ONCE": "1 8"})
+            "gc-sweep-host.sh", str(results), environment={"CLADEFS_GC_AT_ONCE": "1 8"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
         # The fake host script says its name, then its arguments: none.
         self.assertEqual(ran[0], "gc-sweep-linux-host.sh ")
-        self.assertIn("FXDAX_GC_AT_ONCE=1 8", ran)
+        self.assertIn("CLADEFS_GC_AT_ONCE=1 8", ran)
         self.assertIn("--bench", (fleet.home("ubu1") / "fxjob-calls").read_text())
         self.assertEqual((results / "note.md").read_text().splitlines()[0],
-                         "fxdax-gc's sweeps over a bucket of files of many cells (TASK-395.5).")
+                         "cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5).")
         self.assertEqual(fleet.run_driver("gc-sweep-host.sh", "a", "b")[0], 2)
 
     def test_gc_sweeps_of_sides_measure_each_commit_in_one_job(self):
@@ -1038,7 +1038,7 @@ class Drivers(unittest.TestCase):
         fleet = Fleet()
         results = fleet.directory / "migrated"
         status, _, errors = fleet.run_driver("migrate-host.sh", str(results),
-                                             environment={"FXDAX_FAKE_HOST": "migrate"})
+                                             environment={"CLADEFS_FAKE_HOST": "migrate"})
         self.assertEqual(status, 0, errors)
         a, b = ((results / side / "ran.txt").read_text().splitlines() for side in "ab")
         run = (results / "a" / "run.txt").read_text().split()[1]
@@ -1046,10 +1046,10 @@ class Drivers(unittest.TestCase):
         # The same paths on both, the second's run of the same name.
         self.assertEqual(a[1], b[1])
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
-            self.assertIn(f"FXDAX_MIGRATE_PHASE={phase}", side)
-            self.assertIn(f"FXDAX_EXTENTD_TOKEN={token}", side)
-            self.assertIn(f"FXDAX_EXTENTD_REMOTE=file://{held}/bucket/branches", side)
-            self.assertIn(f"FXDAX_MIGRATE_BUNDLE={held}/bundle", side)
+            self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
+            self.assertIn(f"CLADEFS_EXTENTD_TOKEN={token}", side)
+            self.assertIn(f"CLADEFS_EXTENTD_REMOTE=file://{held}/bucket/branches", side)
+            self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"
                          f"a VM, from {fleet.scratch}/{run}/tree\n")
@@ -1061,7 +1061,7 @@ class Drivers(unittest.TestCase):
         fleet = Fleet()
         results = fleet.directory / "migrated"
         status, _, errors = fleet.run_driver("migrate-host.sh", str(results),
-                                             environment={"FXDAX_FAKE_HOST": "fail"})
+                                             environment={"CLADEFS_FAKE_HOST": "fail"})
         self.assertEqual(status, 3)
         self.assertFalse((results / "b").exists())
         self.assertEqual((list(fleet.scratch.iterdir()), fleet.worktrees()), ([], []))
@@ -1070,8 +1070,8 @@ class Drivers(unittest.TestCase):
     def test_a_migration_between_two_hosts_names_a_bucket(self):
         fleet = Fleet()
         self.assertEqual(
-            fleet.run_driver("migrate-host.sh", environment={"FXDAX_MIGRATE_HOSTS": "a b"}),
-            (2, "", "Name a bucket both hosts reach: FXDAX_MIGRATE_BUCKET.\n"))
+            fleet.run_driver("migrate-host.sh", environment={"CLADEFS_MIGRATE_HOSTS": "a b"}),
+            (2, "", "Name a bucket both hosts reach: CLADEFS_MIGRATE_BUCKET.\n"))
 
 
 if __name__ == "__main__":

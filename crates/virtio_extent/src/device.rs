@@ -1,4 +1,4 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use fxdax::{DaemonConnection, RemoteExtentStore, WindowMapping};
+use cladefs::{DaemonConnection, RemoteExtentStore, WindowMapping};
 use log::{error, info};
 use zerocopy::FromZeros;
 
@@ -33,7 +33,7 @@ pub type OnLost = Arc<dyn Fn() + Send + Sync>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Cannot open the extent store {0}: {1:#}")]
-    Store(String, fxdax::Error),
+    Store(String, cladefs::Error),
     #[error("The read-only extent device {0} is restored from no snapshot: it takes none")]
     ReadOnlyRestored(String),
     #[error("The tag {0:?} is longer than 36 bytes")]
@@ -45,18 +45,18 @@ pub enum Error {
     )]
     WindowNotSaved(String),
     #[error("The extent device {0} has a DAX window, which cannot take its guest's faults: {1:#}")]
-    Userfaultfd(String, fxdax::Error),
+    Userfaultfd(String, cladefs::Error),
 }
 
 /// Errors activating a device.
 #[derive(Debug, thiserror::Error)]
 pub enum ActivateError {
     #[error("opening the store anew: {0:#}")]
-    Reopen(fxdax::Error),
+    Reopen(cladefs::Error),
     #[error("creating the DAX window: {0:#}")]
-    Window(fxdax::Error),
+    Window(cladefs::Error),
     #[error("mapping the snapshot's window again: {0}")]
-    MapAgain(fxdax::Errno),
+    MapAgain(cladefs::Errno),
 }
 
 /// The device's DAX window as its transport describes it: shared memory region `id`, of `len`
@@ -75,13 +75,13 @@ enum Making<'a> {
     Restore { snapshot: &'a Snapshot, window_addr: Option<u64> },
 }
 
-/// A virtio extent-store device's VMM-independent half, on an extent store that fxdax's extent
+/// A virtio extent-store device's VMM-independent half, on an extent store that cladefs's extent
 /// daemon serves.
 pub struct Device {
     config: Config,
     // The store before the window, whose host memory the store's fault thread serves: the store
     // is dropped first.
-    // fxdax: none from a follower's reset until it is activated again.
+    // cladefs: none from a follower's reset until it is activated again.
     store: Option<Arc<RemoteExtentStore>>,
     window: Option<DaxWindow>,
     /// Whether the store's window is created, which it is on the first activation.
@@ -89,16 +89,16 @@ pub struct Device {
     /// Maps the window's pages for the guest as the store maps them.
     prefault: Option<Arc<dyn PrefaultGuestMemory>>,
     config_space: ConfigSpace,
-    /// The store's capacity, as the daemon changes it; fxdax: and whether the guest's filesystem is
+    /// The store's capacity, as the daemon changes it; cladefs: and whether the guest's filesystem is
     /// frozen (`VIRTIO_EXTENT_T_FREEZE`), as a snapshot needs it.
     notices: Arc<Notices>,
-    /// fxdax: a follower's writer's commits, as the daemon tells of them.
+    /// cladefs: a follower's writer's commits, as the daemon tells of them.
     following: Arc<Following>,
     /// What the VMM does as the daemon goes, for each connection to it.
     on_lost: OnLost,
-    /// fxdax: the snapshot taken of the device's store, or restored from (TASK-39.1).
+    /// cladefs: the snapshot taken of the device's store, or restored from (TASK-39.1).
     snapshot: Option<Snapshot>,
-    /// fxdax: the window's mappings to map again as the window is created: those of the snapshot
+    /// cladefs: the window's mappings to map again as the window is created: those of the snapshot
     /// the device was restored from.
     mappings: Vec<WindowMapping>,
 }
@@ -159,9 +159,9 @@ impl Device {
         let mut config_space = ConfigSpace::new_zeroed();
         config_space.version = VIRTIO_EXTENT_VERSION.to_le();
         config_space.num_request_queues = u32::from(queues).to_le();
-        config_space.block_size = fxdax::ExtentStore::BLOCK_SIZE.to_le();
+        config_space.block_size = cladefs::ExtentStore::BLOCK_SIZE.to_le();
         config_space.map_alignment =
-            u32::try_from(fxdax::pages::page_size()).expect("a page is small").to_le();
+            u32::try_from(cladefs::pages::page_size()).expect("a page is small").to_le();
         config_space.max_transfer = MAX_TRANSFER.to_le();
         config_space.max_segments = (u32::from(QUEUE_SIZE) - 2).to_le();
         config_space.max_root = MAX_ROOT.to_le();
@@ -175,11 +175,11 @@ impl Device {
         if config.read_only && matches!(making, Making::Restore { .. }) {
             return Err(Error::ReadOnlyRestored(config.id.clone()));
         }
-        // fxdax: a window's faults come through /dev/userfaultfd, which the device opens as the
+        // cladefs: a window's faults come through /dev/userfaultfd, which the device opens as the
         // driver activates it: a host that denies it fails the VM now, saying what it lacks, not
         // the guest's activation, after which the VM has no disk (TASK-308).
         if config.dax_window_size.is_some() {
-            fxdax::userfaultfd_accessible()
+            cladefs::userfaultfd_accessible()
                 .map_err(|err| Error::Userfaultfd(config.id.clone(), err))?;
         }
         let store = connect(&config.extentd_socket, &config.id, &on_lost)
@@ -215,7 +215,7 @@ impl Device {
                     }
                 };
                 let window = DaxWindow::new(vm, size, at)?;
-                // fxdax: a writer's window copies on write (backlog doc-13); a follower's copies
+                // cladefs: a writer's window copies on write (backlog doc-13); a follower's copies
                 // nothing.
                 if !config.read_only {
                     config_space.private_max =
@@ -270,7 +270,7 @@ impl Device {
     }
 
     /// Reads `data.len()` bytes of the configuration space at `offset`, as the driver does, past
-    /// its end zeros. fxdax: the store's capacity, and the shrink the guest is asked to take, as
+    /// its end zeros. cladefs: the store's capacity, and the shrink the guest is asked to take, as
     /// they are now; and a follower's writer's latest commit; and the daemon's latest ask for the
     /// guest's stats.
     pub fn read_config(&self, offset: u64, data: &mut [u8]) {
@@ -319,7 +319,7 @@ impl Device {
         acked: u64,
         interrupt: Arc<dyn ConfigInterrupt>,
     ) -> Result<(), ActivateError> {
-        // fxdax: once the queues are, so that an activation failing on them leaves the store
+        // cladefs: once the queues are, so that an activation failing on them leaves the store
         // closed, to open anew at the next (TASK-79.8), its guest remounting on a new view
         // (doc-4).
         if self.store.is_none() {
@@ -329,13 +329,13 @@ impl Device {
         self.map_again().map_err(ActivateError::MapAgain)?;
         self.notices.resizing.set_interrupt(Some(interrupt.clone()));
         self.following.set_interrupt(Some(interrupt.clone()));
-        // fxdax: the guest is asked for its stats if its driver takes asks (TASK-111.4).
+        // cladefs: the guest is asked for its stats if its driver takes asks (TASK-111.4).
         let asks = acked & (1 << VIRTIO_EXTENT_F_STATS) != 0;
         self.notices.stats.set_interrupt(asks.then_some(interrupt));
         Ok(())
     }
 
-    /// Resets the device, its VMM's workers stopped: as before the driver activated it. fxdax: a
+    /// Resets the device, its VMM's workers stopped: as before the driver activated it. cladefs: a
     /// follower lets go of its store now, not as it is activated again: a store its writer
     /// retired, going with writes uncommitted, opens only once it is gone, for its follower or a
     /// new writer, and the guest may not mount for a while (TASK-79.24). Its guest leaves its
@@ -353,21 +353,21 @@ impl Device {
             }
             self.store = None;
         }
-        // fxdax: no guest is asked for its stats until a driver activates it again, the store
+        // cladefs: no guest is asked for its stats until a driver activates it again, the store
         // answering meanwhile (TASK-111.4).
         self.notices.stats.set_interrupt(None);
     }
 
     /// Creates the store's DAX window in the window's host memory, unless the device has no
     /// window, or it exists.
-    fn create_dax_window(&mut self) -> Result<(), fxdax::Error> {
+    fn create_dax_window(&mut self) -> Result<(), cladefs::Error> {
         let Some(window) = &self.window else {
             return Ok(());
         };
         if self.window_created {
             return Ok(());
         }
-        // fxdax: a writer's copies on write, of `private_max` pages at most; a follower's, of
+        // cladefs: a writer's copies on write, of `private_max` pages at most; a follower's, of
         // none, copies nothing (backlog doc-13).
         let private_max = u64::from_le(self.config_space.private_max);
         let store = self.store.as_ref().expect("the device's store is closed");
@@ -378,12 +378,12 @@ impl Device {
         Ok(())
     }
 
-    /// fxdax: opens a follower's store anew, as of its writer's latest commit, with a window of
+    /// cladefs: opens a follower's store anew, as of its writer's latest commit, with a window of
     /// its own, created as the driver activates the device: after a reset, its guest remounting
     /// on a new view, as it does once it was cut off (`ESTALE`). The old connection went as it
     /// reset ([`Device::reset`]), with its window's faults, before the new one creates its window
     /// in the same memory, which it left inaccessible meanwhile (TASK-79.8).
-    fn reopen(&mut self) -> Result<(), fxdax::Error> {
+    fn reopen(&mut self) -> Result<(), cladefs::Error> {
         let store = connect(&self.config.extentd_socket, &self.config.id, &self.on_lost)?
             .open_read_only(&self.config.path_on_host)?;
         self.following = Arc::new(Following::default());
@@ -395,10 +395,10 @@ impl Device {
         Ok(())
     }
 
-    /// Maps the window's mappings of the snapshot the device was restored from again. fxdax: all
+    /// Maps the window's mappings of the snapshot the device was restored from again. cladefs: all
     /// at once, in a request of the daemon's or a few, each one change of the window, where a MAP
     /// each, a round trip apiece, held the restore up (TASK-92.14).
-    fn map_again(&mut self) -> Result<(), fxdax::Errno> {
+    fn map_again(&mut self) -> Result<(), cladefs::Errno> {
         let mappings = std::mem::take(&mut self.mappings);
         if mappings.is_empty() {
             return Ok(());
@@ -414,7 +414,7 @@ impl Device {
         Ok(())
     }
 
-    /// fxdax: takes a snapshot of the device's store, for a snapshot of the VM, paused, whose
+    /// cladefs: takes a snapshot of the device's store, for a snapshot of the VM, paused, whose
     /// guest's filesystem is frozen, with nothing open (TASK-39.1): `quiesce` has the VMM's
     /// workers serve the requests they took and stop, as they do for the snapshot, so that none
     /// changes the window meanwhile; then the store is forked to `point`, and the window's mappings
@@ -432,7 +432,7 @@ impl Device {
             return Err(SnapshotError::NotFrozen(id));
         }
         quiesce();
-        // fxdax: the point's branch, the extent daemon's to name, its ID one no other branch of its
+        // cladefs: the point's branch, the extent daemon's to name, its ID one no other branch of its
         // bucket has (TASK-364).
         let branch = self
             .store()
@@ -466,7 +466,7 @@ impl Device {
     }
 }
 
-/// fxdax: a connection to the extent daemon listening at `socket`, the device `id`'s, which has
+/// cladefs: a connection to the extent daemon listening at `socket`, the device `id`'s, which has
 /// `on_lost` stop the VM once the daemon goes: the guest's disk is gone then, and the VM stops at
 /// once, rather than going on with every request failing (TASK-50.2). Said before the store opens
 /// over it, so that a daemon going as it opens, as the VM is created, stops it so too, rather than
@@ -475,7 +475,7 @@ fn connect(
     socket: impl AsRef<Path>,
     id: &str,
     on_lost: &OnLost,
-) -> Result<DaemonConnection, fxdax::Error> {
+) -> Result<DaemonConnection, cladefs::Error> {
     let daemon = DaemonConnection::connect(socket)?;
     let (id, on_lost) = (id.to_owned(), on_lost.clone());
     daemon.on_lost(move || {
@@ -485,7 +485,7 @@ fn connect(
     Ok(daemon)
 }
 
-/// fxdax: has `following` hear of the commits of the writer of `store`, a follower's, from the
+/// cladefs: has `following` hear of the commits of the writer of `store`, a follower's, from the
 /// one its view is as of.
 fn hear_commits(store: &RemoteExtentStore, following: &Arc<Following>) {
     let heard = following.clone();
@@ -493,7 +493,7 @@ fn hear_commits(store: &RemoteExtentStore, following: &Arc<Following>) {
     following.committed(store.committed());
 }
 
-/// fxdax: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,
+/// cladefs: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,
 /// through `notices`, while its driver takes asks; otherwise the store answers at once, with none
 /// of the guest's (TASK-111.4).
 fn hear_stats_asks(store: &RemoteExtentStore, notices: &Arc<Notices>) {

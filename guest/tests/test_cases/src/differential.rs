@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax: a script run on two filesystems in one guest at once, step by step (TASK-44.15,
+//! cladefs: a script run on two filesystems in one guest at once, step by step (TASK-44.15,
 //! TASK-149.12): a reference the kernel has long had (ext4), and the filesystem under test (Fxfs).
 //! Each step is done on the reference first, and both are held to the model (`script_run`): the
 //! reference failing it is the model's mistake, or the kernel's, its own kind of failure
@@ -365,7 +365,7 @@ mod tests {
         drop((host.reference, host.subject, host._dir));
     }
 
-    /// fxdax: and the hostile mix's (TASK-149.16), its far steps each held to its own filesystem's
+    /// cladefs: and the hostile mix's (TASK-149.16), its far steps each held to its own filesystem's
     /// largest file.
     #[test]
     #[ignore = "needs root, to loop-mount a filesystem (script_run::tests::Loop)"]

@@ -1,8 +1,8 @@
-// Copyright 2026 The fxdax Authors. All rights reserved.
+// Copyright 2026 The cladefs Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! fxdax's own, a child of data_object_handle.rs: what a DAX window maps a file's data from
+//! cladefs's own, a child of data_object_handle.rs: what a DAX window maps a file's data from
 //! (backlog doc-13), which Fuchsia doesn't have: the extents holding it, and whether each is
 //! sealed, as the window maps only sealed extents.
 
@@ -18,7 +18,7 @@ use std::cmp::{max, min};
 use std::ops::Range;
 use storage_device::ExtentRange;
 
-/// fxdax: whether a DAX window may map a file's blocks ([`DataObjectHandle::extents_in`]): it maps
+/// cladefs: whether a DAX window may map a file's blocks ([`DataObjectHandle::extents_in`]): it maps
 /// sealed extents only, read-only (backlog doc-13). By the numbers of
 /// guest/linux/fs/fxfs/fxfs.h's `enum fxfs_dax_access`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -34,7 +34,7 @@ pub enum ExtentAccess {
 }
 
 impl<S: HandleOwner> DataObjectHandle<S> {
-    /// fxdax: the extents holding the file's data in `range`, clipped to it, in order, with whether
+    /// cladefs: the extents holding the file's data in `range`, clipped to it, in order, with whether
     /// a DAX window may map them yet, as their extents are sealed (`ExtentAccess`). What it maps
     /// the range from (backlog doc-13). Holes are left out.
     pub async fn extents_in(
@@ -88,7 +88,7 @@ impl<S: HandleOwner> DataObjectHandle<S> {
     }
 }
 
-/// fxdax: the parts of `range`, of an extent of `mode` holding a file's `key`, that hold what was
+/// cladefs: the parts of `range`, of an extent of `mode` holding a file's `key`, that hold what was
 /// written: all of it, but of an allocation's extent, whose bitmap says which of its blocks were,
 /// those written alone. The others the device doesn't hold, and they read as zeros, as holes do: a
 /// window mapping them would map what isn't there (TASK-149.36).
@@ -123,7 +123,7 @@ mod tests {
     use crate::object_store::data_object_handle::tests::test_filesystem_and_object_with_key;
     use std::ops::Range;
 
-    /// fxdax: `extents_in` gives the extents holding a file's data in a range, clipped to it, and
+    /// cladefs: `extents_in` gives the extents holding a file's data in a range, clipped to it, and
     /// whether each is sealed, as a DAX window maps sealed extents only (backlog doc-13): blocks
     /// written are unsealed until the device's next barrier seals their extent.
     #[fuchsia::test]
@@ -151,7 +151,7 @@ mod tests {
         fs.close().await.expect("close failed");
     }
 
-    /// fxdax: of what an allocation made, `extents_in` gives what was written since alone: the
+    /// cladefs: of what an allocation made, `extents_in` gives what was written since alone: the
     /// device doesn't hold the rest, which reads as zeros, as holes do, and a window that mapped it
     /// would map what isn't there (TASK-149.36).
     #[fuchsia::test]

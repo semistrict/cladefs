@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: GPL-2.0
-# Copyright 2026 The fxdax Authors.
+# Copyright 2026 The cladefs Authors.
 #
 # Kernel: release
 # Killer: fxfs-guest-checks inherited_acls_on_full_filesystem
@@ -17,7 +17,7 @@
 @@ -598,10 +598,6 @@
  		return err;
  	gid = fxfs_vfs_new_gid(idmap, dir, &mode);
- 	/* fxdax: the ACLs it inherits, made with it (TASK-79.29). */
+ 	/* cladefs: the ACLs it inherits, made with it (TASK-79.29). */
 -	err = fxfs_vfs_acl_xattr(default_acl, ACL_TYPE_DEFAULT, mode, xattrs, &nr_xattrs,
 -				 &values[0]);
 -	if (!err)
@@ -28,7 +28,7 @@
 @@ -623,13 +619,7 @@
  	 */
  	inode_has_no_xattr(d_inode(dentry));
- 	/* fxdax: its ACLs, written with it, cached as fxfs_vfs_store_acl caches them. */
+ 	/* cladefs: its ACLs, written with it, cached as fxfs_vfs_store_acl caches them. */
 -	if (default_acl && S_ISDIR(mode))
 -		set_cached_acl(d_inode(dentry), ACL_TYPE_DEFAULT, default_acl);
 -	if (acl)

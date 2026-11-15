@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
-// Copyright 2026 The fxdax Authors.
+// Copyright 2026 The cladefs Authors.
 /*
  * The sweep (sweep.sh, TASK-149.15): every call the code under test makes that may fail on a real
  * kernel asks here first, a site each (sim_sweep_fails): allocations by fs/fxfs, fs/dax.c and the
