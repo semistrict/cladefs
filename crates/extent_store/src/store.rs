@@ -11,9 +11,10 @@ use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, Extents, FileKey, KINDS, LOGS,
     OPEN_EXTENTS, OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Volume, add_piece,
-    branch_dir, create_branch_dirs, encode_salted, extent_path, files_of, list_numbers, log_path,
+    branch_dir, create_branch_dirs, extent_path, files_of, list_numbers, log_path,
     open_extent_path, open_segment_path, segment_path, spare_path,
 };
+use crate::raw::{RawFile, Sealer};
 use crate::seals;
 use crate::segments::{
     self, Behind, Preparation, Preparing, SECTOR, Segments, Unframed, Unsectored, footer_last,
@@ -310,8 +311,10 @@ struct Logs<F> {
     unsynced: Syncs<F>,
 }
 
-/// A write in progress (see [`Store::begin_write`]): its data goes to `file()` at `offset()`.
-/// Dropping it before it is finished abandons it.
+/// A write in progress (see [`Store::begin_write`]): its data goes to its file, by
+/// [`Write::write`], or by a caller's own I/O of what [`Write::stored`] gives. Dropping it before
+/// it is finished abandons it. fxdax: no caller writes its file otherwise: a sealed store's raw
+/// files are encrypted, a sector at a time, as they write them (TASK-411.5).
 pub struct Write<'a, D: Dir> {
     store: &'a Store<D>,
     extent: ExtentId,
@@ -319,7 +322,7 @@ pub struct Write<'a, D: Dir> {
     opening: u64,
     extent_offset: u64,
     len: u64,
-    file: Arc<D::File>,
+    file: Arc<RawFile<D::File>>,
     offset: u64,
     /// The segment written to, if it isn't the extent's own file.
     segment: Option<SegmentId>,
@@ -329,14 +332,24 @@ pub struct Write<'a, D: Dir> {
 }
 
 impl<D: Dir> Write<'_, D> {
-    /// The file the data goes to.
-    pub fn file(&self) -> &Arc<D::File> {
-        &self.file
+    /// Writes `data`, the write's bytes from `at` in it, to its file: encrypted, if the store is
+    /// sealed, whole sectors then, as what the store takes is (TASK-411.8). fxdax: refused past
+    /// the write's end.
+    pub fn write(&self, data: &[u8], at: u64) -> Result<(), Error> {
+        let len = data.len() as u64;
+        ensure!(at + len <= self.len, "{len} bytes at {at} of a write of {}", self.len);
+        Ok(self.file.write_at(data, self.offset + at)?)
     }
 
-    /// Where in the file the data goes.
-    pub fn offset(&self) -> u64 {
-        self.offset
+    /// fxdax: `data`, the whole write's bytes, as its file is to store them, for a caller writing
+    /// them by an I/O of its own, as an image's device does: encrypted in place if the store is
+    /// sealed (TASK-411.5). They go to the file it names, at the offset it names; written in whole
+    /// sectors if a write of them stops short, from the last whole sector written, they are what
+    /// they are whatever writes them again.
+    pub fn stored(&self, mut data: Aligned) -> Result<Stored<'_, D::File>, Error> {
+        ensure!(data.len() as u64 == self.len, "{} bytes of a write of {}", data.len(), self.len);
+        self.file.encrypt(self.offset, data.as_mut_slice())?;
+        Ok(Stored { file: self.file.file(), offset: self.offset, bytes: data })
     }
 
     /// Records the write, whose data is in the file: reads see it, and the next commit includes
@@ -361,6 +374,14 @@ impl<D: Dir> Write<'_, D> {
             log::warn!("extent store: waiting for {len} bytes at {offset} of a segment: {err}");
         }
     }
+}
+
+/// fxdax: a write's bytes, as its file is to store them ([`Write::stored`]): `bytes`, at `offset`
+/// in `file`, encrypted if the store is sealed.
+pub struct Stored<'a, F> {
+    pub file: &'a Arc<F>,
+    pub offset: u64,
+    pub bytes: Aligned,
 }
 
 impl<D: Dir> Drop for Write<'_, D> {
@@ -699,6 +720,8 @@ impl<D: Dir> Recovering<D> {
     pub fn drop_wal(&mut self) -> Result<(), Error> {
         let dir = &*self.dir;
         let branch = self.file.branch;
+        // fxdax: those closed again, not framed, their raw files and logs going (TASK-411.9).
+        self.wal.drop_closing(dir, branch)?;
         for (footer, number) in std::mem::take(&mut self.wal.segments) {
             let segment = SegmentId { branch: branch.id, number };
             self.remove_files([segment_path(segment)], &footer);
@@ -732,10 +755,13 @@ impl<D: Dir> Recovering<D> {
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
-        let Self { dir, taken, claim, file, wal: recovered } = self;
+        let Self { dir, taken, claim, file, wal: mut recovered } = self;
         let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
         let Opening { state, fenced, cache, keys } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
+        // fxdax: the segments its recovery closed again framed, first, under its keys, as nothing
+        // before them is (TASK-411.9).
+        recovered.close(&*dir, branch, &keys)?;
         // fxdax: what the bucket acknowledged goes into the host's cache by a rename, which can't
         // cross filesystems: a store elsewhere than the cache is refused, not left to read every
         // segment back from the bucket (TASK-359).
@@ -850,11 +876,6 @@ impl<D: Dir> Recovering<D> {
                 Data::Remote(_) => {}
             }
         }
-        // fxdax: those a recovery closed again, in the clear, sealed (TASK-411.3).
-        if keys.is_sealed(branch.id) {
-            let numbers = wal.segments().map(|(_, number)| *number);
-            crate::wal::reseal(&*dir, branch, numbers, &keys)?;
-        }
         let opened = (epoch, recovered.next, chain);
         let files = (options.open_files, keys.clone());
         let mut segments = Segments::open(&*dir, (branch.id, tracked), opened, files)?;
@@ -878,7 +899,7 @@ impl<D: Dir> Recovering<D> {
         }
         let open = segments.open_segment();
         let log = segments.open_log();
-        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt))]);
+        let log = BTreeMap::from([(open, SegmentLog::new(log.file, log.salt, log.sealer))]);
         #[cfg(any(test, feature = "audit"))]
         let replay = {
             let lengths = extents.iter().map(|(extent, entry)| (*extent, entry.len)).collect();
@@ -1382,8 +1403,10 @@ impl<D: Dir> Store<D> {
             (grows, to_segment, overwrites)
         };
         // fxdax: whole sectors, which the open segment takes, and its seal, copying it whole from
-        // its start, appends there (TASK-411.8): refused before the extent opens.
-        if to_segment {
+        // its start, appends there (TASK-411.8): refused before the extent opens. fxdax: and which
+        // a sealed store's large extents' raw files take, encrypted a sector at a time
+        // (TASK-411.5).
+        if to_segment || self.keys.sealing().is_some() {
             Unsectored::check(offset, len)?;
         }
         state.check_room(grows, overwrites)?;
@@ -1430,7 +1453,10 @@ impl<D: Dir> Store<D> {
     /// at its path holds nothing the extent does, as no open extent's writes go to it: a free's, of
     /// the extent while it was open, which the next commit's flush removes. It makes way, so that
     /// the extent may be written anew before that flush (TASK-79.5).
-    fn create_raw(&self, extent: ExtentId) -> Result<D::File, Error> {
+    /// fxdax: sealed, if the store is, under its branch's newest DEK, from a salt of its own kept
+    /// in memory alone, as the file never outlives the process: an opening removes those left
+    /// (TASK-411.5).
+    fn create_raw(&self, extent: ExtentId) -> Result<RawFile<D::File>, Error> {
         let (dir, path) = (&*self.dir, open_extent_path(extent));
         let created = match dir.create(&path, true) {
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -1438,7 +1464,8 @@ impl<D: Dir> Store<D> {
             }
             created => created,
         };
-        created.with_context(|| format!("creating {path}"))
+        let sealer = self.keys.sealing().map(|(dek, key)| Arc::new(Sealer::new(dek, key)));
+        Ok(RawFile::new(created.with_context(|| format!("creating {path}"))?, sealer))
     }
 
     /// fxdax: makes room in the open segment for a write of `len` bytes, if it has none: writes
@@ -2068,13 +2095,14 @@ impl<D: Dir> Store<D> {
         &self,
         state: &mut State<D::File>,
         extent: ExtentId,
-        raw: Arc<D::File>,
+        raw: Arc<RawFile<D::File>>,
         len: u64,
     ) -> Result<u64, Error> {
         let (raw_path, path) = (open_extent_path(extent), extent_path(extent));
         // fxdax: sealed, no part's packed bytes are its data, and it is framed in a copy
-        // (TASK-411.2, TASK-411.3).
+        // (TASK-411.2, TASK-411.3); its raw file's are not either, encrypted (TASK-411.5).
         let mut packer = extent_frame::Packer::new(self.keys.sealing());
+        let clear = raw.clear().filter(|_| packer.key().is_none()).cloned();
         let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
         // The framed file, once a part compresses.
         let mut framed: Option<D::File> = None;
@@ -2084,7 +2112,7 @@ impl<D: Dir> Store<D> {
             let end = packer.end();
             let packed = packer.push(buf);
             // As they are, where they are, as those before.
-            if framed.is_none() && end == at && packed[..] == buf[..] {
+            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
                 continue;
             }
             let file = match &mut framed {
@@ -2108,6 +2136,7 @@ impl<D: Dir> Store<D> {
                 (Arc::new(file), len)
             }
             None => {
+                let raw = clear.expect("an extent framed in place is in the clear");
                 raw.write_at(&tail, end)?;
                 self.dir
                     .rename(&raw_path, &path)
@@ -2797,16 +2826,12 @@ impl<D: Dir> Store<D> {
                 // Its first records: a flush keeps a segment's log while it has one.
                 std::collections::btree_map::Entry::Vacant(vacant) => {
                     let log = self.lock().segments.log_file(&*self.dir, segment)?;
-                    vacant.insert(SegmentLog::new(log.file, log.salt))
+                    vacant.insert(SegmentLog::new(log.file, log.salt, log.sealer))
                 }
             };
-            // Salted as its log's (`wal::LOG_MAGIC`).
-            let salt = log.salt();
-            let encoded: Vec<Vec<u8>> = records[at..at + run]
-                .iter()
-                .map(|(_, record)| encode_salted(record, salt))
-                .collect();
-            log.append(encoded.iter().map(Vec::as_slice)).context("appending commits' records")?;
+            // Salted as its log's (`wal::LOG_MAGIC`); fxdax: MACed, if sealed (TASK-411.5).
+            let appended = records[at..at + run].iter().map(|(_, record)| record);
+            log.append(appended).context("appending commits' records")?;
             at += run;
         }
         Ok(())
@@ -2885,7 +2910,7 @@ impl<D: Dir> Store<D> {
         while at < len {
             let buf = &mut aligned.as_mut_slice()[..(len - at).min(piece) as usize];
             fill(at, buf);
-            write.file().write_at(buf, write.offset() + at)?;
+            write.write(buf, at)?;
             at += buf.len() as u64;
         }
         write.finish();
@@ -3060,7 +3085,7 @@ const OWN_CHUNK: u64 = 16 * extent_frame::PART;
 /// fxdax: copies the first `len` bytes of `from`, a raw file, into `to`, where they are, so many
 /// at a time: the parts of an extent framed in place before the first that compressed
 /// ([`Store::seal_own`], TASK-310).
-fn copy_range<F: File>(from: &F, to: &F, len: u64) -> Result<(), Error> {
+fn copy_range<F: File>(from: &RawFile<F>, to: &F, len: u64) -> Result<(), Error> {
     let mut data = Aligned::new(len.min(OWN_CHUNK) as usize);
     for at in (0..len).step_by(OWN_CHUNK as usize) {
         let buf = &mut data.as_mut_slice()[..(len - at).min(OWN_CHUNK) as usize];

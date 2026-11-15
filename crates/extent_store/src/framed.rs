@@ -6,6 +6,7 @@
 //! parts compressed; and the parts of framed files read lately, unpacked.
 
 use crate::dir::File;
+use crate::raw::RawFile;
 use crate::sync::Mutex;
 use anyhow::{Context as _, Error, bail};
 use extent_frame::{ALIGN, Corrupt, Encoding, Frame, Keys, PART, Parts, Stored, TRAILER};
@@ -238,8 +239,9 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 
 /// A file of extents' data, open.
 pub(crate) enum Source<F> {
-    /// Raw, as written: an open segment's, or an open extent's own.
-    Raw(Arc<F>),
+    /// Raw, as written: an open segment's, or an open extent's own. fxdax: encrypted, if the store
+    /// is sealed, which reads decrypt (TASK-411.5).
+    Raw(Arc<RawFile<F>>),
     /// Framed: a closed segment's, or a sealed extent's own.
     Framed(Arc<Framed<F>>),
 }
@@ -299,7 +301,7 @@ impl<F: File> Source<F> {
 
 /// Adds `len` bytes at `offset` in `file`, a raw file, to `parts`, extending the last if they
 /// follow it.
-fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<F>, offset: u64, len: u64) {
+fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<RawFile<F>>, offset: u64, len: u64) {
     if let Some(Part::Data { file: last, offset: last_offset, len: last_len }) = parts.last_mut()
         && Arc::ptr_eq(last, file)
         && *last_offset + *last_len == offset
@@ -316,9 +318,12 @@ fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<F>, offset: u64, len: u64) 
 pub enum Part<F> {
     /// fxdax: bytes of a raw file, which the store wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
-    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)).
+    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). fxdax: a
+    /// sealed store's are encrypted, a sector at a time: a reader of the file's stored bytes reads
+    /// [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the [`RawFile`]
+    /// itself does (TASK-411.5).
     Data {
-        file: Arc<F>,
+        file: Arc<RawFile<F>>,
         offset: u64,
         len: u64,
     },

@@ -27,6 +27,7 @@ dependencies = [
  "cipher",
  "cpubits",
  "cpufeatures",
+ "zeroize",
 ]
 
 [[package]]
@@ -885,12 +886,17 @@ dependencies = [
 name = "extent_keys"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "assert_matches",
  "aws-lc-rs",
+ "aws-lc-sys",
  "futures",
  "serde",
+ "storage_ptr_slice",
+ "storage_xts",
  "tempfile",
  "thiserror",
+ "zerocopy",
  "zeroize",
 ]
 
@@ -1457,6 +1463,7 @@ dependencies = [
  "anyhow",
  "extent_frame",
  "extent_keys",
+ "extent_remote",
  "extent_store",
  "fidl-fuchsia-io",
  "fuchsia-async",
@@ -1464,8 +1471,10 @@ dependencies = [
  "fxdax",
  "fxfs",
  "libc",
+ "object_store",
  "storage_device",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

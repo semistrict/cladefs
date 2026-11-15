@@ -6,9 +6,10 @@
 //! them (backlog doc-16). A tenant's KEK is in a KMS; it wraps each of the tenant's cells' KEKs,
 //! each of which wraps its volumes' DEKs ([`Secret::wrap`]); an object's data is sealed
 //! ([`Aead`]) under a subkey of its branch's DEK ([`Secret::derive`]), from a salt of its own
-//! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]). Every primitive the workspace
-//! encrypts with is here, over aws-lc-rs, so that one crate holds what is secret and how it is
-//! used.
+//! ([`Salt`]), and its metadata authenticated ([`Secret::mac`]); raw files on local disk are
+//! encrypted a sector at a time ([`xts::Xts`]). Every primitive the workspace encrypts with is
+//! here, over aws-lc-rs, but AES-256-XTS, which it has not (`storage_xts` over `aes`), so that one
+//! crate holds what is secret and how it is used.
 
 use aws_lc_rs::aead::{AES_256_GCM, Aad, LessSafeKey, NONCE_LEN, Nonce, UnboundKey};
 use aws_lc_rs::key_wrap::{AES_256, KeyEncryptionKey, KeyWrap};
@@ -17,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
 pub mod kms;
+pub mod xts;
 
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;

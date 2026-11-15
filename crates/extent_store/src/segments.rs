@@ -17,11 +17,13 @@ use crate::layout::{
     branch_dir, extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number,
     segment_path, spare_path,
 };
+use crate::raw::{RawFile, Sealer};
 use crate::store::{Options, Usage};
 use crate::timings::{self, Timing, durable, framing as framing_phase};
-use crate::wal::{log_header, log_salt, new_salt};
+use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
+use extent_frame::{KeyId, Secret};
 use extent_remote::keys::Ring;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
@@ -29,11 +31,11 @@ use std::sync::Arc;
 use std::time::Instant;
 use storage_device::ExtentId;
 
-/// fxdax: the bytes of a sector of an open segment, whose raw file is to be encrypted a sector at
-/// a time, AES-256-XTS, the sector its tweak (doc-16, TASK-411.5): which takes no reading,
-/// modifying and writing again only if what reaches the segment is whole sectors, at offsets in it
-/// and of lengths that are multiples of this (TASK-411.8).
-pub(crate) const SECTOR: u64 = 4096;
+/// fxdax: the bytes of a sector of an open segment, whose raw file a sealed store encrypts a
+/// sector at a time, AES-256-XTS, the sector its tweak (doc-16, TASK-411.5, [`crate::raw`]):
+/// which takes no reading, modifying and writing again only if what reaches the segment is whole
+/// sectors, at offsets in it and of lengths that are multiples of this (TASK-411.8).
+pub(crate) use crate::raw::SECTOR;
 
 /// fxdax: the error of `len` bytes at `offset` that are not whole sectors ([`SECTOR`]), going to
 /// the open segment: a write of an extent stored in segments, `offset` in the extent, as its seal
@@ -61,12 +63,12 @@ impl Unsectored {
 enum Phase<F> {
     /// Taking writes, in its raw file; fxdax: its commits recorded in its log, which the flushes
     /// append to (TASK-165.9).
-    Open { raw: Arc<F>, log: Log<F> },
+    Open { raw: Arc<RawFile<F>>, log: Log<F> },
     /// fxdax: filled between commits, taking no more writes, which go to the next: the next commit
     /// seals in place what is one run in it, and closes it, its footer naming those runs as the
     /// commit's, which the segments after it go on with, after what the commits before made in it,
     /// as `window` folds them (TASK-92.41). Read from its raw file until then.
-    Full { raw: Arc<F>, log: Log<F>, window: Window },
+    Full { raw: Arc<RawFile<F>>, log: Log<F>, window: Window },
     /// fxdax: closed by commit `last`, its data being framed off the commit, on a thread of its
     /// own, which ends the framing itself ([`Segments::framed`], TASK-153.8): read from its raw
     /// file, which stays open, until then; its commits' records still appended to its log by the
@@ -74,23 +76,25 @@ enum Phase<F> {
     /// file `written`, whole, once the framing wrote it, being made durable then, which the
     /// uploader waits for no more (TASK-384): the bucket's object is what makes its commits
     /// durable, its raw file and log holding them here until it is.
-    Framing { raw: Arc<F>, log: Log<F>, last: u64, written: Option<Arc<Framed<F>>> },
+    Framing { raw: Arc<RawFile<F>>, log: Log<F>, last: u64, written: Option<Arc<Framed<F>>> },
     /// fxdax: its framing failed, which failed the store: read from its raw file, which stays.
-    Failed { raw: Arc<F>, log: Log<F>, error: String },
+    Failed { raw: Arc<RawFile<F>>, log: Log<F>, error: String },
     /// Closed, a segment of the write-ahead log until acknowledged in the bucket. Its framed file,
     /// if open, is among those kept open (`Segments::files`).
     Closed,
 }
 
-/// fxdax: a segment's log, and the salt of its records, its header's (`wal::log_header`).
+/// fxdax: a segment's log, and the salt of its records, its header's (`wal::log_header`); fxdax:
+/// and what MACs them, its raw file's sealer, if sealed (TASK-411.5).
 pub(crate) struct Log<F> {
     pub file: Arc<F>,
     pub salt: u64,
+    pub sealer: Option<Arc<Sealer>>,
 }
 
 impl<F> Clone for Log<F> {
     fn clone(&self) -> Self {
-        Self { file: self.file.clone(), salt: self.salt }
+        Self { file: self.file.clone(), salt: self.salt, sealer: self.sealer.clone() }
     }
 }
 
@@ -295,8 +299,8 @@ impl<F: File> Segments<F> {
             }
             rapidhash::rapidhash(&bytes)
         };
-        let (phase, _) =
-            create_open(dir, open, (&mut spares, &mut None), new_salt(lifetime, open))?;
+        let salt = new_salt(lifetime, open);
+        let (phase, _) = create_open(dir, open, (&mut spares, &mut None), salt, keys.sealing())?;
         for kind in [OPEN_SEGMENTS, LOGS] {
             dir.sync_dir(&branch_dir(kind, branch))?;
         }
@@ -358,7 +362,7 @@ impl<F: File> Segments<F> {
     /// in it the write goes. The write is in progress until it is done: held
     /// ([`Segments::held`]), or dropped ([`Segments::dropped`]). fxdax: refused, nothing reserved,
     /// unless they are whole sectors ([`Unsectored`], TASK-411.8).
-    pub fn reserve(&mut self, len: u64) -> Result<(SegmentId, Arc<F>, u64), Unsectored> {
+    pub fn reserve(&mut self, len: u64) -> Result<(SegmentId, Arc<RawFile<F>>, u64), Unsectored> {
         let open = self.open;
         Unsectored::check(self.tracked[&open].len, len)?;
         Ok(self.change(open, |segment| {
@@ -396,7 +400,7 @@ impl<F: File> Segments<F> {
     /// Appends `len` bytes of an extent's data, sealed in one run, to the open segment, which
     /// holds them: returns its raw file, and where in it they go. fxdax: refused, nothing appended,
     /// unless they are whole sectors ([`Unsectored`], TASK-411.8).
-    pub fn append(&mut self, len: u64) -> Result<(Arc<F>, u64), Unsectored> {
+    pub fn append(&mut self, len: u64) -> Result<(Arc<RawFile<F>>, u64), Unsectored> {
         Unsectored::check(self.tracked[&self.open].len, len)?;
         self.written = true;
         Ok(self.change(self.open, |segment| {
@@ -429,7 +433,7 @@ impl<F: File> Segments<F> {
             segment.written_back = to;
             (back, to - back)
         });
-        Some(Behind { raw: raw.clone(), begin: (from, end - from), wait })
+        Some(Behind { raw: raw.file().clone(), begin: (from, end - from), wait })
     }
 
     /// fxdax: segment `number`, closed, is acknowledged in the bucket, its object there at `key`
@@ -558,15 +562,17 @@ impl<F: File> Segments<F> {
                 let file = dir.open(&log_path(number), false)?;
                 let mut header = [0; crate::wal::LOG_HEADER];
                 file.read_cached(&mut header, 0)?;
-                let salt = log_salt(&header, number)
+                let header = LogHeader::of(&header, number)
                     .ok_or_else(|| anyhow!("{number:?}'s log has no header of its own"))?;
-                Ok(Log { file: Arc::new(file), salt })
+                let sealer = header.sealer(number, &self.keys)?;
+                Ok(Log { file: Arc::new(file), salt: header.salt, sealer })
             }
         }
     }
 
-    /// fxdax: segment `number`'s raw file, whose data a commit's record checks (`wal::LogRecord`):
-    /// there until it goes, once the segment is framed and its commits durable.
+    /// fxdax: segment `number`'s raw file, as stored, whose data a commit's record checks
+    /// (`wal::LogRecord`): there until it goes, once the segment is framed and its commits durable.
+    /// fxdax: encrypted, if sealed, as its records hold its runs (TASK-411.5).
     pub fn raw_file<D: Dir<File = F>>(&self, dir: &D, number: SegmentId) -> Result<Arc<F>, Error> {
         match self.tracked.get(&number).map(|segment| &segment.phase) {
             Some(
@@ -574,7 +580,7 @@ impl<F: File> Segments<F> {
                 | Phase::Full { raw, .. }
                 | Phase::Framing { raw, .. }
                 | Phase::Failed { raw, .. },
-            ) => Ok(raw.clone()),
+            ) => Ok(raw.file().clone()),
             _ => Ok(Arc::new(dir.open(&open_segment_path(number), false)?)),
         }
     }
@@ -658,7 +664,8 @@ impl<F: File> Segments<F> {
         debug_assert!(self.full.is_empty(), "{number:?} closes before those filled before it");
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
-        let (phase, synced) = create_open(dir, next, (&mut self.spares, &mut self.prepared), salt)?;
+        let placing = (&mut self.spares, &mut self.prepared);
+        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.sealing())?;
         // Nothing fails from here on.
         let window =
             std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
@@ -750,7 +757,7 @@ impl<F: File> Segments<F> {
         // Written to in place, its framing would change what the frame says of it.
         let quiet = segment.writers == 0;
         if written {
-            self.closed_unsynced.push(raw.clone());
+            self.closed_unsynced.push(raw.file().clone());
         }
         self.closed_since = true;
         Unframed { number, raw, len, footer, quiet, keys: self.keys.clone() }
@@ -768,7 +775,8 @@ impl<F: File> Segments<F> {
         let number = self.open;
         let next = SegmentId { number: number.number + 1, ..number };
         let salt = new_salt(self.lifetime, next);
-        let (phase, synced) = create_open(dir, next, (&mut self.spares, &mut self.prepared), salt)?;
+        let placing = (&mut self.spares, &mut self.prepared);
+        let (phase, synced) = create_open(dir, next, placing, salt, self.keys.sealing())?;
         let window =
             std::mem::replace(&mut self.window, Window::starting(number.branch, epoch + 1));
         let segment = self.tracked.get_mut(&number).unwrap();
@@ -959,7 +967,8 @@ impl<F: File> Segments<F> {
         }
         self.preparing = true;
         let spare = self.spares.pop();
-        Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next) })
+        let sealer = new_sealer(self.keys.sealing());
+        Some(Preparation { segment: next, spare, salt: new_salt(self.lifetime, next), sealer })
     }
 
     /// fxdax: a preparation's log is made, as `prepared` says: if it is still the next segment's,
@@ -1015,7 +1024,7 @@ impl<F: File> Segments<F> {
         dir: &D,
         prepared: Prepared<F>,
     ) -> Result<Placed<F>, Error> {
-        let Prepared { segment, spare, file, salt } = prepared;
+        let Prepared { segment, spare, file, salt, sealer } = prepared;
         let raw = dir.create(&open_segment_path(segment), true)?;
         let (from, to) = (spare_path(spare), log_path(segment));
         if let Err(error) = dir.rename(&from, &to) {
@@ -1025,7 +1034,7 @@ impl<F: File> Segments<F> {
             }
             return Err(Error::new(error).context(format!("renaming {from} {to}")));
         }
-        Ok(Placed { segment, raw, log: file, salt, synced: false })
+        Ok(Placed { segment, raw, log: file, salt, sealer, synced: false })
     }
 
     /// fxdax: the entries of segment `segment`, placed ([`Segments::prepared`]), were made durable,
@@ -1106,7 +1115,7 @@ impl<F: File> Segments<F> {
             let Phase::Open { raw, .. } = &self.tracked[&self.open].phase else {
                 unreachable!("the open segment is open")
             };
-            syncs.cached(raw.clone());
+            syncs.cached(raw.file().clone());
         }
         for raw in self.closed_unsynced.drain(..) {
             syncs.cached(raw);
@@ -1210,7 +1219,7 @@ impl Recount {
 /// ends itself (TASK-153.8).
 pub(crate) struct Unframed<F> {
     number: SegmentId,
-    raw: Arc<F>,
+    raw: Arc<RawFile<F>>,
     len: u64,
     pub footer: Footer,
     /// fxdax: whether no write was in progress in it as it closed, none to come: what framing it
@@ -1360,11 +1369,14 @@ pub(crate) const WRITTEN_BACK: usize = 1 << 20;
 /// written twice, raw, which the host's disk wrote back as the guest wrote it, and framed: as much
 /// again as its guest wrote, the disk's other writers waiting behind it, on a disk VMs share. Or
 /// else in a file of its own, as before. fxdax: sealed, if `sealing` gives a DEK, its branch's
-/// newest, never in place, as a sealed object's bytes are never its data (TASK-411.3).
+/// newest, never in place, as a sealed object's bytes are never its data (TASK-411.3); nor is a
+/// sealed raw file's, which holds them encrypted otherwise, AES-256-XTS by sector: framing it in
+/// place would write every byte of it again anyway, and a crash part way would leave a file
+/// neither raw nor framed (TASK-411.5).
 fn frame_segment<D: Dir>(
     dir: &D,
     path: &str,
-    (raw_path, raw): (&str, &Arc<D::File>),
+    (raw_path, raw): (&str, &Arc<RawFile<D::File>>),
     (len, quiet): (u64, bool),
     (footer, sealing): (&[u8], extent_remote::layout::Sealing<'_>),
     timing: &mut Timing<4>,
@@ -1375,7 +1387,8 @@ fn frame_segment<D: Dir>(
     // fxdax: sealed, framed in a copy, never in place, as a sealed object's bytes are never its
     // data (TASK-411.2, TASK-411.3).
     let mut packer = extent_frame::Packer::new(sealing);
-    let in_place_maybe = quiet && len > 0 && packer.key().is_none();
+    let clear = raw.clear().filter(|_| packer.key().is_none());
+    let in_place_maybe = quiet && len > 0 && clear.is_some();
     let parts = framing::read(&**raw, len, in_place_maybe)?;
     timing.took(framing_phase::READ);
     // fxdax: in place at once if a sample of its parts says compressing them saves too little,
@@ -1403,9 +1416,9 @@ fn frame_segment<D: Dir>(
     let end = packer.end();
     let (tail, parts) = packer.finish_parts(footer);
     timing.took(framing_phase::COMPRESS);
-    let framed = match in_place {
-        true => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
-        false => None,
+    let framed = match (in_place, clear) {
+        (true, Some(raw)) => frame_in_place(dir, (raw_path, raw), path, end, &tail)?,
+        _ => None,
     };
     let framed = match framed {
         Some(file) => Framed::new(file, parts),
@@ -1642,6 +1655,7 @@ pub(crate) struct Prepared<F> {
     spare: SegmentId,
     file: F,
     salt: u64,
+    sealer: Option<Arc<Sealer>>,
 }
 
 /// fxdax: the next segment's raw file and log, made ahead of it, there under their names, which
@@ -1654,6 +1668,7 @@ pub(crate) struct Placed<F> {
     raw: F,
     log: F,
     salt: u64,
+    sealer: Option<Arc<Sealer>>,
     synced: bool,
 }
 
@@ -1673,11 +1688,12 @@ const MADE: u64 = 1 << 63;
 
 /// fxdax: what to prepare of segment `segment`'s log ([`Segments::to_prepare`]): from `spare`'s
 /// spare log, if any, else a file made anew under a spare's name of its own ([`MADE`]), salted
-/// `salt`.
+/// `salt`; fxdax: sealed by `sealer`, with its raw file, if the store is sealed (TASK-411.5).
 pub(crate) struct Preparation {
     segment: SegmentId,
     spare: Option<SegmentId>,
     salt: u64,
+    sealer: Option<Arc<Sealer>>,
 }
 
 impl Preparation {
@@ -1687,7 +1703,7 @@ impl Preparation {
     /// the store's state lock in `create_open`, a write filling the open segment, every write and
     /// read of the store and its flushes waiting (TASK-333). Fails with the spare it took.
     pub fn prepare<D: Dir>(self, dir: &D) -> Result<Prepared<D::File>, (Option<SegmentId>, Error)> {
-        let Self { segment, spare, salt } = self;
+        let Self { segment, spare, salt, sealer } = self;
         // A file made anew under a name no segment's spare log has: a stale one, its segment
         // opened with another log, its spare later, would take the name, the file a preparation
         // held then gone from under it.
@@ -1699,20 +1715,25 @@ impl Preparation {
                 Some(_) => dir.open(&path, false)?,
                 None => dir.create(&path, false)?,
             };
-            write_header(&log, salt, segment)?;
+            write_header(&log, salt, segment, sealer.as_deref())?;
             Ok(log)
         };
         match make() {
-            Ok(file) => Ok(Prepared { segment, spare: named, file, salt }),
+            Ok(file) => Ok(Prepared { segment, spare: named, file, salt, sealer }),
             Err(error) => Err((spare, Error::new(error).context(format!("preparing {path}")))),
         }
     }
 }
 
 /// fxdax: writes the header of `segment`'s log, its records salted `salt`, to `log`, and syncs it
-/// (`wal::log_header`).
-fn write_header<F: File>(log: &F, salt: u64, segment: SegmentId) -> io::Result<()> {
-    let header = log_header(salt, segment);
+/// (`wal::log_header`); a sealed log's, if `sealer` seals it.
+fn write_header<F: File>(
+    log: &F,
+    salt: u64,
+    segment: SegmentId,
+    sealer: Option<&Sealer>,
+) -> io::Result<()> {
+    let header = log_header(salt, segment, sealer);
     log.write_at(&header, 0)?;
     crate::written::wrote(crate::written::Kind::Log, header.len());
     log.sync_cached()
@@ -1728,12 +1749,17 @@ fn create_open<D: Dir>(
     segment: SegmentId,
     (spares, placed): (&mut Vec<SegmentId>, &mut Option<Placed<D::File>>),
     salt: u64,
+    sealing: Option<(&Secret, KeyId)>,
 ) -> Result<(Phase<D::File>, bool), Error> {
     if let Some(ready) = placed.take_if(|ready| ready.segment == segment && ready.salt == salt) {
-        let (raw, log) = (Arc::new(ready.raw), Log { file: Arc::new(ready.log), salt });
+        let raw = Arc::new(RawFile::new(ready.raw, ready.sealer.clone()));
+        let log = Log { file: Arc::new(ready.log), salt, sealer: ready.sealer };
         return Ok((Phase::Open { raw, log }, ready.synced));
     }
-    let raw = Arc::new(dir.create(&open_segment_path(segment), true)?);
+    // fxdax: sealed if the store is, under its branch's newest DEK (TASK-411.5).
+    let sealer = new_sealer(sealing);
+    let raw =
+        Arc::new(RawFile::new(dir.create(&open_segment_path(segment), true)?, sealer.clone()));
     // fxdax: its log a spare, if there is one, its header written over the one there (TASK-301):
     // durable before any record is appended, and before the spare is renamed its log: renamed
     // first, a crash, or a failure, before the header was durable left the spare's header, and the
@@ -1741,7 +1767,7 @@ fn create_open<D: Dir>(
     // this segment's commits, their runs past its raw data (TASK-310's crash round 270).
     let path = log_path(segment);
     let headed = |log: D::File| -> io::Result<D::File> {
-        write_header(&log, salt, segment)?;
+        write_header(&log, salt, segment, sealer.as_deref())?;
         Ok(log)
     };
     let reused = spares.pop().map(|spare| {
@@ -1758,7 +1784,13 @@ fn create_open<D: Dir>(
         }
         None => headed(dir.create(&path, false)?)?,
     };
-    Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt } }, false))
+    Ok((Phase::Open { raw, log: Log { file: Arc::new(log), salt, sealer } }, false))
+}
+
+/// fxdax: the sealer of a new segment's raw file and log, if `sealing` gives a DEK, its branch's
+/// newest, which they are sealed under then, from a salt of their own (TASK-411.5).
+fn new_sealer(sealing: Option<(&Secret, KeyId)>) -> Option<Arc<Sealer>> {
+    sealing.map(|(dek, key)| Arc::new(Sealer::new(dek, key)))
 }
 
 /// The store's epoch of the last commit of the segment whose footer is `footer`. fxdax: the one it

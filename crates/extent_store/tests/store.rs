@@ -2072,10 +2072,6 @@ impl Dir for Counting {
         self.dir.rename(from, to)
     }
 
-    fn replace(&self, from: &str, to: &str) -> std::io::Result<()> {
-        self.dir.replace(from, to)
-    }
-
     fn link(&self, from: &str, to: &str) -> std::io::Result<()> {
         self.dir.link(from, to)
     }
@@ -2154,8 +2150,9 @@ fn raw_files_are_read_through_the_page_cache() {
     let store = Store::open(dir.clone(), OPTIONS).unwrap();
     assert_eq!(of_raw_files(dir.direct()), BTreeMap::new());
     // And extent 4's block, read back by its flush, whose record holds it (TASK-301), and the
-    // open segment left raw, read once by the opening, which closes it again.
-    assert_eq!(of_raw_files(dir.cached()), cached(14 * BLOCK));
+    // open segment left raw, read twice by the opening, which closes it again: by its recovery,
+    // which finds what it holds, and by its framing, once the store's keys are known (TASK-411.9).
+    assert_eq!(of_raw_files(dir.cached()), cached(15 * BLOCK));
     for (sequence, len) in [(1, 2 * BLOCK), (2, 2 * BLOCK), (3, large), (4, BLOCK)] {
         assert!(read(&store, extent(sequence), 0, len) == pattern(sequence as u8, 0, len));
     }
@@ -2918,7 +2915,7 @@ fn in_flight<'a>(
     data: &[u8],
 ) -> extent_store::Write<'a, MemDir> {
     let write = store.begin_write(extent, offset, data.len() as u64).unwrap();
-    write.file().write_at(data, write.offset()).unwrap();
+    write.write(data, 0).unwrap();
     write
 }
 

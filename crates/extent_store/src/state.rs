@@ -19,6 +19,7 @@ use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, Data, EXTENTS, Extent, Extents, FileKey, Piece, SegmentId, branch_dir, extent_path,
 };
+use crate::raw::RawFile;
 #[cfg(any(test, feature = "audit"))]
 use crate::segments::Recount;
 use crate::segments::{Segments, Unframed};
@@ -862,7 +863,7 @@ impl Space {
 /// Where an open extent's data goes: segments, or a raw file of its own.
 pub(crate) enum Placement<F> {
     Segment,
-    Own(Arc<F>),
+    Own(Arc<RawFile<F>>),
 }
 
 impl<F> Clone for Placement<F> {
