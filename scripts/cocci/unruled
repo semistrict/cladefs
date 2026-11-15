@@ -1,0 +1,49 @@
+# Each mutant of guest/mutants that no rule of scripts/cocci finds, and why no rule finds its kind:
+# NAME: WHY (scripts/cocci-guest.py --mutants, TASK-444.6). Most are a value, a condition or a choice
+# of the algorithm's own, which no other place shares: its killer holds it. A new mutant goes under
+# a rule, or here.
+patch-0010-reads-replace-their-entries: the kernel's fs/dax.c, as guest/linux/patches change it: the rules run on the guest's own C
+patch-0012-invalidate-unmaps-after: the kernel's fs/dax.c, as guest/linux/patches change it: the rules run on the guest's own C
+task-147-growing: how far a write past the end grows the file left unpublished (file->growing): one field's protocol, no shape another shares
+task-149.14.2-growth-keeps-tail: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find
+task-149.14.2-partial-write-keeps-past-end: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find
+task-149.15-round-releases: a round of the worker counted as a range released: which events count is the algorithm's
+task-149.15-sync-without-memory: a sync with no memory for its file list returning as if done: a return value computed wrong, no call or lock to see
+task-149.15-writeback-batch-short: the writeback's batch sized before the semaphore and not counted again under it: a retry loop's condition
+task-149.16-fork-copies-writable-ptes: a flag of the mapping (VM_MIXEDMAP) set: one mmap's contract with fs/dax.c
+task-149.16-short-write-cut-to-its-start: the size a short write's resize cuts to: arithmetic
+task-149.29-tail-moved-though-zero: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find
+task-149.33-chunks-only-aligned: the fallback to an unaligned slot taken out: one branch's condition
+task-149.42-mprotect-batches-whatever-their-dirtiness: a patch of the kernel series left out of scripts/build-guest-kernel.sh: no C of the guest's changed
+task-150.12-pool-kept: a pool's bitmaps left set on its reset: one structure's state
+task-150.9-resize-moves-the-last-block: a flag left out of a call's argument (FXFS_SET_KEEP_TAIL): which flags a call needs is its own
+task-153.1-fault-limit: a bound on a fault's retries taken out: equivalent (Killer: none)
+task-160.2-resize-no-rollback: a failed grow leaving i_size grown: an undo on one error path, which a rule could check only knowing each step's undo
+task-164.11-unsure-range-unmapped-as-counted: a flag left out of a condition (range->unsure)
+task-164.2-writeback-holds-no-range: a range's reference over a writeback, taken and put, both taken out: nothing left unbalanced for a rule to see
+task-164.4-extents-during-seal: a condition forced true (whether a seal is under way)
+task-164.4-forget-before-free: what an error path keeps (`!err` and its guard dropped): what each error means is the algorithm's
+task-164.4-fsync-skips-writeback: fsync returning before the writeback under way is done, on a count of dirty pages: the order of a check and a wait, fsync's own
+task-164.4-model-seal-forgets-late: guest/sim's model of Fxfs, not the guest's C: its drifts are crates/fxfs-sim-diff's to find
+task-164.4-private-uncounted: a count not made (atomic_long_add_return read instead): a value, no call or lock to see
+task-164.4-protect-by-entries: one function called for another (cleaning the entries, not protecting the batch): which of two is right is the algorithm's
+task-164.4-rebind-dirty: a bit test left out of a loop's condition (pages.c)
+task-164.4-release-stale-entries: an early return of a check taken out
+task-164.4-slice-during-seal: the open extents' lookup called for the sealed ones': which of two is right is the algorithm's
+task-164.4-sync-skips-writeback: a sync skipping files with no dirty pages, which a writeback under way holds swapped out: as fsync-skips-writeback, the order of a check and a wait
+task-164.4-truncate-unwritten: a writeback replaced by err = 0: no call left for a rule to see
+task-164.4-wb-sync-none: the protection of a batch taken out of one path, which others keep
+task-164.4-writeback-unowned: a PRIVATE and its failure's handling taken out whole: nothing left for a rule to see
+task-207-no-memory-writeback-lost: a writeback with no memory dropping its pages, not keeping them: what one error means
+task-212-no-memory-folios-lost: as task-207's, of the page cache's folios (super.c): what one error means
+task-283-rebind-leaves-open: the seal before a rebind taken out whole: nothing left for a rule to see
+task-323-fsync-sleeps: a sleep added to fsync, a cost: a rule against sleeps would flag dax.c's three timed waits, there by design; append_writeback times fsync
+task-44.15-private-enomem-eio: an error mapped to another (-ENOMEM to -EIO): which errors pass through is the algorithm's
+task-79.28-before-147: a value returned in one branch (-EXDEV or -EIO)
+task-79.28-range-too-small: a value returned in one branch (-EXDEV or -EIO): equivalent (Killer: none)
+task-79.29-inherited-acls-written-back: inherited ACLs written after the create, in a transaction of their own: what one call writes (super.c)
+task-79.49-fault-ignores-fatal-signals: equivalent (Killer: none): a fault's waits for room are bounded and killable
+task-79.49-store-fails-on-pins: a flag forced false (FAULT_FLAG_USER)
+task-79.53-gap-left: a condition's arithmetic (an offset in a page)
+unmapped-page-read-as-hole: the MAP of a missing page before a read taken out whole: nothing left for a rule to see
+write-past-end-grows: the size a write past the end grows the file to: arithmetic
