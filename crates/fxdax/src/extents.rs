@@ -678,6 +678,7 @@ impl ExtentStore {
         let forked_from = Arc::new(store_dir::ancestry(path)?);
         let fetcher = crate::remote::Fetcher::new(bucket.clone(), keeping.cache.clone());
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
+        let branch = store.description().branch;
         Ok(Self {
             profiling: profiling.flatten(),
             arenas,
@@ -693,7 +694,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(path),
+            fence: Fence::new(path, branch),
             fetcher,
         })
     }
@@ -721,7 +722,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(&self.path),
+            fence: Fence::new(&self.path, self.branch()),
             fetcher: self.fetcher.clone(),
         }
     }
@@ -747,11 +748,19 @@ impl ExtentStore {
         self.fence.fence(why);
     }
 
-    /// fxdax: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`.
+    /// fxdax: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`,
+    /// or `EACCES` once its host forgot its tenant's or cell's keys (`crate::remote::forget`).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn is_fenced(&self) -> bool {
         self.fence.is_fenced()
+    }
+
+    /// fxdax: the errno the store's requests fail with, if it is fenced ([`ExtentStore::is_fenced`]).
+    // The extent daemon's (Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn fenced(&self) -> Option<Errno> {
+        self.fence.errno()
     }
 
     /// fxdax: makes the store a new writer's, which its followers go on following: one opened for

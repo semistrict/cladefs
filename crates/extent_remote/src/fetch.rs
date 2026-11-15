@@ -328,6 +328,34 @@ impl Memory {
     pub fn keys(&self) -> &Arc<HostRing> {
         &self.keys
     }
+
+    /// fxdax: drops what it keeps of the objects of `scope`'s cells, as a host told a tenant's KEK
+    /// is revoked or destroyed, or a cell shredded, does (doc-16, Shredding; TASK-411.7): their
+    /// tails, opened under keys it may hold no more, and the parts fetched last, unpacked, in the
+    /// clear. Read again, they are opened under the keys the host holds then: those other stores
+    /// hold, as a fork of another tenant's keeps what it inherited, and no others
+    /// ([`HostRing::forget`]). GETs in flight finish as they would. Returns how many tails and
+    /// parts it dropped.
+    pub fn forget_kept(&self, scope: keys::Scope) -> usize {
+        let of = |key: &str| layout::cell_of(key).is_some_and(|cell| scope.covers(cell));
+        let tails = {
+            let mut tails = self.tails.lock().unwrap();
+            let doomed: Vec<String> = tails.kept.keys().filter(|key| of(key)).cloned().collect();
+            for key in &doomed {
+                tails.remove(key, None);
+            }
+            doomed.len()
+        };
+        let mut recent = self.recent.lock().unwrap();
+        let doomed: Vec<(String, u64)> =
+            recent.parts.keys().filter(|(key, _)| of(key)).cloned().collect();
+        for id in &doomed {
+            let (used, dropped) = recent.parts.remove(id).expect("a part kept");
+            recent.by_use.remove(&used);
+            recent.bytes -= dropped.size();
+        }
+        tails + doomed.len()
+    }
 }
 
 /// How many bytes of objects' tails a host's fetchers keep in memory, those used least recently

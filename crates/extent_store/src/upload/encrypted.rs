@@ -20,6 +20,7 @@ use extent_remote::fetch::{Fetcher, Limits, Memory, Priority};
 use extent_remote::layout::{self, Branch, Cell, Location, TEST_CELL, test_branch};
 use futures::TryStreamExt as _;
 use object_store::ObjectStore as _;
+use std::collections::BTreeSet;
 use storage_device::ExtentId;
 
 /// The tenant of [`TEST_CELL`], whose KEK the tests' KMS keeps.
@@ -1118,4 +1119,225 @@ fn sealed_logs_changed_are_refused() {
         let segments = files_of(&attempt, "segments/");
         assert_eq!(segments, Vec::new(), "framed from a log changed");
     }
+}
+
+/// A host's fetcher, keeping what it reads in a part cache on disk, in `dir`, as a host's NVMe
+/// cache does (doc-7, Reading), and its memory `memory`, whose keys are the host's.
+fn caching_fetcher(world: &World, memory: &Arc<Memory>, dir: &std::path::Path) -> Fetcher<Bucket> {
+    let cache = Arc::new(extent_remote::cache::Cache::open(dir, 1 << 30, 0).unwrap());
+    Fetcher::new(world.bucket.clone(), Budget::new(Limits::UNBOUNDED), memory.clone(), Some(cache))
+}
+
+/// What `fetcher` reads of `extent`, `len` bytes, at `location`.
+fn fetched_by(
+    world: &World,
+    fetcher: &Fetcher<Bucket>,
+    extent: ExtentId,
+    location: &Location,
+    len: u64,
+) -> Result<Vec<u8>, extent_remote::Error> {
+    world.runtime.block_on(fetcher.read(extent, location, 0, len, Priority::Demand))
+}
+
+/// The paths of the files under `dir`, on the host's disk, that hold any of `data`'s sectors' first
+/// 32 bytes.
+fn clear_files_on_disk(dir: &std::path::Path, data: &[u8]) -> Vec<String> {
+    let pieces: std::collections::HashSet<&[u8]> =
+        data.chunks(4096).map(|sector| &sector[..32]).collect();
+    let mut found = Vec::new();
+    let mut paths = vec![dir.to_path_buf()];
+    while let Some(path) = paths.pop() {
+        if path.is_dir() {
+            paths.extend(std::fs::read_dir(&path).unwrap().map(|entry| entry.unwrap().path()));
+        } else if std::fs::read(&path).unwrap().windows(32).any(|window| pieces.contains(window)) {
+            found.push(path.display().to_string());
+        }
+    }
+    found
+}
+
+/// How many files there are under `dir`.
+fn files_under(dir: &std::path::Path) -> usize {
+    let mut count = 0;
+    let mut paths = vec![dir.to_path_buf()];
+    while let Some(path) = paths.pop() {
+        match path.is_dir() {
+            true => paths.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path())),
+            false => count += 1,
+        }
+    }
+    count
+}
+
+/// TASK-411.7, AC #1 (and TASK-411's AC #1): a tenant shredded, its KEK destroyed in the KMS, and
+/// the hosts told so: none of its volumes is readable on any host. Host 5 holds its store open, its
+/// data in the bucket, in its write-ahead log's closed segment and in its open segment, a commit
+/// durable there (its closed segment, acknowledged, left the log: a closing's own test is
+/// `segments_closed_again_are_never_in_the_clear`); host 6 read it into its part cache on disk, holding the store's keys as a host
+/// serving it does. Told, each forgets the tenant's cell KEKs and pool, and its fetchers the
+/// store's ring: host 6 opens nothing it cached of it, no file of either host holds its data, and
+/// the store, crashed as it is, opens on neither host nor a third, the error naming the tenant,
+/// before anything of its write-ahead log is read. A store of another tenant's reads on. A fork of
+/// the shredded store into another tenant's cell, whose record keeps the DEK it inherited
+/// rewrapped under its own cell's KEK, keeps it in host 5's memory and reads on, there and on a
+/// host opening it afresh: shredding a parent leaves its children what they inherited.
+#[test]
+fn shredded_tenants_leave_none_of_their_volumes_readable_on_any_host() {
+    let world = World::new();
+    world.kms.inner().create(OTHER).unwrap();
+    let (writer, reader) = (world.host(5), world.host(6));
+    // A segment the guest fills is closed by a commit waiting for its upload alone.
+    let filling = Options { filling_wait: Duration::from_secs(3600), ..Options::default() };
+    let dir = made(test_branch(7), "a");
+    let (store, remote) = open_with(&world, &writer, &dir, filling).unwrap();
+    let (uploaded, open) = (ExtentId::new(7, 1), ExtentId::new(7, 2));
+    const LEN: usize = 8 * 4096;
+    let (uploaded_data, open_data) = (noise(1, LEN), noise(2, LEN));
+    written(&store, &remote, uploaded, &uploaded_data);
+    store.write(open, 0, &open_data).unwrap();
+    store.commit(None).unwrap();
+    for kind in ["open-segments/", "logs/"] {
+        assert!(!files_of(&dir, kind).is_empty(), "{kind}: {:?}", dir.files());
+    }
+    let at = location(&store, uploaded);
+
+    // Another tenant's store, and a fork of the shredded tenant's into a cell of the other's.
+    let theirs = Branch { cell: Cell { tenant: OTHER, id: 1 }, id: 9 };
+    let (their_store, their_remote) = open_on(&world, &writer, &made(theirs, "theirs")).unwrap();
+    let (their_extent, their_data) = (ExtentId::new(9, 1), noise(3, 4096));
+    written(&their_store, &their_remote, their_extent, &their_data);
+    let their_at = location(&their_store, their_extent);
+    let child = child_in(OTHER, 2, 8, false);
+    forked(&store, &remote, child).unwrap();
+    let child_dir = made(child.branch, "child");
+    let (child_store, _child_remote) = open_on(&world, &writer, &child_dir).unwrap();
+    let first = uploaded_data[..4096].to_vec();
+    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+
+    // Host 6 serves the shredded tenant's store and the other's, reading into its part cache.
+    let cache_dir = tempfile::tempdir().unwrap();
+    let fetcher = caching_fetcher(&world, &reader.memory, cache_dir.path());
+    let _held =
+        [store.keys(), their_store.keys()].map(|keys| reader.memory.keys().hold(keys.clone()));
+    assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Ok(first.clone()));
+    assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
+    assert!(files_under(cache_dir.path()) >= 2, "{}", files_under(cache_dir.path()));
+
+    // Shredded: its KEK destroyed, then each host told.
+    world.kms.inner().destroy(TENANT).unwrap();
+    let why = "tenant 1: its KEK is destroyed";
+    for host in [&writer, &reader] {
+        assert_eq!(host.runtime.keys.forget(keys::Scope::Tenant(TENANT), why), 1);
+        host.memory.forget_kept(keys::Scope::Tenant(TENANT));
+        let kms = host.runtime.keys.kms.as_ref().unwrap();
+        assert_eq!(kms.refuses(TENANT), Some(extent_remote::Error::Kms(why.into())));
+        assert_eq!(kms.in_pool(TENANT), 0);
+    }
+    // Host 5's fetchers keep the fork's ring, which holds the DEK it inherited of branch 7.
+    assert_eq!(writer.memory.keys().ring().branches(), BTreeSet::from([7, 8, 9]));
+    assert_eq!(reader.memory.keys().ring().branches(), BTreeSet::from([9]));
+    let refused = extent_remote::Error::NoKey(KeyId { branch: 7, generation: 1 });
+    assert_eq!(fetched_by(&world, &fetcher, uploaded, &at, 4096), Err(refused));
+    assert_eq!(fetched_by(&world, &fetcher, their_extent, &their_at, 4096), Ok(their_data.clone()));
+    assert_eq!(read(&world, &writer, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+
+    // No file of either host holds its data; the store opens nowhere, its error naming the tenant.
+    for data in [&uploaded_data, &open_data] {
+        assert_eq!(clear_files(&dir, data), Vec::<String>::new());
+        assert_eq!(clear_files_on_disk(cache_dir.path(), data), Vec::<String>::new());
+    }
+    for host in [&writer, &reader, &world.host(7)] {
+        let refused = open_on(&world, host, &dir.crash(0)).map(drop).unwrap_err();
+        assert_eq!(refused.to_string(), why, "host {}", host.token);
+    }
+    let third = world.host(8);
+    let (child_store, _child_remote) = open_on(&world, &third, &child_dir.crash(0)).unwrap();
+    assert_eq!(read(&world, &third, &child_store, uploaded, LEN), Ok(uploaded_data.clone()));
+    drop((store, remote));
+}
+
+/// TASK-411.7, AC #2: a cell shredded, its wrapped KEK taken out of its object, leaves its volumes
+/// unreadable, and the tenant's other cell readable. A host told nothing opens no store of it
+/// afresh, the cell taken by no one, the error naming the cell; hosts told forget its KEK and their
+/// fetchers its store's ring, opening nothing more of what they cached of it, and the other cell's
+/// store reads on, there and afresh. The collector passes over it, marking, leaving its sealed
+/// objects uncompacted, not failing. The cell's object as it was before, put back, as a bucket
+/// keeping non-current versions would let someone do, opens the store again: why a cell's
+/// shredding needs non-current versions of its object expired, or versioning off.
+#[test]
+fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable() {
+    let world = World::new();
+    let (writer, reader) = (world.host(5), world.host(6));
+    let ours = test_branch(7);
+    let sibling = Branch { cell: Cell { tenant: TENANT, id: 2 }, id: 8 };
+    let dirs = [made(ours, "ours"), made(sibling, "sibling")];
+    let cache_dir = tempfile::tempdir().unwrap();
+    let fetcher = caching_fetcher(&world, &reader.memory, cache_dir.path());
+    let mut opened = Vec::new();
+    let mut at = Vec::new();
+    for (dir, branch) in dirs.iter().zip([ours, sibling]) {
+        let (store, remote) = open_on(&world, &writer, dir).unwrap();
+        // Two extents, one freed: a segment the collector would compact.
+        let (kept, freed) = (ExtentId::new(branch.id, 1), ExtentId::new(branch.id, 2));
+        store.write(freed, 0, &noise(9, 4096)).unwrap();
+        written(&store, &remote, kept, &noise(branch.id, 4096));
+        store.free(freed).unwrap();
+        store.commit(None).unwrap();
+        remote.wait_uploaded(store.epoch().unwrap()).unwrap();
+        let location = location(&store, kept);
+        let _held = reader.memory.keys().hold(store.keys().clone());
+        assert_eq!(fetched_by(&world, &fetcher, kept, &location, 4096), Ok(noise(branch.id, 4096)));
+        drop(_held);
+        at.push((kept, location));
+        opened.push((store, remote));
+    }
+    let held: Vec<_> =
+        opened.iter().map(|(store, _)| reader.memory.keys().hold(store.keys().clone())).collect();
+    let cell_key = layout::cell(TEST_CELL);
+    let before = world.object(&cell_key);
+
+    assert_eq!(world.runtime.block_on(cell::shred(&*world.bucket, TEST_CELL)), Ok(1));
+    let object = world.cell();
+    assert_eq!((object.keks, object.shredded), (Vec::new(), true));
+    let why = "tenant 1: cell 1/1 is shredded, its KEK gone";
+    let untold = world.host(7);
+    let refused = open_on(&world, &untold, &dirs[0].crash(0)).map(drop).unwrap_err();
+    assert_eq!(refused, Failure::Remote(extent_remote::Error::Kms(why.into())));
+
+    for host in [&writer, &reader] {
+        assert_eq!(host.runtime.keys.forget(keys::Scope::Cell(TEST_CELL), why), 1);
+        host.memory.forget_kept(keys::Scope::Cell(TEST_CELL));
+        assert_eq!(host.memory.keys().ring().branches(), BTreeSet::from([8]));
+    }
+    let (ours_extent, ours_at) = &at[0];
+    let key = KeyId { branch: 7, generation: 1 };
+    let unread = fetched_by(&world, &fetcher, *ours_extent, ours_at, 4096);
+    assert_eq!(unread, Err(extent_remote::Error::NoKey(key)));
+    let (sibling_extent, sibling_at) = &at[1];
+    assert_eq!(fetched_by(&world, &fetcher, *sibling_extent, sibling_at, 4096), Ok(noise(8, 4096)));
+    drop((held, opened));
+    for host in [&writer, &reader, &untold] {
+        let refused = open_on(&world, host, &dirs[0].crash(0)).map(drop).unwrap_err();
+        assert_eq!(refused.to_string(), why, "host {}", host.token);
+    }
+    let (store, _remote) = open_on(&world, &untold, &dirs[1].crash(0)).unwrap();
+    assert_eq!(read(&world, &untold, &store, *sibling_extent, 4096), Ok(noise(8, 4096)));
+    for data in [noise(7, 4096), noise(9, 4096)] {
+        assert_eq!(clear_files(&dirs[0], &data), Vec::<String>::new());
+        assert_eq!(clear_files_on_disk(cache_dir.path(), &data), Vec::<String>::new());
+    }
+
+    // The collector, with the tenant's KEK at hand, can't have the cell's.
+    let options = extent_remote::collector::Options { compact_below: 1.0, grace: 0 };
+    let kms: extent_keys::kms::Shared = world.kms.clone();
+    let mut collector = extent_remote::collector::Collector::new(options).kms(Some(kms));
+    let pass = collector.collect_cell(&*world.bucket, TEST_CELL, 0x51);
+    let report = world.runtime.block_on(pass).unwrap();
+    assert_eq!((report.locked, report.uncompacted, report.compacted), (1, 1, 0), "{report:?}");
+
+    // Its object as it was before, put back: the store opens.
+    world.put(&cell_key, before);
+    let host = world.host(8);
+    let (store, _remote) = open_on(&world, &host, &dirs[0].crash(0)).unwrap();
+    assert_eq!(read(&world, &host, &store, *ours_extent, 4096), Ok(noise(7, 4096)));
 }

@@ -13,6 +13,7 @@
 //! KMSes come (doc-16). A cell is made encrypted iff the host has a KMS and the cell's tenant has a
 //! KEK there; a host without one makes its cells in the clear, and opens no sealed one.
 
+use crate::Errno;
 use extent_remote::cache::Cache;
 use extent_remote::fetch::{self, Budget, Limits, Priority};
 use extent_remote::keys;
@@ -158,6 +159,61 @@ pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
 
 /// fxdax: the host's KMS ([`kms`]).
 static KMS: std::sync::OnceLock<Option<Arc<keys::Kms>>> = std::sync::OnceLock::new();
+
+/// fxdax: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Forgotten {
+    /// The stores open of the scope's cells it fenced, which serve nothing more (`EACCES`).
+    pub stores: usize,
+    /// The rings of the scope's stores its fetchers held.
+    pub rings: usize,
+    /// The objects' tails and parts of the scope's cells its fetchers kept in memory.
+    pub kept: usize,
+    /// The extents it took out of the extent cache.
+    pub extents: u64,
+    /// The bytes of their pages it evicted.
+    pub bytes: u64,
+}
+
+/// fxdax: has the host forget what it holds of `scope`'s keys (doc-16, Shredding; TASK-411.7), as
+/// it is told the tenant's KEK is revoked or destroyed in the KMS, or the cell shredded, `why`
+/// saying which: what the control API's `ForgetTenantKeys` and `ShredCell` do.
+///
+/// Every store open of the scope's cells is fenced, each request failing with `EACCES`, as its
+/// opening would fail; the extent cache lets go of them, and of every extent no other open store
+/// holds, its pages evicted, unmapped from the windows that map them; its fetchers forget the
+/// stores' rings and drop what they kept of the scope's objects; its KMS forgets the scope's cell
+/// KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays in
+/// memory: a fenced store's own ring, and its open segment's key, until whoever holds it closes it
+/// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
+/// the pages of extents other stores hold too (a shared point's clone, a public base). On disk,
+/// everything of the scope's is as its keys sealed it: open segments, write-ahead logs, the part
+/// cache.
+pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
+    let fenced = format!("as {scope}'s keys are forgotten: {why}");
+    let stores =
+        crate::fence::fence_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &fenced);
+    let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
+    let kept = MEMORY.forget_kept(scope);
+    let rings = runtime().keys.forget(scope, why);
+    let forgotten = Forgotten { stores, rings, kept, extents, bytes };
+    log::warn!("fxdax: {scope}'s keys forgotten, {why}: {forgotten:?}");
+    forgotten
+}
+
+/// fxdax: shreds `cell` in `bucket` ([`extent_remote::cell::shred`]): its wrapped KEKs taken out of
+/// its object, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
+/// already, its object stays as it is, and the host forgets them all the same: what each host told
+/// of the shredding does. Returns how many generations of its KEK it took out, and what the host
+/// forgot. Only as strong as `bucket` keeps no older version of the cell's object (doc-16).
+pub async fn shred_cell(
+    bucket: &Bucket,
+    cell: crate::Cell,
+) -> Result<(usize, Forgotten), extent_remote::Error> {
+    let removed = extent_remote::cell::shred(bucket, cell).await?;
+    let why = extent_remote::cell::shredded(cell).to_string();
+    Ok((removed, forget(keys::Scope::Cell(cell), &why)))
+}
 
 /// fxdax: a KMS `FXDAX_KMS` names that can't be had: every call refused, saying why.
 struct Unreached(String);
@@ -2525,6 +2581,108 @@ mod tests {
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
         let refused = source.fork_to(dir.path().join("after"), of(1)).map_err(|err| err.errno());
         assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
+    }
+
+    /// TASK-411.7: a host told a cell is shredded, or a tenant's KEK destroyed, forgets their keys:
+    /// their stores open here are fenced, every request failing with `EACCES`, as their openings
+    /// do; their extents leave the extent cache, pages and all; its fetchers forget their rings.
+    /// The tenant's other cell's store, until its tenant goes, and another tenant's, read on, their
+    /// extents cached still. No file of the stores' directories holds what they wrote.
+    #[test]
+    fn stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        for tenant in [1, 2] {
+            kms.create(tenant).unwrap();
+        }
+        crate::remote::set_kms(kms.clone()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        let names = ["ours", "sibling", "theirs"];
+        let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 1, 2]))
+            .enumerate()
+            .map(|(at, (name, tenant))| {
+                let store =
+                    kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
+                let store = store.unwrap();
+                let data = noise(at as u64 + 1, 4 * BLOCK);
+                let extent = write(&store, 1, &data);
+                store.commit(None).unwrap();
+                store.wait_uploaded().unwrap();
+                (store, extent, data)
+            })
+            .collect();
+        let read = |at: usize| {
+            let (store, extent, data) = &stores[at];
+            let mut read = vec![0; data.len()];
+            let done = store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]);
+            done.map(|()| read == *data)
+        };
+        let cached = || {
+            let extents: std::collections::BTreeSet<ExtentId> =
+                crate::cache::keys().into_iter().map(|(_, extent)| extent).collect();
+            stores.iter().map(|(_, extent, _)| extents.contains(extent)).collect::<Vec<_>>()
+        };
+        assert_eq!((0..3).map(read).collect::<Vec<_>>(), [Ok(true), Ok(true), Ok(true)]);
+        assert_eq!(cached(), [true, true, true]);
+        let reopened_errno = |at: usize| {
+            reopened(dir.path().join(names[at]), idle()).map(drop).map_err(|err| err.errno())
+        };
+
+        let cell = stores[0].0.branch().cell;
+        let shredded = futures::executor::block_on(crate::remote::shred_cell(&bucket, cell));
+        let (removed, forgotten) = shredded.unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(
+            (forgotten.stores, forgotten.rings, forgotten.extents),
+            (1, 1, 1),
+            "{forgotten:?}"
+        );
+        assert_eq!(
+            (0..3).map(read).collect::<Vec<_>>(),
+            [Err(crate::Errno::EACCES), Ok(true), Ok(true)]
+        );
+        assert_eq!(cached(), [false, true, true]);
+        assert_eq!(stores[0].0.commit(None), Err(crate::Errno::EACCES));
+
+        kms.destroy(1).unwrap();
+        let why = "tenant 1: its KEK is destroyed";
+        let forgotten = crate::remote::forget(extent_remote::keys::Scope::Tenant(1), why);
+        assert_eq!(
+            (forgotten.stores, forgotten.rings, forgotten.extents),
+            (1, 1, 1),
+            "{forgotten:?}"
+        );
+        assert_eq!(
+            (0..3).map(read).collect::<Vec<_>>(),
+            [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
+        );
+        assert_eq!(cached(), [false, false, true]);
+        assert_eq!(crate::remote::kms().unwrap().in_pool(1), 0);
+
+        // Closed by their holders, the stores of the tenant open no more; the other's does.
+        let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
+        assert_eq!(
+            (0..3).map(reopened_errno).collect::<Vec<_>>(),
+            [Err(Some(crate::Errno::EACCES)), Err(Some(crate::Errno::EACCES)), Ok(())]
+        );
+
+        let mut files = vec![dir.path().to_path_buf()];
+        while let Some(at) = files.pop() {
+            if at.is_dir() {
+                files.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+                continue;
+            }
+            let bytes = std::fs::read(&at).unwrap();
+            for data in &written[..2] {
+                let held = bytes.windows(64).any(|window| window == &data[..64]);
+                assert!(!held, "{} holds a store's data", at.display());
+            }
+        }
     }
 
     /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the

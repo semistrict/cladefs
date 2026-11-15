@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-14 18:33'
-updated_date: '2026-11-14 23:22'
+updated_date: '2026-11-15 01:26'
 labels: []
 dependencies: []
 documentation:
@@ -43,4 +43,6 @@ Tenants need BYOK (their root key in a KMS they control and can revoke), crypto-
 
 <!-- SECTION:NOTES:BEGIN -->
 TASK-411.3: sqlite volumes, FUSE mounts, extentd and restores have no encrypted test variants yet (Linux-only daemon paths; restores fork across cells, TASK-411.4); AC #3 waits on them.
+
+TASK-411.7: AC #3 encrypted variants now written. macOS (run): sqlite volumes, sqlite_extents tests/image.rs a_sealed_database_on_an_image_survives_closing (plain twin asserts the data is in a file in the clear; sealed, in none); FUSE mounts' server, fxdax tests/fuse.rs a_sealed_store_served_reads_back_and_holds_nothing_in_the_clear. Linux-only (compiled with cargo clippy --target x86_64-unknown-linux-gnu, not run): sqlite_extents tests/daemon.rs a_sealed_database_on_the_daemon_reads_in_place_and_survives_reopening (FXDAX_KMS); fxdax tests/fuse_mount.rs a_sealed_store_mounted_holds_nothing_in_the_clear (kernel FUSE); fxdax tests/control.rs sealed_stores_served_and_shredded_through_the_control_api (extentd serving VMs' stores of sealed cells through its socket, then ShredCell/ForgetTenantKeys). Still without a variant: the VMM and guest e2e paths (scripts/test-e2e*.sh).
 <!-- SECTION:NOTES:END -->

@@ -108,6 +108,21 @@ impl Holders {
             .collect()
     }
 
+    /// fxdax: lets go of those whose branches `scope` says are of it, and of those closed: no
+    /// page-in reads through them again (TASK-411.7). Returns whether it let go of one of `scope`.
+    fn forget(&self, scope: &dyn Fn(crate::Branch) -> bool) -> bool {
+        let mut forgot = false;
+        self.0.with(Mutex::lock).retain(|holder| match holder.store.upgrade() {
+            None => false,
+            Some(store) if scope(store.description().branch) => {
+                forgot = true;
+                false
+            }
+            Some(_) => true,
+        });
+        forgot
+    }
+
     /// Whether one is open still.
     fn any_open(&self) -> bool {
         self.0.with(Mutex::lock).iter().any(|holder| holder.store.strong_count() > 0)
@@ -237,6 +252,29 @@ pub(crate) fn evict_arena(arena: ArenaId) {
         extents.extract_if(|(of, _), _| *of == arena).map(|(_, cached)| cached).collect()
     };
     drop(evicted);
+}
+
+/// fxdax: forgets the stores whose branches `scope` says are of it, as their host does as it is
+/// told their tenant's KEK is revoked or destroyed, or their cell shredded (doc-16, Shredding;
+/// TASK-411.7): no cached extent's page is read in through them again, and an extent no other open
+/// store holds goes from the cache, its pages evicted, unmapped from every window that maps them
+/// first, so that what the stores' keys decrypted is no longer in memory, nor read in again: a
+/// window that maps it, faulting, finds no store to read it through. An extent another store open
+/// holds stays, its pages theirs to read (a shared point's clone of another tenant's, a public
+/// base, a fork that inherited it). Returns the bytes of pages it evicted, and of how many
+/// extents.
+pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {
+    let Some(cache) = EXTENT_CACHE.get() else { return (0, 0) };
+    let gone: Vec<Cached> = {
+        let mut extents = cache.extents.with(Mutex::lock);
+        let doomed: Vec<(ArenaId, ExtentId)> = (extents.iter())
+            .filter(|(_, cached)| cached.holders.forget(&scope) && !cached.holders.any_open())
+            .map(|(key, _)| *key)
+            .collect();
+        doomed.iter().filter_map(|key| extents.remove(key)).collect()
+    };
+    let evicted = gone.iter().map(|cached| cached.extent.evict()).sum();
+    (evicted, gone.len() as u64)
 }
 
 /// Which arena an extent's pages are of, and whether a tenant's copy of it may move to the default

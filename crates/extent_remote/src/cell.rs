@@ -20,6 +20,11 @@
 //! fxdax: a cell's object keeps its KEK, every generation of it, each wrapped by its tenant's KEK
 //! in the KMS ([`Object::keks`], doc-16, TASK-411.3), given it by its maker ([`hold`], [`create`]);
 //! none, it is in the clear, and so are its branches ([`crate::keys`]).
+//!
+//! fxdax: a cell is shredded by taking every wrapped KEK out of its object, which is marked so
+//! ([`shred`], doc-16, Shredding; TASK-411.7): its branches' DEKs unwrap no more, and no one takes
+//! the cell again, nor writes a branch of it in the clear. Only as strong as the bucket keeps no
+//! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
 
 use crate::branch::{Start, Step, transition};
 use crate::bucket::Bucket;
@@ -91,6 +96,9 @@ pub struct Object {
     /// fxdax: its KEK, each generation of it, wrapped by its tenant's KEK in the KMS, oldest first:
     /// none, in the clear (TASK-411.3).
     pub keks: Vec<Kek>,
+    /// fxdax: whether it was shredded ([`shred`], TASK-411.7): its KEKs gone, so that its
+    /// branches' data is unreadable, and no one takes it again.
+    pub shredded: bool,
 }
 
 impl Object {
@@ -105,6 +113,7 @@ impl Object {
             volumes: BTreeMap::new(),
             deleted: false,
             keks: kek.into_iter().collect(),
+            shredded: false,
         }
     }
 
@@ -185,7 +194,8 @@ pub async fn make(
 
 /// Takes `cell` for `holder`, of the placement of `token`, at the epoch after its last taking's:
 /// refused if it has no object ([`Error::NoCell`]), if it was deleted ([`Error::Deleted`]), or if
-/// a placement of a higher token holds it ([`Error::Stale`]).
+/// a placement of a higher token holds it ([`Error::Stale`]). fxdax: and if it was shredded
+/// ([`shredded`]).
 pub async fn take(
     bucket: &impl Bucket,
     cell: Cell,
@@ -195,6 +205,7 @@ pub async fn take(
     let epoch = change(bucket, cell, Start::Read, |found| match found {
         None => Err(Error::NoCell),
         Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) if found.shredded => Err(shredded(cell)),
         Some(found) if rules().tokens && found.token > token => Err(Error::Stale),
         Some(found) if found.holder == holder => Ok(Step::Stop(found.epoch)),
         Some(found) => {
@@ -233,7 +244,7 @@ async fn change_held<R>(
 }
 
 /// Holds `cell` for `holder`, of the placement of `token`, in one compare-and-swap of its object:
-/// takes it as [`take`] does; or, if it has no object and `make` says so, makes it, held at epoch 1,
+/// takes it as [`take`] does, a shredded one refused; or, if it has no object and `make` says so, makes it, held at epoch 1,
 /// fxdax: its KEK `kek`, if given (TASK-411.3);
 /// and, given `volume`, has it hold that volume, under that name, unless it names the volume's
 /// branch already, under whatever name it gave it: refused, as [`add_volume`] refuses, if another
@@ -257,6 +268,7 @@ pub async fn hold(
             None if !make => return Err(Error::NoCell),
             None => (Object::made(holder, token, kek.cloned()), true),
             Some(found) if found.deleted => return Err(Error::Deleted),
+            Some(found) if found.shredded => return Err(shredded(cell)),
             Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
             Some(found) if found.holder == holder => (found, false),
             Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
@@ -316,6 +328,9 @@ pub async fn remove_volume(bucket: &impl Bucket, held: Held, name: &str) -> Resu
 /// still: the cell's KEK rotated ([`crate::keys::rotate`], TASK-411.3). Returns its object as left.
 pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Object, Error> {
     change_held(bucket, held, |mut found| {
+        if found.shredded {
+            return Err(shredded(held.cell));
+        }
         if found.keks.iter().any(|had| had.generation >= kek.generation) {
             return Err(Error::Corrupt(format!(
                 "cell {} has a KEK of generation {} or later",
@@ -326,6 +341,35 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
         Ok(Step::Write(found.clone(), found))
     })
     .await
+}
+
+/// fxdax: shreds `cell` (doc-16, Shredding; TASK-411.7): takes every generation of its KEK out of
+/// its object and marks it shredded, by one conditional update, whoever holds it: its branches'
+/// DEKs, wrapped by those KEKs, unwrap no more, and no one takes it again ([`take`], [`hold`]).
+/// Its holder, if any, goes on changing its volumes until told (the mark stays, as every change
+/// keeps the rest of the object); a host that unwrapped its KEK before keeps it until told too
+/// (`crate::keys::Kms::forget`). Shredded already, nothing changes. Returns how many generations
+/// of its KEK it took out: [`Error::NoCell`] if it has no object.
+///
+/// Only as strong as the bucket keeps no older version of the cell's object: with versioning on,
+/// a lifecycle rule must expire non-current versions, or theirs unwrap while the tenant's KEK
+/// lives.
+pub async fn shred(bucket: &impl Bucket, cell: Cell) -> Result<usize, Error> {
+    change(bucket, cell, Start::Read, |found| match found {
+        None => Err(Error::NoCell),
+        Some(found) if found.shredded => Ok(Step::Stop(0)),
+        Some(found) => {
+            let removed = found.keks.len();
+            Ok(Step::Write(Object { keks: Vec::new(), shredded: true, ..found }, removed))
+        }
+    })
+    .await
+}
+
+/// fxdax: the refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its
+/// stores opening no more (`EACCES`), and the collector leaving its sealed objects uncompacted.
+pub fn shredded(cell: Cell) -> Error {
+    Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }
 
 /// Takes out of `cell` the volume naming `branch`, deleted, if it names it: what any placement
@@ -416,6 +460,7 @@ mod tests {
             volumes: BTreeMap::new(),
             deleted: false,
             keks: Vec::new(),
+            shredded: false,
         };
         assert_eq!(object, expected);
         let never = Cell { tenant: 1, id: 2 };
@@ -633,6 +678,7 @@ mod tests {
                 volumes: BTreeMap::new(),
                 deleted: false,
                 keks: Vec::new(),
+                shredded: false,
             };
             block_on(bucket::create(&bucket, &layout::cell(TEST_CELL), layout::encode(&object)));
             let refused = Error::Format { branch: Branch { cell: TEST_CELL, id: 0 }, format };

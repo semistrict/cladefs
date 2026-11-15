@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 00:21'
+updated_date: '2026-11-15 01:23'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -84,6 +84,15 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   (docs/measurements/restructure-before-after-2026-11-07.md): the perf gate the same or better,
   forked DAX 58% faster and a VM 557 MiB cheaper; forks 12 ms; a cold host's page-ins of a fork's
   data slower than reading it from local files was (TASK-225).
+
+- **Versioning and shredding** (doc-16, Shredding; TASK-411.7). Nothing of fxdax needs object
+  versions: every object is create-only or updated by a conditional write. A cell is shredded by
+  taking its wrapped KEKs out of its object (`<C>cell`, `extent_remote::cell::shred`), which holds
+  only while no older version of that object is kept: a bucket with versioning on needs a
+  lifecycle rule expiring non-current versions (S3 `NoncurrentVersionExpiration`; GCS versioning
+  off, or a lifecycle `Delete` of non-current versions), or versioning off. A tenant shredded by
+  its KEK destroyed in the KMS needs no rule: every version of every cell object of it is wrapped
+  by that KEK. The README says it for operators.
 
 ## Decisions
 

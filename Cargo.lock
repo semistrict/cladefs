@@ -3703,6 +3703,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "extent_keys",
  "extent_remote",
  "extent_store",
  "futures",
