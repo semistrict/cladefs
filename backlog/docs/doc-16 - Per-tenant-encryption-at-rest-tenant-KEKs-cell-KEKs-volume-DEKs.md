@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 02:38'
+updated_date: '2026-11-15 03:59'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -468,3 +468,111 @@ dropped with its pool, never written out unwrapped.
   `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `fxdax`
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
+
+## Real KMSes: AWS KMS
+
+*(TASK-411.17)* `FXDAX_KMS=aws-kms://REGION?key=TEMPLATE[&keys=FILE][&endpoint=URL]`
+(`AwsKms`, `extent_keys/src/kms/aws.rs`), the query percent-encoded as any URL's; any other query name is
+refused, so that a misspelt `endpoint` does not send calls to AWS itself.
+
+- **Naming.** Each tenant's KEK is a symmetric KMS key (`SYMMETRIC_DEFAULT`, `ENCRYPT_DECRYPT`)
+  named as `kms::KeyNames` says: the template `key` with `{tenant}` in hexadecimal, say
+  `alias/fxdax-tenant-{tenant}`, an alias per tenant the operator makes (`aws kms create-key`,
+  `aws kms create-alias`); and the overrides file `keys`, lines `TENANT_HEX NAME`, for tenants that
+  bring their own key (BYOK). A name is any form `Encrypt` and `Decrypt` take: a key ID, a key
+  ARN, an alias name or an alias ARN; a key in another account needs its key ARN (or alias ARN).
+- **Endpoint.** AWS's own for the region, unless `endpoint` names another: a VPC interface
+  endpoint, or an emulator. Without `endpoint`, the SDK's own `AWS_ENDPOINT_URL_KMS` and
+  `AWS_ENDPOINT_URL` apply, as for any AWS SDK.
+- **Credentials.** The standard AWS chain, as `aws-config` (AWS's own SDK, Apache-2.0) finds them:
+  the environment (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), the shared
+  profile (`AWS_PROFILE`, `~/.aws/config` and `credentials`, SSO, `credential_process`), web identity
+  (EKS's IRSA), the container's (ECS) and the instance's role (IMDSv2), refreshed as they expire.
+  Nothing of them, nor any key, is logged: an I/O error says the call, the key's name and AWS's
+  error code and message, or the SDK's error and its causes' Display, never its Debug.
+- **Wrap.** KMS `Encrypt` of the key's 32 bytes under the tenant's key, with the encryption context
+  `{"fxdax-tenant": TENANT_HEX}`: the ciphertext decrypts for that tenant alone even where two
+  tenants share a key, and a key policy can let fxdax use a key for one tenant only. The wrapped
+  key is a header, `fxka`, format 1, the key name's length (2 bytes, big-endian) and the name, then
+  KMS's ciphertext blob. `LocalKms`'s begin `fxkw`.
+- **Unwrap.** The header is checked first, asking the KMS nothing: another backend's (`fxkw`, or
+  any not `fxka`), another format, or a key name other than the tenant's (another tenant's key, or
+  the tenant's under a name since changed, TASK-411.20) is `Unauthentic`. Then KMS `Decrypt` with
+  `KeyId` the key's name, so that a ciphertext of another key, even with the tenant's context
+  (whose key's owner could make one), is refused, and with the same context; a plaintext not of
+  32 bytes is `Unauthentic`. The blob names the key version that encrypted it, so a rotated key
+  (automatic rotation, or `RotateKeyOnDemand`) unwraps what every version of it wrapped, and
+  fxdax does nothing on a rotation.
+- **Refusals**, each naming the tenant (`kms::Error`):
+
+  | AWS KMS's error | `kms::Error` |
+  |---|---|
+  | `NotFoundException` | `NoSuchTenant` |
+  | `AccessDeniedException` (the grant or policy taken away), `DisabledException` | `Revoked` |
+  | `KMSInvalidStateException`, the key pending deletion | `Destroyed` |
+  | `KMSInvalidStateException`, any other state (pending import: imported key material deleted; unavailable: a custom key store disconnected; creating, updating) | `Revoked` |
+  | `InvalidCiphertextException`, `IncorrectKeyException` | `Unauthentic` |
+  | anything else: throttling, `KeyUnavailableException`, `KMSInternalException`, `DependencyTimeoutException`, `InvalidKeyUsageException`, 5xx, the network, a timeout, no credentials | `Io` |
+
+  AWS says which invalid state only in its message ("`<key ARN>` is pending deletion."), which the
+  mapping reads. A tenant shreds itself by scheduling its key's deletion: `Destroyed` at once, for
+  the waiting period's 7 to 30 days; cancelling it leaves the key disabled (`Revoked`) until
+  enabled. Once the period is over AWS has forgotten the key and answers `NotFoundException`, as
+  for a key never made, so the tenant reads as having no KEK: its unwraps still fail, but a host
+  would make its new cells in the clear (TASK-411.19); until that is fixed, forget the tenant's keys
+  on every host (`ForgetTenantKeys`) and stop serving it before the waiting period ends. A tenant
+  with imported key material that deletes it reads as `Revoked` (it may import the same material
+  again), never `Destroyed`.
+- **IAM.** fxdax's role needs `kms:Encrypt` and `kms:Decrypt` on each tenant's key, no more (no
+  `kms:DescribeKey`, no `kms:GenerateDataKey`); a condition on the encryption context ties each key
+  to its tenant:
+
+  ```json
+  {
+    "Effect": "Allow",
+    "Action": ["kms:Encrypt", "kms:Decrypt"],
+    "Resource": "arn:aws:kms:REGION:ACCOUNT:key/KEY-ID",
+    "Condition": {"StringEquals": {"kms:EncryptionContext:fxdax-tenant": "2a"}}
+  }
+  ```
+
+  Cross-account BYOK: the tenant's key policy allows fxdax's role (its ARN as principal) the same
+  two actions with the same condition, fxdax's role's own IAM policy allows them on the key's ARN
+  (cross-account use needs both), and the overrides file names the key by its ARN. The tenant
+  revokes by disabling the key or removing that statement (`Revoked`), and shreds by scheduling the
+  key's deletion (`Destroyed`).
+- **Calls.** On a runtime of the backend's own (one thread, `fxdax-aws-kms`), its HTTPS client
+  (hyper 1 over rustls 0.23, the build's, not the SDK's legacy default) made there when first
+  needed: its futures run on any executor, and its connections never outlive a caller's runtime.
+  The SDK retries what AWS says is retryable (throttling, 5xx, a lost connection), three attempts
+  backing off; an attempt times out after 10 s, a call after 30 s, so a KMS that answers not fails a
+  store's opening as `Io` rather than holding it.
+- **Memory.** The key fxdax hands `Encrypt`, and `Decrypt`'s answer, are zeroed where fxdax holds
+  them; the SDK's own copies (the request's JSON body, the response's buffer, its `Blob`) are not,
+  which it offers no way to do. Its models mark both fields sensitive, so its `Debug` redacts
+  them.
+- **Tests.** Against local-kms (github.com/nsmithuk/local-kms, MIT), AWS KMS's emulator, pinned to
+  its commit 2a5e92d09ab6 (2026-02-28), which `scripts/test-local-kms.sh` installs with
+  `go install` into `target/local-kms` and runs the tests named `local_kms` with (ignored in the
+  workspace's run, as the RustFS and Azurite ones), its dummy credentials in the environment for
+  the standard chain to find; each test starts an emulator of its own on a free port
+  (`extent_keys::testing::LocalAwsKms`, the `testing` feature). CI's object-stores job runs it:
+  no AWS account, no secret. `extent_keys` `kms::aws::tests`: wrap and unwrap through
+  `kms::from_url`, keys named by key ID, key ARN, alias name and alias ARN, overrides, a key shared
+  by two tenants refusing each other's (context), a ciphertext of another key under the tenant's
+  context refused (`KeyId`), tampering, a rotated key unwrapping its old version's wraps, disabled
+  (`Revoked`) and enabled again, pending deletion (`Destroyed`), no key (`NoSuchTenant`), an
+  endpoint answering nothing (`Io`, after retries); and, needing no emulator, URLs, the header,
+  another backend's and another tenant's keys refused unasked, and the table on the SDK's errors.
+  `extent_store` `upload::encrypted::local_kms_sealed_stores_open_through_aws_kms`: a sealed
+  store made, written and opened by another host through `aws-kms://...&endpoint=...`, refused
+  revoked and destroyed.
+- **Where the emulator differs from AWS** (behaviour verified against it, not against AWS, as
+  no AWS account was used): it has no IAM, so `AccessDeniedException` is never answered but for a
+  ciphertext naming no key it has, and is tested on the SDK's error alone, as throttling is; it
+  rotates no key on demand, nor before a year, so the rotation test seeds two emulators with the
+  same key ID, the second with a second backing key, as its seeding has rotations; it answers a
+  ciphertext of another key with `InvalidCiphertextException` where AWS answers
+  `IncorrectKeyException` (both `Unauthentic`); it deletes no key, pending deletion for ever, so
+  `NotFoundException` after deletion is untested; its messages are its own, the pending deletion
+  one as AWS's.

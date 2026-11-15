@@ -208,6 +208,9 @@ jobs:
   # (MIT), in a container, as
   # scripts/test-rustfs.sh and scripts/test-azurite.sh start them. Nothing ran them until
   # TASK-149.20, which found `fxdaxctl take` of a new copy at a later placement refused there.
+  # fxdax: and the AWS KMS backend's, against local-kms (MIT), its emulator, which
+  # scripts/test-local-kms.sh installs with Go and each test starts (TASK-411.17): no AWS account,
+  # nor credentials but dummy ones.
   object-stores:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -237,6 +240,12 @@ jobs:
         run: scripts/test-rustfs.sh --no-fail-fast
       - name: The Azure tests, against Azurite
         run: scripts/test-azurite.sh --no-fail-fast
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: false
+      - name: The AWS KMS tests, against local-kms
+        run: scripts/test-local-kms.sh --no-fail-fast
 
   # TASK-330.3: the extent daemon against a degraded bucket, five minutes of it, its VM processes
   # writing all the while (extentd::tests::soak): its memory within its budget, the bucket's
