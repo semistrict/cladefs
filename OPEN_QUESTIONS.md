@@ -21,6 +21,18 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## The nightly: what it measures, its bounds, and what counts as main moving (TASK-441.1, .2, 2026-11-15)
+
+Decided without you:
+- **Cases**: bench-fs-fxfs-guest-dax (groups io, files, fsync, sync), the fork cases cold and warm, and bench-fs-ext4-guest-kernel as the control; 3 rounds of 2 iterations, each round left out rerun once. *Instead:* more cases (fxfs-guest without DAX, pgbench, scaling), which would double the bench slot's night. *Undo:* `CLADEFS_NIGHTLY_CASES`/`_GROUPS`/`_ROUNDS`.
+- **Bounds**: a timing moved past 10% (the task's mutant), the round's control moved when the median of its timings' ratios is past 5% (a host shift moves most of them; one noisy workload doesn't), counts exact. No per-workload bound yet: nothing measured on ubu1 says which workloads are noisier than 10% over three rounds; the first five quiet nights (TASK-441 AC #2) set those (`CLADEFS_AB_BOUNDS`). *Undo:* the defaults in scripts/ab-rounds.py.
+- **Counts are exact, but a daemon's peak anonymous memory**, which its stats sample rather than count, is within 10% (`NAMED` in ab-rounds.py). Written bytes per guest byte by kind are compared exactly: if framing's timing makes them flap, the quiet nights will show it, and `CLADEFS_AB_BOUNDS` takes a bound for them.
+- **A slot whose round and rerun were both left out makes every timing NO RESULT**, rather than judging on the rounds left: "moved in every kept round" over two rounds would report more noise. *Instead:* a minimum of kept rounds.
+- **Main moved** is a commit that changed more than docs/measurements and backlog: the nightly's own commits move main, and so do the many backlog-only commits, none of which change what is measured. *Undo:* nightly.py's `NOT_CODE`.
+- **The count benchmarks run once per commit, with its build, as work**, and the baseline's are those kept from the night it was the head: they are exact, so another run measures the same. *Instead:* rerun them for both sides each night (a second sim build of the base's tests).
+- **Both directions are filed** (slower and faster, higher and lower): a count that fell can be work skipped. *Undo:* `MOVED` in ab-rounds.py.
+- **The nightly's clone runs main's own scripts** (it rebases on origin's main and re-executes itself), its results committed as "cladefs nightly <nightly@HOST>".
+
 ## loom behind features; orderings stronger than needed left as they are (TASK-444.2, 2026-11-15)
 
 Decided without you:

@@ -691,6 +691,61 @@ PTE writable, which guest/sim found (`guest/sim`).
 make check-tla             # about two hours, each model in minutes, on Java; fetches TLC once
 ```
 
+### The nightly measurement on ubu1
+
+Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from the nightly's own
+clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change since
+the night before (its newest commit that changed more than `docs/measurements` and `backlog`), it
+does nothing. Otherwise it measures main's head against the commit the night before measured, as an
+A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_HOST=local`): the head built as work, the
+base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three rounds of both
+sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent sandbox stands on:
+the guest's Fxfs with DAX (cold and warm reads, fsynced appends, SQLite's scans, small files'
+create, stat, readdir and read, create with fsync, sync, syncfs and freeze loops), a fork's boot
+cold and warm, and ext4 on virtio-blk, no cladefs in it, as the control. Beside them, counts that
+a load doesn't move: the guest's device requests, the extent daemon's counters, what each daemon
+wrote by kind for each guest byte and its peak memory (`scripts/budgets.py`'s figures), and three
+benchmarks run with each build (`scripts/counts.sh`: a sandbox's bucket requests by phase, an idle
+fork's heap, the collector's requests over dead cells).
+
+`scripts/ab-rounds.py` judges each round apart. A round is left out when others wrote beside it
+(`contamination.py`) or when its control moved (the median of its timings' ratios past 5%), and
+run once more; a metric moved only if it moved the same way past its bound (10%) in every round
+kept, a count if it differs at all in every round (a daemon's peak memory, sampled, past 10%)
+(`CLADEFS_AB_BOUND`, `CLADEFS_AB_CONTROL_BOUND`,
+`CLADEFS_AB_COUNT_BOUND`, and `CLADEFS_AB_BOUNDS` for single metrics). Each metric that moved, and
+each case or count benchmark that failed only on the head, becomes a backlog task labelled
+`nightly` with both commits, every round's numbers and the command that replays it; a later night
+that finds it again adds a note to the open task. A quiet night files nothing. Each night's results
+are committed to main from the clone, the push retried on a main that moved; a push that fails
+stays in the clone and is said in `~/.local/state/cladefs/nightly/push-failed.txt`, and the next
+night pushes it first.
+
+- Results: `docs/measurements/ubu1-nightly-<time>-<head>/nightly.md` for each night, and
+  `docs/measurements/nightly-history.md` for all of them, newest first.
+- A night that **could not run** (a side failed to build, or no round ran) or that has **no
+  result** (every round was left out: the disk was busy, or the host drifted) measured nothing:
+  its row says why, and its `nightly.md` lists each round and why it was left out. The next night
+  measures from the same base. Three such nights in a row file a task (`[nightly:no-result]`).
+  A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
+- The log: `~/.local/state/cladefs/nightly/nightly.log` on ubu1, a line a step; cron's output in
+  `cron.log` beside it.
+
+A night by hand, on ubu1 (it skips if main's code was measured already):
+
+```sh
+~/src/cladefs-nightly/scripts/nightly-host.sh
+```
+
+Installing it is ubu1's setup, a `~/docs/system-setup.d` step that runs, as the user,
+`scripts/nightly-install.sh` (the clone, its git identity, the cron entry; it checks first that
+fxjob, flock, cargo-nextest, Backlog.md's `backlog` and a fetch without a prompt are there):
+
+```sh
+# ~/docs/system-setup.d/148-cladefs_nightly.sh
+sudo -u ramon -H bash -lc '~/src/fxdax/scripts/nightly-install.sh'
+```
+
 ## Benchmarks
 
 `scripts/bench.sh` compares the guest kernel's Fxfs, on an extent-store device
