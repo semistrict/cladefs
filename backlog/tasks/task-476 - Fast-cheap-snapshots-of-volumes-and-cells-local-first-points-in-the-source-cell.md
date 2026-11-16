@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 02:25'
-updated_date: '2026-11-16 14:12'
+updated_date: '2026-11-16 15:52'
 labels:
   - snapshot
   - bucket
@@ -59,4 +59,6 @@ The user wants extremely fast and cheap snapshots at volume and cell level (2026
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-16: the user chose versions named by the volume's head over a record per snapshot (records stay for good; every pass would read each one ever made). Design: doc-18; doc-7's Versions section. specs/bucket: head vers, commit "version", DropVersion, StartRestoreVersion, the collector keeping each version's state; rules versionsKept, versionsCarried, versionsAcked; models BucketVersions (1,988,678 states, 56 s), BucketVersionsTakeovers (1,620,852, 34 s), BucketCellsVersions (499,990, 18 s); mutations NoVersionsKept, NoVersionsCarried, NoVersionsAcked, NoForksCheckVersions, NoClonesReferFirstVersions, NoCollectorAbandonsVersions each find their violation; every other bucket model and mutation still passes (73 in all, Mac).
 Code (slice 1, bucket and store): extent_frame Contents::versions/VersionCut; extent_remote FORMAT 14, Head::versions, Writer naming versions at acknowledgement, drop_versions/share_version, takeovers carrying them, deletions ending them, record::Forked, branch::fork_version(_with), the collector keeping versions' states and abandoning restores of dropped versions, recovery::recover_version, rules versions_kept/carried/acked; extent_store format 12, Store::commit_version/pending_versions, version copies (StoreFile::version), Remote::versions/drop_versions/share_version. The simulation's versions profile holds over 200 seeds after it found a restore into another cell, being made, unrecoverable until its checkpoint lands (passes now skip it: collector::lost_is_ok); each rule's sim test finds its violation; hand mutant versions-named-past-their-cuts killed. extent_frame/remote/store suites pass (623); workspace clippy passes.
+
+Slice 1 (bucket and store) on main as 48b8eeb04, rebased onto TASK-474's renames (extent_bucket; vdisks; local/uploaded; store format 13, bucket format 14). Verified at 3e8b3d25f: macOS clippy, 2,558 workspace tests, simulation, Shuttle, 516 script tests, Go; Linux (ubu1, fxjob) clippy, 2,868 workspace tests, simulation, Shuttle; all 73 bucket TLA+ models and mutations. After rebasing onto 3e0256500 (pages.rs, memory.rs only): clippy and extent_store's 251 pass. Next: cladefs API (ExtentStore::cut_version, control API Snapshot/ListVersions/WaitVersion/DeleteVersion/ShareVersion, version copies through CreateStore, cladefsctl, Go), the VM process's SNAPSHOT and the device's snapshot, lifecycle request counts (AC #3), the pause on ubu1 (AC #2), then the cell's vdisks with pause handles and SnapshotCell (AC #4, #5).
 <!-- SECTION:NOTES:END -->
