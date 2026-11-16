@@ -298,12 +298,12 @@ impl Filesystem {
         Ok(())
     }
 
-    /// Clones the filesystem's image to a new image at `path`, which must not exist, while it is
-    /// mounted, and returns the clone's storage (see [`Image::clone_storage_to`]).
-    pub async fn clone_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
+    /// Forks the filesystem's image to a new image at `path`, which must not exist, while it is
+    /// mounted, and returns the fork's storage (see [`Image::fork_storage_to`]).
+    pub async fn fork_storage_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
         // As every operation does, it fails once the filesystem is unmounted.
         self.mounted()?;
-        self.volume.image.clone_storage_to(path.as_ref()).await
+        self.volume.image.fork_storage_to(path.as_ref()).await
     }
 
     /// The filesystem's usage.

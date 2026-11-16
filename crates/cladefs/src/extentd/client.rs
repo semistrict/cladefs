@@ -447,7 +447,7 @@ impl RemoteExtentStore {
     /// and returns its branch's ID, once nothing is open
     /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), as with its guest's
     /// filesystem frozen, `EBUSY` otherwise: what a snapshot of the VM is taken at, which any
-    /// number of hosts restore at once, and none writes.
+    /// number of hosts fork at once, and none writes.
     pub fn fork_quiescent(&self, path: &Path) -> Result<u64> {
         let point = Request::Fork { path: path.to_owned(), quiescent: true };
         let reply = self.client.request_blocking(&point)?;

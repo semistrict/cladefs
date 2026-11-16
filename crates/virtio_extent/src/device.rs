@@ -22,7 +22,7 @@ use crate::protocol::{
     VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
 };
 use crate::requests::Requests;
-use crate::window::{DaxWindow, DaxWindowError, PrefaultGuestMemory, WindowVm};
+use crate::window::{DaxWindowError, PrefaultGuestMemory, WindowMemory, WindowVm};
 use crate::workers::{RequestQueue, WorkerQueue, Workers};
 
 /// What the VMM does as a device's extent daemon goes: stops the VM, the guest's disk gone,
@@ -83,7 +83,7 @@ pub struct Device {
     // is dropped first.
     // cladefs: none from a follower's reset until it is activated again.
     store: Option<Arc<RemoteExtentStore>>,
-    window: Option<DaxWindow>,
+    window: Option<WindowMemory>,
     /// Whether the store's window is created, which it is on the first activation.
     window_created: bool,
     /// Maps the window's pages for the guest as the store maps them.
@@ -214,7 +214,7 @@ impl Device {
                         return Err(Error::WindowNotSaved(config.id.clone()));
                     }
                 };
-                let window = DaxWindow::new(vm, size, at)?;
+                let window = WindowMemory::new(vm, size, at)?;
                 // cladefs: a writer's window copies on write (backlog doc-13); a follower's copies
                 // nothing.
                 if !config.read_only {
@@ -458,7 +458,7 @@ impl Device {
             .expect("an extent device's store is snapshotted before the device is saved");
         State {
             config: ConfigState::from(&self.config),
-            window_addr: self.window.as_ref().map(DaxWindow::guest_addr),
+            window_addr: self.window.as_ref().map(WindowMemory::guest_addr),
             point: snapshot.point.clone(),
             point_branch: snapshot.point_branch,
             mappings: snapshot.mappings.iter().map(MappingState::from).collect(),

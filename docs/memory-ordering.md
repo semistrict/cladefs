@@ -33,8 +33,8 @@ store that happens-before doesn't hide from it. A model's verdict counts, not an
   `--check`. The whole run takes about 20 s a mutant.
 - **Classes**, after AtomVChecker: (1) an ordering too weak to publish the state related to it;
   (2) an `AtomicPtr` whose pointee isn't synchronised; (3) an ordering stronger than needed. The
-  host crates have no `AtomicPtr`, and no `std::sync::atomic::fence`: every `fence(` there is
-  `crate::fence`, a store's fencing after a panic.
+  host crates have no `AtomicPtr`, and no `std::sync::atomic::fence` (`crate::halt`, which
+  halts a store after a panic, is no memory fence).
 
 The count, as of 2026-11-15: 326 non-`SeqCst` accesses in the production code of these crates,
 about 90 more in their tests.

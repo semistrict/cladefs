@@ -99,7 +99,7 @@ fn main() -> anyhow::Result<()> {
     cladefs::extentd::logging::to_stderr()?;
     // cladefs: its large buffers given back as they are freed, before any thread is made (TASK-317).
     cladefs::extentd::memory::return_large_allocations();
-    // cladefs: a panic holding a lock shared beyond one store, which no fence contains, stops the
+    // cladefs: a panic holding a lock shared beyond one store, which no halt contains, stops the
     // daemon, rather than poison the lock for every user after (TASK-149.24).
     extent_store::shared::abort_on_panics();
     // cladefs: the failpoints FAILPOINTS sets, in a daemon built with them (TASK-44.10).

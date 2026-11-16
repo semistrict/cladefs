@@ -144,20 +144,20 @@ fn open(path: &Path) -> Storage {
     Storage::open(path).unwrap()
 }
 
-/// A clone of an image, a fork of its branch in its bucket, holds the image's database as it was,
-/// inheriting its extents; the two then change apart, the clone rewriting and so freeing all it
+/// A fork of an image, its branch forked in its bucket, holds the image's database as it was,
+/// inheriting its extents; the two then change apart, the fork rewriting and so freeing all it
 /// inherited, and each reads its own, before and after opening again.
 #[test]
-fn a_clone_and_its_image_go_their_own_ways() {
+fn a_fork_and_its_image_go_their_own_ways() {
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
-    let (path, clone) = (dir.path().join("image"), dir.path().join("clone"));
-    let mounted = mount(Storage::create(&path, 256 << 20).unwrap(), "cladefs-clone-fill");
+    let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
+    let mounted = mount(Storage::create(&path, 256 << 20).unwrap(), "cladefs-fork-fill");
     let mut parent_rows = common::fill(&mounted.2);
     unmount(mounted);
 
-    let cloned = futures::executor::block_on(open(&path).clone_to(&clone)).unwrap();
-    let parent = mount(open(&path), "cladefs-clone-parent");
-    let fork = mount(cloned, "cladefs-clone-fork");
+    let forked = futures::executor::block_on(open(&path).fork_to(&fork_path)).unwrap();
+    let parent = mount(open(&path), "cladefs-fork-parent");
+    let fork = mount(forked, "cladefs-fork-child");
     let mut fork_rows = parent_rows.clone();
     common::check(&fork.2, &fork_rows);
     common::change_parent(&parent.2, &mut parent_rows);
@@ -167,8 +167,8 @@ fn a_clone_and_its_image_go_their_own_ways() {
     unmount(fork);
     unmount(parent);
 
-    for (path, rows) in [(&path, parent_rows), (&clone, fork_rows)] {
-        let mounted = mount(open(path), "cladefs-clone-reopened");
+    for (path, rows) in [(&path, parent_rows), (&fork_path, fork_rows)] {
+        let mounted = mount(open(path), "cladefs-fork-reopened");
         common::check(&mounted.2, &rows);
         unmount(mounted);
     }

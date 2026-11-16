@@ -25,6 +25,6 @@ mod locks;
 mod vfs;
 mod volume;
 
-pub use extent_files::{Contents, Failed, NotFound, Options, Run, Window};
+pub use extent_files::{Contents, Failed, NotFound, Options, Run, VolumeWindow};
 pub use vfs::{Registration, register};
 pub use volume::Volume;

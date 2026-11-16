@@ -86,7 +86,7 @@
 //! [mounted](Filesystem::mount) straight from storage is the `default` volume of an image of its
 //! own, which closing it closes.
 //!
-//! [`Image::snapshot_volume`] clones a whole volume, mounted or not, into a new one, in time and
+//! [`Image::snapshot_volume`] snapshots a whole volume, mounted or not, into a new one, in time and
 //! space independent of its size: the snapshot shares the source's metadata and data until
 //! either changes them, as Fxfs writes changes to new blocks, and what they share is freed once
 //! neither references it.
@@ -105,10 +105,10 @@
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
 //!
-//! An image can be cloned: [`Storage::clone_to`] clones closed storage, and
-//! [`Image::clone_storage_to`] a mounted image's, after writing back its volumes' dirty data.
-//! A clone is a fork of the image's extent store, which shares the image's data rather than
-//! copies it, whatever it holds, and of its branch in its bucket, which the clone shares.
+//! An image can be forked: [`Storage::fork_to`] forks closed storage, and
+//! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
+//! Forking forks the image's extent store, which shares the image's data rather than copies it,
+//! whatever it holds, and its branch in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
 
@@ -131,9 +131,9 @@ mod executor;
 pub mod extentd;
 mod extents;
 pub mod faults;
-mod fence;
 mod filesystem;
 pub mod fuse;
+mod halt;
 #[cfg(test)]
 mod heap;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -192,8 +192,8 @@ pub use extent_remote::layout::{Branch, Cell};
 #[cfg(target_os = "linux")]
 pub use extentd::{DaemonConnection, RemoteDevice, RemoteExtentStore};
 pub use extents::{
-    Commit, ExtentId, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
-    StoreHolding, StoreRole, Whose, WindowMapping, WriteBarriers,
+    Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
+    StoreRole, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::{BranchOf, new_cell};
@@ -203,6 +203,7 @@ pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
 pub use storage::Storage;
+pub use storage_device::ExtentId;
 
 /// cladefs: the commit this build is of, as scripts/build-commit.sh said at build time (build.rs):
 /// a commit, with `-dirty` if a tracked file differed from it, or `unknown`. What extentd's

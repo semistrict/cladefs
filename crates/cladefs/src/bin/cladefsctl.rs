@@ -68,7 +68,7 @@
 //! makes of its branch, as a snapshot's restores do; for a base forked on several hosts; with
 //! `--shared`, shared once made, as `share` shares it. `share` shares the point the store at DIR
 //! is of (TASK-395.7): it forks into cells of other tenants' than its own, as a base image or a
-//! snapshot many tenants clone, which a point not shared refuses (`EACCES`); `unshare` stops such
+//! VM snapshot many tenants fork, which a point not shared refuses (`EACCES`); `unshare` stops such
 //! forks, those made living on. The point's record in its bucket says it, for every host. `delete`
 //! deletes a store, a fork or not: its branch in its bucket, its forks' living on, and its
 //! directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
@@ -113,11 +113,11 @@
 //! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
 //! the cell TENANT/CELL (each in hex): takes its wrapped KEKs out of its object in the daemon's
 //! bucket, so that its volumes' keys unwrap no more, and has the daemon forget what it holds of
-//! them, fencing its stores open there (`EACCES`); run it against every host's daemon, the first
+//! them, halting its stores open there (`EACCES`); run it against every host's daemon, the first
 //! shredding, each forgetting. A bucket that keeps object versions keeps the KEKs in the cell
 //! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
 //! forget the keys of the tenant TENANT (hex), once its KEK is destroyed, or revoked, in the KMS:
-//! its stores there are fenced, their pages leave the cache, its fetchers' and KMS's keys of it
+//! its stores there are halted, their pages leave the cache, its fetchers' and KMS's keys of it
 //! go. `shred-tenant`, through the daemon alone too, is the control API's `ShredTenant`
 //! (TASK-411.27, doc-16 The bucket KMS): under the bucket KMS (a master key, no `CLADEFS_KMS`), it
 //! replaces the tenant TENANT's (hex) KEK object in the daemon's bucket by a tombstone, so that no
@@ -154,7 +154,7 @@ fn forgotten_lines(forgotten: &cladefs::extentd::control::proto::Forgotten) -> S
     let cladefs::extentd::control::proto::Forgotten { stores, rings, kept, extents, bytes } =
         forgotten;
     format!(
-        "stores_fenced {stores}\nrings_forgotten {rings}\nkept_dropped {kept}\n\
+        "stores_halted {stores}\nrings_forgotten {rings}\nkept_dropped {kept}\n\
          extents_evicted {extents}\nbytes_evicted {bytes}\n"
     )
 }

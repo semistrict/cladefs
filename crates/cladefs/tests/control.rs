@@ -405,10 +405,10 @@ fn health_follows_whether_the_daemon_serves() {
 /// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of an encrypted cell through its
 /// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
 /// written by its VM, read back, no file of their directories holding what they wrote in the
-/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and fences its store,
+/// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and halts its store,
 /// its VM's reads failing with EACCES, the other's reading on; called again, it finds the cell
-/// shredded and fences nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
-/// KMS, fences the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
+/// shredded and halts nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
+/// KMS, halts the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
 #[test]
 fn encrypted_stores_served_and_shredded_through_the_control_api() {
     let keys = tempfile::tempdir().unwrap();
@@ -469,8 +469,8 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
 /// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts its
 /// tenants' stores under the bucket KMS, each tenant's KEK made in its bucket on first use; what
 /// VMs wrote is in no file of the stores' directories in the clear. `ShredTenant` replaces the
-/// first tenant's KEK object by a tombstone and fences its store, its VM's reads failing with
-/// EACCES, the other tenant's reading on; called again, it finds the tenant shredded and fences
+/// first tenant's KEK object by a tombstone and halts its store, its VM's reads failing with
+/// EACCES, the other tenant's reading on; called again, it finds the tenant shredded and halts
 /// nothing more. Closed, the store opens no more (PERMISSION_DENIED, EACCES).
 #[test]
 fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api() {

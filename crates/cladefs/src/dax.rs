@@ -38,7 +38,7 @@ mod shuttle_tests;
 pub(crate) mod uffd;
 
 use crate::error::{Errno, Result};
-use crate::extents::{ExtentId, MappingContents, WindowMapping};
+use crate::extents::{MappingContents, WindowMapping};
 use crate::pages::{PhysLocation, page_size};
 use extent_store::shared::SharedLock;
 use futures::future::BoxFuture;
@@ -46,6 +46,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use storage_device::ExtentId;
 
 #[cfg(feature = "shuttle")]
 use shuttle::sync::Mutex;
@@ -622,7 +623,7 @@ impl WindowState {
 pub(crate) struct Window {
     size: u64,
     translation: Translation,
-    /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what fences
+    /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what halts
     /// its store: a panic holding it aborts the daemon (`extent_store::shared`, TASK-149.24).
     state: SharedLock<Mutex<WindowState>>,
     /// cladefs: how it copies on write, if it does (backlog doc-13): a store to a window that
