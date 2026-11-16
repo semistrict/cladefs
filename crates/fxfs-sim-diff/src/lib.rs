@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! guest/sim tests dax.c against a model of Fxfs, guest/sim/fxfs/fxfs.c, a second writing of what
+//! guest/sim tests dax.c against a model of Fxfs, guest/sim/cladefs/cladefs.c, a second writing of what
 //! the window's protocol assumes of it: where the model differs from Fxfs, a run there proves
 //! nothing, or fails a correct dax.c. This runs the model beside Fxfs (fxfs-posix) on the same
 //! operations, and compares what each file comes to (`diff_tests`), so that a drift shows as it is

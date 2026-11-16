@@ -3,12 +3,12 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Refuses a push that changes the guest's DAX code (fs/fxfs, the extent device's driver) unless
+# Refuses a push that changes the guest's DAX code (fs/cladefs, the extent device's driver) unless
 # the commit pushed passed scripts/dax-gate.sh, which notes it (`git notes --ref=dax-gate`)
 # (TASK-119.8). `git config core.hooksPath scripts/hooks` installs it.
 set -euo pipefail
 
-dax_paths=(guest/linux/fs/fxfs guest/linux/drivers/virtio_extent)
+dax_paths=(guest/linux/fs/cladefs guest/linux/drivers/virtio_extent)
 zero=0000000000000000000000000000000000000000
 status=0
 while read -r local_ref local_sha remote_ref remote_sha; do

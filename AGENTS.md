@@ -123,7 +123,7 @@ or don't check. The fix is half the work. For each one:
    invariant, so that it finds this bug and its kin. Put the bug back and see the test go red. A
    seed pinned as a regression test is on top of this, not instead of it.
 3. **Look around it:** find the same blind spot elsewhere. Search for code sharing the pattern, and
-   use coverage (`CLADEFS_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/fxfs`)
+   use coverage (`CLADEFS_GUEST_KERNEL_BUILD=coverage` and `scripts/guest-coverage.py` for `fs/cladefs`)
    to list what near the bug no test runs. Each place found gets a test or a task.
 4. **Record it** in the fix's task notes: how it was found, the blind spot, the test added, and what
    step 3 turned up. Testing too large for the fix goes in a task under TASK-149, ranked by how

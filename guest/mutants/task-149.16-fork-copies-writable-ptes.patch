@@ -11,8 +11,8 @@
 # cow_fork_after_a_split_pmd's run goes down with it, which names no check: the suite is the
 # killer (GCE r867, the check alone, AccessRefused).
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -3529,7 +3529,7 @@
  	 * of a chunk read in whole, a store having split its PMD. The child's store to one the host
  	 * refused, again and again (GCE r861, TASK-149.16). A child's PTEs are its own faults'.

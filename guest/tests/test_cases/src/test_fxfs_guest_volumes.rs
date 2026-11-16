@@ -132,7 +132,7 @@ mod guest {
     /// Mounts `volume`, the default if none, at `target`.
     fn try_mount(volume: Option<&str>, target: &str) -> std::io::Result<()> {
         let source = CString::new("extents").unwrap();
-        let (target, fstype) = (CString::new(target).unwrap(), CString::new("fxfs").unwrap());
+        let (target, fstype) = (CString::new(target).unwrap(), CString::new("cladefs").unwrap());
         let options = volume.map(|volume| CString::new(format!("volume={volume}")).unwrap());
         let data = options.as_ref().map_or(std::ptr::null(), |options| options.as_ptr());
         let ret = unsafe {

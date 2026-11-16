@@ -5,18 +5,18 @@
 # Killer: interleave
 #
 # TASK-149.18: the budget's worker ends a round without waking those it held up (budget_wait),
-# which wait 10 ms for a round (fxfs_dax_throttle): each wakes by its time instead, only slower,
+# which wait 10 ms for a round (cladefs_dax_throttle): each wakes by its time instead, only slower,
 # which nothing saw. guest/sim's timed waits now end early as a spurious wake when their time ends
 # them, their entries queued, and one finding its condition true then is a wake lost: the run fails.
 # interleave seed 5: the throttled write's wait.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2361,7 +2361,6 @@
- 	fxfs_dax_prune(dax);
+ 	cladefs_dax_prune(dax);
  	atomic64_set(&dax->rebinds_done, asked);
  	atomic64_inc(&dax->rounds);
 -	wake_up_all(&dax->budget_wait);
  	if (every && !READ_ONCE(dax->stopping)) {
  		msleep(every);
- 		fxfs_dax_kick(dax, false);
+ 		cladefs_dax_kick(dax, false);

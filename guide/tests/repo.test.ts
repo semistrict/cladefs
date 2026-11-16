@@ -35,7 +35,7 @@ describe("where code comes from", () => {
     ["crates/fidl/src/lib.rs", "stand-in"],
     ["crates/cladefs/src/extents.rs", "cladefs"],
     ["crates/extent_bucket/src/writer.rs", "cladefs"],
-    ["guest/linux/fs/fxfs/dax.c", "cladefs"],
+    ["guest/linux/fs/cladefs/dax.c", "cladefs"],
   ])("%s is %s", (path, origin) => {
     expect(originOf(path, crates)).toBe(origin);
   });
@@ -81,7 +81,7 @@ describe("the symbol index", () => {
     const commit = symbols.find((s) => s.path === "crates/fxfs/src/object_store/journal.rs" && s.name === "commit" && s.container === "Journal");
     expect(commit?.signature).toBe("pub async fn commit(&self, transaction: &mut Transaction<'_>) -> Result<u64, Error>");
     expect(commit?.origin).toBe("fuchsia-changed");
-    const dirty = symbols.find((s) => s.path === "guest/linux/fs/fxfs/dax.c" && s.name === "fxfs_dax_dirty");
+    const dirty = symbols.find((s) => s.path === "guest/linux/fs/cladefs/dax.c" && s.name === "cladefs_dax_dirty");
     expect(dirty?.kind).toBe("fn");
     for (const sym of symbols.filter((s) => s.unique).slice(0, 500)) {
       const text = readFileSync(join(REPO, sym.path), "utf8");

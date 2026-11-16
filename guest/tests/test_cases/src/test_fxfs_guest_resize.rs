@@ -127,7 +127,7 @@ mod guest {
     fn mount() {
         let source = CString::new("extents").unwrap();
         let target = CString::new(MNT).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

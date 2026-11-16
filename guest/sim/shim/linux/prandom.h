@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /* Copyright 2026 The cladefs Authors. */
-/* A seeded generator, for fxfs.dax_delay_us: xorshift, not the kernel's, but as deterministic. */
+/* A seeded generator, for cladefs.dax_delay_us: xorshift, not the kernel's, but as deterministic. */
 #ifndef _SIM_PRANDOM_H
 #define _SIM_PRANDOM_H
 

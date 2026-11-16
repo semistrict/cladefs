@@ -1296,7 +1296,7 @@ mod guest {
     fn mount() {
         fs::create_dir_all(MNT).unwrap();
         let (source, target, fstype) =
-            (CString::new(TAG).unwrap(), CString::new(MNT).unwrap(), CString::new("fxfs").unwrap());
+            (CString::new(TAG).unwrap(), CString::new(MNT).unwrap(), CString::new("cladefs").unwrap());
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

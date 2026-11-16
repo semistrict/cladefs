@@ -7,7 +7,7 @@
 //!
 //! The host boots the guest kernel with an extent-store device with a DAX window, on a new store,
 //! which the guest formats as it mounts it. The guest writes a file, durably, and reads it through
-//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/fxfs/extents), asks the host
+//! the window; then, twice, it reads what its Fxfs counted (/proc/fs/cladefs/extents), asks the host
 //! over vsock for the stats, and reads it again. The host runs cladefsctl (CLADEFSCTL_BIN) against
 //! the daemon's control socket, keeps its JSON in the test's directory (`stats-N.json`), and checks
 //! it:
@@ -216,7 +216,7 @@ mod guest {
     fn mount() {
         let source = CString::new("extents").unwrap();
         let target = CString::new(MNT).unwrap();
-        let fstype = CString::new("fxfs").unwrap();
+        let fstype = CString::new("cladefs").unwrap();
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

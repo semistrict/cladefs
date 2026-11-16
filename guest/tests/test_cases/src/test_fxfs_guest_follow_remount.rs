@@ -4,7 +4,7 @@
 
 //! A follower that can follow no more recovers by remounting (doc-8; TASK-79.23, 79.24, 79.42).
 //!
-//! A batch that fails, as the kernel's `fxfs.follow_fail_batch` has it, ends the follower: what
+//! A batch that fails, as the kernel's `cladefs.follow_fail_batch` has it, ends the follower: what
 //! reads the trees fails with ESTALE. It unmounts and mounts again, and sees all its writer
 //! committed. Then its writer dies with writes uncommitted, which cuts the follower off: an extent
 //! it never read reads ESTALE, and no new writer opens the store while the follower's connection
@@ -261,7 +261,7 @@ mod guest {
     use std::time::{Duration, Instant};
 
     const MNT: &str = "/mnt/fxfs";
-    const FAIL_BATCH: &str = "/sys/module/fxfs/parameters/follow_fail_batch";
+    const FAIL_BATCH: &str = "/sys/module/cladefs/parameters/follow_fail_batch";
     /// How long a follower takes at most to reach its writer's sync, or a cut.
     const WITHIN: Duration = Duration::from_secs(30);
 
@@ -277,7 +277,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())

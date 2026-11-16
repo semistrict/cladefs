@@ -40,11 +40,11 @@ sim_prepare() {
 
 # The sources a build compiles, as `patch -p1` names them in `dir`, and where each is from.
 sim_sources() { # dir
-    echo "../linux/fs/fxfs/dax.c $1/guest/linux/fs/fxfs/dax.c"
-    echo "../linux/fs/fxfs/pages.c $1/guest/linux/fs/fxfs/pages.c"
-    echo "../linux/fs/fxfs/data.c $1/guest/linux/fs/fxfs/data.c"
-    echo "../linux/fs/fxfs/device.c $1/guest/linux/fs/fxfs/device.c"
-    echo "fxfs/fxfs.c $1/guest/sim/fxfs/fxfs.c"
+    echo "../linux/fs/cladefs/dax.c $1/guest/linux/fs/cladefs/dax.c"
+    echo "../linux/fs/cladefs/pages.c $1/guest/linux/fs/cladefs/pages.c"
+    echo "../linux/fs/cladefs/data.c $1/guest/linux/fs/cladefs/data.c"
+    echo "../linux/fs/cladefs/device.c $1/guest/linux/fs/cladefs/device.c"
+    echo "cladefs/cladefs.c $1/guest/sim/cladefs/cladefs.c"
     echo "${KERNEL:?}/fs/dax.c $1/fs/dax.c"
 }
 
@@ -82,15 +82,15 @@ sim_build() { # name, patches...
     local name=$1 dir="$BUILD/mutants/$1" test
     sim_tree "$@" || return 1
     # shellcheck disable=SC2086
-    "$CC" $CFLAGS -c "$dir/guest/linux/fs/fxfs/dax.c" -o "$dir/dax.o" &&
-        "$CC" $CFLAGS -c "$dir/guest/linux/fs/fxfs/pages.c" -o "$dir/pages.o" &&
-        "$CC" $CFLAGS -c "$dir/guest/linux/fs/fxfs/data.c" -o "$dir/data.o" &&
-        "$CC" $CFLAGS -c "$dir/guest/linux/fs/fxfs/device.c" -o "$dir/device.o" &&
-        "$CC" $CFLAGS -c "$dir/guest/sim/fxfs/fxfs.c" -o "$dir/fxfs.o" &&
+    "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/dax.c" -o "$dir/dax.o" &&
+        "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/pages.c" -o "$dir/pages.o" &&
+        "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/data.c" -o "$dir/data.o" &&
+        "$CC" $CFLAGS -c "$dir/guest/linux/fs/cladefs/device.c" -o "$dir/device.o" &&
+        "$CC" $CFLAGS -c "$dir/guest/sim/cladefs/cladefs.c" -o "$dir/cladefs.o" &&
         "$CC" $CFLAGS -c "$dir/fs/dax.c" -o "$dir/fsdax.o" &&
         for test in "${sim_tests[@]}"; do
-            "$CC" $LDFLAGS "$BUILD/tests/$test.o" "$dir/dax.o" "$dir/pages.o" "$dir/data.o" "$dir/device.o" "$dir/fxfs.o" \
-                "$dir/fsdax.o" ${OBJECTS//$BUILD\/fake\/fxfs\/fxfs.o/} -o "$dir/$test" || return 1
+            "$CC" $LDFLAGS "$BUILD/tests/$test.o" "$dir/dax.o" "$dir/pages.o" "$dir/data.o" "$dir/device.o" "$dir/cladefs.o" \
+                "$dir/fsdax.o" ${OBJECTS//$BUILD\/fake\/cladefs\/cladefs.o/} -o "$dir/$test" || return 1
         done
 }
 

@@ -211,7 +211,7 @@ mod guest {
 
     fn mount() {
         fs::create_dir_all(MNT).unwrap();
-        let (source, target, fstype) = (c"extents", CString::new(MNT).unwrap(), c"fxfs");
+        let (source, target, fstype) = (c"extents", CString::new(MNT).unwrap(), c"cladefs");
         // SAFETY: Each is a string, as the call asks.
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())

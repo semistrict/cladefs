@@ -5,7 +5,7 @@
 
 """What a pgbench run's guest says of DAX's write path, and whether it got worse (TASK-146.3).
 
-Reads the last `fxfs stats:` line of a pgbench run's console, what /proc/fs/fxfs said at its end,
+Reads the last `fxfs stats:` line of a pgbench run's console, what /proc/fs/cladefs said at its end,
 and prints the mean of each probe: a window MAP and a write(2). Fails if one is past its ceiling:
 half as much again as measured, a write(2)'s on 2026-10-31 (GCE r365, default commits, against
 which a host's variation is well within that), a MAP's on 2026-11-06 (r794: 53 us; 49-71 us

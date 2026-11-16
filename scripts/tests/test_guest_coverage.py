@@ -2,7 +2,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-"""Tests of scripts/guest-coverage.py, which reports what the guest checks ran of fs/fxfs."""
+"""Tests of scripts/guest-coverage.py, which reports what the guest checks ran of fs/cladefs."""
 
 import unittest
 
@@ -11,7 +11,7 @@ import script
 guest_coverage = script.load("guest-coverage")
 
 GCOV = """\
-        -:    0:Source:fs/fxfs/dax.c
+        -:    0:Source:fs/cladefs/dax.c
 function fxfs_dax_used called 12 returned 100% blocks executed 75%
        12:   10:static int fxfs_dax_used(int a)
         -:   11:{

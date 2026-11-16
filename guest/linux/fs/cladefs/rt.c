@@ -5,7 +5,7 @@
  */
 
 #include <linux/completion.h>
-#include <linux/fxfs_tls.h>
+#include <linux/cladefs_tls.h>
 #include <linux/hrtimer.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
@@ -22,7 +22,7 @@
 
 #include "rt.h"
 
-void *fxfs_rt_alloc(size_t size, size_t align)
+void *cladefs_rt_alloc(size_t size, size_t align)
 {
 	if (align > PAGE_SIZE)
 		return NULL;
@@ -35,24 +35,24 @@ void *fxfs_rt_alloc(size_t size, size_t align)
 	return kvmalloc(size, GFP_KERNEL | __GFP_NOFAIL);
 }
 
-void fxfs_rt_free(void *ptr)
+void cladefs_rt_free(void *ptr)
 {
 	kvfree(ptr);
 }
 
-void fxfs_rt_log(int level, const char *msg, size_t len)
+void cladefs_rt_log(int level, const char *msg, size_t len)
 {
 	static const char *const levels[] = {
 		KERN_EMERG, KERN_ALERT, KERN_CRIT, KERN_ERR,
 		KERN_WARNING, KERN_NOTICE, KERN_INFO, KERN_DEBUG,
 	};
 
-	printk("%sfxfs: %.*s\n", levels[clamp(level, 0, 7)], (int)len, msg);
+	printk("%scladefs: %.*s\n", levels[clamp(level, 0, 7)], (int)len, msg);
 }
 
-void fxfs_rt_panic(const char *msg, size_t len)
+void cladefs_rt_panic(const char *msg, size_t len)
 {
-	panic("fxfs: %.*s\n", (int)len, msg);
+	panic("cladefs: %.*s\n", (int)len, msg);
 }
 
 /* A parker's states: nothing to take, an unpark to take, or a thread sleeping until there is. */
@@ -65,21 +65,21 @@ enum { PARKER_EMPTY, PARKER_NOTIFIED, PARKER_PARKED };
  */
 #define PARKER_SPIN_NS (20 * NSEC_PER_USEC)
 
-struct fxfs_rt_parker {
+struct cladefs_rt_parker {
 	atomic_t state;
 	struct completion unparked;
 };
 
-struct fxfs_rt_parker *fxfs_rt_parker_new(void)
+struct cladefs_rt_parker *cladefs_rt_parker_new(void)
 {
-	struct fxfs_rt_parker *parker = kmalloc(sizeof(*parker), GFP_KERNEL | __GFP_NOFAIL);
+	struct cladefs_rt_parker *parker = kmalloc(sizeof(*parker), GFP_KERNEL | __GFP_NOFAIL);
 
 	atomic_set(&parker->state, PARKER_EMPTY);
 	init_completion(&parker->unparked);
 	return parker;
 }
 
-void fxfs_rt_parker_free(struct fxfs_rt_parker *parker)
+void cladefs_rt_parker_free(struct cladefs_rt_parker *parker)
 {
 	kfree(parker);
 }
@@ -90,7 +90,7 @@ void fxfs_rt_parker_free(struct fxfs_rt_parker *parker)
  */
 #define PARKER_SPINS_PER_CLOCK 64
 
-void fxfs_rt_park(struct fxfs_rt_parker *parker)
+void cladefs_rt_park(struct cladefs_rt_parker *parker)
 {
 	u64 deadline = local_clock() + PARKER_SPIN_NS;
 	unsigned int spins = 0;
@@ -116,23 +116,23 @@ void fxfs_rt_park(struct fxfs_rt_parker *parker)
 	atomic_xchg(&parker->state, PARKER_EMPTY);
 }
 
-void fxfs_rt_unpark(struct fxfs_rt_parker *parker)
+void cladefs_rt_unpark(struct cladefs_rt_parker *parker)
 {
 	/* A thread spinning takes the unpark itself: only a sleeping one is woken. */
 	if (atomic_xchg(&parker->state, PARKER_NOTIFIED) == PARKER_PARKED)
 		complete(&parker->unparked);
 }
 
-struct fxfs_rt_work {
+struct cladefs_rt_work {
 	struct work_struct work;
 	struct workqueue_struct *wq;
 	void (*run)(void *arg);
 	void *arg;
 };
 
-static void fxfs_rt_work_run(struct work_struct *work)
+static void cladefs_rt_work_run(struct work_struct *work)
 {
-	struct fxfs_rt_work *w = container_of(work, struct fxfs_rt_work, work);
+	struct cladefs_rt_work *w = container_of(work, struct cladefs_rt_work, work);
 	/* What it runs may free it, its task's last reference dropped: nothing reads it after. */
 	void (*run)(void *arg) = w->run;
 	void *arg = w->arg;
@@ -150,87 +150,87 @@ static void fxfs_rt_work_run(struct work_struct *work)
  * otherwise get a third of the CPU four unlinkers spinning on a directory's lock leave. Not the
  * rest: compacting at a high priority took the CPU from the writes.
  */
-static struct workqueue_struct *fxfs_rt_wq;
-static struct workqueue_struct *fxfs_rt_urgent_wq;
+static struct workqueue_struct *cladefs_rt_wq;
+static struct workqueue_struct *cladefs_rt_urgent_wq;
 
-int fxfs_rt_init(void)
+int cladefs_rt_init(void)
 {
-	fxfs_rt_wq = alloc_workqueue("fxfs", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
-	fxfs_rt_urgent_wq = alloc_workqueue("fxfs_urgent", WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM,
+	cladefs_rt_wq = alloc_workqueue("cladefs", WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	cladefs_rt_urgent_wq = alloc_workqueue("cladefs_urgent", WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM,
 					    0);
-	if (fxfs_rt_wq && fxfs_rt_urgent_wq)
+	if (cladefs_rt_wq && cladefs_rt_urgent_wq)
 		return 0;
-	fxfs_rt_exit();
+	cladefs_rt_exit();
 	return -ENOMEM;
 }
 
-void fxfs_rt_exit(void)
+void cladefs_rt_exit(void)
 {
-	if (fxfs_rt_urgent_wq)
-		destroy_workqueue(fxfs_rt_urgent_wq);
-	if (fxfs_rt_wq)
-		destroy_workqueue(fxfs_rt_wq);
+	if (cladefs_rt_urgent_wq)
+		destroy_workqueue(cladefs_rt_urgent_wq);
+	if (cladefs_rt_wq)
+		destroy_workqueue(cladefs_rt_wq);
 }
 
-struct fxfs_rt_work *fxfs_rt_work_new(void (*run)(void *arg), bool urgent)
+struct cladefs_rt_work *cladefs_rt_work_new(void (*run)(void *arg), bool urgent)
 {
-	struct fxfs_rt_work *w = kmalloc(sizeof(*w), GFP_KERNEL | __GFP_NOFAIL);
+	struct cladefs_rt_work *w = kmalloc(sizeof(*w), GFP_KERNEL | __GFP_NOFAIL);
 
-	INIT_WORK(&w->work, fxfs_rt_work_run);
-	w->wq = urgent ? fxfs_rt_urgent_wq : fxfs_rt_wq;
+	INIT_WORK(&w->work, cladefs_rt_work_run);
+	w->wq = urgent ? cladefs_rt_urgent_wq : cladefs_rt_wq;
 	w->run = run;
 	w->arg = NULL;
 	return w;
 }
 
-void fxfs_rt_work_queue(struct fxfs_rt_work *w, void *arg)
+void cladefs_rt_work_queue(struct cladefs_rt_work *w, void *arg)
 {
 	/* Its run, if one has begun, has read its argument already. */
 	w->arg = arg;
 	WARN_ON_ONCE(!queue_work(w->wq, &w->work));
 }
 
-void fxfs_rt_work_free(struct fxfs_rt_work *w)
+void cladefs_rt_work_free(struct cladefs_rt_work *w)
 {
 	kfree(w);
 }
 
-struct fxfs_rt_timer {
+struct cladefs_rt_timer {
 	struct hrtimer timer;
 	void (*fire)(void *arg);
 	void *arg;
 };
 
-static enum hrtimer_restart fxfs_rt_timer_fire(struct hrtimer *timer)
+static enum hrtimer_restart cladefs_rt_timer_fire(struct hrtimer *timer)
 {
-	struct fxfs_rt_timer *t = container_of(timer, struct fxfs_rt_timer, timer);
+	struct cladefs_rt_timer *t = container_of(timer, struct cladefs_rt_timer, timer);
 
 	t->fire(t->arg);
 	return HRTIMER_NORESTART;
 }
 
-struct fxfs_rt_timer *fxfs_rt_timer_new(void (*fire)(void *arg), void *arg)
+struct cladefs_rt_timer *cladefs_rt_timer_new(void (*fire)(void *arg), void *arg)
 {
-	struct fxfs_rt_timer *t = kmalloc(sizeof(*t), GFP_KERNEL | __GFP_NOFAIL);
+	struct cladefs_rt_timer *t = kmalloc(sizeof(*t), GFP_KERNEL | __GFP_NOFAIL);
 
-	hrtimer_setup(&t->timer, fxfs_rt_timer_fire, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
+	hrtimer_setup(&t->timer, cladefs_rt_timer_fire, CLOCK_MONOTONIC, HRTIMER_MODE_REL_SOFT);
 	t->fire = fire;
 	t->arg = arg;
 	return t;
 }
 
-void fxfs_rt_timer_start(struct fxfs_rt_timer *timer, u64 ns)
+void cladefs_rt_timer_start(struct cladefs_rt_timer *timer, u64 ns)
 {
 	hrtimer_start(&timer->timer, ns_to_ktime(ns), HRTIMER_MODE_REL_SOFT);
 }
 
-void fxfs_rt_timer_free(struct fxfs_rt_timer *timer)
+void cladefs_rt_timer_free(struct cladefs_rt_timer *timer)
 {
 	hrtimer_cancel(&timer->timer);
 	kfree(timer);
 }
 
-void fxfs_rt_yield(void)
+void cladefs_rt_yield(void)
 {
 	if (in_task())
 		cond_resched();
@@ -242,9 +242,9 @@ void fxfs_rt_yield(void)
  * Waits on `var` as wait_var_event and wait_var_event_timeout do, but exclusively: wake_up_var
  * wakes one such waiter, not all, as a futex's wake does.
  */
-#define fxfs_rt_wait_var_exclusive(var, condition)					\
+#define cladefs_rt_wait_var_exclusive(var, condition)					\
 	___wait_var_event(var, condition, TASK_UNINTERRUPTIBLE, 1, 0, schedule())
-#define fxfs_rt_wait_var_exclusive_timeout(var, condition, timeout)			\
+#define cladefs_rt_wait_var_exclusive_timeout(var, condition, timeout)			\
 ({											\
 	long __ret = timeout;								\
 	if (!___wait_cond_timeout(condition))						\
@@ -254,44 +254,44 @@ void fxfs_rt_yield(void)
 	__ret;										\
 })
 
-bool fxfs_rt_futex_wait(const u32 *futex, u32 expected, u64 timeout_ns)
+bool cladefs_rt_futex_wait(const u32 *futex, u32 expected, u64 timeout_ns)
 {
 	void *var = (void *)futex;
 
 	might_sleep();
 	if (timeout_ns == U64_MAX) {
 		if (READ_ONCE(*futex) == expected)
-			fxfs_rt_wait_var_exclusive(var, READ_ONCE(*futex) != expected);
+			cladefs_rt_wait_var_exclusive(var, READ_ONCE(*futex) != expected);
 		return true;
 	}
-	return fxfs_rt_wait_var_exclusive_timeout(var, READ_ONCE(*futex) != expected,
+	return cladefs_rt_wait_var_exclusive_timeout(var, READ_ONCE(*futex) != expected,
 						  nsecs_to_jiffies(timeout_ns)) != 0;
 }
 
-void fxfs_rt_futex_wake(const u32 *futex)
+void cladefs_rt_futex_wake(const u32 *futex)
 {
 	/* Orders the caller's change to the futex before the check for waiters. */
 	smp_mb();
 	wake_up_var((void *)futex);
 }
 
-void fxfs_rt_futex_wake_all(const u32 *futex)
+void cladefs_rt_futex_wake_all(const u32 *futex)
 {
 	struct wait_bit_key key = __WAIT_BIT_KEY_INITIALIZER((void *)futex, -1);
 	struct wait_queue_head *wq_head = __var_waitqueue((void *)futex);
 
-	/* As fxfs_rt_futex_wake, but for every waiter. */
+	/* As cladefs_rt_futex_wake, but for every waiter. */
 	smp_mb();
 	if (waitqueue_active(wq_head))
 		__wake_up(wq_head, TASK_NORMAL, 0, &key);
 }
 
-u64 fxfs_rt_monotonic_ns(void)
+u64 cladefs_rt_monotonic_ns(void)
 {
 	return ktime_get_ns();
 }
 
-u64 fxfs_rt_realtime_ns(void)
+u64 cladefs_rt_realtime_ns(void)
 {
 	/*
 	 * cladefs: the coarse clock, an inode's own: a ctime the kernel sets after a time read from
@@ -300,29 +300,29 @@ u64 fxfs_rt_realtime_ns(void)
 	return ktime_get_coarse_real_ns();
 }
 
-void fxfs_rt_random_bytes(void *buf, size_t len)
+void cladefs_rt_random_bytes(void *buf, size_t len)
 {
 	get_random_bytes(buf, len);
 }
 
 /* Rust's, once the filesystem's Rust uses guest/rust/std, which has thread-local values. */
-void __weak fxfs_rust_tls_free(void *tls)
+void __weak cladefs_rust_tls_free(void *tls)
 {
 }
 
-void **fxfs_rt_tls(void)
+void **cladefs_rt_tls(void)
 {
 	if (!in_task())
 		return NULL;
-	return &current->fxfs_tls;
+	return &current->cladefs_tls;
 }
 
-void fxfs_rt_tls_exit(struct task_struct *tsk)
+void cladefs_rt_tls_exit(struct task_struct *tsk)
 {
-	void *tls = tsk->fxfs_tls;
+	void *tls = tsk->cladefs_tls;
 
 	if (tls) {
-		tsk->fxfs_tls = NULL;
-		fxfs_rust_tls_free(tls);
+		tsk->cladefs_tls = NULL;
+		cladefs_rust_tls_free(tls);
 	}
 }

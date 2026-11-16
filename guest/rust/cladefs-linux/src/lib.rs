@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The filesystem the guest kernel's fs/fxfs calls (guest/linux/fs/fxfs/fxfs.h): Fxfs, on the
+//! The filesystem the guest kernel's fs/cladefs calls (guest/linux/fs/cladefs/cladefs.h): Fxfs, on the
 //! extent-store device a mount names (`device`), serving the volumes mounted (`fs`).
 //!
 //! Each call blocks the calling thread until Fxfs is done with it, while Fxfs's own tasks run on
@@ -70,7 +70,7 @@ unsafe fn copy_out(data: &[u8], buf: *mut u8, size: usize) -> isize {
 ///
 /// `fs` is mounted, `name` holds `len` bytes, and `buf` has room for `size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_getxattr(
+pub unsafe extern "C" fn cladefs_getxattr(
     fs: *const Fxfs,
     ino: u64,
     name: *const c_char,
@@ -95,7 +95,7 @@ const XATTR_REPLACE: c_int = 2;
 ///
 /// `fs` is mounted, `name` holds `len` bytes, and `value` `value_len`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_setxattr(
+pub unsafe extern "C" fn cladefs_setxattr(
     fs: *const Fxfs,
     ino: u64,
     name: *const c_char,
@@ -124,7 +124,7 @@ pub unsafe extern "C" fn fxfs_setxattr(
 ///
 /// `fs` is mounted, and `buf` has room for `size` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_listxattr(
+pub unsafe extern "C" fn cladefs_listxattr(
     fs: *const Fxfs,
     ino: u64,
     buf: *mut u8,
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn fxfs_listxattr(
 ///
 /// `fs` is mounted, and `name` holds `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_removexattr(
+pub unsafe extern "C" fn cladefs_removexattr(
     fs: *const Fxfs,
     ino: u64,
     name: *const c_char,
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn fxfs_removexattr(
 /// `fs` is mounted, `name` holds `len` bytes, `new_name` `new_len`, and `attr`, `new_attr`,
 /// `dir_attr` and `new_dir_attr` are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_exchange(
+pub unsafe extern "C" fn cladefs_exchange(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -208,18 +208,18 @@ unsafe extern "Rust" fn __getrandom_v03_custom(
 
 /// Readies the runtime.
 #[unsafe(no_mangle)]
-pub extern "C" fn fxfs_init() {
+pub extern "C" fn cladefs_init() {
     linux_rt::init_logger(LevelFilter::Info);
     log::info!("Rust runtime ready");
 }
 
-/// The filesystem `filesystem`, as `fxfs_open` returned it, while it stays open.
+/// The filesystem `filesystem`, as `cladefs_open` returned it, while it stays open.
 ///
 /// # Safety
 ///
 /// `filesystem` is open.
 unsafe fn filesystem(filesystem: *const Filesystem) -> ManuallyDrop<Arc<Filesystem>> {
-    // SAFETY: As the caller promises: `fxfs_open` made it, and `fxfs_close` drops it.
+    // SAFETY: As the caller promises: `cladefs_open` made it, and `cladefs_close` drops it.
     ManuallyDrop::new(unsafe { Arc::from_raw(filesystem) })
 }
 
@@ -227,7 +227,7 @@ unsafe fn filesystem(filesystem: *const Filesystem) -> ManuallyDrop<Arc<Filesyst
 ///
 /// `source` holds `len` bytes, and `filesystem` is writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_open(
+pub unsafe extern "C" fn cladefs_open(
     source: *const c_char,
     len: usize,
     memory: u64,
@@ -253,8 +253,8 @@ pub unsafe extern "C" fn fxfs_open(
 ///
 /// `filesystem` is open, with no volume mounted, and nothing uses it after.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_close(filesystem: *const Filesystem) {
-    // SAFETY: As the caller promises: `fxfs_open` made it, and no volume holds it.
+pub unsafe extern "C" fn cladefs_close(filesystem: *const Filesystem) {
+    // SAFETY: As the caller promises: `cladefs_open` made it, and no volume holds it.
     let filesystem = unsafe { Arc::from_raw(filesystem) };
     let filesystem = Arc::into_inner(filesystem).expect("a volume of the filesystem is mounted");
     if let Err(error) = block_on(filesystem.close()) {
@@ -267,7 +267,7 @@ pub unsafe extern "C" fn fxfs_close(filesystem: *const Filesystem) {
 /// `filesystem` is open, `volume` holds `len` bytes, `fs` and `root` are writable, and `vfs` is the
 /// superblock, whose follower's primitives (vfs.h) outlive the volume.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_mount(
+pub unsafe extern "C" fn cladefs_mount(
     filesystem: *const Filesystem,
     volume: *const c_char,
     len: usize,
@@ -304,9 +304,9 @@ pub unsafe extern "C" fn fxfs_mount(
 
 /// # Safety
 ///
-/// `fs` came from `fxfs_mount`, and is not used again.
+/// `fs` came from `cladefs_mount`, and is not used again.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_unmount(fs: *mut Fxfs) {
+pub unsafe extern "C" fn cladefs_unmount(fs: *mut Fxfs) {
     // SAFETY: As the caller promises.
     let fs = unsafe { Box::from_raw(fs) };
     // Its background worker refers to it where it is, boxed: stopped before it moves.
@@ -316,11 +316,11 @@ pub unsafe extern "C" fn fxfs_unmount(fs: *mut Fxfs) {
     block_on(fs.unmount());
 }
 
-/// cladefs: fault injection (TASK-164.2): the next `count` of `fxfs_write_many`'s transactions fail
+/// cladefs: fault injection (TASK-164.2): the next `count` of `cladefs_write_many`'s transactions fail
 /// once their blocks are written, before they commit
 /// (`fxfs::object_store::data_object_handle::FAIL_COMMITS`).
 #[unsafe(no_mangle)]
-pub extern "C" fn fxfs_set_fail_commits(count: u64) {
+pub extern "C" fn cladefs_set_fail_commits(count: u64) {
     fxfs::object_store::data_object_handle::FAIL_COMMITS
         .store(count, std::sync::atomic::Ordering::Relaxed);
 }
@@ -331,7 +331,7 @@ pub extern "C" fn fxfs_set_fail_commits(count: u64) {
 ///
 /// `filesystem` is open.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_filesystem_follows(filesystem: *const Filesystem) -> bool {
+pub unsafe extern "C" fn cladefs_filesystem_follows(filesystem: *const Filesystem) -> bool {
     // SAFETY: As the caller promises.
     unsafe { (*filesystem).follows() }
 }
@@ -342,7 +342,7 @@ pub unsafe extern "C" fn fxfs_filesystem_follows(filesystem: *const Filesystem) 
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_read_only(fs: *const Fxfs) -> bool {
+pub unsafe extern "C" fn cladefs_read_only(fs: *const Fxfs) -> bool {
     // SAFETY: As the caller promises.
     unsafe { (*fs).read_only() }
 }
@@ -351,7 +351,7 @@ pub unsafe extern "C" fn fxfs_read_only(fs: *const Fxfs) -> bool {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_follows(fs: *const Fxfs) -> bool {
+pub unsafe extern "C" fn cladefs_follows(fs: *const Fxfs) -> bool {
     // SAFETY: As the caller promises.
     unsafe { (*fs).follows() }
 }
@@ -362,7 +362,7 @@ pub unsafe extern "C" fn fxfs_follows(fs: *const Fxfs) -> bool {
 ///
 /// `fs` is mounted, and follows its device's writer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_follow(fs: *const Fxfs) -> c_int {
+pub unsafe extern "C" fn cladefs_follow(fs: *const Fxfs) -> c_int {
     // SAFETY: As the caller promises.
     match block_on(unsafe { (*fs).follow() }) {
         Ok(()) => 0,
@@ -377,7 +377,7 @@ pub unsafe extern "C" fn fxfs_follow(fs: *const Fxfs) -> c_int {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_hold(fs: *const Fxfs, ino: u64) -> c_int {
+pub unsafe extern "C" fn cladefs_hold(fs: *const Fxfs, ino: u64) -> c_int {
     // SAFETY: As the caller promises.
     match block_on(unsafe { (*fs).hold(ino) }) {
         Ok(()) => 0,
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn fxfs_hold(fs: *const Fxfs, ino: u64) -> c_int {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_release(fs: *const Fxfs, ino: u64) {
+pub unsafe extern "C" fn cladefs_release(fs: *const Fxfs, ino: u64) {
     // SAFETY: As the caller promises.
     unsafe { (*fs).release(ino) }
 }
@@ -402,7 +402,7 @@ pub unsafe extern "C" fn fxfs_release(fs: *const Fxfs, ino: u64) {
 ///
 /// `filesystem` is open.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_dax_device(filesystem: *const Filesystem) -> *mut c_void {
+pub unsafe extern "C" fn cladefs_dax_device(filesystem: *const Filesystem) -> *mut c_void {
     // SAFETY: As the caller promises.
     unsafe { (*filesystem).device() }
 }
@@ -433,7 +433,7 @@ unsafe fn copy_extents(
 ///
 /// `fs` is mounted, and `out` has room for `max` extents.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_dax_extents(
+pub unsafe extern "C" fn cladefs_dax_extents(
     fs: *const Fxfs,
     ino: u64,
     offset: u64,
@@ -494,7 +494,7 @@ unsafe fn bytes<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_sync(fs: *const Fxfs) -> c_int {
+pub unsafe extern "C" fn cladefs_sync(fs: *const Fxfs) -> c_int {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     match block_on(fs.sync()) {
@@ -509,7 +509,7 @@ pub unsafe extern "C" fn fxfs_sync(fs: *const Fxfs) -> c_int {
 ///
 /// `filesystem` is open.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_freeze(filesystem: *const Filesystem) -> c_int {
+pub unsafe extern "C" fn cladefs_freeze(filesystem: *const Filesystem) -> c_int {
     // SAFETY: As the caller promises.
     let filesystem = unsafe { &*filesystem };
     match block_on(filesystem.freeze()) {
@@ -525,7 +525,7 @@ pub unsafe extern "C" fn fxfs_freeze(filesystem: *const Filesystem) -> c_int {
 ///
 /// `filesystem` is open, and frozen.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_thaw(filesystem: *const Filesystem) -> c_int {
+pub unsafe extern "C" fn cladefs_thaw(filesystem: *const Filesystem) -> c_int {
     // SAFETY: As the caller promises.
     let filesystem = unsafe { &*filesystem };
     match block_on(filesystem.thaw()) {
@@ -537,13 +537,13 @@ pub unsafe extern "C" fn fxfs_thaw(filesystem: *const Filesystem) -> c_int {
 /// cladefs: fault injection (TASK-200): the next thaw fails before its step `step`, 1 telling the
 /// device, 2 renewing the journal's tail, 3 recording it; 0, none (`fs::FAIL_THAW_AT`).
 #[unsafe(no_mangle)]
-pub extern "C" fn fxfs_set_fail_thaw_at(step: u32) {
+pub extern "C" fn cladefs_set_fail_thaw_at(step: u32) {
     fs::FAIL_THAW_AT.store(step, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// cladefs: the step the next thaw fails before (`fxfs_set_fail_thaw_at`): 0 once one has.
+/// cladefs: the step the next thaw fails before (`cladefs_set_fail_thaw_at`): 0 once one has.
 #[unsafe(no_mangle)]
-pub extern "C" fn fxfs_fail_thaw_at() -> u32 {
+pub extern "C" fn cladefs_fail_thaw_at() -> u32 {
     fs::FAIL_THAW_AT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -553,7 +553,7 @@ pub extern "C" fn fxfs_fail_thaw_at() -> u32 {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_flush_volume(fs: *const Fxfs) -> c_int {
+pub unsafe extern "C" fn cladefs_flush_volume(fs: *const Fxfs) -> c_int {
     // SAFETY: As the caller promises.
     match block_on(unsafe { &*fs }.flush_volume()) {
         Ok(()) => 0,
@@ -567,7 +567,7 @@ pub unsafe extern "C" fn fxfs_flush_volume(fs: *const Fxfs) -> c_int {
 ///
 /// `fs` is mounted, and `buf` holds `size` writable bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_manifest(fs: *const Fxfs, buf: *mut u8, size: usize) -> isize {
+pub unsafe extern "C" fn cladefs_manifest(fs: *const Fxfs, buf: *mut u8, size: usize) -> isize {
     // SAFETY: As the caller promises.
     match block_on(unsafe { &*fs }.manifest()) {
         Ok(manifest) if manifest.len() > size => -(ERANGE as isize),
@@ -586,7 +586,7 @@ pub unsafe extern "C" fn fxfs_manifest(fs: *const Fxfs, buf: *mut u8, size: usiz
 ///
 /// `filesystem` is open, `name` holds `len` bytes, and `manifest` holds `size`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_import(
+pub unsafe extern "C" fn cladefs_import(
     filesystem: *const Filesystem,
     name: *const c_char,
     len: usize,
@@ -627,7 +627,7 @@ pub unsafe extern "C" fn fxfs_seal(filesystem: *const Filesystem) -> c_int {
 ///
 /// `filesystem` is open.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_resize(filesystem: *const Filesystem) -> c_int {
+pub unsafe extern "C" fn cladefs_resize(filesystem: *const Filesystem) -> c_int {
     // SAFETY: As the caller promises.
     let filesystem = unsafe { &*filesystem };
     match block_on(filesystem.resize()) {
@@ -640,7 +640,7 @@ pub unsafe extern "C" fn fxfs_resize(filesystem: *const Filesystem) -> c_int {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_fsync(fs: *const Fxfs) -> c_int {
+pub unsafe extern "C" fn cladefs_fsync(fs: *const Fxfs) -> c_int {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     match block_on(fs.fsync()) {
@@ -653,7 +653,7 @@ pub unsafe extern "C" fn fxfs_fsync(fs: *const Fxfs) -> c_int {
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_punch(fs: *const Fxfs, ino: u64, offset: u64, len: u64) -> c_int {
+pub unsafe extern "C" fn cladefs_punch(fs: *const Fxfs, ino: u64, offset: u64, len: u64) -> c_int {
     // SAFETY: As the caller promises.
     match block_on(unsafe { &*fs }.punch(ino, offset..offset.saturating_add(len))) {
         Ok(()) => 0,
@@ -665,20 +665,20 @@ pub unsafe extern "C" fn fxfs_punch(fs: *const Fxfs, ino: u64, offset: u64, len:
 ///
 /// `fs` is mounted, and `attr` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_getattr(fs: *const Fxfs, ino: u64, attr: *mut Attr) -> c_int {
+pub unsafe extern "C" fn cladefs_getattr(fs: *const Fxfs, ino: u64, attr: *mut Attr) -> c_int {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     // SAFETY: As the caller promises.
     unsafe { write_attr(block_on(fs.reading(|| fs.attr_by_handle(ino))), attr) }
 }
 
-/// cladefs: the attributes of the object `ino`, as `fxfs_getattr`'s, but of one no name links too.
+/// cladefs: the attributes of the object `ino`, as `cladefs_getattr`'s, but of one no name links too.
 ///
 /// # Safety
 ///
 /// `fs` is mounted, and `attr` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_attr_of_open(fs: *const Fxfs, ino: u64, attr: *mut Attr) -> c_int {
+pub unsafe extern "C" fn cladefs_attr_of_open(fs: *const Fxfs, ino: u64, attr: *mut Attr) -> c_int {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     // SAFETY: As the caller promises.
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn fxfs_attr_of_open(fs: *const Fxfs, ino: u64, attr: *mut
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_journal_offset(fs: *const Fxfs) -> u64 {
+pub unsafe extern "C" fn cladefs_journal_offset(fs: *const Fxfs) -> u64 {
     // SAFETY: As the caller promises.
     unsafe { &*fs }.filesystem().journal().file_offset()
 }
@@ -700,7 +700,7 @@ pub unsafe extern "C" fn fxfs_journal_offset(fs: *const Fxfs) -> u64 {
 ///
 /// `fs` is mounted, and `statfs` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_statfs(fs: *const Fxfs, statfs: *mut StatFs) -> c_int {
+pub unsafe extern "C" fn cladefs_statfs(fs: *const Fxfs, statfs: *mut StatFs) -> c_int {
     // SAFETY: As the caller promises.
     let fs = unsafe { &*fs };
     match block_on(fs.statfs()) {
@@ -715,7 +715,7 @@ pub unsafe extern "C" fn fxfs_statfs(fs: *const Fxfs, statfs: *mut StatFs) -> c_
 ///
 /// `fs` is mounted, and `set` readable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_write_inode(fs: *const Fxfs, ino: u64, set: *const SetAttr) -> c_int {
+pub unsafe extern "C" fn cladefs_write_inode(fs: *const Fxfs, ino: u64, set: *const SetAttr) -> c_int {
     // SAFETY: As the caller promises.
     match unsafe { block_on((*fs).setattr(ino, &*set)) } {
         Ok(()) => 0,
@@ -728,7 +728,7 @@ pub unsafe extern "C" fn fxfs_write_inode(fs: *const Fxfs, ino: u64, set: *const
 /// `fs` is mounted, `name` holds `len` bytes, `xattrs` `nr_xattrs` extended attributes, each
 /// holding the bytes it says, and `attr` and `dir_attr` are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_create(
+pub unsafe extern "C" fn cladefs_create(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -755,8 +755,8 @@ pub unsafe extern "C" fn fxfs_create(
     }
 }
 
-/// cladefs: an extended attribute a new object is made with (`fxfs_create`), as C has it
-/// (`struct fxfs_xattr`).
+/// cladefs: an extended attribute a new object is made with (`cladefs_create`), as C has it
+/// (`struct cladefs_xattr`).
 #[repr(C)]
 pub struct Xattr {
     name: *const c_char,
@@ -770,7 +770,7 @@ pub struct Xattr {
 /// `fs` is mounted, `name` holds `len` bytes, `target` `target_len`, and `attr` and `dir_attr`
 /// are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_symlink(
+pub unsafe extern "C" fn cladefs_symlink(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -794,7 +794,7 @@ pub unsafe extern "C" fn fxfs_symlink(
 ///
 /// `fs` is mounted, and `buf` has room for `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_readlink(
+pub unsafe extern "C" fn cladefs_readlink(
     fs: *const Fxfs,
     ino: u64,
     buf: *mut c_char,
@@ -816,7 +816,7 @@ pub unsafe extern "C" fn fxfs_readlink(
 ///
 /// `fs` is mounted, `name` holds `len` bytes, and `attr` and `dir_attr` are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_link(
+pub unsafe extern "C" fn cladefs_link(
     fs: *const Fxfs,
     ino: u64,
     dir: u64,
@@ -837,7 +837,7 @@ pub unsafe extern "C" fn fxfs_link(
 ///
 /// `fs` is mounted, and `attr` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_clone_range(
+pub unsafe extern "C" fn cladefs_clone_range(
     fs: *const Fxfs,
     src: u64,
     offset: u64,
@@ -858,7 +858,7 @@ pub unsafe extern "C" fn fxfs_clone_range(
 ///
 /// `fs` is mounted, and `attr` writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_tmpfile(
+pub unsafe extern "C" fn cladefs_tmpfile(
     fs: *const Fxfs,
     dir: u64,
     mode: u32,
@@ -874,7 +874,7 @@ pub unsafe extern "C" fn fxfs_tmpfile(
 ///
 /// `fs` is mounted, and `name` holds `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_unlink_later(
+pub unsafe extern "C" fn cladefs_unlink_later(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -893,7 +893,7 @@ pub unsafe extern "C" fn fxfs_unlink_later(
 ///
 /// `fs` is mounted, `name` holds `len` bytes, and `dir_attr` is writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_unlink(
+pub unsafe extern "C" fn cladefs_unlink(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -913,7 +913,7 @@ pub unsafe extern "C" fn fxfs_unlink(
 /// `fs` is mounted, `name` holds `len` bytes, `new_name` `new_len`, and `attr`, `dir_attr` and
 /// `new_dir_attr` are writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_rename(
+pub unsafe extern "C" fn cladefs_rename(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -944,7 +944,7 @@ pub unsafe extern "C" fn fxfs_rename(
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_cached_objects(fs: *const Fxfs) -> u64 {
+pub unsafe extern "C" fn cladefs_cached_objects(fs: *const Fxfs) -> u64 {
     // SAFETY: As the caller promises.
     unsafe { (*fs).cached() }
 }
@@ -957,7 +957,7 @@ pub unsafe extern "C" fn fxfs_cached_objects(fs: *const Fxfs) -> u64 {
 ///
 /// `filesystem` is open, and `buf` holds `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_stats(
+pub unsafe extern "C" fn cladefs_stats(
     filesystem: *const Filesystem,
     buf: *mut u8,
     len: usize,
@@ -974,7 +974,7 @@ pub unsafe extern "C" fn fxfs_stats(
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_free_cached_objects(fs: *const Fxfs, count: u64) -> u64 {
+pub unsafe extern "C" fn cladefs_free_cached_objects(fs: *const Fxfs, count: u64) -> u64 {
     // SAFETY: As the caller promises.
     unsafe { (*fs).free_cached(count) }
 }
@@ -983,7 +983,7 @@ pub unsafe extern "C" fn fxfs_free_cached_objects(fs: *const Fxfs, count: u64) -
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_evict(fs: *const Fxfs, ino: u64, unlinked: bool) {
+pub unsafe extern "C" fn cladefs_evict(fs: *const Fxfs, ino: u64, unlinked: bool) {
     // SAFETY: As the caller promises.
     unsafe { (*fs).evict(ino, unlinked) }
 }
@@ -992,7 +992,7 @@ pub unsafe extern "C" fn fxfs_evict(fs: *const Fxfs, ino: u64, unlinked: bool) {
 ///
 /// `fs` is mounted, and `buf` holds `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_write(
+pub unsafe extern "C" fn cladefs_write(
     fs: *const Fxfs,
     ino: u64,
     offset: u64,
@@ -1007,7 +1007,7 @@ pub unsafe extern "C" fn fxfs_write(
     }
 }
 
-/// One of `fxfs_read_into`'s buffers: `struct fxfs_read_part`.
+/// One of `cladefs_read_into`'s buffers: `struct cladefs_read_part`.
 #[repr(C)]
 pub struct ReadPart {
     buf: *mut u8,
@@ -1019,7 +1019,7 @@ pub struct ReadPart {
 /// `fs` is mounted, `parts` holds `count` parts, and each part's `buf` has room for its `len`
 /// bytes, none of them another's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_read_into(
+pub unsafe extern "C" fn cladefs_read_into(
     fs: *const Fxfs,
     ino: u64,
     offset: u64,
@@ -1039,7 +1039,7 @@ pub unsafe extern "C" fn fxfs_read_into(
     }
 }
 
-/// One of `fxfs_write_many`'s writes: `struct fxfs_write_part`.
+/// One of `cladefs_write_many`'s writes: `struct cladefs_write_part`.
 #[repr(C)]
 pub struct WritePart {
     offset: u64,
@@ -1050,9 +1050,9 @@ pub struct WritePart {
 /// # Safety
 ///
 /// `fs` is mounted, `parts` holds `count` parts, and each part's `data` its `len` bytes; `dirty`
-/// bytes of the file's dirty data, which they write, have room reserved (`fxfs_reserve_dirty`).
+/// bytes of the file's dirty data, which they write, have room reserved (`cladefs_reserve_dirty`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_write_many(
+pub unsafe extern "C" fn cladefs_write_many(
     fs: *const Fxfs,
     ino: u64,
     parts: *const WritePart,
@@ -1079,7 +1079,7 @@ pub unsafe extern "C" fn fxfs_write_many(
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_reserve_dirty(fs: *const Fxfs, ino: u64, bytes: u64) -> c_int {
+pub unsafe extern "C" fn cladefs_reserve_dirty(fs: *const Fxfs, ino: u64, bytes: u64) -> c_int {
     // SAFETY: As the caller promises.
     match unsafe { &*fs }.reserve_dirty(ino, bytes) {
         Ok(()) => 0,
@@ -1094,7 +1094,7 @@ pub unsafe extern "C" fn fxfs_reserve_dirty(fs: *const Fxfs, ino: u64, bytes: u6
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_reserve_dirty_what_fits(fs: *const Fxfs, ino: u64, bytes: u64) {
+pub unsafe extern "C" fn cladefs_reserve_dirty_what_fits(fs: *const Fxfs, ino: u64, bytes: u64) {
     // SAFETY: As the caller promises.
     unsafe { &*fs }.reserve_dirty_what_fits(ino, bytes)
 }
@@ -1106,7 +1106,7 @@ pub unsafe extern "C" fn fxfs_reserve_dirty_what_fits(fs: *const Fxfs, ino: u64,
 ///
 /// `fs` is mounted.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_release_dirty(fs: *const Fxfs, ino: u64, bytes: u64) {
+pub unsafe extern "C" fn cladefs_release_dirty(fs: *const Fxfs, ino: u64, bytes: u64) {
     // SAFETY: As the caller promises.
     unsafe { &*fs }.release_dirty(ino, bytes)
 }
@@ -1115,7 +1115,7 @@ pub unsafe extern "C" fn fxfs_release_dirty(fs: *const Fxfs, ino: u64, bytes: u6
 ///
 /// `fs` is mounted, `name` holds `len` bytes, and `attr` is writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_lookup(
+pub unsafe extern "C" fn cladefs_lookup(
     fs: *const Fxfs,
     dir: u64,
     name: *const c_char,
@@ -1128,7 +1128,7 @@ pub unsafe extern "C" fn fxfs_lookup(
     unsafe { write_attr(block_on(fs.reading(|| fs.lookup(dir, name))), attr) }
 }
 
-/// What `fxfs_readdir` calls for each entry, until it returns false.
+/// What `cladefs_readdir` calls for each entry, until it returns false.
 type Emit =
     extern "C" fn(ctx: *mut c_void, name: *const c_char, len: usize, ino: u64, mode: u32) -> bool;
 
@@ -1137,7 +1137,7 @@ type Emit =
 /// `fs` is mounted, `emit` may be called with `ctx`, and `after`, unless null, holds `after_len`
 /// bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_readdir(
+pub unsafe extern "C" fn cladefs_readdir(
     fs: *const Fxfs,
     dir: u64,
     index: u64,
@@ -1165,7 +1165,7 @@ pub unsafe extern "C" fn fxfs_readdir(
 ///
 /// `fs` is mounted, and `buf` has room for `len` bytes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn fxfs_read(
+pub unsafe extern "C" fn cladefs_read(
     fs: *const Fxfs,
     ino: u64,
     offset: u64,

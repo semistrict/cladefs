@@ -19,7 +19,7 @@ pub struct TestFxfsGuestChecks {
     /// Whether the device has a DAX window, and the guest maps files into it.
     pub dax: bool,
     /// cladefs: whether the guest's DAX code sleeps at the steps of its protocol where tasks race
-    /// (fxfs.dax_delay_us), from the run's seed, widening the races' windows (TASK-119.3).
+    /// (cladefs.dax_delay_us), from the run's seed, widening the races' windows (TASK-119.3).
     #[cfg_attr(feature = "guest", allow(dead_code))]
     pub delay: bool,
     /// cladefs: whether the DAX window is small, 32 MiB, as the checks' files fill it: ranges are
@@ -293,7 +293,7 @@ fn torture(n: usize) -> String {
 /// Size of the image, which is sparse.
 #[cfg_attr(feature = "guest", allow(dead_code))]
 const IMAGE_SIZE: u64 = 256 << 20;
-/// cladefs: the directory a coverage kernel's counts of fs/fxfs's sources `COVERED` are left in for
+/// cladefs: the directory a coverage kernel's counts of fs/cladefs's sources `COVERED` are left in for
 /// the host, as the guest's checks end (TASK-119.14).
 const COVERAGE: &str = "coverage";
 const COVERED: [&str; 3] = ["dax", "device", "super"];

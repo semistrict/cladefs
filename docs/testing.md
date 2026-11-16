@@ -132,7 +132,7 @@ under `fxjob`, copying the results back and removing the worktree
 The protocols whose bugs are rare interleavings have TLA+ specs, which TLC
 model-checks exhaustively over small bounds (`specs/`): live read-only
 followers (`specs/follower`, backlog doc-8), the guest Fxfs's copy-on-write
-DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/fxfs/dax.c`),
+DAX (`specs/dax-cow`, backlog doc-13, `guest/linux/fs/cladefs/dax.c`),
 branches in the bucket with the host's write-ahead log (`specs/bucket`,
 backlog doc-7 and doc-14), and Fxfs's super-block claiming only what its
 journal flushed (`specs/journal`). Each rule

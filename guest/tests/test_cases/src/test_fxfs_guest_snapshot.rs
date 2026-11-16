@@ -555,7 +555,7 @@ mod guest {
     use std::os::fd::AsRawFd;
 
     const MNT: &str = "/mnt/fxfs";
-    /// The volume a mount naming none mounts (fs/fxfs's FXFS_DEFAULT_VOLUME).
+    /// The volume a mount naming none mounts (fs/cladefs's CLADEFS_DEFAULT_VOLUME).
     const FXFS_DEFAULT: &str = "default";
     /// `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
     const FIFREEZE: libc::c_ulong = 0xc004_5877;
@@ -565,7 +565,7 @@ mod guest {
         let (source, target, fstype) = (
             CString::new("extents").unwrap(),
             CString::new(MNT).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
         );
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
@@ -627,7 +627,7 @@ mod guest {
         let (source, target, fstype, options) = (
             CString::new("extents").unwrap(),
             CString::new(target).unwrap(),
-            CString::new("fxfs").unwrap(),
+            CString::new("cladefs").unwrap(),
             CString::new(format!("volume={name}")).unwrap(),
         );
         let ret = unsafe {
@@ -660,7 +660,7 @@ mod guest {
 
     /// What the filesystem says of itself as `name`, a count, since it opened.
     fn stat(name: &str) -> Option<u64> {
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap();
         let line = stats.lines().find_map(|line| line.strip_prefix(name)?.strip_prefix(' '));
         line.map(|count| count.parse().unwrap())
     }

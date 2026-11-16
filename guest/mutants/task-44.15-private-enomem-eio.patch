@@ -6,11 +6,11 @@
 #
 # TASK-44.15: a PRIVATE the guest found no memory to ask for fails its write EIO, which says data
 # was lost, not ENOMEM (fxfs-guest-fsx-faults-dax, GCE r698): an iomap's or, since TASK-164.11, one
-# made before the write's lock, both through fxfs_dax_private_failed. cow_private_failed: the write
+# made before the write's lock, both through cladefs_dax_private_failed. cow_private_failed: the write
 # whose request couldn't be allocated.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2648,7 +2648,7 @@
  			    offset, err);
  	atomic_long_sub(counted, &dax->private);

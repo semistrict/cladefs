@@ -7,7 +7,7 @@
 //!
 //! The concurrency protocol (crates/follower, TASK-42.5, TASK-42.10) keeps readers and the
 //! follower's batches apart with the kernel's own rwsem, the follower's fill barrier, which
-//! fs/fxfs's C keeps (`ffi`, vfs.h): its readers hold it shared from before they read the trees
+//! fs/cladefs's C keeps (`ffi`, vfs.h): its readers hold it shared from before they read the trees
 //! until what they read is in the kernel's caches, or copied out; a batch holds it exclusively
 //! while it drops what the kernel caches of what it changes, under each inode's invalidate_lock (a
 //! file's data ranges, mapped or cached; a directory's dentries, which revalidate), applies its
@@ -35,19 +35,19 @@ mod ffi {
     use core::ffi::c_void;
 
     unsafe extern "C" {
-        pub fn fxfs_vfs_fill_begin_extern(vfs: *mut c_void);
-        pub fn fxfs_vfs_fill_end_extern(vfs: *mut c_void);
-        pub fn fxfs_vfs_fill_barrier_assert_held(vfs: *mut c_void);
-        pub fn fxfs_vfs_fill_barrier_take(vfs: *mut c_void);
-        pub fn fxfs_vfs_fill_barrier_release(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_commit(vfs: *mut c_void, which: u32, commit: u64);
-        pub fn fxfs_vfs_follow_failing() -> bool;
-        pub fn fxfs_vfs_drop_file(vfs: *mut c_void, ino: u64, ranges: *const Range, count: usize);
-        pub fn fxfs_vfs_drop_entries(vfs: *mut c_void, ino: u64);
-        pub fn fxfs_vfs_settle_file(vfs: *mut c_void, ino: u64, attr: *const Attr, gone: bool);
+        pub fn cladefs_vfs_fill_begin_extern(vfs: *mut c_void);
+        pub fn cladefs_vfs_fill_end_extern(vfs: *mut c_void);
+        pub fn cladefs_vfs_fill_barrier_assert_held(vfs: *mut c_void);
+        pub fn cladefs_vfs_fill_barrier_take(vfs: *mut c_void);
+        pub fn cladefs_vfs_fill_barrier_release(vfs: *mut c_void);
+        pub fn cladefs_vfs_follow_commit(vfs: *mut c_void, which: u32, commit: u64);
+        pub fn cladefs_vfs_follow_failing() -> bool;
+        pub fn cladefs_vfs_drop_file(vfs: *mut c_void, ino: u64, ranges: *const Range, count: usize);
+        pub fn cladefs_vfs_drop_entries(vfs: *mut c_void, ino: u64);
+        pub fn cladefs_vfs_settle_file(vfs: *mut c_void, ino: u64, attr: *const Attr, gone: bool);
     }
 
-    /// `struct fxfs_range`: bytes of a file a batch changed, from `start` to `end`, exclusive.
+    /// `struct cladefs_range`: bytes of a file a batch changed, from `start` to `end`, exclusive.
     #[repr(C)]
     #[derive(Clone, Copy)]
     pub struct Range {
@@ -61,7 +61,7 @@ const FOLLOW_APPLIED: u32 = 0;
 /// The follower's state is as of a commit no earlier than this one: its batch settled.
 const FOLLOW_SETTLED: u32 = 1;
 
-/// The kernel's primitives, as fs/fxfs's C has them for the superblock `vfs`, for the volume
+/// The kernel's primitives, as fs/cladefs's C has them for the superblock `vfs`, for the volume
 /// whose store is `volume`.
 pub struct GuestKernel {
     vfs: *mut c_void,
@@ -102,14 +102,14 @@ impl GuestKernel {
     /// Says the follower's state is as of commit `commit`, as `which` says (FOLLOW_*).
     fn as_of(&self, which: u32, commit: u64) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_commit(self.vfs, which, commit) };
+        unsafe { ffi::cladefs_vfs_follow_commit(self.vfs, which, commit) };
     }
 
     /// Checks, in a debug kernel (lockdep), that the current task holds the fill barrier: as a
     /// read of the trees must, on behalf of a reader.
     pub fn assert_filling(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_fill_barrier_assert_held(self.vfs) };
+        unsafe { ffi::cladefs_vfs_fill_barrier_assert_held(self.vfs) };
     }
 
     fn ours<'a>(&self, objects: impl IntoIterator<Item = &'a StoreObject>) -> Vec<u64> {
@@ -123,22 +123,22 @@ impl Kernel for GuestKernel {
 
     fn fill_begin(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_fill_begin_extern(self.vfs) }
+        unsafe { ffi::cladefs_vfs_fill_begin_extern(self.vfs) }
     }
 
     fn fill_end(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_fill_end_extern(self.vfs) }
+        unsafe { ffi::cladefs_vfs_fill_end_extern(self.vfs) }
     }
 
     fn barrier_take(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_fill_barrier_take(self.vfs) }
+        unsafe { ffi::cladefs_vfs_fill_barrier_take(self.vfs) }
     }
 
     fn barrier_release(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_fill_barrier_release(self.vfs) }
+        unsafe { ffi::cladefs_vfs_fill_barrier_release(self.vfs) }
     }
 
     fn drop_cached(&self, changes: &Arc<GuestChanges>) {
@@ -154,11 +154,11 @@ impl Kernel for GuestKernel {
         }
         for (ino, ranges) in &files {
             // SAFETY: The superblock outlives the filesystem, and `ranges` the call.
-            unsafe { ffi::fxfs_vfs_drop_file(self.vfs, *ino, ranges.as_ptr(), ranges.len()) };
+            unsafe { ffi::cladefs_vfs_drop_file(self.vfs, *ino, ranges.as_ptr(), ranges.len()) };
         }
         for ino in self.ours(&changes.changes.entries) {
             // SAFETY: The superblock outlives the filesystem.
-            unsafe { ffi::fxfs_vfs_drop_entries(self.vfs, ino) };
+            unsafe { ffi::cladefs_vfs_drop_entries(self.vfs, ino) };
         }
         if changes.changes.volumes_deleted.contains(&self.volume) {
             log::error!("the writer deleted the volume this follower follows");
@@ -170,7 +170,7 @@ impl Kernel for GuestKernel {
             let gone = attr.is_none();
             let attr = attr.as_ref().map_or(core::ptr::null(), |attr| attr as *const Attr);
             // SAFETY: The superblock outlives the filesystem, and `attr` the call.
-            unsafe { ffi::fxfs_vfs_settle_file(self.vfs, *ino, attr, gone) };
+            unsafe { ffi::cladefs_vfs_settle_file(self.vfs, *ino, attr, gone) };
         }
         self.as_of(FOLLOW_SETTLED, changes.commit.load(Ordering::Acquire));
     }
@@ -238,7 +238,7 @@ impl GuestFollow<'_> {
     /// take as it settles, and says its commit is applied.
     async fn applied(&self, changes: &GuestChanges) -> Result<(), Error> {
         // SAFETY: Reads a module parameter.
-        ensure!(!unsafe { ffi::fxfs_vfs_follow_failing() }, "a test failed the batch");
+        ensure!(!unsafe { ffi::cladefs_vfs_follow_failing() }, "a test failed the batch");
         let mut attrs = Vec::new();
         for ino in changes.objects(self.0.volume_id()) {
             attrs.push((ino, self.0.attr_applied(ino).await?));

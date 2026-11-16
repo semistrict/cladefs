@@ -9,17 +9,17 @@
 # after a writeback may have moved the page's block. cow_private_failed: the write succeeds, and the
 # store reaches a page no PRIVATE made the VM's.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2714,9 +2714,9 @@
  					  (u64)(pages + ahead) << PAGE_SHIFT);
  		atomic64_inc(&dax->privates);
  		if (err) {
--			err = fxfs_dax_private_failed(dax, fxfs_dax_page_offset(range, first),
+-			err = cladefs_dax_private_failed(dax, cladefs_dax_page_offset(range, first),
 -						      pages + ahead, newly + beyond, err);
 -			goto unreserve;
-+			pr_warn_ratelimited("fxfs: making %lu pages at %llx of the window private: %d\n",
-+					    pages + ahead, fxfs_dax_page_offset(range, first), err);
++			pr_warn_ratelimited("cladefs: making %lu pages at %llx of the window private: %d\n",
++					    pages + ahead, cladefs_dax_page_offset(range, first), err);
 +			err = 0;
  		}
  		WRITE_ONCE(range->file->dirtied, jiffies);

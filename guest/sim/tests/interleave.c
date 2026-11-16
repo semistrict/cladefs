@@ -158,7 +158,7 @@ static void stamp_make(struct stamp *stamp, u64 ino, loff_t at, int worker, u64 
 {
 	*stamp = (struct stamp) {
 		.magic = STAMP_MAGIC, .ino = ino, .cell = at / SLOT, .worker = worker,
-		.generation = generation, .seals = fxfs_sim_seals(mount->info->fs),
+		.generation = generation, .seals = cladefs_sim_seals(mount->info->fs),
 	};
 	stamp->check = stamp_hash(stamp);
 }
@@ -188,7 +188,7 @@ static void stamp_log(const char *what, const void *bytes)
 	else
 		sim_log("interleave: %s: worker %u's generation %llu of ino %u at %llu, made after %u seals, of %llu now\n",
 			what, stamp.worker, stamp.generation, stamp.ino, (u64)stamp.cell * SLOT,
-			stamp.seals, fxfs_sim_seals(mount->info->fs));
+			stamp.seals, cladefs_sim_seals(mount->info->fs));
 }
 
 /* What is wrong with `got`, read of `ino` at `at`, worker's, between generations: or NULL. */
@@ -207,7 +207,7 @@ static const char *stamp_wrong(const struct stamp *got, u64 ino, loff_t at, int 
 		return "another worker's data";
 	if (got->generation < low)
 		return "a stale read";
-	if (got->generation > high || got->seals > fxfs_sim_seals(mount->info->fs))
+	if (got->generation > high || got->seals > cladefs_sim_seals(mount->info->fs))
 		return "a read from the future";
 	return NULL;
 }
@@ -223,7 +223,7 @@ static __noreturn void wrong_read(const char *what, const char *why, struct file
 		stamp_log("read", got);
 	if (expected)
 		stamp_log("expected", expected);
-	fxfs_sim_read(mount->info->fs, ino, cell_of(at), held, SLOT);
+	cladefs_sim_read(mount->info->fs, ino, cell_of(at), held, SLOT);
 	stamp_log("in Fxfs's extents", held);
 	sim_log("interleave: page %llu of ino %llu\n", at >> PAGE_SHIFT, ino);
 	if (tracing) {
@@ -260,7 +260,7 @@ static bool failed_as_asked(ssize_t result)
 }
 
 /*
- * Whether a read or a load that fell short (`cut`) was made to by fxfs.dax_fail_maps, whose
+ * Whether a read or a load that fell short (`cut`) was made to by cladefs.dax_fail_maps, whose
  * count was `left` before it: it fails any range's map of more than one piece, whichever way in
  * mapped it, a read's too, which says EIO, or stops short, or a load's fault SIGBUS, as of a
  * device's MAP error. Another task's taking one meanwhile passes for this one's.
@@ -270,7 +270,7 @@ static bool map_failure_injected(bool cut, unsigned long left)
 	return cut && sim_param_read("dax_fail_maps") < left;
 }
 
-/* sim_read, again as long as fxfs.dax_fail_maps cuts it short: a read never fails else. */
+/* sim_read, again as long as cladefs.dax_fail_maps cuts it short: a read never fails else. */
 static ssize_t read_file(struct file *file, loff_t at, void *buf, size_t len)
 {
 	unsigned long left;
@@ -424,7 +424,7 @@ static void private_resync(struct worker *worker)
 	 */
 	check(!sim_fsync(worker->file), "an fsync after a failed write");
 	held = kmalloc(PRIVATE_MAX, GFP_KERNEL);
-	fxfs_sim_read(mount->info->fs, file_inode(worker->file)->i_ino, 0, held, size);
+	cladefs_sim_read(mount->info->fs, file_inode(worker->file)->i_ino, 0, held, size);
 	check_bytes("a file after a failed write, against Fxfs's extents", worker->file, whole, held,
 		    size, 0);
 	kfree(held);
@@ -562,7 +562,7 @@ static void private_truncate(struct worker *worker)
 	check(!err || failed_as_asked(err), "a truncate: %d", err);
 	/*
 	 * A growth that failed leaves the file as long as it was: the inode saying a size Fxfs
-	 * hasn't, read in again the file is Fxfs's size, the stores past it lost (fxfs_data_resize).
+	 * hasn't, read in again the file is Fxfs's size, the stores past it lost (cladefs_data_resize).
 	 */
 	check(!err || size <= worker->size || i_size_read(file_inode(worker->file)) == worker->size,
 	      "a growth to %lld that failed (%d) left the file %lld bytes long, not %lld", size, err,
@@ -868,7 +868,7 @@ static void fsync_check(const struct fsync_check *watched)
 	if (watched->slot->flying || watched->slot->begun != watched->begun ||
 	    watched->done.generation != watched->begun)
 		return;
-	fxfs_sim_read(mount->info->fs, file_inode(watched->file->file)->i_ino, watched->at, &held,
+	cladefs_sim_read(mount->info->fs, file_inode(watched->file->file)->i_ino, watched->at, &held,
 		      SLOT);
 	if (memcmp(&held, &watched->done, SLOT))
 		wrong_read("Fxfs's extents after an fsync", all_zeros(&held, SLOT) ?
@@ -903,7 +903,7 @@ static void syncer_task(void *arg)
 /* Each worker's every slot of a file must be its last store, in Fxfs's extents. */
 static void check_slots(const struct slots *file)
 {
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs *fs = mount->info->fs;
 	u64 ino = file_inode(file->file)->i_ino;
 	struct stamp held;
 	unsigned long page;
@@ -911,7 +911,7 @@ static void check_slots(const struct slots *file)
 
 	for (owner = 0; owner < WORKERS; owner++) {
 		for (page = 0; page < file->pages; page++) {
-			fxfs_sim_read(fs, ino, slot_at(owner, page), &held, SLOT);
+			cladefs_sim_read(fs, ino, slot_at(owner, page), &held, SLOT);
 			check_bytes("a file's extents", file->file, (char *)&held,
 				    (char *)&file->slots[owner][page].done, SLOT,
 				    slot_at(owner, page));
@@ -921,16 +921,16 @@ static void check_slots(const struct slots *file)
 
 static void check_extents(const struct worker *worker)
 {
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs *fs = mount->info->fs;
 	char *whole;
 
-	check(fxfs_sim_size(fs, file_inode(worker->file)->i_ino) == worker->size,
+	check(cladefs_sim_size(fs, file_inode(worker->file)->i_ino) == worker->size,
 	      "worker %d's file is %llu bytes long, not %lld", worker->id,
-	      fxfs_sim_size(fs, file_inode(worker->file)->i_ino), worker->size);
+	      cladefs_sim_size(fs, file_inode(worker->file)->i_ino), worker->size);
 	whole = kmalloc(PRIVATE_MAX, GFP_KERNEL);
-	fxfs_sim_read(fs, file_inode(worker->file)->i_ino, 0, whole, worker->size);
+	cladefs_sim_read(fs, file_inode(worker->file)->i_ino, 0, whole, worker->size);
 	check_bytes("its file's extents", worker->file, whole, worker->private, worker->size, 0);
-	fxfs_sim_read(fs, file_inode(worker->twin)->i_ino, 0, whole, worker->twin_size);
+	cladefs_sim_read(fs, file_inode(worker->twin)->i_ino, 0, whole, worker->twin_size);
 	check_bytes("its twin's extents", worker->twin, whole, worker->twin_bytes,
 		    worker->twin_size, 0);
 	kfree(whole);
@@ -1043,7 +1043,7 @@ int main(int argc, char **argv)
 
 			if (sscanf(argv[i + 1], "%llu", &ino) == 1 &&
 			    sscanf(argv[i + 2], "%llu", &page) == 1)
-				fxfs_sim_watch(ino, page);
+				cladefs_sim_watch(ino, page);
 		} else if (!strcmp(argv[i], "-w") && sscanf(argv[i + 1], "%llx", &page) == 1)
 			sim_device_watch(page);
 	}
@@ -1053,7 +1053,7 @@ int main(int argc, char **argv)
 		sim_param_set("dax_trace", "1");
 	setup();
 	if (failing)
-		fxfs_sim_fail(32);
+		cladefs_sim_fail(32);
 	if (verbose)
 		sim_log("interleave: %lu hot pages, Fxfs fails %d, a MAP fails %d\n", hot_pages,
 			failing, failing_maps);
@@ -1079,7 +1079,7 @@ int main(int argc, char **argv)
 	for (i = 0; i < WORKERS; i++)
 		check_extents(&workers[i]);
 	sim_end(SIM_END_FILES_READ);
-	fxfs_sim_stats(&written, &freed, &failed);
+	cladefs_sim_stats(&written, &freed, &failed);
 	sim_log("interleave: seed %llu passed: %llu points, %llu switches, %llu device maps, %llu blocks written back, %llu extents freed, %llu transactions failed, %lu PMDs, trace %llx\n",
 		seed, sim_points(), sim_switches(), sim_device_maps(), written, freed, failed,
 		huge_mapped, sim_trace_hash());

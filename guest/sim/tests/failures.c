@@ -116,7 +116,7 @@ static void check_known(const char *what, struct tracked *file, const char *got,
 	for (i = 0; i < len; i++) {
 		if (got[i] == file->bytes[at + i] || test_bit(at + i, file->unknown))
 			continue;
-		fxfs_sim_read(mount->info->fs, file_inode(file->file)->i_ino, at + i, &held, 1);
+		cladefs_sim_read(mount->info->fs, file_inode(file->file)->i_ino, at + i, &held, 1);
 		sim_log("failures: Fxfs's extents hold %#x there\n", (u8)held);
 		sim_panic("%s at %lld of ino %lu: byte %zu is %#x, not %#x", what, at,
 			  file_inode(file->file)->i_ino, i, (u8)got[i], (u8)file->bytes[at + i]);
@@ -445,7 +445,7 @@ static void check_whole(struct worker *worker, struct tracked *file)
 	check_known("reading it all", file, got, 0, file->size);
 	err = sim_fsync(file->file);
 	check(!err, "fsync: %d", err);
-	fxfs_sim_read(mount->info->fs, file_inode(file->file)->i_ino, 0, held, file->size);
+	cladefs_sim_read(mount->info->fs, file_inode(file->file)->i_ino, 0, held, file->size);
 	for (i = 0; i < file->size; i++) {
 		if (got[i] == held[i])
 			continue;
@@ -614,7 +614,7 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "-W") && i + 2 < argc &&
 			 sscanf(argv[i + 1], "%llu", &ino) == 1 &&
 			 sscanf(argv[i + 2], "%llu", &page) == 1)
-			fxfs_sim_watch(ino, page);
+			cladefs_sim_watch(ino, page);
 	}
 	setup();
 	if (watched_address)

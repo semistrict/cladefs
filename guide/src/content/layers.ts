@@ -11,11 +11,11 @@ export const layers: Layer[] = [
     what: "Linux, running Fuchsia's Fxfs in the kernel",
     role:
       "Each VM's own Linux kernel runs Fxfs, Fuchsia's Rust filesystem, which owns every byte of " +
-      "metadata: the host never sees a file. Linux's VFS calls C glue (fs/fxfs), which calls Fxfs " +
+      "metadata: the host never sees a file. Linux's VFS calls C glue (fs/cladefs), which calls Fxfs " +
       "through one POSIX layer shared with the host's tools. Fxfs keeps the filesystem as extents " +
       "on the device below, and maps sealed ones straight from host memory (DAX).",
-    dirs: ["guest/linux/fs/fxfs", "guest/rust/fxfs-linux", "crates/fxfs-posix", "crates/fxfs"],
-    anchors: ["vfs_fsync", "fxfs_fsync", "posix_fsync", "platform", "journal_commit", "lsm", "guest_fault", "guest_dirty"],
+    dirs: ["guest/linux/fs/cladefs", "guest/rust/cladefs-linux", "crates/fxfs-posix", "crates/fxfs"],
+    anchors: ["vfs_fsync", "cladefs_fsync", "posix_fsync", "platform", "journal_commit", "lsm", "guest_fault", "guest_dirty"],
     docs: ["doc-2", "doc-3", "doc-6", "doc-13"],
     provenance:
       "Fxfs and its libraries are Fuchsia's, copied. cladefs changed some of their files (extents in " +
@@ -30,7 +30,7 @@ export const layers: Layer[] = [
       "Fxfs writes through a virtio device whose requests name extents, never blocks: READ, WRITE, " +
       "FREE, COMMIT, and for DAX, MAP, UNMAP, MAP_ZEROS and PRIVATE. One queue per CPU. The " +
       "device's DAX window is a range of guest physical memory the host fills with pages.",
-    dirs: ["guest/linux/drivers/virtio_extent", "guest/linux/fs/fxfs/device.c", "guest/rust/fxfs-linux/src/device.rs"],
+    dirs: ["guest/linux/drivers/virtio_extent", "guest/linux/fs/cladefs/device.c", "guest/rust/cladefs-linux/src/device.rs"],
     anchors: ["extent_device", "dev_commit_root", "device_submit", "virtio_submit", "device_trait", "extent_id"],
     docs: ["doc-4"],
     provenance: "cladefs's own, against Fuchsia's storage_device::Device trait, which cladefs extended with extents.",

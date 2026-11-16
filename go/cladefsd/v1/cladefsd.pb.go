@@ -2272,7 +2272,7 @@ func (x *VmStats) GetGuest() *GuestStats {
 	return nil
 }
 
-// What a guest's Fxfs counted, as its /proc/fs/fxfs/TAG says.
+// What a guest's Fxfs counted, as its /proc/fs/cladefs/TAG says.
 type GuestStats struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The commit it was built of, empty if it didn't say.

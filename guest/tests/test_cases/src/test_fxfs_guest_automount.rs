@@ -161,7 +161,7 @@ mod guest {
 
     /// The volumes the filesystem has open, as it says (TASK-136.6).
     fn volumes_open() -> usize {
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap();
         let line = stats.lines().find_map(|line| line.strip_prefix("volumes_open "));
         line.expect("no volumes_open").parse().unwrap()
     }
@@ -190,7 +190,7 @@ mod guest {
         // A lookup returns once mounted.
         let repo = format!("{ROOT}/repo");
         check_published(&repo);
-        assert_eq!(mounted(&repo).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&repo).as_deref(), Some("cladefs"));
         let dev = |path: &str| fs::metadata(path).unwrap().dev();
         assert_ne!(dev(&repo), dev(MNT));
         fs::write(format!("{repo}/written"), b"the consumer's\n").unwrap();
@@ -207,7 +207,7 @@ mod guest {
                 });
             }
         });
-        assert_eq!(mounted(&other).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&other).as_deref(), Some("cladefs"));
         assert_eq!(volumes_open(), before + 2);
 
         // A name refused: no mount, no volume.
@@ -226,7 +226,7 @@ mod guest {
         assert_eq!(volumes_open(), before);
         assert_eq!(fs::read(format!("{repo}/written")).unwrap(), b"the consumer's\n");
         check_published(&repo);
-        assert_eq!(mounted(&repo).as_deref(), Some("fxfs"));
+        assert_eq!(mounted(&repo).as_deref(), Some("cladefs"));
     }
 
     fn rebooted() {

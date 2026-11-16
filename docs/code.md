@@ -63,7 +63,7 @@ its tests when the port was deleted (TASK-96.1).
 ## `crates/fxfs-posix`: Fxfs's files and directories
 
 One POSIX layer over Fxfs's object stores, which the guest kernel's VFS calls
-(`guest/rust/fxfs-linux`) and the host's filesystem calls as a library
+(`guest/rust/cladefs-linux`) and the host's filesystem calls as a library
 (`crates/cladefs`), generic over what differs between them (`Platform`): the
 guest's, Fxfs in the kernel, the host's, images being built.
 
@@ -234,9 +234,9 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 The design in backlog doc-2 moves Fxfs into the guest's Linux kernel, over a
 virtio extent store. Its first pieces, from TASK-26.1's spike:
 
-- `guest/linux/fs/fxfs`: the kernel's side, in C. `super.c` is the VFS glue
+- `guest/linux/fs/cladefs`: the kernel's side, in C. `super.c` is the VFS glue
   (superblock, inodes, lookup, readdir, read) over the filesystem's Rust
-  (`fxfs.h`), and `rt.c` gives Rust memory (kvmalloc), logging, panics,
+  (`cladefs.h`), and `rt.c` gives Rust memory (kvmalloc), logging, panics,
   sleeping, work items, timers, the clocks and randomness (`rt.h`). Every call
   into Rust runs in a NOFS allocation scope.
 - `guest/rust`: Rust built for the kernel's targets
@@ -247,18 +247,18 @@ virtio extent store. Its first pieces, from TASK-26.1's spike:
   runtime: the global allocator, printk logging, the panic handler, and an
   executor (`block_on` sleeps the calling thread, `spawn` polls on kernel
   workers, `Timer` uses hrtimers).
-  `fxfs-linux` is the filesystem, Fxfs for the kernel, and `std` is a std for
+  `cladefs-linux` is the filesystem, Fxfs for the kernel, and `std` is a std for
   crates written for one (see below).
 - `scripts/build-guest-kernel.sh` builds Amazon Linux's 6.18 kernel (the
   release it pins), configured as Firecracker's CI configures the 6.18 guests
-  it supports, with fs/fxfs built in, the Rust linked into it as one object of
+  it supports, with fs/cladefs built in, the Rust linked into it as one object of
   what the kernel calls (link-time optimized). The kernel itself has no Rust
   support enabled: Kbuild never sees the Rust. cladefs's changes to the kernel
   are a series of commits on the release (`guest/linux/patches`, each
   with the files of `guest/linux` it adds), which the script makes in the
   kernel's tree and builds. Its `out/<arch>` has what builds the same kernel
-  elsewhere: `patches/` (`git am` them on the release), `libfxfs_linux.a`
-  (copy it to `fs/fxfs/`) and `cladefs.config` (cladefs's options, over
+  elsewhere: `patches/` (`git am` them on the release), `libcladefs_linux.a`
+  (copy it to `fs/cladefs/`) and `cladefs.config` (cladefs's options, over
   Firecracker's configuration).
 - `scripts/probe-guest-std.sh` builds Fxfs's third-party dependencies
   (`guest/std-probe`) for the kernel's targets, against a sysroot whose `std`
@@ -274,7 +274,7 @@ cache, aligned or not), reflinks (`FICLONE`, `FICLONERANGE`, `cp --reflink`,
 and `copy_file_range`, which share extents, counted per range in the
 allocator, and copy nothing), freezing, NFS export's file handles, a
 shrinker of its cached records, and a device's volumes mounted side by side
-(`mount -t fxfs -o volume=NAME tag path`), each with a superblock of its own,
+(`mount -t cladefs -o volume=NAME tag path`), each with a superblock of its own,
 opened as it mounts, sharing the device's journal and DAX window: the filesystem
 freezes once all of them are frozen. What programs see of the rest (the guest
 suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):

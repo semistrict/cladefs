@@ -25,7 +25,7 @@ const progress: Progress = {
       at: 6,
       kind: "question",
       text: "Why shared here?",
-      place: { ...place, quote: "holding the file's semaphore shared", code: { path: "guest/linux/fs/fxfs/dax.c", snippet: "static int fxfs_dax_dirty(" } },
+      place: { ...place, quote: "holding the file's semaphore shared", code: { path: "guest/linux/fs/cladefs/dax.c", snippet: "static int cladefs_dax_dirty(" } },
     },
   ],
 };
@@ -55,7 +55,7 @@ describe("the notebook's blob for Claude", () => {
 
   test("a question carries its quote and the code it was on", () => {
     expect(text).toContain(
-      "1. **Question** on Page Pilot, step 2: A store in fork A, at `guest/linux/fs/fxfs/dax.c`: `static int fxfs_dax_dirty(`:\n\n   > holding the file's semaphore shared\n\n   Why shared here?",
+      "1. **Question** on Page Pilot, step 2: A store in fork A, at `guest/linux/fs/cladefs/dax.c`: `static int cladefs_dax_dirty(`:\n\n   > holding the file's semaphore shared\n\n   Why shared here?",
     );
   });
 

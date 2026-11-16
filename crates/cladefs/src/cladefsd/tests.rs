@@ -961,7 +961,7 @@ fn kernel_load(addr: usize) -> Result<(), i32> {
 }
 
 /// cladefs TASK-187: a guest's stray access, a load or a store at a window offset nothing maps
-/// (fxfs.dax_stray, fxfs-guest-crash-stray-dax), its page faulted first by KVM's asynchronous page
+/// (cladefs.dax_stray, fxfs-guest-crash-stray-dax), its page faulted first by KVM's asynchronous page
 /// fault's worker, writing, then by the vCPU, stays refused, withheld, however often the vCPU
 /// retries it as the VMM does ([`AccessFailures`](crate::AccessFailures)), each retry lifting what
 /// the stage restricted for workers' writes; and is given up on, its VM stopped (Firecracker's

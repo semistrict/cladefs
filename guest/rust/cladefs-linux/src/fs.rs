@@ -34,7 +34,7 @@ use storage_device::DeviceHolder;
 pub type Fxfs = fxfs_posix::Fxfs<Guest>;
 
 /// The volume cladefs's images keep a filesystem's files in (crates/cladefs's `VOLUME_NAME`), which a
-/// mount naming none mounts (fs/fxfs/fxfs.h's FXFS_DEFAULT_VOLUME).
+/// mount naming none mounts (fs/cladefs/cladefs.h's CLADEFS_DEFAULT_VOLUME).
 const VOLUME: &str = "default";
 
 /// When the journal is written, but for syncs: metadata operations stay in memory, as ext4's do
@@ -105,7 +105,7 @@ enum Frozen {
 }
 
 impl Frozen {
-    /// The step it is at, as `fxfs.fail_thaw_at` names it (`FAIL_THAW_AT`).
+    /// The step it is at, as `cladefs.fail_thaw_at` names it (`FAIL_THAW_AT`).
     fn step(&self) -> u32 {
         match self {
             Frozen::Closed { .. } => 1,
@@ -347,7 +347,7 @@ impl Filesystem {
             .is_ok()
         {
             let step = frozen.step();
-            return Err((frozen, anyhow!("fxfs.fail_thaw_at: failing before step {step}")));
+            return Err((frozen, anyhow!("cladefs.fail_thaw_at: failing before step {step}")));
         }
         match frozen {
             Frozen::Closed { commits } => match self.freezer.unfreeze().await {
@@ -416,7 +416,7 @@ impl Filesystem {
         Ok(())
     }
 
-    /// The device, as C has it, for DAX (`struct fxfs_device`).
+    /// The device, as C has it, for DAX (`struct cladefs_device`).
     pub fn device(&self) -> *mut core::ffi::c_void {
         self.dax.device()
     }

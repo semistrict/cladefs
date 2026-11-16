@@ -1444,15 +1444,15 @@ mod guest {
     /// device's requests per operation logged.
     fn observed<T>(workload: &str, count: usize, f: impl FnOnce() -> T) -> T {
         let requests = device_requests().zip(device_request_ns());
-        let waited = fxfs_stats();
+        let waited = cladefs_stats();
         let profiler = Profiler::start();
         let value = f();
         if let Some(profiler) = profiler {
             profiler.report(workload);
         }
         // cladefs: what the guest's Fxfs waited on and did meanwhile, those that changed
-        // (/proc/fs/fxfs/<tag>, TASK-91.7).
-        if let (Some(before), Some(after)) = (waited, fxfs_stats()) {
+        // (/proc/fs/cladefs/<tag>, TASK-91.7).
+        if let (Some(before), Some(after)) = (waited, cladefs_stats()) {
             let changed: Vec<String> = (after.iter())
                 .filter_map(|(name, after)| {
                     let delta = after.checked_sub(*before.get(name)?)?;
@@ -1483,10 +1483,10 @@ mod guest {
         value
     }
 
-    /// cladefs: what the guest's Fxfs counts (/proc/fs/fxfs/<tag>, TASK-91.7), by name, if a
+    /// cladefs: what the guest's Fxfs counts (/proc/fs/cladefs/<tag>, TASK-91.7), by name, if a
     /// filesystem of it is mounted: the first's.
-    fn fxfs_stats() -> Option<std::collections::BTreeMap<String, u64>> {
-        let stats = fs::read_dir("/proc/fs/fxfs").ok()?.find_map(|entry| entry.ok())?.path();
+    fn cladefs_stats() -> Option<std::collections::BTreeMap<String, u64>> {
+        let stats = fs::read_dir("/proc/fs/cladefs").ok()?.find_map(|entry| entry.ok())?.path();
         let text = fs::read_to_string(stats).ok()?;
         Some(
             (text.lines())
@@ -2371,7 +2371,7 @@ mod guest {
                 let dax = if backend == Backend::Ext4DaxPmemFork { "always" } else { "never" };
                 mount(&device, "ext4", &format!("dax={dax}"));
             }
-            _ => mount("bench", "fxfs", ""),
+            _ => mount("bench", "cladefs", ""),
         };
         if role == "base" {
             mount_bench(true);
@@ -2454,12 +2454,12 @@ mod guest {
                     mount(&device, "ext4", "");
                 }
                 Backend::FxfsGuest | Backend::FxfsGuestDax | Backend::FxfsGuestDaxUnsafe => {
-                    mount("bench", "fxfs", "")
+                    mount("bench", "cladefs", "")
                 }
                 // cladefs: the writer runs the workloads once its followers have started; they read,
                 // or only follow.
                 Backend::FxfsGuestDaxFollowed | Backend::FxfsGuestDaxFollowedIdle => {
-                    mount("bench", "fxfs", "");
+                    mount("bench", "cladefs", "");
                     if std::env::var(ROLE).unwrap() != "writer" {
                         follow_reads(self.backend == Backend::FxfsGuestDaxFollowed);
                     }

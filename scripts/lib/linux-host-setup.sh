@@ -218,7 +218,7 @@ host_tree() {
 
 # host_kernel KIND [WORK] builds cladefs's x86-64 guest kernel of KIND from the source
 # (scripts/build-guest-kernel.sh): release; debug (lockdep, KCSAN, DEBUG_ATOMIC_SLEEP); kasan
-# (KASAN, KFENCE, lockdep); coverage (gcov of fs/fxfs); or rust-checks (its Rust's debug
+# (KASAN, KFENCE, lockdep); coverage (gcov of fs/cladefs); or rust-checks (its Rust's debug
 # assertions and overflow checks). It builds in the work directory WORK (default
 # $work/guest-kernel-KIND), its log host_kernel_log (default RESULTS/guest-kernel.log), and
 # refuses to inside a measurement (measurement.sh), and points host_kernel_image at the

@@ -8,16 +8,16 @@
 # in progress has yet to seal it on the device: the host refuses the MAP (-EPERM), and the chunk is
 # mapped as a range of its own instead. cow_map_during_seal's read.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1460,8 +1460,8 @@
  	if (end <= start || READ_ONCE(file->no_slices))
  		return NULL;
  	pages = (end - start) >> PAGE_SHIFT;
--	count = fxfs_dax_sealed_extents(dax, fxfs_vfs_fs(inode->i_sb), inode->i_ino, start,
+-	count = cladefs_dax_sealed_extents(dax, cladefs_vfs_fs(inode->i_sb), inode->i_ino, start,
 -					end - start, &e, 1);
-+	count = fxfs_nofs(fxfs_dax_extents(fxfs_vfs_fs(inode->i_sb), inode->i_ino, start,
++	count = cladefs_nofs(cladefs_dax_extents(cladefs_vfs_fs(inode->i_sb), inode->i_ino, start,
 +						 end - start, &e, 1));
- 	fxfs_dax_delay();
+ 	cladefs_dax_delay();
  	/* Holes, or more than one piece. */
  	if (count == 0 || count == -E2BIG)

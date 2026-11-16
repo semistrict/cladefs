@@ -54,7 +54,7 @@ void sim_shadow_store_begin(struct sim_shadow_call *call, struct file *file, lof
 void sim_shadow_store_end(struct sim_shadow_call *call, const void *bytes, size_t done);
 /* An fsync, which, if it returned 0, has Fxfs hold all the file knows of. */
 void sim_shadow_sync_begin(struct sim_shadow_call *call, struct file *file);
-void sim_shadow_sync_end(struct sim_shadow_call *call, struct fxfs *fs, int err);
+void sim_shadow_sync_end(struct sim_shadow_call *call, struct cladefs *fs, int err);
 /*
  * A user access of `len` bytes at `addr`, a store or a load, through mappings of files, as kernel/mm.c
  * tells the model of it, each mapping's piece a call: `done` bytes of it landed or read, from or into

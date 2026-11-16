@@ -58,11 +58,11 @@ pub fn is_dax(path: &str) -> bool {
     attributes & STATX_ATTR_DAX != 0
 }
 
-/// What the Fxfs mounted from the device tagged `tag` counts, /proc/fs/fxfs/<tag> (TASK-91.7), by
+/// What the Fxfs mounted from the device tagged `tag` counts, /proc/fs/cladefs/<tag> (TASK-91.7), by
 /// name: a histogram (NAME_hist, its buckets' counts comma-separated, TASK-111.6) as how many it
 /// counts.
 pub fn stats(tag: &str) -> std::collections::BTreeMap<String, u64> {
-    let text = fs::read_to_string(format!("/proc/fs/fxfs/{tag}")).unwrap();
+    let text = fs::read_to_string(format!("/proc/fs/cladefs/{tag}")).unwrap();
     (text.lines())
         .map(|line| {
             let (name, value) = line.split_once(' ').unwrap();

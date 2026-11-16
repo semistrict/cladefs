@@ -5,7 +5,7 @@
  * its UNMAP must take all the same: one task, no seals.
  *
  * A file of a chunk, every other page of it written and synced apart, each an extent of its own,
- * holes between: a range of it maps more pieces than a MAP_MANY holds (fxfs_dax_device_map_many),
+ * holes between: a range of it maps more pieces than a MAP_MANY holds (cladefs_dax_device_map_many),
  * so in more requests than one. Cloned whole, and read in, a write to the clone makes its range: the first
  * request maps, the second fails, and the first map of the one by one after it fails too, which
  * fails the write; what the first request mapped, the guest counts mapped nowhere. Once the files

@@ -348,8 +348,8 @@ mod guest {
             said.push(format!("guest_{name}={value}"));
         }
         // cladefs: what its Fxfs counts of copy-on-write DAX's private pages, if it is mounted
-        // (/proc/fs/fxfs/<tag>, the first's).
-        let stats = fs::read_dir("/proc/fs/fxfs").ok().and_then(|mut dir| dir.find_map(Result::ok));
+        // (/proc/fs/cladefs/<tag>, the first's).
+        let stats = fs::read_dir("/proc/fs/cladefs").ok().and_then(|mut dir| dir.find_map(Result::ok));
         let stats = stats.and_then(|stats| fs::read_to_string(stats.path()).ok());
         for line in stats.as_deref().unwrap_or_default().lines() {
             let Some((name, value)) = line.split_once(' ') else { continue };

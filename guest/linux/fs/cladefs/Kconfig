@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 # Copyright 2026 The cladefs Authors.
-config FXFS_FS
+config CLADEFS_FS
 	bool "Fxfs"
 	depends on VIRTIO_EXTENT=y
 	select MAPPING_DIRTY_HELPERS if FS_DAX
@@ -9,4 +9,4 @@ config FXFS_FS
 	  Fuchsia's Fxfs, running in the guest kernels of cladefs's virtual machines,
 	  on the virtio extent-store device.
 	  Its Rust is built outside Kbuild, by cladefs's scripts/build-guest-kernel.sh,
-	  which leaves the archive at fs/fxfs/libfxfs_linux.a.
+	  which leaves the archive at fs/cladefs/libcladefs_linux.a.

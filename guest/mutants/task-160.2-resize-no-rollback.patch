@@ -8,8 +8,8 @@
 # for, which Fxfs hasn't: read in again, the file is Fxfs's size, what was stored past it lost, as
 # guest/sim's copy of the resize had it. interleave's failing seeds: the growth's check.
 
---- a/guest/linux/fs/fxfs/data.c
-+++ b/guest/linux/fs/fxfs/data.c
+--- a/guest/linux/fs/cladefs/data.c
++++ b/guest/linux/fs/cladefs/data.c
 @@ -45,8 +45,6 @@
  	 * and the inode saying a size Fxfs hasn't would lose it at eviction. A cut borrows the room
  	 * it needs (TASK-60), and its pages are gone either way.

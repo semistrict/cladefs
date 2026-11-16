@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! guest/sim's model of Fxfs, through fxfs.h's calls as dax.c and data.c make them, over the
+//! guest/sim's model of Fxfs, through cladefs.h's calls as dax.c and data.c make them, over the
 //! shim's store (shim/shim.c). The model is C with globals of its own, so there is one at a time
 //! (`Model::new`), on one thread. A failure of the model's, a `sim_panic`, panics here.
 //!
@@ -21,7 +21,7 @@ struct Fs {
     _opaque: [u8; 0],
 }
 
-/// `struct fxfs_write_part`.
+/// `struct cladefs_write_part`.
 #[repr(C)]
 struct WritePart {
     offset: u64,
@@ -29,7 +29,7 @@ struct WritePart {
     len: usize,
 }
 
-/// `struct fxfs_dax_extent`: a piece of a file's data, `len` bytes at `offset`, at `extent_offset`
+/// `struct cladefs_dax_extent`: a piece of a file's data, `len` bytes at `offset`, at `extent_offset`
 /// in the extent `sequence`, open (1) or sealed (0).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -44,7 +44,7 @@ pub struct Extent {
     pub extent_size: u64,
 }
 
-/// `FXFS_DAX_OPEN`.
+/// `CLADEFS_DAX_OPEN`.
 pub const OPEN: u32 = 1;
 
 unsafe extern "C-unwind" {
@@ -55,15 +55,15 @@ unsafe extern "C-unwind" {
     fn fxfs_sim_size(fs: *mut Fs, ino: u64) -> u64;
     fn fxfs_sim_read(fs: *mut Fs, ino: u64, offset: u64, buf: *mut c_void, len: usize);
     fn fxfs_sim_reserved(fs: *mut Fs, ino: u64) -> u64;
-    fn fxfs_write_many(
+    fn cladefs_write_many(
         fs: *mut Fs,
         ino: u64,
         parts: *const WritePart,
         count: usize,
         dirty: u64,
     ) -> c_int;
-    fn fxfs_write_inode(fs: *mut Fs, ino: u64, set: *const SetAttr) -> c_int;
-    fn fxfs_clone_range(
+    fn cladefs_write_inode(fs: *mut Fs, ino: u64, set: *const SetAttr) -> c_int;
+    fn cladefs_clone_range(
         fs: *mut Fs,
         src: u64,
         offset: u64,
@@ -73,10 +73,10 @@ unsafe extern "C-unwind" {
         size: u64,
         attr: *mut Attr,
     ) -> c_int;
-    fn fxfs_punch(fs: *mut Fs, ino: u64, offset: u64, len: u64) -> c_int;
-    fn fxfs_fsync(fs: *mut Fs) -> c_int;
-    fn fxfs_reserve_dirty(fs: *mut Fs, ino: u64, bytes: u64) -> c_int;
-    fn fxfs_dax_extents(
+    fn cladefs_punch(fs: *mut Fs, ino: u64, offset: u64, len: u64) -> c_int;
+    fn cladefs_fsync(fs: *mut Fs) -> c_int;
+    fn cladefs_reserve_dirty(fs: *mut Fs, ino: u64, bytes: u64) -> c_int;
+    fn cladefs_dax_extents(
         fs: *mut Fs,
         ino: u64,
         offset: u64,
@@ -84,7 +84,7 @@ unsafe extern "C-unwind" {
         out: *mut Extent,
         max: usize,
     ) -> isize;
-    fn fxfs_set_fail_commits(count: u64);
+    fn cladefs_set_fail_commits(count: u64);
 }
 
 /// A `sim_panic` of the model's, or of the shim's: unwinds to the case that ran it.
@@ -137,7 +137,7 @@ impl Model {
         // SAFETY: the shim's store is the model's alone, and no model exists.
         unsafe {
             sim_device_reset();
-            fxfs_set_fail_commits(0);
+            cladefs_set_fail_commits(0);
             Self { fs: fxfs_sim_new() }
         }
     }
@@ -175,10 +175,10 @@ impl Model {
 
     pub fn reserve_dirty(&self, ino: u64, bytes: u64) -> Result<(), Errno> {
         // SAFETY: As `new_file`'s.
-        result(unsafe { fxfs_reserve_dirty(self.fs, ino, bytes) })
+        result(unsafe { cladefs_reserve_dirty(self.fs, ino, bytes) })
     }
 
-    /// fxfs_write_many: `writes`, bytes at offsets, paid with `dirty` bytes of room reserved.
+    /// cladefs_write_many: `writes`, bytes at offsets, paid with `dirty` bytes of room reserved.
     pub fn write_many(&self, ino: u64, writes: &[(u64, &[u8])], dirty: u64) -> Result<(), Errno> {
         let parts: Vec<_> = writes
             .iter()
@@ -189,12 +189,12 @@ impl Model {
             })
             .collect();
         // SAFETY: As `new_file`'s; each part's data lives through the call.
-        result(unsafe { fxfs_write_many(self.fs, ino, parts.as_ptr(), parts.len(), dirty) })
+        result(unsafe { cladefs_write_many(self.fs, ino, parts.as_ptr(), parts.len(), dirty) })
     }
 
     pub fn write_inode(&self, ino: u64, set: &SetAttr) -> Result<(), Errno> {
         // SAFETY: As `new_file`'s.
-        result(unsafe { fxfs_write_inode(self.fs, ino, set) })
+        result(unsafe { cladefs_write_inode(self.fs, ino, set) })
     }
 
     pub fn clone_range(
@@ -209,26 +209,26 @@ impl Model {
         let mut attr = Attr::default();
         // SAFETY: As `new_file`'s.
         let status = unsafe {
-            fxfs_clone_range(self.fs, src, offset, len, dst, dst_offset, size, &mut attr)
+            cladefs_clone_range(self.fs, src, offset, len, dst, dst_offset, size, &mut attr)
         };
         result(status).map(|()| attr)
     }
 
     pub fn punch(&self, ino: u64, offset: u64, len: u64) -> Result<(), Errno> {
         // SAFETY: As `new_file`'s.
-        result(unsafe { fxfs_punch(self.fs, ino, offset, len) })
+        result(unsafe { cladefs_punch(self.fs, ino, offset, len) })
     }
 
-    /// A seal: fxfs_fsync.
+    /// A seal: cladefs_fsync.
     pub fn fsync(&self) -> Result<(), Errno> {
         // SAFETY: As `new_file`'s.
-        result(unsafe { fxfs_fsync(self.fs) })
+        result(unsafe { cladefs_fsync(self.fs) })
     }
 
     /// Has the next `count` writebacks fail between their bytes and their commits.
     pub fn fail_commits(&self, count: u64) {
         // SAFETY: A global of the model's, which is on this thread.
-        unsafe { fxfs_set_fail_commits(count) }
+        unsafe { cladefs_set_fail_commits(count) }
     }
 
     /// The pieces of `ino`'s data, all of them.
@@ -237,7 +237,7 @@ impl Model {
         loop {
             // SAFETY: As `new_file`'s; `out` holds as many as it says.
             let count = unsafe {
-                fxfs_dax_extents(self.fs, ino, 0, u64::MAX >> 1, out.as_mut_ptr(), out.len())
+                cladefs_dax_extents(self.fs, ino, 0, u64::MAX >> 1, out.as_mut_ptr(), out.len())
             };
             match usize::try_from(count) {
                 Ok(count) => {

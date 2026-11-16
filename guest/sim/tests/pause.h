@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /* Copyright 2026 The cladefs Authors. */
 /*
- * dax.c's pause points (fxfs.dax_pause, TASK-119.9), as guest/tests' checks use them: a test plays
+ * dax.c's pause points (cladefs.dax_pause, TASK-119.9), as guest/tests' checks use them: a test plays
  * an interleaving out exactly. Each scenario here is a guest check's, so that the check's steps
  * are seen to reach what they mean to, where only a guest could tell otherwise.
  */

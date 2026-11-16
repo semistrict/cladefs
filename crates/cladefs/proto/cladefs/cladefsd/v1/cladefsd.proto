@@ -609,7 +609,7 @@ message VmStats {
   optional GuestStats guest = 11;
 }
 
-// What a guest's Fxfs counted, as its /proc/fs/fxfs/TAG says.
+// What a guest's Fxfs counted, as its /proc/fs/cladefs/TAG says.
 message GuestStats {
   // The commit it was built of, empty if it didn't say.
   string build = 1;

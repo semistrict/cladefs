@@ -1,11 +1,11 @@
 # SPDX-License-Identifier: GPL-2.0
 # Copyright 2026 The cladefs Authors.
-fs/fxfs: Fxfs, on the extent-store device
+fs/cladefs: Fxfs, on the extent-store device
 
-Fuchsia's Fxfs in the guest's kernel (cladefs's backlog doc-2): fs/fxfs,
+Fuchsia's Fxfs in the guest's kernel (cladefs's backlog doc-2): fs/cladefs,
 which this adds, and the lines that build it. Its Rust is built outside
 Kbuild, by cladefs's scripts/build-guest-kernel.sh, and linked in from the
-archive it leaves at fs/fxfs/libfxfs_linux.a.
+archive it leaves at fs/cladefs/libcladefs_linux.a.
 
 diff --git a/fs/Kconfig b/fs/Kconfig
 --- a/fs/Kconfig
@@ -14,7 +14,7 @@ diff --git a/fs/Kconfig b/fs/Kconfig
  source "fs/quota/Kconfig"
  
  source "fs/autofs/Kconfig"
-+source "fs/fxfs/Kconfig"
++source "fs/cladefs/Kconfig"
  source "fs/fuse/Kconfig"
  source "fs/overlayfs/Kconfig"
  
@@ -25,7 +25,7 @@ diff --git a/fs/Makefile b/fs/Makefile
  obj-$(CONFIG_AUTOFS_FS)		+= autofs/
  obj-$(CONFIG_ADFS_FS)		+= adfs/
  obj-$(CONFIG_FUSE_FS)		+= fuse/
-+obj-$(CONFIG_FXFS_FS)		+= fxfs/
++obj-$(CONFIG_CLADEFS_FS)		+= cladefs/
  obj-$(CONFIG_OVERLAY_FS)	+= overlayfs/
  obj-$(CONFIG_ORANGEFS_FS)       += orangefs/
  obj-$(CONFIG_UDF_FS)		+= udf/

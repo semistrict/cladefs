@@ -775,5 +775,5 @@ pub fn copy<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W)
 pub fn _print(level: i32, args: fmt::Arguments<'_>) {
     let message = alloc_crate::fmt::format(args);
     // SAFETY: Logs the message's bytes.
-    unsafe { crate::sys::fxfs_rt_log(level, message.as_ptr().cast(), message.len()) };
+    unsafe { crate::sys::cladefs_rt_log(level, message.as_ptr().cast(), message.len()) };
 }

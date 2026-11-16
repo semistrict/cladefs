@@ -285,7 +285,7 @@ pub(super) fn test_stale_entry_flushed() {
     fs::remove_file(&other).unwrap();
 }
 
-/// cladefs: a write whose range's MAP fails after its first piece (the fxfs.dax_fail_maps fault
+/// cladefs: a write whose range's MAP fails after its first piece (the cladefs.dax_fail_maps fault
 /// injection, as a device's MAP error): the chunk in pieces, written back as the page cache's
 /// (created here, a page-cache inode until read in again, doc-13, TASK-164.3) whole, then pages
 /// 0 and 2 again, and read in again, no range mapping it yet. The write fails (EIO), and leaves
@@ -365,8 +365,8 @@ pub(super) fn test_write_killed() {
 }
 
 /// cladefs: a chunk of a file in pieces, which its range's own space maps in one request: that
-/// request fails having mapped the first (fxfs.dax_fail_map_many), and the pieces are mapped
-/// one by one; and that fails too at the second (fxfs.dax_fail_fallbacks), the range left with
+/// request fails having mapped the first (cladefs.dax_fail_map_many), and the pieces are mapped
+/// one by one; and that fails too at the second (cladefs.dax_fail_fallbacks), the range left with
 /// the first alone: a read fails, and the next maps it all; so does a write, leaving the file
 /// as it was. Each on a clone of the file: evicted, a file keeps what its ranges map, which
 /// needs no map (TASK-119.13). The file is read in again from sealed extents (doc-13), and its

@@ -9,7 +9,7 @@
 (* dirties, the host makes the VM's own, a private copy of it at the same *)
 (* address (the device's DAX feature), before any store reaches it.       *)
 (* Fxfs allocates the blocks at writeback, as the page cache's path       *)
-(* does, and commits after their bytes: guest/linux/fs/fxfs/dax.c, DAX    *)
+(* does, and commits after their bytes: guest/linux/fs/cladefs/dax.c, DAX    *)
 (* as it is since writable DAX went (dead-ends/writable-dax.md).          *)
 (*                                                                         *)
 (* A file of a few pages (Pages), one task storing to them, one doing the *)
@@ -89,7 +89,7 @@
 (*   waits on, so that the guest never asks the host for a private page   *)
 (*   past private_max.                                                     *)
 (* - bytesFirst: writeback commits after its bytes are written (Fxfs's     *)
-(*   fxfs_write_many), so that a crash shows old or new data, never what   *)
+(*   cladefs_write_many), so that a crash shows old or new data, never what   *)
 (*   a new extent held unwritten.                                           *)
 (* - installAsNamed: a load's fault installs the page as the window names *)
 (*   it then, its look and its install one step, under the lock the      *)
@@ -256,7 +256,7 @@ SLock ==
     /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, semX, sPage,
                    sWay, stores, wVars>>
 
-\* fxfs_dax_iomap_begin, IOMAP_WRITE (fxfs_dax_cow_dirty): the page made private on the host
+\* cladefs_dax_iomap_begin, IOMAP_WRITE (fxfs_dax_cow_dirty): the page made private on the host
 \* (privateAtIomap), unless the host refuses, then dirty, counted private (countPrivate); a fault
 \* maps it writable before its iomap_end.
 SBegin ==
@@ -283,7 +283,7 @@ SCopy ==
     /\ spc' = IF CanStore(sPage) THEN "unlock" ELSE "stopped"
     /\ UNCHANGED <<fxfsVars, errors, guestVars, sPage, sWay, wVars>>
 
-\* fxfs_dax_iomap_end; a fault holds its page's DAX entry until it returns (SReturn).
+\* cladefs_dax_iomap_end; a fault holds its page's DAX entry until it returns (SReturn).
 SUnlock ==
     /\ spc = "unlock"
     /\ semR' = semR \ {"S"}
@@ -372,7 +372,7 @@ WWp ==
     /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, dirty, wb, sealing, counted, semX, semR, sVars,
                    wOp, wPage, floor, buf, punches>>
 
-\* fxfs_write_many's copy of the pages, from the window into its transfer buffer.
+\* cladefs_write_many's copy of the pages, from the window into its transfer buffer.
 WCopy ==
     /\ wpc = "copy"
     /\ buf' = [p \in Pages |-> IF p \in wb THEN win[p].data ELSE buf[p]]
@@ -420,7 +420,7 @@ WUnlock ==
     /\ UNCHANGED <<hostVars, fxfsVars, ghostVars, pte, dirty, wb, sealing, counted, sVars, wOp,
                    floor, punches>>
 
-\* An fsync's seal (fxfs_fsync), after its writeback.
+\* An fsync's seal (cladefs_fsync), after its writeback.
 WFsSeal ==
     /\ wpc = "fsSeal"
     /\ SealEffect

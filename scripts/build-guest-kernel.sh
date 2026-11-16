@@ -6,8 +6,8 @@
 # Build the guest kernel with Fxfs in it (doc-2, TASK-26.1): Amazon Linux's 6.18 kernel, the
 # release below, configured as Firecracker's CI configures the 6.18 guests it supports (its
 # configurations, in guest/linux/configs, and its docs/kernel-policy.md), with cladefs's series of
-# patches (guest/linux/patches) adding fs/fxfs and drivers/virtio_extent from guest/linux, and the
-# filesystem's Rust, which cargo builds from guest/rust, linked into fs/fxfs (TASK-39.6).
+# patches (guest/linux/patches) adding fs/cladefs and drivers/virtio_extent from guest/linux, and the
+# filesystem's Rust, which cargo builds from guest/rust, linked into fs/cladefs (TASK-39.6).
 #
 #   build-guest-kernel.sh [arm64|x86_64]
 #
@@ -15,7 +15,7 @@
 # it in Lima: scripts/lib/lima.sh build-guest-kernel.sh. The sources and the build live under
 # $CLADEFS_GUEST_KERNEL_WORK (default: ~/cladefs-guest-kernel), and its out/<arch> gets the kernel
 # (Image for arm64, vmlinux for x86-64, as Firecracker loads them) and what builds it elsewhere,
-# on the same release: patches/, the series (git am); libfxfs_linux.a, the Rust, for fs/fxfs; and
+# on the same release: patches/, the series (git am); libcladefs_linux.a, the Rust, for fs/cladefs; and
 # cladefs.config, cladefs's options over the configuration. CLADEFS_GUEST_KERNEL_PROFILE (below) builds
 # one for profiling, CLADEFS_GUEST_KERNEL_LOCK_STAT one counting locks' contention,
 # CLADEFS_GUEST_KERNEL_DEBUG one checking its locking and races, CLADEFS_GUEST_KERNEL_KASAN one checking
@@ -85,10 +85,10 @@ commit() {
     # The header, but for its license lines, up to the diff.
     series=$(sed -n '/^diff --git /q; /^# /d; p' "$patch" | kgit commit-tree "$tree" -p "$series")
 }
-commit 0001-sched-fxfs-tls.patch include/linux/fxfs_tls.h
+commit 0001-sched-cladefs-tls.patch include/linux/cladefs_tls.h
 commit 0002-stack-size.patch
 commit 0003-virtio-extent.patch drivers/virtio_extent include/linux/virtio_extent.h
-commit 0004-fxfs.patch fs/fxfs
+commit 0004-cladefs.patch fs/cladefs
 commit 0007-dax-say-why-a-fault-fails.patch
 commit 0010-dax-read-replaces-no-entry-naming-its-page.patch
 commit 0011-dax-a-folio-put-for-good-keeps-no-share-count.patch
@@ -141,8 +141,8 @@ fi
 if [[ ${CLADEFS_GUEST_KERNEL_LOCK_STAT:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_KERNEL --enable LOCK_STAT
 fi
-# cladefs: with CLADEFS_GUEST_KERNEL_COVERAGE=1, a kernel that counts what fs/fxfs runs (gcov, which
-# fs/fxfs/Makefile asks of its C), for scripts/guest-coverage.py (TASK-119.14): built with its own
+# cladefs: with CLADEFS_GUEST_KERNEL_COVERAGE=1, a kernel that counts what fs/cladefs runs (gcov, which
+# fs/cladefs/Makefile asks of its C), for scripts/guest-coverage.py (TASK-119.14): built with its own
 # CLADEFS_GUEST_KERNEL_WORK.
 if [[ ${CLADEFS_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
     "$src/scripts/config" --file "$src/.config" --enable DEBUG_FS --enable GCOV_KERNEL
@@ -169,11 +169,11 @@ if [[ ${CLADEFS_GUEST_KERNEL_COVERAGE:-} == 1 ]]; then
     grep -q '^CONFIG_GCOV_KERNEL=y' "$src/.config" ||
         { echo "the coverage kernel has no CONFIG_GCOV_KERNEL" >&2; exit 1; }
 fi
-grep -q '^CONFIG_FXFS_FS=y' "$src/.config"
+grep -q '^CONFIG_CLADEFS_FS=y' "$src/.config"
 grep -q '^CONFIG_VIRTIO_EXTENT=y' "$src/.config"
 grep -q '^CONFIG_VIRTIO_PMEM=y' "$src/.config"
 grep -q '^CONFIG_SERIAL_8250_CONSOLE=y' "$src/.config"
-# cladefs: fs/fxfs's tracepoints, in tracefs and for BPF (cladefs.config, TASK-44.16).
+# cladefs: fs/cladefs's tracepoints, in tracefs and for BPF (cladefs.config, TASK-44.16).
 grep -q '^CONFIG_FTRACE=y' "$src/.config"
 grep -q '^CONFIG_BPF_EVENTS=y' "$src/.config"
 # cladefs: an oops panics, and a panic resets the VM (cladefs.config, TASK-311).
@@ -194,28 +194,28 @@ rustflags=$("$root/scripts/build-guest-sysroot.sh" "$target" "$work/rust-$arch")
 (cd "$root/guest/rust" && CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=$rust_checks \
     CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS=$rust_checks RUSTFLAGS="$rustflags" \
     CARGO_TARGET_DIR="$work/rust-$arch/target" \
-    cargo build --release -p fxfs-linux --target "$target")
-cp "$work/rust-$arch/target/$target/release/libfxfs_linux.a" "$src/fs/fxfs/"
+    cargo build --release -p cladefs-linux --target "$target")
+cp "$work/rust-$arch/target/$target/release/libcladefs_linux.a" "$src/fs/cladefs/"
 # The kernel's memcpy and friends for Rust too, not compiler_builtins' generic ones: those are in
 # members of their own, which would otherwise define them for the whole kernel (arm64's own are
 # weak), copying a byte at a time where the kernel's copy words.
 string_functions='memcpy|memmove|memset|memcmp|bcmp|strlen'
-archive="$src/fs/fxfs/libfxfs_linux.a"
+archive="$src/fs/cladefs/libcladefs_linux.a"
 nm -A --defined-only "$archive" 2>/dev/null |
     awk -v names="^($string_functions)\$" '$NF ~ names { split($1, f, ":"); print f[2] }' |
     sort -u | while read -r member; do ar d "$archive" "$member"; done
 cp "$archive" "$out/"
 
-# cladefs: the commit the build is of, which the filesystem shows in /proc/fs/fxfs/build
+# cladefs: the commit the build is of, which the filesystem shows in /proc/fs/cladefs/build
 # (scripts/build-commit.sh, TASK-111.7).
 commit=$("$root/scripts/build-commit.sh")
 make -C "$src" "${make_args[@]}" -j"${CLADEFS_GUEST_KERNEL_JOBS:-$(nproc)}" KBUILD_BUILD_USER=root KBUILD_BUILD_HOST=cladefs \
-    FXFS_BUILD_COMMIT="$commit" "$make_target"
+    CLADEFS_BUILD_COMMIT="$commit" "$make_target"
 # The kernel's own memcpy, which Rust calls, is in the kernel: not Rust's. nm's listing whole,
 # before grep reads it: errexit stops at nm failing, and nothing stops nm part way.
-rust_symbols=$(nm "$src/fs/fxfs/fxfs_rust.o")
+rust_symbols=$(nm "$src/fs/cladefs/cladefs_rust.o")
 if grep -E " [TtWw] ($string_functions)\$" <<< "$rust_symbols" >&2; then
-    echo "fxfs_rust.o defines the string functions above, which must be the kernel's" >&2
+    echo "cladefs_rust.o defines the string functions above, which must be the kernel's" >&2
     exit 1
 fi
 cp "$src/$image" "$out/"

@@ -8,8 +8,8 @@
 # pages it swapped out clean, their extents Fxfs's old ones, and maps those over the private pages
 # it is writing. cow_rebind_during_writeback.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2334,7 +2334,6 @@
  	 * them, and an fsync returns only once they are durable. Returning at once, as no page was
  	 * dirty, an fsync met by the worker's writeback sealed none of its pages (guest/sim, seed 962).
@@ -21,7 +21,7 @@
 @@ -2413,7 +2412,6 @@
  out:
  	if (traced)
- 		trace_fxfs_dax_writeback_end(file->ino, err ?: written);
+ 		trace_cladefs_dax_writeback_end(file->ino, err ?: written);
 -	mutex_unlock(&file->wb_lock);
  	kfree(run_parts);
  	kfree(parts);

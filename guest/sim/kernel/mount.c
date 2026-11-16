@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright 2026 The cladefs Authors.
 /*
- * A mounted file, as fs/fxfs/super.c makes one, in the order super.c calls dax.c: the VFS's system
+ * A mounted file, as fs/cladefs/super.c makes one, in the order super.c calls dax.c: the VFS's system
  * calls for tests. super.c itself isn't built: its fsync, and its writing of an inode's attributes,
  * are rewritten here. Its changes of a file as a whole are data.c's, built as they are: a truncate,
  * a punch and a clone go there, as the VFS's system calls do.
@@ -12,20 +12,20 @@
 #include <sim/shadow.h>
 #include <linux/dax.h>
 
-#include "../../linux/fs/fxfs/vfs.h"
-#include "../../linux/fs/fxfs/device.h"
+#include "../../linux/fs/cladefs/vfs.h"
+#include "../../linux/fs/cladefs/device.h"
 
 /* What vfs.h declares of the followers' tests: off, and followers not built. */
-DEFINE_STATIC_KEY_FALSE(fxfs_vfs_followers);
-unsigned int fxfs_follow_iomap_delay_us;
-bool fxfs_follow_skip_barrier;
+DEFINE_STATIC_KEY_FALSE(cladefs_vfs_followers);
+unsigned int cladefs_follow_iomap_delay_us;
+bool cladefs_follow_skip_barrier;
 
 static struct mm_struct sim_mm = { .next = 1UL << 32 };
 
 /* A file opened, as the mount keeps it: whether its inode is evicted. */
 struct sim_file {
 	struct file file;
-	struct fxfs_vfs_inode inode;
+	struct cladefs_vfs_inode inode;
 	struct list_head list;
 	bool evicted;
 };
@@ -56,12 +56,12 @@ static __noreturn void mount_failed(struct sim_mount *mount, const char *why, lo
 	host_end(0);
 }
 
-/* As fxfs_vfs_filesystem_open's and fxfs_vfs_fill_super's, of one volume. */
+/* As cladefs_vfs_filesystem_open's and cladefs_vfs_fill_super's, of one volume. */
 struct sim_mount *sim_mount_new(void)
 {
 	struct sim_mount *mount = kzalloc(sizeof(*mount), GFP_KERNEL);
-	struct fxfs_vfs_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
-	struct fxfs *fs = fxfs_sim_new();
+	struct cladefs_vfs_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
+	struct cladefs *fs = cladefs_sim_new();
 
 	if (!mounted)
 		host_at_exit(unended);
@@ -75,16 +75,16 @@ struct sim_mount *sim_mount_new(void)
 	if (!fs)
 		mount_failed(mount, "no device", -ENODEV);
 	info->fs = fs;
-	info->dax = fxfs_dax_create((struct fxfs_filesystem *)fs);
+	info->dax = cladefs_dax_create((struct cladefs_filesystem *)fs);
 	if (IS_ERR_OR_NULL(info->dax)) {
-		fxfs_sim_free(fs);
-		mount_failed(mount, "fxfs_dax_create", PTR_ERR(info->dax));
+		cladefs_sim_free(fs);
+		mount_failed(mount, "cladefs_dax_create", PTR_ERR(info->dax));
 	}
-	info->dax_volume = fxfs_dax_add_volume(info->dax, fs);
+	info->dax_volume = cladefs_dax_add_volume(info->dax, fs);
 	if (IS_ERR(info->dax_volume)) {
-		fxfs_dax_destroy(info->dax);
-		fxfs_sim_free(fs);
-		mount_failed(mount, "fxfs_dax_add_volume", PTR_ERR(info->dax_volume));
+		cladefs_dax_destroy(info->dax);
+		cladefs_sim_free(fs);
+		mount_failed(mount, "cladefs_dax_add_volume", PTR_ERR(info->dax_volume));
 	}
 	mount->sb.s_fs_info = info;
 	mount->sb.s_maxbytes = MAX_LFS_FILESIZE;
@@ -93,7 +93,7 @@ struct sim_mount *sim_mount_new(void)
 }
 
 /*
- * fxfs_vfs_evict_inode's, for a file nothing maps: its DAX entries go, as truncate_inode_pages_final
+ * cladefs_vfs_evict_inode's, for a file nothing maps: its DAX entries go, as truncate_inode_pages_final
  * has them, and the page's stale fields with them (dax_folio_put), but its ranges stay. As the
  * kernel's eviction, at the last reference: none taken from now (igrab), it waits for those taken
  * already, as reclaim's and the budget's worker's (igrab). Evicted under them, as it was, it read
@@ -116,7 +116,7 @@ void sim_file_evict(struct file *file)
 		if (xa_is_value(entry))
 			dax_delete_mapping_entry(inode->i_mapping, index);
 	}
-	fxfs_dax_evict(inode);
+	cladefs_dax_evict(inode);
 }
 
 /*
@@ -133,7 +133,7 @@ static int sync_mount(struct sim_mount *mount)
 	for (tries = 0; tries < 3; tries++) {
 		int recorded;
 
-		err = fxfs_dax_settle(mount->info->dax);
+		err = cladefs_dax_settle(mount->info->dax);
 		recorded = xchg(&mount->sb.s_wb_err, 0);
 		err = err ?: recorded;
 		if (!err)
@@ -146,11 +146,11 @@ static int sync_mount(struct sim_mount *mount)
 
 /*
  * As an unmount: every mapping of the mount's files gone, synced, as the VFS syncs a filesystem it
- * unmounts, the files' inodes evicted (evict_inodes), then fxfs_vfs_kill_sb's, of the last volume.
+ * unmounts, the files' inodes evicted (evict_inodes), then cladefs_vfs_kill_sb's, of the last volume.
  */
 void sim_mount_free(struct sim_mount *mount)
 {
-	struct fxfs_vfs_info *info = mount->info;
+	struct cladefs_vfs_info *info = mount->info;
 	struct sim_file *file, *next;
 	struct vm_area_struct *vma, *after;
 	int err;
@@ -166,10 +166,10 @@ void sim_mount_free(struct sim_mount *mount)
 		if (!file->evicted)
 			sim_file_evict(&file->file);
 	}
-	fxfs_dax_quiesce(info->dax);
-	fxfs_dax_remove_volume(info->dax, info->dax_volume);
-	fxfs_dax_destroy(info->dax);
-	fxfs_sim_free(info->fs);
+	cladefs_dax_quiesce(info->dax);
+	cladefs_dax_remove_volume(info->dax, info->dax_volume);
+	cladefs_dax_destroy(info->dax);
+	cladefs_sim_free(info->fs);
 	list_for_each_entry_safe(file, next, &mount->files, list) {
 		list_del(&file->list);
 		kfree(file);
@@ -192,7 +192,7 @@ static enum sim_end_files end_files;
 static void end_mount(void *arg)
 {
 	struct sim_mount *mount = arg;
-	struct fxfs *fs = mount->info->fs;
+	struct cladefs *fs = mount->info->fs;
 	struct sim_file *file;
 	loff_t told;
 	int err;
@@ -216,7 +216,7 @@ static void end_mount(void *arg)
 	sim_sweep_pause(true);
 	list_for_each_entry(file, &mount->files, list) {
 		struct inode *inode = &file->inode.vfs;
-		u64 size = fxfs_sim_size(fs, inode->i_ino);
+		u64 size = cladefs_sim_size(fs, inode->i_ino);
 		char *got, *held;
 		ssize_t done;
 		loff_t at;
@@ -247,7 +247,7 @@ static void end_mount(void *arg)
 		}
 		if (done != size)
 			sim_panic("the end: reading ino %lu whole: %zd of %llu", inode->i_ino, done, size);
-		fxfs_sim_read(fs, inode->i_ino, 0, held, size);
+		cladefs_sim_read(fs, inode->i_ino, 0, held, size);
 		for (at = 0; at < size; at++) {
 			if (got[at] != held[at])
 				sim_panic("the end: ino %lu at %lld: read(2) has %#x, and Fxfs's extents %#x",
@@ -283,7 +283,7 @@ void sim_end(enum sim_end_files files)
 static struct file *file_of(struct sim_mount *mount, u64 ino)
 {
 	struct sim_file *opened = kzalloc(sizeof(*opened), GFP_KERNEL);
-	struct fxfs_vfs_inode *fi = &opened->inode;
+	struct cladefs_vfs_inode *fi = &opened->inode;
 	struct file *file = &opened->file;
 	struct inode *inode = &fi->vfs;
 
@@ -301,15 +301,15 @@ static struct file *file_of(struct sim_mount *mount, u64 ino)
 	init_rwsem(&inode->i_data.invalidate_lock);
 	init_rwsem(&inode->i_data.i_mmap_rwsem);
 	INIT_LIST_HEAD(&inode->i_data.i_mmap);
-	fxfs_dax_inode_init(&fi->dax);
+	cladefs_dax_inode_init(&fi->dax);
 	/*
 	 * As read in, whether new or not: created, copying on write, it would be a page-cache inode
 	 * (TASK-164.3), which the sim doesn't build.
 	 */
-	if (!fxfs_dax_set_inode(inode, false) && sim_swept()) {
+	if (!cladefs_dax_set_inode(inode, false) && sim_swept()) {
 		sim_log("sim: sweep: ino %llu stays in the page cache, which the sim has no model of: read in again\n",
 			ino);
-		fxfs_dax_set_inode(inode, false);
+		cladefs_dax_set_inode(inode, false);
 	}
 	if (!IS_DAX(inode))
 		sim_panic("the file isn't a DAX file");
@@ -326,7 +326,7 @@ u64 sim_dax_stat(struct sim_mount *mount, const char *name)
 	char *line;
 
 	m.buf = kzalloc(m.size, GFP_KERNEL);
-	fxfs_dax_show_stats(mount->info->dax, &m);
+	cladefs_dax_show_stats(mount->info->dax, &m);
 	for (line = m.buf; *line; line++) {
 		if ((line == m.buf || line[-1] == '\n') && !strncmp(line, name, len) &&
 		    line[len] == ' ' && sscanf(line + len + 1, "%llu", &value) == 1) {
@@ -339,7 +339,7 @@ u64 sim_dax_stat(struct sim_mount *mount, const char *name)
 
 struct file *sim_file_new(struct sim_mount *mount)
 {
-	u64 ino = fxfs_sim_new_file(mount->info->fs);
+	u64 ino = cladefs_sim_new_file(mount->info->fs);
 
 	sim_shadow_new(mount, ino);
 	return file_of(mount, ino);
@@ -349,13 +349,13 @@ struct file *sim_file_read_in(struct sim_mount *mount, struct file *file)
 {
 	struct file *again;
 	u64 ino = file_inode(file)->i_ino;
-	int err = fxfs_dax_write_back(file_inode(file));
+	int err = cladefs_dax_write_back(file_inode(file));
 
 	if (err)
 		sim_unexpected("writing ino %llu back: %d", ino, err);
 	sim_file_evict(file);
 	again = file_of(mount, ino);
-	i_size_write(file_inode(again), fxfs_sim_size(mount->info->fs, ino));
+	i_size_write(file_inode(again), cladefs_sim_size(mount->info->fs, ino));
 	return again;
 }
 
@@ -431,24 +431,24 @@ ssize_t sim_read_user(struct file *file, loff_t pos, unsigned long addr, size_t 
  * written back, copying on write, which frees the room reserved beyond what writeback took, and
  * sealed.
  */
-void fxfs_vfs_make_room(struct super_block *sb)
+void cladefs_vfs_make_room(struct super_block *sb)
 {
-	struct fxfs_vfs_info *info = fxfs_vfs_info(sb);
+	struct cladefs_vfs_info *info = cladefs_vfs_info(sb);
 
-	if (!fxfs_dax_settle(info->dax))
-		fxfs_nofs(fxfs_fsync(info->fs));
+	if (!cladefs_dax_settle(info->dax))
+		cladefs_nofs(cladefs_fsync(info->fs));
 }
 
-/* fxfs_vfs_fsync, a DAX file's: file_write_and_wait_range, its dirty pages, and the seal. */
-int fxfs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
+/* cladefs_vfs_fsync, a DAX file's: file_write_and_wait_range, its dirty pages, and the seal. */
+int cladefs_vfs_fsync(struct file *file, loff_t start, loff_t end, int datasync)
 {
 	struct inode *inode = file_inode(file);
 	int err = filemap_write_and_wait_range(inode->i_mapping, start, end);
 
 	if (!err)
-		err = fxfs_dax_write_back(inode);
+		err = cladefs_dax_write_back(inode);
 	if (!err)
-		err = fxfs_nofs(fxfs_fsync(fxfs_vfs_fs(inode->i_sb)));
+		err = cladefs_nofs(cladefs_fsync(cladefs_vfs_fs(inode->i_sb)));
 	return err;
 }
 
@@ -459,7 +459,7 @@ int sim_fsync(struct file *file)
 
 	sim_shadow_sync_begin(&call, file);
 	err = file->f_inode->i_fop->fsync(file, 0, LLONG_MAX, 0);
-	sim_shadow_sync_end(&call, fxfs_vfs_fs(file_inode(file)->i_sb), err);
+	sim_shadow_sync_end(&call, cladefs_vfs_fs(file_inode(file)->i_sb), err);
 	return err;
 }
 
@@ -467,14 +467,14 @@ int sim_fsync(struct file *file)
  * super.c's, which writes the inode's mode, owner and times too: here, the size, if `valid` says
  * so, as Fxfs's write_inode takes it.
  */
-int fxfs_vfs_write_attr(struct inode *inode, u32 valid)
+int cladefs_vfs_write_attr(struct inode *inode, u32 valid)
 {
-	struct fxfs_setattr set = {
-		.valid = valid & (FXFS_SET_SIZE | FXFS_SET_KEEP_TAIL),
+	struct cladefs_setattr set = {
+		.valid = valid & (CLADEFS_SET_SIZE | CLADEFS_SET_KEEP_TAIL),
 		.size = i_size_read(inode),
 	};
 
-	return fxfs_nofs(fxfs_write_inode(fxfs_vfs_fs(inode->i_sb), inode->i_ino, &set));
+	return cladefs_nofs(cladefs_write_inode(cladefs_vfs_fs(inode->i_sb), inode->i_ino, &set));
 }
 
 /* truncate(2), as do_truncate has it: the inode's lock, then setattr's change of size. */
@@ -486,7 +486,7 @@ int sim_truncate(struct file *file, loff_t size)
 
 	sim_shadow_resize_begin(&call, file, size);
 	inode_lock(inode);
-	err = fxfs_data_resize(inode, size, NULL, NULL);
+	err = cladefs_data_resize(inode, size, NULL, NULL);
 	inode_unlock(inode);
 	sim_shadow_resize_end(&call, err);
 	return err;
@@ -524,12 +524,12 @@ unsigned long sim_mmap(struct file *file, loff_t offset, size_t len)
 	return sim_mm_map(&sim_mm, file, offset >> PAGE_SHIFT, len);
 }
 
-int fxfs_vfs_file_open(struct inode *inode, struct file *file)
+int cladefs_vfs_file_open(struct inode *inode, struct file *file)
 {
 	return 0;
 }
 
-int fxfs_vfs_file_release(struct inode *inode, struct file *file)
+int cladefs_vfs_file_release(struct inode *inode, struct file *file)
 {
 	return 0;
 }

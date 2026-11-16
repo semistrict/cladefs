@@ -8,13 +8,13 @@
 # meanwhile are to reach: a fault on the write's own source mapped the chunk only as large as the
 # file, and the write's end was lost (xfstests generic/638).
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -3009,7 +3009,6 @@
- 	fxfs_dax_write_follows(file, iocb->ki_pos, end);
+ 	cladefs_dax_write_follows(file, iocb->ki_pos, end);
  	/* The ranges the file's end moves into, mapped as large as they need. */
  	if (end > old_size) {
 -		WRITE_ONCE(file->growing, end);
  		filemap_invalidate_lock(inode->i_mapping);
- 		ret = fxfs_dax_fit(inode, end);
+ 		ret = cladefs_dax_fit(inode, end);
  		if (!ret && iocb->ki_pos > old_size)

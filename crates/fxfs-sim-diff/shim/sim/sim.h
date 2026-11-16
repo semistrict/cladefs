@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /* Copyright 2026 The cladefs Authors. */
 /*
- * What guest/sim/fxfs/fxfs.c, the sim's model of Fxfs, asks of guest/sim's kernel, over libc, for
+ * What guest/sim/cladefs/cladefs.c, the sim's model of Fxfs, asks of guest/sim's kernel, over libc, for
  * a process of one thread that drives it beside fxfs-posix (crates/fxfs-sim-diff): no scheduler,
  * and so no lock ever waits. A lock taken while held is an operation the harness ran where the
  * model's locks would have had it wait (sim_point), which fails the run.

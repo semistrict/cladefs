@@ -2,9 +2,9 @@
 # Copyright 2026 The cladefs Authors.
 sched: a slot in each task for the thread-local values of Fxfs's Rust
 
-fs/fxfs's Rust keeps thread-local values (its executor's, and std's), in
+fs/cladefs's Rust keeps thread-local values (its executor's, and std's), in
 a slot of the task, which a new task starts without, and which are
-dropped as the task exits (fs/fxfs/rt.c, include/linux/fxfs_tls.h, which
+dropped as the task exits (fs/cladefs/rt.c, include/linux/cladefs_tls.h, which
 this adds too).
 
 diff --git a/include/linux/sched.h b/include/linux/sched.h
@@ -14,8 +14,8 @@ diff --git a/include/linux/sched.h b/include/linux/sched.h
  	/* Journalling filesystem info: */
  	void				*journal_info;
  
-+	/* cladefs: the thread-local values of fs/fxfs's Rust (fs/fxfs/rt.c). */
-+	void				*fxfs_tls;
++	/* cladefs: the thread-local values of fs/cladefs's Rust (fs/cladefs/rt.c). */
++	void				*cladefs_tls;
 +
  	/* Stacked block device info: */
  	struct bio_list			*bio_list;
@@ -27,7 +27,7 @@ diff --git a/kernel/exit.c b/kernel/exit.c
  
  #include "exit.h"
  
-+#include <linux/fxfs_tls.h>
++#include <linux/cladefs_tls.h>
 +
  /*
   * The default value should be high enough to not crash a system that randomly
@@ -36,7 +36,7 @@ diff --git a/kernel/exit.c b/kernel/exit.c
  	exit_shm(tsk);
  	exit_files(tsk);
  	exit_fs(tsk);
-+	fxfs_rt_tls_exit(tsk);
++	cladefs_rt_tls_exit(tsk);
  	if (group_dead)
  		disassociate_ctty(1);
  	exit_nsproxy_namespaces(tsk);
@@ -47,7 +47,7 @@ diff --git a/kernel/fork.c b/kernel/fork.c
  #endif
  
  	p->pagefault_disabled = 0;
-+	p->fxfs_tls = NULL;
++	p->cladefs_tls = NULL;
  
  	lockdep_init_task(p);
  

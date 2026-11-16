@@ -9,7 +9,7 @@
  * one's `done`. A submitter waits for room when
  * the queue is full. The DAX window, if the device has one, is memremapped, so that the guest's
  * Fxfs reads extents mapped into it in place: as pages of a dax_device, with FS_DAX, as
- * virtio_fs_setup_dax makes its cache window, which files map (fs/fxfs/dax.c). cladefs: without
+ * virtio_fs_setup_dax makes its cache window, which files map (fs/cladefs/dax.c). cladefs: without
  * FS_DAX, the driver takes no window: nothing would map it.
  */
 
@@ -71,12 +71,12 @@ struct vext_queue {
 
 /*
  * cladefs: the device's DAX window, its shared memory region, as the pages of a dax_device, which
- * mappings of files map (fs/fxfs/dax.c).
+ * mappings of files map (fs/cladefs/dax.c).
  *
  * Its struct pages are made a part at a time, as dax_direct_access first reaches a part
  * (TASK-92.8). Made whole as the device was probed, a 2 GiB window's took a third of the guest's
  * boot, and 32 MiB of its memory (64 bytes a page), most of which a guest never maps: Fxfs hands
- * the window's space out first fit, from its start and from its middle (fs/fxfs/dax.c). A part is
+ * the window's space out first fit, from its start and from its middle (fs/cladefs/dax.c). A part is
  * a memory section of the window, or what of one it covers: hotplug maps a whole section's struct
  * pages on huge pages, and each making waits for an RCU grace period (mem_hotplug_begin).
  * Nothing reaches the window's memory but through dax_direct_access, so no page is used before it

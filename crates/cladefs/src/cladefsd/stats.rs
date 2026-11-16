@@ -11,7 +11,7 @@
 //! which its device asks the guest's driver for (backlog doc-4's `STATS`), or with none, if its
 //! guest takes no asks ([`super::wire::STATS`]). Once every one answered, or the wait is over, the daemon reads its own
 //! counters: the stats are as of then, each VM's within the wait before it, which says how long
-//! its answer took. Separate reads of `/metrics`, the guests' `/proc/fs/fxfs` and the VM processes'
+//! its answer took. Separate reads of `/metrics`, the guests' `/proc/fs/cladefs` and the VM processes'
 //! threads, which the sandbox team diffed, were taken at moments apart, and said no build.
 
 use super::codec::{StageCounts, Told};
@@ -111,7 +111,7 @@ impl Vm {
 }
 
 /// What a guest's Fxfs counted, as its driver answered ([`super::wire::STATS`]): what its
-/// `/proc/fs/fxfs/TAG` says, and its build.
+/// `/proc/fs/cladefs/TAG` says, and its build.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct GuestStats {
     /// The commit it was built of (its `commit` line), if it said.
@@ -423,7 +423,7 @@ impl Report {
 mod tests {
     use super::*;
 
-    /// TASK-111.4: a guest's stats, as its Fxfs writes them (`/proc/fs/fxfs/TAG`): counters,
+    /// TASK-111.4: a guest's stats, as its Fxfs writes them (`/proc/fs/cladefs/TAG`): counters,
     /// histograms and the build, each line read; a line of neither, left out, the rest kept.
     #[test]
     fn guests_stats_are_their_lines() {

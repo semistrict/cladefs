@@ -8,7 +8,7 @@
 #
 # - specs/follower: live read-only followers' protocol (doc-8);
 # - specs/dax-cow: the guest Fxfs's DAX, copying on write: the window mapping sealed extents and
-#   zeros, a store's page private on the host, written back and rebound (guest/linux/fs/fxfs/dax.c,
+#   zeros, a store's page private on the host, written back and rebound (guest/linux/fs/cladefs/dax.c,
 #   doc-13, TASK-164.4). Writable DAX's specs (dax, dax-region, extent-open) went with it
 #   (dead-ends/writable-dax.md);
 # - specs/bucket: branches in object storage with the host's WAL (doc-7, doc-14, TASK-165.2): its

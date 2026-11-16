@@ -68,7 +68,7 @@ pub(super) fn test_large_folios() {
 /// cladefs: pages scattered across a file, written back together: every other page of a file
 /// of 8 MiB, each written by a write(2) of its own once the file is out of the page cache, so
 /// that each is a folio of its own, and then part of a page past the file's end. Writeback writes
-/// many such folios with one call to Fxfs (fxfs_write_many, TASK-92.10). Read again from the
+/// many such folios with one call to Fxfs (cladefs_write_many, TASK-92.10). Read again from the
 /// device, the file holds what each wrote.
 pub(super) fn test_scattered_writeback() {
     use std::os::unix::fs::FileExt;

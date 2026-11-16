@@ -229,7 +229,7 @@ class Lima(Synced, unittest.TestCase):
 
     def test_the_vms_builds_are_of_the_checkouts_commit(self):
         # The VM's tree has no .git (host_tree), whose builds would say they are of no commit: the
-        # guest kernel's /proc/fs/fxfs/build, which fxfs-guest checks.
+        # guest kernel's /proc/fs/cladefs/build, which fxfs-guest checks.
         ran = self.lima("lib/lima.sh", "settings.sh", commit=True)
         self.assertEqual(ran, (0, f"CLADEFS_BUILD_COMMIT={self.commit}\n", ""))
 
@@ -527,7 +527,7 @@ cat "$(dirname "$0")/../guest/linux/fs.c" "$(dirname "$0")/../crates/fxfs/lib.rs
 """
     CARGO = """#!/bin/bash
 [[ $1 == metadata ]] || { echo "cargo: $*" >&2; exit 3; }
-echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-linux/Cargo.toml"},
+echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/cladefs-linux/Cargo.toml"},
     {"source": null, "manifest_path": "'"$PWD"'/guest/rust/../../crates/fxfs/Cargo.toml"},
     {"source": "registry+https://github.com/rust-lang/crates.io-index",
      "manifest_path": "/registry/serde/Cargo.toml"}]}'
@@ -540,7 +540,7 @@ echo '{"packages": [{"source": null, "manifest_path": "'"$PWD"'/guest/rust/fxfs-
             "Cargo.toml": "[workspace]\n",
             "guest/linux/fs.c": "fs\n",
             "guest/rust/rust-toolchain.toml": '[toolchain]\nchannel = "nightly-2026-10-12"\n',
-            "guest/rust/fxfs-linux/Cargo.toml": "[package]\n",
+            "guest/rust/cladefs-linux/Cargo.toml": "[package]\n",
             "crates/fxfs/Cargo.toml": "[package]\n",
             "crates/fxfs/lib.rs": "fxfs\n",
             # The VMM's, which the kernel isn't built of.

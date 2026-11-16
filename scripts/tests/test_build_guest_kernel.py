@@ -19,29 +19,29 @@ from script import SCRIPTS
 
 FUNCTIONS = ["memcpy", "memmove", "memset", "memcmp", "bcmp", "strlen"]
 TOOLS = {
-    # A clone with fs/fxfs, the series' patches, and a commit's, a tree's or a blob's name.
+    # A clone with fs/cladefs, the series' patches, and a commit's, a tree's or a blob's name.
     "git": """\
 if [[ $1 == -C ]]; then shift 2; fi
 case $1 in
-    clone) mkdir -p "${@: -1}/fs/fxfs" ;;
+    clone) mkdir -p "${@: -1}/fs/cladefs" ;;
     format-patch) while [[ $1 != -o ]]; do shift; done; mkdir -p "$2" ;;
     rev-parse | hash-object | write-tree) echo 0123456789abcdef0123456789abcdef01234567 ;;
     commit-tree) cat > /dev/null; echo 0123456789abcdef0123456789abcdef01234567 ;;
 esac
 """,
-    # The kernel's image, and the object of fs/fxfs's Rust.
+    # The kernel's image, and the object of fs/cladefs's Rust.
     "make": """\
 src=$2
 echo "$@" >> "$FAKE/make"
 if [[ ${@: -1} == vmlinux ]]; then
     : > "$src/vmlinux"
-    : > "$src/fs/fxfs/fxfs_rust.o"
+    : > "$src/fs/cladefs/cladefs_rust.o"
 fi
 """,
     "cargo": """\
 echo "$CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS $CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS" >> "$FAKE/cargo"
 mkdir -p "$CARGO_TARGET_DIR/x86_64-unknown-none/release"
-: > "$CARGO_TARGET_DIR/x86_64-unknown-none/release/libfxfs_linux.a"
+: > "$CARGO_TARGET_DIR/x86_64-unknown-none/release/libcladefs_linux.a"
 """,
     # What the archive's members define, by member, or what the object does, as the test says,
     # by one process, as nm's: a reader that stops early ends it.
@@ -60,7 +60,7 @@ exit "$status"
     "ar": 'echo "$3" >> "$FAKE/deleted"\n',
     "nproc": "echo 8\n",
 }
-MESSAGE = "fxfs_rust.o defines the string functions above, which must be the kernel's\n"
+MESSAGE = "cladefs_rust.o defines the string functions above, which must be the kernel's\n"
 
 
 class RustInTheKernel(unittest.TestCase):
@@ -104,18 +104,18 @@ class RustInTheKernel(unittest.TestCase):
 
     def test_a_kernel_whose_rust_uses_the_kernels_string_functions_is_built(self):
         self.assertEqual(
-            self.build("                 U memcpy\n0000000000000000 T fxfs_init\n"),
+            self.build("                 U memcpy\n0000000000000000 T cladefs_init\n"),
             (0, f"{self.work / 'out' / 'x86_64' / 'vmlinux'}\n", ""),
         )
         self.assertTrue(self.built())
 
     def test_the_kernel_is_built_with_the_commit_the_tree_is_of(self):
-        """TASK-111.7: fs/fxfs shows it in /proc/fs/fxfs/build (scripts/build-commit.sh)."""
+        """TASK-111.7: fs/cladefs shows it in /proc/fs/cladefs/build (scripts/build-commit.sh)."""
         self.build("", env={"CLADEFS_BUILD_COMMIT": "0123abcd-dirty"})
         builds = [line for line in (self.directory / "fake" / "make").read_text().splitlines()
                   if line.endswith(" vmlinux")]
         self.assertEqual(len(builds), 1, builds)
-        self.assertIn(" FXFS_BUILD_COMMIT=0123abcd-dirty vmlinux", builds[0])
+        self.assertIn(" CLADEFS_BUILD_COMMIT=0123abcd-dirty vmlinux", builds[0])
 
     def test_the_kernel_is_built_with_as_many_jobs_as_asked(self):
         """TASK-276.6: CLADEFS_GUEST_KERNEL_JOBS, on a host others share; the CPUs otherwise."""
@@ -137,7 +137,7 @@ class RustInTheKernel(unittest.TestCase):
 
     def test_the_archive_loses_the_members_that_define_string_functions(self):
         archive = "".join(f"compiler_builtins-{i}.o {name}\n" for i, name in enumerate(FUNCTIONS))
-        self.build("", archive + "fxfs_linux-0.o fxfs_init\ncompiler_builtins-6.o memcpy_fast\n")
+        self.build("", archive + "cladefs_linux-0.o cladefs_init\ncompiler_builtins-6.o memcpy_fast\n")
         self.assertEqual(
             (self.directory / "fake" / "deleted").read_text().split(),
             [f"compiler_builtins-{i}.o" for i in range(len(FUNCTIONS))],

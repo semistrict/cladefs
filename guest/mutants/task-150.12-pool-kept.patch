@@ -6,8 +6,8 @@
 #
 # TASK-150.12: the pool destroyed with what a failed UNMAP keeps taken: gen_pool_destroy's BUG_ON.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -4778,9 +4778,6 @@
  {
  	struct gen_pool_chunk *chunk;

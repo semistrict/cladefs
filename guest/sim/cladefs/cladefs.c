@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause
 // Copyright 2026 The cladefs Authors.
 /*
- * A model of Fxfs, as much of fs/fxfs/fxfs.h as dax.c calls: files as arrays of blocks, in extents
- * of the store, with the rules of guest/rust/fxfs-linux and crates/fxfs that the window's protocol
+ * A model of Fxfs, as much of fs/cladefs/cladefs.h as dax.c calls: files as arrays of blocks, in extents
+ * of the store, with the rules of guest/rust/cladefs-linux and crates/fxfs that the window's protocol
  * rests on (doc-13: the window maps sealed extents alone, and writes copy on write):
  *
  * - An extent is open as it is minted, until a seal, for good: minted, open, sealed, and never back
  *   (OpenExtents). A seal forgets which are open as it begins and as it ends, and the device seals
  *   those it holds. One no request reached, the device takes a write to, which leaves it not open,
  *   until the next seal seals it.
- * - A cut that isn't told what the kernel keeps of the last block (FXFS_SET_KEEP_TAIL) zeros what
+ * - A cut that isn't told what the kernel keeps of the last block (CLADEFS_SET_KEEP_TAIL) zeros what
  *   that block holds past the end by moving it to the staging extent (zero_tail), and so does every
  *   growth, a truncate's, a writeback's or a clone's, past the old end, unless it writes that block
  *   anew (txn_grow_size); a writeback of part of a block keeps what it holds up to the end alone,
@@ -19,19 +19,19 @@
  *   Until then the window goes on showing it; then the device maps zeros.
  * - Blocks a clone shares are its source's: an extent's pieces read as open until it is sealed,
  *   whoever holds them.
- * - A transaction fails, if a test asks (fxfs_sim_fail), before it does anything, as one out of space
- *   does: room for dirty pages (fxfs_reserve_dirty) is refused, and a file's growth
- *   (fxfs_write_inode). A cut never fails, as Fxfs's borrows the room it needs. A sweep
+ * - A transaction fails, if a test asks (cladefs_sim_fail), before it does anything, as one out of space
+ *   does: room for dirty pages (cladefs_reserve_dirty) is refused, and a file's growth
+ *   (cladefs_write_inode). A cut never fails, as Fxfs's borrows the room it needs. A sweep
  *   (kernel/sweep.c) has those fail, and writeback's commit, a clone part way, as Fxfs's
  *   transactions of it, a seal and a lookup of a file's extents, each before it does anything.
- * - Writeback (fxfs_write_many), the page cache's and copy-on-write DAX's (doc-13), allocates at
+ * - Writeback (cladefs_write_many), the page cache's and copy-on-write DAX's (doc-13), allocates at
  *   writeback: it copies its pages, a page at a time, into its own buffer, writes them to new
  *   blocks, in one device write no seal comes into, and commits after the bytes: a crash before
  *   the commit leaves the old blocks, which a test may look at, holding the commit
- *   (fxfs_sim_hold_commits), or have fail (fxfs_set_fail_commits). A small one's blocks, STAGED_MAX
+ *   (cladefs_sim_hold_commits), or have fail (cladefs_set_fail_commits). A small one's blocks, STAGED_MAX
  *   bytes at most, are the staging extent's, which every file's small writebacks share, as Fxfs
  *   packs them (multi_write_packed); a larger one's, an extent's of its own. It takes the room the
- *   dirty pages reserved (fxfs_reserve_dirty), done or failed, which nothing may give back twice.
+ *   dirty pages reserved (cladefs_reserve_dirty), done or failed, which nothing may give back twice.
  *
  * It has no journal, no tree, no compaction, no crash consistency: durability isn't simulated, and
  * the real Fxfs's own bugs can't show up here. It's what the window's protocol assumes of Fxfs,
@@ -41,8 +41,8 @@
 #include <sim/sim.h>
 #include <sim/host.h>
 
-#include "../../linux/fs/fxfs/device.h"
-#include "../../linux/fs/fxfs/fxfs.h"
+#include "../../linux/fs/cladefs/device.h"
+#include "../../linux/fs/cladefs/cladefs.h"
 
 #define STAGING_PAGES ((2UL << 20) >> PAGE_SHIFT)
 /* The most pages a writeback packs into the staging extent (Fxfs's STAGED_MAX). */
@@ -79,13 +79,13 @@ struct stub_file {
 	u64 size;
 	u64 nr_blocks;
 	struct block *blocks;
-	/* The bytes of its dirty pages it holds room for (fxfs_reserve_dirty). */
+	/* The bytes of its dirty pages it holds room for (cladefs_reserve_dirty). */
 	u64 reserved;
 	struct list_head list;
 };
 
-struct fxfs {
-	struct fxfs_device *dev;
+struct cladefs {
+	struct cladefs_device *dev;
 	/* Held by each transaction as it changes things: the journal's lock, the files' after it. */
 	struct mutex lock;
 	/* One seal at a time. */
@@ -101,12 +101,12 @@ struct fxfs {
 };
 
 static u64 written, frees, failures;
-/* One transaction in so many fails, if any (fxfs_sim_fail). */
+/* One transaction in so many fails, if any (cladefs_sim_fail). */
 static unsigned int fail_odds;
-/* The file and page whose blocks the log tells of, if any (fxfs_sim_watch). */
+/* The file and page whose blocks the log tells of, if any (cladefs_sim_watch). */
 static u64 watched_ino, watched_page = ~0ULL;
 
-void fxfs_sim_watch(u64 ino, u64 page)
+void cladefs_sim_watch(u64 ino, u64 page)
 {
 	watched_ino = ino;
 	watched_page = page;
@@ -117,36 +117,36 @@ bool sim_device_holds(u64 sequence, u64 page);
 bool sim_device_sealed(u64 sequence);
 u64 sim_device_length(u64 sequence);
 
-void fxfs_sim_stats(u64 *wrote, u64 *freed, u64 *failed)
+void cladefs_sim_stats(u64 *wrote, u64 *freed, u64 *failed)
 {
 	*wrote = written;
 	*freed = frees;
 	*failed = failures;
 }
 
-void fxfs_sim_fail(unsigned int odds)
+void cladefs_sim_fail(unsigned int odds)
 {
 	fail_odds = odds;
 }
 
-u64 fxfs_sim_seals(struct fxfs *fs)
+u64 cladefs_sim_seals(struct cladefs *fs)
 {
 	return fs->seals;
 }
 
-bool fxfs_sim_sealing(struct fxfs *fs)
+bool cladefs_sim_sealing(struct cladefs *fs)
 {
 	/* The device counts a seal's beginning and its end. */
-	return fxfs_device_seals(fs->dev) % 2;
+	return cladefs_device_seals(fs->dev) % 2;
 }
 
-struct fxfs *fxfs_sim_new(void)
+struct cladefs *cladefs_sim_new(void)
 {
-	struct fxfs *fs = kzalloc(sizeof(*fs), GFP_KERNEL);
-	struct fxfs_device_info info;
+	struct cladefs *fs = kzalloc(sizeof(*fs), GFP_KERNEL);
+	struct cladefs_device_info info;
 
-	/* Without it, as a sweep has fs/fxfs/device.c's allocation fail, no filesystem. */
-	fs->dev = fxfs_device_find("sim", 3, &info);
+	/* Without it, as a sweep has fs/cladefs/device.c's allocation fail, no filesystem. */
+	fs->dev = cladefs_device_find("sim", 3, &info);
 	if (!fs->dev) {
 		kfree(fs);
 		return NULL;
@@ -168,7 +168,7 @@ struct fxfs *fxfs_sim_new(void)
  * read; and each extent's counts are what the files' blocks say, which its death, and its free
  * after a flush, go by. As the filesystem goes, nothing under way.
  */
-static void check_blocks(struct fxfs *fs)
+static void check_blocks(struct cladefs *fs)
 {
 	struct stub_extent *extent;
 	struct stub_file *file;
@@ -195,7 +195,7 @@ static void check_blocks(struct fxfs *fs)
 	}
 }
 
-void fxfs_sim_free(struct fxfs *fs)
+void cladefs_sim_free(struct cladefs *fs)
 {
 	struct stub_extent *extent, *next_extent;
 	struct stub_file *file, *next_file;
@@ -211,16 +211,16 @@ void fxfs_sim_free(struct fxfs *fs)
 		kfree(extent->refs);
 		kfree(extent);
 	}
-	fxfs_device_put(fs->dev);
+	cladefs_device_put(fs->dev);
 	kfree(fs);
 }
 
-struct fxfs_device *fxfs_dax_device(struct fxfs_filesystem *filesystem)
+struct cladefs_device *cladefs_dax_device(struct cladefs_filesystem *filesystem)
 {
-	return ((struct fxfs *)filesystem)->dev;
+	return ((struct cladefs *)filesystem)->dev;
 }
 
-u64 fxfs_sim_new_file(struct fxfs *fs)
+u64 cladefs_sim_new_file(struct cladefs *fs)
 {
 	struct stub_file *file = kzalloc(sizeof(*file), GFP_KERNEL);
 
@@ -232,7 +232,7 @@ u64 fxfs_sim_new_file(struct fxfs *fs)
 	return file->ino;
 }
 
-static struct stub_file *find_file(struct fxfs *fs, u64 ino)
+static struct stub_file *find_file(struct cladefs *fs, u64 ino)
 {
 	struct stub_file *file;
 
@@ -243,7 +243,7 @@ static struct stub_file *find_file(struct fxfs *fs, u64 ino)
 	sim_panic("no file %llu", ino);
 }
 
-static struct stub_extent *find_extent(struct fxfs *fs, u64 sequence)
+static struct stub_extent *find_extent(struct cladefs *fs, u64 sequence)
 {
 	struct stub_extent *extent;
 
@@ -255,7 +255,7 @@ static struct stub_extent *find_extent(struct fxfs *fs, u64 sequence)
 }
 
 /* The file `ino`, its lock held, as a transaction of it holds it. */
-static struct stub_file *lock_file(struct fxfs *fs, u64 ino)
+static struct stub_file *lock_file(struct cladefs *fs, u64 ino)
 {
 	struct stub_file *file;
 
@@ -276,7 +276,7 @@ static void reserve_blocks(struct stub_file *file, u64 pages)
 	file->nr_blocks = pages;
 }
 
-static struct stub_extent *new_extent(struct fxfs *fs, u64 pages)
+static struct stub_extent *new_extent(struct cladefs *fs, u64 pages)
 {
 	struct stub_extent *extent = kzalloc(sizeof(*extent), GFP_NOFS);
 
@@ -292,7 +292,7 @@ static struct stub_extent *new_extent(struct fxfs *fs, u64 pages)
 }
 
 /* `pages` pages of the staging extent, a new one if it's sealed or too full: the first page. */
-static u64 take_staged(struct fxfs *fs, u64 pages, struct stub_extent **extent)
+static u64 take_staged(struct cladefs *fs, u64 pages, struct stub_extent **extent)
 {
 	u64 page;
 
@@ -310,24 +310,24 @@ static u64 take_staged(struct fxfs *fs, u64 pages, struct stub_extent **extent)
 
 /* How far `extent` reaches, as allocated, or for the staging extent, while it is open, may yet. */
 /*
- * Whether Fxfs counts no extent's size (fxfs_sim_extent_sizes_unknown), as it counts none of a
+ * Whether Fxfs counts no extent's size (cladefs_sim_extent_sizes_unknown), as it counts none of a
  * base's, another filesystem's allocator's (TASK-229).
  */
 static bool sizes_unknown;
 
-void fxfs_sim_extent_sizes_unknown(bool unknown)
+void cladefs_sim_extent_sizes_unknown(bool unknown)
 {
 	sizes_unknown = unknown;
 }
 
-static u64 extent_bytes(const struct fxfs *fs, const struct stub_extent *extent)
+static u64 extent_bytes(const struct cladefs *fs, const struct stub_extent *extent)
 {
 	if (sizes_unknown)
 		return 0;
 	return (extent == fs->staging && extent->open ? extent->pages : extent->used) << PAGE_SHIFT;
 }
 
-static void put_block(struct fxfs *fs, struct block *block)
+static void put_block(struct cladefs *fs, struct block *block)
 {
 	if (block->sequence) {
 		struct stub_extent *extent = find_extent(fs, block->sequence);
@@ -339,7 +339,7 @@ static void put_block(struct fxfs *fs, struct block *block)
 	block->sequence = 0;
 }
 
-static void read_block(struct fxfs *fs, const struct block *block, void *buf)
+static void read_block(struct cladefs *fs, const struct block *block, void *buf)
 {
 	/* Past what the device holds of it, a block reads as zeros. */
 	if (block->sequence && block->page < sim_device_length(block->sequence))
@@ -349,7 +349,7 @@ static void read_block(struct fxfs *fs, const struct block *block, void *buf)
 		memset(buf, 0, PAGE_SIZE);
 }
 
-void fxfs_sim_read(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len)
+void cladefs_sim_read(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len)
 {
 	struct stub_file *file = find_file(fs, ino);
 	char page[PAGE_SIZE];
@@ -369,12 +369,12 @@ void fxfs_sim_read(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len)
 	}
 }
 
-u64 fxfs_sim_size(struct fxfs *fs, u64 ino)
+u64 cladefs_sim_size(struct cladefs *fs, u64 ino)
 {
 	return find_file(fs, ino)->size;
 }
 
-ssize_t fxfs_dax_extents(struct fxfs *fs, u64 ino, u64 offset, u64 len, struct fxfs_dax_extent *out,
+ssize_t cladefs_dax_extents(struct cladefs *fs, u64 ino, u64 offset, u64 len, struct cladefs_dax_extent *out,
 			 size_t max)
 {
 	struct stub_file *file;
@@ -394,7 +394,7 @@ ssize_t fxfs_dax_extents(struct fxfs *fs, u64 ino, u64 offset, u64 len, struct f
 		if (!block->sequence)
 			continue;
 		extent = find_extent(fs, block->sequence);
-		access = extent->open ? FXFS_DAX_OPEN : FXFS_DAX_SEALED;
+		access = extent->open ? CLADEFS_DAX_OPEN : CLADEFS_DAX_SEALED;
 		if (count && out[count - 1].sequence == block->sequence &&
 		    out[count - 1].access == access &&
 		    out[count - 1].offset + out[count - 1].len == page << PAGE_SHIFT &&
@@ -407,7 +407,7 @@ ssize_t fxfs_dax_extents(struct fxfs *fs, u64 ino, u64 offset, u64 len, struct f
 			count = -E2BIG;
 			break;
 		}
-		out[count++] = (struct fxfs_dax_extent) {
+		out[count++] = (struct cladefs_dax_extent) {
 			.offset = page << PAGE_SHIFT, .len = PAGE_SIZE, .branch = fs->branch,
 			.sequence = block->sequence, .extent_offset = block->page << PAGE_SHIFT,
 			.access = access, .extent_size = extent_bytes(fs, extent),
@@ -417,25 +417,25 @@ ssize_t fxfs_dax_extents(struct fxfs *fs, u64 ino, u64 offset, u64 len, struct f
 	return count;
 }
 
-/* Whether seals wait before their COMMIT (fxfs_sim_hold_seals), and whether one does. */
+/* Whether seals wait before their COMMIT (cladefs_sim_hold_seals), and whether one does. */
 static bool hold_seals, seal_held;
 
-void fxfs_sim_hold_seals(bool hold)
+void cladefs_sim_hold_seals(bool hold)
 {
 	hold_seals = hold;
 }
 
-bool fxfs_sim_seal_held(void)
+bool cladefs_sim_seal_held(void)
 {
 	return seal_held;
 }
 
 /*
  * A seal, around the COMMIT that seals what is open, and then what it left dead is freed. As the
- * guest's Fxfs's (fxfs-linux's Seal::begin_with), what was minted before it is no longer open from
+ * guest's Fxfs's (cladefs-linux's Seal::begin_with), what was minted before it is no longer open from
  * its beginning, before the COMMIT has sealed it on the device.
  */
-int fxfs_fsync(struct fxfs *fs)
+int cladefs_fsync(struct cladefs *fs)
 {
 	struct stub_extent *extent, *next;
 
@@ -443,7 +443,7 @@ int fxfs_fsync(struct fxfs *fs)
 		return -EIO;
 	mutex_lock(&fs->seal);
 	down_write(&fs->writes);
-	fxfs_device_seal_begin(fs->dev);
+	cladefs_device_seal_begin(fs->dev);
 	mutex_lock(&fs->lock);
 	list_for_each_entry(extent, &fs->extents, list)
 		extent->open = false;
@@ -467,7 +467,7 @@ int fxfs_fsync(struct fxfs *fs)
 		extent->open = false;
 	mutex_unlock(&fs->lock);
 	sim_point("a seal's end");
-	fxfs_device_seal_end(fs->dev);
+	cladefs_device_seal_end(fs->dev);
 	up_write(&fs->writes);
 	mutex_lock(&fs->lock);
 	fs->seals++;
@@ -494,7 +494,7 @@ int fxfs_fsync(struct fxfs *fs)
  * again, where Fxfs's stays as it was, sealed and shared alike). A seal between would have it tried
  * again: the model takes no scheduling point in it.
  */
-static void move_tail(struct fxfs *fs, struct stub_file *file, u64 size)
+static void move_tail(struct cladefs *fs, struct stub_file *file, u64 size)
 {
 	u64 at = size >> PAGE_SHIFT, in_extent;
 	struct stub_extent *extent;
@@ -531,16 +531,16 @@ static void set_size(struct stub_file *file, u64 size)
  * Ahead of a growth of `file` to `size`, zeroes what its last block holds past the end (move_tail),
  * unless the growth writes that block anew (`writes_last`), as Fxfs's txn_grow_size and
  * zero_tail_before_growth do, every way a file grows: what a cut that kept the tail
- * (FXFS_SET_KEEP_TAIL) left there is no data.
+ * (CLADEFS_SET_KEEP_TAIL) left there is no data.
  */
-static void zero_before_growth(struct fxfs *fs, struct stub_file *file, u64 size, bool writes_last)
+static void zero_before_growth(struct cladefs *fs, struct stub_file *file, u64 size, bool writes_last)
 {
 	if (size > file->size && !writes_last)
 		move_tail(fs, file, file->size);
 }
 
 /* Makes `file` `size` bytes long if it is shorter, as zero_before_growth says. */
-static void grow(struct fxfs *fs, struct stub_file *file, u64 size, bool writes_last)
+static void grow(struct cladefs *fs, struct stub_file *file, u64 size, bool writes_last)
 {
 	zero_before_growth(fs, file, size, writes_last);
 	if (size > file->size)
@@ -551,7 +551,7 @@ static void grow(struct fxfs *fs, struct stub_file *file, u64 size, bool writes_
  * What a write of part of `file`'s block `page` keeps of the rest: what the block holds up to the
  * file's end, and zeros past it, as Fxfs's read_unaligned_ends.
  */
-static void read_kept(struct fxfs *fs, struct stub_file *file, u64 page, void *buf)
+static void read_kept(struct cladefs *fs, struct stub_file *file, u64 page, void *buf)
 {
 	u64 at = page << PAGE_SHIFT;
 	size_t kept = file->size > at ? min_t(u64, file->size - at, PAGE_SIZE) : 0;
@@ -561,13 +561,13 @@ static void read_kept(struct fxfs *fs, struct stub_file *file, u64 page, void *b
 }
 
 /* What Fxfs says of `file`: its size, and the 512-byte blocks its data takes. */
-static void attr_of(const struct stub_file *file, struct fxfs_attr *attr)
+static void attr_of(const struct stub_file *file, struct cladefs_attr *attr)
 {
 	u64 page, blocks = 0;
 
 	for (page = 0; page < file->nr_blocks; page++)
 		blocks += !!file->blocks[page].sequence;
-	*attr = (struct fxfs_attr) {
+	*attr = (struct cladefs_attr) {
 		.ino = file->ino,
 		.size = file->size,
 		.blocks = blocks << (PAGE_SHIFT - SECTOR_SHIFT),
@@ -576,7 +576,7 @@ static void attr_of(const struct stub_file *file, struct fxfs_attr *attr)
 	};
 }
 
-int fxfs_attr_of_open(struct fxfs *fs, u64 ino, struct fxfs_attr *attr)
+int cladefs_attr_of_open(struct cladefs *fs, u64 ino, struct cladefs_attr *attr)
 {
 	struct stub_file *file = lock_file(fs, ino);
 
@@ -589,14 +589,14 @@ int fxfs_attr_of_open(struct fxfs *fs, u64 ino, struct fxfs_attr *attr)
 
 /*
  * The size alone of what the kernel keeps of the inode: the model has no mode, owner or times.
- * -ENOSPC if it grows the file as a transaction fails (fxfs_sim_fail), nothing changed.
+ * -ENOSPC if it grows the file as a transaction fails (cladefs_sim_fail), nothing changed.
  */
-int fxfs_write_inode(struct fxfs *fs, u64 ino, const struct fxfs_setattr *set)
+int cladefs_write_inode(struct cladefs *fs, u64 ino, const struct cladefs_setattr *set)
 {
 	struct stub_file *file = lock_file(fs, ino);
 	u64 page, old;
 
-	if ((set->valid & FXFS_SET_SIZE) && set->size > file->size &&
+	if ((set->valid & CLADEFS_SET_SIZE) && set->size > file->size &&
 	    (sim_sweep_fails("a growth", __FILE__, __LINE__) ||
 	     (fail_odds && !(sim_random() % fail_odds)))) {
 		failures++;
@@ -604,14 +604,14 @@ int fxfs_write_inode(struct fxfs *fs, u64 ino, const struct fxfs_setattr *set)
 		return -ENOSPC;
 	}
 	mutex_lock(&fs->lock);
-	if (set->valid & FXFS_SET_SIZE) {
+	if (set->valid & CLADEFS_SET_SIZE) {
 		old = file->size;
 		for (page = DIV_ROUND_UP(set->size, PAGE_SIZE); page < file->nr_blocks; page++)
 			put_block(fs, &file->blocks[page]);
 		if (set->size > old) {
 			grow(fs, file, set->size, false);
 		} else {
-			if (set->size < old && !(set->valid & FXFS_SET_KEEP_TAIL))
+			if (set->size < old && !(set->valid & CLADEFS_SET_KEEP_TAIL))
 				move_tail(fs, file, set->size);
 			set_size(file, set->size);
 		}
@@ -621,8 +621,8 @@ int fxfs_write_inode(struct fxfs *fs, u64 ino, const struct fxfs_setattr *set)
 	return 0;
 }
 
-int fxfs_clone_range(struct fxfs *fs, u64 src, u64 offset, u64 len, u64 dst, u64 dst_offset,
-		     u64 size, struct fxfs_attr *attr)
+int cladefs_clone_range(struct cladefs *fs, u64 src, u64 offset, u64 len, u64 dst, u64 dst_offset,
+		     u64 size, struct cladefs_attr *attr)
 {
 	struct stub_file *from, *to;
 	u64 page, pages = len >> PAGE_SHIFT;
@@ -671,7 +671,7 @@ int fxfs_clone_range(struct fxfs *fs, u64 src, u64 offset, u64 len, u64 dst, u64
 	return err;
 }
 
-int fxfs_punch(struct fxfs *fs, u64 ino, u64 offset, u64 len)
+int cladefs_punch(struct cladefs *fs, u64 ino, u64 offset, u64 len)
 {
 	struct stub_file *file = lock_file(fs, ino);
 	u64 page;
@@ -691,10 +691,10 @@ int fxfs_punch(struct fxfs *fs, u64 ino, u64 offset, u64 len)
 
 /*
  * Room for `bytes` of file `ino`'s dirty pages, which writeback pays with: -ENOSPC as a
- * transaction fails (fxfs_sim_fail), when the filesystem has none, as a fault's SIGBUS and a
+ * transaction fails (cladefs_sim_fail), when the filesystem has none, as a fault's SIGBUS and a
  * write(2)'s ENOSPC say.
  */
-int fxfs_reserve_dirty(struct fxfs *fs, u64 ino, u64 bytes)
+int cladefs_reserve_dirty(struct cladefs *fs, u64 ino, u64 bytes)
 {
 	struct stub_file *file;
 
@@ -710,7 +710,7 @@ int fxfs_reserve_dirty(struct fxfs *fs, u64 ino, u64 bytes)
 	return 0;
 }
 
-void fxfs_reserve_dirty_what_fits(struct fxfs *fs, u64 ino, u64 bytes)
+void cladefs_reserve_dirty_what_fits(struct cladefs *fs, u64 ino, u64 bytes)
 {
 	mutex_lock(&fs->lock);
 	find_file(fs, ino)->reserved += bytes;
@@ -726,26 +726,26 @@ static void unreserve(struct stub_file *file, u64 bytes, const char *what)
 	file->reserved -= bytes;
 }
 
-void fxfs_release_dirty(struct fxfs *fs, u64 ino, u64 bytes)
+void cladefs_release_dirty(struct cladefs *fs, u64 ino, u64 bytes)
 {
 	mutex_lock(&fs->lock);
 	unreserve(find_file(fs, ino), bytes, "release");
 	mutex_unlock(&fs->lock);
 }
 
-u64 fxfs_sim_reserved(struct fxfs *fs, u64 ino)
+u64 cladefs_sim_reserved(struct cladefs *fs, u64 ino)
 {
 	return find_file(fs, ino)->reserved;
 }
 
-/* A page fxfs_write_many writes: the file's, and the new block that takes its place. */
+/* A page cladefs_write_many writes: the file's, and the new block that takes its place. */
 struct written {
 	u64 page;
 	struct block block;
 };
 
 /*
- * How many of fxfs_write_many's next transactions fail as they commit (fxfs_set_fail_commits), and
+ * How many of cladefs_write_many's next transactions fail as they commit (cladefs_set_fail_commits), and
  * with what.
  */
 static u64 writebacks_to_fail;
@@ -755,38 +755,38 @@ static int writebacks_fail_with = -EIO;
  * The guest's fault injection (TASK-164.2): the next `count` writebacks fail with EIO, their bytes
  * written, before their commits, which leaves the file as a crash between the two would.
  */
-void fxfs_set_fail_commits(u64 count)
+void cladefs_set_fail_commits(u64 count)
 {
-	fxfs_sim_fail_commits_with(count, -EIO);
+	cladefs_sim_fail_commits_with(count, -EIO);
 }
 
-void fxfs_sim_fail_commits_with(u64 count, int err)
+void cladefs_sim_fail_commits_with(u64 count, int err)
 {
 	writebacks_to_fail = count;
 	writebacks_fail_with = err;
 }
 
-/* Whether writeback's commits wait (fxfs_sim_hold_commits), and the one waiting, of file held_ino. */
+/* Whether writeback's commits wait (cladefs_sim_hold_commits), and the one waiting, of file held_ino. */
 static bool hold_commits;
 static const struct written *held;
 static size_t held_count;
 static u64 held_ino;
 
-void fxfs_sim_hold_commits(bool hold)
+void cladefs_sim_hold_commits(bool hold)
 {
 	hold_commits = hold;
 }
 
-bool fxfs_sim_commit_held(void)
+bool cladefs_sim_commit_held(void)
 {
 	return held;
 }
 
-void fxfs_sim_read_pending(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len)
+void cladefs_sim_read_pending(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len)
 {
 	size_t i, done;
 
-	fxfs_sim_read(fs, ino, offset, buf, len);
+	cladefs_sim_read(fs, ino, offset, buf, len);
 	if (!held || ino != held_ino)
 		return;
 	for (i = 0; i < held_count; i++) {
@@ -804,7 +804,7 @@ void fxfs_sim_read_pending(struct fxfs *fs, u64 ino, u64 offset, void *buf, size
 }
 
 /*
- * fxfs_write_many: the transaction holds the file's lock throughout. Each page copied, a page at a
+ * cladefs_write_many: the transaction holds the file's lock throughout. Each page copied, a page at a
  * time, others running between, as the window's page may change under writeback: what it copied
  * is what it writes, and a page part of which a part covers keeps the rest of its block. Then
  * blocks for them all, the staging extent's if they are few, a new extent's if not, taken and
@@ -813,7 +813,7 @@ void fxfs_sim_read_pending(struct fxfs *fs, u64 ino, u64 offset, void *buf, size
  * tried again in an extent of its own (write_many_paid), which no seal comes into either. Then,
  * unless a test holds it, the commit.
  */
-int fxfs_write_many(struct fxfs *fs, u64 ino, const struct fxfs_write_part *parts, size_t count,
+int cladefs_write_many(struct cladefs *fs, u64 ino, const struct cladefs_write_part *parts, size_t count,
 		    u64 dirty)
 {
 	struct stub_file *file = lock_file(fs, ino);

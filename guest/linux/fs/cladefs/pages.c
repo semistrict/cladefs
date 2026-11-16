@@ -13,7 +13,7 @@
 
 #include "pages.h"
 
-struct fxfs_dax_pages {
+struct cladefs_dax_pages {
 	unsigned long nr;
 	/* Pages with a window page: an extent's, zeros, or a private page. */
 	unsigned long *mapped;
@@ -26,10 +26,10 @@ struct fxfs_dax_pages {
 	unsigned long bits[];
 };
 
-struct fxfs_dax_pages *fxfs_dax_pages_new(unsigned long nr)
+struct cladefs_dax_pages *cladefs_dax_pages_new(unsigned long nr)
 {
 	size_t words = BITS_TO_LONGS(nr);
-	struct fxfs_dax_pages *pages;
+	struct cladefs_dax_pages *pages;
 
 	pages = kzalloc(struct_size(pages, bits, 4 * words), GFP_NOFS);
 	if (!pages)
@@ -42,7 +42,7 @@ struct fxfs_dax_pages *fxfs_dax_pages_new(unsigned long nr)
 	return pages;
 }
 
-void fxfs_dax_pages_free(struct fxfs_dax_pages *pages)
+void cladefs_dax_pages_free(struct cladefs_dax_pages *pages)
 {
 	kfree(pages);
 }
@@ -52,7 +52,7 @@ void fxfs_dax_pages_free(struct fxfs_dax_pages *pages)
  * private, and private and zeros imply mapped. With no transition beside: the file's semaphore
  * held for writing.
  */
-static void fxfs_dax_pages_check(const struct fxfs_dax_pages *pages, unsigned long first,
+static void cladefs_dax_pages_check(const struct cladefs_dax_pages *pages, unsigned long first,
 				 unsigned long last)
 {
 	unsigned long word;
@@ -61,34 +61,34 @@ static void fxfs_dax_pages_check(const struct fxfs_dax_pages *pages, unsigned lo
 		unsigned long mapped = pages->mapped[word];
 
 		WARN_ONCE(pages->dirty[word] & ~pages->private[word],
-			  "fxfs: pages dirty but not private: %lx of word %lu", pages->dirty[word] &
+			  "cladefs: pages dirty but not private: %lx of word %lu", pages->dirty[word] &
 			  ~pages->private[word], word);
 		WARN_ONCE((pages->private[word] | pages->zeros[word]) & ~mapped,
-			  "fxfs: pages private or zeros but not mapped: %lx of word %lu",
+			  "cladefs: pages private or zeros but not mapped: %lx of word %lu",
 			  (pages->private[word] | pages->zeros[word]) & ~mapped, word);
 	}
 }
 
 /* That the `n` pages from `first` are pages of the state: WARNs, and says false, if not. */
-static bool fxfs_dax_pages_within(const struct fxfs_dax_pages *pages, unsigned long first,
+static bool cladefs_dax_pages_within(const struct cladefs_dax_pages *pages, unsigned long first,
 				  unsigned long n)
 {
 	return !WARN_ONCE(first > pages->nr || n > pages->nr - first,
-			  "fxfs: pages %lu+%lu of %lu", first, n, pages->nr);
+			  "cladefs: pages %lu+%lu of %lu", first, n, pages->nr);
 }
 
 /*
  * How many of the `n` bits from `first` of `map` are set, each word read once. Of `private` and
- * `dirty`, iomaps beside the caller may be setting bits (fxfs_dax_pages_dirty, the file's semaphore
+ * `dirty`, iomaps beside the caller may be setting bits (cladefs_dax_pages_dirty, the file's semaphore
  * held shared by both), atomically: a race, and a benign one, so read as one (READ_ONCE), not as
  * find_next_bit's plain loads (KCSAN, GCE r611 and r613). Only a transition under the semaphore
  * held for writing clears a bit, so what a caller holding it shared counts set stays set: a count
- * at least what was set as it began, at most what is set by its end. fxfs_dax_pages_would_dirty's
- * caller takes room for what it counts clear, and gives back what fxfs_dax_pages_dirty, whose
+ * at least what was set as it began, at most what is set by its end. cladefs_dax_pages_would_dirty's
+ * caller takes room for what it counts clear, and gives back what cladefs_dax_pages_dirty, whose
  * test_and_set_bit is the read that decides, then finds others made private or dirty meanwhile
- * (fxfs_dax_dirty).
+ * (cladefs_dax_dirty).
  */
-static unsigned long fxfs_dax_pages_weight(const unsigned long *map, unsigned long first,
+static unsigned long cladefs_dax_pages_weight(const unsigned long *map, unsigned long first,
 					   unsigned long n)
 {
 	unsigned long word, last, count = 0;
@@ -108,37 +108,37 @@ static unsigned long fxfs_dax_pages_weight(const unsigned long *map, unsigned lo
 	return count;
 }
 
-void fxfs_dax_pages_fill(struct fxfs_dax_pages *pages, unsigned long first, unsigned long n,
+void cladefs_dax_pages_fill(struct cladefs_dax_pages *pages, unsigned long first, unsigned long n,
 			 bool zeros)
 {
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return;
 	/*
 	 * A private page's bytes are the host's private page alone: a MAP over it but a rebind's,
 	 * which a writeback and a seal came before, loses them. One of a page mapped already is a
-	 * map tried again, the first having met an extent open still (fxfs_dax_map_pages).
+	 * map tried again, the first having met an extent open still (cladefs_dax_map_pages).
 	 */
 	WARN_ONCE(find_next_bit(pages->private, first + n, first) < first + n,
-		  "fxfs: a MAP of pages %lu+%lu, private", first, n);
+		  "cladefs: a MAP of pages %lu+%lu, private", first, n);
 	bitmap_set(pages->mapped, first, n);
 	if (zeros)
 		bitmap_set(pages->zeros, first, n);
 	else
 		bitmap_clear(pages->zeros, first, n);
-	fxfs_dax_pages_check(pages, first, first + n);
+	cladefs_dax_pages_check(pages, first, first + n);
 }
 
-long fxfs_dax_pages_rebind(struct fxfs_dax_pages *pages, unsigned long first, unsigned long n,
+long cladefs_dax_pages_rebind(struct cladefs_dax_pages *pages, unsigned long first, unsigned long n,
 			   bool zeros)
 {
 	unsigned long page;
 	long rebound = 0;
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return 0;
 	/* A dirty page's stores are in no extent: a MAP over it loses them. */
 	WARN_ONCE(find_next_bit(pages->dirty, first + n, first) < first + n,
-		  "fxfs: a rebind's MAP of pages %lu+%lu, dirty", first, n);
+		  "cladefs: a rebind's MAP of pages %lu+%lu, dirty", first, n);
 	for (page = first; page < first + n; page++) {
 		rebound += test_and_clear_bit(page, pages->private);
 		if (zeros)
@@ -147,7 +147,7 @@ long fxfs_dax_pages_rebind(struct fxfs_dax_pages *pages, unsigned long first, un
 			clear_bit(page, pages->zeros);
 	}
 	bitmap_set(pages->mapped, first, n);
-	fxfs_dax_pages_check(pages, first, first + n);
+	cladefs_dax_pages_check(pages, first, first + n);
 	return rebound;
 }
 
@@ -155,17 +155,17 @@ long fxfs_dax_pages_rebind(struct fxfs_dax_pages *pages, unsigned long first, un
  * Each page private first, then dirty, atomically, as iomaps beside each other dirty pages: so
  * that whoever finds a page dirty finds it private.
  */
-struct fxfs_dax_change fxfs_dax_pages_dirty(struct fxfs_dax_pages *pages, unsigned long first,
+struct cladefs_dax_change cladefs_dax_pages_dirty(struct cladefs_dax_pages *pages, unsigned long first,
 					    unsigned long n)
 {
-	struct fxfs_dax_change made = {};
+	struct cladefs_dax_change made = {};
 	unsigned long page;
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return made;
-	/* Every page of a range a write stores to has a window page (fxfs_dax_map_missing). */
-	WARN_ONCE(fxfs_dax_pages_next_unmapped(pages, first, first + n) < first + n,
-		  "fxfs: pages %lu+%lu dirtied, not mapped", first, n);
+	/* Every page of a range a write stores to has a window page (cladefs_dax_map_missing). */
+	WARN_ONCE(cladefs_dax_pages_next_unmapped(pages, first, first + n) < first + n,
+		  "cladefs: pages %lu+%lu dirtied, not mapped", first, n);
 	for (page = first; page < first + n; page++) {
 		made.private += !test_and_set_bit(page, pages->private);
 		made.dirty += !test_and_set_bit(page, pages->dirty);
@@ -173,26 +173,26 @@ struct fxfs_dax_change fxfs_dax_pages_dirty(struct fxfs_dax_pages *pages, unsign
 	return made;
 }
 
-long fxfs_dax_pages_private_ahead(struct fxfs_dax_pages *pages, unsigned long first,
+long cladefs_dax_pages_private_ahead(struct cladefs_dax_pages *pages, unsigned long first,
 				  unsigned long n)
 {
 	unsigned long page;
 	long made = 0;
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return 0;
-	WARN_ONCE(fxfs_dax_pages_aheadable_run(pages, first, first + n) < first + n,
-		  "fxfs: pages %lu+%lu made private ahead, not all mapped and written", first, n);
+	WARN_ONCE(cladefs_dax_pages_aheadable_run(pages, first, first + n) < first + n,
+		  "cladefs: pages %lu+%lu made private ahead, not all mapped and written", first, n);
 	for (page = first; page < first + n; page++)
 		made += !test_and_set_bit(page, pages->private);
 	return made;
 }
 
-unsigned long fxfs_dax_pages_swap(struct fxfs_dax_pages *pages, unsigned long *set)
+unsigned long cladefs_dax_pages_swap(struct cladefs_dax_pages *pages, unsigned long *set)
 {
 	unsigned long word, swapped = 0;
 
-	fxfs_dax_pages_check(pages, 0, pages->nr);
+	cladefs_dax_pages_check(pages, 0, pages->nr);
 	bitmap_zero(set, pages->nr);
 	for (word = 0; word < BITS_TO_LONGS(pages->nr); word++) {
 		set[word] = pages->dirty[word];
@@ -202,11 +202,11 @@ unsigned long fxfs_dax_pages_swap(struct fxfs_dax_pages *pages, unsigned long *s
 	return swapped;
 }
 
-unsigned long fxfs_dax_pages_redirty(struct fxfs_dax_pages *pages, const unsigned long *set)
+unsigned long cladefs_dax_pages_redirty(struct cladefs_dax_pages *pages, const unsigned long *set)
 {
 	unsigned long word, made = 0;
 
-	fxfs_dax_pages_check(pages, 0, pages->nr);
+	cladefs_dax_pages_check(pages, 0, pages->nr);
 	for (word = 0; word < BITS_TO_LONGS(pages->nr); word++) {
 		unsigned long back = set[word] & pages->private[word] & ~pages->dirty[word];
 
@@ -216,76 +216,76 @@ unsigned long fxfs_dax_pages_redirty(struct fxfs_dax_pages *pages, const unsigne
 	return made;
 }
 
-struct fxfs_dax_change fxfs_dax_pages_cut(struct fxfs_dax_pages *pages, unsigned long first,
+struct cladefs_dax_change cladefs_dax_pages_cut(struct cladefs_dax_pages *pages, unsigned long first,
 					  unsigned long n)
 {
-	struct fxfs_dax_change took = {};
+	struct cladefs_dax_change took = {};
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return took;
-	took.private = -fxfs_dax_pages_weight(pages->private, first, n);
-	took.dirty = -fxfs_dax_pages_weight(pages->dirty, first, n);
+	took.private = -cladefs_dax_pages_weight(pages->private, first, n);
+	took.dirty = -cladefs_dax_pages_weight(pages->dirty, first, n);
 	bitmap_clear(pages->dirty, first, n);
 	bitmap_clear(pages->private, first, n);
 	bitmap_set(pages->zeros, first, n);
 	bitmap_set(pages->mapped, first, n);
-	fxfs_dax_pages_check(pages, first, first + n);
+	cladefs_dax_pages_check(pages, first, first + n);
 	return took;
 }
 
-struct fxfs_dax_change fxfs_dax_pages_unmap(struct fxfs_dax_pages *pages, unsigned long first,
+struct cladefs_dax_change cladefs_dax_pages_unmap(struct cladefs_dax_pages *pages, unsigned long first,
 					    unsigned long n)
 {
-	struct fxfs_dax_change took = {};
+	struct cladefs_dax_change took = {};
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return took;
-	took.private = -fxfs_dax_pages_weight(pages->private, first, n);
-	took.dirty = -fxfs_dax_pages_weight(pages->dirty, first, n);
+	took.private = -cladefs_dax_pages_weight(pages->private, first, n);
+	took.dirty = -cladefs_dax_pages_weight(pages->dirty, first, n);
 	bitmap_clear(pages->dirty, first, n);
 	bitmap_clear(pages->private, first, n);
 	bitmap_clear(pages->zeros, first, n);
 	bitmap_clear(pages->mapped, first, n);
-	fxfs_dax_pages_check(pages, first, first + n);
+	cladefs_dax_pages_check(pages, first, first + n);
 	return took;
 }
 
-struct fxfs_dax_change fxfs_dax_pages_would_dirty(const struct fxfs_dax_pages *pages,
+struct cladefs_dax_change cladefs_dax_pages_would_dirty(const struct cladefs_dax_pages *pages,
 						  unsigned long first, unsigned long n)
 {
-	struct fxfs_dax_change would = {};
+	struct cladefs_dax_change would = {};
 
-	if (!fxfs_dax_pages_within(pages, first, n))
+	if (!cladefs_dax_pages_within(pages, first, n))
 		return would;
-	would.private = n - fxfs_dax_pages_weight(pages->private, first, n);
-	would.dirty = n - fxfs_dax_pages_weight(pages->dirty, first, n);
+	would.private = n - cladefs_dax_pages_weight(pages->private, first, n);
+	would.dirty = n - cladefs_dax_pages_weight(pages->dirty, first, n);
 	return would;
 }
 
-bool fxfs_dax_pages_any_dirty(const struct fxfs_dax_pages *pages)
+bool cladefs_dax_pages_any_dirty(const struct cladefs_dax_pages *pages)
 {
 	/* Writeback sizes its batch holding the semaphore shared, as iomaps dirty pages. */
-	return fxfs_dax_pages_weight(pages->dirty, 0, pages->nr);
+	return cladefs_dax_pages_weight(pages->dirty, 0, pages->nr);
 }
 
-bool fxfs_dax_pages_any_mapped(const struct fxfs_dax_pages *pages, unsigned long first,
+bool cladefs_dax_pages_any_mapped(const struct cladefs_dax_pages *pages, unsigned long first,
 			       unsigned long last)
 {
 	return find_next_bit(pages->mapped, min(last, pages->nr), first) < min(last, pages->nr);
 }
 
-bool fxfs_dax_pages_mapped(const struct fxfs_dax_pages *pages, unsigned long page)
+bool cladefs_dax_pages_mapped(const struct cladefs_dax_pages *pages, unsigned long page)
 {
 	return page < pages->nr && test_bit(page, pages->mapped);
 }
 
-unsigned long fxfs_dax_pages_next_unmapped(const struct fxfs_dax_pages *pages,
+unsigned long cladefs_dax_pages_next_unmapped(const struct cladefs_dax_pages *pages,
 					   unsigned long first, unsigned long last)
 {
 	return find_next_zero_bit(pages->mapped, min(last, pages->nr), first);
 }
 
-unsigned long fxfs_dax_pages_mapped_run(const struct fxfs_dax_pages *pages, unsigned long first,
+unsigned long cladefs_dax_pages_mapped_run(const struct cladefs_dax_pages *pages, unsigned long first,
 					unsigned long last)
 {
 	last = min(last, pages->nr);
@@ -295,39 +295,39 @@ unsigned long fxfs_dax_pages_mapped_run(const struct fxfs_dax_pages *pages, unsi
 						find_next_bit(pages->mapped, last, first);
 }
 
-bool fxfs_dax_pages_unwritten(const struct fxfs_dax_pages *pages, unsigned long page)
+bool cladefs_dax_pages_unwritten(const struct cladefs_dax_pages *pages, unsigned long page)
 {
 	return page < pages->nr && test_bit(page, pages->zeros) &&
 	       !test_bit(page, pages->private);
 }
 
-unsigned long fxfs_dax_pages_unwritten_run(const struct fxfs_dax_pages *pages,
+unsigned long cladefs_dax_pages_unwritten_run(const struct cladefs_dax_pages *pages,
 					   unsigned long first, unsigned long last)
 {
-	bool unwritten = fxfs_dax_pages_unwritten(pages, first);
+	bool unwritten = cladefs_dax_pages_unwritten(pages, first);
 	unsigned long page;
 
 	last = min(last, pages->nr);
-	for (page = first + 1; page < last && fxfs_dax_pages_unwritten(pages, page) == unwritten;
+	for (page = first + 1; page < last && cladefs_dax_pages_unwritten(pages, page) == unwritten;
 	     page++)
 		;
 	return min(page, last);
 }
 
-unsigned long fxfs_dax_pages_aheadable_run(const struct fxfs_dax_pages *pages, unsigned long first,
+unsigned long cladefs_dax_pages_aheadable_run(const struct cladefs_dax_pages *pages, unsigned long first,
 					   unsigned long last)
 {
 	unsigned long page;
 
 	last = min(last, pages->nr);
 	for (page = first; page < last; page++) {
-		if (!test_bit(page, pages->mapped) || fxfs_dax_pages_unwritten(pages, page))
+		if (!test_bit(page, pages->mapped) || cladefs_dax_pages_unwritten(pages, page))
 			break;
 	}
 	return page;
 }
 
-unsigned long fxfs_dax_pages_next_rebindable(const struct fxfs_dax_pages *pages,
+unsigned long cladefs_dax_pages_next_rebindable(const struct cladefs_dax_pages *pages,
 					     unsigned long from, unsigned long *end)
 {
 	unsigned long page = find_next_bit(pages->private, pages->nr, from);

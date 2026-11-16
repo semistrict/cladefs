@@ -393,17 +393,17 @@ pub mod guest {
     /// `FIFREEZE` and `FITHAW`: `_IOWR('X', 119, int)` and `_IOWR('X', 120, int)`.
     pub const FIFREEZE: libc::c_ulong = 0xc004_5877;
     pub const FITHAW: libc::c_ulong = 0xc004_5878;
-    /// fs/fxfs's FXFS_MANIFEST_MAX.
+    /// fs/cladefs's CLADEFS_MANIFEST_MAX.
     const MANIFEST_MAX: usize = 65536;
 
-    /// fs/fxfs's `struct fxfs_manifest`.
+    /// fs/cladefs's `struct cladefs_manifest`.
     #[repr(C)]
     struct Manifest {
         data: u64,
         size: u64,
     }
 
-    /// fs/fxfs's `struct fxfs_import`.
+    /// fs/cladefs's `struct cladefs_import`.
     #[repr(C)]
     struct Import {
         name: u64,
@@ -418,7 +418,7 @@ pub mod guest {
 
     pub fn try_mount(volume: Option<&str>, target: &str) -> std::io::Result<()> {
         let source = CString::new("extents").unwrap();
-        let (target, fstype) = (CString::new(target).unwrap(), CString::new("fxfs").unwrap());
+        let (target, fstype) = (CString::new(target).unwrap(), CString::new("cladefs").unwrap());
         let options = volume.map(|volume| CString::new(format!("volume={volume}")).unwrap());
         let data = options.as_ref().map_or(std::ptr::null(), |options| options.as_ptr());
         // SAFETY: The strings outlive the call.

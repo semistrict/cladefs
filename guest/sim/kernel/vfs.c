@@ -10,7 +10,7 @@
 #include <sim/host.h>
 #include <linux/dax.h>
 
-/* As FXFS_DAX_MAX_DROPS. */
+/* As CLADEFS_DAX_MAX_DROPS. */
 #define SIM_MAX_FAULT_DROPS 256
 
 ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
@@ -120,7 +120,7 @@ int invalidate_inode_pages2_range(struct address_space *mapping, pgoff_t start, 
 
 	/*
 	 * A fault going round for ever: only a seal would end it, if one came (TASK-140). dax.c has a
-	 * write and a fault give up after FXFS_DAX_MAX_DROPS of these: more is that limit gone.
+	 * write and a fault give up after CLADEFS_DAX_MAX_DROPS of these: more is that limit gone.
 	 */
 	if (current->fault_drops >= 0 && ++current->fault_drops > SIM_MAX_FAULT_DROPS)
 		sim_panic("livelock: a fault had its range dropped %d times", current->fault_drops);

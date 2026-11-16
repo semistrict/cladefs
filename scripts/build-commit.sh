@@ -5,7 +5,7 @@
 
 # Print the commit a build of the tree at ROOT (default: this script's) is of, which every build
 # reports (TASK-111.7): cladefsd's /metrics, cladefsctl --version, the VMM's report to cladefsd
-# (crates/cladefs/build.rs) and the guest kernel's /proc/fs/fxfs/build
+# (crates/cladefs/build.rs) and the guest kernel's /proc/fs/cladefs/build
 # (scripts/build-guest-kernel.sh).
 #
 #   build-commit.sh [ROOT]

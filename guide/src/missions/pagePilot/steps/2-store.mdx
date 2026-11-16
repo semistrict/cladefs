@@ -30,7 +30,7 @@ Step through it. The order is the point: private first, dirty second, store last
 <Inv id="three-kinds" />
 <Inv id="private-max" />
 
-The guest side: `fxfs_dax_dirty` asks for `PRIVATE` before anything is dirty, holding the file's
+The guest side: `cladefs_dax_dirty` asks for `PRIVATE` before anything is dirty, holding the file's
 semaphore shared until the store or copy is done.
 
 <Ref id="guest_dirty" />

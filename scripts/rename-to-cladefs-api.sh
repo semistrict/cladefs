@@ -3,8 +3,8 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# The extent service's names and Firecracker's extent API named for cladefs (TASK-501), as a
-# script, so that a branch begun before it can run it and then rebase onto main with its own
+# The extent service's names, Firecracker's extent API and the guest kernel's filesystem module
+# named for cladefs (TASK-501), as a script, so that a branch begun before it can run it and then rebase onto main with its own
 # changes renamed too:
 #
 #   scripts/rename-to-cladefs-api.sh            rename this checkout's live files and paths, and
@@ -32,6 +32,17 @@
 # upstream names `/drives`' parser and module for its API. The device keeps its own: the extent
 # store device (devices/virtio/extent, its Extent, ExtentState and the snapshot's extent_devices),
 # as do the domain's extent words (extent_store, ExtentId, virtio_extent).
+#
+# The guest kernel's module, fs/fxfs, is cladefs: its directory (guest/linux/fs/cladefs), the
+# filesystem's type (mount -t cladefs), CONFIG_CLADEFS_FS, its parameters (cladefs.dax_delay_us,
+# /sys/module/cladefs), its tracepoints (cladefs:cladefs_dax_map), /proc/fs/cladefs, its log's
+# prefix, its C (cladefs_*, CLADEFS_*), the Rust it links (guest/rust/cladefs-linux), its patches,
+# guest/sim's build of it and its model's directory (guest/sim/cladefs), and the Coccinelle and
+# bpftrace scripts over it. Elsewhere the module's own names alone change: the C symbols guest/linux
+# defines (GUEST_SYMBOLS, which this collects from it before renaming), its parameters (GUEST_PARAMS),
+# and the paths and names above. Fxfs itself keeps its name: Fuchsia's crates (crates/fxfs*, the
+# fxfs crate the Rust links, fxfs_trace), the format, the cases that test it (fxfs-guest-*), the
+# fxfs-posix and fxfs-sim-diff crates, and Fxfs in prose.
 #
 # What keeps its old name: records of what was, docs/measurements, docs/reviews, the backlog's
 # tasks (renamed through its CLI, open ones only), dead-ends/, DONE.md,
@@ -99,11 +110,42 @@ if ($ARGV =~ m{(^|/)resources/cladefs/swagger\.yaml$}) {
     s/^  Extent:$/  Cladefs:/mg;
 }
 if ($ARGV =~ m{(^|/)guest/tests/test_cases/src/vm\.rs$}) { s/"extent"/"cladefs"/g; }
+BEGIN { $sym = $ENV{GUEST_SYMBOLS}; $par = $ENV{GUEST_PARAMS}; }
+s{\bfs/fxfs\b}{fs/cladefs}g;
+s{\bsim/fxfs/fxfs\.c\b}{sim/cladefs/cladefs.c}g;
+s{\bsim/fxfs\b}{sim/cladefs}g;
+s/fxfs-linux/cladefs-linux/g; s/fxfs_linux/cladefs_linux/g;
+s/fxfs([-_])tls/cladefs$1tls/g;
+s/\b0004-fxfs\.patch\b/0004-cladefs.patch/g;
+s/\bfxfs_trace\.h\b/cladefs_trace.h/g; s/\bfxfs\.h\b/cladefs.h/g;
+s/\bfxfs-latency\.bt\b/cladefs-latency.bt/g;
+s{/sys/module/fxfs/}{/sys/module/cladefs/}g;
+s/\btracepoint:fxfs:/tracepoint:cladefs:/g; s{\bevents/fxfs\b}{events/cladefs}g;
+s/\bfxfs:(?=fxfs_|\*)/cladefs:/g;
+s/\bCONFIG_FXFS_FS\b/CONFIG_CLADEFS_FS/g;
+s/(KBUILD_MODNAME=\S{0,3})fxfs\b/$1cladefs/g;
+s/(-t )fxfs\b/$1cladefs/g;
+if ($par) { s/\bfxfs\.($par)\b/cladefs.$1/g; }
+if ($sym) {
+    s{(?<![A-Za-z0-9_])($sym)\b}{my $n = $1; $n =~ s/^fxfs/cladefs/; $n =~ s/^FXFS/CLADEFS/; $n}ge;
+}
+if ($ARGV =~ m{(^|/)(guest/linux|guest/sim|guest/mutants|scripts/cocci|scripts/bpftrace)/|(^|/)scripts/[^/]+\.bt$}) {
+    s/%sfxfs:/%scladefs:/g;
+    s/(?<![A-Za-z0-9_])(?<!crates\/)fxfs(?!-(?:guest|posix|sim-diff|automount)|::)/cladefs/g;
+    s/(?<=_)fxfs(?=_)(?!_guest)/cladefs/g;
+    s/(?<![A-Za-z0-9])FXFS/CLADEFS/g;
+}
+if ($ARGV =~ m{(^|/)guest/rust/}) { s/"fxfs: /"cladefs: /g; }
+if ($ARGV =~ m{(^|/)(guest/tests|crates/fxfs-automount)/}) {
+    s/"fxfs"/"cladefs"/g; s/\] fxfs: /] cladefs: /g;
+}
 '
 # Perl that renames a path: the files of Firecracker's configuration layer, besides extentd's.
 # shellcheck disable=SC2016
 rename_path='s/extentd/cladefsd/g;
-s{(src/vmm/src/vmm_config|src/firecracker/src/api_server/request)/extent\.rs$}{$1/cladefs.rs};'
+s{(src/vmm/src/vmm_config|src/firecracker/src/api_server/request)/extent\.rs$}{$1/cladefs.rs};
+s{^guest/rust/fxfs-linux/}{guest/rust/cladefs-linux/};
+if (m{^(guest/linux|guest/sim|scripts/bpftrace)/}) { s/(?<![A-Za-z0-9_])fxfs/cladefs/g; }'
 
 if [[ $mode == filter ]]; then
     exec perl -0777 -pe "$rename"
@@ -111,6 +153,17 @@ fi
 
 if [[ $mode == repo || $mode == backlog ]]; then
     cd "$(git rev-parse --show-toplevel)"
+    # The guest module's parameters, which keep their names under the module's new one.
+    GUEST_PARAMS=$({ git grep -hoP 'module_param(?:_named|_cb)?\(\s*\K\w+' -- guest/linux ||
+        [[ $? == 1 ]]; } | sort -u | paste -sd'|' -)
+    export GUEST_PARAMS
+fi
+if [[ $mode == repo ]]; then
+    # The C symbols the guest module defines, as it names them before this renames them, but
+    # Fuchsia's crate fxfs_trace, whose name its trace header's shares.
+    GUEST_SYMBOLS=$({ git grep -hoP '(?<![A-Za-z0-9_])(?:fxfs|FXFS)_\w+' -- guest/linux ||
+        [[ $? == 1 ]]; } | grep -vx 'fxfs_trace' | sort -u | paste -sd'|' -)
+    export GUEST_SYMBOLS
 fi
 
 if [[ $mode == backlog ]]; then
@@ -137,10 +190,10 @@ formatted() {
     [[ $(rustfmt --edition 2024 --emit stdout <<< "$text" 2> /dev/null) == "$text" ]]
 }
 
-# Contents first, of every file that says extent, as some renames span lines; none saying it is no
-# failure. In a tree of the fork, the Rust that rustfmt left as it was is formatted again: a longer
+# Contents first, of every file that says extent or fxfs, as some renames span lines; none saying
+# it is no failure. In a tree of the fork, the Rust that rustfmt left as it was is formatted again: a longer
 # name may take a line past its width, a module's another place among its neighbours.
-{ git grep -lzIi extent -- "${paths[@]}" || [[ $? == 1 ]]; } | while IFS= read -r -d '' file; do
+{ git grep -lzIiE 'extent|fxfs' -- "${paths[@]}" || [[ $? == 1 ]]; } | while IFS= read -r -d '' file; do
     before=$(< "$file")
     perl -0777 -pi -e "$rename" "$file"
     if [[ $mode == tree && $file == *.rs && $(< "$file") != "$before" ]] && formatted <<< "$before"; then

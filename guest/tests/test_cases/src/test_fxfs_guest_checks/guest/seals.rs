@@ -8,12 +8,12 @@
 use super::*;
 
 /// cladefs: has the kernel log what it traced of the DAX window's page at page frame `frame`, of
-/// whichever pages of files (fxfs.dax_trace, TASK-124): where a mapping maps a page that isn't
+/// whichever pages of files (cladefs.dax_trace, TASK-124): where a mapping maps a page that isn't
 /// its file's.
 fn trace_dump_frame(frame: u64) {
-    let traced = fs::read_to_string("/sys/module/fxfs/parameters/dax_trace");
+    let traced = fs::read_to_string("/sys/module/cladefs/parameters/dax_trace");
     if traced.is_ok_and(|traced| traced.trim() == "Y") {
-        let _ = fs::write("/sys/module/fxfs/parameters/dax_trace_dump", format!("pfn {frame:x}"));
+        let _ = fs::write("/sys/module/cladefs/parameters/dax_trace_dump", format!("pfn {frame:x}"));
     }
 }
 
@@ -32,7 +32,7 @@ fn mapped_pfn(addr: usize) -> Option<u64> {
 }
 
 /// cladefs: dax_writes_ns adds up (TASK-146.2): what writes of a file's every kind of page spent
-/// is in the parts /proc/fs/fxfs/<tag> says, the copy among them: a new step in the write would
+/// is in the parts /proc/fs/cladefs/<tag> says, the copy among them: a new step in the write would
 /// show as dax_write_other_ns. 45% of a pgbench's writes' time had no part to be in. Of a file
 /// read in from sealed extents, whose writes are the window's, copying on write (doc-13; a file
 /// created here is a page-cache inode, TASK-164.3): its iomaps and its copies. Fails if a

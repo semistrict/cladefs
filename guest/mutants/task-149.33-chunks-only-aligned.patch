@@ -9,14 +9,14 @@
 # no slot for it, and every write or read of a large file's chunk fails ENOSPC from then on, most
 # of the window free. unmaps_failed_leave_room_unaligned: its write fails ENOSPC.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -1406,7 +1406,7 @@
  		 * aligned slot from use for good, and every chunk's write failed ENOSPC once each
  		 * slot had one, most of the window free (TASK-149.33).
  		 */
--		if (aligned && pages == FXFS_DAX_PAGES) {
-+		if (false && aligned && pages == FXFS_DAX_PAGES) {
- 			window_offset = fxfs_dax_take_window(dax, pages, false);
+-		if (aligned && pages == CLADEFS_DAX_PAGES) {
++		if (false && aligned && pages == CLADEFS_DAX_PAGES) {
+ 			window_offset = cladefs_dax_take_window(dax, pages, false);
  			if (window_offset >= 0) {
  				atomic_long_inc(&dax->unaligned);

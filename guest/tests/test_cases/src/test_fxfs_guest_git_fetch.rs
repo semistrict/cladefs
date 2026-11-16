@@ -434,7 +434,7 @@ mod guest {
         let _automounter = automounter();
         check_upstream_reached();
         check_the_checkout();
-        assert_eq!(mounted("/repos/repo-g1").as_deref(), Some("fxfs"));
+        assert_eq!(mounted("/repos/repo-g1").as_deref(), Some("cladefs"));
     }
 
     impl Test for TestFxfsGuestGitFetch {

@@ -4,21 +4,21 @@
 // found in the LICENSE file.
 //
 // In a guest: how long the guest Fxfs's seals and DAX window MAPs take, in microseconds, the MAPs
-// by why the window maps (fs/fxfs/fxfs_trace.h's events, docs/guest-tracepoints.md), and the bytes
+// by why the window maps (fs/cladefs/cladefs_trace.h's events, docs/guest-tracepoints.md), and the bytes
 // the seals sealed. Printed as it ends, at Ctrl-C.
 
 BEGIN
 {
-	printf("Tracing fxfs seals and window MAPs; Ctrl-C to end.\n");
+	printf("Tracing cladefs seals and window MAPs; Ctrl-C to end.\n");
 }
 
 // A seal's begin and end: its count, odd as it begins, one more as it ends.
-tracepoint:fxfs:fxfs_seal_begin
+tracepoint:cladefs:cladefs_seal_begin
 {
 	@seal_began[args.seals] = nsecs;
 }
 
-tracepoint:fxfs:fxfs_seal_end
+tracepoint:cladefs:cladefs_seal_end
 /@seal_began[args.seals - 1]/
 {
 	@seal_us = hist((nsecs - @seal_began[args.seals - 1]) / 1000);
@@ -27,19 +27,19 @@ tracepoint:fxfs:fxfs_seal_end
 }
 
 // Why the window maps, on the task that then MAPs: reach, range, rebind or zeros.
-tracepoint:fxfs:fxfs_dax_map
+tracepoint:cladefs:cladefs_dax_map
 {
 	@why[tid] = args.why;
 }
 
-tracepoint:fxfs:fxfs_window_map_start
+tracepoint:cladefs:cladefs_window_map_start
 {
 	@map_began[args.id] = nsecs;
 	@map_why[args.id] = @why[tid];
 	@map_bytes = hist(args.len);
 }
 
-tracepoint:fxfs:fxfs_window_map_end
+tracepoint:cladefs:cladefs_window_map_end
 /@map_began[args.id]/
 {
 	$why = @map_why[args.id];

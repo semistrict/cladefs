@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The extent-store device the filesystem lives on (guest/linux/fs/fxfs/device.h, backlog doc-4),
+//! The extent-store device the filesystem lives on (guest/linux/fs/cladefs/device.h, backlog doc-4),
 //! as Fxfs's `Device`.
 //!
 //! Each operation is one or more of the device's requests, which the device completes from its
@@ -52,13 +52,13 @@ use storage_device::{
 mod ffi {
     use core::ffi::{c_char, c_int, c_void};
 
-    /// `struct fxfs_device`.
+    /// `struct cladefs_device`.
     #[repr(C)]
     pub struct Device {
         _private: [u8; 0],
     }
 
-    /// `struct fxfs_device_info`.
+    /// `struct cladefs_device_info`.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, Default)]
     pub struct Info {
@@ -70,7 +70,7 @@ mod ffi {
         pub max_extent: u64,
     }
 
-    /// `struct fxfs_device_op`.
+    /// `struct cladefs_device_op`.
     #[repr(C)]
     pub struct Op {
         pub type_: u32,
@@ -85,14 +85,14 @@ mod ffi {
     }
 
     unsafe extern "C" {
-        pub fn fxfs_device_find(tag: *const c_char, len: usize, info: *mut Info) -> *mut Device;
-        pub fn fxfs_device_put(dev: *mut Device);
-        pub fn fxfs_device_capacity(dev: *mut Device, capacity: *mut u64, asked: *mut u64)
+        pub fn cladefs_device_find(tag: *const c_char, len: usize, info: *mut Info) -> *mut Device;
+        pub fn cladefs_device_put(dev: *mut Device);
+        pub fn cladefs_device_capacity(dev: *mut Device, capacity: *mut u64, asked: *mut u64)
         -> c_int;
-        pub fn fxfs_device_committed(dev: *mut Device) -> u64;
-        pub fn fxfs_device_seal_begin(dev: *mut Device);
-        pub fn fxfs_device_seal_end(dev: *mut Device);
-        pub fn fxfs_device_submit(
+        pub fn cladefs_device_committed(dev: *mut Device) -> u64;
+        pub fn cladefs_device_seal_begin(dev: *mut Device);
+        pub fn cladefs_device_seal_end(dev: *mut Device);
+        pub fn cladefs_device_submit(
             dev: *mut Device,
             op: *const Op,
             done: extern "C" fn(arg: *mut c_void, status: c_int),
@@ -123,7 +123,7 @@ const WRITE_ROOT: u32 = 1 << 3;
 const COMMIT_UPLOADED: u32 = 1 << 0;
 const COMMIT_ROOT: u32 = 1 << 1;
 const FREE_MANY: u32 = 1 << 0;
-// `struct fxfs_device_info`'s flags (device.h).
+// `struct cladefs_device_info`'s flags (device.h).
 const DEVICE_WRITE_COMMIT: u32 = 1 << 0;
 const DEVICE_FREEZE: u32 = 1 << 1;
 const DEVICE_READ_ONLY: u32 = 1 << 2;
@@ -336,7 +336,7 @@ impl Drop for UploadingGuard {
 }
 
 /// cladefs: how many of something there were, and their nanoseconds, all told; and how many took
-/// each power of two of time (TASK-111.6), as the C side's histograms (fs/fxfs/hist.h) count them:
+/// each power of two of time (TASK-111.6), as the C side's histograms (fs/cladefs/hist.h) count them:
 /// bucket k those under 1.024 us times 2 to the k, the last the rest.
 #[derive(Default)]
 pub struct Timed {
@@ -398,7 +398,7 @@ unsafe impl Send for Dax {}
 unsafe impl Sync for Dax {}
 
 impl Dax {
-    /// The device, as C has it: `struct fxfs_device`, while the filesystem is mounted.
+    /// The device, as C has it: `struct cladefs_device`, while the filesystem is mounted.
     pub fn device(&self) -> *mut c_void {
         self.device.as_ptr().cast()
     }
@@ -442,7 +442,7 @@ unsafe impl Send for Seal<'_> {}
 impl<'a> Seal<'a> {
     /// Waits for another seal to end and for writes in flight, and keeps new ones out until it
     /// ends, around a request that seals the extents open, which then are not; the device's seal
-    /// count tells the DAX window of it (`fxfs_device_seal_begin`). The device applies a request
+    /// count tells the DAX window of it (`cladefs_device_seal_begin`). The device applies a request
     /// in flight while a barrier is on either side of it (doc-4), and a write's several requests on
     /// both: those after it failed on the extent it sealed, as the write's first opened it
     /// (TASK-91.1).
@@ -455,7 +455,7 @@ impl<'a> Seal<'a> {
         let one = sealer.sealing.lock().await;
         sealer.writes.close().await;
         // SAFETY: The device is bound while the filesystem is mounted.
-        unsafe { ffi::fxfs_device_seal_begin(sealer.device.as_ptr()) };
+        unsafe { ffi::cladefs_device_seal_begin(sealer.device.as_ptr()) };
         sealer.open.seal();
         sealer.stats.seal_waits.add(asked);
         Self {
@@ -475,7 +475,7 @@ impl Drop for Seal<'_> {
     fn drop(&mut self) {
         self.open.seal();
         // SAFETY: `begin` began the seal.
-        unsafe { ffi::fxfs_device_seal_end(self.device.as_ptr()) };
+        unsafe { ffi::cladefs_device_seal_end(self.device.as_ptr()) };
         self.writes.open();
         self.stats.seals.add(self.began);
     }
@@ -492,7 +492,7 @@ impl ExtentDevice {
         let mut info = ffi::Info::default();
         // SAFETY: `tag` and `info` are live for the call.
         let device =
-            unsafe { ffi::fxfs_device_find(tag.as_ptr() as *const c_char, tag.len(), &mut info) };
+            unsafe { ffi::cladefs_device_find(tag.as_ptr() as *const c_char, tag.len(), &mut info) };
         let device = NonNull::new(device).ok_or_else(|| {
             anyhow!(FxfsError::NotFound)
                 .context(format!("no extent store tagged {:?}", String::from_utf8_lossy(tag)))
@@ -651,7 +651,7 @@ impl ExtentDevice {
     /// Logs a free of `extent` if it is open: something uses it (TASK-121).
     fn check_free(&self, extent: ExtentId) {
         if self.open.contains(extent) {
-            log::error!("fxfs: freeing {extent:?}, open since the last seal (TASK-121)");
+            log::error!("cladefs: freeing {extent:?}, open since the last seal (TASK-121)");
         }
     }
 
@@ -725,7 +725,7 @@ fn submit<'a>(device: NonNull<ffi::Device>, op: ffi::Op) -> Result<Request<'a>, 
     let arg = Arc::into_raw(completion.clone()) as *mut c_void;
     // SAFETY: The device is bound while the filesystem is mounted, and `op` and its data stay
     // until the device is done, as the request's future waits for that.
-    let ret = unsafe { ffi::fxfs_device_submit(device.as_ptr(), &op, complete, arg) };
+    let ret = unsafe { ffi::cladefs_device_submit(device.as_ptr(), &op, complete, arg) };
     if ret != 0 {
         // SAFETY: The device won't call `complete`, which would have taken `arg` back.
         drop(unsafe { Arc::from_raw(arg as *const Completion) });
@@ -770,7 +770,7 @@ impl Resizer {
         let (mut capacity, mut asked) = (0, 0);
         // SAFETY: The device is bound while the filesystem is mounted.
         let ret =
-            unsafe { ffi::fxfs_device_capacity(self.device.as_ptr(), &mut capacity, &mut asked) };
+            unsafe { ffi::cladefs_device_capacity(self.device.as_ptr(), &mut capacity, &mut asked) };
         (ret == 0).then_some((capacity, asked))
     }
 
@@ -804,7 +804,7 @@ impl Commits {
     /// The number of the writer's latest commit.
     pub fn latest(&self) -> u64 {
         // SAFETY: The device is bound while the filesystem is mounted.
-        unsafe { ffi::fxfs_device_committed(self.device.as_ptr()) }
+        unsafe { ffi::cladefs_device_committed(self.device.as_ptr()) }
     }
 }
 
@@ -833,7 +833,7 @@ impl Drop for LetGo {
         let op = op(T_LET_GO, 0, None, self.commit, std::ptr::null_mut(), 0);
         // SAFETY: The device is bound while the filesystem is mounted, and `op` has no data.
         let ret = unsafe {
-            ffi::fxfs_device_submit(self.device.as_ptr(), &op, let_go_done, std::ptr::null_mut())
+            ffi::cladefs_device_submit(self.device.as_ptr(), &op, let_go_done, std::ptr::null_mut())
         };
         if ret != 0 {
             log::error!("letting go of commits before commit {}: errno {}", self.commit, -ret);
@@ -1223,6 +1223,6 @@ impl Device for ExtentDevice {
 impl Drop for ExtentDevice {
     fn drop(&mut self) {
         // SAFETY: `find` found it, and nothing uses it any more.
-        unsafe { ffi::fxfs_device_put(self.device.as_ptr()) };
+        unsafe { ffi::cladefs_device_put(self.device.as_ptr()) };
     }
 }

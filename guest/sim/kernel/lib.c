@@ -29,12 +29,12 @@ char *strstr(const char *haystack, const char *needle);
 
 /*
  * Whether an allocation by the source `file` is the code under test's, which a sweep fails:
- * fs/fxfs's own, which tests have fail too (sim_alloc_fail, sim_alloc_fail_odds), fs/dax.c's, or
+ * fs/cladefs's own, which tests have fail too (sim_alloc_fail, sim_alloc_fail_odds), fs/dax.c's, or
  * of the XArrays and the pool they use, whose callers see it fail.
  */
 static bool under_test(const char *file)
 {
-	return strstr(file, "fs/fxfs/") || strstr(file, "fs/dax.c") || strstr(file, "lib/xarray.c") ||
+	return strstr(file, "fs/cladefs/") || strstr(file, "fs/dax.c") || strstr(file, "lib/xarray.c") ||
 	       strstr(file, "lib/genalloc.c");
 }
 
@@ -47,7 +47,7 @@ static bool alloc_fails(gfp_t gfp, const char *file, int line)
 		return false;
 	if (sim_sweep_fails("an allocation", file, line))
 		fail = true;
-	else if (!strstr(file, "fs/fxfs/"))
+	else if (!strstr(file, "fs/cladefs/"))
 		fail = false;
 	else if (alloc_odds && !(sim_random() % alloc_odds))
 		fail = true;

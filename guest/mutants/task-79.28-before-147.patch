@@ -6,28 +6,28 @@
 #
 # TASK-79.28 as it was before TASK-147: task-79.28-range-too-small's WARN and EIO, with what has
 # kept a fault from mapping a range too small since. On its own that mutant is equivalent: a fault
-# that sizes its range from the old end holds the invalidate lock the write's fxfs_dax_fit waits
+# that sizes its range from the old end holds the invalidate lock the write's cladefs_dax_fit waits
 # for, and one after it sees `growing`. This one says whether the sim reaches what it was.
 
---- a/guest/linux/fs/fxfs/dax.c
-+++ b/guest/linux/fs/fxfs/dax.c
+--- a/guest/linux/fs/cladefs/dax.c
++++ b/guest/linux/fs/cladefs/dax.c
 @@ -2623,8 +2623,10 @@
  		return PTR_ERR(range);
- 	start = fxfs_dax_chunk_start(range);
+ 	start = cladefs_dax_chunk_start(range);
  	if (range->region || start + ((loff_t)range->pages << PAGE_SHIFT) <= pos) {
 +		bool short_of_pos = !range->region;
 +
- 		fxfs_dax_put_range(dax, range);
+ 		cladefs_dax_put_range(dax, range);
 -		return -EXDEV;
 +		return WARN_ON_ONCE(short_of_pos) ? -EIO : -EXDEV;
  	}
  	first = (pos - start) >> PAGE_SHIFT;
  	end = min_t(loff_t, end, start + ((loff_t)min(range->pages, first + dax->iomap_pages) <<
 @@ -3009,7 +3011,6 @@
- 	fxfs_dax_write_follows(file, iocb->ki_pos, end);
+ 	cladefs_dax_write_follows(file, iocb->ki_pos, end);
  	/* The ranges the file's end moves into, mapped as large as they need. */
  	if (end > old_size) {
 -		WRITE_ONCE(file->growing, end);
  		filemap_invalidate_lock(inode->i_mapping);
- 		ret = fxfs_dax_fit(inode, end);
+ 		ret = cladefs_dax_fit(inode, end);
  		if (!ret && iocb->ki_pos > old_size)

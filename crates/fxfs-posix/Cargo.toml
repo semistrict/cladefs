@@ -1,4 +1,4 @@
-# Fxfs as a POSIX filesystem, which a VFS calls: the guest kernel's (guest/rust/fxfs-linux) and the
+# Fxfs as a POSIX filesystem, which a VFS calls: the guest kernel's (guest/rust/cladefs-linux) and the
 # host's (crates/cladefs). It builds for the guest kernel's targets too, so it makes no system calls.
 [package]
 name = "fxfs-posix"

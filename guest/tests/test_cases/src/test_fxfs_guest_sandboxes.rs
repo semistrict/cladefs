@@ -993,7 +993,7 @@ mod guest {
     /// Mounts the VM's own store's Fxfs at [`MNT`], made as it mounts.
     fn mount_data() {
         fs::create_dir_all(MNT).unwrap();
-        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"fxfs");
+        let (source, target, fstype) = (c"extents", c"/mnt/fxfs", c"cladefs");
         let ret = unsafe {
             libc::mount(source.as_ptr(), target.as_ptr(), fstype.as_ptr(), 0, std::ptr::null())
         };

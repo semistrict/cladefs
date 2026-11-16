@@ -21,7 +21,7 @@ DAX = script.SCRIPTS.parent / "guest" / "linux" / "fs" / "fxfs" / "dax.c"
 
 # fxfs_dax_region_open with TASK-99's race: as it was before 7caa43578, its region's lock taken out.
 TASK_99_REGION_OPEN = """\
-static void fxfs_dax_region_open(struct fxfs_dax *dax, struct fxfs_dax_region *region)
+static void fxfs_dax_region_open(struct cladefs_dax *dax, struct cladefs_dax_region *region)
 {
 \tfxfs_device_assert_in_gate(dax->dev);
 \tfxfs_dax_delay();

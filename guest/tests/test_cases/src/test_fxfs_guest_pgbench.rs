@@ -836,7 +836,7 @@ mod guest {
             match (std::env::var("CLADEFS_PGBENCH_PMEM"), std::env::var("CLADEFS_PGBENCH_BLK")) {
                 (Ok(device), _) => ext4(device, "dax=always"),
                 (_, Ok(device)) => ext4(device, ""),
-                _ => ("extents".to_owned(), "fxfs", ""),
+                _ => ("extents".to_owned(), "cladefs", ""),
             };
         let (source, target, fstype, options) = (
             CString::new(source).unwrap(),
@@ -883,7 +883,7 @@ mod guest {
             .expect("su");
         eprintln!("pgbench: {:.1?}, {}", start.elapsed(), output.status);
         // What the filesystem waited on so far (TASK-91.7), on one line.
-        let stats = fs::read_to_string("/proc/fs/fxfs/extents").unwrap_or_default();
+        let stats = fs::read_to_string("/proc/fs/cladefs/extents").unwrap_or_default();
         eprintln!("fxfs stats: {}", stats.lines().collect::<Vec<_>>().join(" "));
         // And the device's interrupts and the requests completed without one (TASK-91.15).
         eprintln!("device completions: {}", device_completions().join(" "));

@@ -401,7 +401,7 @@ mod guest {
             // The root is Fxfs, and the daemons keep their state on it.
             let mounts = std::fs::read_to_string("/proc/mounts").unwrap();
             let root = mounts.lines().find(|line| line.split(' ').nth(1) == Some("/")).unwrap();
-            assert_eq!(root.split(' ').nth(2), Some("fxfs"), "{root}");
+            assert_eq!(root.split(' ').nth(2), Some("cladefs"), "{root}");
             mount_run();
 
             let containerd_log = "/tmp/containerd.log";

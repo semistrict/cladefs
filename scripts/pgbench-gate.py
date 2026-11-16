@@ -66,7 +66,7 @@ less after the VM's before (or, for the first, before any VM): the mean over the
 first, which pays for what they share, the base's pages in the daemon.
 
 Each pgbench run's guest latencies (TASK-111.6), the histograms the guest's Fxfs keeps of its
-faults, seals and window MAPs (`NAME_hist` in /proc/fs/fxfs/extents, which the case's log has before
+faults, seals and window MAPs (`NAME_hist` in /proc/fs/cladefs/extents, which the case's log has before
 and after each run on its `fxfs stats:` lines), are reported as their percentiles, in us: the upper
 bound of the bucket each falls in, bucket k's 1.024 us times 2 to the k, the last's none.
 

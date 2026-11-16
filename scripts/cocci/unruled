@@ -16,7 +16,7 @@ task-149.29-tail-moved-though-zero: guest/sim's model of Fxfs, not the guest's C
 task-149.33-chunks-only-aligned: the fallback to an unaligned slot taken out: one branch's condition
 task-149.42-mprotect-batches-whatever-their-dirtiness: a patch of the kernel series left out of scripts/build-guest-kernel.sh: no C of the guest's changed
 task-150.12-pool-kept: a pool's bitmaps left set on its reset: one structure's state
-task-150.9-resize-moves-the-last-block: a flag left out of a call's argument (FXFS_SET_KEEP_TAIL): which flags a call needs is its own
+task-150.9-resize-moves-the-last-block: a flag left out of a call's argument (CLADEFS_SET_KEEP_TAIL): which flags a call needs is its own
 task-153.1-fault-limit: a bound on a fault's retries taken out: equivalent (Killer: none)
 task-160.2-resize-no-rollback: a failed grow leaving i_size grown: an undo on one error path, which a rule could check only knowing each step's undo
 task-164.11-unsure-range-unmapped-as-counted: a flag left out of a condition (range->unsure)

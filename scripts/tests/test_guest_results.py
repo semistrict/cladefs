@@ -19,7 +19,7 @@ guest_results = script.load("guest_results")
 # The knobs a run is given, and what says where it writes, which aren't knobs.
 GIVEN = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
     "CLADEFS_GUEST_KERNEL": "/var/lib/fxdax-test/guest-kernel-release/out/x86_64/vmlinux",
@@ -28,7 +28,7 @@ GIVEN = {
 }
 KNOBS = {
     "CLADEFS_E2E_REPEATS": "3",
-    "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200",
+    "CLADEFS_GUEST_CMDLINE": "cladefs.follow_apply_delay_us=200",
     "CLADEFS_GUEST_KERNEL_BUILD": "release",
     "PJDFSTEST_COMMIT": "85a8aea",
 }

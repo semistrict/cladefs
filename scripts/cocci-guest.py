@@ -10,7 +10,7 @@ fails, so that the next instance of a shape is found as it is written, not by a 
     scripts/cocci-guest.py [SOURCE...]
     scripts/cocci-guest.py --mutants
 
-checks SOURCE, files or directories, or the guest's C (guest/linux/fs/fxfs and
+checks SOURCE, files or directories, or the guest's C (guest/linux/fs/cladefs and
 guest/linux/drivers/virtio_extent). A directory's .c and .h files go to spatch together, so that a
 rule binding a function's declaration in a header finds its calls in the .c files. Each rule's
 matches print as spatch's context diffs, whose lines starting with '-' are the code matched. A
@@ -36,7 +36,7 @@ RULES = ROOT / "scripts/cocci"
 MUTANTS = ROOT / "guest/mutants"
 UNRULED = RULES / "unruled"
 SAFE = RULES / "safe"
-GUEST_C = ["guest/linux/fs/fxfs", "guest/linux/drivers/virtio_extent"]
+GUEST_C = ["guest/linux/fs/cladefs", "guest/linux/drivers/virtio_extent"]
 SOURCES = [ROOT / source for source in GUEST_C]
 
 

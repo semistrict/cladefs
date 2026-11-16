@@ -1,11 +1,11 @@
 [package]
-name = "fxfs-linux"
+name = "cladefs-linux"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 publish = false
 
-# The kernel links the archive into fs/fxfs.
+# The kernel links the archive into fs/cladefs.
 [lib]
 crate-type = ["staticlib"]
 

@@ -49,7 +49,7 @@ fn ino(name: &str) -> u64 {
     fs::symlink_metadata(path(name)).unwrap().ino()
 }
 
-/// cladefs: a directory read whole is kept with its inode (super.c's fxfs_vfs_dir_listing): each
+/// cladefs: a directory read whole is kept with its inode (super.c's cladefs_vfs_dir_listing): each
 /// change of its names shows in the next read, every kind of change, a directory read from an open
 /// handle again from its start too, and a directory too large to be kept (TASK-227).
 pub(super) fn test_listings_follow_changes() {
