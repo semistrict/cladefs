@@ -67,7 +67,7 @@
 //! makes of its branch, as a snapshot's restores do; for a base forked on several hosts; with
 //! `--shared`, shared once made, as `share` shares it. `share` shares the point the store at DIR
 //! is of (TASK-395.7): it forks into cells of other tenants' than its own, as a base image or a
-//! snapshot many tenants clone, which a point not shared refuses (`EACCES`); `unshare` stops such
+//! VM snapshot many tenants fork, which a point not shared refuses (`EACCES`); `unshare` stops such
 //! forks, those made living on. The point's record in its bucket says it, for every host. `delete`
 //! deletes a store, a fork or not: its branch in its bucket, its forks' living on, and its
 //! directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this

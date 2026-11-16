@@ -41,9 +41,9 @@ pub struct Storage {
 
 #[derive(Clone)]
 pub(crate) enum Kind {
-    /// An image: its directory, the device's writes and frees, which cloning the image pauses,
-    /// and its store, kept in its bucket, which a clone forks. Its device's I/O bypasses the
-    /// host's page cache, or the image opens not at all (TASK-433.6).
+    /// An image: its directory, the device's writes and frees, which forking the image pauses,
+    /// and its store, kept in its bucket, which forking the image forks. Its device's I/O bypasses
+    /// the host's page cache, or the image opens not at all (TASK-433.6).
     Image {
         dir: PathBuf,
         writes: Arc<WriteGate>,
@@ -65,7 +65,7 @@ impl Storage {
     /// The size of the blocks storage is read and written in. Storage sizes are multiples of it.
     pub const BLOCK_SIZE: u32 = host_store::BLOCK_SIZE;
 
-    /// The image at `path`: a directory holding an extent store (see `image`), a clone's or not,
+    /// The image at `path`: a directory holding an extent store (see `image`), a fork's or not,
     /// its branch kept in the bucket its description names (see `kept`).
     ///
     /// Its I/O bypasses the host's page cache where the host filesystem allows, as the in-process
@@ -82,7 +82,7 @@ impl Storage {
     /// A new image at `path`, which must not exist, holding at most `size` bytes. It holds nothing
     /// until the filesystem writes to it, and must be formatted before it is mounted. Its branch
     /// is kept in a file bucket of its own, beside its directory (`<image>.bucket`), which its
-    /// clones share and which outlives it; or, on a host of cladefs's system, in the host's bucket
+    /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFS_EXTENTD_REMOTE`).
     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
         Self::make(path.as_ref(), (size, host_store::NO_TENANT), true, Self::keeping()?)
@@ -218,24 +218,24 @@ impl Storage {
         matches!(self.kind, Kind::Image { .. })
     }
 
-    /// Clones the image to a new image at `path`, which must not exist, and returns its storage.
-    /// The clone is a fork of the image's branch in its bucket, which the clone keeps its own
+    /// Forks the image to a new image at `path`, which must not exist, and returns its storage.
+    /// The fork's branch is a fork of the image's in its bucket, which the fork keeps its own
     /// branch in: it takes the same space whatever the image holds, inheriting the image's
-    /// extents rather than copies, read from the bucket (TASK-165.7). `path` is the clone's own
-    /// directory. Memory cannot be cloned.
+    /// extents rather than copies, read from the bucket (TASK-165.7). `path` is the fork's own
+    /// directory. Memory cannot be forked.
     ///
-    /// The storage must not be mounted, which it is not while it is the caller's. To clone a
-    /// mounted filesystem's, see [`Filesystem::clone_storage_to`](crate::Filesystem::clone_storage_to).
-    pub async fn clone_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
+    /// The storage must not be mounted, which it is not while it is the caller's. To fork a
+    /// mounted filesystem's, see [`Filesystem::fork_storage_to`](crate::Filesystem::fork_storage_to).
+    pub async fn fork_to(&self, path: impl AsRef<Path>) -> Result<Storage, Error> {
         let Kind::Image { image, writes, .. } = &self.kind else {
-            return Err(Error::msg("memory cannot be cloned to an image"));
+            return Err(Error::msg("memory cannot be forked to an image"));
         };
-        clone_image(image.clone(), writes.clone(), path.as_ref()).await
+        fork_image(image.clone(), writes.clone(), path.as_ref()).await
     }
 
-    /// Deletes the image at `path`, which nothing in this process has open, a clone or not: its
+    /// Deletes the image at `path`, which nothing in this process has open, a fork or not: its
     /// branch in its bucket, whose collector reclaims what no other branch inherited from it, and
-    /// its directory. Its clones live on: their branches are the bucket's, which an image's own
+    /// its directory. Its forks live on: their branches are the bucket's, which an image's own
     /// keeps beside its directory, not in it (TASK-165.7). Fails with `ENOENT` if there is none
     /// at `path`.
     pub fn delete(path: impl AsRef<Path>) -> Result<(), Error> {
@@ -309,26 +309,26 @@ impl fmt::Debug for Storage {
     }
 }
 
-/// Clones `image` to a new image at `path`, a fork of its store, and of its branch in its bucket,
-/// with a branch of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the store
-/// durably and waits for the fork's upload. The clone pauses `writes`, the device's writes and
-/// frees, until the fork's commit is made, so that it is the image as it was at one time.
-pub(crate) async fn clone_image(
+/// Forks `image` to a new image at `path`, a fork of its store, and of its branch in its bucket,
+/// with a branch of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the
+/// store durably and waits for the fork's upload. The fork pauses `writes`, the device's writes
+/// and frees, until the fork's commit is made, so that it is the image as it was at one time.
+pub(crate) async fn fork_image(
     image: Arc<KeptImage>,
     writes: Arc<WriteGate>,
     path: &Path,
 ) -> Result<Storage, Error> {
     let path = path.to_owned();
-    let (done, cloned) = futures::channel::oneshot::channel();
+    let (done, forked) = futures::channel::oneshot::channel();
     std::thread::Builder::new()
-        .name("cladefs clone".into())
+        .name("cladefs fork".into())
         .spawn(move || {
             let forked = image.fork(&path, writes.pause());
-            let cloned =
-                forked.map_err(|error| error.context(format!("cloning to {}", path.display())));
-            let _ = done.send(cloned.map(|()| path));
+            let forked =
+                forked.map_err(|error| error.context(format!("forking to {}", path.display())));
+            let _ = done.send(forked.map(|()| path));
         })
         .map_err(Error::new)?;
-    let path = cloned.await.map_err(Error::new)??;
+    let path = forked.await.map_err(Error::new)??;
     Storage::open(path)
 }

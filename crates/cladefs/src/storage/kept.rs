@@ -7,7 +7,7 @@
 //! of cladefs's system (`host_store::create`). An uploader takes the branch's lease and uploads the
 //! image's commits behind them, as the extent daemon's stores' are (`crate::remote`); the image's
 //! commits are durable once in its store, as before, and closing it waits for them to be uploaded.
-//! A clone is a fork of the branch in the bucket, as the daemon's forks are (`host_store::fork`).
+//! An image's fork forks its branch in the bucket, as the daemon's forks do (`host_store::fork`).
 //! An image's own bucket's collector runs in the process, after commits ([`super::collect`]); a
 //! host's bucket's is the host's.
 
@@ -57,7 +57,7 @@ impl KeptImage {
         Self::opened(opened, cache)
     }
 
-    /// The image at `dir`, or the clone at `dir`, a store of its own holding its branch alone
+    /// The image at `dir`, or the fork at `dir`, a store of its own holding its branch alone
     /// (TASK-165.7): its uploader takes its branch's lease as a copy never placed takes it where
     /// this process is no host's daemon ([`host_store::keeping`]).
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
@@ -79,7 +79,7 @@ impl KeptImage {
         &self.store
     }
 
-    /// What reads the store's extents whose data is in the bucket, as a clone's inherited extents
+    /// What reads the store's extents whose data is in the bucket, as a fork's inherited extents
     /// are (TASK-165.7).
     pub fn fetcher(&self) -> Arc<remote::Fetcher> {
         self.fetcher.clone()
@@ -123,7 +123,7 @@ impl KeptImage {
     }
 }
 
-/// Deletes the image at `path`, or the clone at `path`, which nothing in this process has open
+/// Deletes the image at `path`, or the fork at `path`, which nothing in this process has open
 /// ([`host_store::delete`]): its branch, in the bucket its description names, first, as
 /// a copy never placed deletes it where this process is no host's daemon ([`host_store::token`]).
 pub(crate) fn delete(path: &Path) -> Result<(), Error> {
@@ -215,54 +215,54 @@ mod tests {
         assert_eq!((extents, root), held(image));
     }
 
-    /// TASK-165.6: a clone is a fork of its image's branch in the image's bucket, where it keeps
+    /// TASK-165.6: an image's fork forks the image's branch in the image's bucket, where it keeps
     /// its own: a branch of its own there, whose record names the image's as its parent, and which
-    /// holds what the clone's store does, closed.
+    /// holds what the fork's store does, closed.
     #[test]
-    fn clones_are_forks_in_their_images_bucket() {
+    fn forks_branch_in_their_images_bucket() {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+            let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
             let storage = image_with(&path, b"file", b"original").await;
             let parent = image(&storage).store().description().branch;
-            let clone = storage.clone_to(&clone_path).await.unwrap();
-            let child = image(&clone).store().description().branch;
-            let bucket = bucket_of(&clone_path);
-            assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the clone's bucket is another");
+            let fork = storage.fork_to(&fork_path).await.unwrap();
+            let child = image(&fork).store().description().branch;
+            let bucket = bucket_of(&fork_path);
+            assert!(Arc::ptr_eq(&bucket, &bucket_of(&path)), "the fork's bucket is another");
             let record = extent_remote::branch::record(&*bucket, child).await.unwrap().unwrap();
             let Record::Fork(origin) = record.kind else { panic!("{record:?}") };
             assert_eq!(origin.parent, parent);
 
-            let fs = Filesystem::mount(clone).await.unwrap();
+            let fs = Filesystem::mount(fork).await.unwrap();
             let (file, _) = fs.root().lookup(b"file").await.unwrap();
             file.write(0, b"modified").await.unwrap();
-            let clone = fs.close().await.unwrap();
-            assert_eq!(kept(&bucket, child), held(image(&clone)));
+            let fork = fs.close().await.unwrap();
+            assert_eq!(kept(&bucket, child), held(image(&fork)));
             assert_ne!(kept(&bucket, child), kept(&bucket, parent));
         })
     }
 
-    /// TASK-165.6: deleting an image, or a clone, deletes its branch in its bucket too, which the
+    /// TASK-165.6: deleting an image, or a fork, deletes its branch in its bucket too, which the
     /// collector then reclaims what only it held of.
     #[test]
     fn deleting_images_deletes_their_branches() {
         block_on(async {
             let dir = tempfile::tempdir().unwrap();
-            let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+            let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
             let storage = image_with(&path, b"file", b"original").await;
-            let clone = storage.clone_to(&clone_path).await.unwrap();
-            let child = image(&clone).store().description().branch;
-            drop((clone, storage));
+            let fork = storage.fork_to(&fork_path).await.unwrap();
+            let child = image(&fork).store().description().branch;
+            drop((fork, storage));
             let bucket = bucket_of(&path);
             let record = |branch| extent_remote::branch::record(&*bucket, branch);
             assert!(!record(child).await.unwrap().unwrap().deleted);
-            Storage::delete(&clone_path).unwrap();
+            Storage::delete(&fork_path).unwrap();
             assert!(record(child).await.unwrap().unwrap().deleted);
         })
     }
 
     /// TASK-165.6: an image's commit starts a pass of its bucket's collector, on a thread of its
-    /// own, which the image's clones share; the next commits, within a minute of it, start none.
+    /// own, which the image's forks share; the next commits, within a minute of it, start none.
     #[test]
     fn commits_start_the_collector() {
         block_on(async {
@@ -277,9 +277,9 @@ mod tests {
             node.write(0, b"contents").await.unwrap();
             let storage = fs.close().await.unwrap();
             assert_eq!(collecting.passes(), 1);
-            let clone = storage.clone_to(dir.path().join("clone")).await.unwrap();
-            let shared = image(&clone).collecting().unwrap();
-            assert!(Arc::ptr_eq(shared, &collecting), "the clone's collector is another");
+            let fork = storage.fork_to(dir.path().join("fork")).await.unwrap();
+            let shared = image(&fork).collecting().unwrap();
+            assert!(Arc::ptr_eq(shared, &collecting), "the fork's collector is another");
         })
     }
 
@@ -415,31 +415,31 @@ mod tests {
         }
     }
 
-    /// TASK-291.3: an image and its clone, each written from a thread of its own, commit while
+    /// TASK-291.3: an image and its fork, each written from a thread of its own, commit while
     /// passes of their bucket's collector start after their commits, as often as one ends, and
-    /// compact and delete at once: after each round each holds what was written to it, the clone
+    /// compact and delete at once: after each round each holds what was written to it, the fork
     /// what it inherited too; and opened again, after a pass alone, the same.
     #[test]
-    fn passes_run_among_an_image_and_its_clones_commits() {
+    fn passes_run_among_an_image_and_its_forks_commits() {
         quicken(BUSY);
         let dir = tempfile::tempdir().unwrap();
-        let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+        let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let storage = Storage::create(&path, SIZE).unwrap();
         let collecting = image(&storage).collecting().unwrap().clone();
         let mut files = Files::new();
-        let (fs, clone) = block_on(async {
+        let (fs, fork) = block_on(async {
             let fs = Filesystem::format(storage).await.unwrap();
             churn(&fs, &mut files, 1, 2).await;
-            let clone = Filesystem::mount(fs.clone_storage_to(&clone_path).await.unwrap());
-            (fs, clone.await.unwrap())
+            let fork = Filesystem::mount(fs.fork_storage_to(&fork_path).await.unwrap());
+            (fs, fork.await.unwrap())
         });
-        let mut cloned = files.clone();
+        let mut forked = files.clone();
         std::thread::scope(|scope| {
-            scope.spawn(|| block_on(churn(&clone, &mut cloned, 2, 6)));
+            scope.spawn(|| block_on(churn(&fork, &mut forked, 2, 6)));
             block_on(churn(&fs, &mut files, 3, 6));
         });
         block_on(async {
-            drop(clone.close().await.unwrap());
+            drop(fork.close().await.unwrap());
             drop(fs.close().await.unwrap());
         });
         // The passes among the commits compacted and deleted.
@@ -450,7 +450,7 @@ mod tests {
         let report = image(&Storage::open(&path).unwrap()).collecting().unwrap().pass_now();
         assert!(report.deleted > 0, "{report:?}");
         block_on(async {
-            for (path, files) in [(&path, &files), (&clone_path, &cloned)] {
+            for (path, files) in [(&path, &files), (&fork_path, &forked)] {
                 let fs = Filesystem::mount(Storage::open(path).unwrap()).await.unwrap();
                 holds(&fs, files, &format!("{} opened again", path.display())).await;
                 drop(fs.close().await.unwrap());
@@ -458,7 +458,7 @@ mod tests {
         });
     }
 
-    /// TASK-291.3: an image and its clone, closed and dropped while a pass of their bucket's
+    /// TASK-291.3: an image and its fork, closed and dropped while a pass of their bucket's
     /// collector, held up, runs, leave their bucket whole: opened again, each holds what it did;
     /// and the passes after, those their commits start as they are opened again, held up as they
     /// are closed and dropped again, then one alone, delete what they freed, leaving nothing they
@@ -468,27 +468,27 @@ mod tests {
     fn images_dropped_as_their_pass_runs_leave_their_bucket_whole() {
         quicken(BUSY);
         let dir = tempfile::tempdir().unwrap();
-        let (path, clone_path) = (dir.path().join("image"), dir.path().join("clone"));
+        let (path, fork_path) = (dir.path().join("image"), dir.path().join("fork"));
         let scenario = fail::FailScenario::setup();
-        let (mut files, mut cloned) = (Files::new(), Files::new());
+        let (mut files, mut forked) = (Files::new(), Files::new());
         block_on(async {
             let fs = Filesystem::format(Storage::create(&path, SIZE).unwrap()).await.unwrap();
             churn(&fs, &mut files, 1, 2).await;
-            let clone = Filesystem::mount(fs.clone_storage_to(&clone_path).await.unwrap());
-            let clone = clone.await.unwrap();
-            cloned = files.clone();
-            churn(&clone, &mut cloned, 2, 1).await;
+            let fork = Filesystem::mount(fs.fork_storage_to(&fork_path).await.unwrap());
+            let fork = fork.await.unwrap();
+            forked = files.clone();
+            churn(&fork, &mut forked, 2, 1).await;
             // Passes held up from the next commit's on: both closed and dropped as one runs.
             fail::cfg("collect::pass", "sleep(500)").unwrap();
-            churn(&clone, &mut cloned, 3, 1).await;
-            drop(clone.close().await.unwrap());
+            churn(&fork, &mut forked, 3, 1).await;
+            drop(fork.close().await.unwrap());
             drop(fs.close().await.unwrap());
         });
         // Opened again, they share a collector this holds, which counts what their commits'
         // passes, still held up, delete as they are closed and dropped again.
         let mut collecting = None;
         block_on(async {
-            for (path, files) in [(&path, &files), (&clone_path, &cloned)] {
+            for (path, files) in [(&path, &files), (&fork_path, &forked)] {
                 let storage = Storage::open(path).unwrap();
                 collecting.get_or_insert_with(|| image(&storage).collecting().unwrap().clone());
                 let fs = Filesystem::mount(storage).await.unwrap();
@@ -503,8 +503,8 @@ mod tests {
         assert_eq!(collecting.collected_alone(), Vec::<String>::new(), "collected alone");
         drop(collecting);
         block_on(async {
-            let fs = Filesystem::mount(Storage::open(&clone_path).unwrap()).await.unwrap();
-            holds(&fs, &cloned, "the clone after the pass").await;
+            let fs = Filesystem::mount(Storage::open(&fork_path).unwrap()).await.unwrap();
+            holds(&fs, &forked, "the fork after the pass").await;
             drop(fs.close().await.unwrap());
         });
     }

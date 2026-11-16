@@ -86,7 +86,7 @@
 //! [mounted](Filesystem::mount) straight from storage is the `default` volume of an image of its
 //! own, which closing it closes.
 //!
-//! [`Image::snapshot_volume`] clones a whole volume, mounted or not, into a new one, in time and
+//! [`Image::snapshot_volume`] snapshots a whole volume, mounted or not, into a new one, in time and
 //! space independent of its size: the snapshot shares the source's metadata and data until
 //! either changes them, as Fxfs writes changes to new blocks, and what they share is freed once
 //! neither references it.
@@ -105,10 +105,10 @@
 //! Its commits are uploaded behind them, and closing it waits for them to be; what it frees, the
 //! process collects there after its commits.
 //!
-//! An image can be cloned: [`Storage::clone_to`] clones closed storage, and
-//! [`Image::clone_storage_to`] a mounted image's, after writing back its volumes' dirty data.
-//! A clone is a fork of the image's extent store, which shares the image's data rather than
-//! copies it, whatever it holds, and of its branch in its bucket, which the clone shares.
+//! An image can be forked: [`Storage::fork_to`] forks closed storage, and
+//! [`Image::fork_storage_to`] a mounted image's, after writing back its volumes' dirty data.
+//! Forking forks the image's extent store, which shares the image's data rather than copies it,
+//! whatever it holds, and its branch in its bucket, which the fork shares.
 
 #![deny(missing_docs)]
 

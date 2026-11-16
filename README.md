@@ -193,13 +193,13 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
   Fxfs's errors, and `Error`, for setting up.
 - `storage/` holds `Storage`: an image, or memory. It checks filesystems
-  (fsck), and clones images: a clone is a fork of the image's branch in the
+  (fsck), and forks images: a fork's branch is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFS_EXTENTD_REMOTE`); the clone's directory is a store of its own, which
+  (`CLADEFS_EXTENTD_REMOTE`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
-  deletes clones and images alike: the branch in its bucket, whose collector
-  reclaims what no other branch inherited, and the directory; clones live on.
+  deletes forks and images alike: the branch in its bucket, whose collector
+  reclaims what no other branch inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
   open (`collect.rs`), the only cleaner of what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
@@ -314,7 +314,7 @@ tenant's ID gets it nothing. A snapshot restored on another host needs its point
 there, which the VM manager makes in the tenant's directory first (`CreateStore`
 of the point's branch), and may drop once done (`DropStore`, which leaves the
 branch in the bucket); the proto says how (TASK-154). A point is immutable: any
-number of hosts restore one at once, and none writes it (TASK-158). A base forked
+number of hosts fork one at once, and none writes it (TASK-158). A base forked
 on several hosts is made a point first (`ForkStore`'s `point`).
 The daemon must be able to kill each VM process (it is the daemon's user's, or
 the daemon has `CAP_KILL`), and refuses a connection whose process it could

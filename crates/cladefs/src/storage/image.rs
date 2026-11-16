@@ -66,7 +66,7 @@ impl ImageDevice {
         Self::new(KeptImage::create(dir, made, keeping)?, writes)
     }
 
-    /// The device of the image at `dir`, an image's or a clone's, whose writes, frees and commits
+    /// The device of the image at `dir`, an image's or a fork's, whose writes, frees and commits
     /// go through `writes`.
     pub fn open(dir: &Path, writes: Arc<WriteGate>) -> Result<Self, Error> {
         let image = KeptImage::open(dir).with_context(|| format!("opening {}", dir.display()))?;
@@ -202,7 +202,7 @@ impl Device for ImageDevice {
         _read_opts: ReadOptions,
     ) -> Result<(), Error> {
         let parts = match self.store.locate(extent, offset, buffer.len() as u64) {
-            // cladefs: in the image's bucket, as a clone holds what it inherited (TASK-165.7).
+            // cladefs: in the image's bucket, as a fork holds what it inherited (TASK-165.7).
             Err(ref error)
                 if let Some(remote) = error.downcast_ref::<extent_store::RemoteData>() =>
             {

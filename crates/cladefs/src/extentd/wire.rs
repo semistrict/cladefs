@@ -151,7 +151,7 @@ pub(crate) const ACK: u32 = 12;
 /// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
 /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a point
 /// ([`ExtentStore::point`](crate::ExtentStore::point)): what a snapshot of the VM is taken at,
-/// which any number of hosts restore at once, and none writes.
+/// which any number of hosts fork at once, and none writes.
 pub(crate) const FORK: u32 = 13;
 /// The guest's answer to a [`CAPACITY`] that asked it to shrink to `args[0]` bytes: whether it
 /// took that size, `args[1]` 1, or not, 0.

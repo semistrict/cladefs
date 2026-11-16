@@ -8,7 +8,7 @@
 //! `cladefs-gc` collects an image's own bucket, as one does a host's: the processes that have images
 //! of it open do, a pass after an image's commit, on a thread of its own, at most one every
 //! [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
-//! image and its clones, which reads again only the branches' records that changed (`Collector`).
+//! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
 use extent_remote::collector::{Collector, Options, Report};
 use extent_remote::store::Store as Bucket;
