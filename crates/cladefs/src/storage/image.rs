@@ -94,11 +94,6 @@ impl ImageDevice {
         })
     }
 
-    /// Whether I/O bypasses the host's page cache.
-    pub fn is_direct(&self) -> bool {
-        self.store.dir().is_direct()
-    }
-
     /// Reads `len` bytes at `offset` in `file`: the first `needed` of them, and the rest as far as
     /// the file goes. The I/O reads into a buffer of its own, which it gives back: the caller's
     /// memory is never the host's, which a future leaked would leave it (TASK-24).

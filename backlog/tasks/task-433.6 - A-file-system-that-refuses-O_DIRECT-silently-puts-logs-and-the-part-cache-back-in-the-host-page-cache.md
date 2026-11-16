@@ -3,10 +3,11 @@ id: TASK-433.6
 title: >-
   A file system that refuses O_DIRECT silently puts logs and the part cache back
   in the host page cache
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:55'
-updated_date: '2026-11-16 01:31'
+updated_date: '2026-11-16 01:54'
 labels: []
 dependencies: []
 references:
@@ -38,6 +39,18 @@ Found by the second-vendor review (Codex via scripts/review-change.sh, TASK-444.
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. extent_remote::direct::bypass(file, path) -> io::Result<()>: InvalidInput naming the path, no fallback; a direct::bypass failpoint refuses as eCryptfs would (decided with the user: an error, not a bool).
+2. read_at/write_at lose their direct flag; no buffered path left.
+3. Part cache: Cache::open probes its file system once (the holes probe's file, now probed()) and fails; every file it opens bypasses or fails.
+4. extent_store DiskDir::file uses it; HostDir::is_direct, DiskDir::bypassing, the dead bypass_page_cache and cladefs's Kind::Image.direct / ImageDevice::is_direct go (always true).
+5. Tests: direct::a_refused_bypass_fails, cache::a_cache_whose_file_system_cant_bypass_the_page_cache_fails_to_open, host::stores_whose_file_system_cant_bypass_the_page_cache_fail.
+6. Docs: direct.rs, README, AGENTS.md.
+7. Also (user, same session): delete store.rs's raw_files_are_read_through_the_page_cache and reads_of_raw_files_go_through_the_page_cache, and their counters.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

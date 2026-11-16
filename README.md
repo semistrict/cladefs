@@ -204,8 +204,9 @@ of these stands in with the items the code copied from Fuchsia uses:
   open (`collect.rs`), the only cleaner of what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
     `FileBackedDevice`: an extent store in a directory, `crates/extent_store`'s.
-    Extents' I/O bypasses the host's page cache where the host filesystem
-    allows (`O_DIRECT`, `F_NOCACHE`).
+    Extents' I/O bypasses the host's page cache (`O_DIRECT`, `F_NOCACHE`); on
+    a host filesystem that can't, the image, like the part cache, fails to open
+    rather than run in the host's page cache (TASK-433.6).
   - `io.rs` runs extents' I/O off Fxfs's executor threads: on an io_uring on
     Linux, and a small thread pool elsewhere.
 - `host_store.rs` makes, opens, forks and deletes both host stacks' extent

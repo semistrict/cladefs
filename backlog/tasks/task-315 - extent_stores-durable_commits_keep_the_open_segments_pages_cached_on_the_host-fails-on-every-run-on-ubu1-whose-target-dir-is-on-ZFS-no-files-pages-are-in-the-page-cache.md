@@ -4,10 +4,10 @@ title: >-
   extent_store's durable_commits_keep_the_open_segments_pages_cached_on_the_host
   fails on every run on ubu1, whose target dir is on ZFS: no file's pages are in
   the page cache
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-10 08:58'
-updated_date: '2026-11-16 01:31'
+updated_date: '2026-11-16 01:34'
 labels: []
 dependencies: []
 priority: medium
@@ -43,3 +43,9 @@ Seen again 2026-11-14 (TASK-411 Linux run, target under ~/src on ZFS); rerun wit
 
 Obsolete: the test it names was removed in 3139c4bdd (TASK-433.1); stores' segments are no longer held in the host's page cache.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Obsolete: the test it names was removed in 3139c4bdd (TASK-433.1); stores keep their segments in their own page cache (extent_store::pages), not the host's, so there is nothing left to fix on ZFS. Closed with the user's approval.
+<!-- SECTION:FINAL_SUMMARY:END -->
