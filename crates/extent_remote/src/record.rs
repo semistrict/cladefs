@@ -40,6 +40,13 @@ pub enum Kind {
     /// ([`crate::branch::fork_point`]): until then it holds nothing, and nothing relies on it. The
     /// collector gives it up once that point is deleted ([`crate::branch::abandon`]).
     Forking { origin: Origin, point: Branch },
+    /// cladefs: a fork of a point, made ([`crate::branch::finish_point_fork`]): what
+    /// [`Kind::Forking`] becomes, a fork's child as [`Kind::Fork`] is, but given its record by its
+    /// own host alone, which no parent's writer records, no state naming the fork; and its
+    /// reference, written before it was made, by that host alone (TASK-455). So, of an ID an
+    /// allocator gave it, deleted, it goes with its cell ([`Record::removable`]), and its reference
+    /// retires unmarked ([`Record::retires_unmarked`]).
+    Clone(Origin),
     /// A failed fork's deletion's claim of its child, from what its host knew of the fork, not its
     /// parent's writers from an acknowledged segment ([`crate::branch::delete_fork`]): what it
     /// names may have gone before it landed, no record or state keeping that, so that recovering
@@ -65,7 +72,10 @@ impl Kind {
     pub fn origin(self) -> Option<Origin> {
         match self {
             Self::Root | Self::Own => None,
-            Self::Fork(origin) | Self::Point(origin) | Self::Claim(origin) => Some(origin),
+            Self::Fork(origin)
+            | Self::Clone(origin)
+            | Self::Point(origin)
+            | Self::Claim(origin) => Some(origin),
             Self::Forking { origin, .. } => Some(origin),
         }
     }
@@ -87,7 +97,8 @@ pub struct Record {
     pub owner: u64,
     pub kind: Kind,
     /// A deleted branch's record stays, which a writer of a parent that is slow to record a fork to
-    /// its ID could make again were it removed ([`Record::may_drop`]).
+    /// its ID could make again were it removed; but a given root's and clone's, which go with
+    /// their cell once it is dead ([`Record::removable`]).
     pub deleted: bool,
     /// cladefs: whether a point's forks may be of other tenants' cells than its own: a base image or
     /// a snapshot many tenants clone (TASK-395.7). Of a point alone, which its maker's trusted
@@ -167,14 +178,39 @@ impl Record {
         }
     }
 
-    /// Whether the collector may delete it, once no branch forked from the branch needs it: never.
-    /// A deleted fork's child's record, a writer of its parent that is slow to record the fork
-    /// could make again; and so a deleted root's, whose ID a fork's guest may have named, that
-    /// fork's segment acknowledged and its child not yet recorded, as the root took the ID: its
-    /// record, made then, would name what the collector reclaimed (TASK-174). Their number is
-    /// bounded by the branches made. Without the rule that they stay, a deleted root's goes.
-    pub fn may_drop(&self) -> bool {
-        !rules().records_kept && self.deleted && self.kind == Kind::Root
+    /// cladefs: whether the collector may remove it, with its cell, the cell dead, its branch's ID
+    /// one an allocator gave, `given` ([`crate::objectid::given`]): deleted, a root's or a clone's
+    /// made ([`Kind::Clone`]), records their makers alone make, once, no fork naming an
+    /// allocator's ID (doc-7, Object IDs; TASK-455). Any other stays for good: a deleted fork's
+    /// child's (and a point's, a claim's), a writer of its parent that is slow to record the fork,
+    /// or its next writer, could make again, the branch live again naming what the collector
+    /// reclaimed; a deletion's of a branch it found none of ([`Kind::Own`]), which may be a fork's
+    /// child yet to be recorded; a clone's never made, whose host may yet write its reference; and
+    /// any of an ID no allocator gave, a guest's, which a fork may name too, its segment
+    /// acknowledged and its child not yet recorded as a root took the ID (TASK-174). Without the
+    /// rule that they stay, any deleted record goes; without the rule that IDs are given, any of
+    /// a root's or a clone's, whatever its ID.
+    pub fn removable(&self, given: bool) -> bool {
+        let rules = rules();
+        if !rules.records_kept {
+            return self.deleted;
+        }
+        self.deleted
+            && matches!(self.kind, Kind::Root | Kind::Clone(_))
+            && (given || !rules.ids_given)
+    }
+
+    /// cladefs: whether the reference of its fork, its branch deleted, is retired unmarked, its
+    /// branch's ID one an allocator gave, `given`: a clone's made, whose one writer, its host,
+    /// wrote it before it made the clone, and which no recorder writes, no fork naming the ID
+    /// (TASK-455). A mark is for a writer of it whose read of the child's record came before the
+    /// retirement (TASK-395.13, TASK-395.14): none is left. Without the rule, any clone's, being
+    /// made or made, and a writable fork's still not.
+    pub fn retires_unmarked(&self, given: bool) -> bool {
+        match rules().clones_made_unmarked {
+            true => matches!(self.kind, Kind::Clone(_)) && given,
+            false => matches!(self.kind, Kind::Clone(_) | Kind::Forking { .. }),
+        }
     }
 }
 
@@ -192,6 +228,8 @@ struct Flags {
     point: bool,
     forking: Option<Branch>,
     claimed: bool,
+    /// cladefs: a fork of a point, made ([`Kind::Clone`], TASK-455).
+    cloned: bool,
     /// cladefs: of a point alone ([`Record::shared`], TASK-395.7).
     shared: bool,
     /// cladefs: [`Record::deks`].
@@ -212,12 +250,14 @@ impl From<Record> for Flags {
             point: false,
             forking: None,
             claimed: false,
+            cloned: false,
             shared,
             deks,
             inherited,
         };
         match kind {
             Kind::Root | Kind::Own | Kind::Fork(_) => flags,
+            Kind::Clone(_) => Flags { cloned: true, ..flags },
             Kind::Point(_) => Flags { point: true, ..flags },
             Kind::Forking { point, .. } => Flags { forking: Some(point), ..flags },
             Kind::Claim(_) => Flags { claimed: true, ..flags },
@@ -230,15 +270,20 @@ impl TryFrom<Flags> for Record {
 
     /// The record `flags` say, if they say a [`Kind`]: a fork's, of every kind but a root; an
     /// origin, of every kind but a root and one of its own; and one at most of being a point,
-    /// being forked from one, and being a claim, each of an origin. Shared only if a point.
+    /// being forked from one, being a claim and being a clone made, each of an origin. Shared only
+    /// if a point.
     fn try_from(flags: Flags) -> Result<Self, String> {
-        let kind = match (flags.forked, flags.origin, flags.point, flags.forking, flags.claimed) {
-            (false, None, false, None, false) => Kind::Root,
-            (true, None, false, None, false) => Kind::Own,
-            (true, Some(origin), false, None, false) => Kind::Fork(origin),
-            (true, Some(origin), true, None, false) => Kind::Point(origin),
-            (true, Some(origin), false, Some(point), false) => Kind::Forking { origin, point },
-            (true, Some(origin), false, None, true) => Kind::Claim(origin),
+        let said = (flags.point, flags.forking, flags.claimed, flags.cloned);
+        let kind = match (flags.forked, flags.origin, said) {
+            (false, None, (false, None, false, false)) => Kind::Root,
+            (true, None, (false, None, false, false)) => Kind::Own,
+            (true, Some(origin), (false, None, false, false)) => Kind::Fork(origin),
+            (true, Some(origin), (true, None, false, false)) => Kind::Point(origin),
+            (true, Some(origin), (false, Some(point), false, false)) => {
+                Kind::Forking { origin, point }
+            }
+            (true, Some(origin), (false, None, true, false)) => Kind::Claim(origin),
+            (true, Some(origin), (false, None, false, true)) => Kind::Clone(origin),
             _ => return Err(format!("a branch's record of no kind: {flags:?}")),
         };
         if flags.shared && !flags.point {
@@ -274,9 +319,10 @@ mod tests {
         // and moves are at the bucket's root, its cells' collection under their own prefixes
         // reading neither (TASK-395.2); and 9's, whose records and cells keep no keys, their
         // objects framed in FORMAT 1 of extent_frame (TASK-411.3); and
-        // 10's, whose keys name no epochs, and whose branches have leases, not heads (TASK-407).
-        assert_eq!(FORMAT, 11);
-        for format in [1u32, 2, 7, 8, 9, 10] {
+        // 10's, whose keys name no epochs, and whose branches have leases, not heads (TASK-407);
+        // and 11's, whose clones made say they are forks a recorder may record (TASK-455).
+        assert_eq!(FORMAT, 12);
+        for format in [1u32, 2, 7, 8, 9, 10, 11] {
             let mut older = bytes.clone();
             older[..4].copy_from_slice(&format.to_le_bytes());
             assert_eq!(
@@ -287,15 +333,16 @@ mod tests {
         assert!(matches!(Record::decode(test_branch(3), &bytes[..3]), Err(Error::Corrupt(_))));
     }
 
-    /// TASK-160.14: every combination of a record's seven flags (whether it names an origin, is a
-    /// fork's, is deleted, is a point, is being forked from one, is a claim, and is shared)
-    /// decodes to the one kind it says, deleted or not, shared or not if a point, or is refused:
-    /// fourteen records, and 114 refused. What a record encodes decodes back to it.
+    /// TASK-160.14: every combination of a record's eight flags (whether it names an origin, is a
+    /// fork's, is deleted, is a point, is being forked from one, is a claim, is shared, and is a
+    /// clone made, TASK-455) decodes to the one kind it says, deleted or not, shared or not if a
+    /// point, or is refused: sixteen records, and 240 refused. What a record encodes decodes back
+    /// to it.
     #[test]
     fn records_decode_to_the_kinds_their_flags_say() {
         let origin = Origin { parent: test_branch(1), at: 7 };
         let mut decoded = Vec::new();
-        for bits in 0..128u8 {
+        for bits in 0..=255u8 {
             let flag = |bit: u8| bits & (1 << bit) != 0;
             let flags = Flags {
                 format: FORMAT,
@@ -306,6 +353,7 @@ mod tests {
                 point: flag(3),
                 forking: flag(4).then_some(test_branch(5)),
                 claimed: flag(5),
+                cloned: flag(7),
                 shared: flag(6),
                 deks: Vec::new(),
                 inherited: Vec::new(),
@@ -318,7 +366,8 @@ mod tests {
             }
         }
         let forking = Kind::Forking { origin, point: test_branch(5) };
-        // Bits: origin 1, forked 2, deleted 4, point 8, forking 16, claimed 32, shared 64.
+        // Bits: origin 1, forked 2, deleted 4, point 8, forking 16, claimed 32, shared 64, cloned
+        // 128.
         let kinds = [
             (0, Kind::Root, false, false),
             (2, Kind::Own, false, false),
@@ -334,6 +383,8 @@ mod tests {
             (39, Kind::Claim(origin), true, false),
             (75, Kind::Point(origin), false, true),
             (79, Kind::Point(origin), true, true),
+            (131, Kind::Clone(origin), false, false),
+            (135, Kind::Clone(origin), true, false),
         ];
         assert_eq!(decoded, kinds);
         let refused = Flags {
@@ -345,6 +396,7 @@ mod tests {
             point: true,
             forking: None,
             claimed: false,
+            cloned: false,
             shared: false,
             deks: Vec::new(),
             inherited: Vec::new(),
@@ -352,7 +404,7 @@ mod tests {
         let corrupt = format!(
             "a branch's record of no kind: Flags {{ format: {FORMAT}, owner: 9, origin: None, \
              forked: true, deleted: false, point: true, forking: None, claimed: false, \
-             shared: false, deks: [], inherited: [] }}"
+             cloned: false, shared: false, deks: [], inherited: [] }}"
         );
         let refused = Record::decode(test_branch(2), &encode(&refused));
         assert_eq!(refused, Err(Error::Corrupt(corrupt)));

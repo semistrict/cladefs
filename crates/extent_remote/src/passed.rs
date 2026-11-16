@@ -70,6 +70,16 @@ impl GcLease {
         layout::decode(bytes)
     }
 
+    /// Whether a pass of `holder`, holding its cell as `holding` says, leaves the cell to another,
+    /// as of `now`: one holding it, unexpired ([`Left::Held`]), or one that went through since the
+    /// taker's sweep began ([`Left::Swept`]).
+    pub(crate) fn leaves(&self, holder: u64, holding: Holding, now: u64) -> Option<Left> {
+        if self.holder != holder && self.until > now {
+            return Some(Left::Held);
+        }
+        holding.since.is_some_and(|since| self.ended > since).then_some(Left::Swept)
+    }
+
     /// Itself, its usage counting it as it is encoded: one object of the bytes it takes. Its
     /// encoding's length is the same whatever numbers it holds (`bincode`'s are of fixed width), so
     /// counting itself changes it not.
@@ -217,6 +227,9 @@ pub(crate) struct Listed {
     /// read of the child's record came before, garbage the pass deletes (TASK-395.13,
     /// TASK-395.14). Their writes changed the listing, so that no pass skips them.
     pub stale: Vec<String>,
+    /// cladefs: how many references of forks of the cell's branches it listed, the stale among
+    /// them: none but those, a pass deleting them leaves none (TASK-455).
+    pub references: usize,
 }
 
 /// Lists `cell`, once.
@@ -224,8 +237,8 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: Cell) -> Listed {
     let measured = bucket.now();
     let mut listed = bucket::list(bucket, &cell.prefix()).await;
     listed.sort_by(|a, b| a.key.cmp(&b.key));
-    let (own, lease) = (layout::collectors(cell), layout::gc_lease(cell));
-    let mut digest = Sha256::new();
+    let lease = layout::gc_lease(cell);
+    let digest = digest(cell, &listed);
     let mut usage = Usage { measured, ..Usage::default() };
     let mut objects = BTreeMap::new();
     let mut references = Vec::new();
@@ -233,18 +246,27 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: Cell) -> Listed {
         if meta.key != lease {
             usage.add(&meta.key, meta.size);
         }
-        if !meta.key.starts_with(&own) {
-            digest_of(&mut digest, &meta);
-        }
         match layout::kind(&meta.key) {
             layout::Kind::Reference { .. } => references.push(meta.key),
             _ => drop(objects.insert(meta.key.clone(), meta)),
         }
     }
+    let count = references.len();
     let stale = (references.into_iter())
         .filter(|key| layout::retired_of(key).is_some_and(|mark| objects.contains_key(&mark)))
         .collect();
-    Listed { objects, digest: digest.finalize().into(), usage, stale }
+    Listed { objects, digest, usage, stale, references: count }
+}
+
+/// The digest of a listing of `cell`, `listed`, in the order of their keys ([`Listed::digest`]):
+/// of every object but the collector's own (`<C>gc/`).
+pub(crate) fn digest<'a>(cell: Cell, listed: impl IntoIterator<Item = &'a Meta>) -> [u8; 32] {
+    let own = layout::collectors(cell);
+    let mut digest = Sha256::new();
+    for meta in listed.into_iter().filter(|meta| !meta.key.starts_with(&own)) {
+        digest_of(&mut digest, meta);
+    }
+    digest.finalize().into()
 }
 
 /// Feeds `meta` to `digest`, every part of it after its length, so that no two listings feed the
@@ -301,13 +323,10 @@ pub(crate) async fn take(
         let now = bucket.now();
         let (epoch, ended, passed) = match found {
             None => (1, 0, None),
-            Some(lease) if lease.holder != holder && lease.until > now => {
-                return Err(Error::Left(Left::Held));
-            }
-            Some(lease) if holding.since.is_some_and(|since| lease.ended > since) => {
-                return Err(Error::Left(Left::Swept));
-            }
-            Some(lease) => (lease.epoch + 1, lease.ended, lease.passed),
+            Some(lease) => match lease.leaves(holder, holding, now) {
+                Some(left) => return Err(Error::Left(left)),
+                None => (lease.epoch + 1, lease.ended, lease.passed),
+            },
         };
         // Holding for no time, it holds nothing: a pass racing it, whose time was read before it
         // took the lease, does not find it held.

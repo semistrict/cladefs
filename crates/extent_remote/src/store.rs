@@ -888,10 +888,12 @@ impl Bucket for Store {
         let prefix = prefix.to_owned();
         let list = async move {
             // A listing of many objects takes a request for each page of them (1,000 on S3 and
-            // GCS), which `object_store` does not say: counted as one.
+            // GCS), which `object_store` does not say: counted as its pages (TASK-455).
             let timed = self.counts.request(Request::List, path.as_ref());
             let listed = store.list(path.as_ref()).try_collect::<Vec<ObjectMeta>>().await;
             let listed = timed.answered(listed, |_| 0)?;
+            let more = crate::bucket::list_pages(listed.len()) - 1;
+            self.counts.requests[Request::List as usize].fetch_add(more, Ordering::Relaxed);
             timed.span.set_count(crate::trace::OBJECTS, listed.len() as u64);
             let mut metas: Vec<Meta> = listed.into_iter().map(|meta| self.meta(meta)).collect();
             metas.sort_by(|a, b| a.key.cmp(&b.key));

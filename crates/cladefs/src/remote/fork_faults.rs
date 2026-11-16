@@ -436,11 +436,10 @@ impl World {
                 // cladefs: no reference stays: the branch that took the fork's child's ID holds
                 // none, the fork's writers having taken back the one they wrote (TASK-395.10).
                 Kind::Reference { .. } => true,
+                // A deleted branch's record stays, but with its dead cell, removed whole, if its
+                // branch's ID is an allocator's (TASK-455): gone, it is not listed.
                 Kind::Record { branch } => {
-                    !kept(branch)
-                        && !self
-                            .record(branch)
-                            .is_some_and(|record| record.deleted && !record.may_drop())
+                    !kept(branch) && !self.record(branch).is_some_and(|record| record.deleted)
                 }
                 // A cell's object stays, as its records do (TASK-364); so do references' marks,
                 // retired or taken back (TASK-395.13), and every branch's head, a deleted one's

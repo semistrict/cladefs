@@ -111,6 +111,12 @@ impl Page<'_> {
 /// GCS's ListObjects give a request.
 pub const LIST_PAGE: usize = 1000;
 
+/// cladefs: the requests a listing of `objects` objects takes where a request lists a page of
+/// [`LIST_PAGE`] (S3, GCS): one at least, an empty listing's (TASK-455).
+pub fn list_pages(objects: usize) -> u64 {
+    objects.div_ceil(LIST_PAGE).max(1) as u64
+}
+
 /// cladefs: the most objects [`Bucket::delete_batch`] is given at once: as many as S3's
 /// DeleteObjects takes (TASK-395.5).
 pub const DELETE_BATCH: usize = 1000;
