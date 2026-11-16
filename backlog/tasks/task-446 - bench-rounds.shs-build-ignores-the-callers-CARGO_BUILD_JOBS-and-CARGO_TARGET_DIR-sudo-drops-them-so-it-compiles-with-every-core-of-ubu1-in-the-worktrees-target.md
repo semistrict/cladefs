@@ -4,11 +4,11 @@ title: >-
   bench-rounds.sh's build ignores the caller's CARGO_BUILD_JOBS and
   CARGO_TARGET_DIR: sudo drops them, so it compiles with every core of ubu1, in
   the worktree's target
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:37'
-updated_date: '2026-11-15 23:05'
+updated_date: '2026-11-16 00:43'
 labels:
   - bench
   - ubu1
@@ -35,7 +35,7 @@ scripts/bench-rounds.sh builds the cases' artifacts as root, `fxjob --name round
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -44,4 +44,12 @@ scripts/bench-rounds.sh builds the cases' artifacts as root, `fxjob --name round
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-11-15 (claude): fixed in TASK-368's commit (d82edf385, branch t368): bench-rounds.sh's build passes CARGO_BUILD_JOBS (default 4) and CARGO_TARGET_DIR through sudo, and chowns that target back. scripts/tests/test_e2e_job.py's Rounds runs bench-rounds.sh under fakes (a sudo that resets the environment as sudo does): test_the_cases_build_as_work_and_each_run_boots_them_alone (jobs=4 by default) and test_the_build_takes_the_callers_bounds_on_cargo (jobs=2, the target given), both red with the change taken out. On ubu1 the build ran with CARGO_TARGET_DIR in the home, the target there, and 1,425 s of CPU over 530 s wall (about 2.7 CPUs, within 4).
+
+2026-11-15: Linux, ubu1 under fxjob (CARGO_BUILD_JOBS=4, --test-threads 4), main 21f042594: scripts/test.sh parts workspace and go, 2817 tests passed, 83 skipped; go/extentd/v1 ok (clippy passed in the run before, on 618403778). macOS: the crates this change touched and the scripts suite (see notes above). DoD #1 checked on that evidence.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+bench-rounds.sh's build passes CARGO_BUILD_JOBS (default 4) and CARGO_TARGET_DIR through sudo (with TASK-368). Verified by test_e2e_job.py under fakes and the ubu1 bench-rounds run.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-15 21:12'
+updated_date: '2026-11-16 00:43'
 labels:
   - perf
   - review-2026-11-15
@@ -32,7 +32,7 @@ TASK-443.2 found that daemon heap per open fork is ~220-470 B times the base's e
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -60,4 +60,6 @@ Linux only, NOT run (no ubu1 in this task; cross-compiling fails on aws-lc-sys/z
 AC #1 checked on the local path's evidence (stat_counts_extents_locally); its daemon path's test is Linux-only and unrun. AC #2 (a real base's count on ubu1, into TASK-443.2) and DoD #1 (workspace on macOS and Linux) left open: only extent_store and cladefs ran, on macOS.
 
 Correction: the code's commit is 48a40af6b (9b4dfaad7 above was its first form, amended to drop a proptest-regressions file the hand mutants left; never pushed).
+
+2026-11-15: Linux, ubu1 under fxjob (CARGO_BUILD_JOBS=4, --test-threads 4), main 21f042594: scripts/test.sh parts workspace and go, 2817 tests passed, 83 skipped; go/extentd/v1 ok (clippy passed in the run before, on 618403778). macOS: the crates this change touched and the scripts suite (see notes above). DoD #1 checked on that evidence.
 <!-- SECTION:NOTES:END -->

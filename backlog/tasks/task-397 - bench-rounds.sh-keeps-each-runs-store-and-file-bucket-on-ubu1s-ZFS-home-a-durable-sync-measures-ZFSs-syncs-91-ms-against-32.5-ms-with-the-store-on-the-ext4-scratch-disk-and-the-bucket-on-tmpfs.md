@@ -4,11 +4,11 @@ title: >-
   bench-rounds.sh keeps each run's store and file bucket on ubu1's ZFS home: a
   durable sync measures ZFS's syncs, 91 ms against 32.5 ms with the store on the
   ext4 scratch disk and the bucket on tmpfs
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13 10:20'
-updated_date: '2026-11-15 20:13'
+updated_date: '2026-11-16 00:43'
 labels:
   - bench
   - ubu1
@@ -31,7 +31,7 @@ TASK-371's AC #4 on ubu1, main 10f613290, CLADEFS_REMOTE_LATENCY_MS=25: bench-fs
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -69,6 +69,8 @@ Correction: the tree measured as main, da0b78edd, is main 836047da0, this change
 
 2026-11-15, the user's decision: AC #1's 30/s is stale. Since TASK-407 a durable commit is two bucket requests by design (the segment's create, then the head's swap; measured in TASK-407.5), so the sync-loop on ubu1 at 25 ms reads about 17.5/s on main, not 30/s. AC #1 reworded to within 10% of 17.5/s, naming TASK-407, and checked on the run above: 17.5/s on main da0b78edd, the store on /mnt/fxdax-scratch through fxjob's TMPDIR, the bucket on /dev/shm. OPEN_QUESTIONS.md's entry says it was decided.
 DoD #1 left unchecked: cargo nextest run --workspace on Linux (ubu1, under fxjob) has not run for this change (macOS: the scripts' suite green, 2026-11-15, on the branch rebased onto main 76fabab76). So the task stays In Progress until a ubu1 workspace run passes; then check DoD #1 and set it Done.
+
+2026-11-15: Linux, ubu1 under fxjob (CARGO_BUILD_JOBS=4, --test-threads 4), main 21f042594: scripts/test.sh parts workspace and go, 2817 tests passed, 83 skipped; go/extentd/v1 ok (clippy passed in the run before, on 618403778). macOS: the crates this change touched and the scripts suite (see notes above). DoD #1 checked on that evidence.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
