@@ -3,11 +3,11 @@ id: TASK-475.2
 title: >-
   cladefsd serves the FUSE mount of cells: Mount on its control socket, one
   drain
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16 02:25'
-updated_date: '2026-11-16 04:36'
+updated_date: '2026-11-16 05:36'
 labels:
   - host
   - fuse
@@ -34,7 +34,7 @@ Second step of TASK-475. `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -53,4 +53,12 @@ Second step of TASK-475. `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT
 
 <!-- SECTION:NOTES:BEGIN -->
 Linux (ubu1, fxjob, Rust 1.100): fuse_mount incl. one_mount_attaches_and_detaches_many_stores (now through cladefsd + cladefsctl mount), sigterm_drains_vms_stores_and_the_mount_of_cells, a_daemon_mounting_no_cells_serves_no_mount_calls pass. Bug found by the drain test and fixed: the control service held the mount's Server strongly, so stores closed by the drain's join (Server::unmount keeps slots) were never dropped and their uploaders ran past the drain (exit 1 after 60 s); Control now holds a Weak<Server>, calls after close answer UNAVAILABLE.
+
+DoD #1: scripts/test.sh clippy+workspace on commit 1270ab9fe: macOS 2517/2517, Linux (ubu1, fxjob) 2827/2827; CI's clippy rules clean on both.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+cladefsd mounts tenants' cells with FUSE (CLADEFSD_MOUNT, CLADEFSD_MOUNT_STORES) and serves Mount on its control socket; drain closes the mount within its bound; cladefs-mount --control replaced by cladefsctl mount. Drain test found and fixed stores kept open past the drain (control holds the server weakly). Verified: fuse_mount tests on Linux, full suites.
+<!-- SECTION:FINAL_SUMMARY:END -->

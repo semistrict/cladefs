@@ -1,11 +1,11 @@
 ---
 id: TASK-475
 title: 'cladefsd: one daemon a host, serving VMs'' stores and FUSE cells'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16 02:23'
-updated_date: '2026-11-16 02:25'
+updated_date: '2026-11-16 05:36'
 labels:
   - host
   - fuse
@@ -22,7 +22,7 @@ A cell's volumes may be written by two processes of one host today: cladefs-exte
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The subtasks are done
+- [x] #1 The subtasks are done
 <!-- AC:END -->
 
 ## Definition of Done
@@ -31,3 +31,9 @@ A cell's volumes may be written by two processes of one host today: cladefs-exte
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+One daemon a host: TASK-475.1 (rename), .2 (FUSE mount of cells in cladefsd), .3 (mounted volumes in the store table). Commit 1270ab9fe; full suites pass on macOS and Linux.
+<!-- SECTION:FINAL_SUMMARY:END -->
