@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-16 00:47'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -545,7 +545,10 @@ cache included, with no kill.
 budget** (`cladefs::extentd::process`): its upload memory, a store's framing and sealing for each
 store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
-tenants' rooms, as much as they held at most, and its own (64 MiB). It samples its anonymous
+tenants' rooms, as much as they held at most, the stores' maps of their extents (TASK-453: each
+decoded state the stores share once, at `extent_remote::recovery::ENTRY_BYTES` an entry, and what
+each store holds of its own, at `extent_store::OWN_ENTRY_BYTES`, the most so far), and its own
+(64 MiB). It samples its anonymous
 memory (`RssAnon`) as it keeps its stats, every 200 ms, against that budget as of then, and counts
 the samples past it: the stats line's `process:` (`max-anon`, `anon-budget`, `over-budget`), and
 the metrics `cladefs_extentd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
