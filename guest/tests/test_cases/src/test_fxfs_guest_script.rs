@@ -159,6 +159,9 @@ mod host {
     #[test]
     fn a_killed_runs_files_are_checked_as_the_store_holds_them() {
         use cladefs::Owner;
+        // Every store is sealed (TASK-411.28): this test's, its environment naming no KMS, under
+        // the tests' own, as a guest run's are under the run's (scripts/test-e2e.sh).
+        cladefs::remote::testing::sealed();
         let killed = |files: &[Vec<u8>], seed: u64, output: &[u8]| {
             let dir = tempdir::TempDir::new("killed").unwrap();
             std::fs::write(dir.path().join("seed"), seed.to_string()).unwrap();

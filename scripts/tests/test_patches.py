@@ -129,9 +129,20 @@ class Stoppable:
         return int((self.blocker_dir / "pid").read_text())
 
     def start(self, argv, cwd):
-        """`argv` started in `cwd`, once its killer runs."""
+        """`argv` started in `cwd`, once its killer runs, with SIGINT as a terminal's shell gives it.
+
+        A shell started with SIGINT ignored keeps it ignored, no trap of its own taking it, and
+        a test run sent to the background without job control has it so (bash, `nohup cmd &`):
+        its runner would never see the SIGINT these send it.
+        """
         runner = subprocess.Popen(
-            argv, cwd=cwd, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            argv,
+            cwd=cwd,
+            env=self.env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL),
         )
         self.addCleanup(lambda: runner.poll() is None and runner.kill())
         deadline = time.monotonic() + 30
