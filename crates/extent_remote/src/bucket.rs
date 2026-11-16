@@ -690,7 +690,7 @@ mod tests {
     /// Objects in memory, of `object_store`'s, whose requests the test fails where they would go
     /// again: what `object_store` refuses but for the protocol's conditions, it says as it says the
     /// store is out of reach, which is retried.
-    struct Unretried(crate::store::Store);
+    struct Unretried(crate::object_bucket::ObjectBucket);
 
     impl Bucket for Unretried {
         fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
@@ -751,7 +751,7 @@ mod tests {
         use crate::layout;
         use extent_frame::Frame;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = Unretried(crate::store::Store::new(memory, ""));
+        let bucket = Unretried(crate::object_bucket::ObjectBucket::new(memory, ""));
         // A tail longer than a first read of it, its object cut short before it: its data, which
         // does not compress, from a xorshift generator.
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;

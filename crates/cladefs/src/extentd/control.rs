@@ -515,8 +515,8 @@ impl Extentd for Control {
             vm_private_requests: _,
             vm_private_request_ns: _,
         } = crate::stats::stats();
-        use extent_remote::store::{Request, Upload};
-        let bucket = stores::remote_bucket().map_err(status)?.stats();
+        use extent_remote::object_bucket::{Request, Upload};
+        let bucket = stores::daemon_bucket().map_err(status)?.stats();
         let object_storage = Some(ObjectStorageStats {
             requests: (Request::ALL.into_iter())
                 .map(|request| (request.name().to_owned(), bucket.requests(request)))
@@ -652,10 +652,10 @@ impl Extentd for Control {
     ) -> Result<Response<ShredCellResponse>, Status> {
         let ShredCellRequest { tenant, cell } = request.into_inner();
         let cell = crate::Cell { tenant, id: cell };
-        let bucket = stores::remote_bucket().map_err(status)?;
-        let shredded = crate::remote::shred_cell(&bucket, cell).await.map_err(|err| {
-            let failure = extent_store::upload::Failure::Remote(err);
-            let errno = crate::remote::errno(&failure).unwrap_or(Errno::EIO);
+        let bucket = stores::daemon_bucket().map_err(status)?;
+        let shredded = crate::bucket::shred_cell(&bucket, cell).await.map_err(|err| {
+            let failure = extent_store::upload::Failure::Bucket(err);
+            let errno = crate::bucket::errno(&failure).unwrap_or(Errno::EIO);
             log::error!("extentd: shredding cell {cell}: {failure}");
             saying(errno, format!("shredding cell {cell}: {failure}"))
         })?;
@@ -679,7 +679,7 @@ impl Extentd for Control {
             false => why,
         };
         let scope = extent_remote::keys::Scope::Tenant(tenant);
-        let forgotten = stores::blocking(move || Ok(crate::remote::forget(scope, &why))).await;
+        let forgotten = stores::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
                 forgotten: Some(forgotten_of(forgotten)),
@@ -692,7 +692,7 @@ impl Extentd for Control {
         request: Request<ShredTenantRequest>,
     ) -> Result<Response<ShredTenantResponse>, Status> {
         let ShredTenantRequest { tenant } = request.into_inner();
-        let (destroyed, forgotten) = crate::remote::shred_tenant(tenant).await.map_err(|why| {
+        let (destroyed, forgotten) = crate::bucket::shred_tenant(tenant).await.map_err(|why| {
             log::error!("extentd: shredding tenant {tenant}: {why}");
             saying(Errno::ENOTSUP, why)
         })?;
@@ -705,9 +705,9 @@ impl Extentd for Control {
 }
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
-fn forgotten_of(forgotten: crate::remote::Forgotten) -> Forgotten {
+fn forgotten_of(forgotten: crate::bucket::Forgotten) -> Forgotten {
     let count = |count: usize| u32::try_from(count).unwrap_or(u32::MAX);
-    let crate::remote::Forgotten { stores, rings, kept, extents, bytes } = forgotten;
+    let crate::bucket::Forgotten { stores, rings, kept, extents, bytes } = forgotten;
     Forgotten { stores: count(stores), rings: count(rings), kept: count(kept), extents, bytes }
 }
 

@@ -113,9 +113,9 @@ use extent_remote::bucket::Meta;
 use extent_remote::collector::{Collector, DryRun, Marking, Options, Report};
 use extent_remote::layout;
 use extent_remote::layout::Cell;
+use extent_remote::object_bucket::{ObjectBucket, Request, probe};
 use extent_remote::passed::{self, Sum, Usage};
 use extent_remote::record::Record;
-use extent_remote::store::{Request, Store, probe};
 use extent_remote::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
 use extent_remote::{branch, cell};
 use futures::{Stream, StreamExt as _};
@@ -367,7 +367,7 @@ impl Tenant {
 /// tenants and each one's cells listed a page at a time, so that it holds a page of each at most,
 /// whatever the bucket holds (TASK-395.8).
 async fn say_usage(
-    bucket: &Store,
+    bucket: &ObjectBucket,
     named: Option<u64>,
     out: &mut impl std::io::Write,
 ) -> Result<(), String> {
@@ -395,7 +395,7 @@ async fn say_usage(
 
 /// The cells a command goes over: the one named, or every cell of `bucket`, found by delimiter
 /// listings a page at a time, listing none of their objects (TASK-395.4, TASK-395.5).
-fn cells(bucket: &Store, named: Option<Cell>) -> impl Stream<Item = Cell> + '_ {
+fn cells(bucket: &ObjectBucket, named: Option<Cell>) -> impl Stream<Item = Cell> + '_ {
     match named {
         Some(cell) => futures::stream::iter([cell]).left_stream(),
         None => cell::listed(bucket).right_stream(),
@@ -405,7 +405,7 @@ fn cells(bucket: &Store, named: Option<Cell>) -> impl Stream<Item = Cell> + '_ {
 /// Collects every cell of `bucket`, or the one `named`, a pass over each, once, or every `every`,
 /// deleting or marking as `mode` says, as `run` says; or prints what a pass would delete, once.
 async fn collect(
-    bucket: &Arc<Store>,
+    bucket: &Arc<ObjectBucket>,
     every: Option<Duration>,
     options: Options,
     mode: Mode,
@@ -463,7 +463,7 @@ async fn collect(
 /// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
 /// fork points under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
 /// collects or deletes anything (TASK-411.28).
-fn kms(bucket: &Arc<Store>) -> Result<extent_keys::kms::Shared, String> {
+fn kms(bucket: &Arc<ObjectBucket>) -> Result<extent_keys::kms::Shared, String> {
     let chosen = extent_remote::bucket_kms::from_env(|| Ok(bucket.clone()))?;
     Ok(chosen.shared())
 }
@@ -471,7 +471,7 @@ fn kms(bucket: &Arc<Store>) -> Result<extent_keys::kms::Shared, String> {
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
 /// environment gives (TASK-411.27, `extent_remote::bucket_kms::rotate`), saying what it did on
 /// standard error; failing, once it went over every tenant, if it left any under none of them.
-async fn rotate_master_key(bucket: &Store) -> Result<(), String> {
+async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
     use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
     let keys = MasterKeys::from_env()?.ok_or_else(|| {
         format!(
@@ -507,7 +507,7 @@ async fn rotate_master_key(bucket: &Store) -> Result<(), String> {
 /// such a deletion fails, naming the tenant, the branch left as a deletion stopped partway, its
 /// lease ended: running it again once the KMS answers finishes it.
 async fn delete_branch(
-    bucket: &Store,
+    bucket: &ObjectBucket,
     branch: layout::Branch,
     kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
@@ -520,7 +520,7 @@ async fn delete_branch(
 /// What a dry run over every cell of `bucket`, or the one `named`, finds, printed, a cell at a
 /// time.
 async fn dry_run_cells(
-    bucket: &Store,
+    bucket: &ObjectBucket,
     options: Options,
     named: Option<Cell>,
 ) -> Result<(), String> {
@@ -673,7 +673,7 @@ impl Histogram {
 ///   `cladefs_gc_sweep_locked_cells`, the cells those were of, and
 ///   `cladefs_gc_sweep_resurrected_objects`.
 /// - `cladefs_gc_sweep_requests{request}`: the requests it made of each kind
-///   (`extent_remote::store::Request::name`), listing the cells among them.
+///   (`extent_remote::object_bucket::Request::name`), listing the cells among them.
 /// - `cladefs_gc_pass_seconds`: a histogram of how long its passes took, those it ran;
 ///   `cladefs_gc_slowest_pass_seconds{cell}`: its slowest passes, by their cells, TENANT/CELL.
 /// - `cladefs_gc_peak_resident_bytes`: the most memory the process held so far.
@@ -916,7 +916,7 @@ fn main() -> Result<(), String> {
     let Args { url, command } = parse(std::env::args().skip(1))?;
     log::set_logger(&Stderr).map_err(|err| format!("a log: {err}"))?;
     log::set_max_level(log::LevelFilter::Warn);
-    let bucket = Arc::new(Store::from_url(&url)?);
+    let bucket = Arc::new(ObjectBucket::from_url(&url)?);
     // Of a thread a core: a sweep's passes run on them at once (TASK-395.15).
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1161,7 +1161,7 @@ mod tests {
     fn usage_lists_a_page_of_cells_at_a_time() {
         use extent_remote::Bucket as _;
         use extent_remote::bucket::{LIST_PAGE, PutMode};
-        let bucket = Store::from_url("memory:///").unwrap();
+        let bucket = ObjectBucket::from_url("memory:///").unwrap();
         let many = LIST_PAGE as u64 * 2 + 5;
         let mut cells: Vec<Cell> = (0..many).map(|id| Cell { tenant: 2, id }).collect();
         cells.extend([Cell { tenant: 1, id: 7 }, Cell { tenant: 3, id: 1 }]);
@@ -1175,7 +1175,7 @@ mod tests {
         });
         // Each line written, and how many pages of listings by delimiter were asked for by then.
         struct Lines<'a> {
-            bucket: &'a Store,
+            bucket: &'a ObjectBucket,
             lines: Vec<(String, u64)>,
             line: Vec<u8>,
         }

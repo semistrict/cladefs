@@ -161,7 +161,7 @@ mod host {
         use cladefs::Owner;
         // Every store is encrypted (TASK-411.28): this test's, its environment naming no KMS, under
         // the tests' own, as a guest run's are under the run's (scripts/test-e2e.sh).
-        cladefs::remote::testing::encrypted();
+        cladefs::bucket::testing::encrypted();
         let killed = |files: &[Vec<u8>], seed: u64, output: &[u8]| {
             let dir = tempdir::TempDir::new("killed").unwrap();
             std::fs::write(dir.path().join("seed"), seed.to_string()).unwrap();

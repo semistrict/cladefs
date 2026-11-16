@@ -62,7 +62,7 @@ const SCALE: u64 = 4;
 #[host]
 mod host {
     use super::*;
-    use crate::common::{control, cladefs_guest_should_run, setup_rootfs, spawn_daemon};
+    use crate::common::{cladefs_guest_should_run, control, setup_rootfs, spawn_daemon};
     use crate::script::Failure;
     use crate::soak::{self, Acks, Bound, Fault, Found, KEPT_RUNS, Load, Plan, SLOTS, WRITERS};
     use crate::vm::{self, Firecracker, Vm};
@@ -179,8 +179,8 @@ mod host {
             let state = root.join(&key);
             let host = state.join("host");
             let (bucket, bucket_dir) = match std::env::var("CLADEFS_EXTENTD_REMOTE") {
-                Ok(remote) if !remote.is_empty() => {
-                    (format!("{}/soak-{key}", remote.trim_end_matches('/')), None)
+                Ok(url) if !url.is_empty() => {
+                    (format!("{}/soak-{key}", url.trim_end_matches('/')), None)
                 }
                 _ => {
                     let dir = state.join("bucket");
@@ -364,9 +364,10 @@ mod host {
                 Err(err) => return Err(err.into()),
             };
             std::fs::write(setup.tmp_dir.join("seed"), ledger.seed.to_string())?;
-            let faults =
-                Fault::parse(&std::env::var("CLADEFS_SOAK_FAULTS").unwrap_or_else(|_| "all".into()))
-                    .map_err(anyhow::Error::msg)?;
+            let faults = Fault::parse(
+                &std::env::var("CLADEFS_SOAK_FAULTS").unwrap_or_else(|_| "all".into()),
+            )
+            .map_err(anyhow::Error::msg)?;
             let load_secs = match std::env::var("CLADEFS_SOAK_LOAD_SECS") {
                 Ok(secs) => Some(secs.parse().context("CLADEFS_SOAK_LOAD_SECS is seconds")?),
                 Err(_) => None,
@@ -411,7 +412,7 @@ mod host {
                 ("CLADEFS_EXTENTD_REMOTE", self.paths.bucket.as_ref()),
                 ("CLADEFS_EXTENTD_TOKEN", token.as_ref()),
                 ("CLADEFS_EXTENTD_CACHE", self.paths.cache.as_os_str()),
-                ("CLADEFS_REMOTE_LATENCY_MS", latency.as_ref()),
+                ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];
             let name = format!("extentd-{}", self.daemons);
@@ -865,7 +866,8 @@ mod host {
         }
 
         /// The branches whose uploads the round's daemons failed, as their logs say: those stores'
-        /// uploaders stopped, and their commits fail until they are attached again (remote.rs).
+        /// uploaders stopped, and their commits fail until they are attached again
+        /// (`extent_store::upload`).
         fn uploads_stopped(&self) -> anyhow::Result<BTreeSet<cladefs::Branch>> {
             let mut stopped = BTreeSet::new();
             for daemon in 1..=self.daemons {
@@ -882,7 +884,7 @@ mod host {
                 return du(dir);
             }
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let bucket = extent_remote::store::Store::from_url(&self.paths.bucket)
+            let bucket = extent_remote::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
                 .map_err(anyhow::Error::msg)?;
             let objects = runtime
                 .block_on(bucket.list(""))
@@ -1164,9 +1166,10 @@ RUN apk add --no-cache postgresql postgresql-contrib
         /// Only a store whose uploads were failed may see EIO, and its guest give up.
         #[test]
         fn loads_fail_only_where_uploads_stopped() {
-            let log = "ERROR cladefs::remote: cladefs: uploading branch 0/7a/fb232d4739d569c0: \
-                       reading failpoint writer::upload\nERROR cladefs::extents: cladefs: uploading \
-                       the store's commits: reading failpoint writer::upload\n";
+            let log = "ERROR extent_store::upload: cladefs: uploading branch \
+                       0/7a/fb232d4739d569c0: reading failpoint writer::upload\nERROR \
+                       cladefs::extents: cladefs: uploading the store's commits: reading failpoint \
+                       writer::upload\n";
             let cell = cladefs::Cell { tenant: 0, id: 0x7a };
             let branch = cladefs::Branch { cell, id: 0xfb23_2d47_39d5_69c0 };
             assert_eq!(upload_failures(log), BTreeSet::from([branch]));

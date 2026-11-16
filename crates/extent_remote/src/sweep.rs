@@ -28,7 +28,7 @@ use crate::bucket::{Bucket, ByteRange, Error as BucketError, Listing, Meta, Obje
 use crate::bucket::{PutMode, Version};
 use crate::collector::{Collector, Heard, Holding, Marking, Options, Report};
 use crate::layout::Cell;
-use crate::store::Request;
+use crate::object_bucket::Request;
 use crate::{Error, Left};
 use futures::{FutureExt as _, StreamExt as _};
 use std::future::Future;
@@ -70,8 +70,8 @@ pub struct Sweep {
     pub kms: Option<extent_keys::kms::Shared>,
 }
 
-/// The requests made, of each kind, as a [`crate::store::Store`] counts them: a batch of deletes
-/// one request, a page of a listing one.
+/// The requests made, of each kind, as a [`crate::object_bucket::ObjectBucket`] counts them: a
+/// batch of deletes one request, a page of a listing one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Requests(pub [u64; Request::ALL.len()]);
 
@@ -292,8 +292,9 @@ impl Outcome {
     }
 }
 
-/// A bucket that counts the requests made of it, by kind, as a [`crate::store::Store`] counts its
-/// own: each pass's, apart from the others' it runs beside.
+/// A bucket that counts the requests made of it, by kind, as a
+/// [`crate::object_bucket::ObjectBucket`] counts its own: each pass's, apart from the others' it
+/// runs beside.
 struct Counted<B> {
     bucket: Arc<B>,
     counts: [AtomicU64; Request::ALL.len()],
@@ -390,8 +391,8 @@ mod tests {
     use super::*;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::{self, Branch};
+    use crate::object_bucket::ObjectBucket;
     use crate::passed::Passed;
-    use crate::store::Store;
     use crate::testing::{Direct, Fault, SimBucket};
     use crate::{Writer, branch};
     use futures::executor::block_on;
@@ -634,7 +635,7 @@ mod tests {
 
     /// A bucket that notes, for each request of a cell's, the Tokio task that made it.
     struct Tasks {
-        bucket: Arc<Store>,
+        bucket: Arc<ObjectBucket>,
         tasks: std::sync::Mutex<BTreeSet<(Cell, Option<tokio::task::Id>)>>,
     }
 
@@ -720,7 +721,8 @@ mod tests {
         let runtime =
             tokio::runtime::Builder::new_multi_thread().worker_threads(4).build().unwrap();
         let swept = |spawned: bool| {
-            let store = Arc::new(Store::new(Arc::new(object_store::memory::InMemory::new()), ""));
+            let store =
+                Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
             let bucket = Arc::new(Tasks { bucket: store.clone(), tasks: Default::default() });
             runtime.block_on(fill(&store, &cells, false));
             let sweep = Sweep { spawned, ..sweep(4) };
@@ -786,7 +788,8 @@ mod tests {
     #[test]
     fn sweeps_report_what_the_bucket_counts() {
         let cells = cells(10);
-        let bucket = Arc::new(Store::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         block_on(fill(&bucket, &cells, true));
         let before = block_on(sizes(&*bucket));
         let counted = bucket.stats();

@@ -8,8 +8,8 @@
 //! fork, and its deletion, on a base of as many extents as asked for. A measurement, not a check.
 //!
 //! The bucket is one in memory behind [`Recording`], which notes every request that reaches the
-//! object store, the ones `Store::stats` leaves out too (the collector's marks), with its key,
-//! its bytes and when it began and ended, and behind a fixed latency
+//! object store, the ones `ObjectBucket::stats` leaves out too (the collector's marks), with its
+//! key, its bytes and when it began and ended, and behind a fixed latency
 //! (`extent_remote::faults::Faulty`). So each phase says, beside its requests by kind and its
 //! bytes up and down: how many requests were in flight at once at most; how long at least one was
 //! in flight, which over the latency is how many round trips it made one after another; and the
@@ -24,7 +24,7 @@ use crate::extents::Opening;
 use crate::host_store::{self, DEFAULT_TENANT, new_cell};
 use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
 use extent_remote::faults::{Fault, Faults, Faulty};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use object_store::path::Path as Key;
@@ -404,7 +404,7 @@ fn lifecycle(extents: u64, latency: Duration) {
         Run { extents, latency, log, faults, names: Names::default(), phases: Vec::new() };
 
     // The host the base is made on, and its point: another's than the one measured.
-    let elsewhere = Arc::new(Bucket::new(objects.clone(), ""));
+    let elsewhere = Arc::new(ObjectBucket::new(objects.clone(), ""));
     let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
     let made = dir.path().join("made");
     std::fs::create_dir(&made).unwrap();
@@ -434,7 +434,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
     // directories of its own. What it does once, not for each restore, done first: its
     // conditional writes probed, a block of object IDs taken.
-    let bucket = Arc::new(Bucket::new(objects, ""));
+    let bucket = Arc::new(ObjectBucket::new(objects, ""));
     // The bucket the daemon's stores are made in, as a point taken from it is.
     unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", url_of(&bucket)) };
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();

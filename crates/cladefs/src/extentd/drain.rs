@@ -20,7 +20,7 @@
 //! 3. It waits for the connections to be gone and the control API's calls in flight to be done
 //!    ([`Work`]); closes the points it keeps open for forks; and waits for every store's uploader
 //!    to have uploaded what its store made durable, and stopped, as each does as its store closes
-//!    ([`crate::remote::uploaders`]).
+//!    ([`crate::bucket::uploaders`]).
 //!
 //! All of it within a bound, `CLADEFS_EXTENTD_DRAIN` seconds ([`bound`]): past it, what is left is
 //! logged, and the daemon exits anyway, failing; its stores' commits that weren't durable are
@@ -95,7 +95,7 @@ pub fn drain(within: Duration) -> Result<(), Left> {
             super::server::CONNECTIONS.done().await;
             super::control::CALLS.done().await;
             super::stores::close_points().await;
-            crate::remote::uploaders().wait_for(|uploading| *uploading == 0).await.map(drop)
+            crate::bucket::uploaders().wait_for(|uploading| *uploading == 0).await.map(drop)
         })
         .await
     });
@@ -104,7 +104,7 @@ pub fn drain(within: Duration) -> Result<(), Left> {
         Ok(Err(_)) | Err(_) => Err(Left {
             connections: super::server::CONNECTIONS.count(),
             calls: super::control::CALLS.count(),
-            uploaders: *crate::remote::uploaders().borrow(),
+            uploaders: *crate::bucket::uploaders().borrow(),
         }),
     }
 }

@@ -227,7 +227,7 @@ impl Extents {
         let Some(at) = self.in_bucket(extent) else { return };
         if extent_remote::layout::further(&at.key, &to.key) {
             let len = at.len;
-            self.insert(*extent, Extent { len, data: Data::Remote(to.clone()) });
+            self.insert(*extent, Extent { len, data: Data::Bucket(to.clone()) });
         }
     }
 
@@ -291,7 +291,7 @@ impl<'a> Entry<'a> {
     }
 
     /// The store's own entry, if it is the store's own: those of the bucket's layer are in the
-    /// bucket, their data [`Data::Remote`].
+    /// bucket, their data [`Data::Bucket`].
     pub fn own(self) -> Option<&'a Extent> {
         match self {
             Entry::Own(entry) => Some(entry),
@@ -316,7 +316,7 @@ impl<'a> Entry<'a> {
 
 /// The entry of an extent the bucket holds at `location`.
 fn remote(location: &Location) -> Extent {
-    Extent { len: location.len, data: Data::Remote(location.clone()) }
+    Extent { len: location.len, data: Data::Bucket(location.clone()) }
 }
 
 #[cfg(test)]
@@ -393,7 +393,7 @@ mod tests {
         assert_eq!(one.len(), 9);
         assert!(one.get(&extent(4)).is_none() && one.get(&extent(20)).is_none());
         assert_eq!(one.get(&extent(5)).map(Entry::to_extent), Some(pieces(2)));
-        assert_eq!(one.get(&extent(6)).unwrap().to_extent().data, Data::Remote(moved.clone()));
+        assert_eq!(one.get(&extent(6)).unwrap().to_extent().data, Data::Bucket(moved.clone()));
         assert!(
             matches!(one.get(&extent(7)), Some(Entry::Bucket(location)) if *location == at(70))
         );
@@ -401,7 +401,7 @@ mod tests {
             base.iter().map(|(extent, location)| (*extent, remote(location))).collect();
         expected.retain(|(held, _)| *held != extent(4));
         expected[4].1 = pieces(2);
-        expected[5].1 = Extent { len: 4096, data: Data::Remote(moved) };
+        expected[5].1 = Extent { len: 4096, data: Data::Bucket(moved) };
         assert_eq!(held(&one), expected);
         let lens: Vec<_> = {
             let mut lens: Vec<_> = one.lens().collect();

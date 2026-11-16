@@ -128,7 +128,7 @@ fn mount(args: Vec<std::ffi::OsString>) -> anyhow::Result<()> {
     // start, naming CLADEFS_KMS and CLADEFS_MASTER_KEY (TASK-411.28). After the signals are
     // blocked: choosing it may start threads (a KMS's runtime), which would take SIGTERM and
     // die of it rather than leave it to the thread waiting for it.
-    cladefs::remote::require_kms().map_err(anyhow::Error::msg)?;
+    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)?;
     let mut options = cladefs::fuse::MountOptions::new();
     let (mut paths, mut new) = (Vec::new(), None);
     let (mut control, mut stores, mut bucket) = (None, None, None);

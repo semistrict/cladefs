@@ -47,7 +47,7 @@
 //! ([`a_tenant_filling_its_disk_leaves_others_committing`], TASK-94).
 //! `crates/cladefs/mutants.sh` puts back a bug of each kind it exists to find, and sees it fail.
 
-use super::super::client::RemoteExtentStore;
+use super::super::client::DaemonExtentStore;
 use super::super::disk;
 use super::super::server::{QUEUED_CREDIT, Tenant, connections, serve, serve_tenant};
 use super::super::stores::table;
@@ -815,7 +815,7 @@ enum Page {
 /// Alice: a correct VM process, of a granted tenant, beside mallory's; her store, her window in
 /// this process's memory, which copies on write, and her model of both.
 struct Alice {
-    store: RemoteExtentStore,
+    store: DaemonExtentStore,
     window: NonNull<u8>,
     branch: u64,
     /// The sequence of her next extent.
@@ -852,7 +852,7 @@ impl Alice {
     /// committed.
     fn new(socket: &Path, path: &Path) -> Self {
         let ps = page_size() as usize;
-        let store = RemoteExtentStore::connect(socket, path, 1 << 27).unwrap();
+        let store = DaemonExtentStore::connect(socket, path, 1 << 27).unwrap();
         let window = memory(ALICE_PAGES);
         // SAFETY: The memory is hers, and outlives the store, as it is never unmapped.
         unsafe {
@@ -1785,7 +1785,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     // Alice's store she closed, which mallory names every way it can.
     let archive = alices.join("archive");
     let archived = {
-        let store = RemoteExtentStore::connect(&alice_socket, &archive, STORE_BYTES).unwrap();
+        let store = DaemonExtentStore::connect(&alice_socket, &archive, STORE_BYTES).unwrap();
         let extent = ExtentId { branch: store.branch(), sequence: 1 };
         write(&store, extent, 0, &marked(ALICE_MARK, 0, 4 * BLOCK)).unwrap();
         store.commit(Some(b"archived")).unwrap();
@@ -1793,14 +1793,14 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     };
     // Bob's, the default tenant's, which waits.
     let bob_path = dir.path().join("bob");
-    let bob = RemoteExtentStore::connect(&bob_socket, &bob_path, STORE_BYTES).unwrap();
+    let bob = DaemonExtentStore::connect(&bob_socket, &bob_path, STORE_BYTES).unwrap();
     let bobs = ExtentId { branch: bob.branch(), sequence: 1 };
     write(&bob, bobs, 0, &marked(BOB_MARK, 1, BLOCK)).unwrap();
     bob.commit(None).unwrap();
     // A snapshot in the bucket, of a branch mallory's VM manager makes a point of in its directory.
     // Its extents a MiB each, which mallory's floods of page-ins page in (TASK-149.34).
     let given =
-        RemoteExtentStore::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
+        DaemonExtentStore::connect(&bob_socket, dir.path().join("given"), STORE_BYTES).unwrap();
     let given_branch = given.branch();
     for sequence in 1..=GIVEN_EXTENTS {
         let extent = ExtentId { branch: given_branch, sequence };
@@ -1986,7 +1986,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 .collect();
             named.sort();
             for path in named {
-                let opened = RemoteExtentStore::connect(&mallory_socket, &path, STORE_BYTES);
+                let opened = DaemonExtentStore::connect(&mallory_socket, &path, STORE_BYTES);
                 let errno = opened.map(drop).err().and_then(|error| error.errno());
                 prop_assert_ne!(errno, Some(Errno::EBUSY), "{} stayed held", path.display());
             }
@@ -1997,21 +1997,21 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             let wrote: BTreeSet<&PathBuf> =
                 seen.iter().filter_map(|seen| seen.wrote.as_ref()).collect();
             for path in wrote {
-                let reopened = RemoteExtentStore::connect(&mallory_socket, path, STORE_BYTES)
+                let reopened = DaemonExtentStore::connect(&mallory_socket, path, STORE_BYTES)
                     .map_err(|error| error.to_string())
                     .map(|store| store.commit(None));
                 prop_assert_eq!(reopened, Ok(Ok(())), "{} opened again", path.display());
             }
             // And the daemon serves on.
             let after = vms.join(format!("{case}-after"));
-            let after = RemoteExtentStore::connect(&mallory_socket, &after, STORE_BYTES);
+            let after = DaemonExtentStore::connect(&mallory_socket, &after, STORE_BYTES);
             prop_assert_eq!(after.map(drop).map_err(|error| error.to_string()), Ok(()));
 
             // Nothing came into the others' directories, nor went.
             prop_assert_eq!(listing(&alices), alices_listed.clone());
             prop_assert_eq!(listing(dir.path()), root_listed.clone());
             // Alice's store she closed holds what she wrote; bob's serves.
-            let reopened = RemoteExtentStore::connect(&alice_socket, &archive, STORE_BYTES);
+            let reopened = DaemonExtentStore::connect(&alice_socket, &archive, STORE_BYTES);
             let reopened = reopened.map_err(|error| error.to_string());
             let archived_bytes = reopened.as_ref().map(|store| read(store, archived, 0, 4 * BLOCK));
             prop_assert_eq!(archived_bytes, Ok(Ok(marked(ALICE_MARK, 0, 4 * BLOCK))));
@@ -2071,7 +2071,7 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     let listener = UnixListener::bind(&socket).unwrap();
     let tenant = Tenant::new(1, &vms).unwrap();
     std::thread::spawn(move || serve_tenant(listener, tenant));
-    let store = RemoteExtentStore::connect(&socket, vms.join("store"), 1 << 26).unwrap();
+    let store = DaemonExtentStore::connect(&socket, vms.join("store"), 1 << 26).unwrap();
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
     write(&store, extent(1), 0, &super::pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
@@ -2225,7 +2225,10 @@ fn page_ins_in_flight_are_bounded() {
     const MIB: u64 = 1 << 20;
     host();
     let gated = Arc::new(super::GatedReads::new());
-    super::super::stores::use_bucket(extent_remote::store::Store::new(gated.clone(), "branches"));
+    super::super::stores::use_bucket(extent_remote::object_bucket::ObjectBucket::new(
+        gated.clone(),
+        "branches",
+    ));
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
@@ -2249,7 +2252,7 @@ fn page_ins_in_flight_are_bounded() {
         store.commit(None).unwrap();
         branch
     };
-    let store = RemoteExtentStore::connect(&socket, &path, 1 << 30).unwrap();
+    let store = DaemonExtentStore::connect(&socket, &path, 1 << 30).unwrap();
     store.fork_quiescent(&point).unwrap();
     drop(store);
     // Its VM manager makes the point's store on the other host first: a snapshot names its point's
@@ -2261,7 +2264,7 @@ fn page_ins_in_flight_are_bounded() {
     control(super::super::stores::create(elsewhere.join("point"), 1 << 30, point_branch, made))
         .unwrap();
     let restored = elsewhere.join("store");
-    let forked = RemoteExtentStore::connect_forked(
+    let forked = DaemonExtentStore::connect_forked(
         &socket,
         &restored,
         elsewhere.join("point"),
@@ -2541,7 +2544,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
                 (msocket.clone(), mstores.join(format!("store-{n}")), start.clone());
             std::thread::spawn(move || {
                 // Its capacity bounds what it writes without a limit, 512 MiB in all.
-                let store = RemoteExtentStore::connect(&socket, &path, 64 * MIB);
+                let store = DaemonExtentStore::connect(&socket, &path, 64 * MIB);
                 start.wait();
                 let store = store.unwrap();
                 let mut written = 0;
@@ -2556,7 +2559,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
             })
         })
         .collect();
-    let alice = RemoteExtentStore::connect(&asocket, astores.join("store"), 1 << 30).unwrap();
+    let alice = DaemonExtentStore::connect(&asocket, astores.join("store"), 1 << 30).unwrap();
     start.wait();
     let alices: Vec<_> = (1..=ALICES)
         .map(|sequence| {

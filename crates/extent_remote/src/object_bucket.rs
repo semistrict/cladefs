@@ -7,10 +7,10 @@
 //! Branches rely on conditional writes (doc-7, The head): a create where an object is must fail,
 //! and an update of a version that is not the object's. `object_store` sends S3's `If-None-Match`
 //! and `If-Match`, and GCS's generation preconditions; [`probe`] checks that a store honours them
-//! before anything relies on it, once for each store ([`Store::probed`]).
+//! before anything relies on it, once for each bucket ([`ObjectBucket::probed`]).
 //!
-//! A store counts the requests it makes, by kind, those that fail too, which object storage bills,
-//! and the bytes it uploads, by kind of object, and downloads ([`Store::stats`]).
+//! A bucket counts the requests it makes, by kind, those that fail too, which object storage bills,
+//! and the bytes it uploads, by kind of object, and downloads ([`ObjectBucket::stats`]).
 //!
 //! cladefs: requests that fail, which the helpers of [`crate::bucket`] retry until they answer, it
 //! counts by kind ([`Stats::failures`]) and logs, a warning naming the store's error, the first of
@@ -26,9 +26,10 @@
 //! and memory list a level whole, which their pages are cut out of: a directory is read whole by
 //! any listing of it, and memory has nothing cheaper.
 //!
-//! cladefs: every reader of a bucket reads it through a store, which warns of reading what the
-//! collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a marks object
-//! is, as a store reads the newest every [`crate::marks::REFRESH`] alongside a read of its own.
+//! cladefs: every reader of a bucket reads it through an `ObjectBucket`, which warns of reading
+//! what the collector's newest mark-only pass marked ([`crate::marks`], TASK-264): on wherever a
+//! marks object is, as a bucket reads the newest every [`crate::marks::REFRESH`] alongside a read
+//! of its own.
 
 use crate::bucket::{
     Bucket, ByteRange, Error, LIST_PAGE, Listing, Meta, Object, Page, PutMode, Version,
@@ -47,14 +48,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// A bucket's objects under a prefix.
-pub struct Store {
+pub struct ObjectBucket {
     store: Arc<dyn ObjectStore>,
     /// cladefs: the same store, which lists a level of keys a page a request, if it does (S3, GCS,
     /// Azure): none for files and memory, which list it whole (TASK-395.5).
     pages: Option<Arc<dyn PaginatedListStore>>,
     prefix: String,
     counts: Counts,
-    /// Whether [`Store::probed`] found it honours conditional writes: what it found holds.
+    /// Whether [`ObjectBucket::probed`] found it honours conditional writes: what it found holds.
     honoured: std::sync::atomic::AtomicBool,
     /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
     decoded: crate::recovery::Decoded,
@@ -66,7 +67,7 @@ pub struct Store {
     objectids: crate::objectid::Allocator,
 }
 
-/// The kinds of request a store makes.
+/// The kinds of request a bucket makes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Request {
     Get,
@@ -135,7 +136,7 @@ impl Request {
     }
 }
 
-/// The kinds of object a store uploads, by their keys (doc-7, Layout).
+/// The kinds of object a bucket uploads, by their keys (doc-7, Layout).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Upload {
     Segments,
@@ -222,7 +223,7 @@ struct Window {
 
 impl Turns {
     /// The window at which no write waits for its turn any more: the host's uploads' PUTs at once
-    /// (`cladefs::remote`'s `UPLOADS`).
+    /// (`cladefs::bucket`'s `UPLOADS`).
     const OPEN: u64 = 64;
 
     fn window(&self) -> std::sync::MutexGuard<'_, Window> {
@@ -378,7 +379,7 @@ fn cause(error: &object_store::Error) -> String {
     said
 }
 
-/// What a store did so far: its requests by kind and how long they took, the bytes it uploaded by
+/// What a bucket did so far: its requests by kind and how long they took, the bytes it uploaded by
 /// kind of object, and the bytes it downloaded; cladefs: and the requests that failed, by kind.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Stats {
@@ -520,7 +521,7 @@ impl Drop for Timed<'_> {
         self.counts.request_ns[self.request as usize].fetch_add(ns, Ordering::Relaxed);
     }
 }
-impl Store {
+impl ObjectBucket {
     /// The objects of `store` under `prefix`, a path of segments separated by `/`, or empty.
     /// cladefs: it lists a level of keys whole, as files and memory do, cutting pages out of it.
     pub fn new(store: Arc<dyn ObjectStore>, prefix: &str) -> Self {
@@ -571,10 +572,10 @@ impl Store {
 
     /// cladefs: reads the newest marks object of the collector's mark-only passes over `cell`, if it
     /// is another than the one it holds (TASK-264, TASK-395.2): a listing of the cell's
-    /// `gc/marks/`, then a read of the newest. A store does every [`crate::marks::REFRESH`] for each
-    /// cell it reads, alongside a read of it; its requests go uncounted ([`Store::stats`]), being
-    /// no reader's. A request failed, it keeps what it held, until the next; marks it can't decode,
-    /// it warns of, holding none.
+    /// `gc/marks/`, then a read of the newest. A bucket does every [`crate::marks::REFRESH`] for
+    /// each cell it reads, alongside a read of it; its requests go uncounted
+    /// ([`ObjectBucket::stats`]), being no reader's. A request failed, it keeps what it held, until
+    /// the next; marks it can't decode, it warns of, holding none.
     pub async fn refresh_marks(&self, cell: layout::Cell) {
         let prefix = self.path(layout::marks_of(cell).trim_end_matches('/'));
         let listed = match self.store.list(Some(&prefix)).try_collect::<Vec<_>>().await {
@@ -619,7 +620,7 @@ impl Store {
 
     /// The reading of whether the bucket is marked again, if it is due, and of the marks of the
     /// cell `key` is under, a key or a prefix, if the bucket is marked and they are due
-    /// ([`Store::refresh_marks`]), which a read goes alongside: nothing, if neither is.
+    /// ([`ObjectBucket::refresh_marks`]), which a read goes alongside: nothing, if neither is.
     fn marks_due(
         &self,
         key: &str,
@@ -689,11 +690,12 @@ impl Store {
     }
 }
 
-/// The object store at `url`, as [`Store::from_url`] reaches it, and the prefix the URL names in
-/// it: for tests that put themselves between a store and its objects. cladefs: a degraded one, if the
-/// environment says so (`CLADEFS_REMOTE_LATENCY_MS`, `CLADEFS_REMOTE_FAULTS`: [`crate::faults`]): an
-/// object store as far as a host's own may be, as the sandbox team's RustFS, 25 ms away, which
-/// made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while (TASK-330.3).
+/// The object store at `url`, as [`ObjectBucket::from_url`] reaches it, and the prefix the URL
+/// names in it: for tests that put themselves between a store and its objects. cladefs: a degraded
+/// one, if the environment says so (`CLADEFS_BUCKET_LATENCY_MS`, `CLADEFS_BUCKET_FAULTS`:
+/// [`crate::faults`]): an object store as far as a host's own may be, as the sandbox team's RustFS,
+/// 25 ms away, which made Fxfs's commits wait (TASK-61, TASK-62), or one failing for a while
+/// (TASK-330.3).
 pub fn object_store_at(url: &str) -> Result<(Arc<dyn ObjectStore>, String), String> {
     object_store_with(url, std::env::vars(), &Client::DEFAULT)
 }
@@ -709,7 +711,8 @@ pub(crate) fn object_store_with(
     Ok((objects, prefix))
 }
 
-/// cladefs: a store as it lists a level of keys a page a request, if it does ([`Store::paged`]).
+/// cladefs: a store as it lists a level of keys a page a request, if it does
+/// ([`ObjectBucket::paged`]).
 type Pages = Option<Arc<dyn PaginatedListStore>>;
 
 /// cladefs: what a bucket's URL reaches ([`reach`]).
@@ -803,7 +806,7 @@ fn error(error: &object_store::Error) -> Error {
     }
 }
 
-impl Bucket for Store {
+impl Bucket for ObjectBucket {
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
         Some(&self.decoded)
     }
@@ -906,8 +909,8 @@ impl Bucket for Store {
         }
     }
 
-    /// cladefs: a page a request where the store pages ([`Store::paged`]); else the level whole,
-    /// which the page is cut out of ([`Listing::page`]).
+    /// cladefs: a page a request where the store pages ([`ObjectBucket::paged`]); else the level
+    /// whole, which the page is cut out of ([`Listing::page`]).
     fn list_delimited(
         &self,
         prefix: &str,
@@ -1097,7 +1100,7 @@ pub(crate) mod tests {
         use crate::faults::{Failing, Fault, Faults, Faulty};
         let faults = Faults::new(std::time::Duration::ZERO, None);
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let store = Arc::new(Store::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
         let start = tokio::time::Instant::now();
         let creates: Vec<_> = (0..48)
@@ -1144,7 +1147,7 @@ pub(crate) mod tests {
         use crate::faults::{Failing, Fault, Faults, Faulty};
         let faults = Faults::new(std::time::Duration::ZERO, None);
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let store = Arc::new(Store::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
+        let store = Arc::new(ObjectBucket::new(Arc::new(Faulty::new(objects, faults.clone())), ""));
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
         let key = layout::segment(test_branch(1), 0, 1);
         let creating = tokio::spawn({
@@ -1212,19 +1215,19 @@ pub(crate) mod tests {
     use object_store::memory::InMemory;
     use storage_device::ExtentId;
 
-    fn memory() -> Arc<Store> {
-        Arc::new(Store::new(Arc::new(InMemory::new()), "cladefs/test"))
+    fn memory() -> Arc<ObjectBucket> {
+        Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "cladefs/test"))
     }
 
-    /// CLADEFS_REMOTE_LATENCY_MS adds its milliseconds to each request, as a farther object store's
+    /// CLADEFS_BUCKET_LATENCY_MS adds its milliseconds to each request, as a farther object store's
     /// would (TASK-62): a put and a get, two of them; and each request's time is counted, by its
     /// kind (TASK-165.11).
     #[test]
     fn requests_wait_the_latency_set() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", "50") };
-        let store = Store::from_url("memory:///latency").unwrap();
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
+        let store = ObjectBucket::from_url("memory:///latency").unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         let start = std::time::Instant::now();
         runtime.block_on(async {
@@ -1249,10 +1252,10 @@ pub(crate) mod tests {
     fn file_buckets_wait_the_latency_set() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", "50") };
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", "50") };
         let dir = tempfile::tempdir().unwrap();
         let url = format!("file://{}/", dir.path().canonicalize().unwrap().display());
-        let store = Store::from_url(&url).unwrap();
+        let store = ObjectBucket::from_url(&url).unwrap();
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let start = std::time::Instant::now();
         runtime.block_on(async {
@@ -1265,7 +1268,7 @@ pub(crate) mod tests {
         assert!(took >= std::time::Duration::from_millis(150), "three requests took {took:?}");
     }
 
-    /// TASK-264: a store reads the collector's newest marks with requests it doesn't count, at its
+    /// TASK-264: a bucket reads the collector's newest marks with requests it doesn't count, at its
     /// first read, alongside it, and warns as it gets or heads a key they name, of no other key; nor
     /// of one listed, which a caller may pass over. With no marks, it warns of nothing. TASK-395.2:
     /// a cell's marks, under its prefix, of each cell it reads, read at its first read of the cell.
@@ -1280,11 +1283,11 @@ pub(crate) mod tests {
         let theirs = layout::checkpoint(Branch { cell: other, id: 2 }, 1, 1);
         let warned = || -> Vec<String> { log.lock().unwrap().clone() };
         futures::executor::block_on(async {
-            let writer = Store::new(objects.clone(), "p");
+            let writer = ObjectBucket::new(objects.clone(), "p");
             for key in [&old, &marked, &layout::checkpoint(test_branch(1), 5, 1), &theirs] {
                 writer.put(key, vec![1, 2].into(), PutMode::Create).await.unwrap();
             }
-            let unmarked = Store::new(objects.clone(), "p");
+            let unmarked = ObjectBucket::new(objects.clone(), "p");
             unmarked.get(&marked).await.unwrap();
             unmarked.get(&marked).await.unwrap();
             assert_eq!(warned(), Vec::<String>::new());
@@ -1308,14 +1311,14 @@ pub(crate) mod tests {
             }
             // The marks there, but the bucket not said marked: a reader watches no cell's
             // (TASK-395.4's review).
-            let blind = Store::new(objects.clone(), "p");
+            let blind = ObjectBucket::new(objects.clone(), "p");
             blind.get(&marked).await.unwrap();
             blind.get(&marked).await.unwrap();
             assert!(!blind.marks.marking() && blind.marks.cells_watched() == 0);
             assert_eq!(warned(), Vec::<String>::new());
             writer.put(layout::MARKING, vec![1].into(), PutMode::Create).await.unwrap();
 
-            let reader = Store::new(objects.clone(), "p");
+            let reader = ObjectBucket::new(objects.clone(), "p");
             // Its first read reads the marks, alongside: what it reads after, it warns of.
             reader.head(&layout::checkpoint(test_branch(1), 5, 1)).await.unwrap();
             assert_eq!(reader.stats().requests(Request::List), 0);
@@ -1347,7 +1350,7 @@ pub(crate) mod tests {
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
 
-    /// A store counts its requests by kind, failed ones too, and the bytes it uploads, by kind of
+    /// A bucket counts its requests by kind, failed ones too, and the bytes it uploads, by kind of
     /// object, and downloads.
     #[test]
     fn counts_requests_and_bytes() {
@@ -1490,7 +1493,7 @@ pub(crate) mod tests {
         futures::executor::block_on(probe(&*memory(), 1)).unwrap();
     }
 
-    /// TASK-92.6: a store probed once is not probed again: the second asks nothing.
+    /// TASK-92.6: a bucket probed once is not probed again: the second asks nothing.
     #[test]
     fn stores_are_probed_once() {
         let store = memory();
@@ -1663,9 +1666,9 @@ pub(crate) mod tests {
     }
 
     /// cladefs: the bucket of the directory `dir`, by its URL (TASK-165.1).
-    pub(crate) fn file(dir: &std::path::Path) -> Arc<Store> {
+    pub(crate) fn file(dir: &std::path::Path) -> Arc<ObjectBucket> {
         let url = url::Url::from_directory_path(dir).unwrap();
-        Arc::new(Store::from_url(url.as_str()).unwrap())
+        Arc::new(ObjectBucket::from_url(url.as_str()).unwrap())
     }
 
     #[test]
@@ -1692,7 +1695,7 @@ pub(crate) mod tests {
     fn file_buckets_honour_conditional_writes() {
         let dir = tempfile::tempdir().unwrap();
         let files = object_store::local::LocalFileSystem::new_with_prefix(dir.path()).unwrap();
-        let theirs = Store::new(Arc::new(files), "");
+        let theirs = ObjectBucket::new(Arc::new(files), "");
         let refused = futures::executor::block_on(probe(&theirs, 1)).unwrap_err();
         assert_eq!(
             refused,
@@ -1709,10 +1712,10 @@ pub(crate) mod tests {
     }
 
     /// cladefs: a bucket of the S3 server in memory (TASK-205), under `prefix`, through `client`.
-    fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<Store> {
+    fn s3(server: &S3Server, prefix: &str, client: &Client) -> Arc<ObjectBucket> {
         let url = format!("s3://{}/{prefix}", crate::s3_server::BUCKET);
         let Reached { objects, pages, prefix } = reach(&url, server.options(), client).unwrap();
-        Arc::new(Store::paged(objects, pages, &prefix))
+        Arc::new(ObjectBucket::paged(objects, pages, &prefix))
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -1780,13 +1783,13 @@ pub(crate) mod tests {
         });
     }
 
-    /// TASK-208: the latency every request to `bucket` waits, CLADEFS_REMOTE_LATENCY_MS, set before
+    /// TASK-208: the latency every request to `bucket` waits, CLADEFS_BUCKET_LATENCY_MS, set before
     /// it was made.
     const LATE: u64 = 5;
 
-    /// TASK-208: a bucket made under CLADEFS_REMOTE_LATENCY_MS, `bucket`, does what every bucket
+    /// TASK-208: a bucket made under CLADEFS_BUCKET_LATENCY_MS, `bucket`, does what every bucket
     /// must, its requests each [`LATE`] ms late, one after another.
-    async fn conforms_late(bucket: &Store) {
+    async fn conforms_late(bucket: &ObjectBucket) {
         let started = std::time::Instant::now();
         crate::bucket::conformance(bucket, "conformance").await;
         let requests: u64 = bucket.stats().requests.iter().sum();
@@ -1797,24 +1800,24 @@ pub(crate) mod tests {
         );
     }
 
-    /// TASK-208: sets CLADEFS_REMOTE_LATENCY_MS to [`LATE`].
+    /// TASK-208: sets CLADEFS_BUCKET_LATENCY_MS to [`LATE`].
     fn late() {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_REMOTE_LATENCY_MS", LATE.to_string()) };
+        unsafe { std::env::set_var("CLADEFS_BUCKET_LATENCY_MS", LATE.to_string()) };
     }
 
-    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket in memory conforms, late.
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket in memory conforms, late.
     #[test]
     fn memory_buckets_conform_late() {
         late();
-        let bucket = Store::from_url("memory:///late").unwrap();
+        let bucket = ObjectBucket::from_url("memory:///late").unwrap();
         runtime().block_on(conforms_late(&bucket));
     }
 
-    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket of files conforms, late: its reads, which
-    /// object_store's throttle, before TASK-330.3, panicked on (`unimplemented!`), as well as its
-    /// writes.
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket of files conforms, late: its reads,
+    /// which object_store's throttle, before TASK-330.3, panicked on (`unimplemented!`), as well as
+    /// its writes.
     #[test]
     fn file_buckets_conform_late() {
         late();
@@ -1822,7 +1825,7 @@ pub(crate) mod tests {
         runtime().block_on(conforms_late(&file(dir.path())));
     }
 
-    /// TASK-208: under CLADEFS_REMOTE_LATENCY_MS, a bucket over S3 conforms, late.
+    /// TASK-208: under CLADEFS_BUCKET_LATENCY_MS, a bucket over S3 conforms, late.
     #[test]
     fn s3_buckets_conform_late() {
         late();
@@ -1929,7 +1932,7 @@ pub(crate) mod tests {
                     server.options().into_iter().fold(builder, |builder, (key, value)| {
                         builder.with_config(key.parse().unwrap(), value)
                     });
-                Arc::new(Store::new(Arc::new(builder.build().unwrap()), prefix))
+                Arc::new(ObjectBucket::new(Arc::new(builder.build().unwrap()), prefix))
             };
             let stores = [
                 ("cladefs's", s3(&server, "ours", &Client::DEFAULT)),
@@ -1969,7 +1972,7 @@ pub(crate) mod tests {
     fn over_a_real_store(url: &str) {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
-            let store = Arc::new(Store::from_url(url).unwrap());
+            let store = Arc::new(ObjectBucket::from_url(url).unwrap());
             probe(&*store, std::process::id().into()).await.unwrap();
             // Each run its own branches, and objects.
             let root = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
@@ -2000,7 +2003,7 @@ pub(crate) mod tests {
         const OBJECTS: u64 = 32;
         const SIZE: usize = 8 << 20;
         runtime().block_on(async {
-            let store = Store::from_url(&url).unwrap();
+            let store = ObjectBucket::from_url(&url).unwrap();
             let run = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
             let keys: Vec<String> = (0..OBJECTS).map(|n| format!("uploads-{run:x}/{n}")).collect();
             let start = std::time::Instant::now();

@@ -17,7 +17,7 @@
 //! store of tenant 5, encrypted, whose forks keep the DEKs they inherit rewrapped under their own
 //! cells' KEKs, taken from the host's pool. (Forks in the clear, before TASK-411.28: an old pin's,
 //! `--no-kms` there.) Each request
-//! of the bucket's waits `CLADEFS_REMOTE_LATENCY_MS` more, if set, as a bucket elsewhere's round
+//! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
 //! trips do.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice};
@@ -64,7 +64,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
     }
     store.commit(Some(b"root")).unwrap();
     // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
-    futures::executor::block_on(cladefs::remote::kms().filled(tenant));
+    futures::executor::block_on(cladefs::bucket::kms().filled(tenant));
     let mut took = Vec::with_capacity(forks);
     let before = store.bucket().stats();
     for n in 0..forks {

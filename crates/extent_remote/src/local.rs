@@ -286,7 +286,7 @@ impl ObjectStore for Local {
 mod tests {
     use super::{LOCK, LOCKS, lock_of};
     use crate::bucket::{Bucket as _, Error, PutMode};
-    use crate::store::tests::file;
+    use crate::object_bucket::tests::file;
 
     /// Updates of one version, many at once through two buckets of one directory, as two
     /// processes' would be: one wins, whose bytes the object holds, and the others find it changed.

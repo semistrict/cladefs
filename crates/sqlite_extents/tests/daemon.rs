@@ -134,7 +134,7 @@ fn reads_in_place_and_survives_reopening(name: &str) -> Vec<String> {
 /// A volume on the store at `store`, mapped, registered as the VFS `vfs`, a connection to its
 /// database reading it in place, and the store, to fork.
 struct Mounted {
-    store: Arc<cladefs::RemoteExtentStore>,
+    store: Arc<cladefs::DaemonExtentStore>,
     volume: Arc<Volume>,
     _registration: Registration,
     connection: Connection,
@@ -142,9 +142,9 @@ struct Mounted {
 
 impl Mounted {
     fn new(socket: &Path, store: &Path, vfs: &str) -> Self {
-        let store = Arc::new(cladefs::RemoteExtentStore::connect(socket, store, 1 << 30).unwrap());
+        let store = Arc::new(cladefs::DaemonExtentStore::connect(socket, store, 1 << 30).unwrap());
         let window = daemon::DaemonWindow::new(store.clone(), 1 << 30).unwrap();
-        let device = DeviceHolder::new(cladefs::RemoteDevice::new(store.clone()).unwrap());
+        let device = DeviceHolder::new(cladefs::DaemonDevice::new(store.clone()).unwrap());
         let volume = Volume::open_mapped(device, Box::new(window), Options::default()).unwrap();
         let registration = register(vfs, volume.clone()).unwrap();
         let connection =
@@ -228,7 +228,7 @@ fn a_database_is_fenced_with_its_cell() {
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
     control.sync_store(&store).unwrap();
     let ours = control.branch(&store).unwrap();
-    let objects = extent_remote::store::Store::from_url(&url).unwrap();
+    let objects = extent_remote::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours.cell)).unwrap().unwrap();
     let named = cell::Volume { branch: ours.id, kind: cell::Kind::Sqlite };
@@ -241,7 +241,7 @@ fn a_database_is_fenced_with_its_cell() {
         let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), None, None).await.unwrap();
         // Its writer fences the branch (TASK-371), unwrapping the cell's KEK through the host's
         // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
-        let kms = cladefs::remote::kms();
+        let kms = cladefs::bucket::kms();
         let writer =
             extent_remote::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
         drop(writer.await.unwrap());

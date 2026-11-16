@@ -9,7 +9,7 @@
 //! refused (`ESTALE`): nothing ran them.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -18,7 +18,7 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
     (0..len).map(|i| seed ^ (i % 251) as u8).collect()
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores' remote, as a host whose placement's
+/// Runs cladefsctl with `args`, the bucket at `url` the stores', as a host whose placement's
 /// token is 1: what it prints.
 fn branch(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
@@ -72,7 +72,7 @@ fn rustfs_forks_and_takes_branches() {
 /// fork goes, and then its parent.
 fn forks_and_takes_branches_in(url: &str) {
     let url = url.to_owned();
-    let bucket = Arc::new(Bucket::from_url(&url).unwrap());
+    let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name);
 
@@ -112,7 +112,7 @@ fn forks_and_takes_branches_in(url: &str) {
     assert!(!path("parent").exists());
 }
 
-/// Runs cladefsctl with `args`, the bucket at `url` the stores' remote, expecting it to fail: what it
+/// Runs cladefsctl with `args`, the bucket at `url` the stores', expecting it to fail: what it
 /// says.
 fn branch_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
@@ -143,7 +143,7 @@ fn rustfs_places_and_syncs_stores() {
 /// later, does.
 fn places_and_syncs_stores_in(url: &str) {
     let url = url.to_owned();
-    let bucket = Arc::new(Bucket::from_url(&url).unwrap());
+    let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let dir = tempfile::tempdir().unwrap();
     let path = |name: &str| dir.path().join(name).to_str().unwrap().to_owned();
 

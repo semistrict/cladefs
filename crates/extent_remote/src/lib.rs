@@ -13,8 +13,9 @@
 //! collector, alone, deletes: what no live branch can reach, and objects it compacts.
 //!
 //! The object store is anything with conditional writes ([`Bucket`]): S3 and GCS through the
-//! `object_store` crate ([`store::Store`]) over cladefs's HTTP client ([`client`]), a directory of
-//! the host's ([`local`]), and in tests a simulation that delays, reorders and fails requests.
+//! `object_store` crate ([`object_bucket::ObjectBucket`]) over cladefs's HTTP client ([`client`]),
+//! a directory of the host's ([`local`]), and in tests a simulation that delays, reorders and fails
+//! requests.
 
 /// cladefs: a step of the protocol, which the failpoint of its name fails (the `fail` crate's,
 /// TASK-44.10): the function it is in returns an error there, or whatever a test set the failpoint
@@ -68,6 +69,7 @@ pub mod local;
 pub mod marks;
 mod moves;
 pub mod object;
+pub mod object_bucket;
 pub mod objectid;
 pub mod passed;
 pub mod peer;
@@ -75,7 +77,6 @@ pub mod record;
 pub mod recovery;
 #[cfg(test)]
 mod s3_server;
-pub mod store;
 pub mod sweep;
 pub mod trace;
 pub mod wal;

@@ -4,7 +4,7 @@
 
 //! cladefs: a store's branch kept in object storage, and its uploader (backlog doc-7, Uploads;
 //! doc-14; TASK-28.5, TASK-165.9), which runs on the host's runtime, its uploads within the host's
-//! budget ([`Runtime`]). cladefs's `remote` keeps the host's configuration, budgets, runtime and
+//! budget ([`Runtime`]). cladefs's `bucket` keeps the host's configuration, budgets, runtime and
 //! errno mapping.
 //!
 //! **Opening a store** ([`open`]) is the same whether its branch was here, elsewhere or never
@@ -19,7 +19,8 @@
 //!
 //! **A point** takes no head (doc-7, Points): its store holds its state, recovered, which nothing
 //! writes, and no log; nothing it does goes to the bucket but its forks' records
-//! ([`Remote::forked`], `extent_remote::branch::fork_point`). Any number of hosts hold one at once.
+//! ([`Uploader::forked`], `extent_remote::branch::fork_point`). Any number of hosts hold one at
+//! once.
 //!
 //! **The uploader** hands the store's write-ahead log's segments, framed, whose commits are durable
 //! ([`Store::closed`]), to the writer (`Writer::add_segment`), each the object it is in the bucket,
@@ -32,9 +33,9 @@
 //! Commits waiting to be durable (`COMMIT_UPLOADED`) complete once acknowledged.
 //!
 //! A fork the store makes is a fork of the branch once the segment its commit ends is
-//! acknowledged, which gives the child its record, and checkpointed ([`Remote::forked`]): the
+//! acknowledged, which gives the child its record, and checkpointed ([`Uploader::forked`]): the
 //! child's store is made only then, opening it recovering the child from the bucket. A fork that
-//! fails before is deleted in the bucket, as the fork's alone ([`Remote::unfork`]).
+//! fails before is deleted in the bucket, as the fork's alone ([`Uploader::unfork`]).
 //!
 //! A failure of its writer's stops the uploader for good, and the commits waiting for uploads fail
 //! with it from then on: its writer fenced, its swap of the branch's head refused as a later writer
@@ -49,8 +50,8 @@ use extent_remote::cache::Cache;
 use extent_remote::fetch::Budget;
 use extent_remote::keys::{self, CellKeys, Ring, RingHold};
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
+use extent_remote::object_bucket::ObjectBucket;
 use extent_remote::record::{Kind, Record};
-use extent_remote::store::Store as Bucket;
 use extent_remote::wal::TakenBranch;
 use extent_remote::{Body, Objects, Recovered, Writer, branch, cell};
 use futures::StreamExt as _;
@@ -134,7 +135,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
 /// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
-    bucket: &Bucket,
+    bucket: &ObjectBucket,
     branch: Branch,
     token: u64,
     kms: &Arc<keys::CachingKms>,
@@ -146,7 +147,7 @@ pub fn delete_branch(
 }
 
 /// Why uploading stopped, or a branch could not be uploaded to, or opened: the error as it was,
-/// typed, which cladefs's `remote` maps to its errno, in the one place.
+/// typed, which cladefs's `bucket` maps to its errno, in the one place.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Failure {
     /// What object storage's protocol found of the branch, as `extent_remote` says it: another
@@ -155,7 +156,7 @@ pub enum Failure {
     /// (`Diverged`), another branch has a fork's child's ID (`IdTaken`, TASK-79.82), or what it
     /// needs is gone or corrupt.
     #[error(transparent)]
-    Remote(#[from] extent_remote::Error),
+    Bucket(#[from] extent_remote::Error),
     /// The point a store is of was deleted: it forks no more, and its forks live on.
     #[error("the point was deleted")]
     PointDeleted,
@@ -183,12 +184,12 @@ impl Failure {
 impl PartialEq for Failure {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::Remote(error), Self::Remote(other)) => error == other,
+            (Self::Bucket(error), Self::Bucket(other)) => error == other,
             (Self::PointDeleted, Self::PointDeleted) => true,
             (Self::Local(error), Self::Local(other)) => {
                 format!("{error:#}") == format!("{other:#}")
             }
-            (Self::Remote(_) | Self::PointDeleted | Self::Local(_), _) => false,
+            (Self::Bucket(_) | Self::PointDeleted | Self::Local(_), _) => false,
         }
     }
 }
@@ -200,7 +201,7 @@ impl Eq for Failure {}
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
         match error.downcast::<extent_remote::Error>() {
-            Ok(error) => Self::Remote(error),
+            Ok(error) => Self::Bucket(error),
             Err(error) => Self::Local(Arc::new(error)),
         }
     }
@@ -260,10 +261,10 @@ impl Default for Options {
 pub fn open<D: Dir>(
     recovering: Recovering<D>,
     store_options: crate::Options,
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     (holder, options): (u64, Options),
     runtime: &Runtime,
-) -> Result<(Arc<Store<D>>, Remote<D>), Failure> {
+) -> Result<(Arc<Store<D>>, Uploader<D>), Failure> {
     let sleep: Clock = Arc::new(|interval| tokio::time::sleep(interval).boxed());
     let shared = Shared::new(options, runtime.uploads.clone(), sleep, runtime.keys.clone());
     let (started, start) = std::sync::mpsc::channel();
@@ -284,7 +285,7 @@ pub fn open<D: Dir>(
         drop(uploader);
         UPLOADERS.send_modify(|running| *running -= 1);
         let _ = stop.send(());
-        fail::fail_point!("remote::stopped");
+        fail::fail_point!("upload::stopped");
     });
     let opened = match start.recv() {
         Ok(Ok(store)) => store,
@@ -295,16 +296,16 @@ pub fn open<D: Dir>(
         Err(_) => return Err(Failure::msg("the uploader stopped")),
     };
     let dir = opened.hold_dir()?;
-    let remote = Remote { shared, bucket, stopped: Mutex::new(Some(stopped)), _dir: dir };
-    Ok((opened, remote))
+    let uploader = Uploader { shared, bucket, stopped: Mutex::new(Some(stopped)), _dir: dir };
+    Ok((opened, uploader))
 }
 
 /// A store's uploader (see the module's docs). Dropping it closes the store's open segment, if its
 /// store is open still, uploads what the store made durable, then stops.
-pub struct Remote<D: Dir> {
+pub struct Uploader<D: Dir> {
     shared: Arc<Shared<D>>,
     /// The bucket the store's branch is kept in.
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     /// Says the uploader stopped, once it has.
     stopped: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
     /// The store's directory, held taken for this process until the uploader stopped, last of its
@@ -312,7 +313,7 @@ pub struct Remote<D: Dir> {
     _dir: DirHold<D>,
 }
 
-pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = Bucket> {
+pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = ObjectBucket> {
     /// The store, once opened.
     store: std::sync::OnceLock<Arc<Store<D>>>,
     /// The branch's writer, once it took the branch, and as it takes it again (TASK-204).
@@ -411,7 +412,7 @@ struct Progress {
     next_sequence: u64,
     stop: bool,
     /// Whether, stopping, it stops at once: uploading nothing more, its uploads in flight given up
-    /// on, no checkpoint written ([`Remote::cut_short`]).
+    /// on, no checkpoint written ([`Uploader::cut_short`]).
     cut: bool,
     /// The writer's taking of the branch's head, once it took it.
     taking: Option<Taking>,
@@ -445,7 +446,7 @@ pub struct UploadStatus {
     /// When the uploader first saw the oldest commit not yet uploaded, if one is not: within its
     /// interval of when the commit was made.
     pub oldest_pending: Option<SystemTime>,
-    /// How many commits waited for the lag to shrink ([`Remote::stalls`]).
+    /// How many commits waited for the lag to shrink ([`Uploader::stalls`]).
     pub stalls: u64,
 }
 
@@ -464,7 +465,7 @@ impl Progress {
     }
 }
 
-impl<D: Dir> Remote<D> {
+impl<D: Dir> Uploader<D> {
     /// The store.
     fn store(&self) -> &Arc<Store<D>> {
         self.shared.store()
@@ -480,7 +481,7 @@ impl<D: Dir> Remote<D> {
     }
 
     /// Returns once the commits up to `epoch` are uploaded and acknowledged, as
-    /// [`Remote::wait_uploaded`] does: a future, which holds no thread while it waits, as for a
+    /// [`Uploader::wait_uploaded`] does: a future, which holds no thread while it waits, as for a
     /// sync that object storage keeps waiting (TASK-43.6).
     pub fn uploaded(
         &self,
@@ -540,15 +541,15 @@ impl<D: Dir> Remote<D> {
     /// fork are uploaded: the segment the fork's commit ends names `child`, whose record the
     /// acknowledgement makes, naming the branch and the segment as its origin, and a checkpoint at
     /// the fork is where its recovery starts. `child`'s ID may be another branch's by then, which
-    /// took it after [`Remote::child_free`] found it free (`extent_remote::Error::IdTaken`): the
+    /// took it after [`Uploader::child_free`] found it free (`extent_remote::Error::IdTaken`): the
     /// fork failed, and the uploader goes on.
     ///
     /// A fork of a point commits nothing: the child's record is the fork, and fails if the point
     /// was deleted ([`Failure::PointDeleted`]; `branch::fork_point`).
     ///
-    /// cladefs: a fork into another cell, `inheriting` given ([`Remote::inheriting`]), then gives its
-    /// child its keys, once its record is made: its cell made with the KEK from the host's pool, its
-    /// record given its DEK and those it inherits, rewrapped under that KEK
+    /// cladefs: a fork into another cell, `inheriting` given ([`Uploader::inheriting`]), then gives
+    /// its child its keys, once its record is made: its cell made with the KEK from the host's
+    /// pool, its record given its DEK and those it inherits, rewrapped under that KEK
     /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
     pub fn forked(
         &self,
@@ -556,7 +557,7 @@ impl<D: Dir> Remote<D> {
         child: Child,
         inheriting: Option<keys::Inheriting>,
     ) -> Result<(), Failure> {
-        failing!("remote::forked");
+        failing!("upload::forked");
         self.fork_made(epoch, child)?;
         if let Some(inheriting) = inheriting {
             let holder = self.shared.holder();
@@ -566,7 +567,7 @@ impl<D: Dir> Remote<D> {
     }
 
     /// Makes the fork the store made of its branch with its commit `epoch` a fork of the branch in
-    /// object storage, its child's record and checkpoint ([`Remote::forked`]).
+    /// object storage, its child's record and checkpoint ([`Uploader::forked`]).
     fn fork_made(&self, epoch: u64, child: Child) -> Result<(), Failure> {
         let shared = &self.shared;
         if let Some(point) = shared.point.get() {
@@ -606,7 +607,7 @@ impl<D: Dir> Remote<D> {
         Ok(block_on(keys::inheriting(kms, source, parent, child))??)
     }
 
-    /// Deletes `child` in object storage, a fork the store made that [`Remote::forked`] failed to
+    /// Deletes `child` in object storage, a fork the store made that [`Uploader::forked`] failed to
     /// make: its segment may land after all, its writer taken over before acknowledging it, and the
     /// branch's next writer gives the child a record then, which would keep what it inherited for
     /// ever, no store holding it. Deleted first, it gets a record saying so, which the segment
@@ -652,7 +653,7 @@ impl<D: Dir> Remote<D> {
     /// the child's record.
     pub fn child_free(&self, child: Branch) -> Result<bool, Failure> {
         let found = block_on(branch::record(&*self.bucket, child))??;
-        failing!("remote::child_free");
+        failing!("upload::child_free");
         Ok(found.is_none())
     }
 
@@ -669,7 +670,7 @@ impl<D: Dir> Remote<D> {
     }
 
     /// The bucket the store's branch is kept in.
-    pub fn bucket(&self) -> &Bucket {
+    pub fn bucket(&self) -> &ObjectBucket {
         &self.bucket
     }
 
@@ -699,14 +700,14 @@ impl<D: Dir> Remote<D> {
     }
 
     /// Has the uploader, stopping, upload all its store made durable first, as it does unless
-    /// cut short ([`Remote::cut_short`]): for a store another writer took over, as it was, its
+    /// cut short ([`Uploader::cut_short`]): for a store another writer took over, as it was, its
     /// uploader going on, whose going later no writer waits for.
     pub fn drain_on_stop(&self) {
         self.shared.progress.lock().unwrap().cut = false;
     }
 }
 
-impl<D: Dir> Drop for Remote<D> {
+impl<D: Dir> Drop for Uploader<D> {
     fn drop(&mut self) {
         self.shared.stop();
         if let Some(stopped) = self.stopped.get_mut().unwrap().take() {
@@ -804,7 +805,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 
     /// Has the uploader stop: once it uploaded what its store made durable, its open segment's
-    /// commits too, unless cut short ([`Remote::cut_short`]).
+    /// commits too, unless cut short ([`Uploader::cut_short`]).
     pub(crate) fn stop(&self) {
         self.progress.lock().unwrap().stop = true;
         self.changed.notify(usize::MAX);
@@ -986,7 +987,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             if segments % self.options.checkpoint_every == 0 {
                 // A test's: the checkpoint landing late, after the commits it covers returned, as on
                 // a loaded host, which a collector's pass then runs beside (TASK-339).
-                fail::fail_point!("remote::checkpointing");
+                fail::fail_point!("upload::checkpointing");
                 if let Err(err) = writer.checkpoint().await {
                     log::warn!("cladefs: checkpointing branch {}: {err}", writer.branch());
                 }
@@ -1117,7 +1118,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let keyed = |record| self.ring_of(bucket, &cell_keys, branch, record);
         let writer = match found {
             None => {
-                failing!("remote::create_branch");
+                failing!("upload::create_branch");
                 branch::create(&**bucket, branch, self.holder()).await?;
                 let keys = keyed(None).await?;
                 Writer::open_keyed(bucket.clone(), branch, (holder, token), keys).await?
@@ -1236,7 +1237,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         in_flight: &mut InFlight,
         (close, urgent): (bool, bool),
     ) -> Result<Gathered, Failure> {
-        failing!("remote::gather");
+        failing!("upload::gather");
         let store = self.store();
         let room = IN_FLIGHT.saturating_sub(in_flight.len());
         // What a waiter wants is durable; then closed, if fewer segments wait than may upload, and
@@ -1292,7 +1293,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         in_flight: &mut InFlight,
     ) -> Result<(), Failure> {
         let through = writer.acknowledge().await?;
-        failing!("remote::acknowledged");
+        failing!("upload::acknowledged");
         let acked = in_flight.acknowledged(through);
         let Some(epoch) = acked.last().map(Uploading::epoch) else { return Ok(()) };
         blocking(|| {
@@ -1301,7 +1302,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
             Ok::<_, Failure>(())
         })?;
-        failing!("remote::released");
+        failing!("upload::released");
         let forks = acked.iter().any(|segment| segment.forks);
         {
             let mut progress = self.progress.lock().unwrap();
@@ -1315,7 +1316,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             // Their children have their records, which the acknowledgement made: the checkpoint
             // makes the forks.
             writer.checkpoint().await?;
-            failing!("remote::checkpointed");
+            failing!("upload::checkpointed");
             self.progress.lock().unwrap().forked_through(epoch);
             self.changed.notify(usize::MAX);
         }
@@ -1465,14 +1466,15 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: extent_remote::keys::testing::host(),
         };
-        let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch: BRANCH };
         let volume = crate::Volume { name: "root".into(), kind: cell::Kind::Fxfs };
         Store::make(&dir, description, Some("memory:///cells"), Some(volume)).unwrap();
         let options = Options { token: 5, ..Options::default() };
         let recovering = Store::recover_unmade(dir).unwrap();
-        let (store, remote) =
+        let (store, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .unwrap();
         store.made().unwrap();
@@ -1485,7 +1487,7 @@ mod tests {
 
         store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
-        remote.wait_uploaded(store.epoch().unwrap()).unwrap();
+        uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
         // Another placement takes the cell, and its writer the branch with the cell's epoch,
         // fencing it (TASK-371).
         let taken = runtime.block_on(async {
@@ -1500,8 +1502,8 @@ mod tests {
         assert_eq!(taken.epoch, 2);
         store.write(ExtentId::new(BRANCH.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
-        let fenced = remote.wait_uploaded(store.epoch().unwrap());
-        assert!(matches!(fenced, Err(Failure::Remote(extent_remote::Error::Fenced))), "{fenced:?}");
+        let fenced = uploader.wait_uploaded(store.epoch().unwrap());
+        assert!(matches!(fenced, Err(Failure::Bucket(extent_remote::Error::Fenced))), "{fenced:?}");
         let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), None, None));
         assert_eq!(back.map(|(held, _)| held), Err(extent_remote::Error::Stale));
     }
@@ -1516,14 +1518,15 @@ mod tests {
             uploads: Budget::new(Limits::UNBOUNDED),
             keys: extent_remote::keys::testing::host(),
         };
-        let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
+        let bucket =
+            Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
         let dir = MemDir::new();
         let description = Description { block_size: 4096, capacity: 1 << 30, branch: BRANCH };
         Store::make(&dir, description, Some("memory:///gathers"), None).unwrap();
         // Its uploader uploads nothing it is not asked to within the hour: the test gathers.
         let options = Options { interval: Duration::from_secs(3600), ..Options::default() };
         let recovering = Store::recover_unmade(dir).unwrap();
-        let (store, remote) =
+        let (store, uploader) =
             open(recovering, crate::Options::default(), bucket.clone(), (1, options), &host)
                 .unwrap();
         store.made().unwrap();
@@ -1534,7 +1537,7 @@ mod tests {
             store.close_segment().unwrap();
             store.commit(None).unwrap();
         }
-        let shared = &remote.shared;
+        let shared = &uploader.shared;
         let writer = shared.writer.lock().unwrap().clone().unwrap();
         let mut in_flight = InFlight::default();
         let mut taken = Vec::new();
@@ -1548,8 +1551,8 @@ mod tests {
             });
         }
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
-        assert_eq!(remote.last_uploaded(), store.epoch().unwrap());
-        drop(remote);
+        assert_eq!(uploader.last_uploaded(), store.epoch().unwrap());
+        drop(uploader);
         let state = runtime.block_on(extent_remote::recover(&*bucket, BRANCH, None)).unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=closed as u64).collect::<Vec<_>>());

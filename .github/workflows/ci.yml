@@ -168,7 +168,7 @@ jobs:
           key: cargo-${{ runner.os }}-${{ matrix.parts }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-${{ matrix.parts }}-
       # Every failure, not the first alone. Within macOS's 256 open files a process, as the
-      # stores', the remotes' and physmem's tests were run within, all passing (TASK-149.20.2).
+      # stores', the bucket's and physmem's tests were run within, all passing (TASK-149.20.2).
       - name: scripts/test.sh
         run: scripts/test.sh --no-fail-fast
 

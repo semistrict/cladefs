@@ -182,30 +182,30 @@ mod tests {
     use crate::batch::{Commit, Data, SegmentBuilder, Unframed};
     use crate::layout::test_branch;
     use crate::layout::{self, Contents, Continued, child};
-    use crate::store::Store;
+    use crate::object_bucket::ObjectBucket;
     use crate::{Writer, branch, head};
     use object_store::memory::InMemory;
     use std::sync::Arc;
     use storage_device::ExtentId;
 
-    fn memory() -> Arc<Store> {
-        Arc::new(Store::new(Arc::new(InMemory::new()), ""))
+    fn memory() -> Arc<ObjectBucket> {
+        Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
     }
 
     /// A bucket holding branch 1, a root.
-    async fn bucket() -> Arc<Store> {
+    async fn bucket() -> Arc<ObjectBucket> {
         let bucket = memory();
         branch::create(&*bucket, test_branch(1), 0).await.unwrap();
         bucket
     }
 
     /// A writer of branch 1, a host's, taking it over as `holder`.
-    async fn open(bucket: &Arc<Store>, holder: u64) -> Writer<Store> {
+    async fn open(bucket: &Arc<ObjectBucket>, holder: u64) -> Writer<ObjectBucket> {
         Writer::open(bucket.clone(), test_branch(1), holder, 0).await.unwrap()
     }
 
     /// An empty log of the branch `writer` just took.
-    fn log(writer: &Writer<Store>) -> Wal<Data> {
+    fn log(writer: &Writer<ObjectBucket>) -> Wal<Data> {
         Wal::new(writer.taken().last_commit)
     }
 
@@ -215,7 +215,11 @@ mod tests {
 
     /// Closes `batch` into the next segment of `writer`, which takes it, and of `wal`: returns its
     /// number.
-    fn close(writer: &Writer<Store>, wal: &mut Wal<Data>, batch: impl Into<SegmentBuilder>) -> u64 {
+    fn close(
+        writer: &Writer<ObjectBucket>,
+        wal: &mut Wal<Data>,
+        batch: impl Into<SegmentBuilder>,
+    ) -> u64 {
         let Unframed { footer, data } = batch.into().close(&mut writer.chain());
         let segment = writer.add_segment(data.frame(&footer, writer.keys().encrypting())).unwrap();
         wal.push(footer, data);
@@ -224,14 +228,14 @@ mod tests {
 
     /// Uploads `writer`'s segment `segment` and acknowledges it, with those before it, as the host
     /// does.
-    async fn land(writer: &Writer<Store>, segment: u64) {
+    async fn land(writer: &Writer<ObjectBucket>, segment: u64) {
         writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
     }
 
     /// Puts `wal` after the end of the branch `writer` just took, as opening a store does, and
     /// lands what it stamped again: the commits of the segments it found the branch held.
-    async fn rebase(writer: &Writer<Store>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
+    async fn rebase(writer: &Writer<ObjectBucket>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
             let segment =
@@ -244,7 +248,7 @@ mod tests {
 
     /// The commits the segments branch 1's head names make, in order: each once, if its history
     /// is whole.
-    async fn history(bucket: &Arc<Store>) -> Vec<u64> {
+    async fn history(bucket: &Arc<ObjectBucket>) -> Vec<u64> {
         let named = head::get(&**bucket, test_branch(1)).await.unwrap().unwrap_or_default();
         let mut commits = Vec::new();
         for (segment, epoch) in named.segments(0) {

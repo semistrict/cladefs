@@ -11,7 +11,7 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::{ExtentId, ExtentStore, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{DaemonExtentStore, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -53,7 +53,7 @@ fn stores_open_whole_in_another_process_once_their_vm_goes() {
     let path = dir.path().join("store");
     let mut sequence = 1;
     for round in 0..50 {
-        let store = RemoteExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+        let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
         let mut root = Vec::new();
         for commit in 0..20 {
             for _ in 0..4 {
@@ -83,7 +83,7 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
     let path = dir.path().join("store");
     let mut sequence = 1;
     for round in 0..50u64 {
-        let store = RemoteExtentStore::connect(&socket, &path, 1 << 28).unwrap();
+        let store = DaemonExtentStore::connect(&socket, &path, 1 << 28).unwrap();
         let mut last = Vec::new();
         for commit in 0..20u64 {
             let extent = ExtentId { branch: store.branch(), sequence };
@@ -110,13 +110,13 @@ fn ordered_commits_are_whole_in_another_process_once_their_vm_goes() {
 fn stores_are_told_when_their_daemon_goes() {
     let dir = tempfile::tempdir().unwrap();
     let (mut daemon, socket) = daemon(dir.path());
-    let closed = RemoteExtentStore::connect(&socket, dir.path().join("closed"), 1 << 28).unwrap();
+    let closed = DaemonExtentStore::connect(&socket, dir.path().join("closed"), 1 << 28).unwrap();
     let (told, lost) = std::sync::mpsc::channel();
     let told_closed = told.clone();
     closed.on_daemon_lost(move || told_closed.send("closed").unwrap());
     drop(closed);
 
-    let store = RemoteExtentStore::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
+    let store = DaemonExtentStore::connect(&socket, dir.path().join("store"), 1 << 28).unwrap();
     store.on_daemon_lost(move || told.send("store").unwrap());
     let write = |sequence| {
         let extent = ExtentId { branch: store.branch(), sequence };

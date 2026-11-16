@@ -158,7 +158,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
 - `extentd/` holds the daemon (`bin/cladefs-extentd.rs`) and its client,
-  `RemoteExtentStore`, which a VMM's device is; see the extent daemon below.
+  `DaemonExtentStore`, which a VMM's device is; see the extent daemon below.
 - `dax.rs` holds DAX windows, their mappings and the pages they have mapped,
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
   `dax/uffd.rs` is the VM process's own second stage, in the host memory that
@@ -520,7 +520,7 @@ system call cladefs makes and the filters refuse fails CI rather than a jailed V
 
 | Change | Why |
 |---|---|
-| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::RemoteExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
+| The extent-store device (`devices/virtio/extent`), behind the `cladefs` feature: `PUT /extent/{id}` before boot, or the configuration file's `extent` list, names its tag, store, capacity, DAX window and the extent daemon's socket (`extentd_socket`). Its store is served by the daemon (`cladefs::DaemonExtentStore`). It attaches over virtio-PCI alone (`--enable-pci`), its DAX window a BAR of its own. | The guest's own Fxfs keeps its filesystem in it (backlog doc-4). No cladefs code serves a store in the VM process: the daemon owns the stores and their cache, which the host's VMs share. |
 | Virtio shared memory regions on the PCI transport, a BAR with `VIRTIO_PCI_CAP_SHARED_MEMORY_CFG` capabilities (a general fix), and `KvmMemSlot`, a KVM memory slot any device may map host memory with. | The device's DAX window is a shared memory region, the daemon's memory mapped in; KVM follows it. |
 | The window maps the pages the daemon maps for the guest ahead of its accesses (`KVM_PRE_FAULT_MEMORY`). | Each of KVM's own faults on a page costs an exit, slow under nested virtualization (TASK-25.3). |
 | A vCPU retries a `KVM_RUN` failing with `EFAULT` while a window is remapped. | The daemon's changes to a window's host memory make the guest's access fail meanwhile; see DAX on Linux above (TASK-25.4). |
@@ -670,7 +670,7 @@ writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a ru
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
 a host's store held to what its design writes for a guest's large file and its small files, each
 byte raw once and framed once, a commit's copies a segment's worth at most
-(`remote::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
+(`bucket::write_budgets`); and the daemon against a degraded bucket, slow, full, out of service,
 then answering again, VM processes writing all the while (`extentd::tests::soak`, five minutes in
 CI, half an hour each night in Hunt; with guests, `fxfs-guest-bucket-soak`, by name). Each has a
 past bug put back that it fails (`crates/cladefs/mutants`).

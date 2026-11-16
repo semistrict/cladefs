@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// An extent store that an extent daemon serves this process. See the module docs.
-pub struct RemoteExtentStore {
+pub struct DaemonExtentStore {
     client: Arc<Client>,
     branch: u64,
     /// The daemon's physical memory, which the window maps pages of, by arena: its
@@ -53,9 +53,9 @@ pub struct RemoteExtentStore {
     max_map_count: Option<u64>,
 }
 
-impl RemoteExtentStore {
-    /// cladefs: the most bytes of a guest's stats an answer carries ([`RemoteExtentStore::answer_stats`],
-    /// TASK-111.4).
+impl DaemonExtentStore {
+    /// cladefs: the most bytes of a guest's stats an answer carries
+    /// ([`DaemonExtentStore::answer_stats`], TASK-111.4).
     pub const MAX_STATS: usize = MAX_STATS;
 
     /// The store at `store` that the daemon listening at `socket` serves, created with `capacity`
@@ -134,13 +134,13 @@ impl RemoteExtentStore {
         Ok(Self { client, branch, memories, faults, read_only, transfer, copying, max_map_count })
     }
 
-    /// cladefs: whether it is a follower's, read-only ([`RemoteExtentStore::connect_read_only`]).
+    /// cladefs: whether it is a follower's, read-only ([`DaemonExtentStore::connect_read_only`]).
     pub fn is_read_only(&self) -> bool {
         self.read_only
     }
 
     /// cladefs: the number of the latest commit of a follower's writer it has heard of: its view's,
-    /// or one after ([`RemoteExtentStore::on_committed`]).
+    /// or one after ([`DaemonExtentStore::on_committed`]).
     pub fn committed(&self) -> u64 {
         self.client.committed.latest()
     }
@@ -149,20 +149,20 @@ impl RemoteExtentStore {
     /// of from now on: the latest of each run of them, which the follower may advance to. Returns
     /// the latest heard of as it began: each commit is heard of from one or the other, or a later
     /// one, one as it begins perhaps from both; a second read, of
-    /// [`RemoteExtentStore::committed`], might miss one that the call misses (TASK-444.2.2). Once,
+    /// [`DaemonExtentStore::committed`], might miss one that the call misses (TASK-444.2.2). Once,
     /// of a store.
     pub fn on_committed(&self, committed: impl Fn(u64) + Send + Sync + 'static) -> u64 {
         self.client.committed.listen(Box::new(committed))
     }
 
     /// cladefs: moves a follower's view to its writer's latest commit, holding what the commits
-    /// since the one it was as of held until it lets go of them ([`RemoteExtentStore::let_go`]),
+    /// since the one it was as of held until it lets go of them ([`DaemonExtentStore::let_go`]),
     /// and returns the commit's number (`ADVANCE`). `ESTALE` once it was cut off.
     pub fn advance(&self) -> Result<u64> {
         blocking(self.advance_async())
     }
 
-    /// [`RemoteExtentStore::advance`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::advance`], waiting for the daemon holding no thread.
     pub async fn advance_async(&self) -> Result<u64> {
         let reply = self.client.request(&Request::Advance).await?;
         Ok(Advanced::from_args(reply.header.args).commit)
@@ -174,7 +174,7 @@ impl RemoteExtentStore {
         blocking(self.let_go_async(commit))
     }
 
-    /// [`RemoteExtentStore::let_go`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::let_go`], waiting for the daemon holding no thread.
     pub async fn let_go_async(&self, commit: u64) -> Result<()> {
         self.client.request(&Request::LetGo { commit }).await.map(drop)
     }
@@ -185,7 +185,7 @@ impl RemoteExtentStore {
         blocking(self.pin_async(extent))
     }
 
-    /// [`RemoteExtentStore::pin`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::pin`], waiting for the daemon holding no thread.
     pub async fn pin_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Pin(extent)).await.map(drop)
     }
@@ -195,14 +195,15 @@ impl RemoteExtentStore {
         blocking(self.unpin_async(extent))
     }
 
-    /// [`RemoteExtentStore::unpin`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::unpin`], waiting for the daemon holding no thread.
     pub async fn unpin_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Unpin(extent)).await.map(drop)
     }
 
     /// Calls `changed` with the store's capacity each time the daemon resizes it (the control API's `ResizeStore`), and
-    /// whether the guest is asked to shrink to it, which it answers ([`RemoteExtentStore::resized`]).
-    /// Unless something is called so, the guest refuses every shrink.
+    /// whether the guest is asked to shrink to it, which it answers
+    /// ([`DaemonExtentStore::resized`]). Unless something is called so, the guest refuses every
+    /// shrink.
     pub fn on_capacity(&self, changed: impl Fn(u64, bool) + Send + Sync + 'static) {
         let _ = self.client.capacity.set(Box::new(changed));
     }
@@ -212,16 +213,16 @@ impl RemoteExtentStore {
         blocking(self.resized_async(capacity, took))
     }
 
-    /// [`RemoteExtentStore::resized`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::resized`], waiting for the daemon holding no thread.
     pub async fn resized_async(&self, capacity: u64, took: bool) -> Result<()> {
         self.client.request(&Request::Resized { capacity, took }).await.map(drop)
     }
 
     /// cladefs: calls `asked` with each of the daemon's asks for this process's stats and its
     /// guest's (`STATS_ASK`, TASK-111.4): it asks the guest, if it has one that answers, and says
-    /// so, the guest's answer then going to [`RemoteExtentStore::answer_stats`]; otherwise the store
-    /// answers at once, with no guest's stats, as it does unless something is called so. Called on
-    /// the thread receiving the daemon's messages, it must not wait.
+    /// so, the guest's answer then going to [`DaemonExtentStore::answer_stats`]; otherwise the
+    /// store answers at once, with no guest's stats, as it does unless something is called so.
+    /// Called on the thread receiving the daemon's messages, it must not wait.
     pub fn on_stats_asked(&self, asked: impl Fn(u64) -> bool + Send + Sync + 'static) {
         let _ = self.client.stats_asked.set(Box::new(asked));
     }
@@ -232,7 +233,7 @@ impl RemoteExtentStore {
         blocking(self.answer_stats_async(ask, guest))
     }
 
-    /// [`RemoteExtentStore::answer_stats`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::answer_stats`], waiting for the daemon holding no thread.
     pub async fn answer_stats_async(&self, ask: u64, guest: Option<&str>) -> Result<()> {
         self.client.answer_stats(ask, guest).await.map(drop)
     }
@@ -260,7 +261,7 @@ impl RemoteExtentStore {
         blocking(self.info_async())
     }
 
-    /// [`RemoteExtentStore::info`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::info`], waiting for the daemon holding no thread.
     pub async fn info_async(&self) -> Result<ExtentInfo> {
         Ok(Info::from_args(self.client.request(&Request::Info).await?.header.args).0)
     }
@@ -275,7 +276,7 @@ impl RemoteExtentStore {
         blocking(self.read_async(extent, offset, buffers))
     }
 
-    /// [`RemoteExtentStore::read`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::read`], waiting for the daemon holding no thread.
     pub async fn read_async(
         &self,
         extent: ExtentId,
@@ -321,7 +322,7 @@ impl RemoteExtentStore {
         blocking(self.write_with_barriers_async(extent, offset, buffers, barriers))
     }
 
-    /// [`RemoteExtentStore::write_with_barriers`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::write_with_barriers`], waiting for the daemon holding no thread.
     pub async fn write_with_barriers_async(
         &self,
         extent: ExtentId,
@@ -376,12 +377,12 @@ impl RemoteExtentStore {
         blocking(self.free_async(extent))
     }
 
-    /// [`RemoteExtentStore::free`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::free`], waiting for the daemon holding no thread.
     pub async fn free_async(&self, extent: ExtentId) -> Result<()> {
         self.client.request(&Request::Free(extent)).await.map(drop)
     }
 
-    /// cladefs: frees `extents`, each as [`RemoteExtentStore::free`] does, in order: the first that
+    /// cladefs: frees `extents`, each as [`DaemonExtentStore::free`] does, in order: the first that
     /// fails fails the call, those before it freed. In as few requests as their payloads hold
     /// (`FREE_MANY`), a flush's dead extents in one round trip, rather than one each
     /// (TASK-92.13).
@@ -389,7 +390,7 @@ impl RemoteExtentStore {
         blocking(self.free_many_async(extents))
     }
 
-    /// [`RemoteExtentStore::free_many`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::free_many`], waiting for the daemon holding no thread.
     pub async fn free_many_async(&self, extents: &[ExtentId]) -> Result<()> {
         // Each request names its first extent in its arguments, and those after it its payload.
         let most = 1 + MAX_PAYLOAD as usize / EXTENT_ID_BYTES;
@@ -418,8 +419,8 @@ impl RemoteExtentStore {
     }
 
     /// Commits, and sets the root to `root` if given, completing as `commit` says, waiting for
-    /// the daemon holding no thread ([`RemoteExtentStore::commit`],
-    /// [`RemoteExtentStore::commit_ordered`]).
+    /// the daemon holding no thread ([`DaemonExtentStore::commit`],
+    /// [`DaemonExtentStore::commit_ordered`]).
     pub async fn commit_async(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         self.client.request(&Request::Commit { commit, root }).await.map(drop)
     }
@@ -429,7 +430,7 @@ impl RemoteExtentStore {
         blocking(self.root_async())
     }
 
-    /// [`RemoteExtentStore::root`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::root`], waiting for the daemon holding no thread.
     pub async fn root_async(&self) -> Result<Vec<u8>> {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
@@ -461,11 +462,12 @@ impl RemoteExtentStore {
         super::codec::mappings(&payload).map_err(|_| Errno::EIO)
     }
 
-    /// cladefs: maps `mappings`, a snapshot's [`window_mappings`](RemoteExtentStore::window_mappings),
-    /// again, each at the same offset in the window, its extent's bytes or zeros, in order, the
-    /// first that fails failing the call, those before it mapped: in as few requests as their
-    /// payloads hold (`MAP_MANY`), each one change of the window, rather than a `MAP` each, a round
-    /// trip and a change apiece (TASK-92.14).
+    /// cladefs: maps `mappings`, a snapshot's
+    /// [`window_mappings`](DaemonExtentStore::window_mappings), again, each at the same offset in
+    /// the window, its extent's bytes or zeros, in order, the first that fails failing the call,
+    /// those before it mapped: in as few requests as their payloads hold (`MAP_MANY`), each one
+    /// change of the window, rather than a `MAP` each, a round trip and a change apiece
+    /// (TASK-92.14).
     pub fn map_many(&self, mappings: &[WindowMapping]) -> Result<()> {
         let most = (MAX_PAYLOAD / MAPPING_BYTES) as usize;
         for mappings in mappings.chunks(most) {
@@ -481,7 +483,7 @@ impl RemoteExtentStore {
         blocking(self.map_async(extent, offset, len, window_offset))
     }
 
-    /// [`RemoteExtentStore::map`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::map`], waiting for the daemon holding no thread.
     pub async fn map_async(
         &self,
         extent: ExtentId,
@@ -509,7 +511,7 @@ impl RemoteExtentStore {
         blocking(self.make_private_async(window_offset, len))
     }
 
-    /// [`RemoteExtentStore::make_private`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::make_private`], waiting for the daemon holding no thread.
     pub async fn make_private_async(&self, window_offset: u64, len: u64) -> Result<()> {
         let start = std::time::Instant::now();
         let made = self.client.request(&Request::Private { window_offset, len }).await.map(drop);
@@ -541,7 +543,7 @@ impl RemoteExtentStore {
         blocking(self.unmap_async(window_offset, len))
     }
 
-    /// [`RemoteExtentStore::unmap`], waiting for the daemon holding no thread.
+    /// [`DaemonExtentStore::unmap`], waiting for the daemon holding no thread.
     pub async fn unmap_async(&self, window_offset: u64, len: u64) -> Result<()> {
         self.client.request(&Request::Unmap { window_offset, len }).await.map(drop)
     }
@@ -628,12 +630,12 @@ impl RemoteExtentStore {
         let budget = stage.budget() as u64;
         self.client.request_blocking(&Request::Window { size, private_max, budget })?;
         self.copying.store(private_max.is_some(), Ordering::Release);
-        *faults = Some(stage.serve(Arc::new(RemoteFaults { client: self.client.clone(), size }))?);
+        *faults = Some(stage.serve(Arc::new(DaemonFaults { client: self.client.clone(), size }))?);
         Ok(())
     }
 }
 
-impl Drop for RemoteExtentStore {
+impl Drop for DaemonExtentStore {
     fn drop(&mut self) {
         // cladefs: the window lets go of the daemon's pages first, which the daemon frees once the
         // connection goes, for other VMs' extents, and makes none of the changes the daemon sent
@@ -651,7 +653,7 @@ impl Drop for RemoteExtentStore {
 }
 
 /// cladefs: a VM process's connection to its extent daemon, which opens a store over it, once: a
-/// [`RemoteExtentStore`]. What the VM process does once the daemon goes is said of it before the
+/// [`DaemonExtentStore`]. What the VM process does once the daemon goes is said of it before the
 /// store opens ([`DaemonConnection::on_lost`]), so that a daemon going as it opens the store, as
 /// one killed while the store recovers from its bucket does, is told of as one going later is,
 /// rather than as the open's failure (TASK-232).
@@ -681,13 +683,13 @@ impl DaemonConnection {
     /// before what was asked of it then fails, a store's open included. Nothing is served from then
     /// on, a store's window's faults included, and it doesn't connect again: a VMM stops its VM,
     /// which can't go on, visibly to its host (TASK-50.2), as it creates the VM too (TASK-232).
-    /// Called once, of the connection and its store ([`RemoteExtentStore::on_daemon_lost`]).
+    /// Called once, of the connection and its store ([`DaemonExtentStore::on_daemon_lost`]).
     pub fn on_lost(&self, lost: impl Fn() + Send + Sync + 'static) {
         self.client().lost.listen(Box::new(lost));
     }
 
     /// The store at `store`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(self, store: impl AsRef<Path>, capacity: u64) -> Result<RemoteExtentStore, Error> {
+    pub fn open(self, store: impl AsRef<Path>, capacity: u64) -> Result<DaemonExtentStore, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Fxfs))
     }
 
@@ -698,7 +700,7 @@ impl DaemonConnection {
         self,
         store: impl AsRef<Path>,
         capacity: u64,
-    ) -> Result<RemoteExtentStore, Error> {
+    ) -> Result<DaemonExtentStore, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Sqlite))
     }
 
@@ -708,7 +710,7 @@ impl DaemonConnection {
         self,
         store: impl AsRef<Path>,
         capacity: u64,
-    ) -> Result<RemoteExtentStore, Error> {
+    ) -> Result<DaemonExtentStore, Error> {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Memory))
     }
 
@@ -723,7 +725,7 @@ impl DaemonConnection {
         from: impl AsRef<Path>,
         from_branch: u64,
         capacity: u64,
-    ) -> Result<RemoteExtentStore, Error> {
+    ) -> Result<DaemonExtentStore, Error> {
         let from = from.as_ref().to_owned();
         self.opening(store.as_ref(), Opening::ForkFrom { from, branch: from_branch, capacity })
     }
@@ -731,8 +733,8 @@ impl DaemonConnection {
     /// cladefs: a follower of the store at `store` (backlog doc-8): read-only, as of the latest
     /// commit of its writer, another VM's, which goes on, or of the store as of its last commit, if
     /// no VM writes it; and which it moves to the writer's latest as it advances
-    /// ([`RemoteExtentStore::advance`]).
-    pub fn open_read_only(self, store: impl AsRef<Path>) -> Result<RemoteExtentStore, Error> {
+    /// ([`DaemonExtentStore::advance`]).
+    pub fn open_read_only(self, store: impl AsRef<Path>) -> Result<DaemonExtentStore, Error> {
         self.opening(store.as_ref(), Opening::ReadOnly)
     }
 
@@ -744,9 +746,9 @@ impl DaemonConnection {
         mut self,
         store: &Path,
         opening: Opening,
-    ) -> Result<RemoteExtentStore, Error> {
+    ) -> Result<DaemonExtentStore, Error> {
         let client = self.client.take().expect("a connection opens one store");
-        RemoteExtentStore::open(client.clone(), store, opening).map_err(|err| {
+        DaemonExtentStore::open(client.clone(), store, opening).map_err(|err| {
             let err = match client.lost.happened() {
                 true => err.context("the extent daemon went"),
                 false => err,
@@ -824,12 +826,13 @@ struct Client {
     /// cladefs: what making the stage operations cost this process, which it tells the daemon
     /// (TASK-91.16).
     stage_counts: StageCosts,
-    /// What the daemon's changes of the store's capacity go to ([`RemoteExtentStore::on_capacity`]).
+    /// What the daemon's changes of the store's capacity go to
+    /// ([`DaemonExtentStore::on_capacity`]).
     capacity: OnceLock<Box<dyn Fn(u64, bool) + Send + Sync>>,
-    /// cladefs: what the daemon's asks for stats go to ([`RemoteExtentStore::on_stats_asked`]).
+    /// cladefs: what the daemon's asks for stats go to ([`DaemonExtentStore::on_stats_asked`]).
     stats_asked: OnceLock<Box<dyn Fn(u64) -> bool + Send + Sync>>,
     /// cladefs: the latest commit of a follower's writer heard of, and what hears of the next
-    /// ([`RemoteExtentStore::on_committed`]).
+    /// ([`DaemonExtentStore::on_committed`]).
     committed: Latest,
     /// Whether the VM process is closing the connection itself ([`Client::close`]).
     closing: std::sync::atomic::AtomicBool,
@@ -1381,19 +1384,19 @@ impl Drop for Slot<'_> {
 }
 
 /// The window's faults, which the daemon resolves.
-struct RemoteFaults {
+struct DaemonFaults {
     client: Arc<Client>,
     size: u64,
 }
 
-impl RemoteFaults {
+impl DaemonFaults {
     fn fault_with(&self, fault: Fault) -> BoxFuture<'_, Result<()>> {
         let reply = self.client.request(&Request::Fault(fault));
         Box::pin(async move { reply.await.map(drop) })
     }
 }
 
-impl Faults for RemoteFaults {
+impl Faults for DaemonFaults {
     fn size(&self) -> u64 {
         self.size
     }

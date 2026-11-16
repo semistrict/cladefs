@@ -15,7 +15,7 @@
 
 mod common;
 
-use cladefs::RemoteExtentStore;
+use cladefs::DaemonExtentStore;
 use common::{cache, holds, pattern};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -53,8 +53,8 @@ fn vm_processes_reach_their_daemons_memory_alone() {
     let dir = tempfile::tempdir().unwrap();
     let (one, _one) = daemon(dir.path(), "one");
     let (two, _two) = daemon(dir.path(), "two");
-    let ours = RemoteExtentStore::connect(&one, dir.path().join("ours"), 1 << 24).unwrap();
-    let theirs = RemoteExtentStore::connect(&two, dir.path().join("theirs"), 1 << 24).unwrap();
+    let ours = DaemonExtentStore::connect(&one, dir.path().join("ours"), 1 << 24).unwrap();
+    let theirs = DaemonExtentStore::connect(&two, dir.path().join("theirs"), 1 << 24).unwrap();
     let (our_bytes, their_bytes) = (pattern(1), pattern(2));
     cache(&ours, &our_bytes);
     cache(&theirs, &their_bytes);

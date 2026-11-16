@@ -11,10 +11,10 @@
 #   scripts/counts.sh TREE OUT WORK
 #
 # - lifecycle: what a sandbox's life asks of its bucket, by phase (TASK-443.5,
-#   `remote::lifecycle::bucket_lifecycle_by_phase`): requests by kind and bytes, on bases of
+#   `bucket::lifecycle::bucket_lifecycle_by_phase`): requests by kind and bytes, on bases of
 #   CLADEFS_COUNTS_LIFECYCLE_EXTENTS extents (1024,32768: 262,144 takes 6 minutes);
 # - fork-memory: the heap an open, idle fork holds, by its base's extents (TASK-443.2,
-#   `remote::tests::bench_fork_extent_memory`), counted by the test binary's allocator, at
+#   `bucket::tests::bench_fork_extent_memory`), counted by the test binary's allocator, at
 #   CLADEFS_COUNTS_FORK_EXTENTS extents (1024,32768) and CLADEFS_COUNTS_FORKS forks (20: forks of
 #   a point cost the same from the first, 100 of 300,000 extents would hold 12 GB);
 # - gc-deleted and gc-clones: the requests cladefs-gc's sweeps make of 100 dead cells, and of 100

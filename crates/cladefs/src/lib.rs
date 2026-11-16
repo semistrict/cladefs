@@ -10,7 +10,7 @@
 //!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's extent
 //!   daemon (`cladefs-extentd`, `extentd`) serves the stores of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
-//!   device is a `RemoteExtentStore`, a connection to it.
+//!   device is a `DaemonExtentStore`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
 //!   as the stores a guest's Fxfs mounts. It is the guest's filesystem too: Fxfs's POSIX layer
 //!   (crates/fxfs-posix), which the guest kernel's VFS calls, and the host's filesystem calls as a
@@ -113,7 +113,7 @@
 #![deny(missing_docs)]
 
 // cladefs: `tests-kms` has a host given no KMS encrypt under the tests' KMS, its KEKs known to all
-// (`remote::testing`, TASK-411.28): this crate's tests' and sqlite_extents', which their
+// (`bucket::testing`, TASK-411.28): this crate's tests' and sqlite_extents', which their
 // dev-dependencies turn on, never a host's. A release build is a host's, and tests are not (the dev
 // and sim profiles have debug assertions).
 #[cfg(all(feature = "tests-kms", not(debug_assertions)))]
@@ -123,6 +123,7 @@ compile_error!(
      it on (TASK-411.28)"
 );
 
+pub mod bucket;
 mod cache;
 mod dax;
 mod error;
@@ -147,7 +148,6 @@ pub mod memory_volume;
 mod node;
 pub mod pages;
 mod profile;
-pub mod remote;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod request;
 #[cfg(all(test, feature = "shuttle"))]
@@ -190,7 +190,7 @@ pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_remote::layout::{Branch, Cell};
 #[cfg(target_os = "linux")]
-pub use extentd::{DaemonConnection, RemoteDevice, RemoteExtentStore};
+pub use extentd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
 pub use extents::{
     Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
     StoreRole, Whose, WindowMapping, WriteBarriers,

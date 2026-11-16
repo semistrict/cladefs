@@ -785,7 +785,7 @@ impl World {
                 }
                 if let Some(failure) = session.uploader.failed() {
                     trace!("host {host}: session {id} of {branch:x}'s uploader stopped: {failure}");
-                    if let Failure::Remote(Error::Lost(_) | Error::Corrupt(_)) = failure {
+                    if let Failure::Bucket(Error::Lost(_) | Error::Corrupt(_)) = failure {
                         self.violation(format!("branch {branch:x}'s uploader: {failure}"));
                     }
                     self.end(host, branch, id);
@@ -994,7 +994,7 @@ impl World {
         let session = self.hosts[host].sessions.remove(&branch).unwrap();
         let token = session.token;
         self.stop(host, branch, session);
-        if let Failure::Remote(Error::Diverged) = failure {
+        if let Failure::Bucket(Error::Diverged) = failure {
             let disk = self.hosts[host].disks.get_mut(&branch).unwrap();
             let mut recovering = match Store::recover(disk.dir.clone()) {
                 Ok(recovering) => recovering,
@@ -2373,7 +2373,7 @@ impl World {
                 // And its store, where it names them in the bucket (TASK-195).
                 for (extent, bytes) in &session.guest.held {
                     let location = match store.place(*extent) {
-                        Ok(Some(Place::Remote(location))) => location,
+                        Ok(Some(Place::Bucket(location))) => location,
                         Ok(Some(_)) => continue,
                         Ok(None) => {
                             violations.push(format!("branch {id:x}'s store lost {extent:?}"));

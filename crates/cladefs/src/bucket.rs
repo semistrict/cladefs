@@ -4,7 +4,7 @@
 
 //! cladefs's own: what a host keeps its stores' branches in object storage with (backlog doc-7;
 //! TASK-28.5): its configuration ([`Host`], [`host_token`]), the runtime its stores' uploaders and
-//! fetches run on and their budgets ([`runtime`], [`Fetcher`]), and the errno of each failure
+//! fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each failure
 //! ([`errno`]). The uploader is extent_store's (`extent_store::upload`, TASK-165.9).
 //!
 //! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
@@ -21,7 +21,7 @@ use extent_remote::cache::Cache;
 use extent_remote::fetch::{self, Budget, Limits, Priority};
 use extent_remote::keys;
 use extent_remote::layout::Location;
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
@@ -87,23 +87,23 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
     use extent_remote::Error;
     match failure {
-        Failure::Remote(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
-        Failure::Remote(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
-        Failure::Remote(Error::NoBranch | Error::NoCell | Error::NoVolume(_))
+        Failure::Bucket(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
+        Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
+        Failure::Bucket(Error::NoBranch | Error::NoCell | Error::NoVolume(_))
         | Failure::PointDeleted => Some(Errno::ENOENT),
-        Failure::Remote(Error::IdTaken(_) | Error::VolumeExists(_)) => Some(Errno::EEXIST),
-        Failure::Remote(Error::VolumeName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
-        Failure::Remote(Error::NotShared(_)) => Some(Errno::EACCES),
+        Failure::Bucket(Error::IdTaken(_) | Error::VolumeExists(_)) => Some(Errno::EEXIST),
+        Failure::Bucket(Error::VolumeName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
+        Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
-        Failure::Remote(Error::Kms(_)) => Some(Errno::EACCES),
+        Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
         // cladefs: an encrypted branch inherited by one whose record holds not its keys (TASK-411.4).
-        Failure::Remote(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
+        Failure::Bucket(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
-        Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
+        Failure::Bucket(Error::Format { .. }) => Some(Errno::ENOTSUP),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
-        Failure::Remote(
+        Failure::Bucket(
             Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
         )
         | Failure::Local(_) => None,
@@ -147,7 +147,7 @@ pub fn require_kms() -> Result<(), String> {
 
 /// cladefs: the host's bucket KMS, if [`kms`] is that (TASK-411.27): what shreds a tenant here
 /// ([`shred_tenant`]).
-pub fn bucket_kms() -> Option<Arc<BucketKms<Bucket>>> {
+pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
     host_keys().as_ref().ok().and_then(|keys| keys.bucket.clone())
 }
 
@@ -177,7 +177,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
 }
 
 /// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFS_EXTENTD_REMOTE`).
-fn host_bucket() -> Result<Arc<Bucket>, String> {
+fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
     let url = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
     let url = url.ok_or("CLADEFS_EXTENTD_REMOTE names none")?;
     crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
@@ -186,7 +186,7 @@ fn host_bucket() -> Result<Arc<Bucket>, String> {
 /// cladefs: the host's KMS, as its stores hold it, and the bucket KMS it is over, if it is that.
 struct HostKeys {
     kms: Arc<keys::CachingKms>,
-    bucket: Option<Arc<BucketKms<Bucket>>>,
+    bucket: Option<Arc<BucketKms<ObjectBucket>>>,
 }
 
 /// cladefs: the KMS of a host whose environment chooses none that can be had ([`kms`]).
@@ -284,7 +284,7 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
 /// of the shredding does. Returns how many generations of its KEK it took out, and what the host
 /// forgot. Only as strong as `bucket` keeps no older version of the cell's object (doc-16).
 pub async fn shred_cell(
-    bucket: &Bucket,
+    bucket: &ObjectBucket,
     cell: crate::Cell,
 ) -> Result<(usize, Forgotten), extent_remote::Error> {
     let removed = extent_remote::cell::shred(bucket, cell).await?;
@@ -420,25 +420,26 @@ static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLo
     let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(threads)
-        .thread_name("cladefs remote")
+        .thread_name("cladefs bucket")
         .on_thread_start(extent_store::shared::prepare_thread)
         .enable_all()
         .build()
-        .expect("the remotes' runtime")
+        .expect("the bucket runtime")
 });
 
-/// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`), at their
-/// locations there, as the store names them, on the remotes' runtime, which their uploads use too,
-/// under the host's budget of GETs.
-pub struct Fetcher {
+/// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`),
+/// at their locations there, as the store names them: a fetcher (`extent_remote::fetch::Fetcher`)
+/// that is the host's, its reads on the bucket runtime, which their uploads use too, under the
+/// host's budget of GETs and memory, asking the host's peers first if it has any.
+pub struct HostFetcher {
     runtime: tokio::runtime::Handle,
-    parts: Arc<fetch::Fetcher<Bucket>>,
+    parts: Arc<fetch::Fetcher<ObjectBucket>>,
 }
 
-impl Fetcher {
+impl HostFetcher {
     /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
     /// the host's.
-    pub(crate) fn new(bucket: Arc<Bucket>, cache: Option<Arc<Cache>>) -> Arc<Self> {
+    pub(crate) fn new(bucket: Arc<ObjectBucket>, cache: Option<Arc<Cache>>) -> Arc<Self> {
         let runtime = RUNTIME.handle().clone();
         let runs = runtime.clone();
         // A read ahead is for the guest request whose read started it, if any (TASK-260).
@@ -476,11 +477,12 @@ impl Fetcher {
 
 /// cladefs: the hosts sharing the host's bucket, the one they share, which its stores' fetchers of it
 /// ask for parts before it, if it has any ([`ask_peers`], TASK-406.2).
-static PEERS: std::sync::OnceLock<(Arc<Bucket>, Arc<peers::Peers>)> = std::sync::OnceLock::new();
+static PEERS: std::sync::OnceLock<(Arc<ObjectBucket>, Arc<peers::Peers>)> =
+    std::sync::OnceLock::new();
 
 /// cladefs: has the fetchers of `bucket`, the host's, made from now on ask `peers`, the hosts sharing
 /// it, for the parts they own before it (TASK-406.2): before any store opens. Once.
-pub fn ask_peers(bucket: Arc<Bucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
+pub fn ask_peers(bucket: Arc<ObjectBucket>, peers: Arc<peers::Peers>) -> Result<(), String> {
     PEERS.set((bucket, peers)).map_err(|_| "the host's peers are set already".to_owned())
 }
 
@@ -492,7 +494,7 @@ pub fn peers() -> Option<Arc<peers::Peers>> {
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
 /// (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its stores'
 /// fetchers do, with them, under the host's budget, and asking no peer.
-pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Serving {
+pub fn serving_peers(bucket: Arc<ObjectBucket>, cache: Arc<Cache>) -> Serving {
     Serving {
         runtime: RUNTIME.handle().clone(),
         parts: Arc::new(fetch::Fetcher::new(bucket, BUDGET.clone(), MEMORY.clone(), Some(cache))),
@@ -503,12 +505,12 @@ pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Serving {
 #[derive(Clone)]
 pub struct Serving {
     runtime: tokio::runtime::Handle,
-    parts: Arc<fetch::Fetcher<Bucket>>,
+    parts: Arc<fetch::Fetcher<ObjectBucket>>,
 }
 
 impl Serving {
     /// The stored bytes of the part `asked` names, if the host has it: kept, or
-    /// fetched from the bucket once, however many ask, on the remotes' runtime.
+    /// fetched from the bucket once, however many ask, on the bucket runtime.
     pub async fn part(&self, asked: peers::Asked) -> Result<Option<Arc<[u8]>>, Failure> {
         let parts = self.parts.clone();
         let serving = self.runtime.spawn(async move {
@@ -539,7 +541,7 @@ mod tests {
     use crate::test_data::noise;
     use crate::{ExtentId, ExtentStore, VolatileSlice};
     use extent_remote::cache::Cache;
-    use extent_remote::store::Store as Bucket;
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::testing::read;
     use extent_remote::{branch, recover};
     use object_store::memory::InMemory;
@@ -550,8 +552,8 @@ mod tests {
 
     /// The URL `bucket` is this process's by, made so if it is none's yet: a memory bucket of its
     /// own, by its address, which the stores the tests make in it name (TASK-165.9).
-    pub(super) fn url_of(bucket: &Arc<Bucket>) -> String {
-        let url = format!("memory:///remote-tests-{:p}", Arc::as_ptr(bucket));
+    pub(super) fn url_of(bucket: &Arc<ObjectBucket>) -> String {
+        let url = format!("memory:///bucket-tests-{:p}", Arc::as_ptr(bucket));
         crate::host_store::use_bucket(&url, bucket.clone());
         url
     }
@@ -561,7 +563,7 @@ mod tests {
     pub(super) fn kept_in(
         path: impl AsRef<std::path::Path>,
         (capacity, branch): (u64, Option<crate::Branch>),
-        bucket: &Arc<Bucket>,
+        bucket: &Arc<ObjectBucket>,
         keeping: extent_store::upload::Options,
     ) -> Result<ExtentStore, crate::Error> {
         let branch = branch.unwrap_or_else(crate::host_store::new_alone);
@@ -571,7 +573,7 @@ mod tests {
     /// Has the store at `path` name `bucket` as the bucket its branch is kept in: a host restarted
     /// whose stores reach the bucket otherwise than before, as the fault tests' do (TASK-165.9).
     /// A store whose host died before it described it names nothing.
-    pub(super) fn naming(path: &std::path::Path, bucket: &Arc<Bucket>) {
+    pub(super) fn naming(path: &std::path::Path, bucket: &Arc<ObjectBucket>) {
         let description = path.join("store");
         let text = match std::fs::read_to_string(&description) {
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
@@ -619,7 +621,7 @@ mod tests {
     pub(super) type Uploaded = (Vec<(u64, Vec<u8>)>, Option<Vec<u8>>);
 
     /// The branch's extents and root, read back from `bucket`.
-    pub(super) fn uploaded(bucket: &Arc<Bucket>, branch: crate::Branch) -> Uploaded {
+    pub(super) fn uploaded(bucket: &Arc<ObjectBucket>, branch: crate::Branch) -> Uploaded {
         futures::executor::block_on(async {
             let state = recover(&**bucket, branch, None).await.unwrap().state;
             let mut extents = Vec::new();
@@ -635,7 +637,7 @@ mod tests {
     #[test]
     fn uploads_what_the_store_makes_durable() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), "branches"));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), "branches"));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = store.branch();
@@ -715,7 +717,7 @@ mod tests {
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
         use extent_remote::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (branch, token) = (crate::host_store::new_alone(), crate::host_store::token().unwrap());
         // The writer before, its two segments in flight.
         let before = futures::executor::block_on(async {
@@ -742,11 +744,11 @@ mod tests {
         });
         // The store's commit is the branch's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
-        let epoch = store.remote().unwrap().status().unwrap().taking.unwrap().epoch;
+        let epoch = store.uploader().unwrap().status().unwrap().taking.unwrap().epoch;
         let committed = store.commit(Some(b"after"));
-        let remote = store.remote().unwrap();
-        assert_eq!((committed, remote.failed()), (Ok(()), None));
-        assert_eq!(remote.status().unwrap().taking.unwrap().epoch, epoch);
+        let uploader = store.uploader().unwrap();
+        assert_eq!((committed, uploader.failed()), (Ok(()), None));
+        assert_eq!(uploader.status().unwrap().taking.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
         assert_eq!(uploaded(&bucket, branch), after);
     }
@@ -780,8 +782,8 @@ mod tests {
         let objects: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         // The dying host's way to the objects, and what reaches them after it.
         let gated = Arc::new(Gated::over(objects.clone()));
-        let reached = Arc::new(Bucket::new(gated.clone(), ""));
-        let bucket = Arc::new(Bucket::new(objects, ""));
+        let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(objects, ""));
         let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = extent_remote::collector::collect(&*bucket, holder, &options);
@@ -853,7 +855,7 @@ mod tests {
     #[test]
     fn forks_read_what_they_inherited_compacted_twice_their_checkpoint_late() {
         let scenario = fail::FailScenario::setup();
-        fail::cfg("remote::checkpointing", "sleep(1000)").unwrap();
+        fail::cfg("upload::checkpointing", "sleep(1000)").unwrap();
         inherited_compacted_twice();
         scenario.teardown();
     }
@@ -861,7 +863,7 @@ mod tests {
     fn inherited_compacted_twice() {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = extent_remote::collector::collect(&*bucket, holder, &options);
@@ -932,7 +934,7 @@ mod tests {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
             let pass = extent_remote::collector::collect(&*bucket, holder, &options);
@@ -995,7 +997,7 @@ mod tests {
     }
 
     /// The footers of `branch`'s segments in `bucket`, in order.
-    fn footers(bucket: &Bucket, branch: crate::Branch) -> Vec<extent_remote::layout::Footer> {
+    fn footers(bucket: &ObjectBucket, branch: crate::Branch) -> Vec<extent_remote::layout::Footer> {
         use extent_remote::layout;
         futures::executor::block_on(async {
             let listed = extent_remote::Bucket::list(bucket, &layout::segments(branch)).await;
@@ -1015,7 +1017,7 @@ mod tests {
     fn logs_caught_up_upload_in_order() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = kept_in(dir.path().join("store"), (1 << 30, None), &bucket, idle()).unwrap();
         let branch = store.branch();
         gated.shut.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1028,7 +1030,7 @@ mod tests {
         }
         store.flush().unwrap();
         // Out of reach: the store holds what it committed, the bucket nothing of it.
-        let behind = Arc::new(Bucket::new(gated.store.clone(), ""));
+        let behind = Arc::new(ObjectBucket::new(gated.store.clone(), ""));
         assert_eq!(uploaded(&behind, branch), (vec![], None));
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
         store.wait_uploaded().unwrap();
@@ -1046,7 +1048,7 @@ mod tests {
     ) -> (tempfile::TempDir, crate::host_store::Opened, u64) {
         const EXTENT: usize = 1 << 20;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
         let opened = crate::host_store::create_unmade(
             &path,
@@ -1075,8 +1077,8 @@ mod tests {
     #[test]
     fn commits_stalled_on_the_lag_end_with_their_segment_closed_for_room() {
         let lag = extent_store::upload::Options { max_lag_bytes: BLOCK as u64, ..idle() };
-        let (_dir, crate::host_store::Opened { store, remote, .. }, epoch) = closed_for_room(lag);
-        let stalled = std::sync::Arc::new(remote);
+        let (_dir, crate::host_store::Opened { store, uploader, .. }, epoch) = closed_for_room(lag);
+        let stalled = std::sync::Arc::new(uploader);
         let waiting = stalled.clone();
         let (ended, end) = std::sync::mpsc::channel();
         std::thread::spawn(move || ended.send(waiting.wait_lag(epoch)).unwrap());
@@ -1087,9 +1089,9 @@ mod tests {
     /// TASK-150.2: so does a sync of the store's commits, or anything else waiting for their upload.
     #[test]
     fn uploads_waited_for_end_with_their_segment_closed_for_room() {
-        let (_dir, crate::host_store::Opened { remote, .. }, epoch) = closed_for_room(idle());
+        let (_dir, crate::host_store::Opened { uploader, .. }, epoch) = closed_for_room(idle());
         let (ended, end) = std::sync::mpsc::channel();
-        std::thread::spawn(move || ended.send(remote.wait_uploaded(epoch)).unwrap());
+        std::thread::spawn(move || ended.send(uploader.wait_uploaded(epoch)).unwrap());
         assert_eq!(end.recv_timeout(Duration::from_secs(30)), Ok(Ok(())));
     }
 
@@ -1118,11 +1120,11 @@ mod tests {
             idle(),
         )
         .unwrap();
-        let crate::host_store::Opened { store, remote, .. } = opened;
+        let crate::host_store::Opened { store, uploader, .. } = opened;
         assert!(!free(&path), "taken while the store is open");
         store.close().unwrap();
         assert!(!free(&path), "taken while its uploader runs");
-        drop(remote);
+        drop(uploader);
         assert!(free(&path), "free once the uploader stopped");
     }
 
@@ -1141,7 +1143,7 @@ mod tests {
         let put = Duration::from_millis(350);
         let config = ThrottleConfig { wait_put_per_call: put, ..ThrottleConfig::default() };
         let objects = Arc::new(ThrottledStore::new(InMemory::new(), config));
-        let bucket = Arc::new(Bucket::new(objects, ""));
+        let bucket = Arc::new(ObjectBucket::new(objects, ""));
         let dir = tempfile::tempdir().unwrap();
         let store = kept_in(
             dir.path().join("store"),
@@ -1163,7 +1165,7 @@ mod tests {
         let written = started.elapsed();
         store.wait_uploaded().unwrap();
         let took = started.elapsed();
-        let stalls = store.remote().unwrap().stalls();
+        let stalls = store.uploader().unwrap().stalls();
         let rate = WRITTEN as f64 / took.as_secs_f64() / 1e6;
         println!(
             "{} MiB written in {written:.2?}, uploaded in {took:.2?}: {rate:.0} MB/s; commits took \
@@ -1247,7 +1249,7 @@ mod tests {
         use crate::host_store::fork_child;
         let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
         let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
         let data = pattern(1, BLOCK);
@@ -1469,7 +1471,7 @@ mod tests {
         const FORKS: usize = 4;
         for point in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let base = kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).unwrap();
             for sequence in 1..=EXTENTS {
                 write(&base, sequence, &pattern(sequence as u8, BLOCK));
@@ -1549,7 +1551,7 @@ mod tests {
         use crate::host_store::fork_child;
         const EXTENTS: u64 = 4160;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * EXTENTS * BLOCK as u64 + (1 << 30);
         let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
         for sequence in 1..=EXTENTS {
@@ -1602,7 +1604,7 @@ mod tests {
         let (extents, rounds) =
             (count("CLADEFS_BENCH_EXTENTS", 32768), count("CLADEFS_BENCH_ROUNDS", 20));
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
         let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
         let data = pattern(1, BLOCK);
@@ -1642,7 +1644,7 @@ mod tests {
         );
     }
 
-    /// Has the remotes' runtime (`RUNTIME`) lock each shard of its list of tasks once, so that
+    /// Has the bucket runtime (`RUNTIME`) lock each shard of its list of tasks once, so that
     /// none allocates after: on macOS, a `std::sync::Mutex` allocates its pthread mutex, 64 bytes,
     /// as it is first locked, and the runtime locks the shard of a task's id, numbered across the
     /// process, as it spawns the task and as it ends. Its shards are tokio's: four for each worker,
@@ -1672,7 +1674,7 @@ mod tests {
         use extent_remote::layout::{self, Footer};
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
         let options = extent_store::upload::Options { cache: Some(cache.clone()), ..idle() };
         let store =
@@ -1751,7 +1753,7 @@ mod tests {
     fn files_with_flipped_bytes_are_not_uploaded() {
         use extent_remote::layout;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = store.branch();
@@ -1783,7 +1785,7 @@ mod tests {
     #[test]
     fn durable_commits_fail_once_another_takes_the_branch() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
@@ -1805,7 +1807,7 @@ mod tests {
     #[test]
     fn later_placements_fence_earlier_ones() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -1840,7 +1842,7 @@ mod tests {
     #[test]
     fn earlier_placements_delete_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (first_path, second_path) = (dir.path().join("first"), dir.path().join("second"));
         let first = kept_in(&first_path, (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -1873,7 +1875,7 @@ mod tests {
     #[test]
     fn unplaced_copies_take_their_hosts_token() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let options = extent_store::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
@@ -1892,13 +1894,13 @@ mod tests {
     #[test]
     fn stores_whose_bucket_lacks_their_branch_refuse() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let path = dir.path().join("store");
         let store = kept_in(&path, (1 << 30, None), &bucket, idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
         store.commit(Some(b"acknowledged")).unwrap();
         drop(store);
-        let other = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let other = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         naming(&path, &other);
         let refused = reopened(&path, idle()).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ENOENT));
@@ -1914,7 +1916,7 @@ mod tests {
     #[test]
     fn dropped_stores_upload_their_open_segments_commits() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = store.branch();
@@ -1933,7 +1935,7 @@ mod tests {
     #[test]
     fn waits_for_uploads() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
@@ -2281,10 +2283,10 @@ mod tests {
         options: extent_store::upload::Options,
         failing: fn(&Gated) -> &std::sync::atomic::AtomicBool,
     ) {
-        use extent_remote::store::Request;
+        use extent_remote::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap(),
         );
@@ -2301,12 +2303,12 @@ mod tests {
                 store.commit_ordered(None)
             })
         };
-        let remote = store.remote().unwrap();
-        while remote.stalls() == 0 || bucket.stats().failures(Request::Create) == creates_failed {
+        let uploader = store.uploader().unwrap();
+        while uploader.stalls() == 0 || bucket.stats().failures(Request::Create) == creates_failed {
             std::thread::yield_now();
         }
         assert!(!third.is_finished());
-        assert_eq!(remote.failed(), None, "the uploader stopped");
+        assert_eq!(uploader.failed(), None, "the uploader stopped");
         failing(&gated).store(false, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(third.join().unwrap(), Ok(()));
         store.commit(None).unwrap();
@@ -2331,7 +2333,7 @@ mod tests {
         super::set_upload_memory(BUDGET).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let options =
             extent_store::upload::Options { max_lag: u64::MAX, max_lag_bytes: u64::MAX, ..idle() };
         let store = Arc::new(
@@ -2363,7 +2365,7 @@ mod tests {
             assert!(held() >= 7, "{} uploads held", held());
         });
         let memory = super::upload_memory();
-        let behind = store.remote().unwrap().status().unwrap().pending_bytes;
+        let behind = store.uploader().unwrap().status().unwrap().pending_bytes;
         gated.hold.send_replace(Hold::Nothing);
         for commit in waiting {
             assert_eq!(commit.join().unwrap(), Ok(()));
@@ -2383,7 +2385,7 @@ mod tests {
     fn segments_upload_at_once() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
@@ -2417,7 +2419,7 @@ mod tests {
     fn uploads_done_close_no_segment_for_commits_no_one_waits_for() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let store = Arc::new(
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
@@ -2477,7 +2479,7 @@ mod tests {
             kept_in(
                 dir.path().join("lost"),
                 (1 << 30, None),
-                &Arc::new(Bucket::new(gated.clone(), prefix)),
+                &Arc::new(ObjectBucket::new(gated.clone(), prefix)),
                 options,
             )
             .unwrap(),
@@ -2497,8 +2499,8 @@ mod tests {
                 lost.commit_ordered(None)
             })
         };
-        let remote = lost.remote().unwrap();
-        while remote.stalls() == 0 {
+        let uploader = lost.uploader().unwrap();
+        while uploader.stalls() == 0 {
             std::thread::yield_now();
         }
         assert!(!waiting.is_finished(), "a commit past the lag went on");
@@ -2527,7 +2529,7 @@ mod tests {
         drop(waiting);
         std::fs::rename(dir.path().join("lost"), dir.path().join("gone")).unwrap();
 
-        let bucket = Arc::new(Bucket::new(store, prefix));
+        let bucket = Arc::new(ObjectBucket::new(store, prefix));
         let taken =
             kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket.clone(), idle())
                 .unwrap();
@@ -2565,7 +2567,7 @@ mod tests {
     #[test]
     fn extents_freed_and_written_anew_survive_recovery() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
             kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = lost.branch();
@@ -2598,7 +2600,7 @@ mod tests {
     #[test]
     #[ignore = "a measurement against CLADEFS_PHASES_BUCKET's bucket"]
     fn bucket_round_trips_by_phase() {
-        use extent_remote::store::Request;
+        use extent_remote::object_bucket::Request;
         let url =
             std::env::var("CLADEFS_PHASES_BUCKET").expect("CLADEFS_PHASES_BUCKET names a bucket");
         let url = format!("{}/phases-{:016x}/", url.trim_end_matches('/'), rand::random::<u64>());
@@ -2669,9 +2671,9 @@ mod tests {
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
     fn durable_commits_cost_a_create_and_a_head_swap() {
-        use extent_remote::store::Request;
+        use extent_remote::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
@@ -2703,9 +2705,9 @@ mod tests {
     #[test]
     fn takes_recover_their_branches_once_by_their_segments_tails() {
         use extent_remote::layout;
-        use extent_remote::store::Request;
+        use extent_remote::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
             kept_in(dir.path().join("lost"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = lost.branch();
@@ -2773,7 +2775,7 @@ mod tests {
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs_branches_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
-        let (store, prefix) = extent_remote::store::object_store_at(&url).unwrap();
+        let (store, prefix) = extent_remote::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
         let prefix = format!("{prefix}/{:016x}", rand::random::<u64>());
         survives_its_hosts_loss(store, prefix.trim_start_matches('/'));
@@ -2817,7 +2819,7 @@ mod tests {
     #[test]
     fn opens_branches_elsewhere() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -2859,14 +2861,14 @@ mod tests {
     }
 
     /// TASK-260: a read for a guest request of what only object storage holds logs the requests
-    /// it makes of the bucket, on the remotes' runtime, with the guest request.
+    /// it makes of the bucket, on the bucket runtime, with the guest request.
     #[cfg(target_os = "linux")]
     #[test]
     fn reads_of_object_storage_are_logged_with_their_guest_request() {
         use crate::request::{RequestId, within_now};
         let lines = crate::extentd::logging::capture();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -2889,7 +2891,9 @@ mod tests {
         assert_eq!(data, pattern(1, BLOCK));
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
-            .filter_map(|line| line.strip_prefix("DEBUG extent_remote::store: object storage: "))
+            .filter_map(|line| {
+                line.strip_prefix("DEBUG extent_remote::object_bucket: object storage: ")
+            })
             .map(|line| {
                 let kind = line.split(' ').next().unwrap().to_owned();
                 (kind, line.split_once(" request_id=").map_or("none", |(_, id)| id).to_owned())
@@ -2918,7 +2922,7 @@ mod tests {
 
     /// The directory of a store of `branch` at `path`, its branch kept in `bucket`, made whole, and
     /// not opened: what opening takes the branch into, as the bucket holds it.
-    fn made_for(path: &std::path::Path, branch: crate::Branch, bucket: &Arc<Bucket>) {
+    fn made_for(path: &std::path::Path, branch: crate::Branch, bucket: &Arc<ObjectBucket>) {
         std::fs::create_dir(path).unwrap();
         let description =
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
@@ -2935,7 +2939,7 @@ mod tests {
     fn takes_take_what_the_branch_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket, idle()).unwrap();
         let branch = first.branch();
         let before = write(&first, 1, &pattern(1, BLOCK));
@@ -2969,12 +2973,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         // The first host's, through a gate of its own.
         let dying = Arc::new(Gated::over(memory));
         let lost = dir.path().join("lost");
-        let first =
-            kept_in(&lost, (1 << 30, None), &Arc::new(Bucket::new(dying.clone(), "")), idle());
+        let first = kept_in(
+            &lost,
+            (1 << 30, None),
+            &Arc::new(ObjectBucket::new(dying.clone(), "")),
+            idle(),
+        );
         let first = first.unwrap();
         let branch = first.branch();
         write(&first, 1, &pattern(1, BLOCK));
@@ -3029,7 +3037,7 @@ mod tests {
     #[test]
     fn points_refuse_what_would_change_them() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let source =
             kept_in(dir.path().join("source"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let extent = write(&source, 1, &pattern(1, BLOCK));
@@ -3069,7 +3077,7 @@ mod tests {
     #[test]
     fn points_fork_into_other_tenants_cells_while_shared() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
             cell: crate::host_store::new_cell(tenant),
             id: rand::random::<u64>().max(1),
@@ -3137,9 +3145,9 @@ mod tests {
         for tenant in [1, 2] {
             kms.create(tenant).unwrap();
         }
-        crate::remote::set_kms(kms.clone()).unwrap();
+        crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
             cell: crate::host_store::new_cell(tenant),
             id: rand::random::<u64>().max(1),
@@ -3181,7 +3189,7 @@ mod tests {
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
-        crate::remote::kms().revoked(1, "tenant 1: its KEK is destroyed");
+        crate::bucket::kms().revoked(1, "tenant 1: its KEK is destroyed");
         crate::cache::evict_least_used(None, |_| false);
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
@@ -3201,9 +3209,9 @@ mod tests {
         let local = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         local.create(1).unwrap();
         local.destroy(1).unwrap();
-        crate::remote::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
+        crate::bucket::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
             cell: crate::host_store::new_cell(tenant),
             id: rand::random::<u64>().max(1),
@@ -3231,9 +3239,9 @@ mod tests {
         for tenant in [1, 2] {
             kms.create(tenant).unwrap();
         }
-        crate::remote::set_kms(kms.clone()).unwrap();
+        crate::bucket::set_kms(kms.clone()).unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
             cell: crate::host_store::new_cell(tenant),
             id: rand::random::<u64>().max(1),
@@ -3270,7 +3278,7 @@ mod tests {
         };
 
         let cell = stores[0].0.branch().cell;
-        let shredded = futures::executor::block_on(crate::remote::shred_cell(&bucket, cell));
+        let shredded = futures::executor::block_on(crate::bucket::shred_cell(&bucket, cell));
         let (removed, forgotten) = shredded.unwrap();
         assert_eq!(removed, 1);
         assert_eq!(
@@ -3287,7 +3295,7 @@ mod tests {
 
         kms.destroy(1).unwrap();
         let why = "tenant 1: its KEK is destroyed";
-        let forgotten = crate::remote::forget(extent_remote::keys::Scope::Tenant(1), why);
+        let forgotten = crate::bucket::forget(extent_remote::keys::Scope::Tenant(1), why);
         assert_eq!(
             (forgotten.stores, forgotten.rings, forgotten.extents),
             (1, 1, 1),
@@ -3298,7 +3306,7 @@ mod tests {
             [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
         );
         assert_eq!(cached(), [false, false, true]);
-        assert_eq!(crate::remote::kms().in_pool(1), 0);
+        assert_eq!(crate::bucket::kms().in_pool(1), 0);
 
         // Closed by their holders, the stores of the tenant open no more; the other's does.
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
@@ -3349,7 +3357,7 @@ mod tests {
                 (store, extent, data)
             })
             .collect();
-        assert!(crate::remote::bucket_kms().is_some());
+        assert!(crate::bucket::bucket_kms().is_some());
         for (store, _, _) in &stores {
             let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
@@ -3372,7 +3380,7 @@ mod tests {
             done.map(|()| read == *data)
         };
 
-        let shredded = futures::executor::block_on(crate::remote::shred_tenant(1));
+        let shredded = futures::executor::block_on(crate::bucket::shred_tenant(1));
         let (destroyed, forgotten) = shredded.unwrap();
         assert_eq!((destroyed, forgotten.stores, forgotten.rings), (Destroyed::Now, 1, 1));
         assert_eq!(kek(1), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x01".to_vec()));
@@ -3388,7 +3396,7 @@ mod tests {
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
         let cell = futures::executor::block_on(extent_remote::cell::read(&*bucket, new.cell));
         assert_eq!(cell, Ok(None));
-        let again = futures::executor::block_on(crate::remote::shred_tenant(1)).unwrap();
+        let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
         assert_eq!(again.0, Destroyed::Already);
         assert_eq!(written.len(), 2);
     }
@@ -3399,8 +3407,8 @@ mod tests {
     fn hosts_of_another_kms_shred_no_tenant() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
-        crate::remote::set_kms(kms).unwrap();
-        let refused = futures::executor::block_on(crate::remote::shred_tenant(1)).unwrap_err();
+        crate::bucket::set_kms(kms).unwrap();
+        let refused = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap_err();
         assert_eq!(
             refused,
             "tenant 1: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no CLADEFS_KMS): \
@@ -3416,7 +3424,7 @@ mod tests {
     #[test]
     fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let of = |tenant| crate::Branch {
             cell: crate::host_store::new_cell(tenant),
             id: rand::random::<u64>().max(1),
@@ -3474,7 +3482,7 @@ mod tests {
     #[test]
     fn forks_inherit_their_parents_extents() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let large = pattern(2, 4 << 20);
@@ -3546,7 +3554,7 @@ mod tests {
     fn forks_name_their_commit_though_later_ones_are_acknowledged_with_it() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
-        let bucket = Arc::new(Bucket::new(gated.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let parent = Arc::new(
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap(),
         );
@@ -3593,7 +3601,7 @@ mod tests {
     fn extents_freed_are_spent_on_the_host_that_takes_their_branch() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
                 .unwrap();
             let branch = first.branch();
@@ -3625,7 +3633,7 @@ mod tests {
     #[test]
     fn extents_sealed_and_freed_in_one_segment_are_spent_where_their_branch_is_taken() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -3658,7 +3666,7 @@ mod tests {
     fn resizes_hold_where_their_branch_is_taken() {
         for checkpointed in [false, true] {
             let dir = tempfile::tempdir().unwrap();
-            let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             let first = kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle())
                 .unwrap();
             let branch = first.branch();
@@ -3697,7 +3705,7 @@ mod tests {
         use extent_remote::Bucket as _;
         use extent_remote::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
             kept_in(dir.path().join("first"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let branch = first.branch();
@@ -3733,7 +3741,7 @@ mod tests {
     /// holding an extent and a root: returns the child's record.
     fn forked(
         parent: &ExtentStore,
-        bucket: &Arc<Bucket>,
+        bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
         child: crate::Branch,
     ) -> extent_remote::record::Record {
@@ -3750,7 +3758,7 @@ mod tests {
     #[test]
     fn forks_to_a_child_forked_before_make_nothing() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let child = crate::host_store::fork_child(parent.branch());
@@ -3783,7 +3791,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(Bucket::new(memory, ""));
+        let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
         let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
         // The host gone: what it has in flight may land still.
@@ -3894,7 +3902,7 @@ mod tests {
                 kept_in(
                     dir.join("parent"),
                     (1 << 30, None),
-                    &Arc::new(Bucket::new(gated.clone(), "")),
+                    &Arc::new(ObjectBucket::new(gated.clone(), "")),
                     idle(),
                 )
                 .unwrap(),
@@ -3911,7 +3919,7 @@ mod tests {
                 std::thread::spawn(move || parent.fork_to(path, child))
             };
             gated.wait_held(1);
-            let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+            let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
             let token = crate::host_store::token().unwrap();
             futures::executor::block_on(extent_remote::Writer::open(bucket, branch, 3, token))
                 .unwrap();
@@ -3926,8 +3934,8 @@ mod tests {
         }
 
         /// The bucket as it is.
-        fn bucket(&self) -> Arc<Bucket> {
-            Arc::new(Bucket::new(self.memory.clone(), ""))
+        fn bucket(&self) -> Arc<ObjectBucket> {
+            Arc::new(ObjectBucket::new(self.memory.clone(), ""))
         }
 
         /// The child's record.
@@ -3975,7 +3983,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(Bucket::new(memory, ""));
+        let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
         let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
         crate::ExtentStore::delete(&path, None).unwrap();
@@ -4015,7 +4023,11 @@ mod tests {
 
     /// The store of another branch, `branch`, at `path`, attached to `bucket`, holding an extent
     /// and a root: what a guest may name as its fork's child.
-    fn others(path: &std::path::Path, bucket: &Arc<Bucket>, branch: crate::Branch) -> ExtentStore {
+    fn others(
+        path: &std::path::Path,
+        bucket: &Arc<ObjectBucket>,
+        branch: crate::Branch,
+    ) -> ExtentStore {
         let others = kept_in(path, (1 << 30, Some(branch)), &bucket.clone(), idle()).unwrap();
         write(&others, 1, &pattern(3, BLOCK));
         others.commit(Some(b"other")).unwrap();
@@ -4027,7 +4039,7 @@ mod tests {
 
     /// Whether the branch of `others`, its store, is live still: it commits, and uploads its
     /// commits.
-    fn live(others: &ExtentStore, bucket: &Arc<Bucket>) -> Committed {
+    fn live(others: &ExtentStore, bucket: &Arc<ObjectBucket>) -> Committed {
         write(others, 2, &pattern(4, BLOCK));
         let committed = others.commit(Some(b"again"));
         (committed, others.wait_uploaded(), uploaded(bucket, others.branch()))
@@ -4046,7 +4058,7 @@ mod tests {
     #[test]
     fn forks_to_a_branch_the_bucket_has_fail_with_eexist() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         let other = crate::host_store::fork_child(parent.branch());
@@ -4079,7 +4091,7 @@ mod tests {
             kept_in(
                 dir.join("parent"),
                 (1 << 30, None),
-                &Arc::new(Bucket::new(gated.clone(), "")),
+                &Arc::new(ObjectBucket::new(gated.clone(), "")),
                 idle(),
             )
             .unwrap(),
@@ -4114,7 +4126,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
-        let bucket = Arc::new(Bucket::new(memory, ""));
+        let bucket = Arc::new(ObjectBucket::new(memory, ""));
         let path = dir.path().join("child");
         let (_, child, fork) = forking_held(dir.path(), &gated, &path);
         let others = others(&dir.path().join("other"), &bucket, child);
@@ -4140,7 +4152,7 @@ mod tests {
     #[test]
     fn forks_failed_once_committed_leave_their_child_no_branch() {
         let dir = tempfile::tempdir().unwrap();
-        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let parent =
             kept_in(dir.path().join("parent"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&parent, 1, &pattern(1, BLOCK));
@@ -4176,7 +4188,7 @@ mod tests {
     fn reads_keep_what_they_fetch() {
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let cache = Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap());
         let options = extent_store::upload::Options { cache: Some(cache.clone()), ..idle() };
         let first =

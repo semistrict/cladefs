@@ -784,7 +784,7 @@ mod tests {
         use crate::batch::{Commit, SegmentBuilder};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
+        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
         let live = |child| {
             let record = block_on(record(&*bucket, child)).unwrap();
             record.map(|record| !record.deleted)
@@ -1305,7 +1305,7 @@ mod tests {
         use crate::batch::{Commit, SegmentBuilder};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
+        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
         block_on(async {
             create(&*bucket, test_branch(1), 0).await.unwrap();
             create(&*bucket, test_branch(2), 0).await.unwrap();
@@ -1339,7 +1339,7 @@ mod tests {
         use crate::collector::{Options, collect};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
+        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
         const NOW: Options = Options { compact_below: 0.0, grace: 0 };
         block_on(async {
             create(&*bucket, test_branch(1), 0).await.unwrap();
@@ -1428,7 +1428,7 @@ mod tests {
         use crate::writer::Writer;
         use storage_device::ExtentId;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
+        let bucket = std::sync::Arc::new(crate::object_bucket::ObjectBucket::new(memory, ""));
         block_on(async {
             create(&*bucket, test_branch(1), 0).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();

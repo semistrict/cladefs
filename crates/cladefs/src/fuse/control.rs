@@ -222,7 +222,7 @@ impl proto::mount_server::Mount for Control {
                     // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is encrypted
                     // (TASK-411.3, TASK-411.28).
                     let holding = async {
-                        let kms = crate::remote::kms();
+                        let kms = crate::bucket::kms();
                         let kek = match make {
                             true => Some(keys::new_cell_kek(&kms, cell.tenant).await?),
                             false => None,
@@ -374,8 +374,8 @@ impl proto::mount_server::Mount for Control {
 /// The errno a failure to hold a cell says, as the extent daemon's API has it: `ENOENT` for a cell
 /// the bucket has none of, `ESTALE` for one a later placement holds.
 fn cell_errno(err: &extent_remote::Error) -> Errno {
-    let failure = extent_store::upload::Failure::Remote(err.clone());
-    crate::remote::errno(&failure).unwrap_or(Errno::EIO)
+    let failure = extent_store::upload::Failure::Bucket(err.clone());
+    crate::bucket::errno(&failure).unwrap_or(Errno::EIO)
 }
 
 /// Runs `work` in a task of its own, which completes though the caller gives up on it, and its

@@ -19,11 +19,11 @@
 //! A read asks one load first, whether any marks held name a key, and only then one lookup in the
 //! set of its cell's: a bucket no mark-only pass marked costs a load a read. Whether a mark-only
 //! pass marks the bucket at all, which it says by `gc/marking` ([`layout::MARKING`], removed by an
-//! operator with the marks), is read every [`REFRESH`] alongside a read (`store::Store`): a HEAD a
-//! minute a store. Only while it does are the marks of each cell read watched, read again every
-//! [`REFRESH`] alongside a read of the cell's, never one a read, and a cell not read for two of
-//! them forgotten (TASK-395.4's review: at a million VMs, a listing a minute for every cell each
-//! host reads was thousands a second).
+//! operator with the marks), is read every [`REFRESH`] alongside a read
+//! (`object_bucket::ObjectBucket`): a HEAD a minute a bucket. Only while it does are the marks of
+//! each cell read watched, read again every [`REFRESH`] alongside a read of the cell's, never one a
+//! read, and a cell not read for two of them forgotten (TASK-395.4's review: at a million VMs, a
+//! listing a minute for every cell each host reads was thousands a second).
 //!
 //! Listings are not warned of. A listing names what its caller passes over as well as what it goes
 //! by: a branch's older checkpoints, which recovery lists past to its newest; the segments a
@@ -35,7 +35,7 @@
 
 use crate::bucket::{Meta, Version};
 use crate::layout::{self, Cell, Marks};
-use crate::store::Request;
+use crate::object_bucket::Request;
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -49,7 +49,7 @@ use std::time::{Duration, Instant};
 pub const REFRESH: Duration = Duration::from_secs(60);
 
 /// What a bucket's readers know of the newest marks of the cells they read: a
-/// [`store::Store`](crate::store::Store)'s.
+/// [`object_bucket::ObjectBucket`](crate::object_bucket::ObjectBucket)'s.
 pub(crate) struct Watch {
     /// Whether the marks held, of any cell, name any key: what each read asks first.
     any: AtomicBool,

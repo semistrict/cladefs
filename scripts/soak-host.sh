@@ -5,7 +5,7 @@
 
 # Production-shaped soaks of the guest Fxfs on a Linux host of one's own (TASK-44.18): DAX pgbench
 # (fxfs-guest-pgbench-dax) over a matrix of guest memory, vCPUs and DAX window sizes, its bucket
-# CLADEFS_REMOTE_LATENCY_MS away (25 by default), CLADEFS_SOAK_ROUNDS rounds a cell (3), as the
+# CLADEFS_BUCKET_LATENCY_MS away (25 by default), CLADEFS_SOAK_ROUNDS rounds a cell (3), as the
 # sandbox team's small VMs meet what the suites' 4 GiB, 2-vCPU, 2 GiB-window guest doesn't
 # (TASK-99 was a 2 GiB VM's). Each cell a run of scripts/test-host.sh, one after another; each
 # cell's results, each round's guest log among them (round-K.log), go to
@@ -31,7 +31,7 @@ done
 mkdir -p "$results"
 results=$(cd "$results" && pwd)
 export CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=fxfs-guest-pgbench-dax
-export CLADEFS_E2E_ROUNDS=${CLADEFS_SOAK_ROUNDS:-3} CLADEFS_REMOTE_LATENCY_MS=${CLADEFS_REMOTE_LATENCY_MS:-25}
+export CLADEFS_E2E_ROUNDS=${CLADEFS_SOAK_ROUNDS:-3} CLADEFS_BUCKET_LATENCY_MS=${CLADEFS_BUCKET_LATENCY_MS:-25}
 status=0
 for cell in "${cells[@]}"; do
     IFS=: read -r memory vcpus window <<< "$cell"

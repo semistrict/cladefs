@@ -9,7 +9,7 @@
 //! service (every request failing, 503), then answering again, 300 ms a request, each a fraction
 //! of CLADEFS_BUCKET_SOAK_SECS (1,800, the qualification's; 1,200 at least, so that the bucket is out
 //! of service longer than its S3 client retries a request, about a minute). Through a proxy, not
-//! the daemon's own faults (`CLADEFS_REMOTE_FAULTS`), so that a pin's daemon from before them meets
+//! the daemon's own faults (`CLADEFS_BUCKET_FAULTS`), so that a pin's daemon from before them meets
 //! the same bucket, a qualification's A/B comparing them (TASK-330.4). CLADEFS_BUCKET_SOAK_VMS
 //! VMs (4), each on a store of its own, write files of 16 MiB that don't compress and fsync each,
 //! deleting each once 16 newer are written, at the rate that writes past every store's lag bound
@@ -167,10 +167,10 @@ mod host {
                 "CLADEFS_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
                  longer than its client retries a request"
             );
-            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
             ensure!(
-                remote.starts_with("s3://"),
-                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: \
+                bucket_url.starts_with("s3://"),
+                "CLADEFS_EXTENTD_REMOTE is {bucket_url:?}, not an S3 server's bucket: \
                  scripts/test-e2e-rustfs.sh starts one"
             );
             let server =
@@ -232,7 +232,9 @@ mod host {
                 ended += fraction;
                 let ends = began + run.mul_f64(ended);
                 while Instant::now() < ends {
-                    std::thread::sleep(Duration::from_secs(1).min(ends.saturating_duration_since(Instant::now())));
+                    std::thread::sleep(
+                        Duration::from_secs(1).min(ends.saturating_duration_since(Instant::now())),
+                    );
                     // Said once, the first sample past it, or that none is weighed.
                     let process = stats_line(&stats, "process");
                     if !memory_said {

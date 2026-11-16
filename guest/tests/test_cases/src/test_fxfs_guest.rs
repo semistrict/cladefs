@@ -52,12 +52,24 @@ pub struct TestFxfsGuest {
 impl TestFxfsGuest {
     /// fxfs-guest.
     pub fn host_formats() -> Self {
-        Self { mode: Mode::HostFormats, dax: false, killed: false, daemon_killed: false, stray: false }
+        Self {
+            mode: Mode::HostFormats,
+            dax: false,
+            killed: false,
+            daemon_killed: false,
+            stray: false,
+        }
     }
 
     /// fxfs-guest-format.
     pub fn guest_formats() -> Self {
-        Self { mode: Mode::GuestFormats, dax: false, killed: false, daemon_killed: false, stray: false }
+        Self {
+            mode: Mode::GuestFormats,
+            dax: false,
+            killed: false,
+            daemon_killed: false,
+            stray: false,
+        }
     }
 
     /// fxfs-guest-crash.
@@ -100,7 +112,6 @@ impl TestFxfsGuest {
         Self { dax: true, ..self }
     }
 }
-
 
 /// cladefs: the window of a test that strays out of what it was given, and how much of its start the
 /// test's writers reach: its first half is files' ranges, and regions fill the second from its
@@ -245,8 +256,8 @@ mod host {
     use crate::common::{cladefs_guest_should_run, setup_rootfs, spawn_daemon};
     use crate::vm::Vm;
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
-    use futures::executor::block_on;
     use cladefs::{Filesystem, Owner, Storage};
+    use futures::executor::block_on;
 
     /// The store's capacity: room for the crash test's unnamed file too.
     const CAPACITY: u64 = 128 << 20;
@@ -311,7 +322,10 @@ mod host {
             };
             let earlier_lost = synced.iter().any(lost_before);
             if stayed(writer, index) {
-                assert!(!earlier_lost, "writer {writer}'s file {index} stayed, an earlier one lost");
+                assert!(
+                    !earlier_lost,
+                    "writer {writer}'s file {index} stayed, an earlier one lost"
+                );
             } else {
                 lost += 1;
             }
@@ -415,8 +429,8 @@ mod host {
             };
             // cladefs: on a daemon of its own, which goes on running till its test's end otherwise.
             let daemon = if self.daemon_killed {
-                let socket = std::env::temp_dir()
-                    .join(format!("cladefs-crash-{}.sock", std::process::id()));
+                let socket =
+                    std::env::temp_dir().join(format!("cladefs-crash-{}.sock", std::process::id()));
                 let daemon = spawn_daemon(&test_setup, &socket, "extentd", &[], None)?;
                 vm.extent_store_served("extents", &path, CAPACITY, window, &socket);
                 Some(daemon)
@@ -429,7 +443,8 @@ mod host {
                 // a run, or else a time of the run's own, before the writers fill the store, and
                 // with DAX after its store through a mapping (TASK-119.6).
                 let first = if self.dax { 1100 } else { 300 };
-                let crash_ms = std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
+                let crash_ms =
+                    std::env::var("CLADEFS_CRASH_MS").ok().and_then(|ms| ms.parse().ok());
                 let crash_ms: u64 = crash_ms.unwrap_or_else(|| {
                     let now =
                         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap();
@@ -489,7 +504,7 @@ mod host {
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
                     let socket = std::env::var_os("CLADEFS_EXTENTD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
-                    cladefs::extentd::RemoteExtentStore::connect(socket, other, 1 << 24).unwrap();
+                    cladefs::extentd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }
                 if self.daemon_killed {
                     crate::common::say_daemon_stats(&test_setup, "extentd");
@@ -511,7 +526,8 @@ mod host {
                 // cladefs: what the directory's default ACL handed down came with the creations a
                 // journal flush made durable, their inodes never written back (TASK-79.29).
                 {
-                    let acl = |node: &cladefs::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
+                    let acl =
+                        |node: &cladefs::Node, name: &[u8]| block_on(node.getxattr(name)).unwrap();
                     let (dir, _) = block_on(fs.root().lookup(INHERITS.as_bytes())).unwrap();
                     assert_eq!(acl(&dir, b"system.posix_acl_default"), default_acl());
                     let (file, attr) = block_on(dir.lookup(INHERITS_FILE.as_bytes())).unwrap();

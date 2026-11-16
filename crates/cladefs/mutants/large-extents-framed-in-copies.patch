@@ -3,7 +3,7 @@
 # LangSmith's sandbox hosts' daemons writing 2.3 times what their guests did, framings stalling
 # seconds behind it (TASK-310, TASK-330.2).
 # Kind: writes
-# Killer: remote::write_budgets::a_hosts_store_writes_what_its_design_says
+# Killer: bucket::write_budgets::a_hosts_store_writes_what_its_design_says
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
 @@ -2267,10 +2267,6 @@

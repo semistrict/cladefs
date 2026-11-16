@@ -39,9 +39,9 @@ pub const TENANTS: std::ops::RangeInclusive<u64> = 0..=15;
 
 /// Whether this process has a KMS to encrypt and open stores under (`CLADEFS_KMS`, `CLADEFS_MASTER_KEY`):
 /// what the runner asks before it runs any case, refusing to start with none, naming both, as
-/// every process that opens stores does (TASK-411.28; `cladefs::remote::require_kms`).
+/// every process that opens stores does (TASK-411.28; `cladefs::bucket::require_kms`).
 pub fn require_kms() -> anyhow::Result<()> {
-    cladefs::remote::require_kms().map_err(anyhow::Error::msg)
+    cladefs::bucket::require_kms().map_err(anyhow::Error::msg)
 }
 
 /// Makes a local KMS in `dir` (`CLADEFS_KMS=local://DIR`, extent_keys' `LocalKms`), holding a KEK for
@@ -217,7 +217,7 @@ async fn bucket(
     finder: &Finder,
     report: &mut Report,
 ) -> anyhow::Result<()> {
-    let store = extent_remote::store::Store::from_url(url).map_err(anyhow::Error::msg)?;
+    let store = extent_remote::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
     let listed = store.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
     let mut written = BTreeSet::new();
     let mut records = Vec::new();
