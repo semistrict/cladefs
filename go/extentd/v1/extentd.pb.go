@@ -115,6 +115,8 @@ const (
 	VolumeKind_VOLUME_KIND_FXFS VolumeKind = 0
 	// A database of sqlite_extents, which its VFS alone opens.
 	VolumeKind_VOLUME_KIND_SQLITE VolumeKind = 1
+	// A VM's memory: an extent_files volume of one file, its image (TASK-456).
+	VolumeKind_VOLUME_KIND_MEMORY VolumeKind = 2
 )
 
 // Enum value maps for VolumeKind.
@@ -122,10 +124,12 @@ var (
 	VolumeKind_name = map[int32]string{
 		0: "VOLUME_KIND_FXFS",
 		1: "VOLUME_KIND_SQLITE",
+		2: "VOLUME_KIND_MEMORY",
 	}
 	VolumeKind_value = map[string]int32{
 		"VOLUME_KIND_FXFS":   0,
 		"VOLUME_KIND_SQLITE": 1,
+		"VOLUME_KIND_MEMORY": 2,
 	}
 )
 
@@ -1425,9 +1429,15 @@ type StatStoreResponse struct {
 	// The tenant whose cell its branch is a volume of (TASK-364).
 	Tenant uint64 `protobuf:"varint,17,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	// The cell its branch is a volume of.
-	Cell          uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Cell uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
+	// How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
+	// the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
+	// hundred bytes an extent (TASK-443.2).
+	OwnExtents uint64 `protobuf:"varint,19,opt,name=own_extents,json=ownExtents,proto3" json:"own_extents,omitempty"`
+	// How many it holds that it inherited: those whose bytes are `inherited`.
+	InheritedExtents uint64 `protobuf:"varint,20,opt,name=inherited_extents,json=inheritedExtents,proto3" json:"inherited_extents,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *StatStoreResponse) Reset() {
@@ -1582,6 +1592,20 @@ func (x *StatStoreResponse) GetTenant() uint64 {
 func (x *StatStoreResponse) GetCell() uint64 {
 	if x != nil {
 		return x.Cell
+	}
+	return 0
+}
+
+func (x *StatStoreResponse) GetOwnExtents() uint64 {
+	if x != nil {
+		return x.OwnExtents
+	}
+	return 0
+}
+
+func (x *StatStoreResponse) GetInheritedExtents() uint64 {
+	if x != nil {
+		return x.InheritedExtents
 	}
 	return 0
 }
@@ -3671,7 +3695,7 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"\x13\n" +
 	"\x11SyncStoreResponse\"&\n" +
 	"\x10StatStoreRequest\x12\x12\n" +
-	"\x04path\x18\x01 \x01(\tR\x04path\"\xa8\x04\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"\xf6\x04\n" +
 	"\x11StatStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x12\n" +
@@ -3693,7 +3717,10 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x14pending_upload_bytes\x18\x0f \x01(\x04R\x12pendingUploadBytes\x12*\n" +
 	"\x11oldest_pending_ms\x18\x10 \x01(\x04R\x0foldestPendingMs\x12\x16\n" +
 	"\x06tenant\x18\x11 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x12 \x01(\x04R\x04cell\"\x13\n" +
+	"\x04cell\x18\x12 \x01(\x04R\x04cell\x12\x1f\n" +
+	"\vown_extents\x18\x13 \x01(\x04R\n" +
+	"ownExtents\x12+\n" +
+	"\x11inherited_extents\x18\x14 \x01(\x04R\x10inheritedExtents\"\x13\n" +
 	"\x11ListStoresRequest\"M\n" +
 	"\x12ListStoresResponse\x127\n" +
 	"\x06stores\x18\x01 \x03(\v2\x1f.cladefs.extentd.v1.ListedStoreR\x06stores\"\\\n" +
@@ -3857,11 +3884,12 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*:\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*R\n" +
 	"\n" +
 	"VolumeKind\x12\x14\n" +
 	"\x10VOLUME_KIND_FXFS\x10\x00\x12\x16\n" +
-	"\x12VOLUME_KIND_SQLITE\x10\x012\x9f\x13\n" +
+	"\x12VOLUME_KIND_SQLITE\x10\x01\x12\x16\n" +
+	"\x12VOLUME_KIND_MEMORY\x10\x022\x9f\x13\n" +
 	"\aExtentd\x12^\n" +
 	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
 	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +

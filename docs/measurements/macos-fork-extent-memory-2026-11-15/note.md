@@ -99,6 +99,7 @@ E.g. 32,768, point: 7,796,987 x 400 = 3,118,794,800. Linear in forks as measured
 - The review's claim holds, and its 150-200 B an extent was low: 221 to 238 B for the store's map
   alone, 451 to 468 B for a fork of a live store. Fix filed: TASK-453.
 - Which a real host is depends on the extent count of a real base image, which nothing reports
-  (`fxdaxctl stat` gives bytes): TASK-454. Not guessed here.
+  (`fxdaxctl stat` gives bytes): TASK-454. Not guessed here. Since TASK-454, `cladefsctl stat
+  DIR` prints it, `own_extents` and `inherited_extents` (StatStore's fields of those names).
 - Not measured here: the daemon on Linux (resident memory, glibc's overhead on these many small
   allocations, connections), which is TASK-443.2's first criterion.

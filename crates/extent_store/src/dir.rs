@@ -11,7 +11,6 @@ use std::io;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// A file of a store.
@@ -173,9 +172,10 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// A directory of the host's.
 ///
-/// cladefs: every file of it bypasses the host's page cache where its file system allows
-/// (`O_DIRECT` on Linux, `F_NOCACHE` on macOS), its reads and writes by the blocks around them,
-/// from memory aligned to them (`extent_remote::direct`), so that no byte of a store's is held in
+/// cladefs: every file of it bypasses the host's page cache (`O_DIRECT` on Linux, `F_NOCACHE` on
+/// macOS), or is not opened: a file system that can't fails its openings (TASK-433.6). Its reads
+/// and writes go by the blocks around them, from memory aligned to them
+/// (`extent_remote::direct`), so that no byte of a store's is held in
 /// the host's page cache, a memory no budget of the process's counts (TASK-433). Extents' files
 /// go through the process's page cache instead ([`crate::pages`]): a write lands there and
 /// returns, the disk taking it later, coalesced, as the host's page cache had it, a `WRITE`
@@ -208,8 +208,8 @@ pub type HostFile = crate::CachedFile<DiskFile>;
 impl HostDir {
     /// The directory at `path`, which exists, its extents' files through the process's page cache
     /// ([`crate::pages::shared`]). Its files are opened bypassing the host's page cache, or not
-    /// at all: a file system that refuses to fails their openings (`EINVAL`), never falling back to
-    /// the host's cache, a second memory (TASK-433).
+    /// at all: a file system that refuses to fails their openings (`InvalidInput`), never falling
+    /// back to the host's cache, a second memory (TASK-433, TASK-433.6).
     pub fn new(path: &Path) -> io::Result<Self> {
         Ok(Self::over(DiskDir::new(path)?, crate::pages::shared().clone()))
     }
@@ -218,20 +218,12 @@ impl HostDir {
     pub fn path(&self) -> &Path {
         &self.under().path
     }
-
-    /// Whether its files bypass the host's page cache, as the last one opened did: as each must,
-    /// once one was.
-    pub fn is_direct(&self) -> bool {
-        self.under().bypassing.load(Ordering::Relaxed)
-    }
 }
 
 /// cladefs: a directory of the host's, its files bypassing the host's page cache: what a
 /// [`HostDir`] holds its extents' files in a page cache of the process's over.
 pub struct DiskDir {
     path: PathBuf,
-    /// Whether the last file opened bypasses it.
-    bypassing: AtomicBool,
     /// The directory, open, for `barrier`, and for the `flock` taking it, which outlives this
     /// while other takings of it in the process do ([`Dir::take`]).
     handle: Arc<std::fs::File>,
@@ -241,23 +233,13 @@ impl DiskDir {
     /// The directory at `path`, which exists.
     pub fn new(path: &Path) -> io::Result<Self> {
         let handle = Arc::new(std::fs::File::open(path)?);
-        Ok(Self { path: path.to_owned(), bypassing: AtomicBool::new(false), handle })
+        Ok(Self { path: path.to_owned(), handle })
     }
 
-    /// `file`, opened at `path`, bypassing the host's page cache, or refused if its file system
-    /// refuses that.
+    /// `file`, opened at `path`, bypassing the host's page cache, or refused, naming it, if its
+    /// file system refuses that (`InvalidInput`, [`extent_remote::direct::bypass`]).
     fn file(&self, path: &str, file: std::fs::File) -> io::Result<DiskFile> {
-        let direct = extent_remote::direct::bypass(&file);
-        self.bypassing.store(direct, Ordering::Relaxed);
-        if !direct {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE)",
-                    self.path.join(path).display()
-                ),
-            ));
-        }
+        extent_remote::direct::bypass(&file, &self.path.join(path))?;
         Ok(DiskFile { file, tail: Mutex::default() })
     }
 }
@@ -455,12 +437,12 @@ impl AsRawFd for DiskFile {
 
 impl File for DiskFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        extent_remote::direct::read_at(&self.file, true, buf, offset)
+        extent_remote::direct::read_at(&self.file, buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut tail = self.tail.lock().unwrap();
-        extent_remote::direct::write_at(&self.file, true, &mut tail, buf, offset)
+        extent_remote::direct::write_at(&self.file, &mut tail, buf, offset)
     }
 
     /// Taken as no write is in flight: a write of part of a block writes it whole, the file cut
@@ -520,23 +502,5 @@ fn again_if_interrupted(call: impl Fn() -> libc::c_int) -> io::Result<()> {
         if err.kind() != io::ErrorKind::Interrupted {
             return Err(err);
         }
-    }
-}
-
-/// Makes I/O on `fd`'s file bypass the host's page cache, if its file system allows, and returns
-/// whether it does.
-pub fn bypass_page_cache(fd: RawFd) -> bool {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: Reads and sets the status flags of an open file descriptor.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT) == 0
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        // SAFETY: Sets an option of an open file descriptor.
-        unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) == 0 }
     }
 }

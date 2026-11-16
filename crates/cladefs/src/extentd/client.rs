@@ -702,6 +702,16 @@ impl DaemonConnection {
         self.opening(store.as_ref(), Opening::Create(capacity, Kind::Sqlite))
     }
 
+    /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
+    /// exist, a memory volume of its new cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
+    pub fn open_memory(
+        self,
+        store: impl AsRef<Path>,
+        capacity: u64,
+    ) -> Result<RemoteExtentStore, Error> {
+        self.opening(store.as_ref(), Opening::Create(capacity, Kind::Memory))
+    }
+
     /// The store at `store`, forked from the store at `from` if it doesn't exist: of a VM restored
     /// from a snapshot, whose store point `from` is (TASK-39.1). cladefs: the daemon opens it once
     /// for the restores of one snapshot, and keeps it open for them (TASK-92.5). A point that

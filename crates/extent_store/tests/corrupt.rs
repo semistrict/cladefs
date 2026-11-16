@@ -191,6 +191,9 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
         assert_eq!(extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap(), data);
+        // The framed file under its own name, which the thread making framings durable renames it
+        // to once durable, after the flush returns (TASK-399): what `stored` opens.
+        store.wait_idle().unwrap();
         let byte = stored(&dir, &store, extent(1), MIB as u64 + 5);
         flip(&dir, &byte);
         let Err(error) = closed.bytes() else { panic!("took a flipped byte") };

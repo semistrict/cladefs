@@ -2095,15 +2095,11 @@ fn closed_segments_keep_no_more_files_open_than_allowed() {
 
 /// What a store's files did, by the directory each is in: their syncs that let their pages go
 /// from the host's page cache, of those of extents' data, as a host's do, written through it
-/// (`HostFile::sync`); the bytes read; and of those, the bytes read of extents' data, which a
-/// host's read bypassing its page cache, and the bytes read through that cache
-/// (`File::read_cached`).
+/// (`HostFile::sync`); and the bytes read.
 #[derive(Default)]
 struct Counts {
     drops: BTreeMap<String, u64>,
     read: BTreeMap<String, u64>,
-    direct: BTreeMap<String, u64>,
-    cached: BTreeMap<String, u64>,
 }
 
 /// cladefs: a store's directory in memory whose files count what they do ([`Counts`]).
@@ -2140,40 +2136,16 @@ impl Counting {
     fn read(&self) -> BTreeMap<String, u64> {
         self.counts.lock().unwrap().read.clone()
     }
-
-    /// The bytes read so far of files of extents' data, which a host's read bypassing its page
-    /// cache.
-    fn direct(&self) -> BTreeMap<String, u64> {
-        self.counts.lock().unwrap().direct.clone()
-    }
-
-    /// The bytes read so far through the page cache ([`extent_store::File::read_cached`]).
-    fn cached(&self) -> BTreeMap<String, u64> {
-        self.counts.lock().unwrap().cached.clone()
-    }
-}
-
-/// Of `counts`, by directory, those of raw files' directories: open segments' and open extents'.
-fn of_raw_files(counts: BTreeMap<String, u64>) -> BTreeMap<String, u64> {
-    counts.into_iter().filter(|(kind, _)| kind.starts_with("open-")).collect()
 }
 
 impl extent_store::File for CountedFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-        let mut counts = self.counts.lock().unwrap();
-        *counts.read.entry(self.kind.clone()).or_default() += buf.len() as u64;
-        if self.data {
-            *counts.direct.entry(self.kind.clone()).or_default() += buf.len() as u64;
-        }
-        drop(counts);
+        *self.counts.lock().unwrap().read.entry(self.kind.clone()).or_default() += buf.len() as u64;
         self.file.read_at(buf, offset)
     }
 
     fn read_cached(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
-        let mut counts = self.counts.lock().unwrap();
-        *counts.read.entry(self.kind.clone()).or_default() += buf.len() as u64;
-        *counts.cached.entry(self.kind.clone()).or_default() += buf.len() as u64;
-        drop(counts);
+        *self.counts.lock().unwrap().read.entry(self.kind.clone()).or_default() += buf.len() as u64;
         self.file.read_cached(buf, offset)
     }
 
@@ -2254,82 +2226,6 @@ fn durable_commits_keep_the_open_segments_pages_cached() {
     assert_eq!(dir.drops(), BTreeMap::from([("segments".to_owned(), 1)]));
 }
 
-/// cladefs: a store reads its raw files, the open segment's, those of segments being framed or set
-/// aside, and open extents' own, through the host's page cache, which holds what was just written
-/// to them: a read bypassing it writes the dirty pages it reads back first, waiting for the host's
-/// disk. Under pgbench's load, a commit copying the extents written in pieces waited about 4 ms a
-/// MiB for it, and up to 400 ms, under the store's state, holding every write back; and a closed
-/// segment's framing took a median 100-190 ms to read it (TASK-91.17, TASK-79.93). Here a commit
-/// copies two extents written in pieces, one after the other's, frames the segment it closes, and
-/// frames an extent written in a file of its own; then reopened, the branch frames the open
-/// segment left raw. Each reads its raw file through the cache.
-#[test]
-fn raw_files_are_read_through_the_page_cache() {
-    let dir = Counting::new();
-    let store = create(dir.clone(), 1 << 20);
-    for half in 0..2 {
-        for sequence in 1..=2 {
-            let data = pattern(sequence as u8, half * BLOCK, BLOCK);
-            store.write(extent(sequence), (half * BLOCK) as u64, &data).unwrap();
-        }
-    }
-    let large = OPTIONS.large_extent as usize;
-    store.write(extent(3), 0, &pattern(3, 0, large)).unwrap();
-    store.close_segment().unwrap();
-    store.commit(None).unwrap();
-    // Framed, on a thread of its own, which no commit waits for (TASK-221).
-    settled(&store);
-    assert_eq!(of_raw_files(dir.direct()), BTreeMap::new());
-    // The copies of the two extents, 4 blocks, and the segment framed, 8; the large extent framed.
-    // The flush reads back none: the commit stored an extent on its own, whose data it syncs
-    // before the records, which hold no runs then (TASK-301).
-    let cached = |segments: usize| {
-        let kinds = [("open-extents", large), ("open-segments", segments)];
-        BTreeMap::from(kinds.map(|(kind, bytes)| (kind.to_owned(), bytes as u64)))
-    };
-    assert_eq!(of_raw_files(dir.cached()), cached(12 * BLOCK));
-    store.write(extent(4), 0, &pattern(4, 0, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    drop(store);
-    let store = Store::open(dir.clone(), OPTIONS).unwrap();
-    assert_eq!(of_raw_files(dir.direct()), BTreeMap::new());
-    // And extent 4's block, read back by its flush, whose record holds it (TASK-301), and the
-    // open segment left raw, read twice by the opening, which closes it again: by its recovery,
-    // which finds what it holds, and by its framing, once the store's keys are known (TASK-411.9).
-    assert_eq!(of_raw_files(dir.cached()), cached(15 * BLOCK));
-    for (sequence, len) in [(1, 2 * BLOCK), (2, 2 * BLOCK), (3, large), (4, BLOCK)] {
-        assert!(read(&store, extent(sequence), 0, len) == pattern(sequence as u8, 0, len));
-    }
-}
-
-/// cladefs: every read of a raw file's data goes through the host's page cache, whoever asks, as the
-/// store's copies and framings do (`raw_files_are_read_through_the_page_cache`): the guest's
-/// (`Store::read`), the uploader's (`Store::read_kept`) and a follower's (`Store::read_view`) of an
-/// extent committed in the open segment, and the guest's of an extent open in a file of its own.
-/// What the store wrote lately is what they read most (TASK-91.17).
-#[test]
-fn reads_of_raw_files_go_through_the_page_cache() {
-    let dir = Counting::new();
-    let store = create(dir.clone(), 1 << 20);
-    store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
-    store.commit(None).unwrap();
-    let large = OPTIONS.large_extent as usize;
-    store.write(extent(2), 0, &pattern(2, 0, large)).unwrap();
-    let view = store.view();
-    // Extent 1's block, read back by the commit's flush, which checksums it (TASK-301).
-    let flushed = BTreeMap::from([("open-segments".to_owned(), BLOCK as u64)]);
-    assert_eq!(of_raw_files(dir.cached()), flushed);
-    assert!(read(&store, extent(1), 0, BLOCK) == pattern(1, 0, BLOCK));
-    let mut viewed = vec![0; BLOCK];
-    store.read_view(&view, extent(1), 0, &mut viewed).unwrap();
-    assert!(viewed == pattern(1, 0, BLOCK));
-    assert!(read(&store, extent(2), 0, large) == pattern(2, 0, large));
-    assert_eq!(of_raw_files(dir.direct()), BTreeMap::new());
-    let kinds = [("open-extents", large), ("open-segments", 3 * BLOCK)];
-    let cached = BTreeMap::from(kinds.map(|(kind, bytes)| (kind.to_owned(), bytes as u64)));
-    assert_eq!(of_raw_files(dir.cached()), cached);
-}
-
 /// cladefs: a branch opening again reads of the segments of its write-ahead log their tails alone:
 /// each's trailer and footer, which the replay of its footers needs, and its trailer and table,
 /// which say how much data it holds, three blocks; none of their data, their raw files gone, their
@@ -2389,7 +2285,6 @@ fn cached_pages(path: &std::path::Path) -> usize {
 fn stores_files_hold_no_pages_in_the_hosts_page_cache() {
     let temp = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let store = create(HostDir::new(temp.path()).unwrap(), 64 << 20);
-    assert!(store.dir().is_direct(), "the host's file system bypasses no page cache");
     for sequence in 1..=8 {
         store.write(extent(sequence), 0, &pattern(sequence as u8, 0, BLOCK)).unwrap();
         store.commit(None).unwrap();
@@ -3494,6 +3389,46 @@ fn extents_written_in_runs_seal_where_they_are() {
     }
 }
 
+/// cladefs: once `Store::close` returns, the store reads its directory no more: a look ahead
+/// reading a part written whole when the store closed (on the framer's thread, holding no lock,
+/// TASK-400) ends before close returns. It read on after, and a store opened on the directory
+/// meanwhile counted up to a part of the closed store's reads as its opening's (TASK-426).
+#[test]
+fn close_waits_for_a_look_ahead_reading() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::sync::{Mutex, atomic::AtomicBool, atomic::Ordering};
+    const MIB: usize = 1 << 20;
+    let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let store = Arc::new(Store::create(MemDir::new(), description, options).unwrap());
+    let (reading, looking) = channel();
+    let (go, gone) = channel::<()>();
+    let (reading, gone) = (Mutex::new(reading), Mutex::new(gone));
+    let released = Arc::new(AtomicBool::new(false));
+    let held = fail::FailGuard::with_callback("store::looking_ahead", move || {
+        let _ = reading.lock().unwrap().send(());
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    // Its first parts, written whole: looks ahead at them queued, the first reading, held.
+    store.write(extent(1), 0, &pattern(1, 0, 2 * MIB)).unwrap();
+    looking.recv().unwrap();
+    let (closed, closing) = channel();
+    let thread = std::thread::spawn({
+        let (store, released) = (store.clone(), released.clone());
+        move || {
+            store.close().unwrap();
+            closed.send(released.load(Ordering::SeqCst)).unwrap();
+        }
+    });
+    let timeout = std::time::Duration::from_millis(500);
+    assert_eq!(closing.recv_timeout(timeout), Err(RecvTimeoutError::Timeout), "closed, reading");
+    released.store(true, Ordering::SeqCst);
+    drop((go, held));
+    assert_eq!(closing.recv(), Ok(true), "close returned once the look ahead read");
+    thread.join().unwrap();
+}
+
 /// An extent larger than the part sealing frames at once (16 MiB) is framed whole.
 #[test]
 fn extents_larger_than_a_framing_chunk_seal_whole() {
@@ -3700,9 +3635,10 @@ fn parts_read_again_are_unpacked_once() {
     assert_eq!(unpacks() - before, 35);
 }
 
-/// cladefs: a store's bytes are its branch's own, of the extents it wrote, or inherited from the
-/// branches it was forked from, which it holds in the bucket (TASK-165.7), as they write and free,
-/// and opened again (TASK-49).
+/// cladefs: a store's bytes, and its extents, are its branch's own, of the extents it wrote, or
+/// inherited from the branches it was forked from, which it holds in the bucket (TASK-165.7), as
+/// they write, grow and free, and opened again (TASK-49); the extents counted as they come and go
+/// (TASK-454).
 #[test]
 fn stores_tell_their_own_bytes_from_those_inherited() {
     let parent = BRANCH.id + 1;
@@ -3713,20 +3649,29 @@ fn stores_tell_their_own_bytes_from_those_inherited() {
         let location = bucket_location(key, sequence * 8 * BLOCK as u64, blocks * BLOCK as u64);
         state.extents.insert(ExtentId::new(parent, sequence), location);
     }
-    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
-    store.write(extent(1), 0, &[3; BLOCK]).unwrap();
-    store.write(extent(2), 0, &[4; 40 << 10]).unwrap();
-    store.free(ExtentId::new(parent, 1)).unwrap();
-    store.free(extent(2)).unwrap();
-    store.commit(None).unwrap();
-    let bytes = |store: &Store<MemDir>| {
+    // Own bytes and inherited, own extents and inherited.
+    let held = |store: &Store<MemDir>| {
         let info = store.info().unwrap();
-        (info.own, info.inherited)
+        (info.own, info.inherited, info.own_extents, info.inherited_extents)
     };
     let block = BLOCK as u64;
-    assert_eq!(bytes(&store), (block, 3 * block));
+    let store = created_on(dir.clone(), 1 << 20, state.clone(), WRITER);
+    assert_eq!(held(&store), (0, 5 * block, 0, 2));
+    store.write(extent(1), 0, &[3; BLOCK]).unwrap();
+    store.write(extent(2), 0, &[4; 40 << 10]).unwrap();
+    // Written again, and grown: no more extents.
+    store.write(extent(1), 0, &[5; BLOCK]).unwrap();
+    store.write(extent(2), 40 << 10, &[6; BLOCK]).unwrap();
+    assert_eq!(held(&store), (block + (44 << 10), 5 * block, 2, 2));
+    store.free(ExtentId::new(parent, 1)).unwrap();
+    store.free(extent(2)).unwrap();
+    // Freed again: held no more already.
+    store.free(extent(2)).unwrap();
+    assert_eq!(held(&store), (block, 3 * block, 1, 1));
+    store.commit(None).unwrap();
+    assert_eq!(held(&store), (block, 3 * block, 1, 1));
     drop(store);
-    assert_eq!(bytes(&opened_on(dir, state, WRITER)), (block, 3 * block));
+    assert_eq!(held(&opened_on(dir, state, WRITER)), (block, 3 * block, 1, 1));
 }
 
 /// TASK-295: a write-ahead log dropped, as `cladefsctl take` drops one another writer's commits

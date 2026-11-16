@@ -3,11 +3,11 @@ id: TASK-375
 title: >-
   A measurement round says when others wrote to its disk: fxjob --bench isolates
   CPU, cache and memory bandwidth, not the disk
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12 07:45'
-updated_date: '2026-11-15 20:47'
+updated_date: '2026-11-16 00:43'
 labels:
   - testing
   - ubu1
@@ -31,7 +31,7 @@ Found 2026-11-12 by the coordinator, not by the run: TASK-330.4's qualification 
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -68,4 +68,12 @@ Two fxjob --bench jobs of 90 s each (a dd+fsync workload in the job's TMPDIR sta
 Not shown by that check, by the rule that a loader runs inside the round's job: a loader on the scratch disk in another cgroup (zd0's count less the cgroup's), covered by unit tests only. Unverified on ubu1 until it runs: that fxdax-bench.slice has io.stat and the job's scope's ancestors hold nothing else; that the pool's objset kstats and /dev/zvol links are as assumed. If alone says UNCHECKED, its why names which.
 
 2026-11-15, ubu1, main a252cb53f: scripts/contamination-check.sh /mnt/fxdax-scratch/t375check/r1, all passed. Alone: clean, others wrote 2.6 MB/s over 90 s (2.9 worst minute; bounds 10 and 50); its I/O a cgroup's. Beside the loader (in the same bench job, writing to ZFS home): CONTAMINATED, others 91.8 MB/s over the round (rpool/USERDATA/home 89.6, zd0 1.9, var/lib 0.2), 116.1 MB/s in its first minute; bench-ab.py: pass NO RESULT [contaminated rounds left out: 1], written (MiB) kept, exit 1, saying why. The beside job waited 450 s for the bench slot behind another job. DoD #2: scripts/upstream-changes.py --check passes. DoD #3: no upstream code touched. DoD #1 open: the workspace tests on ubu1 under fxjob have not run on this change.
+
+2026-11-15: Linux, ubu1 under fxjob (CARGO_BUILD_JOBS=4, --test-threads 4), main 21f042594: scripts/test.sh parts workspace and go, 2817 tests passed, 83 skipped; go/extentd/v1 ok (clippy passed in the run before, on 618403778). macOS: the crates this change touched and the scripts suite (see notes above). DoD #1 checked on that evidence.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+scripts/contamination.py runs each measurement round and records others' disk I/O and its own pressure (contamination.json: clean, contaminated, unchecked); bench-ab.py leaves contaminated rounds' timings out, keeps counts, NO RESULT when a side has none clean. Verified: 56 unit tests on fixture sysfs trees; scripts/contamination-check.sh on ubu1 (alone clean at 2.6 MB/s, beside a loader contaminated at 91.8 MB/s, timings left out); Linux workspace 2817 passed.
+<!-- SECTION:FINAL_SUMMARY:END -->

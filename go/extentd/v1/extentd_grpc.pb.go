@@ -190,7 +190,9 @@ type ExtentdClient interface {
 	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(ctx context.Context, in *SyncStoreRequest, opts ...grpc.CallOption) (*SyncStoreResponse, error)
-	// What a store is, and holds.
+	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
+	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
+	// branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatStore(ctx context.Context, in *StatStoreRequest, opts ...grpc.CallOption) (*StatStoreResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
 	// with what StatStore says of each (TASK-50.5).
@@ -589,7 +591,9 @@ type ExtentdServer interface {
 	// Returns once every commit of a store, as of the call, is durable and in the daemon's bucket,
 	// as before a clean stop.
 	SyncStore(context.Context, *SyncStoreRequest) (*SyncStoreResponse, error)
-	// What a store is, and holds.
+	// What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
+	// many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
+	// branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
 	StatStore(context.Context, *StatStoreRequest) (*StatStoreResponse, error)
 	// Lists the stores the daemon serves: those VM processes have open, as writers or followers,
 	// with what StatStore says of each (TASK-50.5).

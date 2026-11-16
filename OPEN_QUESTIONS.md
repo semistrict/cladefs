@@ -21,6 +21,53 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## The glossary: one word per concept, in code too (CONTEXT.md, 2026-11-15)
+
+You chose, grilled: the choices bind identifiers too; **seal** is extents' (encryption says
+*encrypted*); **remote** retired (bucket, daemon client); commit levels **Ordered / Local /
+Uploaded**; `Store` the extent store's alone; **snapshot** VMs' and Fxfs's (points, stats);
+**epoch** a taking's number, a commit's is a **commit number**; a cell's named branch is a
+**vdisk**, **volume** Fxfs's; **collector**, gc its short name; **fork**, not clone or restore;
+**placement** a cell's holding (open extents' `Packing`, the cache's arena); **prefault**;
+**tenant ID** only; segment **phase**, **stage** only the second stage; one `ExtentId`,
+**sequence** vs **segment** number; **test host** (`CLADEFS_TEST_HOST*`); **taking** for what
+was a branch lease; **halted** for a store stopped by a panic or shred, **fenced** for cut off;
+**LangSmith's pin** vs **pin** vs **pinned version**; part cache's env vars named; **round** A/B
+only, a case's **repeats**; same-named types one concept; Follower.tla takes the code's words;
+**room** a segment's alone. Daemon names are TASK-475's (cladefsd).
+
+Decided without you (rest of the scan):
+- **base**: a store VMs fork, public or attached. The WAL's base becomes its **start**
+  (`wal::START`); MakePublic's `generation` flag becomes `attach_only`, so **generation** is keys'
+  (and GCS's) alone. *Instead:* keep `generation` for both.
+- **Default tenant**: `NO_TENANT` becomes `DEFAULT_TENANT`; prose says default tenant, not tenant 0.
+- **acknowledged**: a segment's, by the bucket. A VM process's taking in the daemon's window
+  changes is **confirmed**.
+- **Wire flags**: the extentd wire uses virtio's bits for `COMMIT_*` and `MAP_ZEROS`, one set, as
+  formats change outright. *Instead:* distinct names on the wire.
+- **super-block** for Fxfs's on-disk record, **superblock** for the kernel's VFS one; upstream
+  Fxfs code left as written.
+- **checkpoint**: the bucket's; Fxfs's is a **journal checkpoint** (upstream). Bucket.tla's two
+  abbreviations become one, `ckpt`.
+- **region**: the guest's mapping of a whole extent in its window; virtio's is always a **shared
+  memory region**. **Staging extent**: the allocator's packing of small files, writable DAX's
+  being history.
+- **reader**: a task in a follower's guest; doc-8's "readers are VMs" says followers.
+- **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
+*Undo:* edit CONTEXT.md; the renames are TASK-474 (after TASK-475), stale docs TASK-473.
+
+## The nightly: what it measures, its bounds, and what counts as main moving (TASK-441.1, .2, 2026-11-15)
+
+Decided without you:
+- **Cases**: bench-fs-fxfs-guest-dax (groups io, files, fsync, sync), the fork cases cold and warm, and bench-fs-ext4-guest-kernel as the control; 3 rounds of 2 iterations, each round left out rerun once. *Instead:* more cases (fxfs-guest without DAX, pgbench, scaling), which would double the bench slot's night. *Undo:* `CLADEFS_NIGHTLY_CASES`/`_GROUPS`/`_ROUNDS`.
+- **Bounds**: a timing moved past 10% (the task's mutant), the round's control moved when the median of its timings' ratios is past 5% (a host shift moves most of them; one noisy workload doesn't), counts exact. No per-workload bound yet: nothing measured on ubu1 says which workloads are noisier than 10% over three rounds; the first five quiet nights (TASK-441 AC #2) set those (`CLADEFS_AB_BOUNDS`). *Undo:* the defaults in scripts/ab-rounds.py.
+- **Counts are exact, but a daemon's peak anonymous memory**, which its stats sample rather than count, is within 10% (`NAMED` in ab-rounds.py). Written bytes per guest byte by kind are compared exactly: if framing's timing makes them flap, the quiet nights will show it, and `CLADEFS_AB_BOUNDS` takes a bound for them.
+- **A slot whose round and rerun were both left out makes every timing NO RESULT**, rather than judging on the rounds left: "moved in every kept round" over two rounds would report more noise. *Instead:* a minimum of kept rounds.
+- **Main moved** is a commit that changed more than docs/measurements and backlog: the nightly's own commits move main, and so do the many backlog-only commits, none of which change what is measured. *Undo:* nightly.py's `NOT_CODE`.
+- **The count benchmarks run once per commit, with its build, as work**, and the baseline's are those kept from the night it was the head: they are exact, so another run measures the same. *Instead:* rerun them for both sides each night (a second sim build of the base's tests).
+- **Both directions are filed** (slower and faster, higher and lower): a count that fell can be work skipped. *Undo:* `MOVED` in ab-rounds.py.
+- **The nightly's clone runs main's own scripts** (it rebases on origin's main and re-executes itself), its results committed as "cladefs nightly <nightly@HOST>".
+
 ## loom behind features; orderings stronger than needed left as they are (TASK-444.2, 2026-11-15)
 
 Decided without you:

@@ -14,6 +14,10 @@
 #
 # CLADEFS_BENCH_CASES and CLADEFS_BENCH_GROUPS choose what runs (scripts/bench.sh).
 # CLADEFS_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from SOURCE.
+# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
+# cases' artifacts and the guest kernel into the work directory, as work; `measure` runs the
+# bench against them, building nothing; unset, both (scripts/bench-host.sh runs the two as jobs
+# of their own, TASK-368).
 set -euo pipefail
 repo=$(cd "${1:?source required}" && pwd)
 results=${2:?results directory required}
@@ -21,19 +25,29 @@ iterations=${3:-3}
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
 host_setup
 host_tree bench-tree
-# scripts/bench.sh runs its cases through scripts/test-e2e.sh, which runs the VMM's tests under
-# nextest first (TASK-220): without it, every run failed there, "no such command: nextest" (GCE r1022).
-host_need cargo-nextest
-# Build the guest kernel from this source when asked, as test-linux-host.sh does.
-case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
-    '') ;;
-    release | debug)
-        host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"
-        export CLADEFS_GUEST_KERNEL=$host_kernel_image
-        sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
-        ;;
-    *) echo "CLADEFS_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2 ;;
-esac
+artifacts=$work/artifacts-bench
+if [[ $host_phase != measure ]]; then
+    # Build the guest kernel from this source when asked, as test-linux-host.sh does; or boot
+    # CLADEFS_GUEST_KERNEL's.
+    kernel=${CLADEFS_GUEST_KERNEL:-}
+    case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
+        '') ;;
+        release | debug)
+            host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"
+            kernel=$host_kernel_image
+            ;;
+        *) echo "CLADEFS_GUEST_KERNEL_BUILD is release or debug" >&2; exit 2 ;;
+    esac
+    host_artifacts "$artifacts" bench "$kernel"
+    if [[ $host_phase == build ]]; then
+        echo "Built in ${SECONDS}s." | tee "$results/build.txt"
+        exit 0
+    fi
+fi
+host_prebuilt "$artifacts"
+if [[ -n ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
+fi
 # With CLADEFS_BENCH_PERF=record, perf samples each case's VMM, its threads'
 # stacks (record-all: the whole host's, the extent daemon's too), and
 # perf-CASE.txt says where their time went, and perf-CASE-THREAD.txt each busy

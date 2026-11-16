@@ -10,10 +10,10 @@
 //! maps its cache's pages there, read-only, and this process's faults there go to it, through
 //! userfaultfd. So a page SQLite reads in place is the cache's page itself.
 
-use crate::window::{Contents, Run, Window};
 use crate::{Options, Volume};
 use anyhow::{Context as _, Error, ensure};
 use cladefs::{MappingContents, RemoteDevice, RemoteExtentStore, WindowMapping};
+use extent_files::{Contents, Run, Window};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;

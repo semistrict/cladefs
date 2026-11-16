@@ -189,7 +189,7 @@ mod written;
 pub use written::{Written, written};
 
 pub use cached::{CachedDir, CachedFile};
-pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile, bypass_page_cache};
+pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
 /// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::{Branch, Cell};
 pub use framed::{Aligned, Packed, Part, read_object, read_whole, unpacks};

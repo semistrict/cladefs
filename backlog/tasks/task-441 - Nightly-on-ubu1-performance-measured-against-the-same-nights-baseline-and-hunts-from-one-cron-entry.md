@@ -3,10 +3,11 @@ id: TASK-441
 title: >-
   Nightly on ubu1: performance measured against the same night's baseline, and
   hunts, from one cron entry
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 11:46'
-updated_date: '2026-11-15 13:31'
+updated_date: '2026-11-15 23:48'
 labels:
   - testing
   - ubu1
@@ -39,3 +40,9 @@ Almost every performance problem so far was found by the sandbox team first (rou
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-11-15: installed on ubu1 by ~/docs/system-setup.d/151-cladefs_nightly.sh (committed in ubu1's ~/docs as 5a30bd1), which runs scripts/nightly-install.sh as ramon: clone ~/src/cladefs-nightly, cron 0 2 * * * nightly-host.sh, log ~/.local/state/cladefs/nightly/cron.log. Checked first: backlog CLI 1.55.3 in ~/.local/bin; a cron-like environment (env -i, no agent, BatchMode) can push to origin over ssh (key without passphrase; dry run). nightly-install.sh was mode 644 in git; fixed in 66655cd02. The first night is the one starting 02:00 EST 2026-11-16; nothing has run on Linux before it.
+<!-- SECTION:NOTES:END -->

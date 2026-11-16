@@ -549,6 +549,7 @@ dependencies = [
  "bitflags",
  "cladefs",
  "event-listener",
+ "extent_files",
  "extent_frame",
  "extent_keys",
  "extent_remote",
@@ -946,6 +947,18 @@ checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
  "parking",
  "pin-project-lite",
+]
+
+[[package]]
+name = "extent_files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "rand 0.10.3",
+ "storage_device",
+ "thiserror",
 ]
 
 [[package]]
@@ -3766,6 +3779,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cladefs",
+ "extent_files",
  "extent_keys",
  "extent_remote",
  "extent_store",

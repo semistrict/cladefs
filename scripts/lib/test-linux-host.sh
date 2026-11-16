@@ -17,6 +17,12 @@
 # guest case skipped). It builds in trees that persist between runs, so that a run builds only
 # what changed.
 #
+# As a measurement's run (CLADEFS_HOST_BENCH=1, scripts/perf-gate-host.sh's), it runs in two jobs
+# (linux-host-setup.sh's host_phase): `build`, as work, the workspace's tests, the guest kernel and
+# the guest tests' artifacts (test-e2e.sh's CLADEFS_E2E_BUILD_ONLY); then `measure`, alone, the
+# guest tests against those, building nothing, nor running the harness's own tests (TASK-368). A
+# coverage kernel's counts are read against its build, so that runs in one job alone.
+#
 # Usage: test-linux-host.sh SOURCE RESULTS [TEST...]
 set -euo pipefail
 repo=$(cd "${1:?source required}" && pwd)
@@ -35,7 +41,7 @@ host_record > "$results/host.txt"
 # with exit 127, the parts after it unrun (2026-11-07, TASK-222's run).
 export CLADEFS_TEST_PARTS=${CLADEFS_TEST_PARTS:-clippy workspace sim shuttle scripts guest firecracker}
 
-if [[ ${CLADEFS_WORKSPACE_TESTS:-1} != 0 ]]; then
+if [[ $host_phase != measure && ${CLADEFS_WORKSPACE_TESTS:-1} != 0 ]]; then
     echo "== cladefs tests" >&2
     read -ra test_args <<< "${CLADEFS_TEST_ARGS:-}"
     "$repo/scripts/test.sh" --no-fail-fast "${test_args[@]}" \
@@ -46,27 +52,45 @@ fi
 if [[ ${CLADEFS_GUEST_TESTS:-1} == 0 ]]; then
     exit "$status"
 fi
-if [[ -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
-    CLADEFS_GUEST_KERNEL_BUILD=${CLADEFS_GUEST_KERNEL_BUILD:-release}
+artifacts=$work/artifacts-e2e
+if [[ $host_phase != measure ]]; then
+    if [[ -z ${CLADEFS_GUEST_KERNEL:-} ]]; then
+        CLADEFS_GUEST_KERNEL_BUILD=${CLADEFS_GUEST_KERNEL_BUILD:-release}
+    fi
+    case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
+        '') ;;
+        release | debug | kasan | coverage | rust-checks)
+            if [[ $CLADEFS_GUEST_KERNEL_BUILD == coverage && $host_phase != all ]]; then
+                echo "A coverage kernel's counts are read against its build: no measurement's" >&2
+                exit 2
+            fi
+            echo "== guest kernel ($CLADEFS_GUEST_KERNEL_BUILD)" >&2
+            if ! host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"; then
+                echo "guest kernel: failed, see guest-kernel.log" >&2
+                exit 1
+            fi
+            export CLADEFS_GUEST_KERNEL=$host_kernel_image
+            ;;
+        *)
+            echo "CLADEFS_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks" >&2
+            exit 2
+            ;;
+    esac
+    if [[ $host_phase == build ]]; then
+        echo "== guest tests' artifacts" >&2
+        host_artifacts "$artifacts" e2e "${CLADEFS_GUEST_KERNEL:-}" || exit 1
+        exit "$status"
+    fi
+else
+    host_prebuilt "$artifacts"
 fi
-case ${CLADEFS_GUEST_KERNEL_BUILD:-} in
-    '') ;;
-    release | debug | kasan | coverage | rust-checks)
-        echo "== guest kernel ($CLADEFS_GUEST_KERNEL_BUILD)" >&2
-        if ! host_kernel "$CLADEFS_GUEST_KERNEL_BUILD"; then
-            echo "guest kernel: failed, see guest-kernel.log" >&2
-            exit 1
-        fi
-        export CLADEFS_GUEST_KERNEL=$host_kernel_image
-        # Its kind, which the guest tests' time limits scale by (TASK-168).
-        export CLADEFS_GUEST_KERNEL_BUILD
-        sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
-        ;;
-    *)
-        echo "CLADEFS_GUEST_KERNEL_BUILD is release, debug, kasan, coverage or rust-checks" >&2
-        exit 2
-        ;;
-esac
+if [[ -n ${CLADEFS_GUEST_KERNEL_BUILD:-} ]]; then
+    # Its kind, which the guest tests' time limits scale by (TASK-168).
+    export CLADEFS_GUEST_KERNEL_BUILD
+fi
+if [[ -n ${CLADEFS_GUEST_KERNEL:-} ]]; then
+    sha256sum "$CLADEFS_GUEST_KERNEL" > "$results/guest-kernel.txt"
+fi
 if [[ ${CLADEFS_GUEST_KERNEL_BUILD:-} == coverage ]]; then
     export CLADEFS_COVERAGE="$results/coverage-counts"
     mkdir -p "$CLADEFS_COVERAGE"

@@ -37,10 +37,22 @@
 # the seconds and the most memory of each. On ubu1, scripts/gc-sweep-host.sh runs it, as a
 # measurement.
 #
-#   scripts/gc-sweep.sh WORK RESULTS [SIDE=TREE...]
+# --prepare builds the binaries and fills the buckets, and stops; --prepared sweeps what a
+# --prepare of the same WORK and sides made, building nothing: a measurement's job of work, then
+# its measurement, alone (scripts/lib/gc-sweep-linux-host.sh, TASK-368). Inside a measurement
+# (fxjob --bench), building is refused (scripts/lib/measurement.sh).
+#
+#   scripts/gc-sweep.sh [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-(( $# >= 2 )) || { echo "Usage: $0 WORK RESULTS [SIDE=TREE...]" >&2; exit 2; }
+source "$repo/scripts/lib/measurement.sh"
+usage="Usage: $0 [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]"
+phase=all
+case ${1:-} in
+    --prepare) phase=prepare; shift ;;
+    --prepared) phase=prepared; shift ;;
+esac
+(( $# >= 2 )) || { echo "$usage" >&2; exit 2; }
 mkdir -p "$1" "$2"
 work=$(cd "$1" && pwd)
 results=$(cd "$2" && pwd)
@@ -70,13 +82,21 @@ case $(uname) in
     *) echo "$(uname): no way to copy a bucket cheaply" >&2; exit 2 ;;
 esac
 
+# build TREE TARGET builds TREE's cladefs-gc and cladefs-gc-fill into TARGET, unless the sweeps run
+# what --prepare built.
+build() {
+    [[ $phase != prepared ]] || return 0
+    measurement_refuses "Building cladefs-gc"
+    echo "== building cladefs-gc and cladefs-gc-fill of $1" >&2
+    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p extent_remote \
+        --bin cladefs-gc --bin cladefs-gc-fill
+}
+
 # The sides, and the directory each's binaries are in.
 sides=()
 bins=()
 if (( $# == 0 )); then
-    echo "== building cladefs-gc and cladefs-gc-fill" >&2
-    cargo build --release -q --manifest-path "$repo/Cargo.toml" -p extent_remote \
-        --bin cladefs-gc --bin cladefs-gc-fill
+    build "$repo" "${CARGO_TARGET_DIR:-$repo/target}"
     sides=(this)
     bins=("${CARGO_TARGET_DIR:-$repo/target}/release")
 fi
@@ -85,12 +105,14 @@ for pair in "$@"; do
     [[ $pair == *=* && $side =~ ^[a-z0-9][a-z0-9-]*$ ]] ||
         { echo "$pair: SIDE=TREE, SIDE in lower-case letters, digits and -" >&2; exit 2; }
     tree=$(cd "${pair#*=}" && pwd)
-    echo "== $side: building cladefs-gc and cladefs-gc-fill of $tree" >&2
     # A target of its own, as two trees sharing one would link each other's crates.
-    CARGO_TARGET_DIR=$work/target-$side cargo build --release -q \
-        --manifest-path "$tree/Cargo.toml" -p extent_remote --bin cladefs-gc --bin cladefs-gc-fill
+    build "$tree" "$work/target-$side"
     sides+=("$side")
     bins+=("$work/target-$side/release")
+done
+for bin in "${bins[@]}"; do
+    [[ -x $bin/cladefs-gc && -x $bin/cladefs-gc-fill ]] ||
+        { echo "$bin holds no cladefs-gc and cladefs-gc-fill: --prepare builds them" >&2; exit 2; }
 done
 
 # Each side's bucket, once for its shape.
@@ -98,6 +120,8 @@ shape="$tenants $cells $segments $largest${kind[*]:+ ${kind[*]}}"
 for i in "${!sides[@]}"; do
     side=${sides[i]} bucket=$work/bucket-${sides[i]}
     if [[ ! -f $bucket.shape || $(cat "$bucket.shape") != "$shape" ]]; then
+        [[ $phase != prepared ]] ||
+            { echo "$bucket: not filled as $shape: --prepare fills it" >&2; exit 2; }
         rm -f "$bucket.shape"
         if [[ -e $bucket ]]; then rm -r -- "$bucket"; fi
         echo "== $side: filling $bucket: $tenants tenants of $cells cells of $segments segments" \
@@ -111,6 +135,8 @@ for i in "${!sides[@]}"; do
     fi
     { echo "shape $shape"; cat "$bucket.fill"; } > "$results/fill-$side.txt"
 done
+
+if [[ $phase == prepare ]]; then exit 0; fi
 
 # metric FILE NAME prints the value of the sample NAME (with its labels) in FILE.
 metric() {
