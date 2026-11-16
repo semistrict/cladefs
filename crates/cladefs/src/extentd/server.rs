@@ -1793,7 +1793,7 @@ impl Drop for TransferArea {
 /// store's whose guest committed, on the runtime's blocking threads (TASK-92.49): no more threads
 /// do them than [`FLUSHES`], the work beyond waiting its turn, holding none. What the guest frees
 /// leaves the host's disk with the segments acknowledged in the bucket, whose collector takes it
-/// back, not cleaned behind the guest's commits as it was (TASK-79.2, TASK-165.8).
+/// back, not collected behind the guest's commits as it was (TASK-79.2, TASK-165.8).
 async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot::Receiver<()>) {
     while tokio::time::timeout(FLUSH_EVERY, &mut stopped).await.is_err() {
         if !store.flush_pending() {

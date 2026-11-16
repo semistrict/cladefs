@@ -2718,7 +2718,7 @@ fn wait_for_uploader(path: &Path) {
 
 /// TASK-165.8: what a guest frees of what it committed leaves the host's disk with the segments
 /// its uploader has acknowledged in the bucket, whose collector compacts it there: the daemon
-/// cleans no store behind its guest's commits, as it did (TASK-79.2). The store keeps what the
+/// collects no store behind its guest's commits, as it did (TASK-79.2). The store keeps what the
 /// guest frees for its uploader until the uploader has uploaded the commit that freed it, and it
 /// takes none of the guest's room. Once the store closes, its uploader checkpointing its branch,
 /// the collector deletes the segments no live extent is in, and compacts those the guest's live

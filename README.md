@@ -201,7 +201,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   deletes forks and images alike: the branch in its bucket, whose collector
   reclaims what no other branch inherited, and the directory; forks live on.
   An image's own bucket's collector runs in the processes that have its images
-  open (`collect.rs`), the only cleaner of what they free (TASK-165.8).
+  open (`collect.rs`), the only thing that deletes what they free (TASK-165.8).
   - `image.rs` is the device on images, in place of Fuchsia's
     `FileBackedDevice`: an extent store in a directory, `crates/extent_store`'s.
     Extents' I/O bypasses the host's page cache (`O_DIRECT`, `F_NOCACHE`); on
@@ -212,7 +212,8 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `host_store.rs` makes, opens, forks and deletes both host stacks' extent
   stores in the host's directories, images (`Storage`) and guests' stores
   (`ExtentStore`), with one block size, one set of options and one way of
-  minting branches. Neither stack cleans its stores (TASK-165.8).
+  minting branches. Neither stack collects its stores: the collector alone
+  deletes (TASK-165.8).
 - `pages.rs` configures physical memory (`crates/physmem`): its size, which
   extents' pages come from, and tenants' arenas of it.
 - `executor.rs` holds the fuchsia-async executor Fxfs runs on.
@@ -221,10 +222,11 @@ of these stands in with the items the code copied from Fuchsia uses:
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
 store's directory holds one branch; forks, points and deletion are the
-bucket's (`crates/extent_remote`, TASK-165.7). Nothing cleans a store: once a
-segment is acknowledged in the bucket, it and the extents' files it names
-leave the directory, for the host's cache of the bucket's objects, and the
-bucket's collector takes back what no extent is in (TASK-165.8). Its tests run
+bucket's (`crates/extent_remote`, TASK-165.7). Nothing collects in a store:
+once a segment is acknowledged in the bucket, it and the extents' files it
+names leave the directory, for the host's cache of the bucket's objects, and
+the bucket's collector, the only thing that deletes, takes back what no extent
+is in (TASK-165.8). Its tests run
 it on a file system in memory that crashes at random points.
 
 **DAX on Linux.** KVM maps a guest's memory from the host memory backing its
