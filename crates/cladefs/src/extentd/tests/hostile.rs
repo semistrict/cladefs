@@ -1691,7 +1691,7 @@ fn run_hostile(
         for open in opens {
             shared.answers.wait(open);
         }
-        let commit = Header::new(COMMIT, id()).with_flags(COMMIT_DURABLE);
+        let commit = Header::new(COMMIT, id()).with_flags(COMMIT_UPLOADED);
         let status = send(commit, &[], None).ok().and_then(|id| shared.answers.wait(id));
         committed = shared.writer.load(Ordering::Relaxed).then_some(status);
         if hostile.flood {

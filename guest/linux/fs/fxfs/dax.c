@@ -21,7 +21,7 @@
  * budget) swaps the set out, the writeback set, write-protects what faults made writable by the
  * page tables, and has Fxfs write the pages' bytes from the window to new extents, allocated then,
  * committing after them, as the page cache's writeback does (fxfs_dax_write_back). Once the barrier
- * after it has sealed those extents, a private page in neither set may be mapped back to its
+ * after it has sealed those extents, a private page in neither set may be rebound to its
  * extent's page, the same bytes at the same address (fxfs_dax_rebind), under its file's semaphore
  * held for writing, which sees no store to it under way. An UNMAP, or a truncate's MAP of zeros,
  * ends what it covers (fxfs_dax_dropped). The kernel's DAX entries' dirty tags and locks decide
@@ -365,7 +365,7 @@ struct fxfs_dax_range {
 
 /*
  * cladefs: why the window maps: a region as far as a slice needs, or pages in a range's own space
- * (TASK-91.4), both for the access at hand, which the device maps ahead of (MAP_AHEAD, TASK-112.1).
+ * (TASK-91.4), both for the access at hand, which the device prefaults (MAP_PREFAULT, TASK-112.1).
  */
 enum fxfs_dax_why {
 	FXFS_DAX_REACH,
@@ -799,7 +799,7 @@ static long fxfs_dax_map_all(struct fxfs_dax *dax, struct fxfs_dax_range *range,
 				  map->zeros ?
 				  fxfs_device_map_zeros(dax->dev, map->window_offset, map->len) :
 				  fxfs_device_map(dax->dev, map->branch, map->sequence, map->offset,
-						  map->len, map->window_offset, map->ahead);
+						  map->len, map->window_offset, map->prefault);
 
 			if (one == -ENOENT && !map->zeros && dax->read_only)
 				continue;
@@ -866,12 +866,12 @@ static ssize_t fxfs_dax_sealed_extents(struct fxfs_dax *dax, struct fxfs *fs, u6
  * cladefs: the maps of `range`'s pages `first` to `last`, exclusive, in `maps`, from the pieces
  * `found` of the file's bytes there, `count` of them, sorted, which may reach past them: each
  * sealed piece's pages from its extent, zeros where the file has none, a hole or past its end, but
- * on a follower's window, which leaves those unmapped. Maps ahead (MAP_AHEAD) if `ahead`. As many
- * as 2 * (`last` - `first`) + 1 at most: how many.
+ * on a follower's window, which leaves those unmapped. Prefaults (MAP_PREFAULT) if `prefault`. As
+ * many as 2 * (`last` - `first`) + 1 at most: how many.
  */
 static size_t fxfs_dax_maps_of(struct fxfs_dax *dax, struct fxfs_dax_range *range,
 			       const struct fxfs_dax_extent *found, ssize_t count,
-			       unsigned long first, unsigned long last, bool ahead,
+			       unsigned long first, unsigned long last, bool prefault,
 			       struct fxfs_device_map *maps)
 {
 	loff_t start = fxfs_dax_chunk_start(range);
@@ -903,7 +903,7 @@ static size_t fxfs_dax_maps_of(struct fxfs_dax *dax, struct fxfs_dax_range *rang
 				.offset = e->extent_offset + (at - e->offset),
 				.len = (u64)(to - from) << PAGE_SHIFT,
 				.window_offset = fxfs_dax_page_offset(range, from),
-				.ahead = ahead,
+				.prefault = prefault,
 			};
 		page = max(page, to);
 	}
@@ -919,13 +919,13 @@ static size_t fxfs_dax_maps_of(struct fxfs_dax *dax, struct fxfs_dax_range *rang
  * page-cache inode's writes read in before their seal, or a growth's copy of the last block, may
  * leave; rebinding private pages, as their writeback left them, is fxfs_dax_rebind_range's, which
  * leaves those whose extent is open private. 0, or a -errno. With the file's semaphore held for
- * writing. A read's pages are mapped ahead (MAP_AHEAD, `ahead`), which the host installs and maps
- * for the guest at once; a write's are named alone, which the host installs as they are first
+ * writing. A read's pages are prefaulted (MAP_PREFAULT, `prefault`), which the host installs and
+ * maps for the guest at once; a write's are named alone, which the host installs as they are first
  * touched, a store's PRIVATE putting its private copy in place of nothing, where a page installed
  * first took a TLB flush to replace (doc-13, TASK-276.6).
  */
 static long fxfs_dax_map_pages(struct fxfs_dax *dax, struct fxfs *fs, struct fxfs_dax_range *range,
-			       unsigned long first, unsigned long last, bool ahead)
+			       unsigned long first, unsigned long last, bool prefault)
 {
 	loff_t start = fxfs_dax_chunk_start(range);
 	size_t capacity = last - first, n;
@@ -953,7 +953,7 @@ static long fxfs_dax_map_pages(struct fxfs_dax *dax, struct fxfs *fs, struct fxf
 			goto out;
 		}
 		if (!fxfs_dax_any_unsealed(found, count)) {
-			n = fxfs_dax_maps_of(dax, range, found, count, first, last, ahead, maps);
+			n = fxfs_dax_maps_of(dax, range, found, count, first, last, prefault, maps);
 			ret = fxfs_dax_map_all(dax, range, maps, n, false);
 			if (ret != -EPERM)
 				break;
@@ -1766,7 +1766,7 @@ static struct fxfs_dax_range *fxfs_dax_get_range(struct inode *inode, pgoff_t ch
 		spin_lock(&dax->lock);
 		list_add_tail(&new->list, &dax->used);
 		spin_unlock(&dax->lock);
-		/* Every page of it, zeros past the file's end (doc-13); ahead, a read's. */
+		/* Every page of it, zeros past the file's end (doc-13); prefaulted, a read's. */
 		mapped = fxfs_dax_map_pages(dax, fxfs_vfs_fs(inode->i_sb), new, 0, new->pages,
 					    slice);
 		err = mapped < 0 ? mapped : 0;
@@ -1918,11 +1918,11 @@ static void fxfs_dax_hole(struct iomap *iomap, loff_t length)
  * Before any iomap of such a page, a read's as a write's: a read's hole has a fault map the
  * kernel's zero page, which nothing takes away, no write being new (IOMAP_F_NEW), so that a load
  * read zeros where read(2) read a write's bytes, and a write from the mapping copied them (guest/sim,
- * failures seed 1669). Not a follower's, whose holes have none, as it takes no write. Mapped ahead
- * if `ahead`, a read's (fxfs_dax_map_pages).
+ * failures seed 1669). Not a follower's, whose holes have none, as it takes no write. Prefaulted
+ * if `prefault`, a read's (fxfs_dax_map_pages).
  */
 static int fxfs_dax_map_missing(struct inode *inode, struct fxfs_dax_range *range,
-				unsigned long first, unsigned long last, bool ahead)
+				unsigned long first, unsigned long last, bool prefault)
 {
 	struct fxfs_dax_file *file = range->file;
 	struct fxfs_dax *dax = fxfs_dax_of(inode);
@@ -1942,7 +1942,7 @@ static int fxfs_dax_map_missing(struct inode *inode, struct fxfs_dax_range *rang
 		       (page = fxfs_dax_pages_next_unmapped(range->state, first, last)) < last) {
 			to = fxfs_dax_pages_mapped_run(range->state, page, last);
 			mapped = fxfs_dax_map_pages(dax, fxfs_vfs_fs(inode->i_sb), range, page, to,
-						    ahead);
+						    prefault);
 			err = mapped < 0 ? mapped : 0;
 		}
 		up_write(&file->sem);

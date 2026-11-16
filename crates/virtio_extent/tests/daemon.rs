@@ -218,7 +218,7 @@ fn writes_and_reads() {
     assert_eq!(request(&store, &missing, BLOCK + RESPONSE), (vec![0; BLOCK], errno(Errno::ENOENT)));
     let commit = bytes(
         VIRTIO_EXTENT_T_COMMIT,
-        VIRTIO_EXTENT_COMMIT_DURABLE,
+        VIRTIO_EXTENT_COMMIT_UPLOADED,
         Some(CommitArgs::default()),
         &[],
     );
@@ -237,7 +237,7 @@ fn writes_and_reads() {
     // WRITE's.
     let committed = bytes(
         VIRTIO_EXTENT_T_WRITE,
-        VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE,
+        VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED,
         Some(io(&store, 5, 0, BLOCK)),
         &data[..BLOCK],
     );
@@ -247,7 +247,7 @@ fn writes_and_reads() {
     assert_eq!(request(&store, &after, RESPONSE).1, errno(Errno::EPERM));
     let unknown = bytes(
         VIRTIO_EXTENT_T_WRITE,
-        VIRTIO_EXTENT_WRITE_DURABLE,
+        VIRTIO_EXTENT_WRITE_UPLOADED,
         Some(io(&store, 6, 0, BLOCK)),
         &data[..BLOCK],
     );
@@ -369,27 +369,34 @@ fn follows_a_writer() {
     let (store, dir) = store();
     let follower = RemoteExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
     let (heard, commits) = mpsc::channel();
-    follower.on_committed(move |epoch| {
+    follower.on_committed(move |committed| {
         // Unheard once the test stops listening.
-        let _ = heard.send(epoch);
+        let _ = heard.send(committed);
     });
     let data = vec![7; BLOCK];
     let id = cladefs::ExtentId { branch: store.branch(), sequence: 1 };
     store.write(id, 0, &[cladefs::VolatileSlice::from(&data[..])]).unwrap();
     store.commit(None).unwrap();
-    let epoch = commits.recv().unwrap();
+    let committed = commits.recv().unwrap();
     let read_ = bytes(VIRTIO_EXTENT_T_READ, 0, Some(io(&store, 1, 0, BLOCK)), &[]);
     assert_eq!(
         request(&follower, &read_, BLOCK + RESPONSE),
         (vec![0; BLOCK], errno(Errno::ENOENT))
     );
-    let advance = bytes::<Epoch>(VIRTIO_EXTENT_T_ADVANCE, 0, None, &[]);
-    let (written, status) = request(&follower, &advance, size_of::<Epoch>() + RESPONSE);
+    let advance = bytes::<CommitNumber>(VIRTIO_EXTENT_T_ADVANCE, 0, None, &[]);
+    let (written, status) = request(&follower, &advance, size_of::<CommitNumber>() + RESPONSE);
     assert_eq!(status, 0);
-    assert_eq!(read::<Epoch>(&written), Epoch { epoch: epoch.to_le(), reserved: 0 });
+    assert_eq!(
+        read::<CommitNumber>(&written),
+        CommitNumber { commit: committed.to_le(), reserved: 0 }
+    );
     assert_eq!(request(&follower, &read_, BLOCK + RESPONSE), (data.clone(), 0));
-    let let_go =
-        bytes(VIRTIO_EXTENT_T_LET_GO, 0, Some(Epoch { epoch: epoch.to_le(), reserved: 0 }), &[]);
+    let let_go = bytes(
+        VIRTIO_EXTENT_T_LET_GO,
+        0,
+        Some(CommitNumber { commit: committed.to_le(), reserved: 0 }),
+        &[],
+    );
     assert_eq!(request(&follower, &let_go, RESPONSE), (vec![], 0));
     let id = io(&store, 1, 0, 0).id;
     for type_ in [VIRTIO_EXTENT_T_PIN, VIRTIO_EXTENT_T_UNPIN] {
@@ -401,7 +408,10 @@ fn follows_a_writer() {
     assert_eq!(request(&follower, &write, RESPONSE).1, errno(Errno::EROFS));
     let commit = bytes(VIRTIO_EXTENT_T_COMMIT, 0, Some(CommitArgs::default()), &[]);
     assert_eq!(request(&follower, &commit, RESPONSE).1, errno(Errno::EROFS));
-    assert_eq!(request(&store, &advance, size_of::<Epoch>() + RESPONSE).1, errno(Errno::EINVAL));
+    assert_eq!(
+        request(&store, &advance, size_of::<CommitNumber>() + RESPONSE).1,
+        errno(Errno::EINVAL)
+    );
 }
 
 /// cladefs TASK-77: a guest's driver is untrusted: whatever a request says, of the types and flags
@@ -475,8 +485,8 @@ fn refuses_bad_requests() {
             })
             .collect()
     };
-    let many = entries(&[VIRTIO_EXTENT_MAP_AHEAD, 0]);
-    for flags in [0, VIRTIO_EXTENT_MAP_AHEAD] {
+    let many = entries(&[VIRTIO_EXTENT_MAP_PREFAULT, 0]);
+    for flags in [0, VIRTIO_EXTENT_MAP_PREFAULT] {
         let map = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(MapArgs::default()), &[]);
         assert_eq!(request(&store, &map, RESPONSE).1, errno(Errno::ENOSYS));
         let flags = flags | VIRTIO_EXTENT_MAP_MANY;

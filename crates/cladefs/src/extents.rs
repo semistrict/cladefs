@@ -207,7 +207,7 @@ pub struct ExtentStore {
     /// cladefs: the stores it was forked from, nearest first, as of the forks ([`store_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
     /// cladefs: the uploader of the store's branch to object storage, which opened it, taking its
-    /// lease, or holds its point: durable commits are uploaded ones (doc-4's `COMMIT_DURABLE`).
+    /// lease, or holds its point: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
     remote: Option<extent_store::upload::Remote<HostDir>>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
@@ -224,7 +224,7 @@ pub struct ExtentStore {
     /// cladefs: the window's latest changes, which a refused fault's log tells of the page it was
     /// on ([`ExtentStore::refused`], TASK-44.12).
     changes: StoreMutex<WindowChanges>,
-    /// cladefs: the turns its daemon has taken at making its commits durable behind them
+    /// cladefs: the turns its daemon has taken at making its commits local behind them
     /// ([`ExtentStore::flush_turned`]): how a commit's lag is told in turns, which the daemon's
     /// load stretches, rather than in time (TASK-110).
     flush_turns: std::sync::atomic::AtomicU64,
@@ -421,13 +421,14 @@ pub struct WriteBarriers<'a> {
 /// When a commit completes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Commit {
-    /// Once ordered: the store makes it durable soon after.
+    /// Once ordered: the store makes it local soon after.
     Ordered,
-    /// cladefs: once durable on the host's disk, not waiting for object storage (`COMMIT_LOCAL`):
+    /// cladefs: once local, synced to the host's disk, not waiting for the bucket (`COMMIT_LOCAL`):
     /// what a database's commit waits for, as SQLite's own does on a local filesystem (TASK-301).
     Local,
-    /// Once durable (`COMMIT_DURABLE`): uploaded, if the store has a remote.
-    Durable,
+    /// Once uploaded (`COMMIT_UPLOADED`): its segments acknowledged by the bucket, if the store has
+    /// one; local, if not.
+    Uploaded,
 }
 
 /// cladefs: the errno of the uploader's failure (`Failure::errno`): `EIO`, logged, for one the
@@ -485,7 +486,7 @@ impl Drop for ExtentStore {
         {
             log::warn!("cladefs: writing a boot profile: {err}");
         }
-        // cladefs: its uploader first, which closes its open segment, uploads what it made durable
+        // cladefs: its uploader first, which closes its open segment, uploads what it made local
         // and stops (TASK-192); then the store. A follower's store is its writer's.
         drop(self.remote.take());
         if self.following.is_none()
@@ -814,30 +815,30 @@ impl ExtentStore {
         following.view.lock(&self.fence)
     }
 
-    /// The epoch of the store's latest commit: its writer's, if a follower's.
+    /// The number of the store's latest commit: its writer's, if a follower's.
     pub fn committed(&self) -> Result<u64> {
         self.store.epoch().map_err(errno)
     }
 
-    /// cladefs: the epoch of the commit a follower's view is as of.
-    pub fn epoch(&self) -> Result<u64> {
+    /// cladefs: the number of the commit a follower's view is as of.
+    pub fn view_commit(&self) -> Result<u64> {
         Ok(self.view()?.epoch())
     }
 
     /// cladefs: moves a follower's view to the writer's latest commit, holding what the commits
     /// since the one it was as of held, until it lets go of them ([`ExtentStore::let_go`]): what
-    /// its guest's follower reads as it applies them. Returns the commit's epoch.
+    /// its guest's follower reads as it applies them. Returns the commit's number.
     pub fn advance(&self) -> Result<u64> {
         let mut view = self.view()?;
         view.advance_keeping().map_err(errno)?;
         Ok(view.epoch())
     }
 
-    /// cladefs: lets go of what a follower's view held of the commits before the commit of
-    /// `epoch`, at most its own: their frees go, but for its pins. One of an earlier epoch than
-    /// it holds since, coming after its next advance, changes nothing.
-    pub fn let_go(&self, epoch: u64) -> Result<()> {
-        self.view()?.let_go(epoch);
+    /// cladefs: lets go of what a follower's view held of the commits before the one
+    /// numbered `commit`, at most its own: their frees go, but for its pins. One of an earlier
+    /// commit than it holds since, coming after its next advance, changes nothing.
+    pub fn let_go(&self, commit: u64) -> Result<()> {
+        self.view()?.let_go(commit);
         Ok(())
     }
 
@@ -857,10 +858,10 @@ impl ExtentStore {
         Ok(())
     }
 
-    /// cladefs: waits at most `timeout` for a commit of the store after the commit of `epoch`,
-    /// returning the latest commit's epoch, if one came: what tells its followers.
-    pub fn newer(&self, epoch: u64, timeout: std::time::Duration) -> Option<u64> {
-        self.store.newer(epoch, timeout)
+    /// cladefs: waits at most `timeout` for a commit of the store after the one numbered
+    /// `commit`, returning the latest commit's number, if one came: what tells its followers.
+    pub fn newer(&self, commit: u64, timeout: std::time::Duration) -> Option<u64> {
+        self.store.newer(commit, timeout)
     }
 
     /// cladefs: what says when the store's writer next commits ([`ExtentStore::newer`] then has it),
@@ -946,7 +947,7 @@ impl ExtentStore {
         Some((recorder, stop))
     }
 
-    /// cladefs: forks the store, as of its last commit, made durable first, and returns the fork's
+    /// cladefs: forks the store, as of its last commit, made uploaded first, and returns the fork's
     /// branch: a new branch of `cell`, its ID the bucket's to give (`extent_remote::objectid`,
     /// TASK-364), holding what it holds, whose store is a new directory at `path`, which
     /// [`ExtentStore::open`] opens: `EEXIST` if anything is at `path`. The fork is made in the
@@ -984,11 +985,11 @@ impl ExtentStore {
     pub(crate) fn fork_to(&self, path: impl AsRef<Path>, branch: Branch) -> Result<(), Error> {
         self.fork_span(branch, false).run(|| {
             self.access().may_manage()?;
-            self.make_durable()?;
-            failpoint!("fork::durable");
+            self.make_uploaded()?;
+            failpoint!("fork::uploaded");
             // None comes between the look and the fork's commit.
             let opening = self.opening.write(&self.fence)?;
-            self.fork_durable(path.as_ref(), branch, false, Some(opening))
+            self.fork_uploaded(path.as_ref(), branch, false, Some(opening))
         })
     }
 
@@ -1001,10 +1002,10 @@ impl ExtentStore {
         span
     }
 
-    /// cladefs: forks the store, as [`ExtentStore::fork`] says, its commits made durable: `opening`,
-    /// if given, held until the fork's commit is made, and not as the fork's upload goes. The child
-    /// is a point if `point`.
-    fn fork_durable(
+    /// cladefs: forks the store, as [`ExtentStore::fork`] says, its commits made uploaded:
+    /// `opening`, if given, held until the fork's commit is made, and not as the fork's upload
+    /// goes. The child is a point if `point`.
+    fn fork_uploaded(
         &self,
         path: &Path,
         branch: Branch,
@@ -1204,9 +1205,9 @@ impl ExtentStore {
         })
     }
 
-    /// Sets the most bytes the store's extents may hold, durably: grows it, or shrinks it no lower
-    /// than what its extents hold (`ENOSPC`). The guest's filesystem, which may hold more, agrees
-    /// to a shrink first (the extent daemon's `RESIZE` asks it).
+    /// Sets the most bytes the store's extents may hold, in a commit of its own: grows it, or
+    /// shrinks it no lower than what its extents hold (`ENOSPC`). The guest's filesystem, which may
+    /// hold more, agrees to a shrink first (the extent daemon's `RESIZE` asks it).
     pub fn set_capacity(&self, capacity: u64) -> Result<()> {
         self.access().may_resize()?;
         self.store.set_capacity(capacity).map_err(errno)
@@ -1389,24 +1390,24 @@ impl ExtentStore {
         Ok(())
     }
 
-    /// Commits what was written and freed, and `root` as the store's root if given, durably
-    /// (`COMMIT` with `COMMIT_DURABLE`). It seals the extents written before it; cladefs: no window
-    /// maps any of them, and nothing in a window changes.
+    /// Commits what was written and freed, and `root` as the store's root if given, uploaded
+    /// (`COMMIT` with `COMMIT_UPLOADED`). It seals the extents written before it; cladefs: no
+    /// window maps any of them, and nothing in a window changes.
     pub fn commit(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
-        self.commit_with(root, Commit::Durable)
+        self.commit_with(root, Commit::Uploaded)
     }
 
-    /// cladefs: commits as [`ExtentStore::commit`] does, completing once durable on the host's disk,
-    /// not waiting for object storage (`COMMIT_LOCAL`, TASK-301).
+    /// cladefs: commits as [`ExtentStore::commit`] does, completing once local, synced to the
+    /// host's disk, not waiting for the bucket (`COMMIT_LOCAL`, TASK-301).
     pub fn commit_local(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
         self.commit_with(root, Commit::Local)
     }
 
-    /// cladefs: commits as [`ExtentStore::commit`] does, but without waiting for durability: a
+    /// cladefs: commits as [`ExtentStore::commit`] does, but completing once ordered: a
     /// barrier, ordering what came before before what comes after (`COMMIT` without
-    /// `COMMIT_DURABLE`). [`ExtentStore::flush`] makes the commits ordered so far durable.
+    /// `COMMIT_UPLOADED`). [`ExtentStore::flush`] makes the commits ordered so far local.
     pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
         self.access().may_write()?;
         self.commit_with(root, Commit::Ordered)
@@ -1421,14 +1422,14 @@ impl ExtentStore {
         self.store.wait_framed().map_err(errno)
     }
 
-    /// Makes the commits ordered so far durable.
+    /// Makes the commits ordered so far local.
     pub fn flush(&self) -> Result<()> {
         self.store.flush().map_err(errno)
     }
 
     /// cladefs: `Ok` unless the store's uploader stopped, failed: the store's commits are its
     /// branch's no more, as once a later placement took its cell (`EROFS`, TASK-364), so a commit
-    /// durable on the host's disk alone fails rather than be taken for one a bucket will hold, as
+    /// local alone fails rather than be taken for one a bucket will hold, as
     /// a kept image's does (`storage::kept`).
     fn uploading(&self) -> Result<()> {
         match self.remote.as_ref().and_then(|remote| remote.failed()) {
@@ -1437,9 +1438,9 @@ impl ExtentStore {
         }
     }
 
-    /// Makes the commits ordered so far durable: uploaded, if the store has a remote.
-    fn make_durable(&self) -> Result<()> {
-        let epoch = self.durable_epoch()?;
+    /// Makes the commits ordered so far uploaded, if the store has a remote; local, if not.
+    fn make_uploaded(&self) -> Result<()> {
+        let epoch = self.make_local()?;
         match self.remote.as_ref() {
             Some(remote) => {
                 upload_wait(epoch).run(|| remote.wait_uploaded(epoch).map_err(remote_errno))
@@ -1448,15 +1449,15 @@ impl ExtentStore {
         }
     }
 
-    /// cladefs: makes every commit ordered so far durable, and returns the epoch they are of: what
-    /// [`ExtentStore::uploaded`] waits for. It blocks on the store's I/O.
-    pub fn durable_epoch(&self) -> Result<u64> {
+    /// cladefs: makes every commit ordered so far local, and returns the commit number of the
+    /// latest: what [`ExtentStore::uploaded`] waits for. It blocks on the store's I/O.
+    pub fn make_local(&self) -> Result<u64> {
         let epoch = self.store.epoch().map_err(errno)?;
         self.flush()?;
         Ok(epoch)
     }
 
-    /// cladefs: returns once the commits up to `epoch` ([`ExtentStore::durable_epoch`]) are in
+    /// cladefs: returns once the commits up to `epoch` ([`ExtentStore::make_local`]) are in
     /// object storage, as [`ExtentStore::wait_uploaded`] does: a future, which holds no thread
     /// while it waits (TASK-43.6). `ENOTSUP` without a remote.
     pub fn uploaded(
@@ -1479,28 +1480,28 @@ impl ExtentStore {
         uploading.map(|remote| remote.status().map_err(remote_errno)).transpose()
     }
 
-    /// cladefs: waits until every commit ordered so far is durable and in object storage, as before
+    /// cladefs: waits until every commit ordered so far is uploaded, as before
     /// a clean stop (TASK-39.7). `ENOTSUP` without a remote ([`ExtentStore::attach_remote`]).
     pub fn wait_uploaded(&self) -> Result<()> {
         if self.remote.as_ref().is_none() {
             return Err(Errno::ENOTSUP);
         }
-        self.make_durable()
+        self.make_uploaded()
     }
 
-    /// Whether commits ordered are not durable yet: waiting for [`ExtentStore::flush`], or taken
+    /// Whether commits ordered are not local yet: waiting for [`ExtentStore::flush`], or taken
     /// by a flush in flight, which it waits for.
     pub fn flush_pending(&self) -> bool {
         self.store.flush_pending()
     }
 
-    /// cladefs: counts a turn its daemon took at making its commits durable, whether or not it
-    /// flushed: a commit made before a turn began is durable once the turn ends (TASK-110).
+    /// cladefs: counts a turn its daemon took at making its commits local, whether or not it
+    /// flushed: a commit made before a turn began is local once the turn ends (TASK-110).
     pub fn flush_turned(&self) {
         self.flush_turns.fetch_add(1, std::sync::atomic::Ordering::Release);
     }
 
-    /// cladefs: the turns its daemon has taken at making its commits durable ([`flush_turned`]).
+    /// cladefs: the turns its daemon has taken at making its commits local ([`flush_turned`]).
     ///
     /// [`flush_turned`]: ExtentStore::flush_turned
     pub fn flush_turns(&self) -> u64 {
@@ -1508,8 +1509,8 @@ impl ExtentStore {
     }
 
     /// cladefs: in a span of its own, `store.commit` (`extent_remote::trace`, TASK-258), whose
-    /// children are its phases: `commit.seal` and `commit.write`, the store's; then, durable,
-    /// `store.flush`, and `commit.upload_wait` as it waits for object storage.
+    /// children are its phases: `commit.seal` and `commit.write`, the store's; then, local or
+    /// uploaded, `store.flush`, and `commit.upload_wait` as it waits for object storage.
     fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let span = trace::Span::start("store.commit");
         span.set_branch(self.branch());
@@ -1533,7 +1534,7 @@ impl ExtentStore {
         stats::add_since(Counter::CommitStoreNs, committing);
         let waiting = std::time::Instant::now();
         let waited = match commit {
-            Commit::Durable => self.make_durable(),
+            Commit::Uploaded => self.make_uploaded(),
             Commit::Local => self.flush().and_then(|()| self.uploading()),
             Commit::Ordered => match self.remote.as_ref() {
                 // Within the lag the remote allows.
@@ -1925,9 +1926,9 @@ impl ExtentStore {
             let open = "an extent written since the last commit is open";
             return Err(Error::new(anyhow::Error::new(Errno::EBUSY).context(open)));
         }
-        self.make_durable()?;
-        failpoint!("fork::durable");
-        self.fork_durable(path, branch, point, None)
+        self.make_uploaded()?;
+        failpoint!("fork::uploaded");
+        self.fork_uploaded(path, branch, point, None)
     }
 
     /// cladefs: whether the store holds what `other` does, as of their last commits: the same root,
@@ -2010,9 +2011,9 @@ impl ExtentStore {
     }
 
     /// cladefs: attaches the store at `base`, a fork pinning what it holds, to this one, which
-    /// `branches` of ([`ExtentStore::ancestry`]), durably: `READ` and `MAP` of its extents read
-    /// through to it from now on, and in forks of this store, which a VM restored is. Attached
-    /// already, it does nothing. The guest has no part in this (backlog doc-10).
+    /// `branches` of ([`ExtentStore::ancestry`]), recorded in its directory: `READ` and `MAP` of
+    /// its extents read through to it from now on, and in forks of this store, which a VM restored
+    /// is. Attached already, it does nothing. The guest has no part in this (backlog doc-10).
     pub fn attach_base(&self, base: &Path, branches: &[u64]) -> Result<()> {
         self.access().may_manage()?;
         store_dir::attach(&self.path, base, branches)?;
@@ -2355,7 +2356,7 @@ mod tests {
     }
 
     /// A new store, as [`store`] makes, whose uploader uploads nothing until a commit waits for it
-    /// or the hour is up: what commits made durable on the host alone ([`committed_here`]) seal
+    /// or the hour is up: what commits made local alone ([`committed_here`]) seal
     /// stays in its files, rather than leave for the bucket (TASK-165.9).
     fn held(capacity: u64) -> (ExtentStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -2376,7 +2377,7 @@ mod tests {
         (held.unwrap(), dir)
     }
 
-    /// Commits what `store` wrote, durable on the host alone: its uploader not waited for.
+    /// Commits what `store` wrote, local alone: its uploader not waited for.
     fn committed_here(store: &ExtentStore) {
         store.commit_ordered(None).unwrap();
         store.flush().unwrap();
@@ -2720,19 +2721,19 @@ mod tests {
         assert_eq!(read(&follower, b, 0, BLOCK), Err(Errno::ENOENT));
         assert_eq!(follower.root(), Ok(b"one".to_vec()));
 
-        let epoch = follower.advance().unwrap();
-        assert_eq!(follower.epoch(), Ok(epoch));
+        let commit = follower.advance().unwrap();
+        assert_eq!(follower.view_commit(), Ok(commit));
         assert_eq!(follower.root(), Ok(b"two".to_vec()));
         assert_eq!(read(&follower, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
         assert_eq!(read(&follower, a, 0, BLOCK), Ok(pattern(1, BLOCK)));
-        follower.let_go(epoch).unwrap();
+        follower.let_go(commit).unwrap();
         assert_eq!(read(&follower, a, 0, BLOCK), Err(Errno::EIO));
         // Pinned, an extent stays, whatever commit the follower is as of.
         follower.pin(b).unwrap();
         store.free(b).unwrap();
         store.commit(None).unwrap();
-        let epoch = follower.advance().unwrap();
-        follower.let_go(epoch).unwrap();
+        let commit = follower.advance().unwrap();
+        follower.let_go(commit).unwrap();
         assert_eq!(read(&follower, b, 0, BLOCK), Ok(pattern(2, BLOCK)));
         follower.unpin(b).unwrap();
         assert_eq!(read(&follower, b, 0, BLOCK), Err(Errno::EIO));
@@ -2864,11 +2865,11 @@ mod tests {
         let store = Arc::new(store);
         store.commit(None).unwrap();
         let follower = store.follow();
-        let epoch = follower.epoch().unwrap();
-        assert_eq!(follower.newer(epoch, std::time::Duration::from_millis(10)), None);
+        let commit = follower.view_commit().unwrap();
+        assert_eq!(follower.newer(commit, std::time::Duration::from_millis(10)), None);
         write(&store, id(&store, 1), 0, &pattern(1, BLOCK)).unwrap();
         store.commit(None).unwrap();
-        let newer = follower.newer(epoch, std::time::Duration::from_secs(10));
+        let newer = follower.newer(commit, std::time::Duration::from_secs(10));
         assert_eq!(newer, Some(follower.advance().unwrap()));
     }
 
@@ -2996,7 +2997,7 @@ mod tests {
         race(&store, ROUNDS, |_| {}, &[&write, &commit], &data);
     }
 
-    /// Commits ordered wait for a flush, which makes them durable.
+    /// Commits ordered wait for a flush, which makes them local.
     #[test]
     fn ordered_commits_wait_for_a_flush() {
         let (store, _dir) = store(1 << 20);

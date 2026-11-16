@@ -29,7 +29,7 @@
 //! on, their files the host's cache's. The store closes its open segment for the uploader when a
 //! commit waits for its upload, at a fork, as its interval runs out, and as the uploader stops:
 //! dropping it uploads what the store made durable, its open segment's commits too (TASK-192).
-//! Commits waiting to be durable (`COMMIT_DURABLE`) complete once acknowledged.
+//! Commits waiting to be durable (`COMMIT_UPLOADED`) complete once acknowledged.
 //!
 //! A fork the store makes is a fork of the branch once the segment its commit ends is
 //! acknowledged, which gives the child its record, and checkpointed ([`Remote::forked`]): the

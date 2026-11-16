@@ -490,7 +490,7 @@ fn connect(
 /// one its view is as of.
 fn hear_commits(store: &RemoteExtentStore, following: &Arc<Following>) {
     let heard = following.clone();
-    following.committed(store.on_committed(move |epoch| heard.committed(epoch)));
+    following.committed(store.on_committed(move |commit| heard.committed(commit)));
 }
 
 /// cladefs: has the daemon's asks for the stats of `store`'s VM process and guest ask the guest,

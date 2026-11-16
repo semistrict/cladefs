@@ -6,9 +6,9 @@
 //! filesystem keeps itself on: for what keeps itself on the host's daemon from outside a VM, as a
 //! SQLite volume does (crates/sqlite_extents, TASK-300). Its reads of sealed extents are the
 //! daemon's, from its cache, which every store and VM it serves shares; its writes, frees and
-//! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are
-//! durable on the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
-//! waiting for object storage (the user, 2026-11-09, TASK-301); closing it waits for that.
+//! commits are requests of the daemon, as a VM's device's are. Its commits and flushes are local,
+//! synced to the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
+//! waiting for the bucket (the user, 2026-11-09, TASK-301); closing it waits for that.
 
 use super::RemoteExtentStore;
 use crate::{Commit, VolatileSlice, VolatileSliceMut, WriteBarriers};
@@ -136,7 +136,7 @@ impl Device for RemoteDevice {
     /// Waits for what it committed to be in object storage, as a closed image's branch is whole
     /// in its bucket.
     async fn close(&self) -> Result<(), Error> {
-        self.store.commit_async(None, Commit::Durable).await.map_err(Error::new)
+        self.store.commit_async(None, Commit::Uploaded).await.map_err(Error::new)
     }
 
     async fn flush(&self) -> Result<(), Error> {

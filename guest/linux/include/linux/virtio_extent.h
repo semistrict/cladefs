@@ -64,10 +64,10 @@
  */
 #define VIRTIO_EXTENT_F_MAP_MANY 7
 /*
- * MAP takes MAP_AHEAD: the guest accesses the pages it maps next, as it maps them to read, and the
- * device maps them for it ahead of its accesses (cladefs's TASK-112.1).
+ * MAP takes MAP_PREFAULT: the guest accesses the pages it maps next, as it maps them to read, and
+ * the device maps them for it ahead of its accesses (cladefs's TASK-112.1).
  */
-#define VIRTIO_EXTENT_F_MAP_AHEAD 8
+#define VIRTIO_EXTENT_F_MAP_PREFAULT 8
 /*
  * cladefs: the host asks the guest for its stats: the configuration's `stats_asked` changes, telling
  * it with a configuration change, and the guest answers with STATS (cladefs's TASK-111.4).
@@ -84,11 +84,11 @@
 #define VIRTIO_EXTENT_T_INFO 8
 #define VIRTIO_EXTENT_T_RESIZED 9
 #define VIRTIO_EXTENT_T_FREEZE 10
-/* F_READ_ONLY: the follower's view moves to the writer's latest commit, and says its epoch. */
+/* F_READ_ONLY: the follower's view moves to the writer's latest commit, and says its number. */
 #define VIRTIO_EXTENT_T_ADVANCE 11
 /*
- * F_READ_ONLY: the view lets go of what the commits before the one an epoch names held, which an
- * ADVANCE said: served after the next ADVANCE, it lets go of no more.
+ * F_READ_ONLY: the view lets go of what the commits before the one a commit number names held,
+ * which an ADVANCE said: served after the next ADVANCE, it lets go of no more.
  */
 #define VIRTIO_EXTENT_T_LET_GO 12
 /* F_READ_ONLY: keeps an extent the view holds, whatever commit it advances to, until UNPIN. */
@@ -114,22 +114,23 @@
 #define VIRTIO_EXTENT_MAX_STATS (64 << 10)
 
 /*
- * WRITE: a barrier precedes it; a COMMIT follows it (F_WRITE_COMMIT); that commit is durable; it
+ * WRITE: a barrier precedes it; a COMMIT follows it (F_WRITE_COMMIT); that commit is uploaded; it
  * sets the root, of root_len bytes after the data.
  */
 #define VIRTIO_EXTENT_WRITE_BARRIER (1 << 0)
 #define VIRTIO_EXTENT_WRITE_COMMIT (1 << 1)
-#define VIRTIO_EXTENT_WRITE_DURABLE (1 << 2)
+#define VIRTIO_EXTENT_WRITE_UPLOADED (1 << 2)
 #define VIRTIO_EXTENT_WRITE_ROOT (1 << 3)
-/* COMMIT: it completes once durable; it sets the root. */
-#define VIRTIO_EXTENT_COMMIT_DURABLE (1 << 0)
+/* COMMIT: it completes once uploaded; it sets the root. */
+#define VIRTIO_EXTENT_COMMIT_UPLOADED (1 << 0)
 #define VIRTIO_EXTENT_COMMIT_ROOT (1 << 1)
 /*
- * MAP: its data holds more maps (F_MAP_MANY); accessed next (F_MAP_AHEAD); cladefs: zeros, its extent
- * ignored, which a store makes a private page of zeros. Bit 0, writable DAX's MAP_WRITE, is unused.
+ * MAP: its data holds more maps (F_MAP_MANY); accessed next (F_MAP_PREFAULT); cladefs: zeros, its
+ * extent ignored, which a store makes a private page of zeros. Bit 0, writable DAX's MAP_WRITE, is
+ * unused.
  */
 #define VIRTIO_EXTENT_MAP_MANY (1 << 1)
-#define VIRTIO_EXTENT_MAP_AHEAD (1 << 2)
+#define VIRTIO_EXTENT_MAP_PREFAULT (1 << 2)
 #define VIRTIO_EXTENT_MAP_ZEROS (1 << 3)
 /* FREE: its data names more extents (F_FREE_MANY). */
 #define VIRTIO_EXTENT_FREE_MANY (1 << 0)
@@ -156,7 +157,7 @@ struct virtio_extent_config {
 	/* F_RESIZE: the store's capacity, and the shrink the guest is asked to take, or 0. */
 	__le64 capacity;
 	__le64 asked;
-	/* F_READ_ONLY: the epoch of the writer's latest commit. */
+	/* F_READ_ONLY: the number of the writer's latest commit. */
 	__le64 committed;
 	/* F_DAX: the most private pages the device holds at once (pages of map_alignment). */
 	__le64 private_max;
@@ -195,7 +196,7 @@ struct virtio_extent_map {
 	__le64 window_offset;
 };
 
-/* One of a MAP_MANY's further maps: its flags MAP_AHEAD and MAP_ZEROS alone. */
+/* One of a MAP_MANY's further maps: its flags MAP_PREFAULT and MAP_ZEROS alone. */
 struct virtio_extent_map_entry {
 	struct virtio_extent_map map;
 	__le32 flags;
@@ -233,9 +234,12 @@ struct virtio_extent_stats {
 	__le64 asked;
 };
 
-/* ADVANCE: the epoch of the commit the view is as of now. LET_GO: the epoch it lets go up to. */
-struct virtio_extent_epoch {
-	__le64 epoch;
+/*
+ * ADVANCE: the number of the commit the view is as of now. LET_GO: the commit number it lets go up
+ * to.
+ */
+struct virtio_extent_commit_number {
+	__le64 commit;
 	__le64 reserved;
 };
 
@@ -295,8 +299,8 @@ struct vext_request {
 	/*
 	 * READ, WRITE, MAP: where in the extent. MAP, UNMAP, PRIVATE: how much (len), and where in
 	 * the window.
-	 * RESIZED: the capacity asked (offset). LET_GO: the epoch (offset). STATS: the ask answered
-	 * (offset).
+	 * RESIZED: the capacity asked (offset). LET_GO: the commit number (offset). STATS: the ask
+	 * answered (offset).
 	 */
 	u64 offset;
 	u64 len;
@@ -306,8 +310,8 @@ struct vext_request {
 	 * VIRTIO_EXTENT_COMMIT_ROOT; FREE's further extents, with VIRTIO_EXTENT_FREE_MANY; MAP's
 	 * further maps, with VIRTIO_EXTENT_MAP_MANY; ROOT's buffer, of max_root bytes and a struct
 	 * virtio_extent_root_len after them; INFO's struct virtio_extent_info; ADVANCE's struct
-	 * virtio_extent_epoch; STATS's text. cladefs: READ's and WRITE's length too: one length for all
-	 * data (TASK-160.7).
+	 * virtio_extent_commit_number; STATS's text. cladefs: READ's and WRITE's length too: one
+	 * length for all data (TASK-160.7).
 	 */
 	void *data;
 	u32 data_len;
@@ -336,7 +340,7 @@ struct vext_request {
 		struct virtio_extent_private private;
 		struct virtio_extent_commit commit;
 		struct virtio_extent_resized resized;
-		struct virtio_extent_epoch epoch;
+		struct virtio_extent_commit_number commit_number;
 		struct virtio_extent_stats stats;
 	} args;
 	struct virtio_extent_resp resp;
@@ -377,14 +381,14 @@ bool virtio_extent_freeze(struct virtio_extent *vext);
 bool virtio_extent_free_many(struct virtio_extent *vext);
 /* Whether a MAP may carry MAP_MANY (F_MAP_MANY). */
 bool virtio_extent_map_many(struct virtio_extent *vext);
-/* Whether a MAP, and each of its further maps, may carry MAP_AHEAD (F_MAP_AHEAD). */
-bool virtio_extent_map_ahead(struct virtio_extent *vext);
+/* Whether a MAP, and each of its further maps, may carry MAP_PREFAULT (F_MAP_PREFAULT). */
+bool virtio_extent_map_prefault(struct virtio_extent *vext);
 /*
  * Whether the device follows a store another VM writes, read-only (F_READ_ONLY): the driver
  * refuses what would write (-EROFS), and the filesystem mounts read-only.
  */
 bool virtio_extent_read_only(struct virtio_extent *vext);
-/* F_READ_ONLY: the epoch of the writer's latest commit, as the configuration says now. */
+/* F_READ_ONLY: the number of the writer's latest commit, as the configuration says now. */
 u64 virtio_extent_committed(struct virtio_extent *vext);
 /*
  * cladefs: F_READ_ONLY: a follower's device has a connection to its store, which keeps its writer

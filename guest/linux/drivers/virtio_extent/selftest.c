@@ -171,7 +171,7 @@ static void run(struct vext_selftest *st)
 
 	memcpy(root, ROOT, sizeof(ROOT) - 1);
 	err = CALL(.type = VIRTIO_EXTENT_T_COMMIT,
-		   .flags = VIRTIO_EXTENT_COMMIT_ROOT | VIRTIO_EXTENT_COMMIT_DURABLE,
+		   .flags = VIRTIO_EXTENT_COMMIT_ROOT | VIRTIO_EXTENT_COMMIT_UPLOADED,
 		   .data = root, .data_len = sizeof(ROOT) - 1);
 	if (err)
 		FAIL("COMMIT: %d", err);
@@ -262,8 +262,8 @@ static void run(struct vext_selftest *st)
 	err = CALL(.type = VIRTIO_EXTENT_T_INFO, .data = info, .data_len = sizeof(*info));
 	if (err || le64_to_cpu(info->used) != used + EXTENTS * len)
 		FAIL("INFO: %d, %llu bytes used", err, le64_to_cpu(info->used));
-	/* What followed the last commit is durable once another commits it. */
-	err = CALL(.type = VIRTIO_EXTENT_T_COMMIT, .flags = VIRTIO_EXTENT_COMMIT_DURABLE);
+	/* What followed the last commit is uploaded once another commits it. */
+	err = CALL(.type = VIRTIO_EXTENT_T_COMMIT, .flags = VIRTIO_EXTENT_COMMIT_UPLOADED);
 	if (err)
 		FAIL("COMMIT: %d", err);
 

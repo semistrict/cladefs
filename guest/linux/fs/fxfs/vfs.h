@@ -104,7 +104,7 @@ struct fxfs_vfs_info {
 	/*
 	 * cladefs: the commits a follower's state is as of, as its readers may find it: every batch up
 	 * to `follow_settled`'s commit settled, none past `follow_applied`'s applied
-	 * (FXFS_IOC_FOLLOW_EPOCHS). Written by its batches alone.
+	 * (FXFS_IOC_FOLLOW_COMMITS). Written by its batches alone.
 	 */
 	u64 follow_settled;
 	u64 follow_applied;
@@ -125,15 +125,15 @@ struct fxfs_vfs_info {
 };
 
 /*
- * cladefs: FXFS_IOC_FOLLOW_EPOCHS, on a follower's directory: the commits its state is as of. A read
- * between two calls was of a state as of a commit from the first's `settled` to the second's
+ * cladefs: FXFS_IOC_FOLLOW_COMMITS, on a follower's directory: the commits its state is as of. A
+ * read between two calls was of a state as of a commit from the first's `settled` to the second's
  * `applied` (the followers' history checker, TASK-42.7).
  */
-struct fxfs_follow_epochs {
+struct fxfs_follow_commits {
 	__u64 settled;
 	__u64 applied;
 };
-#define FXFS_IOC_FOLLOW_EPOCHS _IOR('x', 0x42, struct fxfs_follow_epochs)
+#define FXFS_IOC_FOLLOW_COMMITS _IOR('x', 0x42, struct fxfs_follow_commits)
 
 /*
  * cladefs: FXFS_IOC_FOLLOW_STATS, on a follower's directory: its batches, and how long they waited
@@ -384,8 +384,8 @@ int fxfs_dax_settle(struct fxfs_dax *dax);
 void fxfs_dax_stop(struct fxfs_dax *dax);
 void fxfs_dax_start(struct fxfs_dax *dax);
 /*
- * cladefs: the filesystem is frozen, durably, nothing dirty: every private page is mapped back to
- * its extent's, for a snapshot to take the window (doc-13). fxfs_dax_thaw ends it.
+ * cladefs: the filesystem is frozen, its commits uploaded, nothing dirty: every private page is
+ * rebound to its extent's, for a snapshot to take the window (doc-13). fxfs_dax_thaw ends it.
  */
 void fxfs_dax_frozen(struct fxfs_dax *dax);
 /*

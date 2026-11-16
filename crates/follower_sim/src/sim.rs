@@ -91,7 +91,7 @@ struct Follower {
     protocol: Protocol<ShuttleKernel<Changes>>,
     /// The commit the follower's trees are as of, set as a batch is applied, under the fill
     /// barrier.
-    epoch: AtomicU64,
+    commit: AtomicU64,
     /// What its allocator said it allocated as it mounted, as it says still: a follower allocates
     /// nothing, and applies none of the allocator's mutations (doc-8, The follower in Fxfs).
     allocated: u64,
@@ -105,13 +105,13 @@ impl Follow for Follower {
 
     async fn fetch(&self) -> Result<((Batch, u64), Changes), Error> {
         let (batch, changes) = self.fs.fetch().await?;
-        let epoch = self.view.lock().epoch();
-        Ok(((batch, epoch), changes))
+        let commit = self.view.lock().epoch();
+        Ok(((batch, commit), changes))
     }
 
-    async fn apply(&self, (batch, epoch): (Batch, u64)) -> Result<Previous, Error> {
+    async fn apply(&self, (batch, commit): (Batch, u64)) -> Result<Previous, Error> {
         let previous = self.fs.apply(batch).await?;
-        self.epoch.store(epoch, Ordering::SeqCst);
+        self.commit.store(commit, Ordering::SeqCst);
         Ok(previous)
     }
 }
@@ -205,11 +205,11 @@ async fn records(store: &ObjectStore, excluded: &BTreeSet<u64>) -> Vec<String> {
 async fn compare(
     fs: &OpenFxFilesystem,
     oracle: &OpenFxFilesystem,
-    epoch: u64,
+    commit: u64,
     excluded: &BTreeSet<u64>,
 ) -> BTreeMap<String, Node> {
     let (found, expected) = (tree(fs).await, tree(oracle).await);
-    assert_eq!(found, expected, "the follower at commit {epoch} isn't its commit's, in its tree");
+    assert_eq!(found, expected, "the follower at commit {commit} isn't its commit's, in its tree");
     // Its stores' trees are of the layers its commit's are: a flush's swapped in.
     let layers = |fs: &OpenFxFilesystem| {
         [fs.root_parent_store(), fs.root_store()].map(|store| {
@@ -220,7 +220,7 @@ async fn compare(
     let (found_layers, expected_layers): ([Vec<Option<u64>>; 2], _) = (layers(fs), layers(oracle));
     assert_eq!(
         found_layers, expected_layers,
-        "the follower at commit {epoch} isn't its commit's, in its layers"
+        "the follower at commit {commit} isn't its commit's, in its layers"
     );
     for (found, expected) in [
         (fs.root_parent_store(), oracle.root_parent_store()),
@@ -231,7 +231,7 @@ async fn compare(
             (records(&found, excluded).await, records(&expected, excluded).await);
         assert!(
             found == expected,
-            "the follower at commit {epoch} isn't its commit's, in its records of store {store}: \
+            "the follower at commit {commit} isn't its commit's, in its records of store {store}: \
              {found:#?} where its commit's are {expected:#?}"
         );
     }
@@ -246,7 +246,7 @@ fn check_changes(
     before: &BTreeMap<String, Node>,
     after: &BTreeMap<String, Node>,
     changes: &Changes,
-    epoch: u64,
+    commit: u64,
 ) {
     let entries = |tree: &BTreeMap<String, Node>| -> BTreeMap<String, u64> {
         tree.iter().map(|(name, node)| (name.clone(), node.object_id)).collect()
@@ -256,7 +256,7 @@ fn check_changes(
     };
     let object = |object_id| StoreObject { store_object_id: store, object_id };
     let miss = |what: String| -> ! {
-        panic!("a batch's changes miss {what}, to commit {epoch}: {changes:?}")
+        panic!("a batch's changes miss {what}, to commit {commit}: {changes:?}")
     };
     if entries(before) != entries(after) && !changes.entries.contains(&object(root)) {
         miss(format!("the root directory's entries, {before:?} to {after:?}"));
@@ -299,21 +299,21 @@ async fn follow(follower: &Follower, store: &Arc<Store<MemDir>>, excluding_held:
     // Those held as the batch applied, and since.
     let excluded =
         if excluding_held { follower.state.lock().held.clone() } else { BTreeSet::new() };
-    let (epoch, view) = {
+    let (commit, view) = {
         let view = follower.view.lock();
         (view.epoch(), view.duplicate().expect("duplicating the follower's view failed"))
     };
     let oracle = mount(store, view).await;
-    let after = compare(fs, &oracle, epoch, &excluded).await;
+    let after = compare(fs, &oracle, commit, &excluded).await;
     assert_eq!(
         fs.allocator().get_allocated_bytes(),
         follower.allocated,
-        "the follower at commit {epoch} applied its writer's allocations"
+        "the follower at commit {commit} applied its writer's allocations"
     );
     let root_store = fs.root_store();
     let (store_object_id, root) =
         (root_store.store_object_id(), root_store.root_directory_object_id());
-    check_changes(store_object_id, root, &before, &after, &changes, epoch);
+    check_changes(store_object_id, root, &before, &after, &changes, commit);
     let mut state = follower.state.lock();
     state.previous = std::mem::replace(&mut state.last, oracle.clone());
     state.oracles.push(oracle);
@@ -366,7 +366,7 @@ pub async fn simulate(profile: Profile) {
     // The follower, mounted on the commit the writer made first, and the checker's mount of it.
     let follower = {
         let view = store.view();
-        let epoch = view.epoch();
+        let commit = view.epoch();
         let first = mount(&store, view.duplicate().unwrap()).await;
         let device = match profile.mutation {
             Mutation::ReadsPastItsView => ViewDevice::reading_past_its_view(store.clone(), view),
@@ -376,7 +376,7 @@ pub async fn simulate(profile: Profile) {
         let device = DeviceHolder::new(device);
         let fs = FxFilesystemBuilder::new().read_only(true).open(device).await;
         let fs = Arc::new(fs.expect("mounting the follower failed"));
-        compare(&fs, &first, epoch, &BTreeSet::new()).await;
+        compare(&fs, &first, commit, &BTreeSet::new()).await;
         let following = Following {
             first: first.clone(),
             last: first.clone(),
@@ -386,9 +386,9 @@ pub async fn simulate(profile: Profile) {
             batches: 0,
         };
         let protocol = Protocol::new(ShuttleKernel::new(|_: &Changes| {}));
-        let epoch = AtomicU64::new(epoch);
+        let commit = AtomicU64::new(commit);
         let allocated = fs.allocator().get_allocated_bytes();
-        Arc::new(Follower { fs, view, protocol, epoch, allocated, state: Mutex::new(following) })
+        Arc::new(Follower { fs, view, protocol, commit, allocated, state: Mutex::new(following) })
     };
     // The writer's last sync returned; the follower followed a commit after it.
     let done = Arc::new(AtomicBool::new(false));
@@ -441,12 +441,12 @@ pub async fn simulate(profile: Profile) {
                             _ => follower.fs.clone(),
                         }
                     };
-                    let (epoch, found) = {
+                    let (commit, found) = {
                         let _filling = follower.protocol.fill().unwrap();
-                        let epoch = follower.epoch.load(Ordering::SeqCst);
-                        (epoch, observe(&mounted(), name).await)
+                        let commit = follower.commit.load(Ordering::SeqCst);
+                        (commit, observe(&mounted(), name).await)
                     };
-                    history.lock().read(Read { reader, epochs: epoch..=epoch, name, found });
+                    history.lock().read(Read { reader, commits: commit..=commit, name, found });
                     fasync::yield_now().await;
                 }
             })
@@ -480,18 +480,18 @@ pub async fn simulate(profile: Profile) {
                         continue;
                     };
                     // Read until the follower is two batches on, a few times at most.
-                    let held_at = follower.epoch.load(Ordering::SeqCst);
+                    let held_at = follower.commit.load(Ordering::SeqCst);
                     for _ in 0..8 {
-                        if follower.epoch.load(Ordering::SeqCst) >= held_at + 2 {
+                        if follower.commit.load(Ordering::SeqCst) >= held_at + 2 {
                             break;
                         }
-                        let (epoch, found) = {
+                        let (commit, found) = {
                             let _filling = follower.protocol.fill().unwrap();
-                            let epoch = follower.epoch.load(Ordering::SeqCst);
-                            (epoch, read(fs, object_id).await)
+                            let commit = follower.commit.load(Ordering::SeqCst);
+                            (commit, read(fs, object_id).await)
                         };
-                        let epochs = epoch..=epoch;
-                        history.lock().held_read(HeldRead { reader, epochs, object_id, found });
+                        let commits = commit..=commit;
+                        history.lock().held_read(HeldRead { reader, commits, object_id, found });
                         fasync::yield_now().await;
                     }
                     std::mem::drop(hold);

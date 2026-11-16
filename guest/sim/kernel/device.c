@@ -662,7 +662,7 @@ bool virtio_extent_map_many(struct virtio_extent *vext)
 	return true;
 }
 
-bool virtio_extent_map_ahead(struct virtio_extent *vext)
+bool virtio_extent_map_prefault(struct virtio_extent *vext)
 {
 	return false;
 }

@@ -52,10 +52,10 @@ pub const VIRTIO_EXTENT_F_FREE_MANY: u32 = 6;
 /// one its arguments say: the pieces of a file's chunk in one request rather than one each
 /// (TASK-91.4).
 pub const VIRTIO_EXTENT_F_MAP_MANY: u32 = 7;
-/// cladefs: `MAP` takes `MAP_AHEAD`, as each of its further maps does: the guest accesses the pages
-/// next, as it maps them to read, and the device maps them for it ahead of its accesses, as it does
-/// writable ones, rather than the hypervisor one fault at a time (TASK-112.1).
-pub const VIRTIO_EXTENT_F_MAP_AHEAD: u32 = 8;
+/// cladefs: `MAP` takes `MAP_PREFAULT`, as each of its further maps does: the guest accesses the
+/// pages next, as it maps them to read, and the device maps them for it ahead of its accesses, as
+/// it does writable ones, rather than the hypervisor one fault at a time (TASK-112.1).
+pub const VIRTIO_EXTENT_F_MAP_PREFAULT: u32 = 8;
 // cladefs: bits 9 and 10, writable DAX's asks to seal and stage 1's copy on write beside it, are
 // not reused (backlog doc-13).
 /// cladefs: the host asks the guest for its stats, the configuration's `stats_asked` changing, and
@@ -80,9 +80,9 @@ pub const VIRTIO_EXTENT_RESIZED_TOOK: u32 = 1 << 0;
 pub const VIRTIO_EXTENT_T_FREEZE: u32 = 10;
 pub const VIRTIO_EXTENT_FREEZE_FROZEN: u32 = 1 << 0;
 /// cladefs (`VIRTIO_EXTENT_F_READ_ONLY`): moves the follower's view to its writer's latest commit,
-/// holding what the commits between held until `LET_GO`, and writes its epoch (`Epoch`).
+/// holding what the commits between held until `LET_GO`, and writes its number (`CommitNumber`).
 pub const VIRTIO_EXTENT_T_ADVANCE: u32 = 11;
-/// cladefs: lets go of what the follower's view held of the commits before the one an `Epoch`
+/// cladefs: lets go of what the follower's view held of the commits before the one a `CommitNumber`
 /// names, which an `ADVANCE` wrote: served after the next `ADVANCE`, it lets go of no more.
 pub const VIRTIO_EXTENT_T_LET_GO: u32 = 12;
 /// cladefs: keeps an extent the view holds, whatever commit it advances to, until `UNPIN`.
@@ -102,26 +102,26 @@ pub const VIRTIO_EXTENT_T_STATS: u32 = 17;
 pub const VIRTIO_EXTENT_T_LAST: u32 = VIRTIO_EXTENT_T_STATS;
 
 /// A `WRITE`'s flags: a barrier precedes it, as if a `COMMIT` did; a `COMMIT` follows it (with
-/// `WRITE_COMMIT`); that commit completes once durable; cladefs: that commit sets the root, which
+/// `WRITE_COMMIT`); that commit completes once uploaded; cladefs: that commit sets the root, which
 /// follows the data, of `IoArgs::root_len` bytes.
 pub const VIRTIO_EXTENT_WRITE_BARRIER: u32 = 1 << 0;
 pub const VIRTIO_EXTENT_WRITE_COMMIT: u32 = 1 << 1;
-pub const VIRTIO_EXTENT_WRITE_DURABLE: u32 = 1 << 2;
+pub const VIRTIO_EXTENT_WRITE_UPLOADED: u32 = 1 << 2;
 pub const VIRTIO_EXTENT_WRITE_ROOT: u32 = 1 << 3;
 
 /// cladefs: a `FREE`'s flags: its data names more extents to free, each a `virtio_extent_id`
 /// (`F_FREE_MANY`), of [`MAX_MANY_DATA`] bytes at most.
 pub const VIRTIO_EXTENT_FREE_MANY: u32 = 1 << 0;
 
-/// A `COMMIT`'s flags: it completes once durable; it sets the root.
-pub const VIRTIO_EXTENT_COMMIT_DURABLE: u32 = 1 << 0;
+/// A `COMMIT`'s flags: it completes once uploaded; it sets the root.
+pub const VIRTIO_EXTENT_COMMIT_UPLOADED: u32 = 1 << 0;
 pub const VIRTIO_EXTENT_COMMIT_ROOT: u32 = 1 << 1;
 /// A `MAP`'s flags, cladefs: its data holds more maps (`F_MAP_MANY`), of [`MAX_MANY_DATA`] bytes at
-/// most; and the guest accesses the pages next (`F_MAP_AHEAD`); and zeros, its extent and offset
+/// most; and the guest accesses the pages next (`F_MAP_PREFAULT`); and zeros, its extent and offset
 /// ignored, of a writer's window, as each of a `MAP_MANY`'s maps may be. Every map is read-only:
 /// bit 0, writable DAX's `MAP_WRITE`, is not reused.
 pub const VIRTIO_EXTENT_MAP_MANY: u32 = 1 << 1;
-pub const VIRTIO_EXTENT_MAP_AHEAD: u32 = 1 << 2;
+pub const VIRTIO_EXTENT_MAP_PREFAULT: u32 = 1 << 2;
 pub const VIRTIO_EXTENT_MAP_ZEROS: u32 = 1 << 3;
 
 /// The size of each of the device's queues. Its request queues are interchangeable, which a driver
@@ -157,11 +157,11 @@ pub const MAX_STATS: usize = 64 << 10;
 const _: () = assert!(MAX_STATS == cladefs::RemoteExtentStore::MAX_STATS);
 
 /// cladefs: a request's `flags`, of type `type_`, as a device whose cache is `Unsafe` serves them
-/// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not durable.
-pub fn undurable(type_: u32, flags: u32) -> u32 {
+/// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not uploaded.
+pub fn ordered_only(type_: u32, flags: u32) -> u32 {
     match type_ {
-        VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_DURABLE,
-        VIRTIO_EXTENT_T_WRITE => flags & !VIRTIO_EXTENT_WRITE_DURABLE,
+        VIRTIO_EXTENT_T_COMMIT => flags & !VIRTIO_EXTENT_COMMIT_UPLOADED,
+        VIRTIO_EXTENT_T_WRITE => flags & !VIRTIO_EXTENT_WRITE_UPLOADED,
         _ => flags,
     }
 }
@@ -171,16 +171,16 @@ pub fn undurable(type_: u32, flags: u32) -> u32 {
 pub fn write_barriers(flags: u32) -> Option<cladefs::WriteBarriers<'static>> {
     let known = VIRTIO_EXTENT_WRITE_BARRIER
         | VIRTIO_EXTENT_WRITE_COMMIT
-        | VIRTIO_EXTENT_WRITE_DURABLE
+        | VIRTIO_EXTENT_WRITE_UPLOADED
         | VIRTIO_EXTENT_WRITE_ROOT;
     let commit = flags & VIRTIO_EXTENT_WRITE_COMMIT != 0;
     if flags & !known != 0
-        || (flags & (VIRTIO_EXTENT_WRITE_DURABLE | VIRTIO_EXTENT_WRITE_ROOT) != 0 && !commit)
+        || (flags & (VIRTIO_EXTENT_WRITE_UPLOADED | VIRTIO_EXTENT_WRITE_ROOT) != 0 && !commit)
     {
         return None;
     }
-    let after = commit.then_some(if flags & VIRTIO_EXTENT_WRITE_DURABLE != 0 {
-        cladefs::Commit::Durable
+    let after = commit.then_some(if flags & VIRTIO_EXTENT_WRITE_UPLOADED != 0 {
+        cladefs::Commit::Uploaded
     } else {
         cladefs::Commit::Ordered
     });
@@ -285,7 +285,7 @@ pub struct MapArgs {
     pub window_offset: u64,
 }
 
-/// cladefs: one of a `MAP_MANY`'s further maps, its flags `MAP_AHEAD` and `MAP_ZEROS` alone
+/// cladefs: one of a `MAP_MANY`'s further maps, its flags `MAP_PREFAULT` and `MAP_ZEROS` alone
 /// (`F_MAP_MANY`).
 #[derive(Copy, Clone, Debug, Default, FromBytes, IntoBytes, Immutable, KnownLayout)]
 #[repr(C)]
@@ -346,14 +346,14 @@ pub struct Info {
     pub branch: u64,
 }
 
-/// What `ADVANCE` writes, the epoch of the commit the follower's view is as of now, and `LET_GO`
+/// What `ADVANCE` writes, the number of the commit the follower's view is as of now, and `LET_GO`
 /// reads.
 #[derive(
     Copy, Clone, Debug, Default, PartialEq, Eq, FromBytes, IntoBytes, Immutable, KnownLayout,
 )]
 #[repr(C)]
-pub struct Epoch {
-    pub epoch: u64,
+pub struct CommitNumber {
+    pub commit: u64,
     pub reserved: u64,
 }
 
@@ -387,7 +387,8 @@ pub struct ConfigSpace {
     /// (`VIRTIO_EXTENT_F_RESIZE`).
     pub capacity: u64,
     pub asked: u64,
-    /// cladefs: the epoch of the latest commit of a follower's writer (`VIRTIO_EXTENT_F_READ_ONLY`).
+    /// cladefs: the number of the latest commit of a follower's writer
+    /// (`VIRTIO_EXTENT_F_READ_ONLY`).
     pub committed: u64,
     /// cladefs: the most private pages a writer's window holds (`VIRTIO_EXTENT_F_DAX`, backlog
     /// doc-13): 0 of a follower's, which copies nothing.
@@ -425,32 +426,32 @@ mod tests {
 
     use super::*;
 
-    /// cladefs TASK-363: an Unsafe device's commits and writes' commits are ordered, not durable,
+    /// cladefs TASK-363: an Unsafe device's commits and writes' commits are ordered, not uploaded,
     /// and nothing else of their flags, nor any other request's, changes.
     #[test]
-    fn unsafe_requests_are_undurable() {
-        let commit = VIRTIO_EXTENT_COMMIT_DURABLE | VIRTIO_EXTENT_COMMIT_ROOT;
-        assert_eq!(undurable(VIRTIO_EXTENT_T_COMMIT, commit), VIRTIO_EXTENT_COMMIT_ROOT);
+    fn unsafe_requests_are_ordered_only() {
+        let commit = VIRTIO_EXTENT_COMMIT_UPLOADED | VIRTIO_EXTENT_COMMIT_ROOT;
+        assert_eq!(ordered_only(VIRTIO_EXTENT_T_COMMIT, commit), VIRTIO_EXTENT_COMMIT_ROOT);
         let write =
-            VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE | VIRTIO_EXTENT_WRITE_ROOT;
+            VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED | VIRTIO_EXTENT_WRITE_ROOT;
         assert_eq!(
-            undurable(VIRTIO_EXTENT_T_WRITE, write),
+            ordered_only(VIRTIO_EXTENT_T_WRITE, write),
             VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_ROOT
         );
-        assert_eq!(undurable(VIRTIO_EXTENT_T_READ, u32::MAX), u32::MAX);
+        assert_eq!(ordered_only(VIRTIO_EXTENT_T_READ, u32::MAX), u32::MAX);
     }
 
-    /// A WRITE's flags: durability and a root only with a commit, nothing unknown.
+    /// A WRITE's flags: an upload and a root only with a commit, nothing unknown.
     #[test]
     fn writes_barriers() {
         let barriers = write_barriers(VIRTIO_EXTENT_WRITE_BARRIER).unwrap();
         assert!(barriers.before);
         assert_eq!(barriers.after, None);
-        let barriers = write_barriers(VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE);
-        assert_eq!(barriers.unwrap().after, Some(cladefs::Commit::Durable));
+        let barriers = write_barriers(VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED);
+        assert_eq!(barriers.unwrap().after, Some(cladefs::Commit::Uploaded));
         let barriers = write_barriers(VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_ROOT);
         assert_eq!(barriers.unwrap().after, Some(cladefs::Commit::Ordered));
-        assert!(write_barriers(VIRTIO_EXTENT_WRITE_DURABLE).is_none());
+        assert!(write_barriers(VIRTIO_EXTENT_WRITE_UPLOADED).is_none());
         assert!(write_barriers(VIRTIO_EXTENT_WRITE_ROOT).is_none());
         assert!(write_barriers(1 << 4).is_none());
     }
@@ -474,7 +475,7 @@ mod tests {
         assert_eq!(size_of::<MapEntry>(), 48);
         assert_eq!(size_of::<UnmapArgs>(), 16);
         assert_eq!(size_of::<Info>(), 48);
-        assert_eq!(size_of::<Epoch>(), 16);
+        assert_eq!(size_of::<CommitNumber>(), 16);
         assert_eq!(size_of::<ResizedArgs>(), 8);
     }
 
