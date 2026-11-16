@@ -29,8 +29,8 @@ pub(crate) enum Step<T, R> {
     Stop(R),
 }
 
-/// What a [`transition`] starts from.
-pub(crate) enum Start {
+/// What a [`transition`] starts from: and a holding of a cell ([`crate::cell::hold_from`]).
+pub enum Start {
     /// What a read finds.
     Read,
     /// Nothing, as a create expects: one that finds something there reads it from its answer.
@@ -52,8 +52,22 @@ pub(crate) async fn transition<T: Serialize, R>(
     key: &str,
     start: Start,
     decode: impl Fn(&[u8]) -> Result<T, Error>,
-    mut step: impl FnMut(Option<T>) -> Result<Step<T, R>, Error>,
+    step: impl FnMut(Option<T>) -> Result<Step<T, R>, Error>,
 ) -> Result<R, Error> {
+    Ok(transition_leaving(bucket, key, start, decode, step).await?.0)
+}
+
+/// [`transition`], with the object it left at `key`: what it wrote, of the version its write
+/// made, or what it found and stopped at, none if nothing was there (TASK-449). A later
+/// transition of the object starts from it ([`Start::Found`]), a read less, its write conditional
+/// on that version as on one a read found.
+pub(crate) async fn transition_leaving<T: Serialize, R>(
+    bucket: &impl Bucket,
+    key: &str,
+    start: Start,
+    decode: impl Fn(&[u8]) -> Result<T, Error>,
+    mut step: impl FnMut(Option<T>) -> Result<Step<T, R>, Error>,
+) -> Result<(R, Option<Object>), Error> {
     let mut found = match start {
         Start::Read => bucket::get(bucket, key).await,
         Start::Create => None,
@@ -62,19 +76,22 @@ pub(crate) async fn transition<T: Serialize, R>(
     loop {
         let current = found.as_ref().map(|object| decode(&object.bytes)).transpose()?;
         let (next, result) = match step(current)? {
-            Step::Stop(result) => return Ok(result),
+            Step::Stop(result) => return Ok((result, found)),
             Step::Write(next, result) => (next, result),
         };
         let bytes = layout::encode(&next);
+        let written = |version| Object::written(key, bytes.clone(), version, bucket.now());
         found = match found {
-            None => match bucket::create(bucket, key, bytes).await {
-                Created::Created => return Ok(result),
+            None => match bucket::create(bucket, key, bytes.clone()).await {
+                Created::Created(version) => return Ok((result, Some(written(version)))),
                 Created::Exists(object) => Some(object),
             },
-            Some(object) => match bucket::update(bucket, key, bytes, &object.meta.version).await {
-                Updated::Updated => return Ok(result),
-                Updated::Changed => bucket::get(bucket, key).await,
-            },
+            Some(object) => {
+                match bucket::update(bucket, key, bytes.clone(), &object.meta.version).await {
+                    Updated::Updated(version) => return Ok((result, Some(written(version)))),
+                    Updated::Changed => bucket::get(bucket, key).await,
+                }
+            }
         };
     }
 }
@@ -88,6 +105,18 @@ async fn change<R>(
 ) -> Result<R, Error> {
     let decode = |bytes: &[u8]| Record::decode(branch, bytes);
     transition(bucket, &layout::record(branch), start, decode, step).await
+}
+
+/// Changes `branch`'s record as [`change`] does, with the record object it left
+/// ([`transition_leaving`]).
+async fn change_leaving<R>(
+    bucket: &impl Bucket,
+    branch: Branch,
+    start: Start,
+    step: impl FnMut(Option<Record>) -> Result<Step<Record, R>, Error>,
+) -> Result<(R, Option<Object>), Error> {
+    let decode = |bytes: &[u8]| Record::decode(branch, bytes);
+    transition_leaving(bucket, &layout::record(branch), start, decode, step).await
 }
 
 /// The owner every record a writer makes names, its maker having chosen `owner`
@@ -393,6 +422,16 @@ pub async fn record_fork_under(
 /// no child. A fork refused by a record there writes none. Written first, a host dying before the
 /// record left a reference no record names, which nothing retired: specs/bucket's
 /// NoClonesRecordFirst. Forked again, the record its own, it writes it again, which stands.
+///
+/// cladefs: forked again, its record being made, it resumes the fork as another would
+/// ([`resume_point_fork`]): the record said resumed first, with a condition, as the making that
+/// began it may still write the reference after the clone was made (TASK-455's review).
+///
+/// cladefs: four round trips, one after another (TASK-449): the record's create; the reference's;
+/// the point's record read; the record's update, conditional on the version its create left, not
+/// read back. A record there already is what the create finds, as the read a host made of the
+/// child's record first found (`Remote::child_free`, which a fork of a point makes no more): ours
+/// being made, resumed; deleted, or another's, the fork refused.
 pub async fn fork_point(
     bucket: &impl Bucket,
     child: Branch,
@@ -400,6 +439,22 @@ pub async fn fork_point(
     origin: Origin,
     owner: u64,
 ) -> Result<(), Error> {
+    let nothing = std::future::ready(());
+    fork_point_with(bucket, child, point, origin, owner, nothing).await.map(drop)
+}
+
+/// cladefs: [`fork_point`], with `alongside` run at once with the reference's write, once the
+/// child's record is made, if this makes the fork: its host's holding of the child's cell, which
+/// the child's store would hold first as it opens (TASK-449). Returns, if this made the fork, the
+/// child's record as it left it, a clone made; and what `alongside` gave, if it ran.
+pub async fn fork_point_with<T>(
+    bucket: &impl Bucket,
+    child: Branch,
+    point: Branch,
+    origin: Origin,
+    owner: u64,
+    alongside: impl Future<Output = T>,
+) -> Result<(Option<Record>, Option<T>), Error> {
     failpoint!("point::record");
     let owner = self::owner(owner);
     let refers = rules().references && rules().clones_refer_first;
@@ -411,20 +466,26 @@ pub async fn fork_point(
     }
     let kind = match rules().forks_pending {
         true => Kind::Forking { origin, point },
-        false => Kind::Fork(origin),
+        false => Kind::Clone(origin),
     };
     let record = kind.of(owner);
     // A record found that refused the fork.
     let mut refused = None;
-    let making = change(bucket, child, Start::Create, |found| match found {
+    let making = change_leaving(bucket, child, Start::Create, |found| match found {
         None => Ok(Step::Write(record.clone(), true)),
+        // Another's, deleted or not: its ID taken, as a read of the record before found.
+        Some(found) if !found.is_child_of(record.owner) => {
+            refused = Some(found);
+            Err(Error::IdTaken(child))
+        }
+        // Ours, given up on, its point deleted.
         Some(found) if found.deleted => {
             refused = Some(found);
             Err(Error::Deleted)
         }
-        Some(found) if !found.is_child_of(record.owner) => {
-            refused = Some(found);
-            Err(Error::IdTaken(child))
+        // Ours, being made by another making of it, which it resumes.
+        Some(found) if found.forking().is_some() && !found.resumed => {
+            Ok(Step::Write(found.resumed(), true))
         }
         Some(found) => Ok(Step::Stop(found.forking().is_some())),
     })
@@ -432,23 +493,60 @@ pub async fn fork_point(
     if let Some(found) = refused.filter(|_| refers_first) {
         take_back(bucket, origin, child, &found).await;
     }
-    let making = making?;
+    let (making, left) = making?;
+    let mut made = (None, None);
     if making {
         failpoint!("point::recorded");
-        if refers && !refers_first {
-            refer(bucket, origin, child, owner).await;
-            failpoint!("point::referred");
-        }
-        finish_point_fork(bucket, child, point).await?;
+        let referring = async {
+            if refers && !refers_first {
+                refer(bucket, origin, child, owner).await;
+                failpoint!("point::referred");
+            }
+            Ok::<(), Error>(())
+        };
+        let (referred, beside) = futures::join!(referring, alongside);
+        referred?;
+        made =
+            (finish_point_fork_from(bucket, child, point, Start::Found(left)).await?, Some(beside));
     }
     // Without the rule, as a test shows it needed: once made.
     if rules().references && !rules().clones_refer_first {
         refer(bucket, origin, child, owner).await;
     }
-    Ok(())
+    Ok(made)
 }
 
-/// Makes the fork being made of `point` to `child` ([`fork_point`]), whose record is created: fails
+/// cladefs: resumes the fork of a point to `child` that another began ([`fork_point`]), its record
+/// saying it is being made: a store opening `child`, its host dead or slow, makes it, so that it
+/// takes no state of a fork not made (TASK-455's review). The record is said resumed first
+/// ([`Record::resumed`]), with a condition, so that the clone made says so, whose reference's
+/// retirement is then marked: the host that began it, slow, may write the reference after the
+/// clone was made, deleted and its cell removed (rule `resumes_marked`). Then the reference, as
+/// that host writes it, before the fork is made (rule `resumes_refer`): it may have died first.
+/// Then the fork made ([`finish_point_fork`]). A fork made already, it writes nothing: its host,
+/// or a resume, wrote the reference before. Fails as [`finish_point_fork`] does, and with
+/// [`Error::Deleted`] for a fork given up on, [`Error::NoBranch`] for no record.
+pub async fn resume_point_fork(bucket: &impl Bucket, child: Branch) -> Result<(), Error> {
+    let forking = change(bucket, child, Start::Read, |found| match found {
+        None => Err(Error::NoBranch),
+        Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) if found.forking().is_none() => Ok(Step::Stop(None)),
+        Some(found) if found.resumed => Ok(Step::Stop(Some(found))),
+        Some(found) => Ok(Step::Write(found.clone().resumed(), Some(found))),
+    })
+    .await?;
+    let Some(Record { kind: Kind::Forking { origin, point }, owner, .. }) = forking else {
+        return Ok(());
+    };
+    // Without the rule, as a test shows it needed: none written.
+    if rules().references && rules().clones_refer_first && rules().resumes_refer {
+        refer(bucket, origin, child, owner).await;
+    }
+    finish_point_fork(bucket, child, point).await
+}
+
+/// Makes the fork being made of `point` to `child` ([`fork_point`]), whose record is created, a
+/// clone made ([`Kind::Clone`]), its reference written before by its one writer, its host: fails
 /// with [`Error::Deleted`] if the point was deleted, or the fork was given up on. cladefs: and with
 /// [`Error::NotShared`] if `child` is of another tenant's cell than the point, which its record,
 /// as this read finds it, doesn't say is shared (TASK-395.7): unsharing it stops the forks whose
@@ -458,6 +556,19 @@ pub async fn finish_point_fork(
     child: Branch,
     point: Branch,
 ) -> Result<(), Error> {
+    finish_point_fork_from(bucket, child, point, Start::Read).await.map(drop)
+}
+
+/// [`finish_point_fork`], the child's record's update starting from `start`: the record as its
+/// create left it, a read less (TASK-449), its update conditional on that version as on one a read
+/// found, so that its deletion, its giving up, or a resume since makes it read the record anew.
+/// Returns the record as it left it, if it made the fork.
+async fn finish_point_fork_from(
+    bucket: &impl Bucket,
+    child: Branch,
+    point: Branch,
+    start: Start,
+) -> Result<Option<Record>, Error> {
     let tenant = child.cell.tenant;
     if rules().forks_check_points || point.cell.tenant != tenant {
         let found = record(bucket, point).await?;
@@ -471,19 +582,20 @@ pub async fn finish_point_fork(
     failpoint!("point::checked");
     // Conditional, against its being deleted, or given up on ([`abandon`]). A record's bytes
     // repeat only for the same change, which is then made.
-    let made = change(bucket, child, Start::Read, |found| match found {
+    let made = change(bucket, child, start, |found| match found {
         None => Err(Error::NoBranch),
         Some(found) if found.deleted => Err(Error::Deleted),
         Some(found @ Record { kind: Kind::Forking { origin, .. }, .. }) => {
-            Ok(Step::Write(Record { kind: Kind::Fork(origin), ..found }, true))
+            let made = Record { kind: Kind::Clone(origin), ..found };
+            Ok(Step::Write(made.clone(), Some(made)))
         }
-        Some(_) => Ok(Step::Stop(false)),
+        Some(_) => Ok(Step::Stop(None)),
     })
     .await?;
-    if made {
+    if made.is_some() {
         failpoint!("point::made");
     }
-    Ok(())
+    Ok(made)
 }
 
 /// cladefs: shares `point`, if `shared`, or no longer: other tenants' cells than its own may have
@@ -773,7 +885,9 @@ pub async fn delete_fork_under(
                 false => (Kind::Fork(origin), false),
             }
         }
-        Kind::Forking { origin, .. } => (Kind::Fork(origin), false),
+        // A clone made has its record: one of none, never made, stays deleted for good, as the
+        // collector removes no fork's (TASK-455).
+        Kind::Forking { origin, .. } | Kind::Clone(origin) => (Kind::Fork(origin), false),
         Kind::Point(origin) => (Kind::Point(origin), false),
         Kind::Root | Kind::Own => (Kind::Own, false),
     };
@@ -907,8 +1021,8 @@ mod tests {
         assert_eq!(block_on(share(&bucket, point, false)), Ok(()));
         assert_eq!(fork(theirs(7)), Err(Error::NotShared(point)));
         assert_eq!(record(point), Some(Kind::Point(origin).of(0x33)));
-        assert_eq!(record(theirs(6)), Some(Kind::Fork(origin).of(6)));
-        assert_eq!(record(test_branch(5)), Some(Kind::Fork(origin).of(5)));
+        assert_eq!(record(theirs(6)), Some(Kind::Clone(origin).of(6)));
+        assert_eq!(record(test_branch(5)), Some(Kind::Clone(origin).of(5)));
 
         let refused = block_on(share(&bucket, test_branch(5), true));
         assert_eq!(refused, Err(Error::NotPoint(test_branch(5))));
@@ -1244,7 +1358,7 @@ mod tests {
 
             let claim = Kind::Claim(origin).of(0);
             let (key, bytes) = (layout::record(test_branch(3)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created));
+            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
             collect(&*bucket, 2, &NOW).await.unwrap();
             let deleted = Record { deleted: true, ..claim };
             assert_eq!(record(&*bucket, test_branch(3)).await, Ok(Some(deleted)));
@@ -1252,7 +1366,7 @@ mod tests {
             // Its deletion, which stopped, finds it so; or, the pass not there first, finishes it.
             let claim = Kind::Claim(origin).of(0);
             let (key, bytes) = (layout::record(test_branch(4)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created));
+            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
             assert_eq!(
                 delete_fork(&*bucket, test_branch(4), Kind::Fork(origin), 0, 9, 0).await,
                 Ok(true)
@@ -1265,7 +1379,7 @@ mod tests {
             // But one a writer has lost something: it stops the pass, as any branch's.
             let claim = Kind::Claim(origin).of(0);
             let (key, bytes) = (layout::record(test_branch(5)), layout::encode(&claim));
-            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created));
+            assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
             head::take(&*bucket, test_branch(5), 11, 0).await.unwrap();
             let lost = "branch 1/1/5: what its recovery starts from keeps going".to_owned();
             assert_eq!(collect(&*bucket, 3, &NOW).await, Err(Error::Lost(lost)));

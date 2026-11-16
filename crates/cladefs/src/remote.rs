@@ -23,22 +23,22 @@ use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
 
-/// The fencing token of this host's placement, `CLADEFS_EXTENTD_TOKEN`, which the system's control
+/// The fencing token of this host's placement, `CLADEFSD_TOKEN`, which the system's control
 /// plane gives it, and which the copies of stores here that were never placed ([`place`]) take
 /// their branches with, as stores restored or taken here are. Not 0, which would fence nothing:
 /// a host without one keeps no branch (TASK-45).
 pub fn host_token() -> Result<u64, Failure> {
     let missing = || {
         Failure::msg(
-            "CLADEFS_EXTENTD_TOKEN names no placement token: this host's placement's, from the \
+            "CLADEFSD_TOKEN names no placement token: this host's placement's, from the \
              system's control plane, which fences earlier placements",
         )
     };
-    match std::env::var("CLADEFS_EXTENTD_TOKEN") {
+    match std::env::var("CLADEFSD_TOKEN") {
         Ok(token) if !token.is_empty() => match token.parse() {
             Ok(0) => Err(missing()),
             Ok(token) => Ok(token),
-            Err(err) => Err(Failure::local(err, format!("CLADEFS_EXTENTD_TOKEN {token:?}"))),
+            Err(err) => Err(Failure::local(err, format!("CLADEFSD_TOKEN {token:?}"))),
         },
         _ => Err(missing()),
     }
@@ -49,18 +49,18 @@ pub fn host_token() -> Result<u64, Failure> {
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
-    /// The bucket's URL, `CLADEFS_EXTENTD_REMOTE`.
+    /// The bucket's URL, `CLADEFSD_REMOTE`.
     pub bucket: String,
-    /// The placement's fencing token, `CLADEFS_EXTENTD_TOKEN` ([`host_token`]).
+    /// The placement's fencing token, `CLADEFSD_TOKEN` ([`host_token`]).
     pub token: u64,
 }
 
 impl Host {
     /// The host the environment names, or why it names none.
     pub fn from_env() -> Result<Self, String> {
-        let bucket = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
+        let bucket = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
         let bucket = bucket.ok_or_else(|| {
-            "CLADEFS_EXTENTD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
+            "CLADEFSD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
              stores' branches in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;
@@ -120,39 +120,54 @@ impl From<crate::faults::Failpoint> for Failure {
 }
 
 /// The runtime the host's stores' uploaders run on, and the budget of their uploads; cladefs: and the
-/// host's keys, its KMS and those its fetchers share (TASK-411.3).
-pub fn runtime() -> Runtime {
-    let keys = keys::Host { kms: kms(), ring: MEMORY.keys().clone() };
-    Runtime { handle: RUNTIME.handle().clone(), uploads: UPLOADS.clone(), keys }
+/// host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime can't be
+/// made, a later call making it anew ([`remotes`]).
+pub fn runtime() -> Result<Runtime, Failure> {
+    let keys = keys::Host { kms: kms()?, ring: MEMORY.keys().clone() };
+    Ok(Runtime { handle: remotes()?, uploads: UPLOADS.clone(), keys })
+}
+
+/// The runtime every store's uploader, and its fetches, run on, and the calls from no runtime's
+/// task (`extent_store::upload::remotes`, TASK-34, TASK-449's review): one for the process, so
+/// that one runtime serves the connections to the host's buckets, whichever opened them. Fails if
+/// it can't be made, a later call making it anew.
+pub(crate) fn remotes() -> Result<tokio::runtime::Handle, Failure> {
+    Ok(extent_store::upload::remotes()?.handle().clone())
 }
 
 /// cladefs: the host's KMS, as `CLADEFS_KMS` names it the first time it is asked for, or [`set_kms`]
 /// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
 /// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
-/// or in the clear, rather than make in the clear what its tenants have it seal.
-pub fn kms() -> Option<Arc<keys::Kms>> {
-    KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
+/// or in the clear, rather than make in the clear what its tenants have it seal. Fails, keeping
+/// nothing, if the runtime its pools refill on can't be made ([`remotes`]).
+pub fn kms() -> Result<Option<Arc<keys::Kms>>, Failure> {
+    if let Some(kms) = KMS.get() {
+        return Ok(kms.clone());
+    }
+    let runtime = remotes()?;
+    let kms = KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
         Ok(url) if !url.is_empty() => {
             let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
                 log::error!("cladefs: CLADEFS_KMS: {why}");
                 Arc::new(Unreached(why))
             });
-            Some(host_kms(kms))
+            Some(host_kms(kms, runtime))
         }
         _ => None,
-    })
-    .clone()
+    });
+    Ok(kms.clone())
 }
 
-/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on the uploaders'
-/// runtime, off the paths of forks, which take from them (TASK-411.4).
-fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::Kms> {
-    keys::Kms::pooled(kms, keys::Pooling::on(RUNTIME.handle().clone()))
+/// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on `runtime`, the
+/// uploaders', off the paths of forks, which take from them (TASK-411.4).
+fn host_kms(kms: extent_keys::kms::Shared, runtime: tokio::runtime::Handle) -> Arc<keys::Kms> {
+    keys::Kms::pooled(kms, keys::Pooling::on(runtime))
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    KMS.set(Some(host_kms(kms))).map_err(|_| "the host's KMS is set already".to_owned())
+    let runtime = remotes().map_err(|err| err.to_string())?;
+    KMS.set(Some(host_kms(kms, runtime))).map_err(|_| "the host's KMS is set already".to_owned())
 }
 
 /// cladefs: the host's KMS ([`kms`]).
@@ -193,7 +208,9 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
         crate::fence::fence_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &fenced);
     let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
     let kept = MEMORY.forget_kept(scope);
-    let rings = runtime().keys.forget(scope, why);
+    // Its KMS, if it made one: one not made yet unwrapped nothing.
+    let kms = KMS.get().cloned().flatten();
+    let rings = keys::Host { kms, ring: MEMORY.keys().clone() }.forget(scope, why);
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
     log::warn!("cladefs: {scope}'s keys forgotten, {why}: {forgotten:?}");
     forgotten
@@ -275,7 +292,7 @@ static UPLOADS: std::sync::LazyLock<Arc<Budget>> = std::sync::LazyLock::new(|| {
 static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
-/// (TASK-317): extentd's `CLADEFS_EXTENTD_UPLOAD_MEMORY`. However far behind the bucket its stores
+/// (TASK-317): extentd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
 /// fall, what waits for it is on the host's disk, their write-ahead logs, and what of it is in
 /// memory is what this lets upload at once. Before any store opens; no less than the largest
 /// object a store uploads, an extent's of 64 MiB, which goes alone.
@@ -310,21 +327,6 @@ pub fn upload_memory() -> UploadMemory {
     UploadMemory { held, max_held, budget: UPLOADS.limits().bytes }
 }
 
-/// The runtime every store's uploader, and its fetches, run on (TASK-34): sized by the host, not
-/// by how many stores it serves, as each store waits on object storage mostly, and does its disk
-/// work in `block_in_place`, which leaves the runtime's threads to the others. Its threads hold
-/// their lists of the shared locks they take from their start (`extent_store::shared`).
-static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLock::new(|| {
-    let threads = std::thread::available_parallelism().map_or(2, |cpus| cpus.get().clamp(2, 8));
-    tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(threads)
-        .thread_name("cladefs remote")
-        .on_thread_start(extent_store::shared::prepare_thread)
-        .enable_all()
-        .build()
-        .expect("the remotes' runtime")
-});
-
 /// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`), at their
 /// locations there, as the store names them, on the remotes' runtime, which their uploads use too,
 /// under the host's budget of GETs.
@@ -336,8 +338,11 @@ pub struct Fetcher {
 impl Fetcher {
     /// What reads extents' data from `bucket`, keeping the parts it fetches in `cache`, if given,
     /// the host's.
-    pub(crate) fn new(bucket: Arc<Bucket>, cache: Option<Arc<Cache>>) -> Arc<Self> {
-        let runtime = RUNTIME.handle().clone();
+    pub(crate) fn new(
+        bucket: Arc<Bucket>,
+        cache: Option<Arc<Cache>>,
+    ) -> Result<Arc<Self>, Failure> {
+        let runtime = remotes()?;
         let runs = runtime.clone();
         // A read ahead is for the guest request whose read started it, if any (TASK-260).
         let spawn: fetch::Spawn = Arc::new(move |future| {
@@ -349,7 +354,7 @@ impl Fetcher {
             Some((_, peers)) => parts.asking(peers.clone()),
             None => parts,
         };
-        Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) })
+        Ok(Arc::new(Self { runtime, parts: Arc::new(parts.reading_ahead(spawn)) }))
     }
 
     /// `len` bytes at `offset` in `extent`, whose data is at `location` in the bucket: as many as
@@ -390,11 +395,11 @@ pub fn peers() -> Option<Arc<peers::Peers>> {
 /// cladefs: what serves the hosts sharing `bucket`, the host's, the parts they ask it for, as stored
 /// (TASK-406.2): a fetcher of it, keeping what it fetches in `cache`, the host's, as its stores'
 /// fetchers do, with them, under the host's budget, and asking no peer.
-pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Serving {
-    Serving {
-        runtime: RUNTIME.handle().clone(),
+pub fn serving_peers(bucket: Arc<Bucket>, cache: Arc<Cache>) -> Result<Serving, Failure> {
+    Ok(Serving {
+        runtime: remotes()?,
         parts: Arc::new(fetch::Fetcher::new(bucket, BUDGET.clone(), MEMORY.clone(), Some(cache))),
-    }
+    })
 }
 
 /// cladefs: what serves the host's peers the parts they ask for ([`serving_peers`]).
@@ -1071,10 +1076,14 @@ mod tests {
     /// as it is allocated (`crate::heap::held`), not read from the process's resident memory. A
     /// base of each of `CLADEFS_BENCH_EXTENTS` extents (64, 1,024, 32,768 and 300,000 unless set, a
     /// list by commas) of a block each, in a memory bucket, forked `CLADEFS_BENCH_FORKS` times (100
-    /// unless set), once from the store itself, live, whose writer writes a checkpoint for each
-    /// fork, as `extentd::tests::serves_hundreds_of_forks_of_a_base` makes its forks, and once from
-    /// a point of it, whose forks all start from the point's one state. A line for each count of
-    /// forks open, then one of what holds it ([`fork_extent_memory`]).
+    /// unless set; its first count alone), once from the store itself, live, whose writer writes a
+    /// checkpoint for each fork, as `extentd::tests::serves_hundreds_of_forks_of_a_base` makes its
+    /// forks, and once from a point of it, whose forks all start from the point's one state
+    /// (`CLADEFS_BENCH_PARENTS`, `live,point` unless set). A line for each count of forks open,
+    /// then one of what holds it ([`fork_extent_memory`]).
+    /// TASK-453: and it fails unless each fork past the first holds [`IDLE_FORK_BYTES`] at most,
+    /// whatever its base holds, and the daemon's count of the stores' maps
+    /// (`extentd::process::AnonBudget::extents`) covers what they hold.
     /// In the sim profile, optimized as a release build is, which this crate's tests, with their
     /// failpoints, refuse to be (TASK-320): the bytes are any build's, the times this one's.
     /// `cargo nextest run -p cladefs --cargo-profile sim --run-ignored only
@@ -1082,32 +1091,60 @@ mod tests {
     #[test]
     #[ignore = "a benchmark (TASK-443.2): --run-ignored only, in the sim profile"]
     fn bench_fork_extent_memory() {
-        let listed = |name: &str, default: &str| -> Vec<u64> {
+        let listed = |name: &str, default: &str| -> Vec<String> {
             let list = std::env::var(name).unwrap_or_else(|_| default.to_owned());
-            list.split(',').map(|count| count.trim().parse().expect(name)).collect()
+            list.split(',').map(|item| item.trim().to_owned()).collect()
         };
-        let forks = listed("CLADEFS_BENCH_FORKS", "100")[0] as usize;
-        for extents in listed("CLADEFS_BENCH_EXTENTS", "64,1024,32768,300000") {
-            for point in [false, true] {
+        let count = |item: &String| -> u64 { item.parse().expect("a count") };
+        let forks = count(&listed("CLADEFS_BENCH_FORKS", "100")[0]) as usize;
+        let parents = listed("CLADEFS_BENCH_PARENTS", "live,point");
+        for extents in listed("CLADEFS_BENCH_EXTENTS", "64,1024,32768,300000").iter().map(count) {
+            for parent in &parents {
+                let point = match parent.as_str() {
+                    "live" => false,
+                    "point" => true,
+                    other => panic!("CLADEFS_BENCH_PARENTS: {other:?}, neither live nor point"),
+                };
                 fork_extent_memory(extents, forks, point);
             }
         }
+    }
+
+    /// TASK-453: the most bytes of the heap an open, idle fork holds past the first of its base's,
+    /// whatever its base holds: what it inherited it shares with the others, its store's and its
+    /// writer's maps the decoded state they started from, and holds of its own what it wrote, here
+    /// nothing. Measured 31-34 KB a fork (`bench_fork_extent_memory`), 221-468 bytes for each of
+    /// the base's extents more before (TASK-443.2).
+    const IDLE_FORK_BYTES: u64 = 64 << 10;
+
+    /// What the stores' maps of their extents hold now, as the extent daemon counts it
+    /// (`extentd::process::extents_held`, Linux's): what the stores hold of their own, and the
+    /// decoded states they share, each once.
+    fn extents_counted() -> (extent_store::Own, extent_remote::recovery::Held) {
+        (extent_store::own_held(), crate::host_store::decoded_held())
     }
 
     /// Opens `forks` forks of a base of `extents` extents, forked from a point of it if `point`,
     /// from the store itself otherwise, and prints what the heap holds more than before them with
     /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
     /// (marginal), and that for each extent of the base; and how long each of those took to open.
-    /// The first 16 forks of a live store read low: each one's checkpoint, decoded, takes the place
-    /// of one the bucket kept decoded before them (`extent_remote::recovery::Decoded`), which
-    /// nothing else held; those after hold their own.
-    /// Then what holds it, each weighed alone: a copy of a fork's store's map of its extents, the
-    /// keys' bytes of it, the table the rest; the writer's persistent map of them, rebuilt sharing
-    /// nothing; and what closing them all leaves held over the heap before them. Opened and closed
-    /// again, the heap is to the byte what the first closing left.
+    /// TASK-453: each past the first holds [`IDLE_FORK_BYTES`] at most, the decoded state they
+    /// share one, of the base's extents, counted at [`extent_remote::recovery::ENTRY_BYTES`] an
+    /// entry, which covers what the first held more than the others, and a map of them built
+    /// sharing nothing, as the writer's of a base written live is. Then what closing them all
+    /// leaves held over the heap before them; opened and closed again, the heap is to the byte
+    /// what the first closing left (TASK-471: not always, by 80 to 2,048 bytes), checked last.
+    /// Then one fork more writes, commits and uploads a block for every extent of the base, up to
+    /// 4,096: what it holds more, what closing it lets go of more than closing an idle one does,
+    /// what it holds of its own, counted ([`extent_store::Own::bytes`]), covers. And one more frees
+    /// every 32nd extent it inherited, each its writer's map's change apart, a path of its nodes
+    /// copied ([`extent_remote::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
+    /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
+    /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
+    /// more.
     fn fork_extent_memory(extents: u64, forks: usize, point: bool) {
-        use crate::heap::held;
         use crate::host_store::fork_child;
+        let held = || crate::heap::held() as u64;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
         let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
@@ -1120,6 +1157,7 @@ mod tests {
             }
         }
         base.commit(None).unwrap();
+        let base_branch = base.branch().id;
         let parent = match point {
             false => base,
             true => {
@@ -1129,33 +1167,54 @@ mod tests {
                 reopened(&path, idle()).unwrap()
             }
         };
-        let paths: Vec<_> = (0..forks)
+        // And two more, which write and free, open apart from the others.
+        let mut paths: Vec<_> = (0..forks + 2)
             .map(|n| {
                 let path = dir.path().join(format!("fork-{n}"));
                 parent.fork_to(&path, fork_child(parent.branch())).unwrap();
                 path
             })
             .collect();
+        let (freeing, writing) = (paths.pop().unwrap(), paths.pop().unwrap());
         drop(parent);
         let open = |path: &std::path::PathBuf| {
             let opening = crate::extents::Opening { arena: None, profiled: false, keeping: idle() };
             ExtentStore::open_with(path, opening).unwrap()
         };
         let name = if point { "point" } else { "live" };
+        // The heap once the page cache has let go of the files closed, and of the pages it holds:
+        // its list of files names them by `Weak`, whose allocations stay until the list is next
+        // pruned, as its flusher does every quarter of `pages::Options::expire` and
+        // `write_back_all` does at once (TASK-433).
+        // And once the bucket's decoded states let go of what they knew of those no one holds
+        // (`Decoded::held`, TASK-453).
+        let settled = || {
+            extent_store::pages::shared().write_back_all().unwrap();
+            extent_store::pages::shared().evict_to(0);
+            extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+            held()
+        };
 
         let mut stores = Vec::with_capacity(forks);
         let mut samples = Vec::with_capacity(5);
         every_task_shard_locked();
+        let (own_before, decoded_before) = extents_counted();
         let before = held();
         let started = std::time::Instant::now();
         for (n, path) in paths.iter().enumerate() {
             stores.push(open(path));
             if [1, 10, 20, 50, 100].contains(&(n + 1)) {
-                samples.push((n + 1, held() - before, started.elapsed()));
+                samples.push((n as u64 + 1, held() - before, started.elapsed()));
             }
         }
+        let (own, decoded) = extents_counted();
+        let (layers, entries) =
+            (decoded.states - decoded_before.states, decoded.entries - decoded_before.entries);
+        // What this base's bucket holds decoded, whenever it decoded it.
+        let shared = extent_remote::Bucket::decoded(&*bucket).unwrap().held();
         let (mut last, mut last_held, mut last_took) = (0, 0, Duration::ZERO);
-        for (open, held, took) in samples.drain(..) {
+        let first = samples[0].1;
+        for &(open, held, took) in &samples {
             let marginal = (held - last_held) / (open - last);
             let each = (took - last_took) / (open - last) as u32;
             println!(
@@ -1167,25 +1226,25 @@ mod tests {
             );
             (last, last_held, last_took) = (open, held, took);
         }
-        let weighed = held();
-        let copy = stores[0].extents_copy();
-        let map = held() - weighed;
-        drop(copy);
-        let branch = stores[0].branch();
-        // The heap once the page cache has let go of the files closed: its list of files names
-        // them by `Weak`, whose allocations stay until the list is next pruned, as its flusher
-        // does every quarter of `pages::Options::expire` and `write_back_all` does at once
-        // (TASK-433).
-        let settled = || {
-            extent_store::pages::shared().write_back_all().unwrap();
-            held()
-        };
-        stores.clear();
-        let closed = settled();
-        stores.extend(paths.iter().map(open));
-        stores.clear();
-        assert_eq!(settled(), closed, "the heap after the forks were opened and closed again");
+        let others = (last_held - first) / (last.max(2) - 1);
+        println!(
+            "fork memory: extents={extents} parent={name} each-past-the-first={others} \
+             first={first} counted: decoded-states={layers} decoded-entries={entries} \
+             own-entries={} bucket-decoded={shared:?}",
+            own.entries - own_before.entries,
+        );
+        assert!(others <= IDLE_FORK_BYTES, "{others} bytes a fork past the first, at {extents}");
+        // The base's extents, once: in one state, or in a checkpoint of the base's read before and
+        // the fork point's state made of it, holding what changed since.
+        assert_eq!(shared.entries, extents as usize, "the decoded states' entries: {shared:?}");
+        assert_eq!(own, own_before, "the entries the forks hold of their own, idle");
+        let layer = first.saturating_sub(others);
+        let counted = shared.bytes();
+        assert!(layer <= counted, "the decoded state shared: {layer} bytes, counted {counted}");
 
+        // A map of them sharing nothing, as the writer's of a base written live is, which a store
+        // over it counts as its own.
+        let branch = stores[0].branch();
         let state = futures::executor::block_on(async {
             let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
             recover(&*bucket, branch, record.origin()).await.unwrap().state
@@ -1196,31 +1255,308 @@ mod tests {
         for (extent, at) in &state.extents {
             rebuilt.insert(*extent, at.clone());
         }
-        let writer = held() - weighed;
+        let unshared = held() - weighed;
+        drop(rebuilt);
+        let bound = state.extents.len() as u64 * extent_remote::recovery::ENTRY_BYTES;
+        assert!(unshared <= bound, "a map of the extents unshared: {unshared} bytes, of {bound}");
+
+        // Closed, opened and closed again.
+        stores.clear();
+        let closed = settled();
+        stores.extend(paths.iter().map(open));
+        stores.clear();
+        let again = settled();
         println!(
-            "fork memory: extents={extents} parent={name} of a fork: store-map={map} (keys={keys} \
-             table={}) writer-map-unshared={writer} (keys={keys} nodes={}); left-after-close={}",
-            map - keys,
-            writer - keys,
-            closed as i64 - before as i64,
+            "fork memory: extents={extents} parent={name} left-after-close={}",
+            closed as i64 - before as i64
+        );
+
+        // One more writes, commits and uploads, beside an idle one.
+        let writes = extents.min(4096);
+        let (idle, opened) = (open(&paths[0]), open(&writing));
+        let writer = &opened;
+        let floor = writer.info().unwrap().next_sequence.max(writer.info().unwrap().sequence_floor);
+        let own_before = extent_store::own_held();
+        for sequence in floor..floor + writes {
+            write(writer, sequence, &data);
+            if (sequence - floor + 1) % 1024 == 0 {
+                writer.commit(None).unwrap();
+            }
+        }
+        writer.commit(None).unwrap();
+        writer.wait_uploaded().unwrap();
+        let own_after = extent_store::own_held();
+        let own_written = own_after.entries - own_before.entries;
+        assert!(idle.shares_extents_with(writer), "its bucket's layer, written over");
+        // What its writes hold, once its uploader is done with them: what closing it lets go of,
+        // more than closing an idle fork does. Not what the heap holds more meanwhile, which
+        // its uploader's work in flight swings by megabytes.
+        let closing = |store: ExtentStore| {
+            let open = settled();
+            drop(store);
+            open - settled()
+        };
+        let idle = closing(idle);
+        let written = closing(opened).saturating_sub(idle);
+        let counted = own_after.bytes() - own_before.bytes();
+        println!(
+            "fork memory: extents={extents} parent={name} a fork's {writes} writes, uploaded: \
+             held={written} per-write={} own-entries={own_written} counted={counted}; a map of \
+             the base's unshared={unshared} (keys={keys} nodes={})",
+            written / writes,
+            unshared - keys as u64,
+        );
+        assert_eq!(own_written, writes, "the entries its writes hold of its own");
+        assert!(written <= counted, "its writes: {written} bytes held, counted {counted}");
+
+        // One more frees every 32nd extent it inherited, beside an idle one, and checkpoints: its
+        // writer's map, the base's shared, changed in as many places, each a path of its nodes
+        // copied, as is the map its checkpoint decodes as made of the base's, opened again.
+        let (idle, opened) = (open(&paths[0]), open(&freeing));
+        let (counted_before, _) = extents_counted();
+        let frees =
+            (1..=extents).step_by(32).map(|sequence| ExtentId { branch: base_branch, sequence });
+        let frees: Vec<_> = frees.collect();
+        for &extent in &frees {
+            opened.free(extent).unwrap();
+        }
+        opened.commit(None).unwrap();
+        crate::test_checkpoints::checkpointed(&opened, &bucket);
+        opened.wait_uploaded().unwrap();
+        let (counted_after, _) = extents_counted();
+        let counted = counted_after.bytes() - counted_before.bytes();
+        let idle = closing(idle);
+        let freed = closing(opened).saturating_sub(idle);
+        println!(
+            "fork memory: extents={extents} parent={name} a fork's {} frees, scattered, \
+             uploaded: held={freed} per-free={} counted={counted}",
+            frees.len(),
+            freed / frees.len() as u64,
+        );
+        // Opened again, from its checkpoint, beside an idle fork holding the base's map: what
+        // the heap holds more than an idle fork, its map made of the base's, counted.
+        let idle = open(&paths[0]);
+        let decoded = || extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+        let (heap_before, decoded_before) = (settled(), decoded());
+        let reopened = open(&freeing);
+        let (heap_after, decoded_after) = (settled(), decoded());
+        let grown = (heap_after - heap_before).saturating_sub(IDLE_FORK_BYTES);
+        let more = decoded_after.bytes().saturating_sub(decoded_before.bytes());
+        println!(
+            "fork memory: extents={extents} parent={name} reopened from its checkpoint of {} \
+             frees, scattered: held={} past an idle fork's bound={grown} decoded \
+             before={decoded_before:?} after={decoded_after:?} counted={more}",
+            frees.len(),
+            heap_after - heap_before,
+        );
+        drop((idle, reopened));
+        assert!(freed <= counted, "its frees: {freed} bytes held, counted {counted}");
+        assert!(grown <= more, "its map, reopened: {grown} bytes held, counted {more}");
+        assert_eq!(again, closed, "the heap after the forks were opened and closed again");
+    }
+
+    /// TASK-453: the forks of a base open at once hold what they inherited once: their stores' maps
+    /// of it one, the decoded state they started from, which their bucket counts once, whether
+    /// forked from the base live, each from a checkpoint of its own the base's writer wrote, or
+    /// from a point of it. Each reads the base's data; what one writes and frees, an inherited
+    /// extent among them, is its own: the others, and a fork opened after, read the base's, and
+    /// share its map still.
+    #[test]
+    fn forks_open_at_once_share_what_they_inherited() {
+        use crate::host_store::fork_child;
+        const EXTENTS: u64 = 64;
+        const FORKS: usize = 4;
+        for point in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+            let base = kept_in(dir.path().join("base"), (1 << 30, None), &bucket, idle()).unwrap();
+            for sequence in 1..=EXTENTS {
+                write(&base, sequence, &pattern(sequence as u8, BLOCK));
+            }
+            base.commit(None).unwrap();
+            let base_branch = base.branch().id;
+            let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+            let parent = match point {
+                false => base,
+                true => {
+                    let path = dir.path().join("point");
+                    base.point_to(&path, fork_child(base.branch())).unwrap();
+                    reopened(&path, idle()).unwrap()
+                }
+            };
+            let fork = |n: usize| {
+                let path = dir.path().join(format!("fork-{n}"));
+                parent.fork_to(&path, fork_child(parent.branch())).unwrap();
+                path
+            };
+            let paths: Vec<_> = (0..=FORKS).map(fork).collect();
+            let forks: Vec<_> = paths[..FORKS].iter().map(|path| reopened(path, idle())).collect();
+            let forks: Vec<_> = forks.into_iter().map(Result::unwrap).collect();
+            let name = if point { "of a point" } else { "of the live store" };
+            for other in &forks[1..] {
+                assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
+            }
+            let one =
+                extent_remote::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
+            let decoded = || extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+            assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
+            let read = |store: &ExtentStore, extent: ExtentId| {
+                let mut data = vec![0; BLOCK];
+                let read =
+                    store.read(extent, 0, &mut [crate::VolatileSliceMut::from(&mut data[..])]);
+                read.map(|()| data).map_err(|err| err.to_string())
+            };
+            for store in &forks {
+                for sequence in 1..=EXTENTS {
+                    let data = pattern(sequence as u8, BLOCK);
+                    assert_eq!(read(store, inherited(sequence)), Ok(data), "forks {name}");
+                }
+            }
+
+            // The first frees an inherited extent, and writes and commits one of its own.
+            let (freed, own) = (inherited(7), {
+                let info = forks[0].info().unwrap();
+                info.next_sequence.max(info.sequence_floor)
+            });
+            forks[0].free(freed).unwrap();
+            let mine = write(&forks[0], own, &pattern(200, BLOCK));
+            forks[0].commit(None).unwrap();
+            // What a read of an extent a store holds not answers (`NoExtent`, as errno).
+            let none = || Err("ENOENT (errno 2)".to_owned());
+            assert_eq!(read(&forks[0], freed), none());
+            assert_eq!(read(&forks[0], mine), Ok(pattern(200, BLOCK)));
+            let opened = reopened(&paths[FORKS], idle()).unwrap();
+            for store in forks[1..].iter().chain([&opened]) {
+                assert_eq!(read(store, freed), Ok(pattern(7, BLOCK)), "forks {name}: the freed");
+                assert_eq!(read(store, mine), none(), "forks {name}: the first's own");
+                assert!(forks[0].shares_extents_with(store), "forks {name}: their maps, after");
+            }
+            assert_eq!(decoded(), one, "forks {name}: the states they share, after");
+        }
+    }
+
+    /// TASK-453: what a read asks of a fork's store of an extent it inherited, its length and
+    /// whether it is open, and a read of it from the extent cache, there once read, allocate
+    /// nothing: the store's map lends its bucket's layer's entry, where it made one of its own of
+    /// it, its key copied, for every read, under the store's lock. A base of more extents than
+    /// the extent store's audit recounts (`AUDITED_EXTENTS`, 4,096), which the builds of its own
+    /// tests run at every lock of a store's state, as they build it for this crate's tests too
+    /// when run with them: no build but a test's audits.
+    #[test]
+    fn reads_of_inherited_extents_allocate_nothing() {
+        use crate::heap::allocations_while;
+        use crate::host_store::fork_child;
+        const EXTENTS: u64 = 4160;
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let capacity = 2 * EXTENTS * BLOCK as u64 + (1 << 30);
+        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        for sequence in 1..=EXTENTS {
+            write(&base, sequence, &pattern(sequence as u8, BLOCK));
+            if sequence % 1024 == 0 {
+                base.commit(None).unwrap();
+            }
+        }
+        base.commit(None).unwrap();
+        let base_branch = base.branch().id;
+        let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+        let path = dir.path().join("fork");
+        base.fork_to(&path, fork_child(base.branch())).unwrap();
+        let fork = reopened(&path, idle()).unwrap();
+        let held = Ok(Some((BLOCK as u64, false)));
+        let mut data = vec![0; BLOCK];
+        // Each read once: into the cache.
+        for sequence in 1..=EXTENTS {
+            assert_eq!(fork.stored_extent(inherited(sequence)), held);
+            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data), Ok(true));
+            assert_eq!(data, pattern(sequence as u8, BLOCK), "{sequence}");
+        }
+        let (asked, ()) = allocations_while(|| {
+            for sequence in 1..=EXTENTS {
+                assert_eq!(fork.stored_extent(inherited(sequence)), held);
+            }
+        });
+        assert_eq!(asked, 0, "allocations of {EXTENTS} asks of the store");
+        let (read, ()) = allocations_while(|| {
+            for sequence in 1..=EXTENTS {
+                assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut data), Ok(true));
+            }
+        });
+        assert_eq!(read, 0, "allocations of {EXTENTS} reads from the cache");
+    }
+
+    /// TASK-453: a benchmark of a read's hit in the extent cache of an extent a fork inherited
+    /// (`ExtentStore::read_cached`): a base of `CLADEFS_BENCH_EXTENTS` extents (32,768 unless set)
+    /// of a block each, forked, each of them read once into the cache, then all of them read
+    /// `CLADEFS_BENCH_ROUNDS` times (20 unless set), a block each: the time a read, and the
+    /// allocations. In the sim profile: `cargo nextest run -p cladefs --cargo-profile sim
+    /// --run-ignored only bench_inherited_cached_reads --no-capture`.
+    #[test]
+    #[ignore = "a benchmark (TASK-453): --run-ignored only, in the sim profile"]
+    fn bench_inherited_cached_reads() {
+        use crate::host_store::fork_child;
+        let count = |name: &str, default: u64| -> u64 {
+            std::env::var(name).map_or(default, |count| count.parse().expect("a count"))
+        };
+        let (extents, rounds) =
+            (count("CLADEFS_BENCH_EXTENTS", 32768), count("CLADEFS_BENCH_ROUNDS", 20));
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
+        let capacity = 2 * extents * BLOCK as u64 + (1 << 30);
+        let base = kept_in(dir.path().join("base"), (capacity, None), &bucket, idle()).unwrap();
+        let data = pattern(1, BLOCK);
+        for sequence in 1..=extents {
+            write(&base, sequence, &data);
+            if sequence % 1024 == 0 {
+                base.commit(None).unwrap();
+            }
+        }
+        base.commit(None).unwrap();
+        let base_branch = base.branch().id;
+        let inherited = |sequence| ExtentId { branch: base_branch, sequence };
+        let path = dir.path().join("fork");
+        base.fork_to(&path, fork_child(base.branch())).unwrap();
+        let fork = reopened(&path, idle()).unwrap();
+        let mut read = vec![0; BLOCK];
+        for sequence in 1..=extents {
+            assert_eq!(fork.read_from_cache(inherited(sequence), 0, &mut read), Ok(true));
+        }
+        assert_eq!(read, data);
+        let started = std::time::Instant::now();
+        let (allocations, ()) = crate::heap::allocations_while(|| {
+            for _ in 0..rounds {
+                for sequence in 1..=extents {
+                    let hit = fork.read_from_cache(inherited(sequence), 0, &mut read);
+                    assert_eq!(hit, Ok(true));
+                }
+            }
+        });
+        let took = started.elapsed();
+        let reads = extents * rounds;
+        println!(
+            "inherited cached reads: extents={extents} reads={reads} took={took:.2?} \
+             per-read={:.0}ns allocations-per-read={:.2}",
+            took.as_nanos() as f64 / reads as f64,
+            allocations as f64 / reads as f64,
         );
     }
 
-    /// Has the remotes' runtime (`RUNTIME`) lock each shard of its list of tasks once, so that
-    /// none allocates after: on macOS, a `std::sync::Mutex` allocates its pthread mutex, 64 bytes,
-    /// as it is first locked, and the runtime locks the shard of a task's id, numbered across the
-    /// process, as it spawns the task and as it ends. Its shards are tokio's: four for each worker,
-    /// rounded up to a power of two (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and
-    /// closing forks spawns uploaders, so a heap counted to the byte grew by 64 bytes now and then
-    /// as they reached shards none had (32 at most on this runtime): nothing of the stores'. The
-    /// other such holder, each of its threads' list of the shared locks it holds, it makes as each
-    /// starts (`extent_store::shared::prepare_thread`).
+    /// Has the remotes' runtime (`extent_store::upload::remotes`) lock each shard of its list of
+    /// tasks once, so that none allocates after: on macOS, a `std::sync::Mutex` allocates its
+    /// pthread mutex, 64 bytes, as it is first locked, and the runtime locks the shard of a task's
+    /// id, numbered across the process, as it spawns the task and as it ends. Its shards are
+    /// tokio's: four for each worker, rounded up to a power of two
+    /// (`OwnedTasks::gen_shared_list_size`, tokio 1.53). Opening and closing forks spawns
+    /// uploaders, so a heap counted to the byte grew by 64 bytes now and then as they reached
+    /// shards none had (32 at most on this runtime): nothing of the stores'. The other such holder,
+    /// each of its threads' list of the shared locks it holds, it makes as each starts
+    /// (`extent_store::shared::prepare_thread`).
     fn every_task_shard_locked() {
-        use super::RUNTIME;
-        let shards = RUNTIME.metrics().num_workers().next_power_of_two() * 4;
+        let runtime = extent_store::upload::remotes().unwrap();
+        let shards = runtime.metrics().num_workers().next_power_of_two() * 4;
         let mut locked = std::collections::HashSet::new();
         while locked.len() < shards {
-            let task = RUNTIME.spawn(async {});
+            let task = runtime.spawn(async {});
             let id: u64 = task.id().to_string().parse().expect("a task's id is its number");
             locked.insert(id % shards as u64);
             futures::executor::block_on(task).unwrap();
@@ -2301,13 +2637,14 @@ mod tests {
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
         let cell = sizes[&layout::cell(branch.cell)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
-        // holder's as it was and naming the branch (TASK-364); the head, read, then swapped to
-        // take it. The segments' tails it names, all at once: no listing (TASK-407).
+        // holder's as it was and naming the branch (TASK-364); the head, read once, at once with
+        // the record and the cell, the recovery starting from it, then swapped to take it
+        // (TASK-449). The segments' tails it names, all at once: no listing (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
-                    ("get", 5),
+                    ("get", 4),
                     ("get-range", 4),
                     ("head", 0),
                     ("list", 0),
@@ -2318,7 +2655,7 @@ mod tests {
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + 2 * head + cell
+                tails + 2 * record + head + cell
             )
         );
         let mut data = vec![0; 1 << 20];
@@ -2741,7 +3078,7 @@ mod tests {
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
-        crate::remote::kms().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
+        crate::remote::kms().unwrap().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
         crate::cache::evict_least_used(None, |_| false);
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
@@ -2831,7 +3168,7 @@ mod tests {
             [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
         );
         assert_eq!(cached(), [false, false, true]);
-        assert_eq!(crate::remote::kms().unwrap().in_pool(1), 0);
+        assert_eq!(crate::remote::kms().unwrap().unwrap().in_pool(1), 0);
 
         // Closed by their holders, the stores of the tenant open no more; the other's does.
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();

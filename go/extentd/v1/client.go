@@ -51,7 +51,7 @@ type Client struct {
 }
 
 // NewClient returns a client of the control API of the extent daemon whose control socket is at
-// socket (the daemon's CLADEFS_EXTENTD_GRPC). As [grpc.NewClient], it connects at its first call,
+// socket (the daemon's CLADEFSD_GRPC). As [grpc.NewClient], it connects at its first call,
 // and again whenever the connection is lost; opts are added to its own.
 func NewClient(socket string, opts ...grpc.DialOption) (*Client, error) {
 	// The target names no host: the dialer connects to the socket, whatever it asks for, so that

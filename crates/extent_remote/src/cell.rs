@@ -26,7 +26,7 @@
 //! the cell again, nor writes a branch of it in the clear. Only as strong as the bucket keeps no
 //! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
 
-use crate::branch::{Start, Step, transition};
+use crate::branch::{Start, Step, transition, transition_leaving};
 use crate::bucket::Bucket;
 use crate::keys::Kek;
 use crate::layout::{self, Branch, Cell, FORMAT};
@@ -228,6 +228,23 @@ pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<Object>, Er
     }
 }
 
+/// cladefs: whether `held` holds its cell still, read: [`Error::Stale`] if another took it since,
+/// [`Error::Deleted`] if it was deleted, refused if it was shredded. What a writer's taking of a
+/// branch reads once its head is taken, of a holding its host remembers rather than read before,
+/// whose epoch the head was taken with (`Taking::remembered`, TASK-449's review): found so, it
+/// held the cell as the head was taken, as epochs only grow, holding by holding.
+pub async fn still_held(bucket: &impl Bucket, held: Held) -> Result<(), Error> {
+    match read(bucket, held.cell).await? {
+        None => Err(Error::NoCell),
+        Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) if found.shredded => Err(shredded(held.cell)),
+        Some(found) if (found.epoch, found.holder) != (held.epoch, held.holder) => {
+            Err(Error::Stale)
+        }
+        Some(_) => Ok(()),
+    }
+}
+
 /// Changes the object of the cell `held` holds as `step` says, if `held` holds it still:
 /// [`Error::Fenced`] if another took it since, [`Error::Deleted`] if it was deleted.
 async fn change_held<R>(
@@ -257,41 +274,61 @@ async fn change_held<R>(
 pub async fn hold(
     bucket: &impl Bucket,
     cell: Cell,
+    holding: (u64, u64),
+    making: (bool, Option<&Kek>),
+    volume: Option<(&str, Volume)>,
+) -> Result<(Held, Object), Error> {
+    let (held, object, _) = hold_from(bucket, cell, Start::Read, holding, making, volume).await?;
+    Ok((held, object))
+}
+
+/// cladefs: [`hold`], starting from `start`: what a read found, or what a holding before left, or
+/// nothing, for a cell just drawn, whose object its maker creates; its write conditional on what it
+/// starts from, as on what a read found, so that a write of another's since is read and gone on
+/// from (TASK-449). Returns too the cell's object as it left it, raw, what a later holding starts
+/// from: a fork's host holds its child's cell so, and the child's store, opening, from that.
+pub async fn hold_from(
+    bucket: &impl Bucket,
+    cell: Cell,
+    start: Start,
     (holder, token): (u64, u64),
     (make, kek): (bool, Option<&Kek>),
     volume: Option<(&str, Volume)>,
-) -> Result<(Held, Object), Error> {
+) -> Result<(Held, Object, Option<crate::bucket::Object>), Error> {
     if let Some((name, _)) = volume
         && !valid_name(name)
     {
         return Err(Error::VolumeName(name.into()));
     }
-    change(bucket, cell, Start::Read, |found| {
-        let (mut object, mut changed) = match found {
-            None if !make => return Err(Error::NoCell),
-            None => (Object::made(holder, token, kek.cloned()), true),
-            Some(found) if found.deleted => return Err(Error::Deleted),
-            Some(found) if found.shredded => return Err(shredded(cell)),
-            Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
-            Some(found) if found.holder == holder => (found, false),
-            Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
-        };
-        if let Some((name, volume)) = volume
-            && !object.volumes.values().any(|had| had.branch == volume.branch)
-        {
-            if object.volumes.contains_key(name) {
-                return Err(Error::VolumeExists(name.into()));
+    let decode = |bytes: &[u8]| Object::decode(cell, bytes);
+    let ((held, object), left) =
+        transition_leaving(bucket, &layout::cell(cell), start, decode, |found| {
+            let (mut object, mut changed) = match found {
+                None if !make => return Err(Error::NoCell),
+                None => (Object::made(holder, token, kek.cloned()), true),
+                Some(found) if found.deleted => return Err(Error::Deleted),
+                Some(found) if found.shredded => return Err(shredded(cell)),
+                Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
+                Some(found) if found.holder == holder => (found, false),
+                Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
+            };
+            if let Some((name, volume)) = volume
+                && !object.volumes.values().any(|had| had.branch == volume.branch)
+            {
+                if object.volumes.contains_key(name) {
+                    return Err(Error::VolumeExists(name.into()));
+                }
+                object.volumes.insert(name.into(), volume);
+                changed = true;
             }
-            object.volumes.insert(name.into(), volume);
-            changed = true;
-        }
-        let held = Held { cell, epoch: object.epoch, holder };
-        Ok(match changed {
-            true => Step::Write(object.clone(), (held, object)),
-            false => Step::Stop((held, object)),
+            let held = Held { cell, epoch: object.epoch, holder };
+            Ok(match changed {
+                true => Step::Write(object.clone(), (held, object)),
+                false => Step::Stop((held, object)),
+            })
         })
-    })
-    .await
+        .await?;
+    Ok((held, object, left))
 }
 
 /// Adds to the cell `held` holds the volume `name`, `volume`: [`Error::VolumeExists`] if it has

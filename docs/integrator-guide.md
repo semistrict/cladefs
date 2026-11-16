@@ -18,7 +18,7 @@ follows from that.
 
 ## Per-host setup
 
-1. Start `cladefs-extentd` with `CLADEFS_EXTENTD_GRPC` naming its control socket. Keep that socket away
+1. Start `cladefsd` with `CLADEFSD_GRPC` naming its control socket. Keep that socket away
    from jails. It can do everything, so it is mode 0600, the daemon's user's, whatever the umask
    (TASK-159): run the VM manager as that user, or as root.
 2. For each tenant, call `Grant` with the tenant's name, the directory of its stores, and its jails'
@@ -33,6 +33,12 @@ follows from that.
 
 Grants don't survive a restart of the daemon. After one, call `Grant` again, and bind-mount the new
 socket.
+
+To show tenants' cells on the host as files, start `cladefsd` with `CLADEFSD_MOUNT` naming a mount
+point and `CLADEFSD_MOUNT_STORES` a directory for their stores: it mounts them with FUSE and serves
+the Mount service (`proto/cladefs/mount/v1/mount.proto`, Go `go/mount/v1`) on the same control
+socket. One daemon then holds every cell of the host, whether VMs or the mount serve its volumes
+(TASK-475.2).
 
 ## Upgrading the daemon
 

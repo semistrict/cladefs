@@ -22,7 +22,7 @@
 # CLADEFS_GC_TENANTS, CLADEFS_GC_CELLS, CLADEFS_GC_SEGMENTS, CLADEFS_GC_LARGEST, CLADEFS_GC_FILL,
 # CLADEFS_GC_AT_ONCE, CLADEFS_GC_SWEEPS, CLADEFS_GC_ROUNDS and CLADEFS_GC_CELL shape the bucket and the
 # sweeps (scripts/gc-sweep.sh), and
-# reach the host, as every other CLADEFS_* does. CLADEFS_BENCH_NOTE says what the run is for; CLADEFS_HOST_LIMIT caps it (default 3h).
+# reach the host, as every other CLADEFS_* and CLADEFSD_* does. CLADEFS_BENCH_NOTE says what the run is for; CLADEFS_HOST_LIMIT caps it (default 3h).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

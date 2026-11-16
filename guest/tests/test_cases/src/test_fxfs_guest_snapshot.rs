@@ -12,7 +12,7 @@
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
 //!   restore names a point and a store it doesn't have here, so it takes the point's branch from
-//!   the bucket, and forks the store from it. The bucket is CLADEFS_EXTENTD_REMOTE's, if set, or one
+//!   the bucket, and forks the store from it. The bucket is CLADEFSD_REMOTE's, if set, or one
 //!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
 //!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
 //!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
@@ -301,22 +301,22 @@ mod host {
                     // test's directory, a round's of a soak, may not be.
                     let socket = std::env::temp_dir()
                         .join(format!("cladefs-{}-extentd.sock", std::process::id()));
-                    let named = std::env::var_os("CLADEFS_EXTENTD_REMOTE")
+                    let named = std::env::var_os("CLADEFSD_REMOTE")
                         .is_some_and(|remote| !remote.is_empty());
                     let bucket = std::ffi::OsStr::new("memory:///migrate");
                     // Beside it, for its tenant's socket, in the jail if there is one.
                     let tenants =
                         std::env::temp_dir().join(format!("cladefs-{}-tenants", std::process::id()));
-                    let mut env = vec![("CLADEFS_EXTENTD_TENANTS", tenants.as_os_str())];
+                    let mut env = vec![("CLADEFSD_TENANTS", tenants.as_os_str())];
                     if !named {
-                        env.push(("CLADEFS_EXTENTD_REMOTE", bucket));
+                        env.push(("CLADEFSD_REMOTE", bucket));
                     }
                     let daemon =
                         crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, None)?;
                     std::mem::forget(daemon);
                     socket
                 }
-                _ => std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into(),
+                _ => std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into(),
             };
             let (snapshot, memory) = (dir.join("snapshot"), dir.join("memory"));
             if phase == Some(Phase::Target) {
@@ -527,7 +527,7 @@ mod host {
             // open meanwhile: a look at the point through the daemon's control API, which works
             // on the point alone, closes it first.
             if !stores.is_empty() {
-                let extentd = std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD");
+                let extentd = std::env::var_os("CLADEFSD").expect("CLADEFSD");
                 let mut point = test_setup.tmp_dir.join("snapshot").into_os_string();
                 point.push(".extent-extents");
                 let control = crate::common::control(Path::new(&extentd)).expect("control API");

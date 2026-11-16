@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! TASK-258: the daemon's binary exports its spans over OTLP, to the collector
-//! `OTEL_EXPORTER_OTLP_ENDPOINT` names, with `CLADEFS_EXTENTD_TRACES=otlp`; and sends nothing
+//! `OTEL_EXPORTER_OTLP_ENDPOINT` names, with `CLADEFSD_TRACES=otlp`; and sends nothing
 //! without. The collector is one of the test's own, which takes OTLP over HTTP as a real one does
 //! (`docs/tracing.md` runs Jaeger's), and keeps what it is sent.
 
@@ -75,17 +75,17 @@ fn collector() -> (String, mpsc::Receiver<(String, Vec<u8>)>) {
 /// A daemon serving at `socket`, its stores' branches in a bucket in its memory, as `traces` says
 /// of its spans, OpenTelemetry's variables naming `endpoint` the collector, every trace kept.
 fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(socket)
-        .env("CLADEFS_EXTENTD_REMOTE", "memory:///branches")
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
+        .env("CLADEFSD_REMOTE", "memory:///branches")
+        .env("CLADEFSD_TOKEN", "1")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_TRACES_SAMPLER", "always_on")
         .env_remove("OTEL_SERVICE_NAME");
     match traces {
-        Some(traces) => command.env("CLADEFS_EXTENTD_TRACES", traces),
-        None => command.env_remove("CLADEFS_EXTENTD_TRACES"),
+        Some(traces) => command.env("CLADEFSD_TRACES", traces),
+        None => command.env_remove("CLADEFSD_TRACES"),
     };
     let daemon = KillOnDrop(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -126,7 +126,7 @@ fn the_daemon_exports_its_spans_over_otlp() {
     assert_eq!(targets, BTreeSet::from(["/v1/traces"]));
     let body: Vec<u8> = exports.into_iter().flat_map(|(_, body)| body).collect();
     let missing: Vec<&str> = [
-        "cladefs-extentd",
+        "cladefsd",
         "extentd.open",
         "extentd.write",
         "extentd.commit",

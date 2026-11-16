@@ -12,7 +12,7 @@
 //! blocks once however many links it has, as `du -sx` counts them. One rule for what is shared: a
 //! file is the tenant's whose directory holds it, and one in no tenant's directory is no tenant's.
 //! A fork's directory holds what the fork wrote; what it shares of its base is in the bucket, and
-//! read through the host's part cache (`CLADEFS_EXTENTD_CACHE`), which is no tenant's: copies of the
+//! read through the host's part cache (`CLADEFSD_CACHE`), which is no tenant's: copies of the
 //! bucket's objects that any tenant's stores read, a closed segment's too once acknowledged, which
 //! its own capacity and floor bound, evicting what it must to keep within them. A tenant's reads
 //! can't fill the disk through it, and no tenant's limit depends on what another read. The default
@@ -140,6 +140,8 @@ impl Disk {
 
     /// What it takes, in bytes, as last counted, with what was admitted since.
     pub fn used(&self) -> u64 {
+        // Relaxed: a report. Only admit and recount, which decide by it, need its order with
+        // `writing` (SeqCst).
         self.used.load(Ordering::Relaxed)
     }
 
@@ -241,6 +243,8 @@ impl Drop for Admitted {
 
 impl Drop for Disk {
     fn drop(&mut self) {
+        // Relaxed: its last admission done (each holds the disk), nothing of its own is ordered
+        // with this; others' admissions see the total as any read-modify-write leaves it.
         USED.fetch_sub(self.used(), Ordering::Relaxed);
     }
 }
@@ -364,6 +368,7 @@ pub fn total_limit() -> Option<u64> {
 
 /// What every tenant's disk takes together.
 pub fn total() -> u64 {
+    // Relaxed: a report, as Disk::used.
     USED.load(Ordering::Relaxed)
 }
 

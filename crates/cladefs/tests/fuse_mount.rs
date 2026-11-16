@@ -3,7 +3,8 @@
 // found in the LICENSE file.
 
 //! Tests of stores mounted with FUSE through Linux's kernel (`cladefs::fuse::MountOptions`,
-//! `cladefs-mount`, TASK-222), used with ordinary file system calls, then read back from the store.
+//! `cladefs-mount`, TASK-222; cladefsd's mount of cells, TASK-475.2), used with ordinary file system
+//! calls, then read back from the store.
 //!
 //! A test run by root mounts with mount(2); any other user's, through `fusermount3`, which the
 //! hosts the tests run on have (libfuse 3's `fuse3`: .github/workflows/ci.yml,
@@ -373,47 +374,67 @@ fn a_store_mounted_is_not_mounted_again() {
     block_on(mount.join().unwrap().check()).unwrap();
 }
 
-/// `cladefs-mount --control SOCKET --stores DIR --bucket URL MOUNTPOINT`, all in `dir`, once it has
-/// said it is mounted (TASK-302): its child, its control socket and its mount point.
-fn cladefs_mount_stores(dir: &Path) -> (KillOnDrop, PathBuf, PathBuf) {
-    let (socket, stores, bucket) = (dir.join("control"), dir.join("stores"), dir.join("bucket"));
-    std::fs::create_dir(&stores).unwrap();
-    std::fs::create_dir(&bucket).unwrap();
-    let bucket = url::Url::from_directory_path(&bucket).unwrap().to_string();
-    let mountpoint = dir.join("mnt");
-    std::fs::create_dir(&mountpoint).unwrap();
-    let flags = ["--control", socket.to_str().unwrap(), "--stores", stores.to_str().unwrap()];
-    let mut child = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_cladefs-mount"))
-            .args(flags)
-            .args(["--bucket", &bucket])
-            .arg(&mountpoint)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap(),
-    );
-    let mut said = String::new();
-    std::io::BufReader::new(child.0.stdout.take().unwrap()).read_line(&mut said).unwrap();
-    if said.is_empty() {
-        let mut stderr = String::new();
-        child.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
-        panic!("cladefs-mount ended unmounted, {}: {stderr}", child.0.wait().unwrap());
-    }
-    assert_eq!(said.trim_end(), mountpoint.to_str().unwrap());
-    (child, socket, mountpoint)
+/// cladefsd serving at `vm`, its VM socket, of placement `token`, its bucket the directory `bucket`,
+/// mounting cells at `dir`/mnt, their stores in `dir`/stores, its control socket `dir`/control
+/// (TASK-475.2), once its control socket is there, which it makes once its mount is: its child,
+/// its control socket and its mount point.
+fn cladefsd_mounting(dir: &Path, bucket: &Path, token: u64) -> (KillOnDrop, PathBuf, PathBuf) {
+    let (socket, stores, mountpoint) = (dir.join("control"), dir.join("stores"), dir.join("mnt"));
+    std::fs::create_dir_all(bucket).unwrap();
+    std::fs::create_dir_all(&mountpoint).unwrap();
+    let mut command = cladefsd(&dir.join("vm.sock"), bucket, token);
+    command
+        .env("CLADEFSD_GRPC", &socket)
+        .env("CLADEFSD_MOUNT", &mountpoint)
+        .env("CLADEFSD_MOUNT_STORES", &stores);
+    (serving(command, &socket), socket, mountpoint)
 }
 
-/// `cladefs-mount COMMAND ARGS`: what it prints, once it succeeds.
-fn cladefs_mount_command(args: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_cladefs-mount")).args(args).output().unwrap();
+/// cladefsd serving at `vm`, of placement `token`, its bucket the directory `bucket`, its memory
+/// fixed, as a test's, and its standard error piped.
+fn cladefsd(vm: &Path, bucket: &Path, token: u64) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
+    command
+        .arg(vm)
+        .arg((256u64 << 20).to_string())
+        .env("CLADEFSD_REMOTE", url::Url::from_directory_path(bucket).unwrap().to_string())
+        .env("CLADEFSD_TOKEN", token.to_string())
+        .stderr(Stdio::piped());
+    command
+}
+
+/// `command`, a cladefsd's, started, once `socket` is there: or what it said, if it ended first.
+fn serving(mut command: Command, socket: &Path) -> KillOnDrop {
+    let mut child = KillOnDrop(command.spawn().unwrap());
+    while !socket.exists() {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            let mut stderr = String::new();
+            child.0.stderr.take().unwrap().read_to_string(&mut stderr).unwrap();
+            panic!("cladefsd ended, {status}: {stderr}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    child
+}
+
+/// `cladefsctl mount ARGS` through the daemon whose control socket is `socket`.
+fn cladefsctl_mount_command(socket: &str, args: &[&str]) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsctl"));
+    command.env("CLADEFSD_GRPC", socket).arg("mount").args(args);
+    command
+}
+
+/// `cladefsctl mount ARGS` through the daemon whose control socket is `socket`: what it prints,
+/// once it succeeds.
+fn cladefsctl_mount(socket: &str, args: &[&str]) -> String {
+    let output = cladefsctl_mount_command(socket, args).output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(output.status.success(), "cladefs-mount {args:?}: {}: {stderr}", output.status);
+    assert!(output.status.success(), "cladefsctl mount {args:?}: {}: {stderr}", output.status);
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// One mount of many stores (TASK-302), of tenants' cells (TASK-364): a cell attached through its
-/// control socket shows each Fxfs volume of it at TENANT/CELL/VOLUME, a filesystem of its own
+/// One mount of many stores (TASK-302), of tenants' cells (TASK-364), cladefsd's (TASK-475.2): a cell
+/// attached through its control socket shows each Fxfs volume of it at TENANT/CELL/VOLUME, a filesystem of its own
 /// (nothing renamed between them, nothing made in the mount's directories of its own); its cell's
 /// objects in the bucket under its tenant's prefix. A cell detached goes, written back, so that it
 /// attaches again from its stores, or, those gone, from the bucket; a volume with a file open is
@@ -421,17 +442,14 @@ fn cladefs_mount_command(args: &[&str]) -> String {
 #[test]
 fn one_mount_attaches_and_detaches_many_stores() {
     let dir = tempfile::tempdir().unwrap();
-    let (child, socket, m) = cladefs_mount_stores(dir.path());
+    let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
     let socket = socket.to_str().unwrap();
     assert_eq!(names(&m), Vec::<String>::new());
     let capacity = STORE_SIZE.to_string();
     let (one, two) = ("0000000000000001", "0000000000000002");
     // A new cell of each tenant's, of no volumes: nothing shown.
     let attach = |tenant: &str, cell: &str| {
-        cladefs_mount_command(&["attach", socket, tenant, cell])
-            .lines()
-            .map(str::to_owned)
-            .collect()
+        cladefsctl_mount(socket, &["attach", tenant, cell]).lines().map(str::to_owned).collect()
     };
     let new: Vec<String> = attach("1", "0");
     let a = new[0].clone();
@@ -439,8 +457,9 @@ fn one_mount_attaches_and_detaches_many_stores() {
     let b = new[0].clone();
     assert_eq!(names(&m), Vec::<String>::new());
     let volume = |tenant: &str, cell: &str, name: &str| {
-        let made = ["create-volume", socket, tenant, cell, name, &capacity];
-        cladefs_mount_command(&made).trim().to_owned()
+        cladefsctl_mount(socket, &["create-volume", tenant, cell, name, &capacity])
+            .trim()
+            .to_owned()
     };
     let (root, data, other) =
         (volume("1", &a, "root"), volume("1", &a, "data"), volume("2", &b, "root"));
@@ -469,7 +488,7 @@ fn one_mount_attaches_and_detaches_many_stores() {
         std::fs::metadata(at_a.join("data/file")).unwrap().ino()
     );
     let listed = format!("{one} {a}\n  data {data}\n  root {root}\n{two} {b}\n  root {other}\n");
-    assert_eq!(cladefs_mount_command(&["list", socket]), listed);
+    assert_eq!(cladefsctl_mount(socket, &["list"]), listed);
     // The cells' objects are under their tenants' prefixes: their cells' objects, and their
     // volumes' branches.
     let bucket = dir.path().join("bucket");
@@ -482,13 +501,13 @@ fn one_mount_attaches_and_detaches_many_stores() {
 
     // Detached, and attached again from its stores; the other cell detached, its stores gone,
     // then attached again from the bucket.
-    cladefs_mount_command(&["detach", socket, "1", &a]);
+    cladefsctl_mount(socket, &["detach", "1", &a]);
     assert_eq!(names(&m), [two]);
     let again: Vec<String> = attach("1", &a);
     assert_eq!(again, [a.clone(), format!("data {data}"), format!("root {root}")]);
     assert_eq!(std::fs::read_to_string(at_a.join("data/file")).unwrap(), "in data");
     assert_eq!(std::fs::read_to_string(at_a.join("root/file")).unwrap(), "in root");
-    cladefs_mount_command(&["detach", socket, "2", &b]);
+    cladefsctl_mount(socket, &["detach", "2", &b]);
     std::fs::remove_dir_all(dir.path().join("stores").join(two)).unwrap();
     let again: Vec<String> = attach("2", &b);
     assert_eq!(again, [b.clone(), format!("root {other}")]);
@@ -497,19 +516,18 @@ fn one_mount_attaches_and_detaches_many_stores() {
     // A file open holds its volume, and its cell's detach, until it is closed.
     let open = std::fs::File::open(at_a.join("data/file")).unwrap();
     let mut detach = KillOnDrop(
-        Command::new(env!("CARGO_BIN_EXE_cladefs-mount"))
-            .args(["detach", socket, "1", &a])
+        cladefsctl_mount_command(socket, &["detach", "1", &a])
             .stderr(Stdio::piped())
             .spawn()
             .unwrap(),
     );
     let detaching = format!("{one} {a}\n  data {data} detaching\n{two} {b}\n  root {other}\n");
-    while cladefs_mount_command(&["list", socket]) != detaching {}
+    while cladefsctl_mount(socket, &["list"]) != detaching {}
     assert_eq!(names(&m), [two]);
     assert!(detach.0.try_wait().unwrap().is_none(), "detached with a file open");
     drop(open);
     assert!(detach.0.wait().unwrap().success());
-    assert_eq!(cladefs_mount_command(&["list", socket]), format!("{two} {b}\n  root {other}\n"));
+    assert_eq!(cladefsctl_mount(socket, &["list"]), format!("{two} {b}\n  root {other}\n"));
 
     terminate(child, &m);
     // Each store is whole, and holds what was written.
@@ -526,4 +544,87 @@ fn one_mount_attaches_and_detaches_many_stores() {
             fs.close().await.unwrap();
         }
     });
+}
+
+/// SIGTERM drains cladefsd's VMs' stores and its mount of cells alike, within one bound
+/// (TASK-475.2): a VM process's store closed, its last commit durable; the mount gone, its
+/// volume's write written back and uploaded, so that a later placement's daemon, with none of the
+/// stores, attaches the cell from the bucket and reads it; the daemon exits 0.
+#[test]
+fn sigterm_drains_vms_stores_and_the_mount_of_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let bucket = dir.path().join("bucket");
+    let first = dir.path().join("first");
+    std::fs::create_dir(&first).unwrap();
+    let (child, socket, m) = cladefsd_mounting(&first, &bucket, 1);
+    let socket = socket.to_str().unwrap();
+    let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
+    let capacity = STORE_SIZE.to_string();
+    cladefsctl_mount(socket, &["create-volume", "1", &cell, "root", &capacity]);
+    let volume = m.join("0000000000000001").join(&cell).join("root");
+    std::fs::write(volume.join("file"), "drained").unwrap();
+
+    let vm = cladefs::RemoteExtentStore::connect(first.join("vm.sock"), first.join("vm"), 1 << 28);
+    let vm = vm.unwrap();
+    vm.commit_ordered(Some(b"vm drained")).unwrap();
+    terminate(child, &m);
+    drop(vm);
+    assert_eq!(
+        cladefs::ExtentStore::open(first.join("vm")).unwrap().root().unwrap(),
+        b"vm drained"
+    );
+
+    let second = dir.path().join("second");
+    std::fs::create_dir(&second).unwrap();
+    let (child, socket, m) = cladefsd_mounting(&second, &bucket, 2);
+    let socket = socket.to_str().unwrap();
+    assert_eq!(cladefsctl_mount(socket, &["attach", "1", &cell]).lines().count(), 2);
+    let volume = m.join("0000000000000001").join(&cell).join("root");
+    assert_eq!(std::fs::read_to_string(volume.join("file")).unwrap(), "drained");
+    terminate(child, &m);
+}
+
+/// A daemon mounting no cells has no Mount service: `cladefsctl mount` fails, saying so
+/// (TASK-475.2).
+#[test]
+fn a_daemon_mounting_no_cells_serves_no_mount_calls() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("control");
+    let mut command = cladefsd(&dir.path().join("vm.sock"), &dir.path().join("bucket"), 1);
+    std::fs::create_dir(dir.path().join("bucket")).unwrap();
+    command.env("CLADEFSD_GRPC", &socket);
+    let _daemon = serving(command, &socket);
+    let output = cladefsctl_mount_command(socket.to_str().unwrap(), &["list"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "listed");
+    assert!(
+        stderr.contains("listing the cells: code: 'Operation is not implemented or not supported'"),
+        "{stderr}"
+    );
+}
+
+/// A volume cladefsd's mount has attached is the mount's alone (TASK-475.3): a VM process opening
+/// its store, and the control API forking it, each fail with `EBUSY` at once, not after waiting
+/// for it to be let go; detached, its store forks.
+#[test]
+fn a_volume_mounted_is_the_mounts_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (child, socket, m) = cladefsd_mounting(dir.path(), &dir.path().join("bucket"), 1);
+    let socket = socket.to_str().unwrap();
+    let cell = cladefsctl_mount(socket, &["attach", "1", "0"]).trim().to_owned();
+    cladefsctl_mount(socket, &["create-volume", "1", &cell, "root", &STORE_SIZE.to_string()]);
+    let store = dir.path().join("stores").join("0000000000000001").join(&cell).join("root");
+
+    let started = std::time::Instant::now();
+    let vm = cladefs::RemoteExtentStore::connect(dir.path().join("vm.sock"), &store, STORE_SIZE);
+    assert_eq!(vm.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
+    let control = cladefs::extentd::control::Client::connect(socket).unwrap();
+    let forked = control.fork_store(&store, &dir.path().join("fork"));
+    assert_eq!(forked.err().and_then(|err| err.errno()), Some(cladefs::Errno::EBUSY));
+    let waited = started.elapsed();
+    assert!(waited < std::time::Duration::from_secs(5), "refused after {waited:?}");
+
+    cladefsctl_mount(socket, &["detach", "1", &cell]);
+    control.fork_store(&store, &dir.path().join("fork")).unwrap();
+    terminate(child, &m);
 }

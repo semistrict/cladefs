@@ -111,6 +111,12 @@ impl Page<'_> {
 /// GCS's ListObjects give a request.
 pub const LIST_PAGE: usize = 1000;
 
+/// cladefs: the requests a listing of `objects` objects takes where a request lists a page of
+/// [`LIST_PAGE`] (S3, GCS): one at least, an empty listing's (TASK-455).
+pub fn list_pages(objects: usize) -> u64 {
+    objects.div_ceil(LIST_PAGE).max(1) as u64
+}
+
 /// cladefs: the most objects [`Bucket::delete_batch`] is given at once: as many as S3's
 /// DeleteObjects takes (TASK-395.5).
 pub const DELETE_BATCH: usize = 1000;
@@ -126,6 +132,15 @@ const BATCHES_AT_ONCE: usize = 4;
 pub struct Object {
     pub bytes: Vec<u8>,
     pub meta: Meta,
+}
+
+impl Object {
+    /// cladefs: the object a write of `bytes` at `key` left, of `version`, as of `now`, the
+    /// store's clock: what a read of it would find, until another's write (TASK-449).
+    pub(crate) fn written(key: &str, bytes: Vec<u8>, version: Version, now: u64) -> Self {
+        let meta = Meta { key: key.to_owned(), version, size: bytes.len() as u64, modified: now };
+        Self { bytes, meta }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -223,6 +238,12 @@ pub trait Bucket: Send + Sync + 'static {
     /// if it keeps them: a host's bucket does, so that the forks of a base it opens decode the
     /// checkpoint they start from once (TASK-92.55).
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
+        None
+    }
+
+    /// cladefs: what the host knows of the bucket without asking it again, if it keeps it
+    /// ([`crate::known`], TASK-449): a host's bucket does, and the simulation's.
+    fn known(&self) -> Option<&crate::known::Known> {
         None
     }
 }
@@ -405,8 +426,9 @@ pub(crate) async fn delete(bucket: &impl Bucket, key: &str) {
 
 /// What [`create`] found.
 pub(crate) enum Created {
-    /// The object holds what was written: this call wrote it, or one before it wrote the same.
-    Created,
+    /// The object holds what was written, of this version: this call wrote it, or one before it
+    /// wrote the same.
+    Created(Version),
     /// Another object was there.
     Exists(Object),
 }
@@ -418,11 +440,13 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
     let mut failures = 0;
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Create).await {
-            Ok(_) => return Created::Created,
+            Ok(version) => return Created::Created(version),
             Err(Error::AlreadyExists) => {
                 // Perhaps this one's own write, which landed though its answer was lost.
                 match get(bucket, key).await {
-                    Some(object) if bytes == object.bytes => return Created::Created,
+                    Some(object) if bytes == object.bytes => {
+                        return Created::Created(object.meta.version);
+                    }
                     Some(object) => return Created::Exists(object),
                     // Deleted since: try again.
                     None => {}
@@ -435,7 +459,8 @@ pub(crate) async fn create(bucket: &impl Bucket, key: &str, bytes: Vec<u8>) -> C
 
 /// What [`update`] found.
 pub(crate) enum Updated {
-    Updated,
+    /// The object holds what was written, of this version.
+    Updated(Version),
     /// The object changed since `version`.
     Changed,
 }
@@ -452,10 +477,10 @@ pub(crate) async fn update(
     let mut failures = 0;
     loop {
         match bucket.put(key, bytes.clone(), PutMode::Update(version.clone())).await {
-            Ok(_) => return Updated::Updated,
+            Ok(version) => return Updated::Updated(version),
             Err(Error::Precondition | Error::NotFound) => {
                 return match get(bucket, key).await {
-                    Some(object) if bytes == object.bytes => Updated::Updated,
+                    Some(object) if bytes == object.bytes => Updated::Updated(object.meta.version),
                     _ => Updated::Changed,
                 };
             }

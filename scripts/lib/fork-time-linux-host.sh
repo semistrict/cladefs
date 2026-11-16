@@ -63,7 +63,7 @@ if [[ $host_phase != measure ]]; then
         tree=$(cd "${pair#*=}" && pwd)
         echo "== $label: building $tree" >&2
         (cd "$tree" && CARGO_TARGET_DIR=$scratch/target-$label host_cargo build --release -q \
-            -p cladefs --bin cladefs-extentd --bin cladefsctl)
+            -p cladefs --bin cladefsd --bin cladefsctl)
     done
     if [[ $host_phase == build ]]; then exit 0; fi
 fi
@@ -72,7 +72,7 @@ fi
 for pair in "$@"; do
     label=${pair%%=*}
     bin=$scratch/target-$label/release
-    [[ -x $bin/cladefs-extentd && -x $bin/cladefsctl ]] ||
+    [[ -x $bin/cladefsd && -x $bin/cladefsctl ]] ||
         { echo "$label: not built in $bin: CLADEFS_HOST_PHASE=build builds it" >&2; exit 2; }
     dir=$scratch/$label
     if [[ -e $dir ]]; then rm -r -- "$dir"; fi
@@ -80,17 +80,17 @@ for pair in "$@"; do
     out=$results/$label.tsv
     : > "$out"
     echo "== $label: timing" >&2
-    CLADEFS_EXTENTD_REMOTE="file://$dir/bucket/" CLADEFS_EXTENTD_TOKEN=1 \
-        CLADEFS_EXTENTD_CACHE="$dir/cache" CLADEFS_EXTENTD_GRPC="$dir/extentd.control" \
-        CLADEFS_EXTENTD_STATS="$results/$label-stats.txt" \
-        "$bin/cladefs-extentd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
+    CLADEFSD_REMOTE="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
+        CLADEFSD_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/extentd.control" \
+        CLADEFSD_STATS="$results/$label-stats.txt" \
+        "$bin/cladefsd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
     daemon=$!
     for _ in {1..600}; do
         [[ -S $dir/extentd.control ]] && break
         kill -0 "$daemon" || { echo "$label: the daemon exited" >&2; exit 1; }
         sleep 0.1
     done
-    export CLADEFS_EXTENTD_GRPC=$dir/extentd.control
+    export CLADEFSD_GRPC=$dir/extentd.control
     # timed STEP ITERATION COMMAND... runs COMMAND and records how long it took.
     timed() {
         local step=$1 iteration=$2 start end

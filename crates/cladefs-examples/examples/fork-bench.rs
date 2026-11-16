@@ -40,8 +40,8 @@ fn main() {
     }
     // SAFETY: before any thread of the process's reads the environment.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///fork-bench");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", "memory:///fork-bench");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
         if kms {
             std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display()));
         }
@@ -71,7 +71,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
     store.commit(Some(b"root")).unwrap();
-    if let Some(kms) = cladefs::remote::kms() {
+    if let Some(kms) = cladefs::remote::kms().unwrap() {
         // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
         futures::executor::block_on(kms.filled(tenant));
     }

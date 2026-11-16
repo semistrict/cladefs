@@ -9,7 +9,7 @@
 //! acknowledged in the bucket, whose collector takes it back (TASK-165.8).
 //!
 //! Every store keeps its branch in a bucket, which its description names (TASK-165.6): one made on
-//! a host of cladefs's system, this host's (`CLADEFS_EXTENTD_REMOTE`); one made elsewhere, as an image
+//! a host of cladefs's system, this host's (`CLADEFSD_REMOTE`); one made elsewhere, as an image
 //! of the cladefs CLI's or a test's is, a file bucket of its own, beside its directory, which its
 //! forks share ([`create`]). Opening a store opens its bucket ([`Opened`]), the one this process
 //! has of that URL ([`bucket`]). A store made by older code, of an older format, is refused
@@ -23,6 +23,7 @@
 use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
+use extent_remote::known::Learned;
 use extent_remote::layout::{Branch, Cell, Child};
 use extent_remote::store::Store as Bucket;
 use extent_remote::{branch, cell};
@@ -148,6 +149,18 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<Bucket>> {
     Ok(bucket)
 }
 
+/// cladefs: what the decoded states of the branches this process's buckets keep, or its stores hold
+/// as the maps of the extents they share, hold: each once, however many stores share it
+/// (`extent_remote::recovery::Decoded::held`, TASK-453).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn decoded_held() -> extent_remote::recovery::Held {
+    let buckets = BUCKETS.lock().unwrap();
+    (buckets.values())
+        .filter_map(|bucket| extent_remote::Bucket::decoded(&**bucket))
+        .map(extent_remote::recovery::Decoded::held)
+        .fold(extent_remote::recovery::Held::default(), std::ops::Add::add)
+}
+
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the
 /// buckets they put themselves in front of; unless it is already, the same.
 #[cfg(test)]
@@ -158,10 +171,10 @@ pub(crate) fn use_bucket(url: &str, bucket: Arc<Bucket>) {
 }
 
 /// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
-/// if it is a host of cladefs's system (`CLADEFS_EXTENTD_REMOTE`, as [`crate::remote::Host`] has it);
+/// if it is a host of cladefs's system (`CLADEFSD_REMOTE`, as [`crate::remote::Host`] has it);
 /// else a file bucket of the store's own ([`bucket_named`]).
 fn bucket_for(path: &Path) -> anyhow::Result<String> {
-    let host = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
+    let host = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
     bucket_named(host, path)
 }
 
@@ -190,10 +203,10 @@ pub(crate) fn keeps_own_bucket(store: &Store<HostDir>) -> bool {
 
 /// The fencing token copies of stores never placed take their branches with where this process
 /// opens them as no host's daemon does, as [`crate::Storage`] does: this host's placement's, if it
-/// is a host of cladefs's system (`CLADEFS_EXTENTD_TOKEN`, [`crate::remote::host_token`]); else the
+/// is a host of cladefs's system (`CLADEFSD_TOKEN`, [`crate::remote::host_token`]); else the
 /// first placement's. So the daemon and the cladefs CLI on one host take each other's branches.
 pub(crate) fn token() -> Result<u64, Failure> {
-    match std::env::var_os("CLADEFS_EXTENTD_TOKEN").filter(|token| !token.is_empty()) {
+    match std::env::var_os("CLADEFSD_TOKEN").filter(|token| !token.is_empty()) {
         Some(_) => crate::remote::host_token(),
         None => Ok(FIRST_PLACEMENT),
     }
@@ -289,9 +302,16 @@ pub(crate) fn create_unmade(
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let branch = match of {
             BranchOf::New(cell) => new_branch(&*self::bucket(&url)?, cell)?,
+            // Its record, read to see the bucket has it, is what the store's opening, next, would
+            // read first: learned for it, a read less (`extent_remote::known`, TASK-449).
             BranchOf::Taken(branch) => {
-                let found = upload::block_on(branch::record(&*self::bucket(&url)?, branch))??;
-                found.ok_or(extent_remote::Error::NoBranch)?;
+                let bucket = self::bucket(&url)?;
+                let found = upload::block_on(branch::record(&*bucket, branch))??;
+                let record = found.ok_or(extent_remote::Error::NoBranch)?;
+                if let Some(known) = extent_remote::Bucket::known(&*bucket) {
+                    let learned = Learned { record, cell: None, headless: false };
+                    known.learn(branch, learned);
+                }
                 branch
             }
             #[cfg(test)]
@@ -353,7 +373,7 @@ fn opened(recovering: Recovering<HostDir>, keeping: upload::Options) -> Result<O
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
-    let runtime = crate::remote::runtime();
+    let runtime = crate::remote::runtime()?;
     let holding = (rand::random(), keeping);
     let (store, remote) = upload::open(recovering, options(), bucket.clone(), holding, &runtime)?;
     Ok(Opened { store, bucket, remote })
@@ -448,7 +468,9 @@ fn fork_in<H>(
         }
         err => anyhow::anyhow!("forking to branch {branch}: {err}"),
     };
-    if !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+    // A fork of a point needs no look first: its child's record's create refuses a record there
+    // alike (`Remote::child_free`, TASK-449).
+    if !remote.is_point() && !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
         return Err(Error::new(taken(branch)));
     }
     let made = match remote.is_point() {
@@ -533,7 +555,7 @@ pub(crate) fn delete(
         Some(bucket) => {
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
-            let kms = crate::remote::kms();
+            let kms = crate::remote::kms()?;
             extent_store::upload::delete_branch(bucket, branch, token, kms.as_ref())
         }
         None => Ok(()),

@@ -253,7 +253,7 @@ pub(crate) const MAP_MANY: u32 = 32;
 /// connection. Nothing replies.
 pub(crate) const STAGE_PRIVATE_COUNTS: u32 = 33;
 /// cladefs: how long a VM process's stage operations go uncounted at most while it makes them
-/// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFS_EXTENTD_STATS`).
+/// ([`STAGE_COUNTS`]): within a sample of the daemon's stats file (`CLADEFSD_STATS`).
 pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;

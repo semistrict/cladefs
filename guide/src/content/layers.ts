@@ -51,7 +51,7 @@ export const layers: Layer[] = [
   },
   {
     id: "daemon",
-    name: "cladefs-extentd",
+    name: "cladefsd",
     what: "one daemon per host: every VM's store and window",
     role:
       "One process serves the extent stores of a host's hundreds of VMs, so each sealed extent is " +

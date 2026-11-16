@@ -36,11 +36,11 @@ KEPT = [
     "CLADEFS_BUSYBOX",
     "CLADEFS_FIRECRACKER_SECCOMP_FILTER",
     "CLADEFS_FIRECRACKER_JAILER",
-    "CLADEFS_EXTENTD_GRPC",
-    "CLADEFS_EXTENTD_STATS",
-    "CLADEFS_EXTENTD_METRICS",
-    "CLADEFS_EXTENTD_ROOTS",
-    "CLADEFS_EXTENTD_TENANTS",
+    "CLADEFSD_GRPC",
+    "CLADEFSD_STATS",
+    "CLADEFSD_METRICS",
+    "CLADEFSD_ROOTS",
+    "CLADEFSD_TENANTS",
     "CLADEFS_BENCH_RESULTS",
 ]
 # The run host_command's tests name, and its directory on the host.
@@ -148,16 +148,16 @@ class HostCommand(unittest.TestCase):
         # Knobs for the host: where its stores keep their branches, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
-            "CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix",
+            "CLADEFSD_REMOTE": "s3://bucket/prefix",
             "CLADEFS_S3_URL": "s3://bucket/test",
-            "CLADEFS_EXTENTD_CACHE": "/cache",
+            "CLADEFSD_CACHE": "/cache",
             "CLADEFS_FIRECRACKER": "/laptop/firecracker",
         }
         self.assertEqual(
             self.host_command({**here, **host}, "test-linux-host.sh")[1],
             sorted(BASE + [
-                "CLADEFS_EXTENTD_CACHE=/cache",
-                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix",
+                "CLADEFSD_CACHE=/cache",
+                "CLADEFSD_REMOTE=s3://bucket/prefix",
                 "CLADEFS_FIRECRACKER=/laptop/firecracker",
                 "CLADEFS_S3_URL=s3://bucket/test",
             ]),
@@ -179,7 +179,7 @@ class HostCommand(unittest.TestCase):
                 ]
                 for path in (Path(parent, file) for file in files):
                     if path.suffix in [".rs", ".sh", ".py"] and path != HOST:
-                        read.update(re.findall(r"\bCLADEFS_\w+", path.read_text(errors="replace")))
+                        read.update(re.findall(r"\bCLADEFSD?_\w+", path.read_text(errors="replace")))
         self.assertEqual([name for name in KEPT if name not in read], [])
 
     def test_empty_values_are_not_sent(self):
@@ -201,17 +201,17 @@ class HostCommand(unittest.TestCase):
 
     def test_a_path_in_home_is_in_the_hosts(self):
         self.assertEqual(
-            self.host_command({"CLADEFS_EXTENTD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"CLADEFS_EXTENTD_CACHE={HOST_HOME}/cache"]),
+            self.host_command({"CLADEFSD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
+            sorted(BASE + [f"CLADEFSD_CACHE={HOST_HOME}/cache"]),
         )
 
     def test_the_callers_values_replace_this_machines(self):
         self.assertEqual(
             self.host_command(
-                {"CLADEFS_EXTENTD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
+                {"CLADEFSD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
                  # The run's own, which no caller's replaces.
                  "CLADEFS_HOST_WORK": "/laptop/work"},
-                "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
                 "CLADEFS_MIGRATE_BUNDLE=~/run-x/bundle",
                 # Empty, unset there.
                 "CLADEFS_ZSTD_LEVEL=",
@@ -220,7 +220,7 @@ class HostCommand(unittest.TestCase):
             )[1:],
             (
                 sorted(BASE + [
-                    "CLADEFS_EXTENTD_REMOTE=s3://bucket/prefix/run-x",
+                    "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
                     f"CLADEFS_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
                 ]),
                 COMMAND + ["CLADEFS_NOT=an argument"],
@@ -271,12 +271,14 @@ echo "$(basename "$0") $phase $where" >> "$results/jobs.txt"
 if [[ $phase != measure ]]; then
     measurement_refuses "$(basename "$0")'s build"
     [[ ${{CLADEFS_FAKE_HOST:-}} != fail-build ]] || exit 4
+    # The build fills the scratch disk to CLADEFS_FAKE_FILL KiB free (fake_ssh.py's df).
+    if [[ -n ${{CLADEFS_FAKE_FILL:-}} ]]; then echo "$CLADEFS_FAKE_FILL" > "$HOME/df-free"; fi
 fi
 if [[ $phase == build ]]; then exit 0; fi
 {{
     echo "$(basename "$0") $*"
     echo "source $source"
-    env | grep -E '^(CLADEFS_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
+    env | grep -E '^(CLADEFSD?_|PJDFSTEST_|CARGO_BUILD_JOBS=)' | sort
 }} > "$results/ran.txt"
 echo "ran $(basename "$0") $*"
 case ${{CLADEFS_FAKE_HOST:-}} in
@@ -580,14 +582,7 @@ class Runs(unittest.TestCase):
             (run / "job").mkdir(parents=True)
             (run / "job" / "lock").touch()
         # The running one's job holds its lock.
-        holder = subprocess.Popen(
-            [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1]); "
-             "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()",
-             running / "job" / "lock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        self.addCleanup(holder.stdout.close)
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.stdin.close)
-        self.assertEqual(holder.stdout.readline(), "held\n")
+        hold(self, running / "job" / "lock")
         for run in (old, running):
             os.utime(run, (0, 0))
         status, out, errors = fleet.drive(RAN)
@@ -660,6 +655,103 @@ class Runs(unittest.TestCase):
                                   r"fxdax.slice/fxdax-bench.slice/fxjob-\d+.scope\), holding its "
                                   r"cores and memory from every other measurement")
         self.assertTrue(refusal.endswith("(TASK-368)\n"), refusal)
+
+
+GIB = 1 << 30
+
+
+def hold(test, lock):
+    """Holds `lock`, a file, as a running job holds its run's, until `test` ends."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1]); "
+         "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    test.addCleanup(holder.stdout.close)
+    test.addCleanup(holder.wait)
+    test.addCleanup(holder.stdin.close)
+    test.assertEqual(holder.stdout.readline(), "held\n")
+
+
+class Room(unittest.TestCase):
+    """TASK-489: a run that names the room it needs on the scratch disk, which every job on the
+    host shares, checks it is there before it builds (CLADEFS_HOST_ROOM) and before its
+    measurement (CLADEFS_HOST_ROOM_MEASURE), each check a line of RESULTS/room.txt; and its earlier
+    runs of the same name go first (CLADEFS_HOST_SWEEP)."""
+
+    def test_a_run_short_of_room_prepares_nothing(self):
+        fleet = Fleet()
+        (fleet.home("ubu1") / "df-free").write_text(f"{GIB >> 10}\n")
+        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_HOST_ROOM": str(2 * GIB)})
+        self.assertEqual((status, out, errors), (
+            28, "", "Not enough room: the scratch disk /mnt/fake-scratch has 1073741824 bytes free "
+                    "before the run builds, which needs 2147483648 (CLADEFS_HOST_ROOM).\n"))
+        self.assertEqual((fleet.directory / "results" / "room.txt").read_text(),
+                         "build 1073741824 2147483648 short /mnt/fake-scratch\n")
+        self.assertEqual((fleet.calls(), fleet.runs()), (["ubu1 bash -s -- room"], []))
+
+    def test_a_measurement_whose_build_filled_the_disk_measures_nothing(self):
+        """The first night on ubu1: its sides built, the disk was full as its measurement began,
+        which could not write even its status."""
+        for fill, status_, jobs, measured in [
+            (str(4 * GIB >> 10), "status 0", ["test-linux-host.sh build work",
+                                              "test-linux-host.sh measure bench"],
+             "measure 4294967296 2147483648 ok"),
+            ("1024", "status 28", ["test-linux-host.sh build work"],
+             "measure 1048576 2147483648 short"),
+        ]:
+            with self.subTest(fill=fill):
+                fleet = Fleet()
+                (fleet.home("ubu1") / "df-free").write_text(f"{8 * GIB >> 10}\n")
+                (fleet.home("ubu1") / "du-size").write_text("3\n")
+                status, out, errors = fleet.drive(RAN, environment={
+                    "CLADEFS_HOST_BENCH": "1", "CLADEFS_HOST_ROOM": str(2 * GIB),
+                    "CLADEFS_HOST_ROOM_MEASURE": str(2 * GIB), "CLADEFS_FAKE_FILL": fill})
+                self.assertEqual((status, out, errors), (0, f"{status_}\n", ""))
+                results = fleet.directory / "results"
+                self.assertEqual((results / "jobs.txt").read_text().splitlines(), jobs)
+                self.assertEqual((results / "room.txt").read_text().splitlines(), [
+                    "build 8589934592 2147483648 ok /mnt/fake-scratch", "built 3072",
+                    f"{measured} /mnt/fake-scratch"])
+                self.assertEqual(fleet.runs(), [])
+        self.assertEqual((results / "remote.log").read_text(),
+                         "Not enough room: the scratch disk /mnt/fake-scratch has 1048576 bytes "
+                         "free before the run measures, which needs 2147483648 "
+                         "(CLADEFS_HOST_ROOM_MEASURE).\n")
+
+    def test_a_run_names_bytes(self):
+        fleet = Fleet()
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_ROOM": "100G"}),
+                         (2, "", "CLADEFS_HOST_ROOM is a count of bytes: 100G\n"))
+
+    def test_the_earlier_runs_of_its_name_go_but_a_running_one_and_others(self):
+        fleet = Fleet()
+        fleet.scratch.mkdir()
+        ended, running = (fleet.scratch / f"run-nightly-2026111{n}T070003Z-{n}1111111"
+                          for n in (5, 4))
+        others = [fleet.scratch / name for name in (
+            "run-t435-20261115T070003Z-22222222", "run-nightlyx-20261115T070003Z-33333333",
+            "run-20261115T070003Z-44444444", "run-nightly-old", "kernels")]
+        for run in (ended, running, *others):
+            (run / "job").mkdir(parents=True)
+            (run / "job" / "lock").touch()
+            (run / "trees" / "head" / "target").mkdir(parents=True)
+        (ended / "job" / "status").write_text("0\n")
+        hold(self, running / "job" / "lock")
+        status, out, errors = fleet.drive(
+            RAN, environment={"CLADEFS_HOST_RUN": "nightly", "CLADEFS_HOST_SWEEP": "1"})
+        self.assertEqual((status, out, errors), (
+            0, "status 0\n", f"Keeping {running}: its job runs.\n"
+                             f"Removing {ended}, an earlier run of nightly's.\n"))
+        self.assertEqual(fleet.runs(), [
+            "run-20261115T070003Z-44444444", running.name, "run-nightly-old",
+            "run-nightlyx-20261115T070003Z-33333333", "run-t435-20261115T070003Z-22222222"])
+        self.assertTrue((fleet.scratch / "kernels").is_dir())
+
+    def test_only_a_named_run_sweeps(self):
+        fleet = Fleet()
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_SWEEP": "1"}),
+                         (2, "", "CLADEFS_HOST_SWEEP sweeps the runs of CLADEFS_HOST_RUN's name: "
+                                 "name them\n"))
 
 
 class Source(unittest.TestCase):
@@ -882,6 +974,23 @@ class Resume(unittest.TestCase):
                       (results / "remote.log").read_text())
         self.assertEqual(fleet.runs(), [])
 
+    def test_a_job_whose_status_is_empty_is_lost(self):
+        """TASK-489: on a full disk the job's shell made its status file and could write nothing in
+        it; the wait read `status ` and bash's return refused the empty number."""
+        fleet, run = self.left({})
+        directory = fleet.scratch / run
+        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
+        for written in ("", "no space\n"):
+            with self.subTest(status=written):
+                (directory / "job" / "status").write_text(written)
+                status, out, errors = fleet.drive(
+                    f'host_name {run}; host_state=launched; status=0; '
+                    'host_wait > /dev/null || status=$?; echo "status $status $host_state"')
+                self.assertEqual((status, out, errors), (
+                    0, "status 1 ended\n",
+                    f"{run} on ubu1 is lost: its job ended without its status (its status file "
+                    "empty or unreadable: was its disk full?).\n"))
+
     def test_a_running_job_is_cancelled(self):
         fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
         status, out, errors = fleet.run_driver("test-host.sh", "cancel", run)
@@ -978,12 +1087,12 @@ class Drivers(unittest.TestCase):
         status, _, errors = fleet.run_driver(
             "test-host.sh", str(results),
             environment={"CLADEFS_E2E_TEST": "fxfs-guest --tag dax-gate",
-                         "CLADEFS_EXTENTD_REMOTE": "s3://bucket/p"})
+                         "CLADEFSD_REMOTE": "s3://bucket/p"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
         self.assertEqual(ran[0], "test-linux-host.sh fxfs-guest --tag dax-gate")
         run = (results / "run.txt").read_text().split()[1]
-        self.assertIn(f"CLADEFS_EXTENTD_REMOTE=s3://bucket/p/{run}", ran)
+        self.assertIn(f"CLADEFSD_REMOTE=s3://bucket/p/{run}", ran)
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
         self.assertEqual(fleet.runs(), [])
 
@@ -1168,8 +1277,8 @@ class Drivers(unittest.TestCase):
         self.assertEqual(a[1], b[1])
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
             self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
-            self.assertIn(f"CLADEFS_EXTENTD_TOKEN={token}", side)
-            self.assertIn(f"CLADEFS_EXTENTD_REMOTE=file://{held}/bucket/branches", side)
+            self.assertIn(f"CLADEFSD_TOKEN={token}", side)
+            self.assertIn(f"CLADEFSD_REMOTE=file://{held}/bucket/branches", side)
             self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"

@@ -14,6 +14,11 @@
 //! block go in order, each once: an ID costs no request but its block's first, and a block's
 //! object no more than its taking says. An allocator going, its block's IDs not given go with it.
 //! Blocks are chosen at random, so that allocators taking blocks at once seldom meet.
+//!
+//! cladefs: block 0 no allocator takes: its IDs are those tests name, as a guest might, which no
+//! allocator gives (TASK-455). An ID of a block taken is [`given`] to one making alone, which
+//! no fork names (doc-7, Object IDs): a root's or a clone's record of one, deleted, goes with its
+//! dead cell, no recorder making it again (`record::Record::removable`).
 
 use crate::bucket::{self, Bucket, Created};
 use crate::layout;
@@ -24,7 +29,8 @@ use std::sync::Mutex;
 /// block.
 pub const BLOCK: u64 = 1 << 24;
 
-/// How many blocks there are: none holds `u64::MAX`, which names no branch.
+/// How many blocks there are: none holds `u64::MAX`, which names no branch. Block 0, the IDs tests
+/// name, no allocator takes.
 const BLOCKS: u64 = u64::MAX / BLOCK;
 
 /// What a block's object holds: its taker, a random number its allocator chose, so that the
@@ -76,23 +82,33 @@ impl Allocator {
         let mut block = self.block.lock().unwrap();
         let (taken, next) = block.as_mut().filter(|(_, next)| *next < BLOCK)?;
         let id = *taken * BLOCK + *next;
+        debug_assert!(id >= BLOCK, "block 0's IDs are named, never given");
         *next += 1;
         Some(id)
     }
 }
 
-/// The number in `block` of its first ID: not 0's, which names no branch.
+/// The number in `block` of its first ID.
 fn first(block: u64) -> u64 {
-    u64::from(block == 0)
+    assert_ne!(block, 0, "block 0's IDs are named, never given");
+    0
+}
+
+/// cladefs: whether `id` is one an allocator gave: of a block an allocator took, whose object is
+/// there, kept for good, and not block 0, the IDs tests name (TASK-455). A request a call: a
+/// GET of the block's object.
+pub async fn given(bucket: &impl Bucket, id: u64) -> bool {
+    let block = id / BLOCK;
+    block != 0 && bucket::get(bucket, &layout::objectid_block(block)).await.is_some()
 }
 
 /// Takes a block of `bucket`'s that no allocator took, at random, and returns it.
 async fn take(bucket: &impl Bucket) -> u64 {
     let bytes = layout::encode(&Taken { taker: rand::random() });
     loop {
-        let block = rand::random::<u64>() % BLOCKS;
+        let block = 1 + rand::random::<u64>() % (BLOCKS - 1);
         match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await {
-            Created::Created => return block,
+            Created::Created(_) => return block,
             // Another's: another block.
             Created::Exists(_) => {}
         }
@@ -148,14 +164,24 @@ mod tests {
                 taken.insert(take(&bucket).await);
             }
             assert_eq!(taken.len(), 64);
+            assert!(!taken.contains(&0), "block 0 taken");
             assert_eq!(bucket::list(&bucket, "objectid/").await.len(), 64);
         });
     }
 
-    /// Block 0's first ID is 1: 0 names no branch.
+    /// No ID of block 0 is given, 0 among them, which names no branch: no allocator takes the
+    /// block, whose IDs tests name, and none of them is given though its object were there
+    /// (TASK-455). An allocator's ID is given; one of a block no allocator took is not.
     #[test]
     fn no_id_is_0() {
-        let allocator = Allocator { block: Mutex::new(Some((0, first(0)))) };
-        assert_eq!(allocator.given(), Some(1));
+        futures::executor::block_on(async {
+            let bucket = memory();
+            bucket::create(&bucket, &layout::objectid_block(0), b"by hand".to_vec()).await;
+            assert_eq!((given(&bucket, 0).await, given(&bucket, 1).await), (false, false));
+            let id = Allocator::new().next(&bucket).await;
+            assert!(id >= BLOCK, "{id} of block 0");
+            let untaken = if id / BLOCK == 1 { 2 } else { 1 } * BLOCK;
+            assert_eq!((given(&bucket, id).await, given(&bucket, untaken).await), (true, false));
+        });
     }
 }

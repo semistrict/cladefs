@@ -69,7 +69,7 @@ impl Kept {
     fn opened(opened: Opened, cache: Option<Arc<Cache>>) -> anyhow::Result<Self> {
         let Opened { store, bucket, remote } = opened;
         let url = store.bucket().unwrap_or_default().to_owned();
-        let fetcher = remote::Fetcher::new(bucket.clone(), cache);
+        let fetcher = remote::Fetcher::new(bucket.clone(), cache).map_err(anyhow_of)?;
         let own = host_store::keeps_own_bucket(&store);
         let collecting = own.then(|| collect::of(&url, &bucket));
         Ok(Self { store, remote, fetcher, collecting })

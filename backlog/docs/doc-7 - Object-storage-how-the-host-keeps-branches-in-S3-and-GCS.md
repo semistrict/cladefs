@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-16 07:46'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -171,13 +171,13 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>segments/<branch>/<epoch>.<seq>` | sealed extents and a footer; `seq` dense from 0, `epoch` its writer's (The head) | create-only, by the writer of `epoch` alone |
 | `<C>extents/<branch>/<epoch>.<seq>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `seq`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
 | `<C>checkpoints/<branch>/<epoch>.<seq>` | the branch's state as of segment `seq`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
-| `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, whether a failed fork's claim | create; updated with a condition |
-| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407) | created, then swapped with a condition; never deleted |
+| `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, or made, and whether another than its host resumed it, whether a failed fork's claim | create; updated with a condition |
+| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
 | `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a clone's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
-| `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good |
+| `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good, as is its cell; none for a clone's made by its host alone, of an ID an allocator gave (Dead cells removed whole) |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
@@ -218,7 +218,8 @@ names its branch already: a volume's name is its branch's from its first, whatev
 store of it is taken into. All in one compare-and-swap of the cell's object (`cell::hold`), a read
 alone when nothing changes. Only the holder changes a cell's volumes, conditional on the epoch and
 holder it took it at (`Fenced` otherwise). Deleting a branch takes its cell first, deletes the
-branch with the cell's epoch, and takes its volume out of the cell. A cell's object stays, as
+branch with the cell's epoch, and takes its volume out of the cell. *(TASK-455: but with its cell,
+dead, removed whole: Dead cells removed whole.)* A cell's object stays, as
 branches' records do: its epoch fences its volumes' heads, so made anew at epoch 1 it would leave
 a branch whose head a higher epoch took unopenable.
 
@@ -250,7 +251,9 @@ other's pages.
 An allocator, one per bucket in a process, takes a block of 2^24 IDs by creating its object,
 `objectid/<block>`, which only one taking does; it gives the block's IDs in order, each once, an ID
 costing no request but its block's first. A block is chosen at random, so that allocators taking
-blocks at once seldom meet, and kept for good, as an ID is never given again: an allocator going,
+blocks at once seldom meet, and kept for good, as an ID is never given again (TASK-455: block 0 no
+allocator takes, its IDs those tests name; an ID of a block taken is *given*, to one making alone,
+which no fork names, `objectid::given`, what removing a dead cell goes by): an allocator going,
 its block's IDs not given go with it. A fork's child takes no ID of a branch its parent holds
 extents of all the same (`extent_store::Inherited`), as a test's fork may name its child.
 
@@ -472,7 +475,9 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
 - **What it costs.** A durable commit is two round trips one after the other, the segment's create
   and the head's swap; before, its create alone, the fencing (TASK-371, which had taken a third
   away). A take is the head's read and swap, then the recovery's reads, all of them at once, as
-  their keys are known. *Measured on ubu1 (TASK-407.5, 2026-11-15,
+  their keys are known; cladefs: the record, the head and the cell's object read at once, the
+  recovery from that head, and, of a branch the host just made, none of them (What a host knows,
+  TASK-449). *Measured on ubu1 (TASK-407.5, 2026-11-15,
   docs/measurements/durable-commits-under-the-head-2026-11-15.md):* a guest's sync-loop round
   through the daemon, at 25 ms a request, about 60 ms under the head against about 33 ms before:
   one round trip more, a sync loop of about 17 a second where it was 30.
@@ -545,7 +550,14 @@ cache included, with no kill.
 budget** (`cladefs::extentd::process`): its upload memory, a store's framing and sealing for each
 store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
-tenants' rooms, as much as they held at most, and its own (64 MiB). It samples its anonymous
+tenants' rooms, as much as they held at most, the stores' maps of their extents (TASK-453: each
+decoded state the stores share once, at `extent_remote::recovery::ENTRY_BYTES` an entry, and what
+each store holds of its own, at `extent_store::OWN_ENTRY_BYTES`, the most so far; and each run of
+changes, side by side, to a map shared with another, a state's made of another's or a store's
+writer's of its bucket's layer, at `extent_remote::recovery::RUN_BYTES`, the path of the persistent
+map's nodes it copies, a full copy at most: a free scattered over a shared map holds ~2 KB, not an
+entry's 512 or 1,024 bytes), and its own
+(64 MiB). It samples its anonymous
 memory (`RssAnon`) as it keeps its stats, every 200 ms, against that budget as of then, and counts
 the samples past it: the stats line's `process:` (`max-anon`, `anon-budget`, `over-budget`), and
 the metrics `cladefs_extentd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
@@ -648,13 +660,15 @@ immutable instead.
 
 The steps of a fork of point P to child C:
 
-1. C's record, created saying the fork is being made (`forking: P`). cladefs: then its reference
-   under the cell of the branch P names (Garbage collection, References; after the record since
-   TASK-395.10).
+1. C's record, created saying the fork is being made (`forking: P`): a record there refuses the
+   fork, another's as `IdTaken`, no look made first (TASK-449). cladefs: then its reference under
+   the cell of the branch P names (Garbage collection, References; after the record since
+   TASK-395.10), and at once C's cell held by its host (What a host knows, TASK-449).
 2. A read of P's record: deleted, the fork fails. cladefs: so does it if C is of another tenant's cell
    than P, and the record doesn't say P is shared (`Error::NotShared`, `EACCES`; TASK-395.7). The
    read is made then whatever the rule that checks for deletion says.
-3. C's record, updated with a condition: no longer being made. Only then does the fork succeed.
+3. C's record, updated with a condition, from the version its create left: no longer being made.
+   Only then does the fork succeed.
 4. cladefs (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
    makes is: C's cell, made with a KEK of the host's pool, and C's record given its keys by a
    conditional update: its DEK and those it inherits, from the host's copy of P, rewrapped under
@@ -680,7 +694,10 @@ that finds C. The danger is a pass that finds neither, or takes P for deleted wi
   a fork before it, that state names.
 
 **A host dying** at any step leaves C's record being made, or made, and a directory with no store,
-which deleting removes (Forks): a record made stands as a fork's orphan, for
+which deleting removes (Forks); or a store of C, which opening resumes (`branch::resume_point_fork`,
+TASK-455's review): C's record said resumed, with a condition, then its reference written, as the
+host would have, then steps 2 and 3. A fork of P to C forked again, finding C's record its own and
+being made, resumes it likewise. A record made stands as a fork's orphan, for
 `cladefs-gc --delete-branch` (TASK-165.7); one being made holds what P holds until the collector gives
 it up, once P goes, or an operator deletes it. A dead host's create landing late finds a deleted
 record, and its update, being conditional, fails.
@@ -710,6 +727,112 @@ rewrapped under its own cell's KEK, so that the point's tenant shredding its KEK
 (no copy of the point opens) and breaks none made. No tenant is special: tenant 0's
 points are shared or not as any other's. Forks of branches with writers into another tenant's cell
 (a public base forked into a tenant's directory) are not checked yet (TASK-395.9).
+
+### What a host knows: a restore in 6 round trips (TASK-449)
+
+Measured by TASK-443.5 (docs/measurements/macos-bucket-lifecycle-2026-11-15): a restore, a fork of
+a point and its child's first open, asked the bucket 14 requests, 13 one after another (0.41 s at
+30 ms a request, 1.3 s at 100 ms) before the VM could boot; 25 in 21 on a host that never saw the
+point. The child's record was read 4 times and written twice, its head read twice, for a branch
+the host had made moments before, and a point taken from the bucket was opened twice. Now 8
+requests in 6 round trips, and 12 in 9 cold (docs/measurements/macos-restore-round-trips-2026-11-16:
+7 in 6 and 11 in 9, before TASK-449's review added the cell's read once the head is taken):
+
+| | before | after |
+|---|---|---|
+| fork of a point | 6 in 6: the child's record read; created; the reference; the point's record; the child's record read; updated | 5 in 4: the child's record created; the reference and the child's cell held, at once; the point's record; the child's record updated from the version its create left |
+| the child's first open | 8 in 7: record and head at once; head; the base's head; the cell read; the cell created; the head created; the record | 3 in 2: the head created; then the record and the cell's object, at once |
+| a point taken, cold | 11 in 8, opened twice | 4 in 3: the point's record (with the collector's marking looked at); the base's head; the checkpoint at the fork point |
+
+Each read skipped is one no other actor can make wrong, or one whose being wrong costs requests and
+never safety:
+
+- **Facts that never change once seen** (`extent_remote::known`, `Known::epoch`): the epoch of the
+  writer of a segment a head names. A head's runs of epochs only grow: an acknowledgement names
+  more, a takeover goes on from the end, a deletion keeps what it names, and nothing renames a
+  segment named; only a removal deletes a head, with its cell (specs/bucket's action property
+  `NamedEpochsStay`, checked in the models with takeovers, deletions, removals, compaction and
+  restores). So a fork point's checkpoint, at the key of that epoch (`state_at`), is read with no
+  read of the origin's head once a host read it there: every restore after its first on a host,
+  and the point's own open before its forks'.
+- **A point has no head**, then or ever (rule `points_take_no_writer`; invariant
+  `PointsUnwritten`): its copy reads none (`head::Read::of_point`).
+- **What a host learned of a branch it is about to open** (`known::Learned`): its record as its own
+  fork or take left it, its cell's object as its fork held it, and that it has no head, taken by
+  the branch's store's first opening here (`upload.rs`'s `first_reads`) in place of its first
+  reads. Each is what a read at the moment of the write would have found, so using it is that
+  read made earlier, which every step after must allow for. A step that writes does: the head's
+  taking, and the cell's holding when it changes the cell, are conditional on the version they
+  start from, and go on from what is there if another's write came between. A step that decides
+  from it and writes nothing checks nothing, so each such fact is read again once the head is
+  taken, at once with the recovery: the record (`Writer::take`), as after a first read from
+  before the branch's deletion, or its cell's removal (the model's `staleTake` and `OpenGone`, in
+  BucketRemovals and BucketForks); and the cell's object, if its holding started from what the
+  fork left (`Taking::remembered`, `cell::still_held`; TASK-449's review). The holding finds the
+  cell held by this placement already, as the fork left it, and writes nothing; but another host,
+  placed later, may have taken the cell since (for another of its volumes, not taking the clone's
+  head), and the head would then be taken with the fork's epoch, a superseded token: the store
+  writing the clone as its writer until the later placement's writer fenced it, what its guest
+  wrote meanwhile lost, where the opening should have been refused (`ESTALE`), as it was when it
+  read the cell first. Read once the head is taken, the cell found with the same epoch and holder
+  was held so as the head was taken (a cell's epoch only grows, each taking by another holder
+  the one after); found otherwise, the opening is refused, `Stale`, the head taken with the old
+  token fenced by the later placement's first taking. A GET more, no round trip
+  (`restores_refused_to_placements_superseded_since_their_forks`). Cells and their holding are
+  not in specs/bucket, whose placements give tokens per branch (`Place`), so this is argued here,
+  not checked (TASK-487, with the simulation, which learns nothing): the model takes a
+  placement's token to be current as it takes a head, which the code makes so by the cell's
+  holding, read or conditional, or, from memory, by this read after.
+  The other learned facts need no read after: the clone's having no head makes the head's taking
+  a create, refused if a head is there. What is learned lives in the host's memory alone, a few
+  thousand at most, the oldest going first; the opening of the branch's store takes it as it
+  begins, whatever comes of it after, so nothing learned outlives the opening it was learned for;
+  and only a store whose log goes on from nothing the bucket acknowledged uses it.
+- **No look at a clone's ID first**: the record's create finds any record there, and refuses it
+  as the look did: another's, deleted or not, `IdTaken` (`EEXIST`); ours given up on, its point
+  deleted (`ENOENT`); ours being made, resumed (TASK-455's order kept: resumed with a condition,
+  then the reference, then the fork made).
+- **The clone's update from its create's version**: conditional on it as on one a read found
+  (`transition_leaving`, `Start::Found`), so its deletion, its giving up, or a resume since makes
+  it read the record anew, as before.
+- **The child's cell held by its fork**, made, for the host's placement, the volume the child's
+  store will be, at once with the reference, after the record (a cell of no record keeps its
+  object, Dead cells removed whole): what the child's store would hold first as it opens, done
+  earlier, as a holding before a crash and a reopening is. A fork that fails after leaves the
+  cell's object in a cell already kept, a clone never made. Only on a host with no KMS, for a fork
+  inheriting no keys: otherwise the child's store makes its cell, sealed or not, as it opens
+  (TASK-485).
+- **One open of a point taken from the bucket**: `ExtentStore::take_with` opens the store its
+  making opened, rather than closing and opening it again; the record its making read to see the
+  bucket has the branch is learned for that opening.
+- **Reads at once**: an opening with nothing learned reads the record, the head and the cell's
+  object at once; the recovery starts from the head read with the record (`recover_under_from`),
+  which the taking goes on from, rather than reading it again.
+
+**Connections.** The calls from no runtime's task (`extent_store::upload::block_on`, a fork's steps
+among them) each ran on a runtime of their own, dropped as they returned: a bucket's connections
+are tasks of the runtime that opened them (`reqwest`, as `object_store` uses it), so every
+connection such a call opened closed with it, and a fork asking more at once than the host's
+runtime had left idle in the pool connected anew each time, a TCP handshake, and a TLS one on a
+bucket elsewhere, before its request (`requests_on_runtimes_dropped_after_connect_anew`;
+cladefs's `restores_connect_to_the_bucket_no_more`: a connection a restore before). They run in the
+context of the host's remotes' runtime now (`extent_store::upload::remotes`, which the stores'
+uploaders and fetches run on), so one runtime serves every connection to the host's buckets,
+whichever call opened it, and they stay in the pool (`calls_from_no_task_spawn_on_the_remotes_runtime`).
+A runtime of the calls' own beside it, as TASK-449 first had, served from its own two threads the
+sockets of the connections they left in the pool, which the host's uploads then took. A failed
+making of that runtime (a thread not spawned, under a limit of the process's threads) fails the
+call it was made for, and the next makes it anew (`calls_after_a_failed_making_of_the_runtime_make_it_anew`):
+kept failed, every fork, take and deletion of the host would have failed until its daemon
+restarted. *Measured (TASK-449's review, macOS, debug build, 15 cores; cladefs's
+`uploads_after_restores`, 512 MiB committed after 8 restores, against the S3 server in memory,
+over HTTP, as the tree has no TLS one):* 186 MiB/s on the one runtime of 8 workers, 235 with the
+calls' own runtime of 2 beside it, 241 on one runtime of 10: the uploads go as fast as the threads
+serving them, wherever they are; TASK-486 for the runtime's size.
+
+`remote::lifecycle::restores_ask_the_bucket_what_the_protocol_needs` pins each phase's requests and
+round trips one after another (the longest chain of requests each begun once the one before it was
+answered); `bucket_lifecycle_by_phase` measures them at any base size and latency.
 
 ## Reading
 
@@ -914,7 +1037,8 @@ origin), as the clone's record names that origin as its own.
    deleted point, no record yet) loses nothing.
 6. **Marks, compacts and deletes** within the cell as the whole-bucket pass did (steps below), its
    live branches' states and the fork points' together. A cell with no live branch and no reference
-   is reclaimed whole but its records and its cell object.
+   is reclaimed whole but its records and its cell object; and those too, with its heads and its
+   lease, if every record of it is a given root's or clone's (Dead cells removed whole, TASK-455).
 7. **Retires** its deleted children's references, if the cell has no live branch and no reference,
    marking each first; and deletes its own references listed beside their marks, written again
    since their retirements (References, Marked).
@@ -1159,7 +1283,8 @@ The rest of a pass, unchanged within the cell:
     its own, which would have to land before what it covers and be read after the listing, two
     orderings more (`dead-ends/collector-in-flight-declarations.md`);
   - moves no state's way goes through, once compacted in turn or once their object is gone;
-  - no record, deleted or not (Forks, TASK-174); no head, a deleted branch's final one fencing its
+  - no record, deleted or not (Forks, TASK-174), but with its cell removed whole (TASK-455); no
+    head but so, or in a cell of no record (a stale taker's); a deleted branch's final one fencing its
     writers.
 
 **Time** (the grace period, by the store's clock) only spares readers that just looked an extent up
@@ -1265,7 +1390,16 @@ A pass takes the lease, a GET and a conditional PUT, and lists the cell. If its 
 digest recorded, of the same options, it **skips**: it recovers and reads nothing, and deletes what
 was deferred once due (after its check of the lease, as every pass), then records that the next
 pass goes in full, as what goes once those are gone (moves of an object deleted) none worked out.
-Otherwise it passes in full. An idle cell, dead or not, costs a pass three requests: the lease's
+Otherwise it passes in full. *(TASK-455: a pass first **looks**: it reads the lease and, if the
+lease records a listing, lists the cell; a listing of the digest recorded, of the same options,
+nothing deferred due (and no KEK to be had for what was left sealed), it ends there, writing
+nothing, as a pass that writes nothing and deletes nothing fences no other: an idle cell costs a
+sweep two requests, the lease's GET and the LIST. Otherwise it takes the lease, and goes by the
+look's listing if its taking is the lease's next epoch, no pass taking it between, as if it listed
+once it took, else lists again. A look records nothing, so `ended` stays the last pass in full's.
+And a pass in full over a dead cell it does not remove, deferring nothing, records the digest of
+what its listing leaves once its deletes land, so that the next skips it rather than go over it in
+full for those deletes, retiring its references again.)* Before: an idle cell, dead or not, costs a pass three requests: the lease's
 GET and PUT, and one LIST; holding it for a time (`--lease`, Sweeps), the letting go of the lease,
 a GET and a PUT, more. Mark-only passes and dry runs
 never skip, and record nothing.
@@ -1355,6 +1489,91 @@ full, which nothing under its prefix changed since if passes since skipped it; a
 on, nulls. It holds a page of tenants, a page of cells and the leases in flight, whatever the
 bucket holds. TASK-394's sum by a listing of the whole bucket is gone, with what it said of what is
 no cell's (object-ID blocks, `gc/marking`).
+
+### Dead cells removed whole (TASK-455, format 12; 13 since its review)
+
+Agent sandboxes make and delete 10^4 to 10^6 branches a day. Before, every dead cell kept its
+cell's object, its records, its heads and its collector lease, and a clone its mark under its base's
+cell, for good: 5 requests a dead cell every sweep, and a base's pass listing a mark a clone ever
+retired (docs/measurements/macos-gc-dead-cells-2026-11-15). Now a pass in full over a cell that is
+dead (no live branch, no reference), with no mark under it (of a reference retired, which a stale
+writer may write again; or a mark-only pass's), deferring nothing, removes it whole when **every
+record of it is a deleted root's or a deleted clone's made** (`record::Kind::Clone`, what
+`Forking` becomes as its fork is made; format 12), **of an ID an allocator gave** (`objectid::given`:
+its block's object there, never block 0): after retiring its references, it deletes its heads and
+its object, then its records, then its lease. A pass stopping between finds the records, or the
+lease alone, and goes on; a cell of no record keeps its object (a cell being made has one before its
+record) but loses its heads and, nothing else left, its lease.
+
+Why it is safe: those records are made once, by their makers alone. A root's by its maker, a clone's
+by its host (`fork_point`), each of an ID the allocator gave it, which no fork names (hosts take
+every ID from the allocator; a guest naming one is outside the protocol): so no parent's writer or
+deletion, nor its next writer, records it again from a state naming a fork to it, as they would a
+writable fork's child, and a point's, whose records therefore stay, as do claims, a deletion's of a
+branch it found none of (`Own`), and a clone's never made, its host perhaps yet to write its
+reference. Writers of the removed branches fail: a head swap is conditional on the version its
+writer holds, which is gone; a taking from a read of the record before the deletion creates a head
+and stops at its read of the record again, finding none, and that head, in a cell of no record, the
+next pass deletes, being no fence (below); a late segment is garbage the next pass deletes. A
+deletion run again after
+leaves a deleted record (`Own`), which stays: such a cell costs sweeps as before.
+
+**Clones' references retired unmarked.** A clone's reference has one writer, its host, which wrote it
+before it made the clone; no recorder writes it, no fork naming the ID. So a clone made, of a given
+ID, is retired by deleting its reference, unmarked (`Record::retires_unmarked`); every other
+retirement is marked first, as before. A base's cell then holds its live clones' references and
+nothing of the clones gone, and its pass lists that much however many clones were made.
+
+**But a clone resumed is marked** (TASK-455's review). A fork of a point may be finished by another
+than its host: a store opening the clone (its host dead, or slow and its placement moved), or a
+fork of the point forked again finding the record being made its own. Its host may then still
+write the reference, late, after the clone was made, deleted and its cell removed, where an
+unmarked retirement would leave it standing for good, keeping the base's state at the fork point.
+So whoever resumes a fork says so in its record first, with a condition, while it is being made
+(`Record::resumed`, format 13), and only then writes the reference: a resume reading the record
+after it was made writes none, and a clone made says it was resumed whenever anyone but its host
+may write its reference after. Its retirement is marked (rule `resumes_marked`), the base's next
+pass deleting a late write by the mark. A resume writes the reference before it makes the fork
+(rule `resumes_refer`): before, a store's opening made it with none, and a host dying between
+the record and the reference left a clone whose origin's state at the fork point no pass kept once
+the point was gone.
+
+**Fences kept** (TASK-455's review). A deletion ends the branch's head first, made final where it
+has none, then writes its record (deleted, of its own if none is there): a fork's child deleted
+before its parent's writer recorded it (the TASK-79.78 race) has a final head and no record in
+between, for as long as the deletion and the slow writer take. A head of a branch whose record a
+pass did not list therefore goes only if it is not final, and a GET finds no record after all (a
+listing of many pages may miss one): a stale taker's, of a branch removed, whose record never
+comes back. A final one is a fence: it stays, and keeps its cell from removal, so that a writer
+taking the child once the slow writer records it finds it and fails `Deleted`. Before, a pass over
+a cell of no record deleted every head in it, and removal deleted the heads of branches of no
+record with the cell: the slow writer's record then let a writer take the child, which the
+deletion, going on, marked deleted under it, its acknowledged writes collected. *Costs:* two GETs
+a head no record was listed with; such a fence, its deletion never finished, keeps its cell, and
+its lease, as before TASK-455.
+
+specs/bucket models it: `Given`, the allocator's IDs, which forks and contests never name (rule
+`idsGivenOnce`), restores taking one each once; `GcFinish` removing a dead cell of given roots and
+clones made (rule `recordsKept`, now saying which records may go), retiring a given clone's
+reference unmarked (rule `clonesMadeUnmarked`); a stale taking after a removal (`OpenGone`).
+Invariant `RemovedStayGone`: a removed branch never lives again. Mutations: `NoRecordsKept` (any
+dead cell removed: a slow writer makes a deleted fork's child's record again), `NoIdsGivenOnce`
+(a fork names a given clone's ID, and its slow writer records it after the clone's cell went) and
+`NoClonesMadeUnmarked` (a clone being made retired unmarked, its host writing its reference after);
+model `BucketRemovals`. And (TASK-455's review) deletions of forks' children before their records
+(`deleteEarly`) and resumes by another host (`resume`): rules `fencesKept`, `resumesRefer` and
+`resumesMarked`, invariant `DeletedUntaken` (no writer holds a deleted branch); mutations
+`NoFencesKept` (a pass deletes a deletion's fence, and a writer takes the child once recorded),
+`NoResumesRefer` (a clone resumed with no reference) and `NoResumesMarked` (a clone resumed
+retired unmarked, its host's reference landing after); models `BucketFences`, `BucketResumes`.
+
+*Costs:* a GET of the ID's block per deleted root or clone a pass in full reads; nothing a sweep
+after. *Not removed:* dead cells of writable forks' children and points (their parents' writers may
+record them again from states naming the forks, for as long as any such state may be read), of
+clones never made, of IDs no allocator gave; and the marks of their references.
+
+**LISTs counted by their pages** (TASK-455): `cladefs-gc`'s counts, and a store's, count a listing
+of N objects as ceil(N / 1,000) requests, one at least, as S3 and GCS serve it.
 
 ## Testing
 

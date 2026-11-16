@@ -1,0 +1,4 @@
+lifecycle 0
+fork-memory 0
+gc-deleted 0
+gc-clones 0

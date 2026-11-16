@@ -8,16 +8,25 @@ scripts/nightly-host.sh runs on ubu1 from cron, in the nightly's own clone, ROOT
 
 Each night's results are a directory of docs/measurements, HOST-nightly-<time>-<head>, holding
 what scripts/bench-ab-host.sh fetched, `night.json`, what the night found, and `nightly.md`, the
-same for a reader. They are its state too: the night before is the newest of them, and its head,
-if it built, is tonight's baseline.
+same for a reader. They are its state too: the newest night that measured is the last word on
+main, and its head is tonight's baseline.
 
   plan
-      `skip WHY` if the newest night measured main's code already, else `run BASE HEAD`. HEAD is
-      the newest commit of origin's main that changed more than what the nightly writes
-      (docs/measurements, backlog; others' backlog commits too, which measure the same), so that
-      a night's own commit is no change to measure. BASE is the newest night's head that built;
-      with none, the first night's base, kept until a head builds; with no night at all, HEAD's
-      first parent.
+      `skip WHY` if the newest night that measured (outcome `measured`) measured main's code
+      already, else `run BASE HEAD`. HEAD is the newest commit of origin's main that changed more
+      than what the nightly writes (docs/measurements, backlog; others' backlog commits too, which
+      measure the same), so that a night's own commit is no change to measure. BASE is the newest
+      measured night's head; with none, the first night's base; with no night at all, HEAD's
+      first parent. A night that could not run, or whose rounds were all left out, measured
+      nothing: the next night measures the same commits again, or main's newer head against the
+      same base (TASK-489).
+  room
+      `BUILD MEASURE`, the bytes a night needs free on the scratch disk before it builds and
+      before it measures (scripts/lib/host.sh's CLADEFS_HOST_ROOM and CLADEFS_HOST_ROOM_MEASURE):
+      each the larger of its setting and a fifth more than the most the last ROOM_NIGHTS nights
+      took (their room.txt and rounds-size.txt), the build's with the measurement's added. The
+      settings, CLADEFS_NIGHTLY_ROOM_BUILD and CLADEFS_NIGHTLY_ROOM_MEASURE (ROOM's comment
+      says why their defaults), take bytes or K, M, G and T.
   report --results DIR --base SHA --head SHA --status N
       judges the night (scripts/ab-rounds.py), writes night.json and nightly.md in DIR,
       regenerates docs/measurements/nightly-history.md, and files a backlog task for each metric
@@ -63,6 +72,20 @@ HISTORY = "nightly-history.md"
 BAD = ("could not run", "no result")
 # How many bad nights in a row file a task.
 BAD_NIGHTS = 3
+# What a night needs free on the scratch disk, /mnt/fxdax-scratch (TASK-489), unless earlier nights
+# took more. Its build: both sides' worktrees in its run's directory, each with target directories
+# of its own (the workspace's and Firecracker's release builds), the guest kernels, scripts/
+# counts.sh's work and the artifacts kept (CLADEFS_AB_KEEP), copied there from the run's: an hour
+# after the first night, which built both sides, the nightly's run directories held 83 GB, and a
+# fifth more is 100G. Its
+# measurement: the rounds' results, each case's store and guests' images on the same disk while it
+# runs and what failed cases leave there until the end; no night has measured on ubu1 yet, so 20G,
+# a guess until rounds-size.txt says more, which the margin then follows.
+ROOM = {"build": ("CLADEFS_NIGHTLY_ROOM_BUILD", "100G"),
+        "measure": ("CLADEFS_NIGHTLY_ROOM_MEASURE", "20G")}
+# How many of the newest nights' sizes the need follows, and by how much more (a fifth).
+ROOM_NIGHTS = 7
+ROOM_MARGIN = (6, 5)
 LABELS = "perf,nightly"
 PUSH_TRIES = 3
 A, B = "base", "head"
@@ -106,12 +129,12 @@ def plan(root, measurements):
     """What tonight does: ("skip", why) or ("run", base, head)."""
     head = git(root, "log", "-1", "--format=%H", "origin/main", "--", ".", *NOT_CODE).stdout.strip()
     found = nights(measurements)
-    if found and found[-1]["head"] == head:
-        return "skip", (f"main's code is {head[:12]}'s, which the night of {found[-1]['date']} "
-                        "measured")
-    built = [record for record in found if record.get("head_built")]
-    if built:
-        return "run", built[-1]["head"], head
+    measured = [record for record in found if record["outcome"] == "measured"]
+    if measured and measured[-1]["head"] == head:
+        return "skip", (f"main's code is {head[:12]}'s, which the night of "
+                        f"{measured[-1]['date']} measured")
+    if measured:
+        return "run", measured[-1]["head"], head
     if found:
         return "run", found[0]["base"], head
     parent = git(root, "rev-parse", "--verify", "--quiet", f"{head}^", check=False).stdout.strip()
@@ -122,6 +145,67 @@ def plan(root, measurements):
 
 def short(sha):
     return sha[:8] if sha else "-"
+
+
+UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": 1 << 30, "T": 1 << 40}
+
+
+def size(text, name):
+    """The bytes `text` says, a count of bytes or of K, M, G or T (1024's, as fxjob's); `name`,
+    the setting it is, says what is wrong with one that is none."""
+    said = re.fullmatch(r"([0-9]+)([KMGT]?)", text)
+    if not said:
+        sys.exit(f"{name} is bytes, or K, M, G or T of them: {text}")
+    return int(said[1]) * UNITS[said[2]]
+
+
+def gib(count):
+    return f"{count / (1 << 30):.1f} GiB"
+
+
+def room(found, environ=os.environ):
+    """What a night needs free on the scratch disk before it builds and before it measures, in
+    bytes: each the larger of its setting (ROOM) and ROOM_MARGIN more than the most the newest
+    ROOM_NIGHTS nights of `found` took, the build's with the measurement's added."""
+    taken = [record.get("room") or {} for record in found[-ROOM_NIGHTS:]]
+
+    def need(phase, figure):
+        name, default = ROOM[phase]
+        most = max([each[figure] for each in taken if each.get(figure)], default=0)
+        return max(size(environ.get(name) or default, name),
+                   -(-most * ROOM_MARGIN[0] // ROOM_MARGIN[1]))
+
+    measure = need("measure", "rounds")
+    return need("build", "built") + measure, measure
+
+
+def room_taken(results):
+    """What RESULTS says of the scratch disk: each check (scripts/lib/host.sh's room.txt), the
+    bytes the run's directory held once built, and the bytes the rounds' results held
+    (bench-ab-linux-host.sh's rounds-size.txt); None for one it lacks."""
+    taken = {"checks": [], "built": None, "rounds": None}
+    path = results / "room.txt"
+    for line in path.read_text().splitlines() if path.exists() else []:
+        words = line.split(" ", 4)
+        if words[0] == "built":
+            taken["built"] = int(words[1])
+        else:
+            taken["checks"].append({"phase": words[0], "free": int(words[1]),
+                                    "need": int(words[2]), "verdict": words[3],
+                                    "disk": words[4]})
+    rounds = results / "rounds-size.txt"
+    if rounds.exists():
+        taken["rounds"] = int(rounds.read_text())
+    return taken
+
+
+BEFORE = {"build": "before building", "measure": "before measuring"}
+
+
+def room_line(check):
+    """A check of the scratch disk, a phrase."""
+    return (f"the scratch disk {check['disk']} had {gib(check['free'])} free "
+            f"{BEFORE[check['phase']]}, the night needs {gib(check['need'])}")
 
 
 def key(row):
@@ -155,8 +239,12 @@ def replay(row, record, environ):
             f"scripts/bench-ab-host.sh RESULTS && scripts/ab-rounds.py compare RESULTS base head")
 
 
-def outcome(results, comparison, status):
+def outcome(results, comparison, status, taken):
     """What the night came to: (outcome, why), outcome measured, no result or could not run."""
+    for check in taken["checks"]:
+        if check["verdict"] == "short":
+            return "could not run", (f"{room_line(check)} (see room.txt; "
+                                     f"{ROOM[check['phase']][0]})")
     failed = results / "build-failed"
     if failed.exists():
         side = failed.read_text().strip()
@@ -181,7 +269,8 @@ def judge(results, base, head, status, environ=os.environ):
         comparison = ab_rounds.compare(results, A, B, environ.get("CLADEFS_AB_CONTROL",
                                                                   ab_rounds.CONTROL) or None,
                                        ab_rounds.Bounds.of(environ))
-    said, why = outcome(results, comparison, status)
+    taken = room_taken(results)
+    said, why = outcome(results, comparison, status, taken)
     record = {
         "date": now(),
         "base": base,
@@ -191,6 +280,7 @@ def judge(results, base, head, status, environ=os.environ):
         "why": why,
         "head_built": (results / "artifacts-b.txt").exists() and not (
             results / "build-failed").exists(),
+        "room": taken,
         "moved": [],
         "broken": [],
         "no_result": [],
@@ -331,6 +421,17 @@ def night_markdown(record, comparison, push):
              + (f": {record['why']}" if record["why"] else "") + ".", ""]
     if push:
         lines += ["## An earlier night's push", ""] + [f"- {line}" for line in push] + [""]
+    taken = record["room"]
+    if taken["checks"]:
+        lines += ["## The scratch disk", ""]
+        lines += [f"- {BEFORE[check['phase']].capitalize()}: {gib(check['free'])} free on "
+                  f"{check['disk']}, {gib(check['need'])} needed ({check['verdict']})."
+                  for check in taken["checks"]]
+        lines += [f"- {what}: {gib(taken[figure])}." for figure, what in
+                  (("built", "The run's directory once built"),
+                   ("rounds", "The rounds' results before their stores went"))
+                  if taken[figure] is not None]
+        lines.append("")
     if record["tasks"]:
         lines += ["## Tasks", ""] + [f"- {task['id']} ({task['action']}): {task['key']}"
                                      for task in record["tasks"]] + [""]
@@ -500,6 +601,7 @@ def main(argv, environ=os.environ):
     parser.add_argument("--root", default=str(HERE.parent))
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("plan")
+    sub.add_parser("room")
     reported = sub.add_parser("report")
     reported.add_argument("--results", required=True)
     reported.add_argument("--base", required=True)
@@ -515,6 +617,8 @@ def main(argv, environ=os.environ):
     state = state_dir(environ)
     if args.action == "plan":
         print(" ".join(plan(root, measurements)))
+    elif args.action == "room":
+        print(*room(nights(measurements), environ))
     elif args.action == "report":
         report(root, args.results, args.base, args.head, args.status, state, environ)
     elif args.action == "history":

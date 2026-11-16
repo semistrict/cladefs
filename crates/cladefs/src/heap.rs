@@ -9,6 +9,7 @@
 //! that what one counts is its own.
 
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -29,6 +30,21 @@ pub(crate) static CASE: Mutex<String> = Mutex::new(String::new());
 #[global_allocator]
 static ALLOCATOR: Bounded = Bounded;
 
+thread_local! {
+    /// How many times this thread allocated, or grew an allocation ([`allocations_while`]): of
+    /// its own, whatever the process's other threads do meanwhile.
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// How many times this thread allocated, or grew an allocation, while `work` ran, with what it
+/// returned: so that a test asserts a path allocates nothing (TASK-453).
+pub(crate) fn allocations_while<R>(work: impl FnOnce() -> R) -> (u64, R) {
+    let count = || ALLOCATIONS.with(Cell::get);
+    let before = count();
+    let done = work();
+    (count() - before, done)
+}
+
 /// What the process holds of its heap now.
 pub(crate) fn held() -> usize {
     HELD.load(Ordering::Relaxed)
@@ -36,6 +52,8 @@ pub(crate) fn held() -> usize {
 
 impl Bounded {
     fn check(size: usize) {
+        // Gone with its thread, as it ends: nothing to count for it then.
+        let _ = ALLOCATIONS.try_with(|allocations| allocations.set(allocations.get() + 1));
         let held = HELD.fetch_add(size, Ordering::Relaxed) + size;
         PEAK.fetch_max(held, Ordering::Relaxed);
         let limit = LIMIT.load(Ordering::Relaxed);

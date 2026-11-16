@@ -13,7 +13,7 @@
 //!   memory past what its design bounds it by, its uploads within their memory however often each
 //!   is tried (TASK-317);
 //! - **the failures show** in the stats line (`failed-NAME`) and the metrics
-//!   (`cladefs_extentd_object_storage_failures_total`), by kind (TASK-314);
+//!   (`cladefsd_object_storage_failures_total`), by kind (TASK-314);
 //! - **commits wait at the lag bound and never fail** (doc-7, decision 3; doc-12): each store's
 //!   commits stall, none returning an error, for as long as the bucket fails;
 //! - **everything uploads once the bucket answers, within doc-12's bound**: every commit made
@@ -25,7 +25,10 @@
 //! - **a failing bucket is sent no more than probes** (TASK-382): through a failing phase, the
 //!   writes that failed, each its object sent whole, are a wave of the host's uploads at once and
 //!   then a probe of each kind every [`extent_remote::store`]'s backoff at most, not every upload
-//!   tried again and again, most of the daemon's CPU in the qualification's soak.
+//!   tried again and again, most of the daemon's CPU in the qualification's soak;
+//! - **its background threads live** (TASK-493): a panic holding what is shared beyond one store,
+//!   the page cache's flusher's work among it, aborts it, as the daemon's does; and the page
+//!   cache's flusher is alive throughout, where its death once went unseen, the soak passing.
 //!
 //! `CLADEFS_SOAK_SECS` says how long it runs (default 300 s, CI's; 1,800 or more each night, Hunt's
 //! `soak` job), the phases each a fraction of it. Ignored by the workspace's suite, which it would
@@ -150,7 +153,7 @@ fn vm_process(
 }
 
 /// The bucket's failures of each kind, as the daemon's stats file says them (`failed-NAME`), and
-/// as its metrics do (`cladefs_extentd_object_storage_failures_total`), which must agree.
+/// as its metrics do (`cladefsd_object_storage_failures_total`), which must agree.
 fn failures(stats: &std::path::Path) -> Vec<(Request, u64)> {
     let kept = std::fs::read_to_string(stats).unwrap_or_default();
     let line = kept.lines().find(|line| line.starts_with("object-store: ")).unwrap_or_default();
@@ -161,10 +164,8 @@ fn failures(stats: &std::path::Path) -> Vec<(Request, u64)> {
             let field = format!("failed-{}=", request.name());
             let said = (line.split(' ').find_map(|word| word.strip_prefix(&field)))
                 .map_or(0, |count| count.parse().unwrap());
-            let name = format!(
-                "cladefs_extentd_object_storage_failures_total{{request=\"{}\"}}",
-                request.name()
-            );
+            let name =
+                format!("cladefsd_object_storage_failures_total{{request=\"{}\"}}", request.name());
             let metric = (metrics.lines().find_map(|line| line.strip_prefix(&name)))
                 .map_or(0, |count| count.trim().parse().unwrap());
             // The metrics are as of now, the file as of its last poll: never behind it.
@@ -188,17 +189,24 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
         (dir.path().join("bucket"), dir.path().join("faults"), dir.path().join("stats.txt"));
     std::fs::create_dir(&bucket).unwrap();
     let _ = super::super::logging::to_stderr();
-    // As the daemon starts (`cladefs-extentd`): its large buffers given back as they are freed, its
+    // As the daemon starts (`cladefsd`): its large buffers given back as they are freed, its
     // limit of open files raised.
     super::super::memory::return_large_allocations();
     super::super::raise_open_files_limit().unwrap();
+    // A panic holding what no store's fence contains, the page cache's flusher's work among it,
+    // aborting the process (TASK-149.24, TASK-493).
+    extent_store::shared::abort_on_panics();
+    let flusher_lives = || {
+        let pages = extent_store::pages::shared();
+        assert!(!pages.flusher_died(), "the page cache's flusher died: {:?}", pages.usage());
+    };
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()));
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
+        std::env::set_var("CLADEFSD_TOKEN", "1");
         std::env::set_var("CLADEFS_REMOTE_FAULTS", &faults);
-        std::env::set_var("CLADEFS_EXTENTD_STATS", &stats);
+        std::env::set_var("CLADEFSD_STATS", &stats);
     }
     crate::remote::set_upload_memory(UPLOAD_MEMORY).unwrap();
 
@@ -249,6 +257,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
                 caught_up = Some(since.elapsed());
             }
             assert_eq!(connections(), VMS, "a VM process let go, or gone");
+            flusher_lives();
             let sample = process::last();
             assert_eq!(
                 sample.over_budget,
@@ -337,6 +346,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
         let waited = Duration::from_millis(wrote.longest_commit_ms.load(Ordering::Relaxed));
         assert!(waited >= run.mul_f64(0.05), "VM process {vm}'s commits waited {waited:?} at most");
     }
+    flusher_lives();
     let sample = process::sample();
     eprintln!("soak: {}", process::line());
     assert_eq!(sample.over_budget, 0, "{sample:?}");

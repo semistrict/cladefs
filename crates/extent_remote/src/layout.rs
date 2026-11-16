@@ -40,8 +40,12 @@ pub use extent_frame::segment::{
 /// moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints' keys
 /// name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it holds
 /// and its newest checkpoint, replacing its lease, and footers name no segment they follow;
-/// nothing reads 10's.
-pub const FORMAT: u32 = 11;
+/// nothing reads 10's. 12: a fork of a point, made, says so ([`Kind::Clone`](crate::record::Kind::Clone)),
+/// so that the collector removes a dead cell of given roots and clones whole (TASK-455); nothing
+/// reads 11's. 13: a fork of a point says whether another than its host resumed it
+/// ([`Record::resumed`](crate::record::Record::resumed)), whose clone's reference is retired
+/// marked (TASK-455's review); nothing reads 12's.
+pub const FORMAT: u32 = 13;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";

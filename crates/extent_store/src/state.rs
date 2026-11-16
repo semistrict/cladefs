@@ -14,10 +14,11 @@
 
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
+use crate::extents::{Entry, Extents};
 use crate::framed::{Files, Framed};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
-    Change, Data, EXTENTS, Extent, Extents, FileKey, Piece, SegmentId, branch_dir, extent_path,
+    Change, Data, EXTENTS, Extent, FileKey, Piece, SegmentId, branch_dir, extent_path,
 };
 use crate::raw::RawFile;
 #[cfg(any(test, feature = "audit"))]
@@ -176,13 +177,14 @@ pub(crate) enum Reader {
 }
 
 /// cladefs: where an extent is in its life, as the store's state has it, found in one place
-/// ([`State::life`], TASK-160.18), which readers and writers decide by.
+/// ([`State::life`], TASK-160.18), which readers and writers decide by. cladefs: its entry borrowed
+/// from the layer of the store's map that holds it ([`Entry`], TASK-453).
 pub(crate) enum Life<'a> {
     /// Written since the last commit, which seals it: its entry, as the writes that finished left
     /// it, if one did.
-    Open(Option<&'a Extent>),
+    Open(Option<Entry<'a>>),
     /// Sealed, and held.
-    Held(&'a Extent),
+    Held(Entry<'a>),
     /// Freed by a commit, and kept: for the bucket, views or pins ([`Kept`]).
     Kept(&'a Kept),
     /// Sealed once, and freed, and not kept: its number the branch writes no more (TASK-79.6).
@@ -191,11 +193,11 @@ pub(crate) enum Life<'a> {
     Unknown,
 }
 
-impl Life<'_> {
+impl<'a> Life<'a> {
     /// Its entry, if the store holds it: open or sealed.
-    pub fn held(&self) -> Option<&Extent> {
-        match self {
-            Life::Open(entry) => *entry,
+    pub fn held(&self) -> Option<Entry<'a>> {
+        match *self {
+            Life::Open(entry) => entry,
             Life::Held(entry) => Some(entry),
             Life::Kept(_) | Life::Spent | Life::Unknown => None,
         }
@@ -255,7 +257,7 @@ impl<F: File> State<F> {
             }
         };
         match life {
-            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.clone()),
+            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.to_extent()),
             Life::Kept(kept) if readable(kept) => Ok(kept.entry.clone()),
             // Kept for another, freed before what the view holds: what it let go of.
             Life::Kept(_) if matches!(reader, Reader::View { .. }) => {
@@ -288,9 +290,7 @@ impl<F: File> State<F> {
     /// where they went, if they are named on their way there ([`Store::moved`](crate::Store::moved)).
     pub fn moved(&mut self, moved: &[(ExtentId, Location, Location)]) {
         for (extent, _, to) in moved {
-            if let Some(entry) = self.extents.get_mut(extent) {
-                entry.data.follow(to);
-            }
+            self.extents.follow(extent, to);
             self.kept.moved(*extent, to);
         }
     }
@@ -332,7 +332,7 @@ impl<F: File> State<F> {
         let cached_key = |key: &str| cached.then(|| key.to_owned());
         for extent in sealed {
             let entry =
-                self.extents.get_mut(&extent).expect("an extent sealed in a segment is held");
+                self.extents.own_mut(&extent).expect("an extent sealed in a segment is held");
             let Data::Pieces(pieces) = &entry.data else {
                 unreachable!("{extent:?}, sealed, is not")
             };
@@ -343,7 +343,7 @@ impl<F: File> State<F> {
         }
         let mut leaving = Vec::new();
         for (extent, location) in own {
-            if let Some(entry) = self.extents.get_mut(extent)
+            if let Some(entry) = self.extents.own_mut(extent)
                 && entry.data == Data::Own
             {
                 entry.data = Data::Remote(location.clone());
@@ -673,8 +673,7 @@ impl<F: File> State<F> {
         if !self.uncommitted.is_empty() || self.replay.begun.is_some() {
             return;
         }
-        let lengths: BTreeMap<ExtentId, u64> =
-            self.extents.iter().map(|(extent, entry)| (*extent, entry.len)).collect();
+        let lengths: BTreeMap<ExtentId, u64> = self.extents.lens().collect();
         assert_eq!(lengths, self.replay.extents.0, "the extents, as the footers say");
         let root = self.replay.root.as_deref().unwrap_or_default();
         assert_eq!(self.root, root, "the root, as the footers say");
@@ -696,19 +695,19 @@ impl<F: File> State<F> {
     /// says, it checks only as far as what it holds bounds them.
     pub fn audit(&self) {
         let branch = self.segments.open_segment().branch;
-        let held: Vec<_> = self.extents.iter().collect();
-        self.space.audit(branch, &held, self.gate.is_writing());
+        self.space.audit(branch, self.extents.lens(), self.gate.is_writing());
         self.uncommitted.audit(&self.extents);
         self.kept.audit();
         let own =
             |extent: &ExtentId, entry: &Extent| extent.branch == branch && entry.data == Data::Own;
         let mut recount = Recount::default();
         let mut own_files = HashSet::new();
-        for &(extent, entry) in &held {
-            let sealed = !self.uncommitted.is_open(*extent);
-            recount.holds(*extent, entry, sealed);
-            if sealed && own(extent, entry) {
-                own_files.insert(*extent);
+        for (extent, entry) in self.extents.iter() {
+            let entry = entry.into_cow();
+            let sealed = !self.uncommitted.is_open(extent);
+            recount.holds(extent, &entry, sealed);
+            if sealed && own(&extent, &entry) {
+                own_files.insert(extent);
             }
         }
         for (extent, kept) in self.kept.iter() {
@@ -765,16 +764,13 @@ struct Held {
 }
 
 impl Holding {
-    /// What `extents`, those of `branch` and those it inherited, hold: what an opening counts, and
-    /// the audit recounts.
-    pub fn of<'a>(
-        branch: u64,
-        extents: impl IntoIterator<Item = (&'a ExtentId, &'a Extent)>,
-    ) -> Self {
+    /// What `extents`, those of `branch` and those it inherited, by their lengths, hold: what an
+    /// opening counts, and the audit recounts.
+    pub fn of(branch: u64, extents: impl IntoIterator<Item = (ExtentId, u64)>) -> Self {
         let mut holding = Self::default();
-        for (extent, entry) in extents {
+        for (extent, len) in extents {
             holding.entered(extent.branch == branch);
-            holding.grew(entry.len, extent.branch == branch);
+            holding.grew(len, extent.branch == branch);
         }
         holding
     }
@@ -895,8 +891,8 @@ impl Space {
     /// cladefs: panics unless it counts `held`, the extents of `branch`, and what they hold, of them
     /// its own (TASK-454); and, unless `writing`, writes in progress reserving none (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
-    fn audit(&self, branch: u64, held: &[(&ExtentId, &Extent)], writing: bool) {
-        let recounted = Holding::of(branch, held.iter().copied());
+    fn audit(&self, branch: u64, held: impl Iterator<Item = (ExtentId, u64)>, writing: bool) {
+        let recounted = Holding::of(branch, held);
         assert_eq!(self.holding, recounted, "the bytes the extents hold, own, and their counts");
         assert!(writing || self.reserved == 0, "{} bytes reserved, no write in progress", {
             self.reserved
@@ -1068,7 +1064,8 @@ impl<F> Uncommitted<F> {
         assert_eq!(self.overwritten, overwritten, "written over");
         for (extent, open) in &self.open {
             assert!(open.opening <= self.openings, "{extent:?} opened past the openings");
-            let data = extents.get(extent).map(|entry| (entry.len, &entry.data));
+            let entry = extents.get(extent).map(Entry::into_cow);
+            let data = entry.as_deref().map(|entry| (entry.len, &entry.data));
             match (&open.placement, data) {
                 (Placement::Segment, Some((len, Data::Pieces(pieces)))) => {
                     let written: u64 = pieces.iter().map(|piece| piece.len).sum();

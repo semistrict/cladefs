@@ -24,7 +24,7 @@
 # of its suite, from its summary (scripts/guest_results.py): its rounds, or the round it failed in,
 # its checks failed, and the command that replays it. CLADEFS_SOAK_ROUNDS scales each group's rounds
 # by a factor (1 by default), CLADEFS_SOAK_CAP caps them (for a short check of the soak itself), and
-# every CLADEFS_* setting scripts/test-host.sh takes reaches the host. Each run is of the commit
+# every CLADEFS_* and CLADEFSD_* setting scripts/test-host.sh takes reaches the host. Each run is of the commit
 # scripts/test-host.sh runs (scripts/lib/host.sh's CLADEFS_HOST_COMMIT, HEAD by default).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -48,7 +48,7 @@ soak() {
     local group=$1 rounds=$(($2 * factor)) kernel=$3 seconds=$4 own=()
     if [[ -n $cap ]] && (( rounds > cap )); then rounds=$cap; fi
     if [[ $group == mixed ]]; then
-        own=(CLADEFS_EXTENTD_FAILPOINTS=1)
+        own=(CLADEFSD_FAILPOINTS=1)
     fi
     env ${own[@]+"${own[@]}"} CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST="--tag soak-$group" \
         CLADEFS_E2E_ROUNDS=$rounds CLADEFS_GUEST_KERNEL_BUILD=$kernel \

@@ -28,13 +28,15 @@ use tokio::net::TcpStream;
 use tokio::time::{Instant, Sleep};
 
 /// The bucket it serves.
-pub(crate) const BUCKET: &str = "cladefs";
+pub const BUCKET: &str = "cladefs";
 
 /// An S3 server, on 127.0.0.1, for as long as the runtime it started on runs.
-pub(crate) struct S3Server {
+pub struct S3Server {
     address: SocketAddr,
     /// Its objects, if it serves them.
     objects: Option<Arc<Mutex<Objects>>>,
+    /// How many connections it accepted (TASK-449).
+    connections: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[derive(Clone)]
@@ -64,7 +66,7 @@ impl S3Server {
     /// Starts one on the current runtime, reading at most `rate` bytes a second of its
     /// connections, if any rate. A connection's socket buffers little of what is sent it, so that
     /// a sender feels the link's rate.
-    pub(crate) fn start(rate: Option<u64>) -> Self {
+    pub fn start(rate: Option<u64>) -> Self {
         let socket = tokio::net::TcpSocket::new_v4().unwrap();
         socket.set_recv_buffer_size(64 << 10).unwrap();
         socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -73,9 +75,12 @@ impl S3Server {
         let link = rate.map(|rate| Arc::new(Link { rate, free: Mutex::new(Instant::now()) }));
         let objects = Arc::new(Mutex::new(Objects::default()));
         let served = objects.clone();
+        let connections = Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let accepted = connections.clone();
         tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
+                accepted.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let stream = Throttled { stream, link: link.clone(), waiting: None };
                 let objects = objects.clone();
                 let serve = hyper::service::service_fn(move |request| {
@@ -90,23 +95,37 @@ impl S3Server {
                 });
             }
         });
-        Self { address, objects: Some(served) }
+        Self { address, objects: Some(served), connections }
     }
 
     /// One that something else serves at `address`.
-    pub(crate) fn at(address: SocketAddr) -> Self {
-        Self { address, objects: None }
+    pub fn at(address: SocketAddr) -> Self {
+        Self { address, objects: None, connections: Default::default() }
+    }
+
+    /// How many connections it accepted so far: each a TCP handshake, and on a real bucket a TLS
+    /// one too, before its first request (TASK-449).
+    pub fn connections(&self) -> u64 {
+        self.connections.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The requests it served so far, by kind: `get`, `head`, `put`, `delete`, `delete-objects`
     /// (DeleteObjects), `list` and `list-delimited` (ListObjectsV2, by delimiter or not).
-    pub(crate) fn requests(&self) -> BTreeMap<&'static str, u64> {
+    pub fn requests(&self) -> BTreeMap<&'static str, u64> {
         let objects = self.objects.as_ref().expect("a server of its own");
         objects.lock().unwrap().requests.clone()
     }
 
+    /// Its bucket's objects, through cladefs's client, as a host reaches S3: for other crates'
+    /// tests (TASK-449).
+    pub fn objects(&self) -> Arc<dyn object_store::ObjectStore> {
+        let url = format!("s3://{BUCKET}/");
+        let client = &crate::client::Client::DEFAULT;
+        crate::store::reach(&url, self.options(), client).unwrap().objects
+    }
+
     /// The options of an S3 store of its bucket, `s3://cladefs/...`.
-    pub(crate) fn options(&self) -> Vec<(String, String)> {
+    pub fn options(&self) -> Vec<(String, String)> {
         [
             ("aws_endpoint", format!("http://{}", self.address)),
             ("aws_allow_http", "true".to_owned()),

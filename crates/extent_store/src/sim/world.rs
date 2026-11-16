@@ -892,6 +892,7 @@ impl World {
         let (started, start) = mpsc::channel();
         let (running, bucket) = (uploader.clone(), self.bucket.clone());
         let running = self.spawn_uploader(async move {
+            let recovering = (recovering, None);
             running.run(recovering, store_options(), bucket, holder, started).await;
         });
         let lineage = self.hosts[host].disks[&branch].lineage;
@@ -1938,6 +1939,15 @@ impl World {
             // Its cells are in the clear: nothing is left sealed (TASK-411.6).
             locked: 0,
             uncompacted: 0,
+            // cladefs: the cells whose records went, as only a dead cell's removal deletes them,
+            // all of them at once (TASK-455).
+            removed: (gone())
+                .filter_map(|key| match layout::kind(key) {
+                    layout::Kind::Record { branch } => Some(branch.cell),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .len(),
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}

@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-15 13:41'
+updated_date: '2026-11-16 00:47'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -297,7 +297,14 @@ The child's directory is made once its record exists; opening it is opening a st
 waited for its record before too (`Remote::forked`), so a fork's latency changes by the child's
 recovery: its state is read from the bucket, the checkpoint the parent's writer wrote as the fork
 was acknowledged and the footers after it, and taken by the child, O(extents) of the parent at the
-fork, not shared in memory with the parent's. Measured (TASK-165.10,
+fork. *Since TASK-453 (2026-11-15)* what the child inherits is shared in memory: its store's map of
+its extents is two layers, the bucket's, the recovered state's persistent map, which its writer's
+state and every other store that started from the same decoded state share, never changed, and its
+own over it (what it writes, frees, seals and follows), lookups reading its own first
+(`extent_store::extents`); the host's decoded checkpoints stay found while a store holds one, and
+one decoded anew is made of the most alike held still, sharing what is equal
+(`extent_remote::recovery::Decoded`). An idle fork holds ~32 KB, not 220-470 bytes an extent of its
+base. Measured (TASK-165.10,
 docs/measurements/restructure-before-after-2026-11-07.md): forks 12 ms against 18 ms before the
 restructure and 26 ms before step 9, opens 7.6 ms against 19.4; a cold host's first read of a
 fork's data slower, fetched where it was read from local files (TASK-225).

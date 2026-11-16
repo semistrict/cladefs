@@ -11,7 +11,7 @@
 //! all the while.
 //!
 //! scripts/sandboxes.sh runs it: it starts the S3 server with its data on the disk the case's
-//! directory is on, names its bucket (CLADEFS_EXTENTD_REMOTE, an `s3://` URL, and the server's
+//! directory is on, names its bucket (CLADEFSD_REMOTE, an `s3://` URL, and the server's
 //! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
 //! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
@@ -542,10 +542,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let dir = &test_setup.tmp_dir;
             let mut tally = Tally::default();
             // The topology: the bucket an S3 server's, its data on the case's disk.
-            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
+            let remote = std::env::var("CLADEFSD_REMOTE").unwrap_or_default();
             ensure!(
                 remote.starts_with("s3://"),
-                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
+                "CLADEFSD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
                  starts one"
             );
             let bucket_dir = std::env::var_os("CLADEFS_SANDBOX_BUCKET_DIR")
@@ -572,7 +572,7 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 let socket = sockets.path().join(format!("{name}.sock"));
                 // Each host's own placement.
                 let token = (at + 1).to_string();
-                let env = [("CLADEFS_EXTENTD_TOKEN", std::ffi::OsStr::new(&token))];
+                let env = [("CLADEFSD_TOKEN", std::ffi::OsStr::new(&token))];
                 let daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,
@@ -755,8 +755,8 @@ RUN apk add --no-cache postgresql postgresql-contrib git
 
     impl Test for TestFxfsGuestSandboxes {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFSD_BIN").is_none() {
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");
             }
             cladefs_guest_should_run()
         }

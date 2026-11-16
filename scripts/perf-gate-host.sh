@@ -28,7 +28,7 @@
 # kernel unless CLADEFS_GUEST_KERNEL_BUILD says otherwise; each Firecracker in its jailer's jail, as
 # production runs it, unless CLADEFS_FIRECRACKER_JAIL is set empty (TASK-172: a jailed VM process's
 # DAX window budgets its mappings as the host allows, as an unjailed one's does); CLADEFS_GATE_* are
-# the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* reaches the host
+# the gates' thresholds (pgbench-gate.py), and every other CLADEFS_* and CLADEFSD_* reaches the host
 # (test-host.sh), CLADEFS_GUEST_CMDLINE among them.
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

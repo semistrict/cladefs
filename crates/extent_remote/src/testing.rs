@@ -79,6 +79,10 @@ pub enum Fault {
 #[derive(Default)]
 pub struct SimBucket {
     inner: Mutex<Inner>,
+    /// What the simulation's hosts know of it without asking it again ([`Bucket::known`]): one for
+    /// them all, kept through their crashes, so that what one learned another may use, stale, as
+    /// a read from earlier, which the protocol allows for (TASK-449).
+    known: crate::known::Known,
 }
 
 impl SimBucket {
@@ -432,6 +436,10 @@ impl Bucket for SimBucket {
     fn now(&self) -> u64 {
         self.inner.lock().unwrap().clock
     }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        Some(&self.known)
+    }
 }
 
 /// The same bucket, its requests taking effect at once and never failing: the simulation's view,
@@ -553,7 +561,11 @@ pub const SWEEPS: u64 = 32;
 /// garbage at once, but a live branch's fork's, whose writers record it yet: no pass would ever
 /// retire it (TASK-395.10); so is one whose child's record names another origin, or none, and one
 /// marked retired, which its parent's cell's pass deletes (TASK-395.13); the collector's leases and
-/// marks stay, and references' marks.
+/// marks stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose records
+/// are each a root's or a clone's made, deleted, of an ID an allocator gave, which goes whole,
+/// records, heads, object and lease (TASK-455); and a cell's of no record, its heads, and its lease
+/// once nothing else is left. A final head of a branch of no record, a deletion's fence, stays,
+/// and keeps its cell (TASK-455's review).
 pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
     use crate::layout::{Location, Origin};
     use crate::record::{Kind as Made, Record};
@@ -578,6 +590,51 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         records.iter().filter(|(branch, _)| branch.cell == cell).all(|(_, record)| record.deleted)
             && !references.iter().any(|(_, parent, _, _)| parent.cell == cell)
     };
+    // cladefs: the branches of deleted roots and clones whose IDs an allocator gave (TASK-455).
+    let mut given = BTreeSet::new();
+    for (&branch, record) in &records {
+        let asked = matches!(record.kind, Made::Root | Made::Clone(_));
+        if record.deleted && asked && crate::objectid::given(bucket, branch.id).await {
+            given.insert(branch);
+        }
+    }
+    // cladefs: the heads of branches of no record, final: deletions' fences, whose records may yet
+    // come, which stay and keep their cells (TASK-455's review). Any other head of no record, a
+    // stale taker's, is garbage.
+    let mut fences = BTreeSet::new();
+    for key in &keys {
+        if let Kind::Head { branch } = layout::kind(key)
+            && !records.contains_key(&branch)
+            && crate::head::epoch(bucket, branch)
+                .await
+                .is_ok_and(|epoch| epoch == layout::Head::FINAL)
+        {
+            fences.insert(key.clone());
+        }
+    }
+    let fenced = |cell: layout::Cell| {
+        fences
+            .iter()
+            .any(|key| matches!(layout::kind(key), Kind::Head { branch } if branch.cell == cell))
+    };
+    // Whether a cell goes whole: dead, no mark under it, no fence, each of its records, one at
+    // least, one it may go with.
+    let marked_under = |cell: layout::Cell| {
+        keys.iter().any(|key| match layout::kind(key) {
+            Kind::Retired { parent, .. } => parent.cell == cell,
+            Kind::Marks { cell: of, .. } => of == cell,
+            _ => false,
+        })
+    };
+    let removed = |cell: layout::Cell| {
+        let mut held = records.iter().filter(|(branch, _)| branch.cell == cell).peekable();
+        held.peek().is_some()
+            && dead(cell)
+            && !marked_under(cell)
+            && !fenced(cell)
+            && held.all(|(branch, record)| record.removable(given.contains(branch)))
+    };
+    let recorded = |cell: layout::Cell| records.keys().any(|branch| branch.cell == cell);
     // The moves of a location's object listed, every pass's (TASK-407.1): none of no cell's, which
     // nothing compacts.
     let moves_of = |key: &str| -> Vec<String> {
@@ -586,7 +643,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         listed.cloned().collect()
     };
     let mut maps = MovesMaps::default();
-    let mut needed = BTreeSet::new();
+    let mut needed = fences.clone();
     let mut touched = BTreeSet::new();
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
     let mut points: BTreeSet<Origin> = BTreeSet::new();
@@ -597,10 +654,11 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     for (&branch, record) in &records {
         let key = layout::record(branch);
         // Deleted branches' records stay (TASK-174), and every branch's head, a deleted one's
-        // final, which fences its writers (TASK-407).
-        needed.insert(layout::head(branch));
+        // final, which fences its writers (TASK-407): but those of a cell that goes whole
+        // (TASK-455).
         if record.deleted {
-            if !record.may_drop() {
+            if !removed(branch.cell) {
+                needed.insert(layout::head(branch));
                 needed.insert(key);
             }
             continue;
@@ -609,9 +667,10 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         needed.insert(layout::head(branch));
         let (origin, point): (Option<Origin>, bool) = match record.kind {
             Made::Root | Made::Own => (None, false),
-            Made::Fork(origin) | Made::Claim(origin) | Made::Forking { origin, .. } => {
-                (Some(origin), false)
-            }
+            Made::Fork(origin)
+            | Made::Clone(origin)
+            | Made::Claim(origin)
+            | Made::Forking { origin, .. } => (Some(origin), false),
             Made::Point(origin) => (Some(origin), true),
         };
         let Ok(recovered) = crate::recovery::recover(bucket, branch, origin).await else {
@@ -722,13 +781,18 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         // cladefs: cells' objects stay, as their branches' records do, their epochs fencing their
         // volumes' leases; blocks of object IDs taken, for good (TASK-364); and the collector's
         // leases and marks, and references not yet retirable (TASK-395).
+        let alone = |cell: layout::Cell| {
+            let prefix = cell.prefix();
+            keys.iter().filter(|other| other.starts_with(&prefix)).count() == 1
+        };
         let kept = match layout::kind(key) {
-            Kind::Cell { .. }
-            | Kind::ObjectIds { .. }
-            | Kind::GcLease { .. }
-            | Kind::Marks { .. }
-            | Kind::Marking
-            | Kind::Retired { .. } => true,
+            // cladefs: but a cell's that goes whole; and the lease of a cell of no record alone in
+            // it, a removal stopped short of it (TASK-455).
+            Kind::Cell { cell } => !removed(cell),
+            Kind::GcLease { cell } => !removed(cell) && (recorded(cell) || !alone(cell)),
+            Kind::ObjectIds { .. } | Kind::Marks { .. } | Kind::Marking | Kind::Retired { .. } => {
+                true
+            }
             Kind::Reference { .. } => !retirable.contains(key) && !unnamed.contains(key),
             _ => false,
         };
@@ -824,7 +888,7 @@ mod tests {
             pool.spawner()
                 .spawn_local(async move {
                     let created = create(&*sim, key, bytes.to_vec()).await;
-                    results.borrow_mut().push((key, matches!(created, Created::Created)));
+                    results.borrow_mut().push((key, matches!(created, Created::Created(_))));
                 })
                 .unwrap();
         }

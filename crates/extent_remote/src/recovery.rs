@@ -33,7 +33,7 @@ use futures::future::{BoxFuture, FutureExt as _, Shared};
 use futures::{StreamExt as _, TryStreamExt as _};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use storage_device::ExtentId;
 
 /// What a branch holds as of a segment: where its extents are, `P`, and the rest of its state.
@@ -245,6 +245,12 @@ pub struct Recovered<S = State> {
     pub head: Option<Head>,
     /// The keys it read, which the collector keeps.
     pub touched: BTreeSet<String>,
+    /// cladefs: the decoded state it started from, if it started from one: its newest checkpoint's,
+    /// or the state its origin had where it was forked, which its extents' map shares, a
+    /// persistent one, with every other recovery that started from it (TASK-453). Whoever keeps
+    /// what it recovered holds it, so that what reads through the bucket after finds it decoded
+    /// while it does ([`Decoded`]), and shares it too.
+    pub layer: Option<Arc<State>>,
 }
 
 impl<S> Recovered<S> {
@@ -267,9 +273,9 @@ impl<S> Recovered<S> {
 impl Recovered<Layers> {
     /// The branch's state, its layers in one.
     pub(crate) fn flatten(self) -> Recovered {
-        let Self { state, head, touched } = self;
+        let Self { state, head, touched, layer } = self;
         let state = state.placed(Layered::flatten);
-        Recovered { state, head, touched }
+        Recovered { state, head, touched, layer }
     }
 }
 
@@ -380,6 +386,23 @@ pub async fn recover_under(
     Ok(recover_layers(&checkpoints, branch, origin).await?.flatten())
 }
 
+/// cladefs: the state of `branch` as [`recover_under`] finds it, starting from `head`, what a read of
+/// its head found, rather than a read of its own (TASK-449): as an opening store reads its head at
+/// once with its record, and a point's copy knows it has none. The head read before is as good as
+/// one read now: it names what the branch held as of that read, the recovery is of that, and
+/// whatever takes the branch after goes on from what is there then (`Writer::take`). Something it
+/// names gone, it starts again from a read of the head, as [`recover_under`] does.
+pub async fn recover_under_from(
+    bucket: &impl Bucket,
+    branch: Branch,
+    origin: Option<Origin>,
+    head: Option<Head>,
+    ring: &Ring,
+) -> Result<Recovered, Error> {
+    let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
+    Ok(recover_layers_from(&checkpoints, branch, origin, Some(head)).await?.flatten())
+}
+
 /// The state of `branch`, forked from `origin`, as `head` names it, a head its reader holds, as a
 /// writer that took it does, or a deletion that ended it: nothing it names goes while it holds it,
 /// but for a takeover since, which fails the writer at its next swap ([`Error::Fenced`]). What it
@@ -413,8 +436,22 @@ pub(crate) async fn recover_layers<B: Bucket>(
     branch: Branch,
     origin: Option<Origin>,
 ) -> Result<Recovered<Layers>, Error> {
+    recover_layers_from(checkpoints, branch, origin, None).await
+}
+
+/// [`recover_layers`], its first attempt from `first`, a head read before, if given
+/// ([`recover_under_from`]).
+async fn recover_layers_from<B: Bucket>(
+    checkpoints: &Checkpoints<'_, B>,
+    branch: Branch,
+    origin: Option<Origin>,
+    mut first: Option<Option<Head>>,
+) -> Result<Recovered<Layers>, Error> {
     for _ in 0..RESTARTS {
-        let head = head::get(checkpoints.bucket, branch).await?;
+        let head = match first.take() {
+            Some(head) => head,
+            None => head::get(checkpoints.bucket, branch).await?,
+        };
         match attempt(checkpoints, branch, origin, head).await {
             Ok(recovered) => return Ok(recovered),
             Err(Attempt::Restart) => {}
@@ -551,11 +588,11 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
                         let Some(object) = bucket::get(bucket, &key).await else {
                             return Ok(None);
                         };
-                        let state = Arc::new(checkpoint(&key, &object.bytes, branch, keys)?);
-                        if let Some(decoded) = decoded {
-                            decoded.keep(&key, &state);
-                        }
-                        Ok(Some(state))
+                        let state = checkpoint(&key, &object.bytes, branch, keys)?;
+                        Ok(Some(match decoded {
+                            Some(decoded) => decoded.keep(&key, state),
+                            None => Arc::new(state),
+                        }))
                     };
                     let flight = flight.boxed().shared();
                     if self.keep > 0 {
@@ -584,30 +621,162 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
 /// share ([`Bucket::decoded`]), by their checkpoints' keys, each written once (TASK-407). A
 /// state's extents are a persistent map, which a recovery starting from it takes for nothing; the
 /// last [`Decoded::KEEP`] decoded are kept: those the forks being opened start from (TASK-92.55).
+///
+/// cladefs: and every state decoded that something still holds, as an open store holds the one it
+/// started from ([`Recovered::layer`]), however many were decoded since (TASK-453): the forks of a
+/// base opened after it find it, and share it, while one is open. And a state decoded anew shares
+/// what it holds alike with the state held still that has the most of its extents' branches' in
+/// common with it, its map made of that one's, changed where it differs ([`rebased`]): the
+/// checkpoints a live store's writer writes for each of its forks hold the same extents, and a
+/// fork's own checkpoint, as it opens again, its base's but its own, each decoded apart a copy of
+/// them all, 230 bytes an extent a fork (TASK-443.2). What they hold, each map once, and each made
+/// of another held still by what it changed ([`Changes`]), it says ([`Decoded::held`]), which the
+/// extent daemon counts.
 #[derive(Default)]
 pub struct Decoded {
     kept: Mutex<Kept>,
 }
 
-/// The states [`Decoded`] keeps, by their checkpoints' keys, and those, oldest first.
+/// The states [`Decoded`] keeps, by their checkpoints' keys, and those, oldest first; and every one
+/// it decoded others may hold still.
 #[derive(Default)]
 struct Kept {
     states: HashMap<String, Arc<State>>,
     order: VecDeque<String>,
+    live: HashMap<String, Live>,
+}
+
+/// A state decoded, which others may hold still ([`Decoded`]): how many of its extents each branch
+/// has, by its ID, which its likeness to another's is reckoned by; and, if it was made of another
+/// ([`rebased`]), that one and what it changed of it.
+struct Live {
+    state: Weak<State>,
+    branches: BTreeMap<u64, usize>,
+    made_of: Option<(Weak<State>, Changes)>,
+}
+
+/// What the states a [`Decoded`] keeps, or others hold still, hold ([`Decoded::held`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Held {
+    /// How many states, each map counted once.
+    pub states: usize,
+    /// The entries of their extents' maps, each held once however many share it: of a state made
+    /// of another held still, those it changed; of the others, all of them.
+    pub entries: usize,
+    /// The runs the entries changed of maps made of others make ([`Changes`]).
+    pub runs: usize,
+}
+
+impl Held {
+    /// The most bytes of the heap they hold: [`ENTRY_BYTES`] an entry, [`RUN_BYTES`] a run.
+    pub fn bytes(&self) -> u64 {
+        self.entries as u64 * ENTRY_BYTES + self.runs as u64 * RUN_BYTES
+    }
+}
+
+impl std::ops::Add for Held {
+    type Output = Held;
+
+    fn add(self, other: Held) -> Held {
+        Held {
+            states: self.states + other.states,
+            entries: self.entries + other.entries,
+            runs: self.runs + other.runs,
+        }
+    }
+}
+
+/// The most bytes of the process's heap an entry of a decoded state's map of its extents holds, its
+/// share of the persistent map's nodes and its location's, or of the nodes a change of a map made
+/// of another's copies: what [`Held::bytes`] counts each as. A bound, measured by cladefs's
+/// `bench_fork_extent_memory` (TASK-453), which fails past it.
+pub const ENTRY_BYTES: u64 = 512;
+
+/// The most bytes of the process's heap a run of changes to a map of extents shared with another
+/// copies, past [`ENTRY_BYTES`] for each entry changed: a persistent map's change copies the path
+/// to the leaf it is in, the leaf (16 entries, their locations' keys copied too) and the branches
+/// over it, unless a change before copied them, and, a leaf left too small, its sibling. Changes
+/// side by side share one path; scattered, each copies its own: measured 1.9-2.1 KB a change,
+/// every 32nd entry of 32,768 changed (`bench_fork_extent_memory`, TASK-453), and bounded at every
+/// spacing and size by `tests::changes_bound_what_maps_made_of_others_copy`. What
+/// [`Changes::bytes`], and extent_store's count of what its stores' writers change of the maps
+/// they share, count each run as.
+pub const RUN_BYTES: u64 = 4096;
+
+/// What a map of extents made of another changed of it ([`rebased`]): the entries, removed, added
+/// or placed anew, and the runs they make, in order, no entry of the other's it kept between those
+/// of a run, each copying a path of the persistent map's nodes ([`RUN_BYTES`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub entries: usize,
+    pub runs: usize,
+}
+
+impl Changes {
+    /// All of a map of `len` entries: made of none, or sharing nothing.
+    pub fn all(len: usize) -> Self {
+        Self { entries: len, runs: 0 }
+    }
+
+    /// The most bytes of the heap they hold: [`ENTRY_BYTES`] an entry, [`RUN_BYTES`] a run.
+    pub fn bytes(&self) -> u64 {
+        self.entries as u64 * ENTRY_BYTES + self.runs as u64 * RUN_BYTES
+    }
+
+    /// What a map of `len` entries made of another with these changes holds of its own: these,
+    /// or all of it, if less: its changes copy each of its nodes once at most, the map made then
+    /// one sharing nothing.
+    pub fn within(self, len: usize) -> Self {
+        let all = Self::all(len);
+        if self.bytes() > all.bytes() { all } else { self }
+    }
 }
 
 impl Decoded {
     /// How many states it keeps: a host's forks open from a few bases' newest checkpoints at once.
     const KEEP: usize = 16;
 
-    /// The state the checkpoint at `key` holds, if it kept it.
+    /// The state the checkpoint at `key` holds, if it kept it, or another holds it still.
     fn get(&self, key: &str) -> Option<Arc<State>> {
-        self.kept.lock().unwrap().states.get(key).cloned()
+        let kept = self.kept.lock().unwrap();
+        let held = || kept.live.get(key).and_then(|live| live.state.upgrade());
+        kept.states.get(key).cloned().or_else(held)
     }
 
-    /// Keeps `state`, which the checkpoint at `key` holds.
-    fn keep(&self, key: &str, state: &Arc<State>) {
+    /// Keeps `state`, which the checkpoint at `key` holds, just decoded: its extents made of the
+    /// most alike of the states others hold still, if one is alike ([`rebased`]). Returns it, or the
+    /// one at `key` another decoded meanwhile, if one did. Made holding no lock: one walk of both.
+    fn keep(&self, key: &str, mut state: State) -> Arc<State> {
+        let branches = branches_of(&state.extents);
+        let alike = {
+            let kept = self.kept.lock().unwrap();
+            let likeness = |live: &Live| -> usize {
+                let common = live.branches.iter().filter_map(|(branch, held)| {
+                    branches.get(branch).map(|holds| (*holds).min(*held))
+                });
+                common.sum()
+            };
+            (kept.live.values())
+                .filter_map(|live| Some((likeness(live), live.state.upgrade()?)))
+                .filter(|(likeness, _)| *likeness > 0)
+                .max_by_key(|(likeness, held)| (*likeness, held.through))
+                .map(|(_, held)| held)
+        };
+        let mut made_of = None;
+        if let Some(alike) = alike
+            && let Some((extents, changes)) = rebased(&state.extents, &alike.extents)
+        {
+            state.extents = extents;
+            made_of = Some((Arc::downgrade(&alike), changes));
+        }
         let mut kept = self.kept.lock().unwrap();
+        if let Some(held) = kept.live.get(key).and_then(|live| live.state.upgrade()) {
+            return held;
+        }
+        let state = Arc::new(state);
+        kept.live.retain(|_, live| live.state.strong_count() > 0);
+        let live = Live { state: Arc::downgrade(&state), branches, made_of };
+        kept.live.insert(key.to_owned(), live);
         if kept.states.insert(key.to_owned(), state.clone()).is_none() {
             kept.order.push_back(key.to_owned());
         }
@@ -615,7 +784,93 @@ impl Decoded {
             let oldest = kept.order.pop_front().unwrap();
             kept.states.remove(&oldest);
         }
+        state
     }
+
+    /// What the states it keeps, and those others hold still, hold ([`Held`]): each map once,
+    /// however many share it; of a state made of another held still, what it changed of it
+    /// ([`Changes::within`] the map), counted with that one; of the others, made of none or of one
+    /// no one holds any more, which they hold the rest of, all of it. And it lets go of what it
+    /// knew of those no one holds, as each decoding does: their keys and weak references.
+    pub fn held(&self) -> Held {
+        let mut kept = self.kept.lock().unwrap();
+        kept.live.retain(|_, live| live.state.strong_count() > 0);
+        // Each map, with the most of what its states hold of their own: one made of none, or of
+        // one held no more, all of it.
+        let mut maps: Vec<(Arc<State>, Changes)> = Vec::new();
+        for live in kept.live.values() {
+            let Some(state) = live.state.upgrade() else { continue };
+            let len = state.extents.len();
+            let made_of = live.made_of.as_ref().filter(|(made_of, _)| made_of.strong_count() > 0);
+            let own = made_of.map_or(Changes::all(len), |(_, changes)| changes.within(len));
+            match maps.iter_mut().find(|(other, _)| other.extents.ptr_eq(&state.extents)) {
+                Some((_, most)) if own.bytes() > most.bytes() => *most = own,
+                Some(_) => {}
+                None => maps.push((state, own)),
+            }
+        }
+        let (entries, runs) = maps
+            .iter()
+            .map(|(_, own)| (own.entries, own.runs))
+            .fold((0, 0), |(entries, runs), (more, others)| (entries + more, runs + others));
+        Held { states: maps.len(), entries, runs }
+    }
+}
+
+/// How many of `extents` each branch has, by its ID.
+fn branches_of(extents: &Extents) -> BTreeMap<u64, usize> {
+    let mut branches = BTreeMap::new();
+    for extent in extents.keys() {
+        *branches.entry(extent.branch).or_default() += 1;
+    }
+    branches
+}
+
+/// cladefs: `fresh`, a state's extents just decoded, made of `alike`'s, another's of its branch, as
+/// persistent maps make one of another: `alike`'s changed where `fresh` differs from it, sharing
+/// with it the rest, with what it changed ([`Changes`], TASK-453). None if it changes as many as
+/// half of them, which share little. One walk of both in order, their keys the extents'.
+fn rebased(fresh: &Extents, alike: &Extents) -> Option<(Extents, Changes)> {
+    use std::cmp::Ordering;
+    let most = fresh.len() / 2;
+    let mut made = alike.clone();
+    let mut changes = Changes::default();
+    // Whether the last entry walked was a change: one after it is of its run.
+    let mut changing = false;
+    let (mut old, mut new) = (alike.iter().peekable(), fresh.iter().peekable());
+    loop {
+        let order = match (old.peek(), new.peek()) {
+            (None, None) => break,
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (Some((was, _)), Some((is, _))) => was.cmp(is),
+        };
+        match order {
+            Ordering::Less => {
+                let (extent, _) = old.next().unwrap();
+                made.remove(extent);
+            }
+            Ordering::Greater => {
+                let (extent, location) = new.next().unwrap();
+                made.insert(*extent, location.clone());
+            }
+            Ordering::Equal => {
+                let ((_, was), (extent, is)) = (old.next().unwrap(), new.next().unwrap());
+                if was == is {
+                    changing = false;
+                    continue;
+                }
+                made.insert(*extent, is.clone());
+            }
+        }
+        changes.runs += usize::from(!changing);
+        changing = true;
+        changes.entries += 1;
+        if changes.entries > most {
+            return None;
+        }
+    }
+    Some((made, changes))
 }
 
 /// The state of the branch `before` recovered, forked from `origin`, recovered on from it to what
@@ -631,7 +886,7 @@ pub async fn recover_on(
     head: Option<Head>,
     ring: &Ring,
 ) -> Result<Recovered, Error> {
-    let Recovered { state, head: was, touched } = before;
+    let Recovered { state, head: was, touched, layer } = before;
     let branch = state.branch;
     let from = was.as_ref().map_or(0, |was| was.end);
     // A checkpoint since, covering what it would follow on from: the collector, going by it, may
@@ -639,7 +894,7 @@ pub async fn recover_on(
     if head.as_ref().and_then(|head| head.checkpoint).is_some_and(|(seq, _)| seq >= from) {
         return recover_from(bucket, branch, origin, head, ring).await;
     }
-    let mut recovered = Recovered { state: Layered::of(state), head: head.clone(), touched };
+    let mut recovered = Recovered { state: Layered::of(state), head: head.clone(), touched, layer };
     match follow((bucket, ring), &mut recovered, from).await {
         Ok(()) => Ok(recovered.flatten()),
         Err(Attempt::Restart) => recover_from(bucket, branch, origin, head, ring).await,
@@ -658,6 +913,7 @@ async fn attempt<B: Bucket>(
     let bucket = checkpoints.bucket;
     let mut touched = BTreeSet::new();
     let checkpoint = head.as_ref().and_then(|head| head.checkpoint(branch));
+    let mut layer = None;
     let state = match checkpoint {
         Some(key) => {
             let Some(state) = checkpoints.read_key(&key, branch).await? else {
@@ -667,7 +923,9 @@ async fn attempt<B: Bucket>(
             if state.through.is_none() {
                 return Err(Attempt::Failed(Error::Corrupt(key)));
             }
-            Layered::of(Arc::unwrap_or_clone(state))
+            let of = Layered::of(State::clone(&state));
+            layer = Some(state);
+            of
         }
         None => match origin {
             None => Layered::of(State::new(branch)),
@@ -682,7 +940,10 @@ async fn attempt<B: Bucket>(
                 )
                 .await;
                 match at {
-                    Ok(at) => Layered::inheriting(at, branch),
+                    Ok(at) => {
+                        layer = Some(at.clone());
+                        Layered::inheriting(at, branch)
+                    }
                     // A checkpoint of its own since, which the collector going by may have let
                     // what it inherits go for: the head changed (TASK-177).
                     Err(Attempt::Failed(Error::Lost(lost))) => {
@@ -697,7 +958,7 @@ async fn attempt<B: Bucket>(
         },
     };
     let from = state.through.map_or(0, |seq| seq + 1);
-    let mut recovered = Recovered { state, head, touched };
+    let mut recovered = Recovered { state, head, touched, layer };
     follow((bucket, checkpoints.keys), &mut recovered, from).await?;
     Ok(recovered)
 }
@@ -710,7 +971,7 @@ async fn follow<B: Bucket>(
     recovered: &mut Recovered<Layers>,
     from: u64,
 ) -> Result<(), Attempt> {
-    let Recovered { state, head, touched } = recovered;
+    let Recovered { state, head, touched, .. } = recovered;
     let Some(named) = head.as_ref() else { return Ok(()) };
     let branch = state.branch;
     let mut footers = futures::stream::iter(named.segments(from))
@@ -824,16 +1085,24 @@ fn state_at<'a, B: Bucket>(
 ) -> BoxFuture<'a, Result<Arc<State>, Attempt>> {
     Box::pin(async move {
         let bucket = checkpoints.bucket;
-        let head = head::get(bucket, branch).await?;
-        let Some(epoch) = head.as_ref().and_then(|head| head.epoch_of(at)) else {
-            return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
+        let by_key = branch.cell != from || kept;
+        // cladefs: read by the key of the epoch a head was seen naming the segment by, if one was:
+        // the head's to read only if the checkpoint isn't there (TASK-449, `known`).
+        let known = bucket.known().filter(|_| by_key).and_then(|known| known.epoch(branch, at));
+        let mut head = None;
+        let epoch = match known {
+            Some(epoch) => epoch,
+            None => {
+                head = Some(head::get(bucket, branch).await?);
+                named_epoch(bucket, branch, head.as_ref().and_then(Option::as_ref), at)?
+            }
         };
         // cladefs: a fork point's a pass keeps for the forks to other cells is read as they read
         // it, by the key of its checkpoint alone, if there is one: a later writer's checkpoint at
         // the segment, at its own key, may name the extents along other moves, of other passes,
         // than the forks follow from it (TASK-407, TASK-407.1). None yet, no fork read it: the
         // newest checkpoint up to there, as whoever writes it reads it.
-        if branch.cell != from || kept {
+        if by_key {
             let key = layout::checkpoint(branch, at, epoch);
             match checkpoints.read_key(&key, branch).await? {
                 Some(state) if state.through != Some(at) => {
@@ -848,6 +1117,10 @@ fn state_at<'a, B: Bucket>(
                 None => return Err(Attempt::Failed(Error::Lost(key))),
             }
         }
+        let head = match head {
+            Some(head) => head,
+            None => head::get(bucket, branch).await?,
+        };
         let listed = checkpoints.list(branch, kept.then_some(at)).await;
         let mut state = match newest_to(&listed, at) {
             Some(meta) => {
@@ -914,6 +1187,24 @@ fn state_at<'a, B: Bucket>(
         drop(footers);
         Ok(Arc::new(state.placed(Layered::flatten)))
     })
+}
+
+/// cladefs: the epoch of the writer of segment `at` of `branch`, as `head`, its head, names it:
+/// noted as known for good (`known`, TASK-449), a head's runs of epochs only growing; or
+/// [`Error::Lost`] if it names none.
+fn named_epoch<B: Bucket>(
+    bucket: &B,
+    branch: Branch,
+    head: Option<&Head>,
+    at: u64,
+) -> Result<u64, Attempt> {
+    let Some(epoch) = head.and_then(|head| head.epoch_of(at)) else {
+        return Err(Attempt::Failed(Error::Lost(format!("segment {at:x} of {branch}"))));
+    };
+    if let Some(known) = bucket.known() {
+        known.named(branch, at, epoch);
+    }
+    Ok(epoch)
 }
 
 /// cladefs: makes sure `branch` has a checkpoint as of its segment `at`, which its head names: the
@@ -1022,6 +1313,67 @@ mod tests {
     use crate::writer::{Objects, Writer};
     use object_store::memory::InMemory;
     use std::sync::Arc;
+
+    /// TASK-453: a map of extents made of another, `rebased`, holds no more of the heap past the
+    /// other's than its changes count (`Changes::within` it): of maps of 1,024, 32,768 and 300,000
+    /// entries, each its location's key a string of its own, as a checkpoint decodes them, changed
+    /// every 3rd to every 16,384th entry, by turns removed, placed anew and joined by a new one
+    /// after it; in one block of an eighth of them; and grown by as many new at its end.
+    #[test]
+    fn changes_bound_what_maps_made_of_others_copy() {
+        let branch = test_branch(1);
+        // The base's extents, every other sequence number, so that new ones go between; each its
+        // segment's key, 64 extents a segment, a string of its own.
+        let extent = |sequence: u64| ExtentId::new(branch.id, sequence);
+        let at = |sequence: u64, epoch: u64| Location {
+            key: crate::layout::segment(branch, sequence / 128 + 1, epoch),
+            offset: sequence % 128 * 4096,
+            len: 4096,
+        };
+        for len in [1_024u64, 32_768, 300_000] {
+            let alike: Extents = (0..len).map(|n| (extent(2 * n), at(2 * n, 1))).collect();
+            let scattered = [3u64, 4, 8, 32, 1024, 16_384].map(|every| {
+                let mut fresh = alike.clone();
+                for (turn, n) in (0..len).step_by(every as usize).enumerate() {
+                    match turn % 3 {
+                        0 => drop(fresh.remove(&extent(2 * n))),
+                        1 => drop(fresh.insert(extent(2 * n), at(2 * n, 2))),
+                        _ => drop(fresh.insert(extent(2 * n + 1), at(2 * n + 1, 2))),
+                    }
+                }
+                (format!("one in {every}"), fresh)
+            });
+            let mut block = alike.clone();
+            for n in len / 2..len / 2 + len / 8 {
+                block.insert(extent(2 * n), at(2 * n, 2));
+            }
+            let mut grown = alike.clone();
+            for n in len..len + len / 8 {
+                grown.insert(extent(2 * n), at(2 * n, 1));
+            }
+            let cases = scattered.into_iter().chain([
+                ("a block of an eighth".to_owned(), block),
+                ("an eighth more at its end".to_owned(), grown),
+            ]);
+            for (case, fresh) in cases {
+                // Decoded apart, as a checkpoint is: sharing nothing with `alike`.
+                let fresh: Extents =
+                    fresh.iter().map(|(extent, at)| (*extent, at.clone())).collect();
+                let before = crate::heap::held();
+                let (made, changes) = rebased(&fresh, &alike).expect(&case);
+                let held = (crate::heap::held() - before) as u64;
+                assert_eq!(made, fresh, "{len} entries, {case}: the map made");
+                let counted = changes.within(made.len());
+                println!(
+                    "{len} entries, {case}: {changes:?}, {held} bytes held, {} a change, counted \
+                     {counted:?}, {} bytes",
+                    held / changes.entries as u64,
+                    counted.bytes()
+                );
+                assert!(held <= counted.bytes(), "{len} entries, {case}: {held} bytes held");
+            }
+        }
+    }
 
     /// A segment's object holds the segment its key names: of its branch, of its number, by the
     /// writer of its epoch.

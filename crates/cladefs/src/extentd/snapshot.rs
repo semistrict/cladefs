@@ -41,7 +41,7 @@ pub(crate) struct Snapshot {
     /// Its counters, which only grow, by the names its metrics give them (`Stats::named`, dashes
     /// as underscores).
     pub counters: Vec<(String, u64)>,
-    /// Its gauges, by the names its metrics give them, without `cladefs_extentd_`.
+    /// Its gauges, by the names its metrics give them, without `cladefsd_`.
     pub gauges: Vec<(&'static str, u64)>,
     /// Its VM processes, those that opened a store, in the order they connected.
     pub vms: Vec<Vm>,
