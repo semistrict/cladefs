@@ -26,10 +26,11 @@
 //! - **Mallory gets nothing of theirs**: no reply, no stage operation, names their branches or
 //!   holds their bytes; it maps no arena but its tenant's and the public one, gets no other
 //!   tenant's memory, and finds none of their bytes in the memory it gets, read whole.
-//! - **The daemon holds no more of mallory's than the protocol's bounds say** (`server::Peer::room`
-//!   each connection), however it floods it (TASK-150.3): the process's heap, counted as it is
-//!   allocated (`crate::heap::Bounded`), and a VM process past its room let go. Nor more of the host's disk
-//!   than its tenant's limit (TASK-94): its writes past it refused with `ENOSPC`, as alice's go on.
+//! - **The daemon holds no more of mallory's than the protocol's bounds say**
+//!   (`server::Peer::credit` each connection), however it floods it (TASK-150.3): the process's
+//!   heap, counted as it is allocated (`crate::heap::Bounded`), and a VM process past its credit
+//!   let go. Nor more of the host's disk than its tenant's limit (TASK-94): its writes past it
+//!   refused with `ENOSPC`, as alice's go on.
 //! - **Nothing of mallory's stays, nor goes**: its every connection ends; every store it named opens
 //!   again (TASK-150.5), every one it wrote commits; no point is taken of a branch it named
 //!   (TASK-150.4); nothing comes into the others' directories; nothing panics, nor crashes; bob's
@@ -37,7 +38,7 @@
 //!
 //! What it found is pinned beside it: VM processes shrinking the memory they are given crashed the
 //! daemon ([`vm_processes_shrinking_their_memory_crash_nothing`]); requests held copies of
-//! their whole lengths past the connection's room ([`what_requests_hold_is_within_the_room`]);
+//! their whole lengths past the connection's credit ([`what_requests_hold_is_within_the_credit`]);
 //! a connection's faults paged in as many parts at once as it kept faults in flight
 //! ([`page_ins_in_flight_are_bounded`], TASK-149.34), which mallory's floods of page-ins do here;
 //! a tenant's connections held as many times their rooms as it had connections
@@ -48,7 +49,7 @@
 
 use super::super::client::RemoteExtentStore;
 use super::super::disk;
-use super::super::server::{QUEUED_ROOM, Tenant, connections, serve, serve_tenant};
+use super::super::server::{QUEUED_CREDIT, Tenant, connections, serve, serve_tenant};
 use super::super::stores::table;
 use super::super::wire::*;
 use super::{BLOCK, LastWords, control, host, memory, read, within, write};
@@ -138,8 +139,8 @@ const WAIT: Duration = Duration::from_secs(60);
 /// What the daemon holds at most of what a VM process with a window of `window` bytes keeps in
 /// flight, as the protocol bounds it: its requests' stream data, what it queued for it besides,
 /// and as many mappings as a reply to `MAPPINGS` holds of its window (TASK-79.16, TASK-79.43).
-fn room(window: u64) -> u64 {
-    MAX_STREAM_BYTES + QUEUED_ROOM + window / page_size() * MAPPING_BYTES
+fn credit(window: u64) -> u64 {
+    MAX_STREAM_BYTES + QUEUED_CREDIT + window / page_size() * MAPPING_BYTES
 }
 
 /// A word of a message mallory says: as it is, or naming a branch, as the case has it.
@@ -297,7 +298,7 @@ struct Hostile {
     acts: Vec<Act>,
     /// Whether it waits for what it said to be answered before it goes: or hangs up mid-request.
     waits: bool,
-    /// Whether it then floods the daemon with reads past its room, their replies unread.
+    /// Whether it then floods the daemon with reads past its credit, their replies unread.
     flood: bool,
     last_words: LastWords,
 }
@@ -722,9 +723,9 @@ fn hostile() -> impl Strategy<Value = Hostile> {
     )
         .prop_map(|(opens, window, area, acking, mut acts, waits, flood, last_words)| {
             // A flood is of a connection that has a store of its own and waits for its answers,
-            // whose room, of the window it asked for, is no more than a few hundred mebibytes: one
-            // it doesn't change, as another window, asked for later, may; nor its store's capacity,
-            // which its fills would reach, refusing its flood's write.
+            // whose credit, of the window it asked for, is no more than a few hundred mebibytes:
+            // one it doesn't change, as another window, asked for later, may; nor its store's
+            // capacity, which its fills would reach, refusing its flood's write.
             let flood = flood && opens == Opens::Own && waits && window.0 != MAX_WINDOW;
             if flood {
                 acts.retain(|act| match act {
@@ -1466,9 +1467,9 @@ fn receive(
                         if size > MAX_WINDOW {
                             seen.vast.push(size);
                         } else {
-                            // The connection's bound, and the heap's, are its room's of it.
+                            // The connection's bound, and the heap's, are its credit's of it.
                             let before = shared.granted.fetch_max(size, Ordering::Relaxed);
-                            let more = (room(size.max(before)) - room(before)) as usize;
+                            let more = (credit(size.max(before)) - credit(before)) as usize;
                             // Unless the case is over, and checks nothing.
                             let _ =
                                 LIMIT.try_update(Ordering::Relaxed, Ordering::Relaxed, |limit| {
@@ -1706,10 +1707,10 @@ fn run_hostile(
     }
     let mut let_go = false;
     if flood.is_some() {
-        // Past the room the window it was granted makes, by a few reads: none of their replies
+        // Past the credit the window it was granted makes, by a few reads: none of their replies
         // read.
         let own = shared.own.load(Ordering::Relaxed);
-        let reads = room(shared.granted.load(Ordering::Relaxed)) / FLOOD_READ + 64;
+        let reads = credit(shared.granted.load(Ordering::Relaxed)) / FLOOD_READ + 64;
         for _ in 0..reads {
             let read = Header::new(READ, id()).with_args(&[own, FLOOD_EXTENT, 0, FLOOD_READ]);
             if sender.send(read, &[], &[]).is_err() {
@@ -1869,9 +1870,9 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                 arena: mallory.arena(),
             });
             *CASE.lock().unwrap() = format!("case {case}: {hostiles:#?}");
-            // As much as the heap may hold, the rooms of mallory's connections raised as their
+            // As much as the heap may hold, the credits of mallory's connections raised as their
             // windows are granted.
-            let limit = held() as u64 + SLACK + hostiles.len() as u64 * room(0);
+            let limit = held() as u64 + SLACK + hostiles.len() as u64 * credit(0);
             LIMIT.store(limit as usize, Ordering::Relaxed);
             // Its disk limited a few MiB past what it takes, which its fills reach (TASK-94); but
             // as a connection of its floods, whose write, which its reads read, is to be admitted.
@@ -1921,7 +1922,7 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
                     );
                     commits.fetch_add(1, Ordering::Relaxed);
                 }
-                // A flood past its room is let go.
+                // A flood past its credit is let go.
                 if hostile.flood {
                     prop_assert_eq!(seen.flood, Some((Some(0), true)));
                     floods.fetch_add(1, Ordering::Relaxed);
@@ -2106,14 +2107,15 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     drop(store);
 }
 
-/// TASK-149.17: what the daemon holds of a VM process's requests is within the connection's room
-/// ([`room`]), whatever they ask: whole extents read and written, through the stream, as many at
-/// once as the room holds, and through its transfer area, more at once than the connection serves,
-/// their replies read as they come. Each running held a copy of its whole length, which the room
-/// doesn't count, as a transfer's data isn't: 481 MiB held of reads, 1,024 of writes from the area.
-/// And each `ROOT` copied a root as large as a payload: 768 MiB held of 16.
+/// TASK-149.17: what the daemon holds of a VM process's requests is within the connection's
+/// credit ([`credit`]), whatever they ask: whole extents read and written, through the stream, as
+/// many at once as the credit holds, and through its transfer area, more at once than the
+/// connection serves, their replies read as they come. Each running held a copy of its whole
+/// length, which the credit doesn't count, as a transfer's data isn't: 481 MiB held of reads,
+/// 1,024 of writes from the area. And each `ROOT` copied a root as large as a payload: 768 MiB
+/// held of 16.
 #[test]
-fn what_requests_hold_is_within_the_room() {
+fn what_requests_hold_is_within_the_credit() {
     host();
     let dir = tempfile::tempdir().unwrap();
     // A bucket of files, as one in memory would hold what it is sent in the heap counted here.
@@ -2152,7 +2154,7 @@ fn what_requests_hold_is_within_the_room() {
     assert_eq!(root(5, len as usize), -Errno::EINVAL.raw());
     assert_eq!(root(6, MAX_ROOT), 0);
     // So many of each kind, `at_once` in flight, as many as the protocol allows: those of the
-    // stream whose data the room holds, and those of the area all of them. Their replies are read
+    // stream whose data the credit holds, and those of the area all of them. Their replies are read
     // as they come.
     let mut burst = |kind: &str, headers: Vec<Header>, payload: &[u8], at_once: usize| {
         let count = headers.len();
@@ -2170,7 +2172,7 @@ fn what_requests_hold_is_within_the_room() {
             }
         });
         // The daemon's, and the reply this reads, which its receiver holds as it does.
-        (kind.to_owned(), held <= room(0) + MAX_PAYLOAD, held >> 20)
+        (kind.to_owned(), held <= credit(0) + MAX_PAYLOAD, held >> 20)
     };
     let stream = (MAX_STREAM_BYTES / len) as usize;
     let many = 16;
@@ -2202,8 +2204,8 @@ fn what_requests_hold_is_within_the_room() {
             ("writes from the area", true),
             ("writes", true)
         ],
-        "MiB held past the room's {} MiB and a reply's: {held:?}",
-        room(0) >> 20,
+        "MiB held past the credit's {} MiB and a reply's: {held:?}",
+        credit(0) >> 20,
     );
 }
 
@@ -2343,27 +2345,27 @@ fn page_ins_in_flight_are_bounded() {
     });
     let held = [burst("faults", faults.collect()), burst("reads", reads.collect())];
     // A connection's page-ins, each a part and those it reads ahead, as many at once as it
-    // resolves; and the heap within its room.
+    // resolves; and the heap within its credit.
     let paged = (super::super::server::PAGE_INS as u64
         * (1 + super::super::super::cache::PARTS_AHEAD)
         * extent_frame::PART)
         >> 20;
-    let room = room(EXTENTS * MIB) >> 20;
+    let credit = credit(EXTENTS * MIB) >> 20;
     println!("MiB of the tenant's memory and of the heap held: {held:?}");
     let within: Vec<_> = held
         .iter()
-        .map(|(what, paging, heap)| (what.as_str(), *paging <= paged, *heap <= room))
+        .map(|(what, paging, heap)| (what.as_str(), *paging <= paged, *heap <= credit))
         .collect();
     assert_eq!(
         within,
         [("faults", true, true), ("reads", true, true)],
-        "MiB of the tenant's memory and of the heap held, past {paged} and {room}: {held:?}"
+        "MiB of the tenant's memory and of the heap held, past {paged} and {credit}: {held:?}"
     );
 }
 
 /// TASK-149.35: what the daemon holds of one tenant's VM processes' requests is bounded by the room
-/// its connections share, not by how many connections it has: each connection has a room of its
-/// own (272 MiB without a window), and a tenant as many as 1,024, so one tenant, within the
+/// its connections share, not by how many connections it has: each connection has a credit of
+/// its own (272 MiB without a window), and a tenant as many as 1,024, so one tenant, within the
 /// protocol, held some 272 GiB, every tenant's daemon with it. Here many of mallory's connections,
 /// of one tenant, each flood the daemon with reads whose replies they leave unread, filling the
 /// connection's queue, which the tenant's room bounds across them; alice, another tenant, flooding
@@ -2461,7 +2463,7 @@ fn a_tenants_in_flight_data_is_bounded() {
         alice_read.payload.len(),
     );
     // Mallory's tenant holds no more than its room, a connection's own slack over it at most (one
-    // request admitted as the room emptied): far less than its connections' rooms together.
+    // request admitted as the room emptied): far less than its connections' credits together.
     assert!(
         mallory.in_flight().peak() <= ROOM + MAX_PAYLOAD,
         "mallory's tenant held {mallory_peak} MiB, past its {} MiB room",

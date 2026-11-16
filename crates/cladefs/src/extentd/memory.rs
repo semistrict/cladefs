@@ -319,8 +319,8 @@ pub fn return_large_allocations() {
 
 /// cladefs: the room a tenant's connections share, unless one is set for it ([`set_room`]):
 /// what of its VM processes' requests the daemon holds at once, their stream data and what it has
-/// queued for them, together (TASK-149.35). Each connection has a room of its own too
-/// (`server::Peer::room`, 272 MiB without a window), and a tenant as many as 1,024 connections:
+/// queued for them, together (TASK-149.35). Each connection has a credit of its own too
+/// (`server::Peer::credit`, 272 MiB without a window), and a tenant as many as 1,024 connections:
 /// some 272 GiB of one tenant's, held within the protocol, every tenant's daemon with it. A VM
 /// process moves the data of its requests through its transfer area, up to 256 KiB each, 8 at once,
 /// which no room counts; past that, through the stream. 8 GiB is 30 VM processes at once keeping
