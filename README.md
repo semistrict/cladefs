@@ -622,7 +622,7 @@ The backlog (`backlog/`, managed with Backlog.md) tracks what remains.
 ```sh
 scripts/test.sh          # macOS or Linux
 scripts/test-linux.sh    # Linux, in a Lima VM
-scripts/test-host.sh     # x86-64 Linux with KVM, on a host of one's own over ssh (ubu1)
+scripts/test-host.sh     # x86-64 Linux with KVM, on the test host over ssh (ubu1)
 ```
 
 `scripts/lima-setup.sh` creates the Lima VM the Linux scripts use on macOS, and
@@ -644,7 +644,7 @@ scripts/test-e2e-linux.sh  # Linux, in a Lima VM
 
 Each case is in suites, which the scripts run it by: `scripts/test-e2e.sh --tag kernel`, or cases
 by name, `--tag e2e` if none (the runner's `list --help` names the suites). A run's outcomes are
-data, a round's in `CASE/round-K.json` and the run's in `summary.json` (`scripts/guest_results.py`).
+data, a repeat's in `CASE/repeat-K.json` and the run's in `summary.json` (`scripts/guest_results.py`).
 
 `scripts/test-e2e-rustfs.sh` runs them with their branches in an S3 bucket on the host (RustFS, a
 process of its release's binary), as production keeps them in object storage. The nightly suite (`--tag nightly`)
@@ -685,14 +685,14 @@ put back, fail it (`crates/cladefs/mutants/framed-in-copies.patch`). The short m
 minutes, runs on GitHub's runners' nested KVM on every push to main
 (`.github/workflows/sandboxes.yml`, from `ci.yml`), and by hand on a branch. The long mode is
 LangSmith's controlled load, 16 VMs eight at a time, each doing more: it runs on ubu1 alone, by
-hand, in the qualification before each pin (below), as no CI runner has its memory (TASK-330.5).
+hand, in the qualification before each candidate (below), as no CI runner has its memory (TASK-330.5).
 Each run keeps what the host and the run spent every 30 s (`resources.log`):
 
 ```sh
 scripts/sandboxes.sh [short|long]   # Linux (KVM); CLADEFS_SANDBOX_DISK, ext4, holds it all
 ```
 
-### Before a pin goes to LangSmith
+### Before a candidate goes to LangSmith
 
 LangSmith runs cladefs at a commit they take, their pin (96c7808b8 as of 2026-11-11, TASK-310), and
 bump it now and then. Before a candidate is offered, it is qualified against their pin on ubu1,
@@ -731,7 +731,7 @@ of the comparison, saying so above the table and in each cell, and keeps its cou
 (bytes written for each guest byte, peak memory), which a load doesn't move. A metric with no
 clean round on a side is NO RESULT, and fails the comparison. Where others' I/O can't be told
 from the round's own (no cgroup v2 cgroup of its own, as in a CI runner's container or on macOS;
-a ZFS dataset as the round's disk), the round is not checked, said as such, never clean
+a ZFS dataset as the round's disk), the round is unchecked, said as such, never clean
 (TASK-375). A round run by hand is recorded the same way, and `scripts/contamination-check.sh`
 checks the record on a host with fxjob, a round alone and one beside a loader of its own:
 
@@ -743,8 +743,8 @@ scripts/contamination-check.sh /mnt/fxdax-scratch/contamination-check   # ubu1, 
 `scripts/test-guest-kernel.sh` builds the guest kernel with Fxfs in it and runs
 the guest tests on it, in Lima on macOS.
 
-`scripts/test-host.sh` runs them too, on a Linux host of one's own over ssh
-(`CLADEFS_HOST`, ubu1 by default): in a worktree there of a commit origin has,
+`scripts/test-host.sh` runs them too, on the test host, a Linux machine of one's own, over ssh
+(`CLADEFS_TEST_HOST`, ubu1 by default): in a worktree there of a commit origin has,
 under `fxjob`, copying the results back and removing the worktree
 (`scripts/lib/host.sh`).
 
@@ -769,12 +769,12 @@ Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from th
 clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change since
 the night before (its newest commit that changed more than `docs/measurements` and `backlog`), it
 does nothing. Otherwise it measures main's head against the commit the night before measured, as an
-A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_HOST=local`): the head built as work, the
-base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three rounds of both
-sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent sandbox stands on:
-the guest's Fxfs with DAX (cold and warm reads, fsynced appends, SQLite's scans, small files'
-create, stat, readdir and read, create with fsync, sync, syncfs and freeze loops), a fork's boot
-cold and warm, and ext4 on virtio-blk, no cladefs in it, as the control. Beside them, counts that
+A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_TEST_HOST=local`): the head built as
+work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three
+rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent
+sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends, SQLite's
+scans, small files' create, stat, readdir and read, create with fsync, sync, syncfs and freeze
+loops), a fork's boot cold and warm, and ext4 on virtio-blk, no cladefs in it, as the control. Beside them, counts that
 a load doesn't move: the guest's device requests, the extent daemon's counters, what each daemon
 wrote by kind for each guest byte and its peak memory (`scripts/budgets.py`'s figures), and three
 benchmarks run with each build (`scripts/counts.sh`: a sandbox's bucket requests by phase, an idle
@@ -832,12 +832,12 @@ spreads and ratios to ext4. The guests' root filesystem is an Alpine image
 built with podman.
 
 ```sh
-scripts/bench-host.sh      # x86-64 Linux with KVM, on a host of one's own (ubu1)
+scripts/bench-host.sh      # x86-64 Linux with KVM, on the test host (ubu1)
 scripts/bench.sh           # this host, Linux
 scripts/bench-linux.sh     # Linux, in a Lima VM
 ```
 
-`scripts/bench-host.sh` keeps its results in `docs/measurements`, with the host
+`scripts/bench-host.sh` keeps its results in `docs/measurements`, with the test host
 and the source it measured.
 
 For SQLite, set `CLADEFS_BENCH_GROUPS=sqlite`. This compares cold and warm scans

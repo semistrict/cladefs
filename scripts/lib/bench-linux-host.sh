@@ -14,7 +14,7 @@
 #
 # CLADEFS_BENCH_CASES and CLADEFS_BENCH_GROUPS choose what runs (scripts/bench.sh).
 # CLADEFS_GUEST_KERNEL_BUILD (release or debug) builds the guest kernel from SOURCE.
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
 # cases' artifacts and the guest kernel into the work directory, as work; `measure` runs the
 # bench against them, building nothing; unset, both (scripts/bench-host.sh runs the two as jobs
 # of their own, TASK-368).

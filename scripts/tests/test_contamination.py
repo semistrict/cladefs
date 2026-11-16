@@ -72,7 +72,7 @@ class Disks(unittest.TestCase):
                          ({"zd0": "230:0"}, {"tank": {"tank/vol/scratch"}}, {"nvme0n1": "tank"},
                           [], []))
 
-    def test_a_zvol_whose_pool_says_nothing_is_not_checked(self):
+    def test_a_zvol_whose_pool_says_nothing_is_unchecked(self):
         self.tree.zvol("zd16", "230:16", "tank/scratch")
         self.tree.mount("/mnt/scratch", "230:16", "ext4", "/dev/zd16")
         self.assertEqual(layout_of(self.tree, "/mnt/scratch"), (
@@ -81,7 +81,7 @@ class Disks(unittest.TestCase):
             ["tank: no counts of its datasets (/proc/spl/kstat/zfs/tank/objset-*): others' "
              "writes to the pool can't be told"]))
 
-    def test_a_zvol_no_dataset_is_named_for_is_not_checked(self):
+    def test_a_zvol_no_dataset_is_named_for_is_unchecked(self):
         self.tree.disk("zd0", "230:0")
         self.tree.mount("/mnt/scratch", "230:0", "ext4", "/dev/zd0")
         (self.tree.root / "dev/zvol").mkdir()
@@ -119,7 +119,7 @@ class Disks(unittest.TestCase):
         self.assertEqual(layout_of(self.tree, "/results"),
                          ({"nvme0n1": "259:0", "sdb": "8:16"}, {}, {}, [], []))
 
-    def test_a_zfs_dataset_as_the_rounds_disk_is_not_checked(self):
+    def test_a_zfs_dataset_as_the_rounds_disk_is_unchecked(self):
         """ZFS writes for no cgroup: the round's writes to a dataset others write to can't be
         told from theirs. The pool's other datasets' writes are still others'."""
         self.tree.mount("/home", "0:45", "zfs", "tank/home")
@@ -132,12 +132,12 @@ class Disks(unittest.TestCase):
             ["/home/me/results: on the ZFS dataset tank/home, whose I/O is no cgroup's: this "
              "round's writes to it can't be told from others'"]))
 
-    def test_a_filesystem_on_no_block_device_is_not_checked(self):
+    def test_a_filesystem_on_no_block_device_is_unchecked(self):
         self.tree.mount("/", "0:52", "overlay", "overlay")
         self.assertEqual(layout_of(self.tree, "/results"), (
             {}, {}, {}, [], ["/results: on overlay (overlay), no block device found"]))
 
-    def test_a_host_with_no_mounts_to_read_is_not_checked(self):
+    def test_a_host_with_no_mounts_to_read_is_unchecked(self):
         """macOS, for the scripts' local parts."""
         self.assertEqual(layout_of(self.tree, "/Users/me/results"), (
             {}, {}, {}, [],
@@ -355,7 +355,7 @@ class Accounting(unittest.TestCase):
             "/s holds others' work too (j): others' writes can't be told from its own; its "
             "disk's whole writes were 100.0 MB/s over the round, 100.0 in its worst minute"]))
 
-    def test_a_disk_not_found_is_not_checked_whatever_was_measured(self):
+    def test_a_disk_not_found_is_unchecked_whatever_was_measured(self):
         layout = Layout(devices={"nvme0n1": "259:0"}, unchecked=["/home/r: on the ZFS dataset"])
         samples = disk((0.0, 0, 0, 0, 0), (600.0, 0, 6 * GB, 0, 6 * GB))
         record = contamination.judge(samples, layout, Bounds())
@@ -375,7 +375,7 @@ class Accounting(unittest.TestCase):
         self.assertEqual((record["verdict"], record["why"], record["said"], record["devices"]),
                          ("clean", [], ["/dev/shm/r: tmpfs, no device: nothing to record"], {}))
 
-    def test_a_round_of_no_time_is_not_checked(self):
+    def test_a_round_of_no_time_is_unchecked(self):
         samples = disk((5.0, 0, 0, 0, 0), (5.0, 0, 0, 0, 0))
         record = contamination.judge(samples, ONE_DISK, Bounds())
         self.assertEqual((record["verdict"], record["why"]),
@@ -478,7 +478,7 @@ class Run(unittest.TestCase):
         self.assertEqual(said, "contamination: clean: others wrote 1.0 MB/s to its disk over "
                                "600 s, 1.0 in its worst minute (bounds 10 and 50)\n")
 
-    def test_a_round_whose_cgroup_others_share_is_not_checked(self):
+    def test_a_round_whose_cgroup_others_share_is_unchecked(self):
         self.tree.cgroup("/bench.slice/other.scope")
         status, said, record = self.run_round(self.others_write(9 * GB, 8400 * MB))
         why = ("/bench.slice has the nearest I/O accounting to the round's cgroup, and holds "
@@ -496,7 +496,7 @@ class Run(unittest.TestCase):
         self.assertEqual((record["verdict"], record["pressure"]),
                          ("clean", {"of": "host", "cpu_ms": 0, "memory_ms": 0, "io_ms": 0}))
 
-    def test_a_disk_gone_under_the_round_is_not_checked(self):
+    def test_a_disk_gone_under_the_round_is_unchecked(self):
         stat = self.tree.root / "sys/class/block/nvme0n1/stat"
         status, said, record = self.run_round(f"rm {stat}; exit 4")
         self.assertEqual(status, 4)
@@ -504,7 +504,7 @@ class Run(unittest.TestCase):
             f"recording failed: FileNotFoundError: [Errno 2] No such file or directory: '{stat}'"]})
         self.assertEqual(said, "contamination: UNCHECKED: " + record["why"][0] + "\n")
 
-    def test_a_round_that_left_no_record_was_not_checked(self):
+    def test_a_round_that_left_no_record_is_unchecked(self):
         self.assertEqual(contamination.load(self.results), {"verdict": "unchecked", "why": [
             "no record of others' I/O beside it (contamination.json)"]})
 

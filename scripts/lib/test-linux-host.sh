@@ -7,7 +7,7 @@
 # workspace's tests (unless CLADEFS_WORKSPACE_TESTS=0; CLADEFS_TEST_ARGS, split at
 # spaces, are cargo nextest's arguments, such as a filter), then cladefs's guest
 # tests (unless CLADEFS_GUEST_TESTS=0; scripts/test-e2e.sh; TESTs name them),
-# whose DAX window takes KVM's faults through userfaultfd. With CLADEFS_HOST_TRACE, a bpftrace
+# whose DAX window takes KVM's faults through userfaultfd. With CLADEFS_TEST_HOST_TRACE, a bpftrace
 # script of SOURCE's traces the host as the guest tests run, its maps in RESULTS/host-trace.txt
 # (scripts/extent-transport.bt, TASK-164.11.1). With CLADEFS_GUEST_KERNEL_BUILD set
 # (release; debug: lockdep, KCSAN, DEBUG_ATOMIC_SLEEP; kasan: KASAN, KFENCE, lockdep; or coverage:
@@ -17,9 +17,9 @@
 # guest case skipped). It builds in trees that persist between runs, so that a run builds only
 # what changed.
 #
-# As a measurement's run (CLADEFS_HOST_BENCH=1, scripts/perf-gate-host.sh's), it runs in two jobs
-# (linux-host-setup.sh's host_phase): `build`, as work, the workspace's tests, the guest kernel and
-# the guest tests' artifacts (test-e2e.sh's CLADEFS_E2E_BUILD_ONLY); then `measure`, alone, the
+# As a measurement's run (CLADEFS_TEST_HOST_BENCH=1, scripts/perf-gate-host.sh's), it runs in two
+# jobs (linux-host-setup.sh's host_phase): `build`, as work, the workspace's tests, the guest kernel
+# and the guest tests' artifacts (test-e2e.sh's CLADEFS_E2E_BUILD_ONLY); then `measure`, alone, the
 # guest tests against those, building nothing, nor running the harness's own tests (TASK-368). A
 # coverage kernel's counts are read against its build, so that runs in one job alone.
 #
@@ -97,23 +97,23 @@ if [[ ${CLADEFS_GUEST_KERNEL_BUILD:-} == coverage ]]; then
 fi
 # A crash leaves a core, whose threads' stacks the results keep, and only those, as the host goes
 # with the core: a VMM died of SIGSEGV in a soak, and nothing said where (2026-10-31). Private
-# memory alone (coredump_filter): a guest's and a daemon's arenas are shared. Not on a host of
-# one's own (CLADEFS_HOST_PROVISIONED), whose core pattern is that of every process there, others'
-# runs' too, and its own setup's.
+# memory alone (coredump_filter): a guest's and a daemon's arenas are shared. Not on a test host
+# (CLADEFS_TEST_HOST_PROVISIONED), whose core pattern is that of every process there,
+# others' runs' too, and its own setup's.
 cores="$results/cores"
 mkdir -p "$cores"
-if [[ ${CLADEFS_HOST_PROVISIONED:-} != 1 ]]; then
+if [[ ${CLADEFS_TEST_HOST_PROVISIONED:-} != 1 ]]; then
     sysctl -q -w kernel.core_pattern="$cores/core.%p"
     ulimit -c unlimited
     echo 0x11 > /proc/self/coredump_filter
 fi
 echo "== guest tests" >&2
 tracer=
-if [[ -n ${CLADEFS_HOST_TRACE:-} ]]; then
+if [[ -n ${CLADEFS_TEST_HOST_TRACE:-} ]]; then
     host_need bpftrace
     # What it says, its first MiB, the rest read and dropped, which a closed pipe would kill it
     # for: extent-transport.bt had it say 700 MB over a 30-minute case (GCE r810, r811).
-    bpftrace -q -o "$results/host-trace.txt" "$repo/$CLADEFS_HOST_TRACE" \
+    bpftrace -q -o "$results/host-trace.txt" "$repo/$CLADEFS_TEST_HOST_TRACE" \
         2> >({ head -c 1048576; cat > /dev/null; } > "$results/host-trace.log") &
     tracer=$!
 fi

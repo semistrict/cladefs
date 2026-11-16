@@ -118,13 +118,13 @@ class Guard(unittest.TestCase):
                          (0, "cargo build --release\n", ""))
 
     def test_a_phase_is_the_build_or_the_measurement(self):
-        self.assertEqual(self.host_setup("host_setup", WORK, CLADEFS_HOST_PHASE="rounds"),
-                         (2, "", "CLADEFS_HOST_PHASE is build or measure, or unset for both\n"))
+        self.assertEqual(self.host_setup("host_setup", WORK, CLADEFS_TEST_HOST_PHASE="rounds"),
+                         (2, "", "CLADEFS_TEST_HOST_PHASE is build or measure, or unset for both\n"))
 
     def test_a_measurement_runs_what_was_built(self):
         artifacts = self.directory / "artifacts"
         self.assertEqual(self.host_setup(f"host_prebuilt {artifacts}", WORK),
-                         (2, "", f"{artifacts} holds no artifacts: CLADEFS_HOST_PHASE=build makes "
+                         (2, "", f"{artifacts} holds no artifacts: CLADEFS_TEST_HOST_PHASE=build makes "
                                  "them\n"))
         artifacts.mkdir()
         (artifacts / "artifacts.txt").write_text("source x\n")

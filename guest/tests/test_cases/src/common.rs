@@ -64,9 +64,9 @@ pub fn guest_kernel_slowness() -> anyhow::Result<f64> {
     }
 }
 
-/// cladefs: says in the round's log what the daemon named `name` the test spawned ([`spawn_daemon`])
-/// kept in its stats file, how long its commits waited to be made durable among it: a passing
-/// round's directory, and the file in it, doesn't outlive the run (TASK-165.9).
+/// cladefs: says in the repeat's log what the daemon named `name` the test spawned
+/// ([`spawn_daemon`]) kept in its stats file, how long its commits waited to be made durable among
+/// it: a passing repeat's directory, and the file in it, doesn't outlive the run (TASK-165.9).
 pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
     let path = test_setup.tmp_dir.join(format!("{name}-stats.txt"));
     match fs::read_to_string(&path) {
@@ -74,7 +74,7 @@ pub fn say_daemon_stats(test_setup: &TestSetup, name: &str) {
         Err(err) => eprintln!("{name} stats: reading {}: {err}", path.display()),
     }
     // And its stores' warnings, of flushes and framings past extentd's turn among them, in its
-    // log, as the stats file, gone with a round's directory that passed.
+    // log, as the stats file, gone with a repeat's directory that passed.
     let log = test_setup.tmp_dir.join(format!("{name}.log"));
     let warned = fs::read_to_string(&log).unwrap_or_default();
     let warned = warned.lines().filter(|line| line.contains("WARN extent_store"));
@@ -97,8 +97,8 @@ pub fn daemon_stats(path: &Path) -> anyhow::Result<std::collections::BTreeMap<St
 }
 
 /// cladefs: what a process cost its host, as its kernel counts it, whatever the process says of
-/// itself: what an A/B of two pins compares of their daemons, a pin's daemon from before it
-/// counted its own writes and memory among them (TASK-330.4).
+/// itself: what an A/B of LangSmith's pin and a candidate compares of their daemons, the pin's
+/// daemon from before it counted its own writes and memory among them (TASK-330.4).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProcessCosts {
     /// What its kernel wrote to disks for it (/proc/PID/io's `write_bytes`).

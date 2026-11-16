@@ -618,18 +618,19 @@ fn log_tail(log: &str) -> std::borrow::Cow<'_, str> {
         .into()
 }
 
-/// cladefs: where `runner test` writes its case's outcome as data, and of which round of which run
+/// cladefs: where `runner test` writes its case's outcome as data, and of which repeat of which run
 /// (TASK-160.31).
 struct Record {
     outcome: PathBuf,
-    /// scripts/guest_results.py's run.json: its commit, its knobs and its rounds.
+    /// scripts/guest_results.py's run.json: its commit, its knobs and its repeats.
     run: Option<PathBuf>,
-    round: u32,
+    repeat: u32,
 }
 
-/// cladefs: `result`'s outcome as data, in round `round` of the run `run` says (`Record::run`), with
-/// the knobs that replay it, those of the run and those the case chose, and the command that does.
-fn outcome_json(result: &TestResult, run: &serde_json::Value, round: u32) -> serde_json::Value {
+/// cladefs: `result`'s outcome as data, in repeat `repeat` of the run `run` says (`Record::run`),
+/// with the knobs that replay it, those of the run and those the case chose, and the command that
+/// does.
+fn outcome_json(result: &TestResult, run: &serde_json::Value, repeat: u32) -> serde_json::Value {
     let ran = result.ran.as_ref();
     let (outcome, reason) = match &result.outcome {
         TestOutcome::Pass => ("pass", None),
@@ -649,8 +650,8 @@ fn outcome_json(result: &TestResult, run: &serde_json::Value, round: u32) -> ser
         .collect();
     serde_json::json!({
         "case": result.name,
-        "round": round,
-        "rounds": run["rounds"].as_u64().unwrap_or(1),
+        "repeat": repeat,
+        "repeats": run["repeats"].as_u64().unwrap_or(1),
         "outcome": outcome,
         "reason": reason,
         "failed_checks": ran.map(|ran| ran.failed_checks.clone()).unwrap_or_default(),
@@ -735,7 +736,7 @@ fn run_tests(
             }
             None => serde_json::Value::Null,
         };
-        let mut outcome = serde_json::to_vec_pretty(&outcome_json(result, &run, record.round))?;
+        let mut outcome = serde_json::to_vec_pretty(&outcome_json(result, &run, record.repeat))?;
         outcome.push(b'\n');
         fs::write(&record.outcome, outcome)
             .with_context(|| record.outcome.display().to_string())?;
@@ -766,7 +767,7 @@ fn run_tests(
         if extra.is_empty() { String::new() } else { format!(" ({})", extra.join(", ")) };
 
     // cladefs: a case asked for by name that skips fails: it was to run. Fresh hosts without a
-    // guest kernel skipped every guest case asked for, and the run passed, round after round.
+    // guest kernel skipped every guest case asked for, and the run passed, run after run.
     let skipped_asked = test_case != "all" && num_skip > 0;
     if num_fail > 0 || skipped_asked {
         eprintln!("(See test artifacts at: {})", base_dir.display());
@@ -803,13 +804,14 @@ enum CliCommand {
         /// cladefs: write the case's outcome, as JSON, to this file
         #[arg(long)]
         outcome: Option<PathBuf>,
-        /// cladefs: the run the case is of, its commit, knobs and rounds (a run.json of
+        /// cladefs: the run the case is of, its commit, knobs and repeats (a run.json of
         /// scripts/guest_results.py's), which its outcome records
         #[arg(long, requires = "outcome")]
         run: Option<PathBuf>,
-        /// cladefs: the round of the run it is, which its outcome records
+        /// cladefs: the repeat of the case it is, in a run that repeats each case, which its
+        /// outcome records
         #[arg(long, default_value_t = 1, requires = "outcome")]
-        round: u32,
+        repeat: u32,
     },
     StartVm {
         #[arg(long)]
@@ -872,7 +874,7 @@ impl Default for CliCommand {
             github_summary: false,
             outcome: None,
             run: None,
-            round: 1,
+            repeat: 1,
         }
     }
 }
@@ -918,13 +920,13 @@ fn main() -> anyhow::Result<()> {
             eprintln!("encrypted: {}", report.summary());
             Ok(())
         }
-        CliCommand::Test { test_case, base_dir, keep_all, github_summary, outcome, run, round } => {
+        CliCommand::Test { test_case, base_dir, keep_all, github_summary, outcome, run, repeat } => {
             sockets_fit(&std::env::temp_dir())?;
             // cladefs: the stores its cases make and open in its own processes are encrypted under the
             // host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as every
             // process that opens stores does (TASK-411.28); scripts/test-e2e.sh names one.
             encrypted::require_kms()?;
-            let record = outcome.map(|outcome| Record { outcome, run, round });
+            let record = outcome.map(|outcome| Record { outcome, run, repeat });
             run_tests(&test_case, base_dir, keep_all, github_summary, record)
         }
     }
@@ -1014,7 +1016,7 @@ mod tests {
         assert_eq!(shell_word(""), "''");
     }
 
-    /// cladefs: a round's outcome as data: the run's knobs and those the case chose, which its
+    /// cladefs: a repeat's outcome as data: the run's knobs and those the case chose, which its
     /// replay runs it with, alone, on ubu1.
     #[test]
     fn an_outcome_says_how_to_replay_it() {
@@ -1037,10 +1039,10 @@ mod tests {
         };
         let run = serde_json::json!({
             "commit": "abc123",
-            "rounds": 5,
+            "repeats": 5,
             "knobs": {
                 "CLADEFS_E2E_TEST": "--tag dax-gate",
-                "CLADEFS_E2E_ROUNDS": "5",
+                "CLADEFS_E2E_REPEATS": "5",
                 "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
                 "CLADEFS_WORKSPACE_TESTS": "0",
             },
@@ -1049,8 +1051,8 @@ mod tests {
             outcome_json(&result, &run, 3),
             serde_json::json!({
                 "case": "fxfs-guest-checks-dax",
-                "round": 3,
-                "rounds": 5,
+                "repeat": 3,
+                "repeats": 5,
                 "outcome": "fail",
                 "reason": "seed 77: expected exactly \"OK\\n\"",
                 "failed_checks": ["sparse"],
@@ -1062,10 +1064,10 @@ mod tests {
                 "limit_secs": 180,
                 "commit": "abc123",
                 "replay": "CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST=fxfs-guest-checks-dax \
-                    CLADEFS_E2E_ROUNDS=5 CLADEFS_GUEST_CMDLINE='fxfs.follow_apply_delay_us=200 quiet' \
+                    CLADEFS_E2E_REPEATS=5 CLADEFS_GUEST_CMDLINE='fxfs.follow_apply_delay_us=200 quiet' \
                     CLADEFS_SEED=77 scripts/test-host.sh",
                 "knobs": {
-                    "CLADEFS_E2E_ROUNDS": "5",
+                    "CLADEFS_E2E_REPEATS": "5",
                     "CLADEFS_E2E_TEST": "--tag dax-gate",
                     "CLADEFS_GUEST_CMDLINE": "fxfs.follow_apply_delay_us=200 quiet",
                     "CLADEFS_SEED": "77",
@@ -1121,7 +1123,7 @@ mod tests {
         };
         let outcome = outcome_json(&result, &serde_json::Value::Null, 1);
         assert_eq!(
-            (&outcome["outcome"], &outcome["reason"], &outcome["rounds"], &outcome["commit"]),
+            (&outcome["outcome"], &outcome["reason"], &outcome["repeats"], &outcome["commit"]),
             (
                 &serde_json::json!("skip"),
                 &serde_json::json!("a deadlock on purpose"),

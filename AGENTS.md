@@ -17,7 +17,7 @@ A batch is several backlog tasks. Pick the batch's tasks, read them, write all t
 only then compile.
 
 Do not alternate "write one change, compile, test, write the next". A compile of this workspace,
-a guest kernel build and a host run each take minutes; paying them per change wastes most of
+a guest kernel build and a test host run each take minutes; paying them per change wastes most of
 the time. Rust's compiler catches most of what a per-change build would, all at once at the end
 of a batch.
 
@@ -28,24 +28,23 @@ of a batch.
   (`scripts/test.sh`), and one ubu1 run of the workspace and the guest cases.
 - While a batch's ubu1 run goes, write the next batch rather than wait for it.
 - Measure a change on its own only when isolating it is the point of the measurement (an A/B on
-  one host).
+  one test host).
 
 ### Linux runs go to ubu1
 
-The user's rule (2026-11-11): every Linux run goes to ubu1, a
-physical host others' agents share, through the `scripts/*-host.sh` drivers
-(`scripts/lib/host.sh`; `CLADEFS_HOST` names another host): `test-host.sh`, `bench-host.sh`,
-`bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
+The user's rule (2026-11-11): every Linux run goes to ubu1, the test host, a physical machine
+others' agents share, through the `scripts/*-host.sh` drivers (`scripts/lib/host.sh`;
+`CLADEFS_TEST_HOST` names another test host): `test-host.sh`, `bench-host.sh`, `bench-ab-host.sh`, `perf-gate-host.sh`, `soak-host.sh`, `soak-workloads-host.sh`,
 `mutants-host.sh`, `guest-mutants-host.py`, `gets-host.sh`, `migrate-host.sh`,
 `fork-time-host.sh`, `gc-sweep-host.sh`. A run is a worktree there of a commit origin has (push first; HEAD of a clean
-tree by default, `CLADEFS_HOST_COMMIT` names another), its own target directories, its job under
+tree by default, `CLADEFS_TEST_HOST_COMMIT` names another), its own target directories, its job under
 `fxjob` (`--bench` for measurements), results copied back, worktree removed. A measurement builds
 nothing inside `fxjob --bench`: its run builds first as a job of work, then measures what that
-built (`host_job`'s `CLADEFS_HOST_PHASE`), and anything that would build inside a measurement
+built (`host_job`'s `CLADEFS_TEST_HOST_PHASE`), and anything that would build inside a measurement
 refuses to (`scripts/lib/measurement.sh`, TASK-368). Guest kernels come
-from a cache on the host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
+from a cache on the test host keyed by their sources (`host_kernel`). A driver stopped mid-run leaves
 the job running: `DRIVER resume RUN RESULTS` fetches it, `DRIVER cancel RUN` ends it. Pass the run
-number as `CLADEFS_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
+number as `CLADEFS_TEST_HOST_RUN` (e.g. `r1040`). ubu1's setup is its `~/docs/system-setup.d` steps: what a
 run needs installed goes there as a step, never into a run.
 
 ## Commit in batches, only what compiled and passed its tests
