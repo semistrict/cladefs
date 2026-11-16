@@ -3424,7 +3424,8 @@ static ssize_t fxfs_vfs_stats_text(void *arg, char *buf, size_t len)
 
 	if (err)
 		return err;
-	fxfs_vfs_build_show(&m, NULL);
+	/* It can't fail: its result is the seq_file's, whose overflow counts. */
+	(void)fxfs_vfs_build_show(&m, NULL);
 	return seq_has_overflowed(&m) ? -EOVERFLOW : m.count;
 }
 

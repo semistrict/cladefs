@@ -1456,9 +1456,9 @@ static void vext_remove(struct virtio_device *vdev)
 	cancel_work_sync(&vext->stats_work);
 	vext_selftest_remove(vdev);
 	sysfs_remove_group(&vdev->dev.kobj, &vext_attr_group);
-	/* Closed, it has no queues left to let go of. */
+	/* Closed, it has no queues left to let go of. It can't fail: its result is the core's. */
 	if (!vext->closed)
-		vext_reset_prepare(vdev);
+		(void)vext_reset_prepare(vdev);
 }
 
 static const struct virtio_device_id vext_ids[] = {

@@ -49,8 +49,12 @@ echo "$SHA256  $zip" | shasum -a 256 -c - >/dev/null
 # Clippy's rules the code keeps (clippy.toml): no blocking call in async code unless allowed, with
 # why (TASK-44.20); and the compiler's warnings, as errors, the Shuttle builds' too (below), whose
 # code no other build compiles: one went unread in a run's output, a drop of a usize (TASK-287).
-# First, as it fails at once.
+# First, as it fails at once. Before them, rustfmt's (rustfmt.toml) on the workspace's crates: `cargo
+# fmt` without --all, which would format the vendored trees their path dependencies reach too
+# (vendor/firecracker, guest/rust/std), formatted as their upstreams keep them (TASK-436).
 if part clippy; then
+    # In $root: `cargo fmt --manifest-path` finds no targets in a virtual manifest.
+    (cd "$root" && cargo fmt --check)
     UCD_ZIP="$zip" cargo clippy --manifest-path "$root/Cargo.toml" --workspace --tests -- \
         -A clippy::all -D clippy::disallowed_methods -D warnings
     cargo clippy --manifest-path "$root/Cargo.toml" -p extent_store -p physmem -p cladefs \

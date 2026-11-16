@@ -2,15 +2,16 @@
 # Copyright 2026 The cladefs Authors.
 #
 # Kernel: sim
-# Killer: interleave
+# Killer: scenarios shared_reads_stay
 #
 # Patch 0010, TASK-152, taken out: a read fault of a page another mapping holds, its blocks shared,
 # replaces the entry naming that page, unmapping it from every mapping, so that two processes
 # reading one page undo each other's mappings, a fault each load: the livelock of a build's
 # processes reading a binary out of shared blocks, which no wrong byte, WARN or fault going round
-# shows, each fault succeeding. Killed by kernel/mm.c's check that a load faults again on a page
-# its mapping held only after something other than a fault unmapped it (TASK-149.14), with no
-# scenario written for it.
+# shows, each fault succeeding. Found by kernel/mm.c's check that a load faults again on a page
+# its mapping held only after something other than a fault unmapped it (TASK-149.14): interleave
+# did at seed 610, then no seed of 2,000 once later changes moved them (TASK-149.47).
+# shared_reads_stay: two mappings of a page a clone shares, loaded in turn.
 
 --- a/fs/dax.c
 +++ b/fs/dax.c
