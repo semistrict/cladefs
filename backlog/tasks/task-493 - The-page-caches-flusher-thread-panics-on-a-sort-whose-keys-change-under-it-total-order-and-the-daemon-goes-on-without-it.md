@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 10:31'
-updated_date: '2026-11-16 10:52'
+updated_date: '2026-11-16 11:15'
 labels:
   - bug
 dependencies: []
@@ -23,7 +23,7 @@ Found 2026-11-16 on ubu1 running extentd::tests::soak::a_degraded_bucket_costs_t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The sorts take each file's key once (a snapshot before sorting) so no concurrent change can break the order, with a test that changes keys during a sort and fails before the fix
+- [x] #1 The sorts take each file's key once (a snapshot before sorting) so no concurrent change can break the order, with a test that changes keys during a sort and fails before the fix
 - [ ] #2 A panic on the flusher thread (or any page-cache background thread) is not silent: the daemon fails or logs and restarts it as the project's rule for background threads says, and the soak test fails if the flusher died
 - [ ] #3 TASK-490's uploads-copied-each-try is shown killed by the soak's own check, not by this panic, on ubu1
 <!-- AC:END -->
@@ -56,4 +56,6 @@ Structure: the cache orders files only through PageCache::files_by (keys taken o
 Dead flusher: shared::Holding (the HELD marker, now also Shared<G>'s) with Holding::work(FLUSHER) held for the flusher thread's life: cladefsd's abort_on_panics aborts at its panic naming "page cache flusher" (TASK-149.24's rule; decision in OPEN_QUESTIONS.md). Without the hook: Dying guard sets flusher_died, logs an error, wakes writers; throttle panics instead of waiting for good. Tests: a_panic_on_the_flusher_aborts_the_daemon (child process SIGABRT naming it; red with the Holding line removed: the child lived on), a_dead_flusher_is_known_and_holds_no_writer_for_good (red with Dying removed).
 Soak: abort_on_panics as cladefsd does, flusher_lives() each second and at the end. Linux-only: cross-checked (cargo check --target aarch64-unknown-linux-musl -p cladefs --lib --profile test); not run here (ubu1).
 Look-around (sort, sort_by*, sort_unstable*, sort_by_cached_key, max_by*, min_by*, BinaryHeap, select_nth, binary_search_by over extent_store, extent_remote, cladefs src): only pages.rs read live keys. Others sort owned values or snapshot tuples: cladefs cache.rs evict_in_order and let_go_least_used (keys collected into tuples first), dax/uffd.rs runs (tuples), extent_store views.rs min_by_key (under the views lock; min/max_by_key compute each key once anyway), extent_remote recovery.rs max_by_key (under the kept lock), extent_remote cache.rs found.modified (metadata snapshot), store/collector/passed/sweep/keys/memory/disk/control (fields of owned items). No BinaryHeap or select_nth. A syntactic rust-rules.py rule was tried and dropped (dead-ends/sort-keys-syntactic-rule.md: it flagged a pure accessor in fxfs-posix).
+
+macOS (6c1914594): clippy part as CI (fmt, workspace -D disallowed_methods -D warnings, shuttle and loom builds) clean; workspace nextest 2538/2538; shuttle part 37+10+6+33+10+18+loom 2+1+1 all passed. sim part not run. Open: AC #2's soak run and AC #3 need ubu1; DoD Linux run too.
 <!-- SECTION:NOTES:END -->
