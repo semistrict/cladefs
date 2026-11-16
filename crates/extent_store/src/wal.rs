@@ -58,7 +58,7 @@ use crate::layout::{
     FRAMING, LOGS, OPEN_SEGMENTS, SEGMENTS, SegmentId, branch_dir, decode, encode, extent_path,
     list_numbers, log_path, open_segment_path, segment_path,
 };
-use crate::raw::{SECTOR, Sealer};
+use crate::raw::{RawEncryption, SECTOR};
 use crate::segments::{fold, footer_last, segment_footer};
 use anyhow::{Context as _, Error, ensure};
 use extent_frame::segment::{Branch, Chain, Contents, Footer, epoch_of, writer_of};
@@ -239,27 +239,27 @@ impl LogRecord {
 
     /// The records of `bytes`, `segment`'s log, that are whole: those of any kind, after its
     /// header, salted as it says ([`LOG_MAGIC`]), as a log reused does, whose records from before
-    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: a sealed log's
-    /// each followed by its MAC ([`SEALED_LOG_MAGIC`]), which is checked if `sealer`, its sealer,
-    /// is given: one not authentic fails it, naming it; read holding no key, as recovery reads, it
-    /// is not checked (TASK-411.5).
+    /// are torn then; none if its header isn't `segment`'s ([`log_salt`]). cladefs: an encrypted
+    /// log's each followed by its MAC ([`ENCRYPTED_LOG_MAGIC`]), which is checked if `encryption`,
+    /// its encryption, is given: one not authentic fails it, naming it; read holding no key, as
+    /// recovery reads, it is not checked (TASK-411.5).
     fn decode(
         bytes: &[u8],
         segment: SegmentId,
-        sealer: Option<&Sealer>,
+        encryption: Option<&RawEncryption>,
     ) -> Result<Vec<Self>, Error> {
         let Some(header) = LogHeader::of(bytes, segment) else { return Ok(Vec::new()) };
         let bytes = bytes.get(LOG_RECORDS as usize..).unwrap_or_default();
         let unauthentic = std::cell::Cell::new(None);
         let (records, _) = crate::layout::decode_with(bytes, header.salt, |at, payload| {
-            let payload = match header.sealed {
+            let payload = match header.encrypted {
                 None => payload,
                 Some(_) => {
                     let (payload, mac) =
                         payload.split_at_checked(payload.len().checked_sub(MAC_LEN)?)?;
                     let at = LOG_RECORDS + at as u64;
                     let mac = mac.try_into().expect("a MAC's bytes");
-                    if sealer.is_some_and(|sealer| !sealer.verify(at, payload, mac)) {
+                    if encryption.is_some_and(|encryption| !encryption.verify(at, payload, mac)) {
                         unauthentic.set(Some(at));
                         return None;
                     }
@@ -294,13 +294,13 @@ impl LogRecord {
 /// its own.
 pub(crate) const LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 
-/// cladefs: what a sealed store's segment's log starts with, in place of [`LOG_MAGIC`]: after the
-/// same fields, the DEK its segment's raw file is encrypted under and its log authenticated with,
-/// its branch's and its generation, and the salt of their subkeys (`raw::Sealer`), then the
-/// header's MAC; each record of it is followed by its MAC, of its offset in the log and its bytes
-/// (TASK-411.5). Its records hold of the runs of its commits what the raw file stores, encrypted.
-/// A log in the clear is as it was.
-pub(crate) const SEALED_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x03";
+/// cladefs: what an encrypted store's segment's log starts with, in place of [`LOG_MAGIC`]: after
+/// the same fields, the DEK its segment's raw file is encrypted under and its log authenticated
+/// with, its branch's and its generation, and the salt of their subkeys (`raw::RawEncryption`),
+/// then the header's MAC; each record of it is followed by its MAC, of its offset in the log and
+/// its bytes (TASK-411.5). Its records hold of the runs of its commits what the raw file stores,
+/// encrypted. A log in the clear is as it was.
+pub(crate) const ENCRYPTED_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x03";
 
 /// cladefs: where a segment's log's records start, after its header.
 pub(crate) const LOG_RECORDS: u64 = 4096;
@@ -308,45 +308,51 @@ pub(crate) const LOG_RECORDS: u64 = 4096;
 /// cladefs: the bytes of a clear log's header ([`LOG_MAGIC`]) that say anything.
 const LOG_FIELDS: usize = LOG_MAGIC.len() + 3 * 8;
 
-/// cladefs: the bytes of a log's header that say anything, a sealed one's ([`SEALED_LOG_MAGIC`]),
-/// which a clear one's are fewer than: what a reader of its header reads.
+/// cladefs: the bytes of a log's header that say anything, an encrypted one's
+/// ([`ENCRYPTED_LOG_MAGIC`]), which a clear one's are fewer than: what a reader of its header
+/// reads.
 pub(crate) const LOG_HEADER: usize = LOG_FIELDS + 8 + 4 + SALT_LEN + MAC_LEN;
 
-/// cladefs: the header of `segment`'s log, its records salted with `salt` ([`LOG_MAGIC`]); a sealed
-/// one's, MACed, if `sealer` seals its raw file and log ([`SEALED_LOG_MAGIC`]).
-pub(crate) fn log_header(salt: u64, segment: SegmentId, sealer: Option<&Sealer>) -> Vec<u8> {
+/// cladefs: the header of `segment`'s log, its records salted with `salt` ([`LOG_MAGIC`]); an
+/// encrypted one's, MACed, if `encryption` encrypts its raw file and log ([`ENCRYPTED_LOG_MAGIC`]).
+pub(crate) fn log_header(
+    salt: u64,
+    segment: SegmentId,
+    encryption: Option<&RawEncryption>,
+) -> Vec<u8> {
     let mut header = vec![0; LOG_RECORDS as usize];
     let fields = [salt, segment.branch, segment.number].map(u64::to_le_bytes);
-    let magic = if sealer.is_some() { SEALED_LOG_MAGIC } else { LOG_MAGIC };
+    let magic = if encryption.is_some() { ENCRYPTED_LOG_MAGIC } else { LOG_MAGIC };
     header[..magic.len()].copy_from_slice(magic);
     header[magic.len()..LOG_FIELDS].copy_from_slice(fields.as_flattened());
-    if let Some(sealer) = sealer {
+    if let Some(encryption) = encryption {
         let mut at = LOG_FIELDS;
-        let key = (sealer.key.branch.to_le_bytes(), sealer.key.generation.to_le_bytes());
-        for field in [&key.0[..], &key.1[..], &sealer.salt.0[..]] {
+        let key = (encryption.key.branch.to_le_bytes(), encryption.key.generation.to_le_bytes());
+        for field in [&key.0[..], &key.1[..], &encryption.salt.0[..]] {
             header[at..at + field.len()].copy_from_slice(field);
             at += field.len();
         }
-        let mac = sealer.mac(0, &header[..at]);
+        let mac = encryption.mac(0, &header[..at]);
         header[at..at + MAC_LEN].copy_from_slice(&mac);
     }
     header
 }
 
-/// cladefs: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its records,
-/// and, if sealed, the DEK and salt of its sealer, with the bytes its MAC is of, and the MAC.
+/// cladefs: a segment's log's header, as its bytes say ([`LogHeader::of`]): the salt of its
+/// records, and, if encrypted, the DEK and salt of its encryption, with the bytes its MAC is of,
+/// and the MAC.
 pub(crate) struct LogHeader {
     pub salt: u64,
-    sealed: Option<(KeyId, Salt, [u8; MAC_LEN])>,
+    encrypted: Option<(KeyId, Salt, [u8; MAC_LEN])>,
     signed: Vec<u8>,
 }
 
 impl LogHeader {
     /// The header of `log`, `segment`'s log's bytes, if it has one, and it is `segment`'s.
     pub fn of(log: &[u8], segment: SegmentId) -> Option<Self> {
-        let sealed = match log.get(..LOG_MAGIC.len())? {
+        let encrypted = match log.get(..LOG_MAGIC.len())? {
             magic if magic == LOG_MAGIC => false,
-            magic if magic == SEALED_LOG_MAGIC => true,
+            magic if magic == ENCRYPTED_LOG_MAGIC => true,
             _ => return None,
         };
         let u64_at = |at: usize| u64::from_le_bytes(log[at..at + 8].try_into().unwrap());
@@ -355,39 +361,40 @@ impl LogHeader {
         if (SegmentId { branch, number }) != segment {
             return None;
         }
-        if !sealed {
-            return Some(Self { salt, sealed: None, signed: fields.to_vec() });
+        if !encrypted {
+            return Some(Self { salt, encrypted: None, signed: fields.to_vec() });
         }
         let signed = log.get(..LOG_HEADER - MAC_LEN)?;
         let generation = u32::from_le_bytes(log[LOG_FIELDS + 8..][..4].try_into().unwrap());
         let key = KeyId { branch: u64_at(LOG_FIELDS), generation };
         let salt_at = LOG_FIELDS + 12;
-        let sealing = Salt(log[salt_at..salt_at + SALT_LEN].try_into().unwrap());
+        let key_salt = Salt(log[salt_at..salt_at + SALT_LEN].try_into().unwrap());
         let mac = log.get(LOG_HEADER - MAC_LEN..LOG_HEADER)?.try_into().unwrap();
-        Some(Self { salt, sealed: Some((key, sealing, mac)), signed: signed.to_vec() })
+        Some(Self { salt, encrypted: Some((key, key_salt, mac)), signed: signed.to_vec() })
     }
 
-    /// The sealer of `segment`'s raw file and log, if this, its log's header, says they are sealed,
+    /// The encryption of `segment`'s raw file and log, if this, its log's header, says they are
+    /// encrypted,
     /// under the DEK of `keys`' it names, the header's MAC checked: refused if `keys` hold no such
     /// DEK, or its MAC is not the header's.
-    pub fn sealer(
+    pub fn encryption(
         &self,
         segment: SegmentId,
         keys: &extent_remote::keys::Ring,
-    ) -> Result<Option<Arc<Sealer>>, Error> {
-        let Some((key, salt, mac)) = &self.sealed else { return Ok(None) };
+    ) -> Result<Option<Arc<RawEncryption>>, Error> {
+        let Some((key, salt, mac)) = &self.encrypted else { return Ok(None) };
         let keys = keys.of(segment.branch);
         let dek = extent_frame::Keys::dek(&keys, *key).ok_or_else(|| {
             anyhow::anyhow!(
-                "{segment:?}'s raw file is sealed under {key:?}, which the store holds not"
+                "{segment:?}'s raw file is encrypted under {key:?}, which the store holds not"
             )
         })?;
-        let sealer = Sealer::of(dek, *key, *salt);
+        let encryption = RawEncryption::of(dek, *key, *salt);
         ensure!(
-            sealer.verify(0, &self.signed, mac),
+            encryption.verify(0, &self.signed, mac),
             "{segment:?}'s log: its header is not authentic"
         );
-        Ok(Some(Arc::new(sealer)))
+        Ok(Some(Arc::new(encryption)))
     }
 }
 
@@ -415,22 +422,23 @@ pub(crate) struct SegmentLog<F> {
     file: Arc<F>,
     end: u64,
     salt: u64,
-    /// cladefs: what MACs its records, if it is sealed (TASK-411.5).
-    sealer: Option<Arc<Sealer>>,
+    /// cladefs: what MACs its records, if it is encrypted (TASK-411.5).
+    encryption: Option<Arc<RawEncryption>>,
 }
 
 impl<F: File> SegmentLog<F> {
     /// A segment's log, `file`, holding no records yet, after its header ([`log_header`]), made or
-    /// reused with it, its records salted with `salt`; cladefs: and MACed by `sealer`, if sealed.
-    pub fn new(file: Arc<F>, salt: u64, sealer: Option<Arc<Sealer>>) -> Self {
-        Self { file, end: LOG_RECORDS, salt, sealer }
+    /// reused with it, its records salted with `salt`; cladefs: and MACed by `encryption`, if
+    /// encrypted.
+    pub fn new(file: Arc<F>, salt: u64, encryption: Option<Arc<RawEncryption>>) -> Self {
+        Self { file, end: LOG_RECORDS, salt, encryption }
     }
 
     /// Appends `records` after those before, encoded, salted ([`crate::layout::encode_salted`]),
     /// and syncs them. cladefs: keeping the log's pages in the host's page cache, as the open
     /// segment's raw file keeps its (TASK-301): a log is appended to and synced again and again,
     /// and its next record's append would read its last page back from the disk first. cladefs:
-    /// each followed by its MAC, if sealed ([`SEALED_LOG_MAGIC`]).
+    /// each followed by its MAC, if encrypted ([`ENCRYPTED_LOG_MAGIC`]).
     pub fn append<'a>(
         &mut self,
         records: impl IntoIterator<Item = &'a LogRecord>,
@@ -438,8 +446,8 @@ impl<F: File> SegmentLog<F> {
         let start = self.end;
         for record in records {
             let mut payload = bincode::serialize(record).expect("records serialize");
-            if let Some(sealer) = &self.sealer {
-                let mac = sealer.mac(self.end, &payload);
+            if let Some(encryption) = &self.encryption {
+                let mac = encryption.mac(self.end, &payload);
                 payload.extend_from_slice(&mac);
             }
             let record = &crate::layout::frame_salted(&payload, self.salt);
@@ -469,17 +477,17 @@ pub(crate) struct Recovered {
 
 impl Recovered {
     /// cladefs: frames the segments recovery closed again ([`Recovered::closing`]), in `dir`, of
-    /// `branch`, holding `keys`, the store's: sealed under its branch's newest DEK if they seal, else
-    /// in the clear; each from its raw data and its log's records read again, which must still be
-    /// those recovery kept, with the footer recovery folded them into, and synced; then the
-    /// directory of framed files synced, and their raw files and logs removed, as the commits they
-    /// hold are durable in the framed files then. Recovery frames nothing itself: it holds no key
-    /// yet, and a sealed branch's segment framed in the clear and resealed later left its data on
-    /// the host's disk in the clear meanwhile, and for good if the host died between (TASK-411.9).
-    /// A crash before leaves the raw files and logs, which the next recovery closes again alike.
-    /// cladefs: a sealed store's raw data is decrypted first, under the DEK and salt its log's header
-    /// names, which the header's MAC and each record's must be authentic under, as recovery read
-    /// them holding no key (TASK-411.5).
+    /// `branch`, holding `keys`, the store's: encrypted under its branch's newest DEK if they
+    /// encrypt, else in the clear; each from its raw data and its log's records read again, which
+    /// must still be those recovery kept, with the footer recovery folded them into, and synced;
+    /// then the directory of framed files synced, and their raw files and logs removed, as the
+    /// commits they hold are durable in the framed files then. Recovery frames nothing itself: it
+    /// holds no key yet, and an encrypted branch's segment framed in the clear and encrypted later
+    /// left its data on the host's disk in the clear meanwhile, and for good if the host died
+    /// between (TASK-411.9). A crash before leaves the raw files and logs, which the next recovery
+    /// closes again alike. cladefs: an encrypted store's raw data is decrypted first, under the DEK
+    /// and salt its log's header names, which the header's MAC and each record's must be authentic
+    /// under, as recovery read them holding no key (TASK-411.5).
     pub fn close<D: Dir>(
         &mut self,
         dir: &D,
@@ -489,11 +497,12 @@ impl Recovered {
         if self.closing.is_empty() {
             return Ok(());
         }
-        let sealing = keys.sealing();
+        let encryption = keys.encrypting();
         for (footer, number) in &self.segments {
             let Some(kept) = self.closing.get(number) else { continue };
             let segment = SegmentId { branch: branch.id, number: *number };
-            let Logged { records, mut data, sealer, .. } = log_records(dir, segment, Some(keys))?;
+            let Logged { records, mut data, encryption: raw_encryption, .. } =
+                log_records(dir, segment, Some(keys))?;
             ensure!(
                 records.get(..kept.len()) == Some(&kept[..]),
                 "{segment:?}'s log changed since its recovery"
@@ -502,16 +511,17 @@ impl Recovered {
             // in place cut short leaves the raw file with its tail, torn (TASK-310).
             let end = footer.contents.runs().map(|&(_, offset, len)| offset + len).max();
             data.truncate((end.unwrap_or(0) as usize).min(data.len()));
-            // cladefs: decrypted, if sealed: its runs are whole sectors (TASK-411.5, TASK-411.8).
-            if let Some(sealer) = &sealer {
+            // cladefs: decrypted, if encrypted: its runs are whole sectors (TASK-411.5,
+            // TASK-411.8).
+            if let Some(raw_encryption) = &raw_encryption {
                 ensure!(
                     (data.len() as u64).is_multiple_of(SECTOR),
                     "{segment:?}'s runs end at {}, inside a sector",
                     data.len()
                 );
-                sealer.decrypt(0, &mut data);
+                raw_encryption.decrypt(0, &mut data);
             }
-            let framed = extent_frame::framed(&data, &footer.encode(), sealing);
+            let framed = extent_frame::framed(&data, &footer.encode(), encryption);
             let path = segment_path(segment);
             remove(dir, &path)?;
             let file = dir.create(&path, true)?;
@@ -824,8 +834,8 @@ fn whole_footer<D: Dir>(dir: &D, segment: SegmentId, left: bool) -> Result<Optio
     if !left {
         return Ok(footer);
     }
-    // cladefs: whole by the keyless check, its parts' stored bytes against their CRCs, sealed or
-    // not: what a recovery holding no key yet tells of a sealed one, never taken for torn and
+    // cladefs: whole by the keyless check, its parts' stored bytes against their CRCs, encrypted or
+    // not: what a recovery holding no key yet tells of an encrypted one, never taken for torn and
     // closed again from its raw file (TASK-411.3).
     let whole = footer.is_some() && extent_frame::check(&read_whole(&file)?).is_ok();
     if whole {
@@ -906,15 +916,15 @@ struct Logged {
     /// it: a flush makes a commit durable only once its record and its runs' data both are
     /// (TASK-334).
     refused: bool,
-    /// cladefs: what its raw data is encrypted under and its log authenticated with, if sealed, read
-    /// holding the store's keys (TASK-411.5).
-    sealer: Option<Arc<Sealer>>,
+    /// cladefs: what its raw data is encrypted under and its log authenticated with, if encrypted,
+    /// read holding the store's keys (TASK-411.5).
+    encryption: Option<Arc<RawEncryption>>,
 }
 
 /// What the log of `segment` and its raw file hold ([`Logged`]); none if it has no log. Read
-/// holding no key, as recovery reads, its records' MACs unchecked if it is sealed, its data as
-/// stored; cladefs: or holding `keys`, the store's, which give its sealer, and which its header and
-/// records must be authentic under (TASK-411.5).
+/// holding no key, as recovery reads, its records' MACs unchecked if it is encrypted, its data as
+/// stored; cladefs: or holding `keys`, the store's, which give its encryption, and which its header
+/// and records must be authentic under (TASK-411.5).
 fn log_records<D: Dir>(
     dir: &D,
     segment: SegmentId,
@@ -924,23 +934,23 @@ fn log_records<D: Dir>(
         Ok(log) => read_file(&log)?,
         Err(err) if not_found(&err) => {
             let (records, data) = (Vec::new(), Vec::new());
-            return Ok(Logged { records, data, refused: false, sealer: None });
+            return Ok(Logged { records, data, refused: false, encryption: None });
         }
         Err(err) => return Err(err.into()),
     };
     let header = LogHeader::of(&bytes, segment);
-    let sealer = match (keys, &header) {
-        (Some(keys), Some(header)) => header.sealer(segment, keys)?,
+    let encryption = match (keys, &header) {
+        (Some(keys), Some(header)) => header.encryption(segment, keys)?,
         _ => None,
     };
-    let records = LogRecord::decode(&bytes, segment, sealer.as_deref())?;
+    let records = LogRecord::decode(&bytes, segment, encryption.as_deref())?;
     let raw = dir.open(&open_segment_path(segment), true)?;
     let mut data = vec![0; raw.size()? as usize];
     raw.read_cached(&mut data, 0)?;
     let whole = records.iter().take_while(|record| record.restore(&mut data)).count();
     let refused = whole < records.len();
     let records = records.into_iter().take(whole).map(|record| record.contents).collect();
-    Ok(Logged { records, data, refused, sealer })
+    Ok(Logged { records, data, refused, encryption })
 }
 
 /// The footer of a segment closed again, left open, or framed part way, from the records of its
@@ -1200,10 +1210,10 @@ mod tests {
     }
 
     /// TASK-411.9: a recovery frames nothing: a segment it closes again keeps its raw data and log,
-    /// no framed file, until the store's keys frame it, sealed under its branch's DEK, never in the
-    /// clear, its data as it was. TASK-411.3: a sealed segment's framed file, whole, its raw data
-    /// and log still there, is whole to a recovery holding no key, as one's in the clear is:
-    /// checked by its CRCs, never closed again from its raw data.
+    /// no framed file, until the store's keys frame it, encrypted under its branch's DEK, never in
+    /// the clear, its data as it was. TASK-411.3: an encrypted segment's framed file, whole, its
+    /// raw data and log still there, is whole to a recovery holding no key, as one's in the clear
+    /// is: checked by its CRCs, never closed again from its raw data.
     #[test]
     fn segments_closed_again_are_framed_under_the_keys_alone() {
         let dir = MemDir::new();
@@ -1217,29 +1227,29 @@ mod tests {
         // Recovered again before it is framed, it holds the same.
         assert_eq!(recover(&dir, BRANCH).unwrap().segments, recovered.segments);
         let dek = extent_frame::Secret::from_bytes(&[3; 32]);
-        let keys = extent_remote::keys::Ring::sealing_for_tests(BRANCH.id, 1, dek, []);
+        let keys = extent_remote::keys::Ring::encrypting_for_tests(BRANCH.id, 1, dek, []);
         recovered.close(&dir, BRANCH, &keys).unwrap();
         assert!(recovered.closing.is_empty());
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
         let path = segment_path(segment(0));
         let read = || read_whole(&dir.open(&path, true).unwrap()).unwrap();
-        let sealed = read();
+        let encrypted = read();
         let key = extent_frame::KeyId { branch: BRANCH.id, generation: 1 };
         assert!(matches!(
-            extent_frame::Frame::of(&sealed).unwrap().seal,
-            extent_frame::Seal::Sealed { key: sealing, .. } if sealing == key
+            extent_frame::Frame::of(&encrypted).unwrap().encryption,
+            extent_frame::Encryption::Encrypted { key: under, .. } if under == key
         ));
-        assert_eq!(extent_frame::data(&sealed, &keys.of(BRANCH.id)).unwrap(), vec![0; 4096]);
+        assert_eq!(extent_frame::data(&encrypted, &keys.of(BRANCH.id)).unwrap(), vec![0; 4096]);
         assert_eq!(
-            extent_frame::data(&sealed, &extent_frame::NoKeys),
+            extent_frame::data(&encrypted, &extent_frame::NoKeys),
             Err(extent_frame::Error::NoKey(key))
         );
-        // Framed whole, sealed, its raw data and log still there.
+        // Framed whole, encrypted, its raw data and log still there.
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         let recovered = recover(&dir, BRANCH).unwrap();
         assert_eq!(recovered.segments, [(footer, 0)]);
         assert!(recovered.closing.is_empty());
-        assert_eq!(read(), sealed);
+        assert_eq!(read(), encrypted);
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 

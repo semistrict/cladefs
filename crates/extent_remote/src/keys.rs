@@ -19,8 +19,8 @@
 //!
 //! **Opening a store** gives every writer and reader of it a [`Ring`]: its branch's DEKs, every
 //! generation of them, and its ancestors', unwrapped under the cell's KEK ([`ring`]); and which of
-//! those branches are sealed, whose objects in the clear its readers refuse ([`Ring::of`],
-//! `extent_frame::Keys::sealed`): a downgrade. A host's fetchers, which share what they keep for
+//! those branches are encrypted, whose objects in the clear its readers refuse ([`Ring::of`],
+//! `extent_frame::Keys::encrypted`): a downgrade. A host's fetchers, which share what they keep for
 //! all its stores, open parts with the union of its stores' rings ([`HostRing`]).
 //!
 //! **Forks into other cells** (doc-16, Forks and shared points; TASK-411.4). A branch's record
@@ -34,7 +34,7 @@
 //! the fork's path. A record without them yet (a fork's child before its keys, a point, a branch
 //! of a cell in the clear) is read by crossing into its ancestors' cells, their KEKs unwrapped by
 //! the KMS, which its first writer then rewraps ([`with_dek`]); a writer of a cell in the clear
-//! inherits nothing sealed ([`Error::Inherited`]): no sealed data goes into the clear.
+//! inherits nothing encrypted ([`Error::Inherited`]): no encrypted data goes into the clear.
 //!
 //! **Pools.** A host wraps new cell KEKs ahead, a pool a tenant, refilled in batches on its
 //! runtime as a take leaves one low, off the fork's path ([`Pooling`]). A tenant whose KEK the KMS
@@ -42,8 +42,8 @@
 //! and no fork inherits its keys, until the KMS answers for it again.
 //!
 //! **Generations.** A record's DEKs are a list of generations, each wrapped by a generation of its
-//! cell's KEK, which it names. New objects are sealed under the newest ([`Ring::sealing`]); the
-//! others stay readable. A generation is added by a conditional update of the record
+//! cell's KEK, which it names. New objects are encrypted under the newest ([`Ring::encrypting`]);
+//! the others stay readable. A generation is added by a conditional update of the record
 //! ([`add_generation`]); rotating a cell's KEK adds a generation of it to the cell's object, then
 //! rewraps every record's DEKs under it, each by a conditional update ([`rotate`]). Older
 //! generations of the cell's KEK stay in its object: a writer that read the cell before a rotation
@@ -52,7 +52,7 @@
 //!
 //! **Shredding** (doc-16, Shredding; TASK-411.7). A tenant is shredded by destroying its KEK in the
 //! KMS, a cell by taking its wrapped KEKs out of its object ([`crate::cell::shred`]): a cell
-//! shredded is sealed and refuses its KEKs, naming itself. A host told either forgets what it
+//! shredded is encrypted and refuses its KEKs, naming itself. A host told either forgets what it
 //! holds of it ([`Host::forget`], a [`Scope`]): its KMS's unwrapped cell KEKs and pool, and its
 //! fetchers' keys of the scope's stores; DEKs other tenants' stores hold, which they inherited,
 //! stay theirs.
@@ -186,18 +186,18 @@ pub fn unwrap_inherited(
 }
 
 /// What a reader of a store's objects holds: the DEKs of its branch and its ancestors, by which
-/// they are, and which of those branches are sealed, whose objects in the clear it refuses; and the
-/// key its writer seals new objects under, its branch's newest, if it writes. Empty: a reader of
-/// branches in the clear, or of metadata alone, as the collector's marking is ([`compacting`]
-/// for its compaction's).
+/// they are, and which of those branches are encrypted, whose objects in the clear it refuses; and
+/// the key its writer encrypts new objects under, its branch's newest, if it writes. Empty: a
+/// reader of branches in the clear, or of metadata alone, as the collector's marking is
+/// ([`compacting`] for its compaction's).
 #[derive(Debug, Default)]
 pub struct Ring {
     deks: HashMap<KeyId, Arc<Secret>>,
     /// The branch, cell and all, of each ID its DEKs are of: what rewrapping them for a branch of
     /// another cell binds them to ([`inherit`]).
     places: HashMap<u64, Branch>,
-    sealed: BTreeSet<u64>,
-    sealing: Option<KeyId>,
+    encrypted: BTreeSet<u64>,
+    encrypting: Option<KeyId>,
     /// The branch whose store it was opened for ([`ring`]): what a host forgetting a tenant's or a
     /// cell's keys goes by ([`HostRing::forget`], TASK-411.7). None for others'.
     owner: Option<Branch>,
@@ -207,33 +207,33 @@ pub struct Ring {
 static CLEAR: LazyLock<Arc<Ring>> = LazyLock::new(Arc::default);
 
 impl Ring {
-    /// The empty ring: of no key, sealing nothing, refusing nothing.
+    /// The empty ring: of no key, encrypting nothing, refusing nothing.
     pub fn clear() -> Arc<Self> {
         CLEAR.clone()
     }
 
     /// Its keys as a reader of the objects of `branch` holds them: that branch's DEKs alone, so
-    /// that an object at a key of one branch sealed under another's DEK is not opened, and its
-    /// objects in the clear refused if it is sealed.
+    /// that an object at a key of one branch encrypted under another's DEK is not opened, and its
+    /// objects in the clear refused if it is encrypted.
     pub fn of(&self, branch: u64) -> View<'_> {
         View { ring: self, branch }
     }
 
-    /// The DEK a writer seals new objects under, and which it is: its branch's newest, if the ring
-    /// is its writer's and its branch sealed.
-    pub fn sealing(&self) -> Option<(&Secret, KeyId)> {
-        let id = self.sealing?;
-        Some((&**self.deks.get(&id).expect("a ring holds the key it seals under"), id))
+    /// The DEK a writer encrypts new objects under, and which it is: its branch's newest, if the
+    /// ring is its writer's and its branch encrypted.
+    pub fn encrypting(&self) -> Option<(&Secret, KeyId)> {
+        let id = self.encrypting?;
+        Some((&**self.deks.get(&id).expect("a ring holds the key it encrypts under"), id))
     }
 
-    /// Whether `branch`'s objects are sealed, as its record says.
-    pub fn is_sealed(&self, branch: u64) -> bool {
-        self.sealed.contains(&branch)
+    /// Whether `branch`'s objects are encrypted, as its record says.
+    pub fn is_encrypted(&self, branch: u64) -> bool {
+        self.encrypted.contains(&branch)
     }
 
     /// Whether it holds no key.
     pub fn is_empty(&self) -> bool {
-        self.deks.is_empty() && self.sealed.is_empty()
+        self.deks.is_empty() && self.encrypted.is_empty()
     }
 
     /// The generations of `branch`'s DEK it holds, in order.
@@ -246,20 +246,20 @@ impl Ring {
 
     /// The branches whose keys it holds.
     pub fn branches(&self) -> BTreeSet<u64> {
-        self.deks.keys().map(|id| id.branch).chain(self.sealed.iter().copied()).collect()
+        self.deks.keys().map(|id| id.branch).chain(self.encrypted.iter().copied()).collect()
     }
 
     /// A writer's ring for tests that hold no KMS: of `branch`'s DEK of `generation`, `dek`, which
-    /// it seals under, and of the others `deks` give, by which they are.
+    /// it encrypts under, and of the others `deks` give, by which they are.
     #[cfg(any(test, feature = "testing"))]
-    pub fn sealing_for_tests(
+    pub fn encrypting_for_tests(
         branch: u64,
         generation: u32,
         dek: Secret,
         deks: impl IntoIterator<Item = (KeyId, Secret)>,
     ) -> Arc<Self> {
         let id = KeyId { branch, generation };
-        let mut ring = Self { sealing: Some(id), ..Self::default() };
+        let mut ring = Self { encrypting: Some(id), ..Self::default() };
         ring.insert(Branch { cell: layout::TEST_CELL, id: branch }, generation, dek);
         for (id, dek) in deks {
             ring.insert(Branch { cell: layout::TEST_CELL, id: id.branch }, id.generation, dek);
@@ -267,20 +267,20 @@ impl Ring {
         Arc::new(ring)
     }
 
-    /// Holds `dek`, `branch`'s of `generation`: the branch is sealed.
+    /// Holds `dek`, `branch`'s of `generation`: the branch is encrypted.
     fn insert(&mut self, branch: Branch, generation: u32, dek: Secret) {
         self.deks.insert(KeyId { branch: branch.id, generation }, Arc::new(dek));
         self.places.insert(branch.id, branch);
-        self.sealed.insert(branch.id);
+        self.encrypted.insert(branch.id);
     }
 
     /// Whether it holds `branch`'s DEKs.
     fn holds(&self, branch: Branch) -> bool {
-        self.sealed.contains(&branch.id)
+        self.encrypted.contains(&branch.id)
     }
 
     /// Adds the keys `record`, `branch`'s, keeps, unwrapped under `keys`, its cell's: its own DEKs,
-    /// the branch sealed if it has any, and those it keeps of ancestors of other cells
+    /// the branch encrypted if it has any, and those it keeps of ancestors of other cells
     /// ([`Inherited`]).
     async fn take(
         &mut self,
@@ -336,14 +336,14 @@ impl Keys for View<'_> {
         (id.branch == self.branch).then(|| self.ring.deks.get(&id).map(|dek| &**dek)).flatten()
     }
 
-    fn sealed(&self) -> bool {
-        self.ring.is_sealed(self.branch)
+    fn encrypted(&self) -> bool {
+        self.ring.is_encrypted(self.branch)
     }
 }
 
 /// The branch the object at `key` is of, by its key: the moves of an object are of that object's
-/// branch, as the collector seals them under the DEK it was sealed under (TASK-411.6). None for one
-/// of no branch's.
+/// branch, as the collector encrypts them under the DEK it was encrypted under (TASK-411.6). None
+/// for one of no branch's.
 pub fn branch_of(key: &str) -> Option<u64> {
     match layout::kind(key) {
         Key::Segment { branch, .. }
@@ -382,7 +382,7 @@ impl Held {
         for ring in self.rings.values() {
             union.deks.extend(ring.deks.iter().map(|(id, dek)| (*id, dek.clone())));
             union.places.extend(ring.places.iter().map(|(id, branch)| (*id, *branch)));
-            union.sealed.extend(ring.sealed.iter().copied());
+            union.encrypted.extend(ring.encrypted.iter().copied());
         }
         self.union = Arc::new(union);
     }
@@ -458,7 +458,7 @@ type Takings = HashMap<(Cell, u32), (Option<(u64, u64)>, Unwrap)>;
 
 /// How a host keeps its pools of new cell KEKs (doc-16, Forks and shared points; TASK-411.4): a
 /// tenant's refilled in batches, on `handle`, off the paths that take from it, once a take leaves
-/// fewer than `low`, or a sealed store of the tenant opens.
+/// fewer than `low`, or an encrypted store of the tenant opens.
 #[derive(Clone, Debug)]
 pub struct Pooling {
     pub low: usize,
@@ -496,7 +496,7 @@ struct Pools {
 /// How long a host believes the KMS that a tenant has no KEK, its cells made in the clear, asking
 /// it nothing for the tenant meanwhile (TASK-411.10): so that a host opening its stores, each
 /// asking for a KEK should its cell be made, calls the KMS once a minute at most, and a tenant
-/// given a KEK has its cells made sealed from a minute on at most. Its cells made before stay in
+/// given a KEK has its cells made encrypted from a minute on at most. Its cells made before stay in
 /// the clear (doc-16, The KMS and how a cell chooses).
 pub const KEKLESS_FOR: Duration = Duration::from_secs(60);
 
@@ -869,7 +869,7 @@ impl CellKeys {
         Self { cell, keks: object.keks.clone(), taking, kms, shredded: object.shredded }
     }
 
-    /// Whether the host reading under them has a KMS, which a cell sealed needs.
+    /// Whether the host reading under them has a KMS, which an encrypted cell needs.
     pub fn has_kms(&self) -> bool {
         self.kms.is_some()
     }
@@ -879,9 +879,9 @@ impl CellKeys {
         self.cell
     }
 
-    /// Whether its branches are sealed: its object keeps a KEK, or it was shredded, its KEKs
+    /// Whether its branches are encrypted: its object keeps a KEK, or it was shredded, its KEKs
     /// refused then ([`CellKeys::kek`]): no branch of it is written in the clear.
-    pub fn sealed(&self) -> bool {
+    pub fn encrypted(&self) -> bool {
         !self.keks.is_empty() || self.shredded
     }
 
@@ -917,13 +917,13 @@ impl CellKeys {
         Ok(keks)
     }
 
-    /// Its newest KEK, unwrapped, and its generation: a cell sealed has one, but a shredded one,
-    /// refused.
+    /// Its newest KEK, unwrapped, and its generation: an encrypted cell has one, but a shredded
+    /// one, refused.
     async fn newest_kek(&self) -> Result<(Arc<Secret>, u32), Error> {
         if self.shredded {
             return Err(crate::cell::shredded(self.cell));
         }
-        let newest = self.newest().expect("a cell sealed has a KEK");
+        let newest = self.newest().expect("an encrypted cell has a KEK");
         Ok((self.kek(newest).await?, newest))
     }
 
@@ -964,21 +964,21 @@ pub fn held(
     CellKeys::of(cell, &object, kms.cloned())
 }
 
-/// `branch`'s record, given its first DEK by a conditional update if its cell is sealed and it has
-/// none: what the branch's writer does as it takes it, a fork's child's record, which its parent's
-/// writers made, naming none (their bytes the same, whoever wrote them), or a new branch's. With
-/// it, in the same update, the DEKs of every ancestor of another cell whose objects it reads,
-/// rewrapped under its cell's KEK ([`Inherited`], TASK-411.4): read by crossing into their cells,
-/// their KEKs unwrapped by the KMS, as a record without its keys is read ([`ring`]). A fork into
-/// another cell gives them as it makes the fork, so that its child's writer finds them there
-/// ([`give_inherited`]); a child whose fork's host failed to is given them here.
+/// `branch`'s record, given its first DEK by a conditional update if its cell is encrypted and it
+/// has none: what the branch's writer does as it takes it, a fork's child's record, which its
+/// parent's writers made, naming none (their bytes the same, whoever wrote them), or a new
+/// branch's. With it, in the same update, the DEKs of every ancestor of another cell whose objects
+/// it reads, rewrapped under its cell's KEK ([`Inherited`], TASK-411.4): read by crossing into
+/// their cells, their KEKs unwrapped by the KMS, as a record without its keys is read ([`ring`]). A
+/// fork into another cell gives them as it makes the fork, so that its child's writer finds them
+/// there ([`give_inherited`]); a child whose fork's host failed to is given them here.
 pub async fn with_dek(
     bucket: &impl Bucket,
     keys: &CellKeys,
     branch: Branch,
     record: Record,
 ) -> Result<Record, Error> {
-    if !keys.sealed() || !record.deks.is_empty() {
+    if !keys.encrypted() || !record.deks.is_empty() {
         return Ok(record);
     }
     let (kek, newest) = keys.newest_kek().await?;
@@ -999,14 +999,14 @@ async fn give_keys(
 }
 
 /// Adds a generation of `branch`'s DEK, the next, by a conditional update of its record: new
-/// objects are sealed under it from the next opening of its store on, the others staying readable
-/// under theirs. Returns the generation.
+/// objects are encrypted under it from the next opening of its store on, the others staying
+/// readable under theirs. Returns the generation.
 pub async fn add_generation(
     bucket: &impl Bucket,
     keys: &CellKeys,
     branch: Branch,
 ) -> Result<u32, Error> {
-    if !keys.sealed() {
+    if !keys.encrypted() {
         return Err(Error::Corrupt(format!("branch {branch}'s cell is in the clear")));
     }
     let found = branch::record(bucket, branch).await?.ok_or(Error::NoBranch)?;
@@ -1117,20 +1117,20 @@ pub async fn rotate(
 }
 
 /// The ring of a store of `branch`, whose record is `record`, of the cell `keys` are of: its
-/// branch's DEKs, every generation, and the newest to seal new objects under if `writes`; those
+/// branch's DEKs, every generation, and the newest to encrypt new objects under if `writes`; those
 /// its record keeps of ancestors of other cells ([`Inherited`]); and its ancestors', along its
 /// origins, each record read. A host with no KMS reads nothing more of a cell in the clear, its
-/// ring empty, its readers refusing what is sealed ([`Error::NoKey`]); one with a KMS walks its
-/// origins as for a sealed one.
+/// ring empty, its readers refusing what is encrypted ([`Error::NoKey`]); one with a KMS walks its
+/// origins as for an encrypted one.
 ///
 /// An ancestor of its cell's is unwrapped under its cell's KEK. One of another cell (TASK-411.4):
 /// a record with its keys holds those of every one it reads, as they were given it with them
-/// ([`with_dek`]), so that it needs no other cell's KEK, a sealed ancestor it holds not refused
+/// ([`with_dek`]), so that it needs no other cell's KEK, an encrypted ancestor it holds not refused
 /// ([`Error::Inherited`]). A record without them yet, a point's, a fork's child's before they are
 /// given, or a branch's of a cell in the clear, is read by crossing into that ancestor's cell, its
 /// object read, its KEK unwrapped by the KMS, its keys and those it inherits taken from there on;
-/// but a writer of a cell in the clear inherits nothing sealed ([`Error::Inherited`]): it could
-/// keep none of its keys, and no sealed data goes into the clear.
+/// but a writer of a cell in the clear inherits nothing encrypted ([`Error::Inherited`]): it could
+/// keep none of its keys, and no encrypted data goes into the clear.
 pub async fn ring(
     bucket: &impl Bucket,
     keys: &CellKeys,
@@ -1138,14 +1138,14 @@ pub async fn ring(
     record: &Record,
     writes: bool,
 ) -> Result<Arc<Ring>, Error> {
-    if !keys.sealed() && !keys.has_kms() {
+    if !keys.encrypted() && !keys.has_kms() {
         return Ok(Ring::clear());
     }
     let mut ring = Ring { owner: Some(branch), ..Ring::default() };
     ring.take(keys, branch, record).await?;
     if writes {
         let newest = record.deks.iter().map(|dek| dek.generation).max();
-        ring.sealing = newest.map(|generation| KeyId { branch: branch.id, generation });
+        ring.encrypting = newest.map(|generation| KeyId { branch: branch.id, generation });
     }
     // Whether its record has its keys, and with them all it inherits from other cells.
     let given = !record.deks.is_empty();
@@ -1167,7 +1167,7 @@ pub async fn ring(
             ring.take(keys, parent, &found).await?;
             continue;
         }
-        if given || (writes && !keys.sealed()) {
+        if given || (writes && !keys.encrypted()) {
             return Err(Error::Inherited { branch, from: parent });
         }
         let theirs = match crossed.entry(parent.cell) {
@@ -1190,12 +1190,12 @@ pub async fn ring(
 }
 
 /// The ring the collector compacts a cell's objects under (TASK-411.6): of `records`, branches of
-/// the cell and their records, those with any DEK sealed, their objects in the clear refused; and,
-/// if `keys`, the cell's, are given, their DEKs and those they keep of ancestors of other cells
-/// ([`Ring::take`]), unwrapped under the generations of its KEK they name, each unwrapped once
-/// ([`CellKeys`] keeps what it unwrapped). It seals nothing of its own: the collector seals what it
-/// compacts under the key its source was sealed under. Without `keys`, it unwraps nothing: what a
-/// pass compacting only objects in the clear holds, asking its KMS nothing.
+/// the cell and their records, those with any DEK encrypted, their objects in the clear refused;
+/// and, if `keys`, the cell's, are given, their DEKs and those they keep of ancestors of other
+/// cells ([`Ring::take`]), unwrapped under the generations of its KEK they name, each unwrapped
+/// once ([`CellKeys`] keeps what it unwrapped). It encrypts nothing of its own: the collector
+/// encrypts what it compacts under the key its source was encrypted under. Without `keys`, it
+/// unwraps nothing: what a pass compacting only objects in the clear holds, asking its KMS nothing.
 pub async fn compacting<'a>(
     records: impl IntoIterator<Item = (Branch, &'a Record)>,
     keys: Option<&CellKeys>,
@@ -1210,7 +1210,7 @@ pub async fn compacting<'a>(
         }
         match keys {
             None => {
-                ring.sealed.insert(branch.id);
+                ring.encrypted.insert(branch.id);
             }
             Some(keys) => ring.take(keys, branch, record).await?,
         }
@@ -1221,9 +1221,9 @@ pub async fn compacting<'a>(
     })
 }
 
-/// The ring `branch`'s writer would hold, its record `record`, to seal what it writes of the
+/// The ring `branch`'s writer would hold, its record `record`, to encrypt what it writes of the
 /// branch's under: its cell's object read, its KEK unwrapped by `kms`, the host's (refused with
-/// none); empty for a branch in the clear, nothing read. What another than its writer seals the
+/// none); empty for a branch in the clear, nothing read. What another than its writer encrypts the
 /// branch's objects under: its deletion's checkpoints at the fork points of its forks to other
 /// cells ([`crate::branch::delete_under`], TASK-411.4).
 pub async fn writing(
@@ -1242,10 +1242,10 @@ pub async fn writing(
     ring(bucket, &keys, branch, record, true).await
 }
 
-/// The keys of a fork's parent that whoever records the fork seals the parent's checkpoint at the
-/// fork point under, if the child is of another cell and the parent sealed (TASK-411.4): those its
-/// writer holds; or, for its deletion, or a failed fork's claim, the host's KMS, with the parent's
-/// record if read, asked only once a checkpoint is to be written ([`writing`]).
+/// The keys of a fork's parent that whoever records the fork authenticates the parent's checkpoint
+/// at the fork point under, if the child is of another cell and the parent encrypted (TASK-411.4):
+/// those its writer holds; or, for its deletion, or a failed fork's claim, the host's KMS, with the
+/// parent's record if read, asked only once a checkpoint is to be written ([`writing`]).
 #[derive(Clone, Copy)]
 pub enum Parents<'a> {
     Held(&'a Arc<Ring>),
@@ -1253,9 +1253,9 @@ pub enum Parents<'a> {
 }
 
 impl Parents<'_> {
-    /// The ring of `parent`, the parent, to seal its checkpoint under: its record read if not
-    /// given; refused if it is sealed and the KMS is none ([`Error::Kms`]), rather than write it
-    /// in the clear, which the child refuses.
+    /// The ring of `parent`, the parent, to authenticate its checkpoint under: its record read if
+    /// not given; refused if it is encrypted and the KMS is none ([`Error::Kms`]), rather than
+    /// write it in the clear, which the child refuses.
     pub async fn ring(self, bucket: &impl Bucket, parent: Branch) -> Result<Arc<Ring>, Error> {
         match self {
             Self::Held(ring) => Ok(ring.clone()),
@@ -1276,7 +1276,8 @@ impl Parents<'_> {
 pub struct Inheriting {
     kms: Arc<Kms>,
     child: Branch,
-    /// An ancestor of another cell than the child's whose objects are sealed: what an error names.
+    /// An ancestor of another cell than the child's whose objects are encrypted: what an error
+    /// names.
     from: Branch,
     source: Arc<Ring>,
     kek: Option<(Arc<Secret>, Kek)>,
@@ -1298,7 +1299,7 @@ impl Drop for Inheriting {
 /// no request more. Asked for before anything of the
 /// fork is made, so that a fork refused makes nothing: refused if `kms`, the host's, last heard
 /// that a tenant of those branches' KEK is revoked or destroyed ([`Kms::revoked`]); if the
-/// child's tenant has no KEK, its cell in the clear ([`Error::Inherited`]: no sealed data goes
+/// child's tenant has no KEK, its cell in the clear ([`Error::Inherited`]: no encrypted data goes
 /// into the clear); or as the KMS refuses a KEK for the child's cell, which comes from the host's
 /// pool, no call made then ([`Kms::new_kek`]).
 pub async fn inheriting(
@@ -1358,7 +1359,7 @@ pub async fn give_inherited(
         }
         false => {
             let keys = CellKeys::of(child.cell, &object, Some(kms));
-            if !keys.sealed() {
+            if !keys.encrypted() {
                 return Err(Error::Inherited { branch: child, from: inheriting.from });
             }
             keys.newest_kek().await?
@@ -1371,7 +1372,7 @@ pub async fn give_inherited(
         .await
 }
 
-/// What a host gives its stores to seal and read under (TASK-411.3): its KMS, if it has one, and
+/// What a host gives its stores to encrypt and read under (TASK-411.3): its KMS, if it has one, and
 /// the keys its fetchers share, of the stores it serves ([`HostRing`], the host's fetchers'
 /// `fetch::Memory::keys`).
 #[derive(Clone, Default)]
@@ -1467,26 +1468,26 @@ mod tests {
     }
 
     /// A ring's keys, as a reader of one branch holds them: that branch's DEKs alone, its objects
-    /// sealed if it has any; a branch of none, in the clear. A host's ring is the union of its
+    /// encrypted if it has any; a branch of none, in the clear. A host's ring is the union of its
     /// stores', each held while its store is open.
     #[test]
     fn rings_hold_each_branchs_keys_for_its_objects_alone() {
         let one = KeyId { branch: 7, generation: 1 };
         let other = KeyId { branch: 8, generation: 1 };
-        let ring = Ring::sealing_for_tests(7, 1, Secret::random(), [(other, Secret::random())]);
+        let ring = Ring::encrypting_for_tests(7, 1, Secret::random(), [(other, Secret::random())]);
         assert!(ring.of(7).dek(one).is_some() && ring.of(8).dek(other).is_some());
         assert!(ring.of(7).dek(other).is_none() && ring.of(8).dek(one).is_none());
-        assert!(ring.of(7).sealed() && ring.of(8).sealed() && !ring.of(9).sealed());
-        assert_eq!(ring.sealing().map(|(_, id)| id), Some(one));
-        assert!(of_key(&ring, &layout::segment(test_branch(8), 3, 1)).sealed());
+        assert!(ring.of(7).encrypted() && ring.of(8).encrypted() && !ring.of(9).encrypted());
+        assert_eq!(ring.encrypting().map(|(_, id)| id), Some(one));
+        assert!(of_key(&ring, &layout::segment(test_branch(8), 3, 1)).encrypted());
         let moves = layout::moves(&layout::segment(test_branch(7), 3, 1), 1).unwrap();
         assert_eq!(branch_of(&moves), Some(7));
-        assert!(!of_key(&ring, &layout::cell(TEST_CELL)).sealed());
+        assert!(!of_key(&ring, &layout::cell(TEST_CELL)).encrypted());
 
         let host = HostRing::new();
         assert!(host.ring().is_empty());
         let held = host.hold(ring.clone());
-        let another = Ring::sealing_for_tests(9, 2, Secret::random(), []);
+        let another = Ring::encrypting_for_tests(9, 2, Secret::random(), []);
         let also = host.hold(another);
         assert_eq!(host.ring().branches(), BTreeSet::from([7, 8, 9]));
         assert_eq!(host.ring().generations(9), [2]);
@@ -1500,7 +1501,7 @@ mod tests {
     /// A cell made with a KEK from the host's pool keeps it wrapped; a taking of it by another
     /// host unwraps it once, however many of its branches it opens at once, and a taking after
     /// that once more; a fork's child of the cell and a point there read their parent's DEK, of
-    /// the cell's; a writer of a cell in the clear inheriting from a sealed branch is refused.
+    /// the cell's; a writer of a cell in the clear inheriting from an encrypted branch is refused.
     #[test]
     fn cell_keys_unwrap_once_a_taking_and_rings_follow_origins() {
         let (_dir, counted, kms) = kms();
@@ -1546,10 +1547,13 @@ mod tests {
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 1));
         assert_eq!(rings[0].branches(), BTreeSet::from([7]));
         assert_eq!(rings[1].branches(), BTreeSet::from([7, 8]));
-        assert_eq!(rings[1].sealing().map(|(_, id)| id), Some(KeyId { branch: 8, generation: 1 }));
+        assert_eq!(
+            rings[1].encrypting().map(|(_, id)| id),
+            Some(KeyId { branch: 8, generation: 1 })
+        );
         assert_eq!(rings[2].branches(), BTreeSet::from([7]));
-        assert_eq!(rings[2].sealing().map(|(_, id)| id), None);
-        let (dek, _) = rings[0].sealing().unwrap();
+        assert_eq!(rings[2].encrypting().map(|(_, id)| id), None);
+        let (dek, _) = rings[0].encrypting().unwrap();
         assert_eq!(
             rings[1].of(7).dek(KeyId { branch: 7, generation: 1 }).unwrap().expose(),
             dek.expose()
@@ -1610,14 +1614,14 @@ mod tests {
     /// TASK-411.4: a fork's child in a cell of another tenant's, before its keys are given, is read
     /// by crossing into its parent's cell, unwrapping its KEK; its first writer gives it its DEK and
     /// the parent's, rewrapped under its own cell's KEK, in one update; from then on its ring needs
-    /// its own cell's KEK alone, the parent's tenant's KEK destroyed, and refuses a sealed ancestor
-    /// its record holds not. Rotating its cell's KEK rewraps what it inherits too.
+    /// its own cell's KEK alone, the parent's tenant's KEK destroyed, and refuses an encrypted
+    /// ancestor its record holds not. Rotating its cell's KEK rewraps what it inherits too.
     #[test]
     fn rings_cross_cells_until_records_hold_what_they_inherit() {
         let (_dir, counted, kms) = kms();
         counted.inner().create(2).unwrap();
         let bucket = Direct(SimBucket::new());
-        // The parent, 7, sealed, in the test cell; a fork's child, 10, in a cell of tenant 2's.
+        // The parent, 7, encrypted, in the test cell; a fork's child, 10, in a cell of tenant 2's.
         let parent = test_branch(7);
         let parents = made_cell(&bucket, &kms, TEST_CELL, 5);
         block_on(branch::create(&bucket, parent, 1)).unwrap();
@@ -1625,7 +1629,7 @@ mod tests {
         let given = block_on(with_dek(&bucket, &parents, parent, record(parent))).unwrap();
         let (dek, _) = block_on(ring(&bucket, &parents, parent, &given, true))
             .unwrap()
-            .sealing()
+            .encrypting()
             .map(|(dek, id)| (Secret::from_bytes(dek.expose()), id))
             .unwrap();
         let child = Branch { cell: Cell { tenant: 2, id: 5 }, id: 10 };
@@ -1708,7 +1712,7 @@ mod tests {
         kms.refill(tenant);
         runtime.block_on(kms.filled(tenant));
         assert_eq!((counted.wraps(), kms.in_pool(tenant)), (7, 0));
-        let source = Ring::sealing_for_tests(7, 1, Secret::random(), []);
+        let source = Ring::encrypting_for_tests(7, 1, Secret::random(), []);
         let child = crate::layout::Child {
             branch: Branch { cell: Cell { tenant: 2, id: 9 }, id: 8 },
             owner: 1,
@@ -1736,7 +1740,7 @@ mod tests {
 
     /// TASK-411.10: a tenant the KMS says has no KEK is believed to have none for
     /// [`KEKLESS_FOR`]: its cells made in the clear, one wrap asked of the KMS however many are,
-    /// the KEK given it meanwhile heard of only then; from then on its cells are made sealed.
+    /// the KEK given it meanwhile heard of only then; from then on its cells are made encrypted.
     #[test]
     fn tenants_without_a_kek_are_asked_for_one_once_a_while() {
         let (_dir, counted, kms) = kms();
@@ -1823,10 +1827,10 @@ mod tests {
         let added = block_on(cell::add_kek(&bucket, held, Kek { generation: 2, ..kek }));
         assert_eq!(added, Err(refused.clone()));
 
-        // Read anew, the cell's keys are refused, sealed though: no branch of it written in the
+        // Read anew, the cell's keys are refused, encrypted though: no branch of it written in the
         // clear, a new one given no DEK.
         let fresh = CellKeys::of(TEST_CELL, &after, Some(other.clone()));
-        assert!(fresh.sealed());
+        assert!(fresh.encrypted());
         assert_eq!(opened(&fresh, ours), Err(refused.clone()));
         let new = test_branch(8);
         block_on(branch::create(&bucket, new, 1)).unwrap();

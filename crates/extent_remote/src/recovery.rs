@@ -21,7 +21,7 @@
 //!
 //! cladefs: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
 //! checkpoints are checked against their MACs under the keys it holds, and those of a branch it
-//! holds sealed refused in the clear. The collector's holds none, reading them as it did.
+//! holds encrypted refused in the clear. The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::keys::Ring;
@@ -744,7 +744,7 @@ async fn moved(bucket: &impl Bucket, branch: Branch, head: Option<&Head>) -> Att
 /// The footer of segment `seq` of `branch` by the writer of `epoch`, if it is there: read by its
 /// object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
 /// segment whole. cladefs: checked against its MAC if `keys` hold its key, and refused in the clear
-/// if they hold its branch sealed (TASK-411.3).
+/// if they hold its branch encrypted (TASK-411.3).
 async fn segment_footer(
     (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
@@ -926,9 +926,9 @@ fn state_at<'a, B: Bucket>(
 /// further along their moves than a reader names them. One there stands, any writer's (TASK-407.6).
 /// [`Error::Lost`] if the state there is gone: no reader recovers a fork from there either.
 ///
-/// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
-/// writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in the
-/// clear (TASK-411.4). Asked for only if it is to be written.
+/// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are encrypted, as
+/// its writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in
+/// the clear (TASK-411.4). Asked for only if it is to be written.
 pub(crate) async fn checkpoint_at(
     bucket: &impl Bucket,
     branch: Branch,
@@ -945,12 +945,12 @@ pub(crate) async fn checkpoint_at(
         return Ok(());
     }
     let keys = keys.ring(bucket, branch).await?;
-    debug_assert!(keys.sealing().is_none_or(|(_, id)| id.branch == branch.id));
+    debug_assert!(keys.encrypting().is_none_or(|(_, id)| id.branch == branch.id));
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
         match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell, false).await {
             Ok(state) => {
-                let checkpoint = crate::checkpoint::encode_under(&state, keys.sealing());
+                let checkpoint = crate::checkpoint::encode_under(&state, keys.encrypting());
                 bucket::create(bucket, &key, checkpoint).await;
                 return Ok(());
             }

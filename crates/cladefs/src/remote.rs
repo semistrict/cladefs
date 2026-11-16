@@ -11,7 +11,7 @@
 //! opening stores reads, the extent daemon, the cladefs CLI's mounts and `cladefsctl` alike: a
 //! `local:///DIR` alone, a directory of tenants' KEKs (`extent_keys::kms::LocalKms`), until real
 //! KMSes come (doc-16). A cell is made encrypted iff the host has a KMS and the cell's tenant has a
-//! KEK there; a host without one makes its cells in the clear, and opens no sealed one.
+//! KEK there; a host without one makes its cells in the clear, and opens no encrypted one.
 
 use crate::Errno;
 use extent_remote::cache::Cache;
@@ -94,12 +94,12 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
         Failure::Remote(Error::Kms(_)) => Some(Errno::EACCES),
-        // cladefs: a sealed branch inherited by one whose record can't hold its keys: a fork of
+        // cladefs: an encrypted branch inherited by one whose record can't hold its keys: a fork of
         // it into a cell in the clear (TASK-411.4).
         Failure::Remote(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
-        // The collector's alone (TASK-395.5). cladefs: data sealed under a key the host doesn't
+        // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
         Failure::Remote(
             Error::Lost(_)
@@ -128,8 +128,8 @@ pub fn runtime() -> Runtime {
 
 /// cladefs: the host's KMS, as `CLADEFS_KMS` names it the first time it is asked for, or [`set_kms`]
 /// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
-/// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
-/// or in the clear, rather than make in the clear what its tenants have it seal.
+/// refusing every call, naming why: the host then opens no encrypted store and makes no cell,
+/// encrypted or in the clear, rather than make in the clear what its tenants have it encrypt.
 pub fn kms() -> Option<Arc<keys::Kms>> {
     KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
         Ok(url) if !url.is_empty() => {
@@ -185,7 +185,7 @@ pub struct Forgotten {
 /// memory: a fenced store's own ring, and its open segment's key, until whoever holds it closes it
 /// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
 /// the pages of extents other stores hold too (a shared point's clone, a public base). On disk,
-/// everything of the scope's is as its keys sealed it: open segments, write-ahead logs, the part
+/// everything of the scope's is as its keys encrypted it: open segments, write-ahead logs, the part
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let fenced = format!("as {scope}'s keys are forgotten: {why}");
@@ -2687,11 +2687,11 @@ mod tests {
     /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
     /// host's KMS: the point's clone into the other tenant's cell keeps the DEK it inherits
     /// rewrapped under its own cell's KEK. The point deleted, the collector run (compacting
-    /// nothing: compaction of sealed objects is TASK-411.6's), and the point's tenant's KEK
+    /// nothing: compaction of encrypted objects is TASK-411.6's), and the point's tenant's KEK
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
     /// no more.
     #[test]
-    fn sealed_points_fork_into_other_tenants_cells_while_shared() {
+    fn encrypted_points_fork_into_other_tenants_cells_while_shared() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {

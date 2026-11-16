@@ -92,8 +92,8 @@ macro_rules! failing {
 /// bytes, [`UPLOAD_BYTES`], so that a host whose stores are far behind holds no more than these
 /// at once, whatever their number (TASK-79.19), and in number.
 ///
-/// cladefs: and the keys it seals and reads under (TASK-411.3): its KMS, if it has one, and the keys
-/// its fetchers share, which each store's are held in while it is open.
+/// cladefs: and the keys it encrypts and reads under (TASK-411.3): its KMS, if it has one, and the
+/// keys its fetchers share, which each store's are held in while it is open.
 #[derive(Clone)]
 pub struct Runtime {
     pub handle: tokio::runtime::Handle,
@@ -128,11 +128,11 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// (TASK-39.4). Deleting it again does nothing. A later placement's branch, whose token is higher,
 /// is not deleted (`extent_remote::Error::Stale`, TASK-45.1).
 ///
-/// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
-/// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). A sealed branch's forks to
-/// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
-/// unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
+/// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from
+/// deleting nothing (`Stale`), and the cell's other volumes' writers going on; then the volume
+/// naming it is taken out of the cell (`extent_remote::cell::forget`, TASK-364). An encrypted
+/// branch's forks to other cells it records get its checkpoint at their fork points under its keys,
+/// its cell's KEK unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
 pub fn delete_branch(
     bucket: &Bucket,
     branch: Branch,
@@ -737,8 +737,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         })
     }
 
-    /// cladefs: the uploader, sealing and reading under `keys`, the host's (TASK-411.3). Before it
-    /// starts.
+    /// cladefs: the uploader, encrypting and reading under `keys`, the host's (TASK-411.3). Before
+    /// it starts.
     pub(crate) fn keyed(self: Arc<Self>, keys: keys::Host) -> Arc<Self> {
         let mut shared = Arc::into_inner(self).expect("an uploader not started");
         shared.keys = keys;
@@ -1034,7 +1034,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None if recovering.base().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
-            // cladefs: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
+            // cladefs: made once its cell is held, which gives it its DEK, if encrypted
+            // (TASK-411.3).
             None => None,
             Some(record) if record.is_point() => {
                 let (state, keys) = self.point(bucket, branch, record).await?;
@@ -1049,8 +1050,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 return Ok(None);
             }
             Some(record) => {
-                // cladefs: recovered under its keys, if its record says it is sealed: its cell's,
-                // as this placement holds it next, unwrapped once for that taking (TASK-411.3).
+                // cladefs: recovered under its keys, if its record says it is encrypted: its
+                // cell's, as this placement holds it next, unwrapped once for that taking
+                // (TASK-411.3).
                 let before = match record.deks.is_empty() {
                     true => Ring::clear(),
                     false => {
@@ -1110,16 +1112,16 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
         };
         let cell_keys = keys::held(kms, branch.cell, object, kek);
-        // cladefs: the host serves a sealed cell of the tenant's: its pool of new cell KEKs, which
-        // forks of its stores into new cells take, filled off this path (TASK-411.4).
+        // cladefs: the host serves an encrypted cell of the tenant's: its pool of new cell KEKs,
+        // which forks of its stores into new cells take, filled off this path (TASK-411.4).
         if let Some(kms) = kms
-            && cell_keys.sealed()
+            && cell_keys.encrypted()
         {
             kms.refill(branch.cell.tenant);
         }
         let token = held.epoch;
         // Its state, once it holds the lease, recovered on from what was found before. cladefs:
-        // under its keys, its DEK given it first if its cell is sealed and it has none: a new
+        // under its keys, its DEK given it first if its cell is encrypted and it has none: a new
         // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
         // under them (TASK-411.3).
         let keyed = |record| self.ring_of(bucket, &cell_keys, branch, record);
@@ -1157,10 +1159,10 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         Ok(Some(writer))
     }
 
-    /// cladefs: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's: its
-    /// record's DEKs, given it its first if its cell is sealed and it has none, and its
-    /// ancestors' (`keys::with_dek`, `keys::ring`, TASK-411.3). Its record is `record`, if read,
-    /// or read now if its cell is sealed.
+    /// cladefs: the keys of the store of `branch`, of the cell `cell_keys` are of, its writer's:
+    /// its record's DEKs, given it its first if its cell is encrypted and it has none, and its
+    /// ancestors' (`keys::with_dek`, `keys::ring`, TASK-411.3). Its record is `record`, if read, or
+    /// read now if its cell is encrypted.
     async fn ring_of(
         &self,
         bucket: &Arc<B>,
@@ -1168,7 +1170,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         branch: extent_remote::layout::Branch,
         record: Option<Record>,
     ) -> Result<Arc<Ring>, Failure> {
-        if !cell_keys.sealed() && !cell_keys.has_kms() {
+        if !cell_keys.encrypted() && !cell_keys.has_kms() {
             return Ok(Ring::clear());
         }
         let record = match record {

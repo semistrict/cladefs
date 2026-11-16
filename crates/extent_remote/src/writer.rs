@@ -23,8 +23,8 @@
 //! while they go: what a host's writers hold at once is bounded, however far behind they are.
 //!
 //! cladefs: a writer holds its store's ring ([`crate::keys::Ring`], TASK-411.3): it recovers the
-//! branch reading under it, and seals its fences and authenticates its checkpoints under its
-//! branch's newest DEK; the segments it is given come sealed by their store.
+//! branch reading under it, and encrypts its fences and authenticates its checkpoints under its
+//! branch's newest DEK; the segments it is given come encrypted by their store.
 
 use crate::bucket::{self, Bucket, Created};
 use crate::fetch::{Budget, Limits, Priority};
@@ -110,7 +110,7 @@ pub struct Writer<B: Bucket> {
     inner: Mutex<Inner>,
     /// What follows the collector's moves with it, if anything does ([`Writer::following`]).
     mover: std::sync::OnceLock<Mover>,
-    /// cladefs: the keys it reads and seals under (TASK-411.3).
+    /// cladefs: the keys it reads and encrypts under (TASK-411.3).
     keys: Arc<Ring>,
 }
 
@@ -293,7 +293,7 @@ impl<B: Bucket> Writer<B> {
         self.branch
     }
 
-    /// cladefs: the keys it reads and seals under (TASK-411.3).
+    /// cladefs: the keys it reads and encrypts under (TASK-411.3).
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
     }
@@ -612,7 +612,7 @@ impl<B: Bucket> Writer<B> {
         let key = layout::checkpoint(self.branch, seq, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
-        let checkpoint = crate::checkpoint::encode_under(&state, self.keys.sealing());
+        let checkpoint = crate::checkpoint::encode_under(&state, self.keys.encrypting());
         bucket::create(&*self.bucket, &key, checkpoint).await;
         {
             let mut held = self.held.lock().await;

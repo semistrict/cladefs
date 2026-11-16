@@ -7,9 +7,9 @@
 //! with a CRC32C; after them, a footer of the rest of the state, the keys of the objects the
 //! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]). A reader
 //! after every extent reads the table whole; one after a single extent reads the footer, and one
-//! block. cladefs: under its branch's DEK, if it has one, authenticated, not sealed
-//! ([`crate::Seal::Authenticated`], TASK-411.3): metadata, which the collector reads holding no
-//! key (doc-16, What is encrypted).
+//! block. cladefs: under its branch's DEK, if it has one, authenticated, not encrypted
+//! ([`crate::Encryption::Authenticated`], TASK-411.3): metadata, which the collector reads holding
+//! no key (doc-16, What is encrypted).
 
 use crate::{Corrupt, Error, KeyId, Keyed, Keys, Secret, crc};
 use serde::{Deserialize, Serialize};
@@ -200,17 +200,17 @@ mod tests {
     }
 
     fn encoded(entries: &[Entry]) -> Vec<u8> {
-        sealed(entries, None)
+        keyed(entries, None)
     }
 
     /// The table of `entries`, authenticated under `key` if given.
-    fn sealed(entries: &[Entry], key: Option<(&Secret, KeyId)>) -> Vec<u8> {
+    fn keyed(entries: &[Entry], key: Option<(&Secret, KeyId)>) -> Vec<u8> {
         let rows =
             entries.iter().map(|entry| (entry.id, entry.key.as_str(), entry.offset, entry.len));
         encode(rows, b"rest".to_vec(), key)
     }
 
-    /// A reader holding `keys`, which holds its objects sealed: a reader of a branch with a DEK.
+    /// A reader holding `keys`, which holds its objects encrypted: a reader of a branch with a DEK.
     struct Holding<'a>(&'a std::collections::HashMap<KeyId, Secret>);
 
     impl Keys for Holding<'_> {
@@ -218,7 +218,7 @@ mod tests {
             self.0.get(&id)
         }
 
-        fn sealed(&self) -> bool {
+        fn encrypted(&self) -> bool {
             true
         }
     }
@@ -226,7 +226,7 @@ mod tests {
     /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; cladefs:
     /// in the clear, and under a key, authenticated, read alike by readers holding it or none, and
     /// refused, changed, by one holding it; one in the clear refused by a reader holding its
-    /// objects sealed (TASK-411.3).
+    /// objects encrypted (TASK-411.3).
     #[test]
     fn tables_hold_their_entries() {
         let id = KeyId { branch: 3, generation: 0 };
@@ -234,7 +234,7 @@ mod tests {
         for key in [None, Some((&keys[&id], id))] {
             for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
                 let entries = entries(count);
-                let bytes = sealed(&entries, key);
+                let bytes = keyed(&entries, key);
                 let (footer, decoded) = decode(&bytes, &keys).unwrap();
                 assert_eq!((footer.rest.as_slice(), &decoded), (&b"rest"[..], &entries), "{count}");
                 assert_eq!(decode(&bytes, &crate::NoKeys), Ok((footer.clone(), entries)));
@@ -242,15 +242,17 @@ mod tests {
                 let expected: Vec<Id> = (0..blocks).map(|block| (3, block * 1820)).collect();
                 assert_eq!(firsts, expected, "{count}");
             }
-            let mut bytes = sealed(&entries(3000), key);
+            let mut bytes = keyed(&entries(3000), key);
             bytes[100] ^= 1;
             assert!(decode(&bytes, &keys).is_err());
         }
         // Authenticated: its entries in the clear, as stored; a part's tag changed, its table's
         // CRC made to match, read by a reader holding no key, refused by one holding it.
-        let bytes = sealed(&entries(10), Some((&keys[&id], id)));
+        let bytes = keyed(&entries(10), Some((&keys[&id], id)));
         let frame = crate::Frame::of(&bytes).unwrap();
-        assert!(matches!(frame.seal, crate::Seal::Authenticated { key, .. } if key == id));
+        assert!(
+            matches!(frame.encryption, crate::Encryption::Authenticated { key, .. } if key == id)
+        );
         let mut tampered = bytes.clone();
         tampered[(frame.table().start + 17) as usize] ^= 1;
         let trailer = tampered.len() - crate::TRAILER as usize;
@@ -261,9 +263,9 @@ mod tests {
             decode(&tampered, &keys).map(|_| ()),
             Err(Corrupt("an object's table, by its MAC".into()).into())
         );
-        // In the clear, refused by a reader holding its objects sealed.
-        let clear = sealed(&entries(10), None);
-        assert_eq!(decode(&clear, &Holding(&keys)).map(|_| ()), Err(Error::Clear));
+        // In the clear, refused by a reader holding its objects encrypted.
+        let clear = keyed(&entries(10), None);
+        assert_eq!(decode(&clear, &Holding(&keys)).map(|_| ()), Err(Error::Unencrypted));
         assert_eq!(decode(&bytes, &Holding(&keys)).map(|(_, entries)| entries), Ok(entries(10)));
     }
 

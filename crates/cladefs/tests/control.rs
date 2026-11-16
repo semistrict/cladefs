@@ -402,7 +402,7 @@ fn health_follows_whether_the_daemon_serves() {
     });
 }
 
-/// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of a sealed cell through its
+/// TASK-411.7, and TASK-411's AC #3 (extentd serving a VM's store of an encrypted cell through its
 /// socket): stores of two cells of a tenant whose KEK the daemon's KMS (`CLADEFS_KMS`) keeps, each
 /// written by its VM, read back, no file of their directories holding what they wrote in the
 /// clear. `ShredCell` takes the first cell's wrapped KEK out of its object and fences its store,
@@ -410,7 +410,7 @@ fn health_follows_whether_the_daemon_serves() {
 /// shredded and fences nothing more. `ForgetTenantKeys`, once the tenant's KEK is destroyed in the
 /// KMS, fences the other. Closed, neither store opens again (PERMISSION_DENIED, EACCES).
 #[test]
-fn sealed_stores_served_and_shredded_through_the_control_api() {
+fn encrypted_stores_served_and_shredded_through_the_control_api() {
     let keys = tempfile::tempdir().unwrap();
     let kms_dir = keys.path().join("kms");
     let kms = extent_keys::kms::LocalKms::open(&kms_dir).unwrap();
@@ -427,7 +427,7 @@ fn sealed_stores_served_and_shredded_through_the_control_api() {
     assert_ne!(branch.cell, other.cell);
     let vms = [daemon.open(&ours, CAPACITY), daemon.open(&sibling, CAPACITY)];
     for (seed, vm) in (1..).zip(&vms) {
-        write(vm, &pattern(seed), b"sealed");
+        write(vm, &pattern(seed), b"encrypted");
     }
     let read = |vm: &cladefs::RemoteExtentStore, seed: u64| {
         let mut data = vec![0; 64 << 10];

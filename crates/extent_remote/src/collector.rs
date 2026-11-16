@@ -67,18 +67,19 @@
 //! checkpoints, after which the moves go too, unless a state's way to its extents still goes through
 //! them.
 //!
-//! cladefs: marking reads metadata alone, which is in the clear in a sealed cell too, holding no key;
-//! compacting copies extents out of objects' data, sealed there, so a pass compacting one unwraps
-//! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
-//! branches' DEKs from their records; and seals each one's moves under the key it was sealed under,
-//! with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting nothing
-//! sealed asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
-//! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, compacts what
-//! is in the clear, and leaves what is sealed, saying so ([`Report::locked`]): a revoked tenant's
-//! compaction stops, its garbage still goes. It records its listing's digest as any pass does, and
-//! what it left ([`Passed::uncompacted`]): a pass after it, the cell unchanged, skips the cell while
-//! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
-//! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
+//! cladefs: marking reads metadata alone, which is in the clear in an encrypted cell too, holding
+//! no key; compacting copies extents out of objects' data, encrypted there, so a pass compacting
+//! one unwraps its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass,
+//! and its branches' DEKs from their records; and encrypts each one's moves under the key it was
+//! encrypted under, with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass
+//! compacting nothing encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had,
+//! the tenant's KEK revoked or destroyed, or the collector having no KMS, the pass marks and
+//! deletes as ever, compacts what is in the clear, and leaves what is encrypted, saying so
+//! ([`Report::locked`]): a revoked tenant's compaction stops, its garbage still goes. It records
+//! its listing's digest as any pass does, and what it left ([`Passed::uncompacted`]): a pass after
+//! it, the cell unchanged, skips the cell while the tenant's KEK is still not to be had, which the
+//! KMS is asked once a sweep, for all of the tenant's cells ([`Heard`], TASK-411.13), and goes
+//! over it in full once it is.
 //!
 //! A branch's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
@@ -120,7 +121,7 @@ use crate::passed::{self, Decided, Deferred, GcLease, Listed, Passed, Taken, Usa
 use crate::record::{self, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
-use extent_frame::{Keys as _, Seal};
+use extent_frame::{Encryption, Keys as _};
 use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
@@ -188,13 +189,13 @@ pub struct Report {
     /// cladefs: the passes that skipped their cells, each unchanged since its last pass, deleting
     /// only what that pass deferred (TASK-395.6).
     pub skipped: usize,
-    /// cladefs: the passes that left objects sealed uncompacted, their cell's KEK not to be had: the
-    /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
-    /// having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and deleted
-    /// what no live branch needs, warning of the cell and why. And those that skipped a cell a
-    /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
+    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had:
+    /// the KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the
+    /// collector having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and
+    /// deleted what no live branch needs, warning of the cell and why. And those that skipped a
+    /// cell a pass before left so, its tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
-    /// cladefs: the objects sealed that those passes would have compacted, or the pass before a
+    /// cladefs: the objects encrypted that those passes would have compacted, or the pass before a
     /// skipping one would have.
     pub uncompacted: usize,
 }
@@ -271,7 +272,7 @@ pub struct Collector {
     options: Options,
     /// cladefs: how its passes hold their cells (TASK-395.5).
     holding: Holding,
-    /// cladefs: the KMS its passes unwrap their cells' KEKs through, to compact what is sealed
+    /// cladefs: the KMS its passes unwrap their cells' KEKs through, to compact what is encrypted
     /// (TASK-411.6): each pass by a [`keys::Kms`] of its own, so that nothing unwrapped outlives
     /// the pass, and a tenant's KEK revoked stops the next. None: they compact only what is in the
     /// clear.
@@ -284,14 +285,14 @@ pub struct Collector {
 
 /// cladefs: what a sweep's passes heard of their cells' tenants' KEKs from the KMS (TASK-411.13):
 /// whether each is to be had, asked once, however many of its passes ask. What a pass goes by over
-/// a cell unchanged since a pass that left objects sealed uncompacted, its cell's KEK not to be had
-/// ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked tenant's
-/// idle cells cost a sweep a lease and a listing each, and the KMS one call for all of them; and
-/// going over it in full, compacting them, once it is. The KMS is asked by a wrap of a key of no
-/// use, which it makes only with the tenant's KEK, revoked, destroyed or failing refusing it as
-/// they refuse an unwrap; a KMS that wraps but unwraps not the cell's KEK (another than the one
-/// that wrapped it) has the cell passed in full, and left so, each sweep, as before. Without a
-/// KMS, none is: the cell is skipped, asking nothing.
+/// a cell unchanged since a pass that left objects encrypted uncompacted, its cell's KEK not to be
+/// had ([`Passed::uncompacted`]): skipping it while the KEK is still not, so that a revoked
+/// tenant's idle cells cost a sweep a lease and a listing each, and the KMS one call for all of
+/// them; and going over it in full, compacting them, once it is. The KMS is asked by a wrap of a
+/// key of no use, which it makes only with the tenant's KEK, revoked, destroyed or failing
+/// refusing it as they refuse an unwrap; a KMS that wraps but unwraps not the cell's KEK (another
+/// than the one that wrapped it) has the cell passed in full, and left so, each sweep, as before.
+/// Without a KMS, none is: the cell is skipped, asking nothing.
 #[derive(Default)]
 pub struct Heard {
     asked: std::sync::Mutex<BTreeMap<u64, Shared<BoxFuture<'static, bool>>>>,
@@ -335,10 +336,10 @@ impl Collector {
         Self { holding, ..self }
     }
 
-    /// cladefs: one whose passes compact objects sealed under their cells' keys, unwrapped through
-    /// `kms`, if given (TASK-411.6): a pass unwraps its cell's KEK only if it compacts an object
-    /// sealed, once for all of them; marking, dry runs and passes compacting nothing sealed ask
-    /// it nothing.
+    /// cladefs: one whose passes compact objects encrypted under their cells' keys, unwrapped
+    /// through `kms`, if given (TASK-411.6): a pass unwraps its cell's KEK only if it compacts an
+    /// object encrypted, once for all of them; marking, dry runs and passes compacting nothing
+    /// encrypted ask it nothing.
     pub fn kms(self, kms: Option<kms::Shared>) -> Self {
         Self { kms, ..self }
     }
@@ -412,8 +413,8 @@ impl Collector {
 
     /// cladefs: a pass over `cell`, which holds its lease as `taken` says, and what the last pass to
     /// end recorded, `recorded`: what it did, and what it records, if anything. A pass after one
-    /// that left objects sealed uncompacted skips the cell only while its tenant's KEK is still not
-    /// to be had, as `heard` says (TASK-411.13).
+    /// that left objects encrypted uncompacted skips the cell only while its tenant's KEK is still
+    /// not to be had, as `heard` says (TASK-411.13).
     async fn collect_held(
         &self,
         bucket: &impl Bucket,
@@ -465,8 +466,8 @@ impl Collector {
         doomed.iter().for_each(|meta| usage.remove(&meta.key, meta.size));
         compacted.iter().for_each(|(key, size)| usage.add(key, *size));
         let decided = Decided::by(&self.options);
-        // cladefs: what it left sealed uncompacted went by its KMS, outside the cell: recorded, so
-        // that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
+        // cladefs: what it left encrypted uncompacted went by its KMS, outside the cell: recorded,
+        // so that the next skips the cell only while the KEK is still not to be had (TASK-411.13).
         let (listing, uncompacted) = (pass.recording.digest, report.uncompacted as u64);
         Ok((report, Some(Passed { listing, decided, deferred, usage, uncompacted })))
     }
@@ -481,7 +482,7 @@ impl Collector {
     /// were marked, and one a writer whose read of the child's record came before writes again
     /// after, the pass over its parent's cell deletes (TASK-395.14). An unchanged dead cell costs
     /// a pass its lease and its listing. What it records: nothing new, if it deleted nothing.
-    /// cladefs: it says what that pass left sealed uncompacted, as left still (TASK-411.13).
+    /// cladefs: it says what that pass left encrypted uncompacted, as left still (TASK-411.13).
     async fn skip(
         &self,
         bucket: &impl Bucket,
@@ -1392,8 +1393,8 @@ fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) ->
 /// were listed at: read once each, as they never change, and forgotten once they are gone. The live
 /// extents of an object are measured against its data, as its trailer says, which its listed size,
 /// compressed (TASK-29), may be far below: before, a mostly dead segment whose data compressed was
-/// never compacted (TASK-293). cladefs: and its trailer's seal says whether compacting it needs its
-/// key, read keyless (TASK-411.6).
+/// never compacted (TASK-293). cladefs: and its trailer's encryption says whether compacting it
+/// needs its key, read keyless (TASK-411.6).
 #[derive(Default)]
 struct Trailers(BTreeMap<String, (Version, u64, Frame)>);
 
@@ -1456,21 +1457,21 @@ async fn trailer(bucket: &impl Bucket, meta: &Meta) -> Result<Option<Frame>, Err
 }
 
 /// An object a pass compacts ([`Pass::compactable`]): as listed, its live extents, and how it is
-/// sealed, as its trailer says.
+/// encrypted, as its trailer says.
 struct Compactable<'a> {
     meta: &'a Meta,
     extents: &'a BTreeMap<ExtentId, Location>,
-    seal: Seal,
+    encryption: Encryption,
 }
 
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
 /// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
 /// size, if it did: those there first, if the pass created them before. cladefs:
 /// it reads the object under `ring`'s keys of its branch, refusing one in the clear of a branch
-/// sealed, and seals its moves under the key the object was sealed under, the DEK of the same
-/// generation, with a salt of their own (TASK-411.6): every reader following the moves read the
-/// object under that key, where a store opened before a newer generation was added holds none of
-/// it. An object in the clear's moves are in the clear.
+/// encrypted, and encrypts its moves under the key the object was encrypted under, the DEK of the
+/// same generation, with a salt of their own (TASK-411.6): every reader following the moves read
+/// the object under that key, where a store opened before a newer generation was added holds none
+/// of it. An object in the clear's moves are in the clear.
 async fn compact_object(
     bucket: &impl Bucket,
     key: &str,
@@ -1482,7 +1483,7 @@ async fn compact_object(
     let keys = keys::of_key(ring, key);
     // Its data, checked: compacting copies none that is corrupt under new CRCs.
     let object_data = layout::data_under(&object.bytes, &keys).map_err(|err| err.reading(key))?;
-    let sealing = match Frame::of(&object.bytes)?.seal.keyed() {
+    let encryption = match Frame::of(&object.bytes)?.encryption.keyed() {
         Some((id, _)) => Some((keys.dek(id).ok_or(Error::NoKey(id))?, id)),
         None => None,
     };
@@ -1499,7 +1500,7 @@ async fn compact_object(
     }
     // Its own moves of it, created before, stand.
     let footer = Moves { of: key.to_owned(), extents: entries };
-    let bytes = layout::with_footer_under(&data, &footer, sealing);
+    let bytes = layout::with_footer_under(&data, &footer, encryption);
     let size = match bucket::create(bucket, &moves, bytes.clone()).await {
         Created::Created => bytes.len() as u64,
         Created::Exists(stood) => stood.meta.size,
@@ -1678,7 +1679,7 @@ impl Pass {
 
     /// The objects mostly freed, as the lengths of their data in their trailers say
     /// ([`Trailers`]): those [`Pass::compact`] compacts, each with its live extents, which take
-    /// less than `options`' fraction of it, and its seal.
+    /// less than `options`' fraction of it, and its encryption.
     async fn compactable(
         &self,
         bucket: &impl Bucket,
@@ -1701,11 +1702,11 @@ impl Pass {
         Ok((ours.into_iter())
             .filter_map(|(meta, extents)| {
                 let frame = trailers.known(meta)?;
-                let seal = frame.seal;
+                let encryption = frame.encryption;
                 below(extents, options, frame.data_len).then_some(Compactable {
                     meta,
                     extents,
-                    seal,
+                    encryption,
                 })
             })
             .collect())
@@ -1717,7 +1718,7 @@ impl Pass {
     /// is compacted only where no moves of it were listed, and moves only where they were, never
     /// both of one way. They all end before the pass works out what goes, as one at a time: what
     /// goes is of the listing before, which none of their moves is in. The moves' keys and sizes.
-    /// cladefs: those sealed under their branches' DEKs, unwrapped under the cell's KEK through
+    /// cladefs: those encrypted under their branches' DEKs, unwrapped under the cell's KEK through
     /// `kms` once for the pass, and only if one is to be compacted ([`Pass::compacting`],
     /// TASK-411.6).
     async fn compact(
@@ -1749,13 +1750,14 @@ impl Pass {
     }
 
     /// cladefs: the keys `compactable`'s objects are compacted under ([`keys::compacting`],
-    /// TASK-411.6): which of their branches are sealed, as the pass's records of them say, whose
-    /// objects in the clear are refused; and, if any of the objects is sealed, those branches' DEKs,
-    /// unwrapped under the cell's KEK by a [`keys::Kms`] of this pass's over `kms`, each generation
-    /// of the KEK once: the pass's one call of the KMS, however many objects it compacts. None of
-    /// them sealed, it asks nothing. The KEK not to be had, `kms` refusing it (a tenant's KEK
-    /// revoked or destroyed, the KMS failing) or none given, the objects sealed are left
-    /// uncompacted, counted in `report` and warned of, and the pass goes on with those in the clear.
+    /// TASK-411.6): which of their branches are encrypted, as the pass's records of them say,
+    /// whose objects in the clear are refused; and, if any of the objects is encrypted, those
+    /// branches' DEKs, unwrapped under the cell's KEK by a [`keys::Kms`] of this pass's over `kms`,
+    /// each generation of the KEK once: the pass's one call of the KMS, however many objects it
+    /// compacts. None of them encrypted, it asks nothing. The KEK not to be had, `kms` refusing it
+    /// (a tenant's KEK revoked or destroyed, the KMS failing) or none given, the objects encrypted
+    /// are left uncompacted, counted in `report` and warned of, and the pass goes on with those in
+    /// the clear.
     async fn compacting(
         &self,
         bucket: &impl Bucket,
@@ -1769,8 +1771,9 @@ impl Pass {
             .filter(|(branch, _)| branches.contains(&branch.id))
             .map(|(&branch, record)| (branch, record))
             .collect();
-        let sealed = compactable.iter().filter(|object| object.seal.keyed().is_some()).count();
-        if sealed == 0 {
+        let encrypted =
+            compactable.iter().filter(|object| object.encryption.keyed().is_some()).count();
+        if encrypted == 0 {
             return keys::compacting(records, None).await;
         }
         let cell = self.cell;
@@ -1783,11 +1786,11 @@ impl Pass {
             Err(Error::Kms(why)) => {
                 log::warn!(
                     cell:%, why:%;
-                    "cladefs-gc: cell {cell}: {sealed} objects sealed left uncompacted: {why}"
+                    "cladefs-gc: cell {cell}: {encrypted} objects encrypted left uncompacted: {why}"
                 );
                 report.locked += 1;
-                report.uncompacted += sealed;
-                compactable.retain(|object| object.seal.keyed().is_none());
+                report.uncompacted += encrypted;
+                compactable.retain(|object| object.encryption.keyed().is_none());
                 keys::compacting(records, None).await
             }
             ring => ring,
@@ -3912,12 +3915,12 @@ mod tests {
         })
     }
 
-    /// TASK-411.2: compacting an object sealed under a key the ring given doesn't hold copies none
-    /// of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
+    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies
+    /// none of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
     /// compacts under its cell's keys, TASK-411.6, or leaves it); its twin in the clear is
     /// compacted, its live extent copied to its moves.
     #[test]
-    fn objects_sealed_are_not_compacted_without_their_keys() {
+    fn objects_encrypted_are_not_compacted_without_their_keys() {
         let id = extent_frame::KeyId { branch: 1, generation: 0 };
         let dek = extent_frame::Secret::from_bytes(&[3; 32]);
         let key = layout::segment(test_branch(1), 0, 1);
@@ -3927,13 +3930,13 @@ mod tests {
             BTreeMap::from([(live, Location { key: key.clone(), offset: 4096, len: 4096 })]);
         let footer = layout::encode(&());
         block_on(async {
-            let sealed = Direct(SimBucket::new());
+            let encrypted = Direct(SimBucket::new());
             let object = extent_frame::framed(&data, &footer, Some((&dek, id)));
-            assert!(matches!(bucket::create(&sealed, &key, object).await, Created::Created));
-            let before = held(&sealed).await;
-            let compacted = compact_object(&sealed, &key, &extents, (&Ring::clear(), 1)).await;
+            assert!(matches!(bucket::create(&encrypted, &key, object).await, Created::Created));
+            let before = held(&encrypted).await;
+            let compacted = compact_object(&encrypted, &key, &extents, (&Ring::clear(), 1)).await;
             assert_eq!(compacted, Err(Error::NoKey(id)));
-            assert_eq!(held(&sealed).await, before);
+            assert_eq!(held(&encrypted).await, before);
 
             let clear = Direct(SimBucket::new());
             let object = extent_frame::framed(&data, &footer, None);
@@ -5741,10 +5744,11 @@ mod tests {
         });
     }
 
-    /// TASK-411.6: what the tests of compacting sealed cells share: a bucket; a KMS holding the KEK
-    /// of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of branch 1 of the cell,
-    /// sealed, its record's DEK wrapped under the cell's KEK, holding the ring its store holds.
-    struct Sealed {
+    /// TASK-411.6: what the tests of compacting encrypted cells share: a bucket; a KMS holding the
+    /// KEK of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of branch 1 of the
+    /// cell, encrypted, its record's DEK wrapped under the cell's KEK, holding the ring its store
+    /// holds.
+    struct Encrypted {
         bucket: Arc<Store>,
         counted: Arc<Counted<LocalKms>>,
         kms: kms::Shared,
@@ -5755,10 +5759,10 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// The segments [`Sealed::mostly_freed`] writes.
-    const SEALED_SEGMENTS: u64 = 3;
+    /// The segments [`Encrypted::mostly_freed`] writes.
+    const ENCRYPTED_SEGMENTS: u64 = 3;
 
-    impl Sealed {
+    impl Encrypted {
         /// The cell made by a host with a KEK it wrapped, its branch 1 given a DEK by its writer,
         /// as `extent_store` makes them; the KMS's calls since counted from none.
         async fn new() -> Self {
@@ -5789,7 +5793,7 @@ mod tests {
             Self { bucket, counted, kms, writer, ring, cell, _dir: dir }
         }
 
-        /// The KMS's wraps and unwraps, since [`Sealed::new`] or the last reset.
+        /// The KMS's wraps and unwraps, since [`Encrypted::new`] or the last reset.
         fn calls(&self) -> (u64, u64) {
             (self.counted.wraps(), self.counted.unwraps())
         }
@@ -5799,21 +5803,22 @@ mod tests {
             Collector::new(options).kms(Some(self.kms.clone()))
         }
 
-        /// `commit`, in a segment of its own sealed under the branch's DEK, uploaded and
+        /// `commit`, in a segment of its own encrypted under the branch's DEK, uploaded and
         /// acknowledged.
         async fn commit(&self, commit: Commit) {
             let objects = Batch::from(commit).close(&mut self.writer.chain());
-            let seq = self.writer.add_segment(objects.frame_under(self.ring.sealing())).unwrap();
+            let seq = self.writer.add_segment(objects.frame_under(self.ring.encrypting())).unwrap();
             self.writer.upload(seq).await.unwrap();
             self.writer.acknowledge().await.unwrap();
         }
 
-        /// [`SEALED_SEGMENTS`] segments, each of an extent kept, of [`kept`]'s data, and a larger one
-        /// freed after, then a checkpoint past them: what a pass compacting below a half compacts.
+        /// [`ENCRYPTED_SEGMENTS`] segments, each of an extent kept, of [`kept`]'s data, and a
+        /// larger one freed after, then a checkpoint past them: what a pass compacting below a half
+        /// compacts.
         /// The extents kept, each with its segment's key.
         async fn mostly_freed(&self) -> Vec<(ExtentId, String)> {
             let (mut kept_at, mut frees) = (Vec::new(), Vec::new());
-            for n in 0..SEALED_SEGMENTS {
+            for n in 0..ENCRYPTED_SEGMENTS {
                 let first = self.writer.chain().next_sequence();
                 let (small, large) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
                 let extents = vec![(small, kept(n)), (large, vec![b'f'; 20_000])];
@@ -5821,7 +5826,7 @@ mod tests {
                 kept_at.push((small, self.writer.location(small).unwrap().key));
                 frees.push(large);
             }
-            self.commit(Commit { tag: SEALED_SEGMENTS + 1, frees, ..Commit::default() }).await;
+            self.commit(Commit { tag: ENCRYPTED_SEGMENTS + 1, frees, ..Commit::default() }).await;
             self.writer.checkpoint().await.unwrap();
             kept_at
         }
@@ -5831,12 +5836,12 @@ mod tests {
         async fn checkpointed(&self) {
             let extent = ExtentId::new(1, self.writer.chain().next_sequence());
             let extents = vec![(extent, b"more".to_vec())];
-            self.commit(Commit { tag: SEALED_SEGMENTS + 2, extents, ..Commit::default() }).await;
+            self.commit(Commit { tag: ENCRYPTED_SEGMENTS + 2, extents, ..Commit::default() }).await;
             self.writer.checkpoint().await.unwrap();
         }
     }
 
-    /// The data of the extent kept in segment `n` of [`Sealed::mostly_freed`]'s: of no bytes
+    /// The data of the extent kept in segment `n` of [`Encrypted::mostly_freed`]'s: of no bytes
     /// repeated, so that a window of it is found nowhere else.
     fn kept(n: u64) -> Vec<u8> {
         let mut state = (n + 1).wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
@@ -5866,51 +5871,55 @@ mod tests {
         fetcher.read(extent, location, 0, location.len, demand).await
     }
 
-    /// The seal of the object at `key`, as its trailer says.
-    async fn seal_at(bucket: &impl Bucket, key: &str) -> Seal {
+    /// The encryption of the object at `key`, as its trailer says.
+    async fn encryption_at(bucket: &impl Bucket, key: &str) -> Encryption {
         let bytes = bucket::get(bucket, key).await.unwrap().bytes;
-        Frame::of(&bytes).unwrap().seal
+        Frame::of(&bytes).unwrap().encryption
     }
 
-    /// TASK-411.6, AC #1, #2: a pass compacting a sealed cell's objects mostly freed unwraps the
-    /// cell's KEK through the KMS once for them all, and seals each one's moves under the DEK its
-    /// segment was sealed under, of the same generation, with a salt of their own, holding none of
-    /// their data in the clear. A reader holding the branch's keys reads the extents moved, from
-    /// where their writer named them, their segments gone, and from the moves its next checkpoint
-    /// names; one holding none reads none of them. Passes that compact nothing (none below their
-    /// fraction, or nothing left to compact) and dry runs ask the KMS nothing.
+    /// TASK-411.6, AC #1, #2: a pass compacting an encrypted cell's objects mostly freed unwraps
+    /// the cell's KEK through the KMS once for them all, and encrypts each one's moves under the
+    /// DEK its segment was encrypted under, of the same generation, with a salt of their own,
+    /// holding none of their data in the clear. A reader holding the branch's keys reads the
+    /// extents moved, from where their writer named them, their segments gone, and from the moves
+    /// its next checkpoint names; one holding none reads none of them. Passes that compact nothing
+    /// (none below their fraction, or nothing left to compact) and dry runs ask the KMS nothing.
     #[test]
-    fn sealed_cells_are_compacted_under_their_keys_unwrapped_once_a_pass() {
+    fn encrypted_cells_are_compacted_under_their_keys_unwrapped_once_a_pass() {
         block_on(async {
-            let sealed = Sealed::new().await;
-            let kept_at = sealed.mostly_freed().await;
+            let encrypted = Encrypted::new().await;
+            let kept_at = encrypted.mostly_freed().await;
             let dek = KeyId { branch: 1, generation: keys::FIRST };
             let compacting = Options { compact_below: 0.5, grace: 0 };
 
             // Marking alone, compacting nothing, and a dry run: no call.
-            let report = sealed.collector(KEEP).collect(&*sealed.bucket, 1).await.unwrap();
+            let report = encrypted.collector(KEEP).collect(&*encrypted.bucket, 1).await.unwrap();
             assert_eq!((report.compacted, report.locked), (0, 0));
-            let dry = sealed.collector(compacting);
-            let dry = dry.dry_run_cell(&*sealed.bucket, layout::TEST_CELL).await.unwrap();
-            assert_eq!(dry.compactable.len(), SEALED_SEGMENTS as usize);
-            assert_eq!(sealed.calls(), (0, 0));
+            let dry = encrypted.collector(compacting);
+            let dry = dry.dry_run_cell(&*encrypted.bucket, layout::TEST_CELL).await.unwrap();
+            assert_eq!(dry.compactable.len(), ENCRYPTED_SEGMENTS as usize);
+            assert_eq!(encrypted.calls(), (0, 0));
 
             // Compacting them: one unwrap for the three.
-            let mut collector = sealed.collector(compacting);
-            let report = collector.collect(&*sealed.bucket, 2).await.unwrap();
+            let mut collector = encrypted.collector(compacting);
+            let report = collector.collect(&*encrypted.bucket, 2).await.unwrap();
             assert_eq!(
                 (report.compacted, report.locked, report.uncompacted),
-                (SEALED_SEGMENTS as usize, 0, 0)
+                (ENCRYPTED_SEGMENTS as usize, 0, 0)
             );
-            assert_eq!(sealed.calls(), (0, 1));
-            let objects = held(&*sealed.bucket).await;
+            assert_eq!(encrypted.calls(), (0, 1));
+            let objects = held(&*encrypted.bucket).await;
             for (n, (_, segment)) in kept_at.iter().enumerate() {
-                let moves = moves_at(&*sealed.bucket, segment).await.unwrap();
-                let (Seal::Sealed { key, salt }, Seal::Sealed { key: of, salt: of_salt }) = (
-                    seal_at(&*sealed.bucket, &moves).await,
-                    seal_at(&*sealed.bucket, segment).await,
-                ) else {
-                    panic!("{moves} or {segment} not sealed");
+                let moves = moves_at(&*encrypted.bucket, segment).await.unwrap();
+                let (
+                    Encryption::Encrypted { key, salt },
+                    Encryption::Encrypted { key: of, salt: of_salt },
+                ) = (
+                    encryption_at(&*encrypted.bucket, &moves).await,
+                    encryption_at(&*encrypted.bucket, segment).await,
+                )
+                else {
+                    panic!("{moves} or {segment} not encrypted");
                 };
                 assert_eq!((key, of), (dek, dek));
                 assert_ne!(salt, of_salt);
@@ -5922,56 +5931,60 @@ mod tests {
             }
 
             // The next deletes the segments compacted, compacting nothing: no call more.
-            let report = collector.collect(&*sealed.bucket, 3).await.unwrap();
+            let report = collector.collect(&*encrypted.bucket, 3).await.unwrap();
             assert_eq!((report.compacted, report.locked), (0, 0));
-            let left = keys(&*sealed.bucket).await;
+            let left = keys(&*encrypted.bucket).await;
             assert!(kept_at.iter().all(|(_, segment)| !left.contains(segment)), "{left:?}");
-            assert_eq!(sealed.calls(), (0, 1));
+            assert_eq!(encrypted.calls(), (0, 1));
 
             // Read where their writer named them, followed to their moves; then where its next
             // checkpoint names them.
             for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let at = sealed.writer.location(*extent).unwrap();
+                let at = encrypted.writer.location(*extent).unwrap();
                 assert_eq!((at.key.as_str(), at.len), (segment.as_str(), 4096));
-                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
-                let keyless = read_holding(&sealed.bucket, &Ring::clear(), *extent, &at).await;
+                let keyless = read_holding(&encrypted.bucket, &Ring::clear(), *extent, &at).await;
                 assert_eq!(keyless, Err(Error::NoKey(dek)));
             }
-            sealed.checkpointed().await;
+            encrypted.checkpointed().await;
             for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let at = sealed.writer.location(*extent).unwrap();
-                assert_eq!(Some(at.key.clone()), moves_at(&*sealed.bucket, segment).await);
-                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                let at = encrypted.writer.location(*extent).unwrap();
+                assert_eq!(Some(at.key.clone()), moves_at(&*encrypted.bucket, segment).await);
+                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
             }
-            assert_eq!(sealed.calls(), (0, 1));
+            assert_eq!(encrypted.calls(), (0, 1));
         });
     }
 
-    /// TASK-411.6: an object sealed under a DEK's generation older than its record's newest is
-    /// compacted to moves sealed under its own: a store opened before the newer was added, which
+    /// TASK-411.6: an object encrypted under a DEK's generation older than its record's newest is
+    /// compacted to moves encrypted under its own: a store opened before the newer was added, which
     /// holds none of it, reads the extents moved.
     #[test]
-    fn moves_are_sealed_under_the_generation_their_objects_were() {
+    fn moves_are_encrypted_under_the_generation_their_objects_were() {
         block_on(async {
-            let sealed = Sealed::new().await;
-            let kept_at = sealed.mostly_freed().await;
+            let encrypted = Encrypted::new().await;
+            let kept_at = encrypted.mostly_freed().await;
             let branch = test_branch(1);
-            let added = keys::add_generation(&*sealed.bucket, &sealed.cell, branch).await.unwrap();
+            let added =
+                keys::add_generation(&*encrypted.bucket, &encrypted.cell, branch).await.unwrap();
             assert_eq!(added, keys::FIRST + 1);
-            assert_eq!(sealed.ring.generations(1), [keys::FIRST]);
-            let mut collector = sealed.collector(Options { compact_below: 0.5, grace: 0 });
-            let report = collector.collect(&*sealed.bucket, 1).await.unwrap();
-            assert_eq!(report.compacted, SEALED_SEGMENTS as usize);
-            collector.collect(&*sealed.bucket, 2).await.unwrap();
+            assert_eq!(encrypted.ring.generations(1), [keys::FIRST]);
+            let mut collector = encrypted.collector(Options { compact_below: 0.5, grace: 0 });
+            let report = collector.collect(&*encrypted.bucket, 1).await.unwrap();
+            assert_eq!(report.compacted, ENCRYPTED_SEGMENTS as usize);
+            collector.collect(&*encrypted.bucket, 2).await.unwrap();
             for (n, (extent, segment)) in kept_at.iter().enumerate() {
-                let moves = moves_at(&*sealed.bucket, segment).await.unwrap();
-                let seal = seal_at(&*sealed.bucket, &moves).await;
+                let moves = moves_at(&*encrypted.bucket, segment).await.unwrap();
+                let encryption = encryption_at(&*encrypted.bucket, &moves).await;
                 let first = KeyId { branch: 1, generation: keys::FIRST };
-                assert!(matches!(seal, Seal::Sealed { key, .. } if key == first), "{seal:?}");
-                let at = sealed.writer.location(*extent).unwrap();
-                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                assert!(
+                    matches!(encryption, Encryption::Encrypted { key, .. } if key == first),
+                    "{encryption:?}"
+                );
+                let at = encrypted.writer.location(*extent).unwrap();
+                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
             }
         });
@@ -5993,28 +6006,28 @@ mod tests {
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 0));
         for segment in &segments {
             let moves = bucket.served(moves_at(&*bucket, segment)).0.unwrap();
-            let (seal, _) = bucket.served(seal_at(&*bucket, &moves));
-            assert_eq!(seal, Seal::Clear, "{moves}");
+            let (encryption, _) = bucket.served(encryption_at(&*bucket, &moves));
+            assert_eq!(encryption, Encryption::None, "{moves}");
         }
     }
 
     /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
-    /// what no live branch needs, but compacts none of what is sealed, saying so in its report, as
-    /// one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records its
-    /// listing's digest and what it left, so that a pass after it, the cell unchanged, skips it,
-    /// asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still not to
-    /// be had (no call at all without a KMS), saying what is left; a write to the cell has the next
-    /// go over it in full; and the KEK given back, the next compacts.
+    /// what no live branch needs, but compacts none of what is encrypted, saying so in its report,
+    /// as one of a collector with no KMS does, which asks none. TASK-411.13, AC #1, #2: it records
+    /// its listing's digest and what it left, so that a pass after it, the cell unchanged, skips
+    /// it, asking its lease and a listing, and the KMS one wrap, refused, while the KEK is still
+    /// not to be had (no call at all without a KMS), saying what is left; a write to the cell has
+    /// the next go over it in full; and the KEK given back, the next compacts.
     #[test]
     fn cells_of_revoked_tenants_are_marked_and_swept_but_not_compacted() {
         block_on(async {
-            let sealed = Sealed::new().await;
-            let kept_at = sealed.mostly_freed().await;
+            let encrypted = Encrypted::new().await;
+            let kept_at = encrypted.mostly_freed().await;
             let compacting = Options { compact_below: 0.5, grace: 0 };
             let locked = |report: Report| (report.compacted, report.locked, report.uncompacted);
-            let segments = SEALED_SEGMENTS as usize;
+            let segments = ENCRYPTED_SEGMENTS as usize;
             // A pass's report, and the requests it made, by kind.
-            let bucket = &sealed.bucket;
+            let bucket = &encrypted.bucket;
             let pass = |collector: Collector, holder| async move {
                 let mut collector = collector;
                 let before = bucket.stats().requests;
@@ -6031,12 +6044,12 @@ mod tests {
             };
             let idle = vec![(Request::Get, 1), (Request::List, 1), (Request::Update, 1)];
 
-            // No KMS: no call, the sealed left.
-            let before = keys(&*sealed.bucket).await;
+            // No KMS: no call, the encrypted left.
+            let before = keys(&*encrypted.bucket).await;
             let (report, _) = pass(Collector::new(compacting), 1).await;
             assert_eq!(locked(report), (0, 1, segments));
-            assert_eq!(sealed.calls(), (0, 0));
-            let after = keys(&*sealed.bucket).await;
+            assert_eq!(encrypted.calls(), (0, 0));
+            let after = keys(&*encrypted.bucket).await;
             assert_eq!(report.deleted, before.len() - after.len());
             assert_eq!(report.deleted, 1);
             assert!(after.iter().all(|key| !matches!(layout::kind(key), Kind::Moves { .. })));
@@ -6048,49 +6061,49 @@ mod tests {
             let skipped =
                 Report { skipped: 1, locked: 1, uncompacted: segments, ..Report::default() };
             assert_eq!((report, made), (skipped, idle.clone()));
-            assert_eq!(sealed.calls(), (0, 0));
+            assert_eq!(encrypted.calls(), (0, 0));
 
             // Revoked: skipped still, each pass asking the KMS one wrap, refused.
-            sealed.counted.inner().revoke(layout::TEST_CELL.tenant).unwrap();
+            encrypted.counted.inner().revoke(layout::TEST_CELL.tenant).unwrap();
             for holder in [4, 5] {
-                let (report, made) = pass(sealed.collector(compacting), holder).await;
+                let (report, made) = pass(encrypted.collector(compacting), holder).await;
                 assert_eq!((report, made), (skipped, idle.clone()));
             }
-            assert_eq!(sealed.calls(), (2, 0));
-            assert_eq!(keys(&*sealed.bucket).await, after);
+            assert_eq!(encrypted.calls(), (2, 0));
+            assert_eq!(keys(&*encrypted.bucket).await, after);
             // Written to: in full, its unwrap refused, left again, deleting what the write left
             // behind; the next in full too, the cell changed by that; then skipped again.
-            sealed.checkpointed().await;
+            encrypted.checkpointed().await;
             let full = |report: Report| (locked(report), report.skipped, report.deleted);
-            let (report, made) = pass(sealed.collector(compacting), 6).await;
+            let (report, made) = pass(encrypted.collector(compacting), 6).await;
             assert_eq!(full(report), ((0, 1, segments), 0, 1));
             assert!(made.len() > idle.len(), "{made:?}");
-            let (report, _) = pass(sealed.collector(compacting), 7).await;
+            let (report, _) = pass(encrypted.collector(compacting), 7).await;
             assert_eq!(full(report), ((0, 1, segments), 0, 0));
-            assert_eq!(sealed.calls(), (2, 2));
-            let (report, made) = pass(sealed.collector(compacting), 8).await;
+            assert_eq!(encrypted.calls(), (2, 2));
+            let (report, made) = pass(encrypted.collector(compacting), 8).await;
             assert_eq!((report, made), (skipped, idle.clone()));
-            assert_eq!(sealed.calls(), (3, 2));
+            assert_eq!(encrypted.calls(), (3, 2));
 
             // Given back: the KMS wraps, the cell gone over in full, compacted.
-            sealed.counted.inner().unrevoke(layout::TEST_CELL.tenant).unwrap();
-            let (report, _) = pass(sealed.collector(compacting), 9).await;
+            encrypted.counted.inner().unrevoke(layout::TEST_CELL.tenant).unwrap();
+            let (report, _) = pass(encrypted.collector(compacting), 9).await;
             assert_eq!(full(report), ((segments, 0, 0), 0, 0));
-            assert_eq!(sealed.calls(), (4, 3));
+            assert_eq!(encrypted.calls(), (4, 3));
             for (n, (extent, _)) in kept_at.iter().enumerate() {
-                let at = sealed.writer.location(*extent).unwrap();
-                let read = read_holding(&sealed.bucket, &sealed.ring, *extent, &at).await;
+                let at = encrypted.writer.location(*extent).unwrap();
+                let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
             }
             // Compacted, the next deletes what was, recording nothing left; then skipped, asking
             // the KMS nothing.
-            let (report, _) = pass(sealed.collector(compacting), 10).await;
+            let (report, _) = pass(encrypted.collector(compacting), 10).await;
             assert_eq!(full(report), ((0, 0, 0), 0, segments));
-            let (report, _) = pass(sealed.collector(compacting), 11).await;
+            let (report, _) = pass(encrypted.collector(compacting), 11).await;
             assert_eq!(full(report), ((0, 0, 0), 0, 0));
-            let (report, made) = pass(sealed.collector(compacting), 12).await;
+            let (report, made) = pass(encrypted.collector(compacting), 12).await;
             assert_eq!((report, made), (Report { skipped: 1, ..Report::default() }, idle));
-            assert_eq!(sealed.calls(), (4, 3));
+            assert_eq!(encrypted.calls(), (4, 3));
         });
     }
 
@@ -6116,39 +6129,39 @@ mod tests {
         assert_eq!(counted.wraps(), 3);
     }
 
-    /// TASK-411.6, AC #4: the moves of a sealed object, copied whole to the key of another's moves
-    /// of its branch, are refused there, by readers holding the branch's keys and by those holding
-    /// none: their footer, which its MAC covers, names the object they are the moves of
+    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's
+    /// moves of its branch, are refused there, by readers holding the branch's keys and by those
+    /// holding none: their footer, which its MAC covers, names the object they are the moves of
     /// (TASK-411.3). Their footer made to name the other, framed anew in the clear, which needs no
     /// key, is a downgrade, refused by readers holding the keys.
     #[test]
-    fn sealed_moves_copied_to_another_key_of_their_branch_are_refused() {
+    fn encrypted_moves_copied_to_another_key_of_their_branch_are_refused() {
         block_on(async {
-            let sealed = Sealed::new().await;
-            let kept_at = sealed.mostly_freed().await;
-            let mut collector = sealed.collector(Options { compact_below: 0.5, grace: 0 });
-            collector.collect(&*sealed.bucket, 1).await.unwrap();
-            collector.collect(&*sealed.bucket, 2).await.unwrap();
-            sealed.checkpointed().await;
+            let encrypted = Encrypted::new().await;
+            let kept_at = encrypted.mostly_freed().await;
+            let mut collector = encrypted.collector(Options { compact_below: 0.5, grace: 0 });
+            collector.collect(&*encrypted.bucket, 1).await.unwrap();
+            collector.collect(&*encrypted.bucket, 2).await.unwrap();
+            encrypted.checkpointed().await;
             let [(_, of_one), (other, of_other), ..] = &kept_at[..] else { panic!() };
-            let moves_one = moves_at(&*sealed.bucket, of_one).await.unwrap();
-            let moves_other = moves_at(&*sealed.bucket, of_other).await.unwrap();
-            let at = sealed.writer.location(*other).unwrap();
+            let moves_one = moves_at(&*encrypted.bucket, of_one).await.unwrap();
+            let moves_other = moves_at(&*encrypted.bucket, of_other).await.unwrap();
+            let at = encrypted.writer.location(*other).unwrap();
             assert_eq!(at.key, moves_other);
-            let read = read_holding(&sealed.bucket, &sealed.ring, *other, &at).await;
+            let read = read_holding(&encrypted.bucket, &encrypted.ring, *other, &at).await;
             assert_eq!(read, Ok(kept(1)));
 
-            let copied = bucket::get(&*sealed.bucket, &moves_one).await.unwrap().bytes;
-            let put = sealed.bucket.put(&moves_other, copied.clone().into(), PutMode::Overwrite);
+            let copied = bucket::get(&*encrypted.bucket, &moves_one).await.unwrap().bytes;
+            let put = encrypted.bucket.put(&moves_other, copied.clone().into(), PutMode::Overwrite);
             put.await.unwrap();
             let refused = Error::Corrupt(format!("{moves_other} holds the moves of {of_one}"));
-            for ring in [sealed.ring.clone(), Ring::clear()] {
-                let read = read_holding(&sealed.bucket, &ring, *other, &at).await;
+            for ring in [encrypted.ring.clone(), Ring::clear()] {
+                let read = read_holding(&encrypted.bucket, &ring, *other, &at).await;
                 assert_eq!(read, Err(refused.clone()));
             }
 
             // Made to name the other and its extent, framed in the clear.
-            let view = keys::of_key(&sealed.ring, &moves_one);
+            let view = keys::of_key(&encrypted.ring, &moves_one);
             let data = layout::data_under(&copied, &view).unwrap();
             let mut footer: Moves = layout::footer_under(&copied, &view).unwrap();
             assert_eq!(footer.of, *of_one);
@@ -6157,8 +6170,8 @@ mod tests {
                 (*extent, to.key) = (*other, moves_other.clone());
             }
             let forged = layout::with_footer(&data, &footer);
-            sealed.bucket.put(&moves_other, forged.into(), PutMode::Overwrite).await.unwrap();
-            let read = read_holding(&sealed.bucket, &sealed.ring, *other, &at).await;
+            encrypted.bucket.put(&moves_other, forged.into(), PutMode::Overwrite).await.unwrap();
+            let read = read_holding(&encrypted.bucket, &encrypted.ring, *other, &at).await;
             assert_eq!(read, Err(Error::Downgrade(moves_other.clone())));
         });
     }

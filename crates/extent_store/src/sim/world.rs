@@ -1935,7 +1935,7 @@ impl World {
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
-            // Its cells are in the clear: nothing is left sealed (TASK-411.6).
+            // Its cells are in the clear: nothing encrypted is left uncompacted (TASK-411.6).
             locked: 0,
             uncompacted: 0,
         };

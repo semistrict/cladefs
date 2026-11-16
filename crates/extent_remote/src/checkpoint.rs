@@ -21,14 +21,14 @@ pub fn encode(state: &State) -> Vec<u8> {
     encode_under(state, None)
 }
 
-/// cladefs: the checkpoint of `state`, authenticated, not sealed, under the DEK `sealing` gives, if
-/// it gives one: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
-pub fn encode_under(state: &State, sealing: layout::Sealing<'_>) -> Vec<u8> {
+/// cladefs: the checkpoint of `state`, authenticated, not encrypted, under the DEK `encryption`
+/// gives, if it gives one: metadata, which the collector reads holding no key (doc-16, TASK-411.3).
+pub fn encode_under(state: &State, encryption: layout::EncryptionKey<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter()).map(|(extent, location)| {
         ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
     });
-    table::encode(entries, layout::encode(&rest), sealing)
+    table::encode(entries, layout::encode(&rest), encryption)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -43,7 +43,7 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
 }
 
 /// cladefs: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
-/// and MACs if they hold its key, and refused in the clear if they hold its branch sealed
+/// and MACs if they hold its key, and refused in the clear if they hold its branch encrypted
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
     let (footer, entries) = table::decode(bytes, keys)?;
