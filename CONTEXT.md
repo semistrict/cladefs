@@ -340,7 +340,7 @@ _Avoid_: durable
 How much of what was ordered a crash may lose: at most a second's worth.
 
 **Drain**:
-What a daemon does on SIGTERM: every store closed, durable and uploaded, before it exits.
+What a daemon does on SIGTERM: every store closed and its commits uploaded before it exits.
 
 **Format**:
 The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
