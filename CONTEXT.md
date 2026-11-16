@@ -89,7 +89,7 @@ The first touch of a named page, which puts it into the VM process's memory.
 
 **Prefault**:
 Having KVM map installed pages ahead of the guest's accesses.
-_Avoid_: map ahead (`MAP_AHEAD` becomes `MAP_PREFAULT`), pre-fault, pre-faulting
+_Avoid_: map ahead, pre-fault, pre-faulting
 
 **Private page**:
 A window page the VM owns, copied on the guest's store or by `PRIVATE`, at the same address, named by no extent.
@@ -148,7 +148,7 @@ _Avoid_: tenant name
 
 **Default tenant**:
 The tenant whose ID is 0: the daemon's own socket's, and public bases'.
-_Avoid_: tenant 0, common tenant, no tenant (`NO_TENANT` becomes `DEFAULT_TENANT`)
+_Avoid_: tenant 0, common tenant, no tenant
 
 **Grant**:
 Giving a tenant its own VM socket, for the VM manager to put in the tenant's jails.
@@ -410,7 +410,7 @@ A host's dropping the keys of a shredded tenant or cell, fencing its stores.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST`.
+A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars are to say `TEST_HOST` (the scripts' `CLADEFS_HOST*` still).
 _Avoid_: host alone
 
 **Driver**:
@@ -489,28 +489,37 @@ A dead end that was a diagnosis, not an approach.
 
 ## Ambiguities
 
-Words that mean several things today. Say the qualified form. These choices bind code
-identifiers too (types, protos, env vars, binaries), not prose alone.
+Words that meant several things. Say the qualified form. These choices bind code
+identifiers too (types, protos, env vars, binaries), not prose alone; the names below that the
+code does not have yet are said so.
 
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
-- **remote**: retired, in code too; say **bucket** or **daemon client**.
+- **remote**: retired, in code too; say **bucket** or **daemon client**. `CLADEFS_EXTENTD_REMOTE`
+  keeps it until TASK-475 names the daemon's env vars.
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
-- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**, in code too (`cell::Vdisk`, `CreateVdisk`).
+- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code says volume
+  (`cell::Volume`, `CreateVolume`) until TASK-475 lands; then `cell::Vdisk`, `CreateVdisk`.
 - **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
-- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol too.
+- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol
+  and StatStore's `committed`; extent_store's `Store::epoch` and `View::epoch` and the trace's `epoch`
+  still say epoch for it.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; branches have none since TASK-407.
-- **durable**: names no stage; say **local** or **uploaded**, in code too.
+- **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
+  `COMMIT_UPLOADED`). `Store::make_durable`, the `durable_lag` stats and the trace's `durable` still
+  say it.
 - **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it.
 - **region**: the guest's; virtio's is a **shared memory region**.
-- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag becomes `attach_only`).
+- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
-- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version**.
+- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`host_pin` in the scripts still).
 - **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too.
+  `CLADEFS_E2E_ROUNDS` and `CLADEFS_SOAK_ROUNDS` still say round for a case's repeats.
 - **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.
-- **cache**: env vars name theirs: `CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`.
+- **cache**: env vars name theirs: the part cache's are `CLADEFSD_PART_CACHE`,
+  `CLADEFSD_PART_CACHE_BYTES` once TASK-475 lands (`CLADEFS_EXTENTD_CACHE*` until then).

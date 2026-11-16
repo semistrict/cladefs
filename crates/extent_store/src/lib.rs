@@ -23,7 +23,7 @@
 //!   it is framed as objects in object storage are (`extent_frame`), its data in parts compressed
 //!   with zstd, with its footer: what the commits since it opened changed. cladefs: framed on a
 //!   thread of its own, which the commit's flush waits for, not the commit, nor the writes behind
-//!   it; read from its raw file until then. Its raw file goes once that commit is durable. cladefs:
+//!   it; read from its raw file until then. Its raw file goes once that commit is local. cladefs:
 //!   one compressing would save less than an eighth of is framed in place, its parts stored raw,
 //!   its raw file, its tail appended, linked as its framed file: its data written once
 //!   (TASK-310). Between commits, full, holding a segment
@@ -42,7 +42,7 @@
 //!   in place, its raw file renamed its framed file, its tail appended: its data written once
 //!   (TASK-310);
 //! - `logs/<branch>/<n>`: each segment's log of the commits made in it, a record each, appended as
-//!   they are made durable, until it is framed and they are; and `wal`, its write-ahead log's
+//!   they are made local, until it is framed and they are; and `wal`, its write-ahead log's
 //!   start, the branch's commit its first segment goes on from (TASK-165.9: the `wal` module has
 //!   the write-ahead log).
 //!
@@ -54,22 +54,22 @@
 //! **Commits.** A commit is a barrier: it seals the extents written before it, copying each whose
 //! pieces are not one run in the open segment, cladefs: or in a segment filled since the last commit,
 //! into one there, or into a file of its own if it is large, and orders what came before it before
-//! what comes after. Its durability follows ([`Store::flush`], or
-//! [`Store::commit`], which waits for it): commits become durable in order, several at once,
+//! what comes after. Its level follows ([`Store::flush`], or
+//! [`Store::commit`], which waits for it): commits become local in order, several at once,
 //! which syncs the data written since the last flush, and the directories whose entries changed,
 //! then appends the commits' records to the logs of the segments they were made in and syncs
 //! those. Only then do the files they made unreferenced go.
 //!
 //! **Recovery.** Opening a store recovers its write-ahead log from its directory (the `wal`
 //! module): the segments framed whole, and those a crash left open or torn closed again from their
-//! raw data and the records of their logs that are whole, which are the commits made durable, at
+//! raw data and the records of their logs that are whole, which are the commits made local, at
 //! least. Its branch is the bucket's, recovered by its uploader, after whose end the log is put
 //! by its commits ([`Recovering::open`], `extent_bucket::Wal::rebase`); the store's state is the
 //! branch's and its log's segments' after it. cladefs: a closed segment's raw file goes only once
-//! the commits its footer names are durable, so that one closed by a commit not durable has it
-//! still, holding what the commits durable wrote, whatever its framed file holds (TASK-79.33). So
+//! the commits its footer names are local, so that one closed by a commit not local has it
+//! still, holding what the local commits wrote, whatever its framed file holds (TASK-79.33). So
 //! a crash at any point leaves each branch as of a prefix of its commits, one at least as late as
-//! the last made durable.
+//! the last made local.
 //!
 //! **Footers.** A closed segment's footer is the one segments in object storage have
 //! (`extent_frame::segment`), so that a closed segment is the object its branch keeps there, byte
@@ -85,8 +85,8 @@
 //! ([`Store::acknowledged`], TASK-165.8), the extents sealed in it, and those stored on their own
 //! its footer names, held or kept, are the bucket's: read there ([`BucketData`]), and their files
 //! leave the store, into the host's cache of the bucket's objects if the uploader gave one, the
-//! segment's once no write is in progress in it. Durably: the write-ahead log's start records it,
-//! after the commits durable so far. So the branch's files are what is not acknowledged yet, and
+//! segment's once no write is in progress in it. Locally: the write-ahead log's start records it,
+//! after the commits local so far. So the branch's files are what is not acknowledged yet, and
 //! the open segment: what the upload lag bound bounds, with the segment's room, and the cache's
 //! capacity. Nothing cleans the branch's segments here: what no extent is in leaves with them, the
 //! bucket's collector's to take back. What writes since the last commit wasted, writing over what

@@ -134,8 +134,8 @@ export const invariants: Invariant[] = [
     layer: "daemon",
     claim:
       "An fsync returns once its commit is ordered: in extentd, its data in the store's files. It " +
-      "is durable on the host's disk within 50 ms at the median, 1 s at most; sync, syncfs, " +
-      "unmount and freeze wait for durable, and with a bucket, for uploaded.",
+      "is local, on the host's disk, within 50 ms at the median, 1 s at most; sync, syncfs, " +
+      "unmount and freeze wait for local, and with a bucket, for uploaded.",
     why:
       "doc-2's rule: a crash may lose a suffix of recent history, never a middle. fsync keeps its " +
       "ordering without a round trip to the disk.",
@@ -161,7 +161,7 @@ export const invariants: Invariant[] = [
     layer: "bucket",
     claim:
       "An extent's ID is minted once, by its branch's writer. A fork is a new branch that " +
-      "inherits its parent's extents as of a durable commit, without copying them.",
+      "inherits its parent's extents as of an uploaded commit, without copying them.",
     why: "IDs never collide across writers or forks, so nothing inherited ever needs renaming or copying.",
     enforcedBy: ["extent_id", "es_fork", "fork_point", "store_commit_fork"],
     evidence: [

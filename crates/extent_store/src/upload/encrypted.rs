@@ -459,7 +459,7 @@ fn generations_encrypt_new_objects_and_rotations_rewrap() {
     assert_eq!(read(&world, &other, &store, ExtentId::new(7, 2), 4096), Ok(noise(2, 4096)));
 }
 
-/// AC #5, as TASK-411.28 left it: an object of a branch put at its key in the clear, its encrypt's
+/// AC #5, as TASK-411.28 left it: an object of a branch put at its key in the clear, its encryption's
 /// kind made 0 as one who can write the bucket would (a downgrade): refused by the branch's readers
 /// and by a reader holding no key, as the collector reads, as corrupt, whether its tail was kept
 /// before or not. Its newest checkpoint so: its store's recovery refuses it.
@@ -472,7 +472,7 @@ fn objects_of_encrypted_branches_unencrypted_are_refused() {
     let extent = ExtentId::new(7, 1);
     written(&store, &uploader, extent, &noise(1, 4096));
     let at = location(&store, extent);
-    // Its trailer's encrypt's kind, after the lengths of its data, parts and footer, and the
+    // Its trailer's encryption's kind, after the lengths of its data, parts and footer, and the
     // footer's CRC: 0, in the clear.
     let downgraded = |mut bytes: Vec<u8>| {
         let trailer = bytes.len() - extent_frame::TRAILER as usize;
@@ -971,7 +971,7 @@ fn files_of(dir: &MemDir, kind: &str) -> Vec<(String, Vec<u8>)> {
 /// committed, or framed; reads of the extents, open, sealed in the open segment or in a file of
 /// their own, and framed, give it back; its logs are headed `wal::LOG_MAGIC`. TASK-411.15:
 /// [`crate::on_disk`], holding no key, finds none of its framed files and logs in the clear; and
-/// copies of them made as stores wrote them in the clear before TASK-411.28, a framed file's encrypt
+/// copies of them made as stores wrote them in the clear before TASK-411.28, a framed file's encryption
 /// of kind 0 and a log headed `FXLOG\0\0\x02`, all so.
 #[test]
 fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
@@ -1022,7 +1022,7 @@ fn encrypted_stores_raw_files_and_logs_hold_no_plaintext() {
     for (path, mut bytes) in framed.chain([(log, header)]) {
         if !path.starts_with("logs/") {
             let at = bytes.len() - extent_frame::TRAILER as usize;
-            // The trailer's encrypt's kind, after the lengths of its data, parts and footer, and the
+            // The trailer's encryption's kind, after the lengths of its data, parts and footer, and the
             // footer's CRC.
             bytes[at + 28] = 0;
             assert!(extent_frame::in_the_clear(&bytes), "{path}");

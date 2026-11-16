@@ -20,8 +20,8 @@
 //! ([`Secret::derive`]); the nonce is the part's index, and the associated data its index,
 //! encoding and lengths. The table's entry holds the part's tag; the CRC stays, over the bytes
 //! stored, encrypted, so that a reader holding no key, the collector, checks them as before, and a
-//! part corrupt is told from one under another key. The footer, the table and the trailer stay in
-//! the clear, authenticated by HMAC-SHA256 under a second subkey from the same salt, which a
+//! part corrupt is told from one under another key. The footer, the table and the trailer stay
+//! unencrypted, authenticated by HMAC-SHA256 under a second subkey from the same salt, which a
 //! reader holding the key checks ([`Keys`]), and one holding none does not.
 //!
 //! Parts are bound to their object by its salt, not by its key in object storage, as doc-16 first
@@ -40,11 +40,11 @@
 //! (doc-16, What is encrypted), each part's tag a GMAC of its stored bytes, which a reader holding
 //! the key checks.
 //!
-//! cladefs: no object is in the clear (TASK-411.28): a trailer whose encrypt is of kind 0, as one whose
-//! encrypt, MACs and tags are zeroed, is corrupt to every reader, holding keys or none. (Before, a
+//! cladefs: no object is in the clear (TASK-411.28): a trailer whose encryption is of kind 0, as one whose
+//! encryption, MACs and tags are zeroed, is corrupt to every reader, holding keys or none. (Before, a
 //! cell with no KEK wrote in the clear, and a reader of an encrypted branch refused its objects in the
-//! clear, TASK-411.3: the trailer's encrypt is not authenticated, and one who can write the bucket
-//! could otherwise zero an object's encrypt, MACs and tags, and have it read as its branch's.)
+//! clear, TASK-411.3: the trailer's encryption is not authenticated, and one who can write the bucket
+//! could otherwise zero an object's encryption, MACs and tags, and have it read as its branch's.)
 //!
 //! cladefs: an object framed in place from an encrypted store's raw file ([`Encryption::Sectors`],
 //! TASK-411.23): every part stored raw, as its raw file holds it, AES-256-XTS a sector at a time
@@ -84,7 +84,7 @@ const _: () = assert!(ALIGN.is_multiple_of(SECTOR as u64) && PART.is_multiple_of
 
 /// The bytes of the table for each part: its offset, stored length, CRC32C and encoding, and its
 /// tag. cladefs: one size for every kind of object (TASK-411.2), so that where a table is, and how a
-/// reader of a suffix finds it, never depends on the encrypt its trailer names.
+/// reader of a suffix finds it, never depends on the encryption its trailer names.
 pub const ENTRY: u64 = 8 + 4 + 4 + 1 + TAG_LEN as u64;
 
 /// A part's tag, which its table's entry holds: AES-256-GCM's, or a truncated HMAC's.
@@ -1092,7 +1092,7 @@ fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKe
     encryption[13..].copy_from_slice(&key.salt.0);
     bytes.extend_from_slice(&encryption);
     bytes.extend_from_slice(&key.mac.mac(footer));
-    // The table's MAC covers the trailer before it: the footer's MAC, the encrypt, the lengths.
+    // The table's MAC covers the trailer before it: the footer's MAC, the encryption, the lengths.
     let mac = key.mac.mac(&bytes[start..]);
     bytes.extend_from_slice(&mac);
     // And its CRC, the MAC too.
@@ -2367,7 +2367,7 @@ mod tests {
         assert_eq!(format_1(&[], b"").len(), 40);
     }
 
-    /// TASK-411.2: a trailer's encrypt is encrypted, authenticated or a raw file's sectors, as its kind
+    /// TASK-411.2: a trailer's encryption is encrypted, authenticated or a raw file's sectors, as its kind
     /// says; of another kind, or in the clear (TASK-411.28), it is corrupt, to a reader holding no
     /// key too.
     #[test]

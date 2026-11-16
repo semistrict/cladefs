@@ -3,12 +3,12 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: '2026-10-31 22:17'
-updated_date: '2026-11-15 14:47'
+updated_date: '2026-11-16 04:06'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
 doc-2's requirement 2 is the rule: a crash may lose a suffix of recent history, and the filesystem
-recovers to a prefix of it. fsync keeps its ordering, and need not wait for durability. This says
+recovers to a prefix of it. fsync keeps its ordering, and need not wait for a commit to be local. This says
 what that means, failure by failure. The *Tested by* column names what shows it, or says nothing
 does: a claim no test shows is a design statement, not a result.
 
@@ -17,16 +17,16 @@ file's written pages are private pages in host memory, as the page cache's are f
 and reach the store only as writeback `WRITE`s them, then commits. The window plays no part in
 recovery.
 
-## The stages a commit goes through
+## The levels a commit reaches
 
-| Stage | What it means | When |
+| Level | What it means | When |
 |---|---|---|
 | Ordered | `COMMIT` returned: extentd has it, in order: its data in the store's files, its commit record in extentd's memory (`Pending`, `Store::commit_locked`) | as `fsync` returns |
-| Durable locally | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
-| Uploaded | in object storage, a contiguous prefix, the lease still the writer's | the lag (below) |
+| Local | the data synced, then the record written and synced (`Store::make_durable`) | within 50 ms at the median (32 ms on main); the crash bound, 1 s, at most (below) |
+| Uploaded | in the bucket, a contiguous prefix, acknowledged by the head's swap while the writer holds it | the lag (below) |
 
 *Revised 2026-11-08 (TASK-221, the user's decision: the window is what main achieves):* "within
-50 ms" is the **median**: extentd makes the commits ordered durable every 50 ms, a flush behind the
+50 ms" is the **median**: extentd makes the commits ordered local every 50 ms, a flush behind the
 host's disk at worst. Measured on main (08d444ef7, GCE n2-standard-16, jailed, 3 rounds each of
 fxfs-guest-pgbench and -pgbench-dax, ~365,000 commits a round, extentd's `durable_lag_*` stats): the
 median 32 ms or less, p99 64 ms or less, 85% within 50 ms, and the longest under 1,024 ms (about
@@ -36,20 +36,20 @@ pgbench cases to the median (`durable_lag_within_50ms`). Shortening the tail is 
 (TASK-221's notes: commits whose sealing copies whole extents into the open segment).
 
 A guest's **fsync, fdatasync, msync and O_SYNC** wait for *ordered*. **sync, syncfs, unmount and
-freeze** ask for `COMMIT_DURABLE`, and wait for *durable locally*, and with a remote, for *uploaded*.
-So an acknowledged fsync is not yet durable: it is ordered, and survives what leaves extentd alive.
+freeze** ask for `COMMIT_UPLOADED`, and wait for *local*, and with a bucket, for *uploaded*.
+So an acknowledged fsync is not yet local: it is ordered, and survives what leaves extentd alive.
 
-*Added 2026-11-12 (TASK-384):* *uploaded* needs *durable locally* of the commits, not of the
+*Added 2026-11-12 (TASK-384):* *uploaded* needs *local* of the commits, not of the
 segment's framed file. A segment's upload waits for its commits' records synced in its log (the
 flush), and for its framed file written, not synced: the framed file's sync, and its directory's,
 go on at once with the upload, and the store hears of the acknowledgement only once they are done,
 its files leaving then as before. A crash meanwhile keeps every commit: the segment's raw file and
-log, which hold them, stay until its framed file is durable; once the bucket acknowledged it,
-recovery takes its commits as the bucket's (`wal::recover`: a log's commits the base acknowledged
+log, which hold them, stay until its framed file is synced; once the bucket acknowledged it,
+recovery takes its commits as the bucket's (`wal::recover`: a log's commits the start acknowledged
 are the bucket's), and, the store not told yet, the bucket's state, which the store opens on, holds
 them. And the next segment's raw file and log are made ahead of it, under their names, their
-entries made durable off the commits: a raw file and log holding no record, past the last segment,
-hold nothing, and an opening removes them (`ending`, TASK-334). A durable commit, closing a segment
+entries synced off the commits: a raw file and log holding no record, past the last segment,
+hold nothing, and an opening removes them (`ending`, TASK-334). An uploaded commit, closing a segment
 and opening the next for its upload, waited for those syncs one after another, ext4 journal
 commits, some 8 ms over the bucket's round trip on ubu1; 2 ms after
 (`durable_commits_through_the_daemon`, crash test `segments_upload_before_their_framed_files_are_durable`).
@@ -58,14 +58,14 @@ commits, some 8 ms over the bucket's round trip on ubu1; 2 ms after
 is ZFS. The median, the p99 and the crash bound are GCE's (TASK-221), and TASK-384's 8 ms and 2 ms
 are of a store on ubu1's ext4 scratch disk (/mnt/fxdax-scratch) with the bucket on tmpfs. What did
 run on ZFS is every measurement scripts/bench-rounds.sh made before 2026-11-15: its results'
-directory, in the home, held each run's stores and its file bucket. Their durable syncs' rates
+directory, in the home, held each run's stores and its file bucket. Their local commits' sync rates
 (TASK-371's 3.2/s, 6.1/s, 10.8/s and 15.9/s; docs/measurements' ubu1-loop-baseline-2026-11-11, its
 -governed run and ubu1-unsafe-2026-11-11) are ZFS's syncs' as much as cladefs's, 91 ms a sync there
 against 32.5 ms with the store on ext4 and the bucket in memory, and say nothing of this
-contract's *durable locally*. bench-rounds.sh now keeps a run's stores on ext4 and its bucket on
+contract's *local*. bench-rounds.sh now keeps a run's stores on ext4 and its bucket on
 tmpfs, and refuses another filesystem (scripts/test-e2e-job.sh).
 
-The lag is bounded by commits and bytes (`remote::Options`: 4096 commits, 1 GiB, by default) and in
+The lag is bounded by commits and bytes (`upload::Options`: 4096 commits, 1 GiB, by default) and in
 time by the segment's age. Past the bound, commits wait: the lag is what a lost host can cost, and
 it stays within the bound.
 
@@ -77,9 +77,9 @@ it stays within the bound.
 | VMM killed (SIGKILL) | kept | kept | fxfs-guest-crash-dax-killed |
 | extentd killed | what was ordered within the crash bound (1 s) may go, its records unwritten; a prefix stays, a file whose fsync returned in that time found short or empty at worst. The VM exits 158 | kept | fxfs-guest-crash-dax-daemon-killed (1 of 296 files told of went, GCE r342), fxfs-guest-daemon-lost |
 | Host reboot or kernel crash, disk kept | what was ordered within the crash bound may go; a prefix stays | kept | **nothing: no test loses a host's page cache (TASK-67)** |
-| Host lost, disk with it, with a remote | the unuploaded lag goes; a prefix stays | kept | the simulation (doc-7, `crashes_anywhere`); **no guest test (TASK-67)** |
-| Host lost, without a remote | everything goes | everything goes | not a recovery case: a store with no remote, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; extentd refuses to start without a remote (`CLADEFS_EXTENTD_REMOTE`, TASK-45) |
-| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_remote's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `extentd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
+| Host lost, disk with it, with a bucket | the unuploaded lag goes; a prefix stays | kept | the simulation (doc-7, `crashes_anywhere`); **no guest test (TASK-67)** |
+| Host lost, without a bucket | everything goes | everything goes | not a recovery case: a store with no bucket, or whose bucket is a file bucket beside it (an image's, `<image>.bucket`), lives on one disk; extentd refuses to start without a bucket (`CLADEFS_EXTENTD_REMOTE`, TASK-45) |
+| The bucket failing for good: out of reach, full, refusing its credentials | kept: waits at the lag bound, then fails nothing (below) | kept: waits | extent_bucket's `writes_failing_say_why_until_they_land` (a full disk's `ENOSPC`, logged); cladefs's `commits_wait_at_the_lag_bound_while_the_bucket_is_full`, `commits_wait_at_the_lag_bound` (TASK-314); for minutes, slow, full, then out of service, then answering, VM processes writing all the while: cladefs's `extentd::tests::soak` (5 min in CI, 30 each night), `fxfs-guest-bucket-soak` with guests (TASK-330.3) |
 
 Every row keeps ordering: what survives is a prefix of the commits, never a later commit without an
 earlier one. Filesystems recover by replaying their journal to that prefix. Open-but-unnamed files
@@ -99,12 +99,12 @@ are freed as the store is next mounted.
 - **The bucket failing**, for a while or for good, fails nothing (TASK-314; doc-7, decision 3: as
   a hard NFS mount hangs). Every request it fails is retried, from 50 ms apart, doubling, to 5 s,
   until it is answered. Meanwhile the guest's `sync`, `syncfs`, unmount and freeze wait at once,
-  as they wait for *uploaded*; its fsyncs go on, ordered and made durable locally, until the lag
+  as they wait for *uploaded*; its fsyncs go on, ordered and made local, until the lag
   reaches its bound (4,096 commits or 1 GiB of write-ahead log), then wait too; its writes go on,
   and so do its reads of what the host has, but a page-in of what only the bucket holds waits. Its
   kernel says so as a hang does (`fxfs: Write I/O request blocked for N s`, hung tasks), and
   nothing returns an error. Once the bucket answers, within 5 s of its next retry, all of it goes
-  on, and nothing was lost: what waited was durable locally all along. *Decided 2026-11-10
+  on, and nothing was lost: what waited was local all along. *Decided 2026-11-10
   (TASK-314), the most conservative of the options:* failing commits after a bound instead would
   give the guest errors for data that is safe on the host's disk, and a guest filesystem that
   errors on fsync shuts down, or retries what Linux has already dropped from its page cache: a
@@ -112,8 +112,8 @@ are freed as the store is next mounted.
   data. It is loud instead: extentd logs each kind of request failing as the run of failures
   starts, a warning naming the bucket's own error (a file bucket's `No space left on device`,
   S3's `AccessDenied`), then every 30 s with how many failed, and as it answers again
-  (`extent_remote::store`, `FAILING_EVERY`); counts them by kind (the stats line's `failed-NAME`,
-  GetStats' `ObjectStorageStats.failures`, the metric `cladefs_extentd_object_storage_failures_total`),
+  (`extent_bucket::object_bucket`, `FAILING_EVERY`); counts them by kind (the stats line's `failed-NAME`,
+  GetCounters' `ObjectStorageStats.failures`, the metric `cladefs_extentd_object_storage_failures_total`),
   beside how long each store's oldest commit has waited for its upload
   (`cladefs_extentd_upload_oldest_pending_seconds`), what an operator alerts on; and warns as a
   commit first waits at the bound. *Added 2026-11-10 (TASK-317):* meanwhile extentd's memory does
@@ -136,6 +136,5 @@ to. The README lists the rest ("How a VM process exits").
 ## Not promised
 
 - That an fsync survives extentd or the host going within the crash bound (1 s) of returning. An application that
-  needs that must `syncfs`, which costs a round trip to the disk, and to object storage with a
-  remote.
+  needs that must `syncfs`, which costs a round trip to the disk, and to the bucket with one.
 - Anything of what the lag holds, across the loss of a host.

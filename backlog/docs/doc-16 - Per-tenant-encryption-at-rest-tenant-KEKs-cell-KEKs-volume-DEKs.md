@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-15 19:31'
+updated_date: '2026-11-16 04:13'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
 
@@ -135,23 +135,24 @@ tenant KEK   in the KMS; never leaves it. Destroying it shreds the tenant.
 A DEK has generations: a record keeps a list of `(generation, wrapped DEK)`, a new writer may add one,
 and every object's trailer names the branch and generation its subkey came from. Rotating a KEK
 rewraps what it wraps (the KMS's own rotation, or a conditional update of each record or cell
-object); rotating a DEK starts a generation, which seals what writers write from then on. *(found,
+object); rotating a DEK starts a generation, which encrypts what writers write from then on. *(found,
 TASK-411.6)* Old data does not move to it: checkpoints rewrite metadata alone, and compaction
-seals each object's moves under the generation the object was sealed under, as a store opened
+encrypts each object's moves under the generation the object was encrypted under, as a store opened
 before the generation was added holds none of it. Moving old data on needs readers that learn
 newer generations (TASK-411.12).
 
-**Why a subkey per object, from a random salt:** object keys are create-only, but a fenced writer
-keeps its own bytes for `segments/<branch>/<seq>` in its WAL after another epoch's landed there
-(doc-14). Nonces from the key alone would repeat across the two, leaking both plaintexts' XOR and
-GCM's authentication key. A salt per object makes every subkey new.
+**Why a subkey per object, from a random salt:** object keys are create-only, and since TASK-407
+each names its writer's epoch (`segments/<branch>/<epoch>.<segment>`); before, a fenced writer kept
+its own bytes for `segments/<branch>/<seq>` in its WAL after another epoch's landed there (doc-14).
+Nonces from the key alone would have repeated across the two, leaking both plaintexts' XOR and
+GCM's authentication key. A salt per object makes every subkey new, whatever key it lands at.
 
 ## What is encrypted
 
 *(decided: data encrypted, metadata authenticated only)*
 
 - **Data parts:** each part of a framed object (`extent_frame::PART`, 1 MiB) is compressed
-  first, as now, then sealed with AES-256-GCM under the object's subkey
+  first, as now, then encrypted with AES-256-GCM under the object's subkey
   (`dek.derive(salt, ["cladefs frame parts"])`); the nonce is the part's index, the associated data
   its index, encoding, stored and unpacked lengths. The table's entry holds the tag (every FORMAT 2
   entry has one, zeros in the clear: 33 bytes a part). Compression keeps working; ciphertext is the
@@ -160,12 +161,13 @@ GCM's authentication key. A salt per object makes every subkey new.
   and segment. The salt binds instead: a part moved to another object fails under that object's
   subkey. A whole object copied to another key of its branch is caught by its footer where the
   footer names its place (segments: branch, number, epoch), and by TASK-411.3 for the others.
-- **Footers, tables, trailers, checkpoints, moves' maps, records, cell objects, leases:** in the
+- **Footers, tables, trailers, checkpoints, moves' maps, records, cell objects, heads, collector
+  leases:** in the
   clear, as now, plus a MAC under a key derived from the DEK (*TASK-411.3*: a checkpoint is framed
-  `Seal::Authenticated`, kind 2: its parts, the table's entries, in the clear, each tagged with a
+  `Encryption::Authenticated`, kind 2: its parts, the table's entries, in the clear, each tagged with a
   GMAC under the object's parts subkey, its footer and table MACed, so that the collector reads it
   holding no key and a key-holding reader checks every byte), which key-holding readers check (a
-  frame's footer and its table, which covers the trailer's seal and the footer's MAC, each have an
+  frame's footer and its table, which covers the trailer's `encryption` and the footer's MAC, each have an
   HMAC-SHA256 under `dek.derive(salt, ["cladefs frame mac"])` in the trailer; restamping a footer
   needs the key and keeps the salt). The
   collector reads them without keys, checking CRCs, as now. They show extent IDs, sizes, the fork
@@ -174,7 +176,7 @@ GCM's authentication key. A salt per object makes every subkey new.
   anyway, so that is no new power.
 - **The trailer** gains the salt, the branch and DEK generation, and a flag: FORMAT 2 of
   `extent_frame` (doc-11 rule 1: a FORMAT 1 reader names FORMAT 2, not corrupt). An object in the
-  clear says so, its MACs and tags zeros; as its seal is not authenticated, a reader of a branch
+  clear says so, its MACs and tags zeros; as its `encryption` is not authenticated, a reader of a branch
   with a DEK refuses its objects in the clear (TASK-411.3), or a bucket writer could downgrade one.
 - **Local disk:** closed segments in the WAL and the part cache hold the stored bytes, so they are
   encrypted with nothing more. *(decided)* **The open segment is encrypted too**, under the volume
@@ -202,7 +204,7 @@ GCM's authentication key. A salt per object makes every subkey new.
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
 | `cladefs-gc`, marking | none | reads metadata only |
 | `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
-| `cladefs-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was sealed under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
+| `cladefs-gc`, compacting | the cell's KEK, through the KMS, for that pass | *(decided)* compaction copies extents out of decompressed data (`collector::compact_object`), so it decrypts and re-encrypts, under the source branch's DEK, the generation the object was encrypted under, with a new salt (TASK-411.6). Revoking a tenant's key stops its compaction, which is right; its garbage still goes. A collector that never decrypts (moving whole stored parts) was the alternative; it reclaims less, as one live extent keeps its 1 MiB part |
 | the control API | whatever a fork across cells needs | rewraps (below) |
 
 ## Forks and shared points
@@ -214,7 +216,7 @@ never needs another cell's KEK, nor another tenant's KMS, and **shredding a pare
 children what they inherited**, as doc-7's rule that forks keep what they inherited (Deleting a
 point) already says. Shared points (TASK-395.7) work the same way: the trusted control API, which
 can unwrap both, rewraps at each fork into another tenant's cell, so the point's owner shredding its
-tenant stops new forks of the point and breaks no clone.
+tenant stops new forks of the point and breaks no fork.
 
 A fork into a new cell needs a new cell KEK, which only the KMS can wrap under the tenant's KEK.
 *(decided)* **Hosts keep a pool of cell KEKs per tenant, wrapped ahead of time** in batches, and a
@@ -241,7 +243,7 @@ dropped with its pool, never written out unwrapped.
 ## Decided later the same day
 
 - **Unencrypted stores stay** *(decided; superseded by TASK-411.28: no plaintext, One sealed mode)*: FORMAT 2's trailer says whether an object is encrypted,
-  and a cell with no wrapped KEK (tenant 0, tests that ask) writes in the clear, its records with no
+  and a cell with no wrapped KEK (the default tenant's, tests that ask) writes in the clear, its records with no
   DEKs. Both paths are tested: every encryption test has a plaintext twin where it applies.
 - **No migration** *(decided)*: no bucket in use needs keeping; FORMAT 2 refuses FORMAT 1 by name,
   as `layout::FORMAT` 5 refused 4 (doc-11 rule 1).
@@ -252,7 +254,7 @@ dropped with its pool, never written out unwrapped.
 
 ## What TASK-411.3 made
 
-- **Formats.** `layout::FORMAT` 10 (9 refused by name, no migration). A cell's object gains
+- **Formats.** `layout::FORMAT` 10 (9 refused by name, no migration; 11 since TASK-407). A cell's object gains
   `keks: Vec<Kek { generation, wrapped }>`, its KEK's generations wrapped by the tenant's KEK in
   the KMS, oldest first; none: a cell in the clear. A record gains `deks: Vec<Dek { generation,
   kek, wrapped }>`, each generation of the branch's DEK wrapped by the cell's KEK of generation
@@ -263,59 +265,59 @@ dropped with its pool, never written out unwrapped.
   footer under the MAC.
 - **The KMS and how a cell chooses.** `CLADEFS_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
-  `cladefs::remote::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
+  `cladefs::bucket::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
   compact sealed cells (TASK-411.6; marking keyless). *(TASK-411.28: every cell is made sealed, a
   process with no KMS refusing to start; `NoSuchTenant` refuses the cell as destroyed: One sealed
   mode.)* A cell was made sealed iff
   the host has a KMS and the cell's tenant has a KEK in it; `NoSuchTenant` means the clear (unless
   the tenant's sealed marker says it had one: TASK-411.19, below), any
   other refusal (revoked, destroyed, unreachable, a bad `CLADEFS_KMS`) fails the making, so that no
-  cell a tenant wants sealed is made in the clear. New cell KEKs come from a per-tenant pool of keys
+  cell a tenant wants encrypted is made in the clear. New cell KEKs come from a per-tenant pool of keys
   wrapped ahead (a wrap when it is empty; a KEK that made no cell goes back to it).
   *(TASK-411.10; gone with TASK-411.28, One sealed mode)* A host believes a `NoSuchTenant` for `keys::KEKLESS_FOR`, 60 s, from the wrap
-  that heard it (`keys::Kms::new_kek`, or a pool's refill), asking the KMS nothing for that tenant
+  that heard it (`keys::CachingKms::new_kek`, or a pool's refill), asking the KMS nothing for that tenant
   meanwhile: every opening of a store whose record has no DEK asks for a KEK in case it makes the
   cell, so a host opening a plaintext tenant's stores made one wrap call per opening; now one a
   minute at most (openings asking at once, before the first answer, ask each: a wrapped KEK is one
-  cell's alone). The cost: a tenant given a KEK has new cells made sealed within 60 s, not at once;
-  cells made in the clear before stay so (a cell's sealing is chosen as it is made). Give a tenant
-  its KEK a minute before making the cells it wants sealed. Any answer of the KMS for the tenant
-  forgets it had none. `extent_remote` `keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while`
+  cell's alone). The cost: a tenant given a KEK has new cells made encrypted within 60 s, not at once;
+  cells made in the clear before stay so (a cell's encryption is chosen as it is made). Give a tenant
+  its KEK a minute before making the cells it wants encrypted. Any answer of the KMS for the tenant
+  forgets it had none. `extent_bucket` `keys::tests::tenants_without_a_kek_are_asked_for_one_once_a_while`
   (paused clock) and `extent_store` `upload::encrypted::cells_of_tenants_with_no_kek_are_in_the_clear`
   count the calls.
-- **Taking a cell** unwraps its KEK once per taking (`keys::Kms`, keyed by cell, generation and
+- **Taking a cell** unwraps its KEK once per taking (`keys::CachingKms`, keyed by cell, generation and
   the taking's epoch and holder; a writer's recovery, which reads before it holds the cell,
   predicts the taking it makes, `CellKeys::to_hold`), however many volumes open: a test counts one
   unwrap for three. A cell the host made unwraps nothing. Branch DEKs are unwrapped locally.
-- **Rings.** Opening a store builds a `keys::Ring`: its branch's DEK generations (the newest seals
+- **Rings.** Opening a store builds a `keys::Ring`: its branch's DEK generations (the newest encrypts
   new objects) and its ancestors' along their origins, read from their records and unwrapped under
   the cell's KEK. (An ancestor of another cell with DEKs was refused, `Error::Inherited`, until
   TASK-411.4 rewrapped them: below.) A branch's first writer gives its record its first DEK by a conditional
   update (`keys::with_dek`): records written by a parent's writers for a fork name none, so that
   they stay the same whoever writes them. Points have none. Every writer and reader of the store
-  holds the ring: the writer (fences sealed, checkpoints authenticated, recovery checked), the
-  store (segments and own extents sealed, local files read under it), and the host's fetchers,
+  holds the ring: the writer (fences encrypted, checkpoints authenticated, recovery checked), the
+  store (segments and own extents encrypted, local files read under it), and the host's fetchers,
   which open tails and parts under the union of the rings of the stores the host serves
   (`keys::HostRing`, in `fetch::Memory`), a tail opened once the host holds its key, `NoKey`
   never kept; peers are served stored bytes, needing none.
-- **Downgrades.** A reader holding a branch sealed (`Keys::sealed`) refuses its objects in the
+- **Downgrades.** A reader holding a branch encrypted (`Keys::encrypted`) refuses its objects in the
   clear (`Error::Downgrade`, naming the object) and authenticated ones under keys it lacks.
   *(TASK-411.28: no object is in the clear; one whose seal says so is corrupt, `Error::Downgrade`
   gone.)*
 - **Generations and rotation.** `keys::add_generation` appends a DEK generation by a conditional
-  update; stores opened after seal under it, the older still read. `keys::rotate` adds a cell KEK
+  update; stores opened after encrypt under it, the older still read. `keys::rotate` adds a cell KEK
   generation (conditional on the holder holding the cell), then rewraps every record's DEKs under
   it, each by a conditional update. Older KEK generations stay in the cell's object: a writer that
   read the cell before the rotation may wrap a new DEK under the generation it read after the
   rotation listed the records, so dropping them needs that fenced first (follow-up).
 - **Local disk.** `wal::whole_footer` checks a framed segment whole by the keyless check
-  (`extent_frame::check`), sealed or not. *(TASK-411.9)* WAL recovery runs before the store's keys
+  (`extent_frame::check`), encrypted or not. *(TASK-411.9)* WAL recovery runs before the store's keys
   are known and frames nothing: a segment it closes again keeps its raw file and log, its footer
   folded and stamped provisionally as before (`Recovered::closing`), and is framed as the store
-  opens, holding its ring, first of all (`Recovered::close`, from `Recovering::open`): sealed if the
-  ring seals, in the clear otherwise, the raw file and log removed once the framed file and its
-  entry are durable. A crash before leaves them, which the next recovery closes again alike;
-  `drop_wal` removes them durably. (TASK-411.3 framed it in the clear and resealed it as the store
+  opens, holding its ring, first of all (`Recovered::close`, from `Recovering::open`): encrypted if the
+  ring encrypts, in the clear otherwise, the raw file and log removed once the framed file and its
+  entry are synced. A crash before leaves them, which the next recovery closes again alike;
+  `drop_wal` removes them, synced. (TASK-411.3 framed it in the clear and encrypted it again as the store
   opened, its data on the host's disk in the clear meanwhile, and for good if the host died
   between; `wal::reseal` and `Dir::replace` went.)
 
@@ -323,17 +325,17 @@ dropped with its pool, never written out unwrapped.
 
 - **Marking stays keyless.** A pass reads records, checkpoints (authenticated, their parts in the
   clear), segments' footers, moves' maps and trailers holding no key, as before; each candidate's
-  trailer, which it reads anyway for its data's length, says whether it is sealed.
-- **Compacting under the cell's keys.** A pass whose compactable objects include a sealed one
+  trailer, which it reads anyway for its data's length, says whether it is encrypted.
+- **Compacting under the cell's keys.** A pass whose compactable objects include an encrypted one
   reads the cell's object and unwraps its KEK through the collector's KMS
-  (`collector::Collector::kms`, `sweep::Sweep::kms`), by a `keys::Kms` made for that pass alone:
+  (`collector::Collector::kms`, `sweep::Sweep::kms`), by a `keys::CachingKms` made for that pass alone:
   one unwrap per KEK generation its branches' DEKs name, one in practice, however many objects it
   compacts, and nothing kept past the pass, so a tenant's KEK revoked stops the next. The DEKs come
   from the pass's records of those branches (`keys::compacting`). A pass compacting only objects in
   the clear, or nothing (no candidate below its fraction, `--compact-below 0`), and every dry run
   ask the KMS nothing: `collector`'s tests count the calls with `extent_keys::testing::Counted`.
-- **Moves sealed as their objects were.** `compact_object` reads the object under the ring's view of
-  its branch (an object in the clear of a branch with DEKs is refused, a downgrade) and seals its
+- **Moves encrypted as their objects were.** `compact_object` reads the object under the ring's view of
+  its branch (an object in the clear of a branch with DEKs is refused, a downgrade) and encrypts its
   moves under the very key its trailer names, branch and generation, with a salt of their own;
   their footer, `Moves::of` under its MAC, names the object they are the moves of, so moves copied
   whole to another moves key of the branch are refused, by readers holding the keys or none
@@ -343,20 +345,20 @@ dropped with its pool, never written out unwrapped.
   objects in the clear are in the clear, as before.
 - **KEKs not to be had.** The KMS refusing the cell's KEK (the tenant's KEK revoked or destroyed,
   the KMS failing), or the collector having no KMS: the pass still marks, compacts what is in the
-  clear, and deletes what no live branch needs, leaving the sealed uncompacted; it counts them in
+  clear, and deletes what no live branch needs, leaving the encrypted uncompacted; it counts them in
   its report (`Report::locked`, the passes, `Report::uncompacted`, the objects), warns naming the
   cell and the KMS's refusal. *(TASK-411.13)* It records its listing's digest and how many it left
-  (`passed::Passed::uncompacted`); a pass after it, the cell unchanged, skips the cell (its lease
-  and one listing) while the tenant's KEK is still not to be had, which a sweep asks the KMS once a
+  (`passed::Passed::uncompacted`); a pass after it, the cell unchanged, skips the cell (its collector
+  lease and one listing) while the tenant's KEK is still not to be had, which a sweep asks the KMS once a
   tenant for all its cells (`collector::Heard`, a wrap of a key of no use; none without a KMS), and
   goes over it in full, compacting, once it is, or once the cell changes. (TASK-411.6 recorded no
   digest: every pass over a revoked tenant's idle cells went in full.)
-  `cladefs-gc` prints them on the pass's line and the sweep's (`left N sealed uncompacted, without
+  `cladefs-gc` prints them on the pass's line and the sweep's (`left N encrypted uncompacted, without
   their cell's KEK`) and in `--metrics` (`cladefs_gc_sweep_objects{action="uncompacted"}`,
   `cladefs_gc_sweep_locked_cells`).
 - **`cladefs-gc` reads `CLADEFS_KMS`** as every cladefs process does (`extent_keys::kms::from_url`); one it
   names that can't be had stops it before it collects (a CLI fails at once rather than leave every
-  sealed cell uncompacted); `--dry-run` reads none.
+  encrypted cell uncompacted); `--dry-run` reads none.
 
 
 ## What TASK-411.4 made
@@ -370,16 +372,16 @@ dropped with its pool, never written out unwrapped.
   is at 7), as FORMAT 2 of `extent_frame` was for TASK-411.2. They are given with the branch's
   first DEK, in one conditional update (`branch::give_deks`): **a record with DEKs holds all it
   inherits from other cells** (given), its readers needing no other cell's KEK.
-- **Who gives them.** A fork's host, as it makes the fork (`extent_store::upload::Remote`):
-  `Remote::inheriting(child)`, before anything of the fork is made (its commit, a point's clone's
+- **Who gives them.** A fork's host, as it makes the fork (`extent_store::upload::Uploader`):
+  `Uploader::inheriting(child)`, before anything of the fork is made (its commit, a point's fork's
   record), takes the keys the parent's store holds in memory (its ring: its own DEKs and every
   ancestor's) and a KEK for the child's cell from the host's pool (`keys::inheriting`); then
-  `Remote::forked(epoch, child, inheriting)`, once the child's record is made, makes the child's
+  `Uploader::forked(commit, child, inheriting)`, once the child's record is made, makes the child's
   cell with that KEK (`cell::make`: create-only, held by no placement, token 0, so that any
-  placement takes it; the host's `keys::Kms` keeps the KEK for the cell's first taking here, so
+  placement takes it; the host's `keys::CachingKms` keeps the KEK for the cell's first taking here, so
   that the child's store opening here unwraps nothing), and gives the child's record its first DEK
   and the parent's keys rewrapped under the new KEK (`keys::give_inherited`). A failure there fails
-  the fork, which cladefs deletes (`Remote::unfork`). Nothing is given for a fork within a cell (the
+  the fork, which cladefs deletes (`Uploader::unfork`). Nothing is given for a fork within a cell (the
   child's writer gives its own DEK as before, and with it what the parent's record inherits), for
   a point, nor for a fork of branches in the clear: plaintext forks make no request more, no KMS
   call. A child its fork's host did not give keys to (its host died between the record and the
@@ -387,46 +389,46 @@ dropped with its pool, never written out unwrapped.
   writer (`keys::with_dek`), reading across, below.
 - **Points keep no key**, nothing writing them: their copies read what they name by crossing into
   their origins' cells (one unwrap of the origin's cell KEK a taking, cached), and forks of them,
-  restores and shared points' clones, rewrap from the copy's ring like any other fork: so the
-  point's owner shredding its tenant stops new forks of it (no copy opens) and breaks no clone. A
-  host holding a copy open, told the tenant's KEK is revoked (`Kms::revoked`), refuses forks of it
+  shared points' included, rewrap from the copy's ring like any other fork: so the
+  point's owner shredding its tenant stops new forks of it (no copy opens) and breaks no fork. A
+  host holding a copy open, told the tenant's KEK is revoked (`CachingKms::revoked`), refuses forks of it
   before anything is made.
 - **Rings** (`keys::ring`): a given record is read with its own cell's KEK alone: its DEKs, its
-  inherited ones, and its same-cell ancestors' records; a sealed ancestor of another cell it holds
+  inherited ones, and its same-cell ancestors' records; an encrypted ancestor of another cell it holds
   not is refused (`Error::Inherited`). A record without its keys (a point, a fork's child before
-  they are given, a branch of a cell in the clear) crosses into each sealed ancestor's cell, its
+  they are given, a branch of a cell in the clear) crosses into each encrypted ancestor's cell, its
   object read and its KEK unwrapped, taking its DEKs and inherited ones; but a writer of a cell in
-  the clear inheriting anything sealed is refused, and so is a fork of a sealed store into a cell
-  in the clear, before anything is made (`ENOTSUP`): no sealed data goes into the clear.
+  the clear inheriting anything encrypted is refused, and so is a fork of an encrypted store into a cell
+  in the clear, before anything is made (`ENOTSUP`): no encrypted data goes into the clear.
 - **KMS calls on the fork's path: none**, its cell KEK from the pool, the parent's keys in memory.
   The child's first opening on the forking host: none. On another host: one unwrap of the child's
   cell KEK, as for any cell taken.
 - **Pools** (`keys::Pooling`; cladefs: 8 a tenant at least, 16 a refill, on the uploaders' runtime):
-  a take leaving a pool low, or a sealed store of the tenant opening, refills it in a batch of
-  wraps at once, off the fork's path (`Kms::refill`, `Kms::filled`); an empty pool wraps one on the
-  path. `Kms::revoked(tenant)`, called on every revoked or destroyed answer of the KMS (a refill's,
+  a take leaving a pool low, or an encrypted store of the tenant opening, refills it in a batch of
+  wraps at once, off the fork's path (`CachingKms::refill`, `CachingKms::filled`); an empty pool wraps one on the
+  path. `CachingKms::revoked(tenant)`, called on every revoked or destroyed answer of the KMS (a refill's,
   an unwrap's) and by the control API (TASK-411.7's to wire), drops the tenant's pool, a refill
   going adding nothing, and its cached cell KEKs, and marks it refused: no refill, no fork
   inheriting its keys, until a KMS call for it succeeds again. KEKs a pool wrapped before a
   destruction nothing has heard of yet still make cells, unreadable from the first, until a refill
   or another call hears it.
 - **Checkpoints at fork points** (`recovery::checkpoint_at`, which `branch::record_fork` writes
-  for a child of another cell) are authenticated under the parent's DEK, if it is sealed, as its
-  writers' are: a child holding the parent's keys refuses one in the clear. Its writer's ring seals
-  them (`branch::record_fork_under`, `keys::Parents::Held`); a deletion recording a sealed
+  for a child of another cell) are authenticated under the parent's DEK, if it is encrypted, as its
+  writers' are: a child holding the parent's keys refuses one in the clear. Its writer's ring authenticates
+  them (`branch::record_fork_under`, `keys::Parents::Held`); a deletion recording an encrypted
   branch's forks, the host's KMS (`branch::delete_under`, `extent_store::upload::delete_branch`):
   with none, it fails rather than write one the child refuses; a failed fork's claim, the host's
   KMS (`branch::delete_fork_under`). Asked for only when one is to be written. *(TASK-411.14)*
-  `cladefs-gc --delete-branch` deletes under `CLADEFS_KMS`'s KMS, as its passes compact: a sealed
+  `cladefs-gc --delete-branch` deletes under `CLADEFS_KMS`'s KMS, as its passes compact: an encrypted
   branch with an unrecorded fork into another cell (its writer died between the fork's
   acknowledgement and recording it) is deleted given one, the checkpoint at the fork point
   authenticated under the branch's DEK. Without one the deletion fails naming the tenant and
-  `CLADEFS_KMS`, its lease ended and its record not yet deleted: a deletion stopped partway, which
-  running it again with the KMS finishes (`extent_remote` `tests/gc.rs`
-  `deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms`).
+  `CLADEFS_KMS`, its head ended and its record not yet deleted: a deletion stopped partway, which
+  running it again with the KMS finishes (`extent_bucket` `tests/gc.rs`
+  `deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms`).
 - **Rotation** rewraps a record's inherited DEKs with its own; `add_generation` keeps them.
 - **Generations a child reads.** A child keeps the generations its parent's lineage had when it
-  was given its keys; what it reads of its parent was sealed under them (segments up to the fork
+  was given its keys; what it reads of its parent was encrypted under them (segments up to the fork
   point, the checkpoint there, written before the child's record). TASK-411.6's compaction must
   keep an object's generation when it rewrites one a child inherits, or the child loses it.
 - **Crashes in the middle of a fork** (doc-7's protocol unchanged: the record create-only before
@@ -444,10 +446,10 @@ dropped with its pool, never written out unwrapped.
   where and when it was, and a deletion refused for want of a KMS is a deletion stopping partway,
   which the model has.
 - **Fork latency** (`cargo run --release -p cladefs-examples --example fork-bench`, on a Mac, a
-  memory bucket, 2026-11-14): a fork of a store of 64 extents into a new cell, median, sealed 32-34
-  ms, in the clear 31-35 ms, with a KMS or none: the same within noise; 3 bucket requests more a
-  sealed fork (the cell's create, the record's read beside it, its update), 47.5 against 44.5. With
-  10 ms a request (`CLADEFS_REMOTE_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
+  memory bucket, 2026-11-14): a fork of a store of 64 extents into a new cell, median, encrypted 32-34
+  ms, in the clear 31-35 ms, with a KMS or none: the same within noise; 3 bucket requests more an
+  encrypted fork (the cell's create, the record's read beside it, its update), 47.5 against 44.5. With
+  10 ms a request (`CLADEFS_BUCKET_LATENCY_MS`), 225-242 ms against 200-218 ms: the two round trips
   more. No KMS call. Linux numbers: the user's, later.
 
 ## What TASK-411.5 made
@@ -457,16 +459,16 @@ dropped with its pool, never written out unwrapped.
   none. Checked against IEEE 1619's vectors 10 and 11 (as aws-lc's `xts_test.cc` carries them) and
   against aws-lc's own `EVP_aes_256_xts` on random keys and 4 KiB sectors (a dev-dependency on
   `aws-lc-sys`, at the version aws-lc-rs builds).
-- **Raw files.** `extent_store::RawFile`: a sealed store's (its ring seals, `Ring::sealing`) open
+- **Raw files.** `extent_store::RawFile`: an encrypted store's (its ring encrypts, `Ring::encrypting`) open
   segments' and large extents' raw files are encrypted a sector at a time (`SECTOR`, 4096), the
   sector's place in the file its tweak (the data unit number), under
   `Xts::derive(dek, salt, "cladefs raw file")`: two HKDF subkeys (`[info, "data"]`, `[info, "tweak"]`)
   of the branch's newest DEK and a salt drawn for the file. Writes are whole sectors (TASK-411.8;
-  a sealed store refuses writes to large extents that are not, `Unsectored`, as it always refused
+  an encrypted store refuses writes to large extents that are not, `Unsectored`, as it always refused
   them to segments), encrypted through a buffer; reads decrypt the sectors they are in. A large
   extent's raw file keeps its salt in memory alone: an opening removes those left. A clear store's
   raw files are as they were, byte for byte.
-- **Logs.** A sealed store's segment's log is headed `FXLOG\0\0\x03` (`wal::SEALED_LOG_MAGIC`):
+- **Logs.** An encrypted store's segment's log is headed `FXLOG\0\0\x03` (`wal::ENCRYPTED_LOG_MAGIC`):
   after the clear header's fields (record salt, branch, number), the DEK's branch (u64) and
   generation (u32) and the raw file's 32-byte salt, then an HMAC-SHA256 of the header so far under
   `dek.derive(salt, ["cladefs raw file log mac"])`; each record's payload (bincode of `LogRecord`) is
@@ -484,59 +486,59 @@ dropped with its pool, never written out unwrapped.
   object's bytes are AES-GCM parts and tags, not the XTS sectors the raw file holds, so framing in
   place would write every byte again anyway, and a crash part way would leave a file neither raw
   nor framed. `RawFile::clear` hands the inner file to in-place framing only in the clear.
-  Nor does a look ahead (TASK-400, merged from main) see a sealed segment's parts as it fills:
+  Nor does a look ahead (TASK-400, merged from main) see an encrypted segment's parts as it fills:
   its bytes in the raw file are XTS ciphertext, and a framing in a copy reads every part anyway,
-  so `Segment::new` gives a sealed open segment no `Ahead`, nothing is queued for the framer
+  so `Segment::new` gives an encrypted open segment no `Ahead`, nothing is queued for the framer
   (`Job::See`), and its framing reads all its parts through `RawFile`, decrypting
-  (`sealed_segments_parts_are_not_seen_ahead`). A clear store's looks ahead are main's: through
+  (`encrypted_segments_parts_are_neither_seen_nor_held_ahead`). A clear store's looks ahead are main's: through
   `RawFile`, the clear file's bytes as they are, their CRCs and looks those its in-place framing
-  writes. TASK-401's writing back holds for sealed framed files as for clear copies: the framing
+  writes. TASK-401's writing back holds for encrypted framed files as for clear copies: the framing
   writes its copy to the page cache, `make_durable` writes it back a MiB at a time before it
   syncs it, and the uploader reads it through the cache (`read_object`).
-  Nor are a sealed segment's parts packed ahead and held in memory (TASK-400's held parts,
-  c2daf7630, merged from main): holding rides on the look ahead, which a sealed segment has none
+  Nor are an encrypted segment's parts packed ahead and held in memory (TASK-400's held parts,
+  c2daf7630, merged from main): holding rides on the look ahead, which an encrypted segment has none
   of, so nothing of it is queued, packed or held, and its framing reads every part back through
-  `RawFile`, decrypting, then packs and seals it, as before. Chosen over packing and sealing ahead
-  because that would need the framed object's key (`Packer::new(sealing)` draws its salt and
+  `RawFile`, decrypting, then packs and encrypts it, as before. Chosen over packing and encrypting ahead
+  because that would need the framed object's key (`Packer::new(encryption)` draws its salt and
   derives its `ObjectKey` at framing) drawn when the segment opens, kept with it across the
   framer's queue, the threads packing ahead, eviction and a framing that fails and runs again,
   each part's nonce (its index) under it never reused for other bytes; and the parts held would be
   ciphertext the governor evicts and a framing re-reads anyway. Not holding adds no key's
   lifetime, no plaintext anywhere but the framing's own buffers, and keeps the bytes framed what
-  they were. The cost: a sealed store's framings in a copy read their raw file back as clear
+  they were. The cost: an encrypted store's framings in a copy read their raw file back as clear
   stores' did before TASK-400, from disk once the host let its pages go (TASK-421).
   `Store`'s look ahead asserts it is of a clear raw file; `Packer::push_stored` asserts a part is
-  sealed as its object is, so a clear held part could never reach a sealed object. Tests:
-  `sealed_segments_parts_are_neither_seen_nor_held_ahead`,
-  `sealed_stores_hold_no_parts_packed_ahead` (a sealed store holds nothing, reads all its parts
+  encrypted as its object is, so a clear held part could never reach an encrypted object. Tests:
+  `encrypted_segments_parts_are_neither_seen_nor_held_ahead`,
+  `encrypted_stores_hold_no_parts_packed_ahead` (an encrypted store holds nothing, reads all its parts
   back, and leaves no plaintext in any file; its clear twin holds its parts and reads its last
   alone).
 - **No writer of raw files but the store.** `Write::file()` went: `Write::write` encrypts, and
   `Write::stored` gives a caller doing its own I/O (cladefs's image device) the file, the offset and
   the bytes encrypted, which it writes again from the last whole sector written after a short
-  write. `Part::Data` carries the `RawFile`: such a reader reads `RawFile::read_range` and
+  write. `Located::Data` carries the `RawFile`: such a reader reads `RawFile::read_range` and
   decrypts it (`RawFile::decrypt`).
 - **Cost, macOS (Apple M5 Pro, 15 CPUs, `store-bench`, release, 2026-11-14).** Writes into open segments, 1 MiB extents:
-  1.8-1.9 GB/s sealed against 2.8-3.6 GB/s in the clear; reads of them while open 1.6-1.7 against
+  1.8-1.9 GB/s encrypted against 2.8-3.6 GB/s in the clear; reads of them while open 1.6-1.7 against
   2.3-2.7 GB/s; 4 KiB extents 195 against 209 MiB/s. Framing 32 MiB segments, four stores at once:
-  text 66-76 ms each in the clear, 70-72 ms sealed; noise 39-41 ms in the clear (in place), 83-85 ms
-  sealed (in a copy). Linux to be measured.
+  text 66-76 ms each in the clear, 70-72 ms encrypted; noise 39-41 ms in the clear (in place), 83-85 ms
+  encrypted (in a copy). Linux to be measured.
 
 ## What TASK-411.7 made
 
-- **A cell shredded** (`extent_remote::cell::shred`): one conditional update of `<C>cell`, by
+- **A cell shredded** (`extent_bucket::cell::shred`): one conditional update of `<C>cell`, by
   whoever calls it, not its holder, takes every KEK generation out and sets `shredded`
-  (`cell::Object::shredded`, layout FORMAT 10 extended, unreleased). Takings and holdings of it are
+  (`cell::Object::shredded`, layout FORMAT 10 extended, unreleased; 11 since TASK-407). Takings and holdings of it are
   refused (`cell::shredded`: `Error::Kms`, "tenant T: cell T/C is shredded, its KEK gone", so
-  `EACCES` to callers and the collector's locked path, marking and deleting on, its sealed objects
+  `EACCES` to callers and the collector's locked path, marking and deleting on, its encrypted objects
   left uncompacted, not a corrupt pass), and so is `add_kek`. `CellKeys` of a shredded cell are
-  sealed and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
+  encrypted and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
   given. Its holder, if any, goes on changing its volumes until told: every change keeps the mark.
-- **A host told** (`cladefs::remote::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
+- **A host told** (`cladefs::bucket::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
   control API (`ShredCell`, which shreds then forgets, idempotent, to be called on every host;
   `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
   cladefsctl (`shred-cell`, `forget-tenant-keys`):
-  - fences every store of the scope open in the process (`fence::fence_stores`, fences listed by
+  - halts every store of the scope open in the process (`halt::halt_stores`, halts listed by
     branch): each request fails with `EACCES` from then on, as its reopening does; extentd refuses
     its VM process's requests so;
   - takes the scope's stores out of the extent cache's holders (`cache::forget`): an extent no
@@ -545,24 +547,24 @@ dropped with its pool, never written out unwrapped.
   - drops what its fetchers kept of the scope's objects (`fetch::Memory::forget_kept`: tails opened
     under keys, parts unpacked in the clear) and the rings of the scope's stores
     (`HostRing::forget`, by `Ring`'s owner, the branch whose store opened it);
-  - has its KMS forget the scope (`keys::Kms::forget`): a tenant's unwrapped cell KEKs, pool and
-    forks inheriting its keys (`Kms::revoked`, now wired), until the KMS answers for it again; a
+  - has its KMS forget the scope (`keys::CachingKms::forget`): a tenant's unwrapped cell KEKs, pool and
+    forks inheriting its keys (`CachingKms::revoked`, now wired), until the KMS answers for it again; a
     cell's unwrapped KEKs, refused from then on on this host even under a cell object read before.
-- **What stays.** In memory: a fenced store's own ring and its open segment's XTS key, until
+- **What stays.** In memory: a halted store's own ring and its open segment's XTS key, until
   whoever holds it closes it (a VM process whose guest met `EACCES`, a point kept for forks); the
   DEKs other stores hold, which they inherited (a fork of the shredded tenant into another's keeps
   its keys: shredding a parent leaves its children what they inherited, and their pages); pages of
-  extents other open stores hold too (a shared point's clone, a public base, by design one copy for
+  extents other open stores hold too (a shared point's fork, a public base, by design one copy for
   all). A host not told keeps reading its open stores under what it unwrapped, but opens none afresh:
   a fresh opening reads the cell object (shredded) or asks the KMS (destroyed). On disk: everything
-  of the scope's is as its keys sealed it, open segments (XTS), logs (MACed, metadata), the part
+  of the scope's is as its keys encrypted it, open segments (XTS), logs (MACed, metadata), the part
   cache (GCM), and a shredded cell's objects stay in the bucket, ciphertext, until its branches are
   deleted. A race: a store opening on a host as it is told may finish opening; telling it again
-  fences it.
+  halts it.
 - **Tests.** `extent_store` `upload::encrypted::shredded_tenants_leave_none_of_their_volumes_readable_on_any_host`
   (two hosts, open segment, part cache on disk, a cross-tenant fork reading on) and
   `shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable` (the collector
-  locked, the old cell object put back reading again: why versions must expire); `extent_remote`
+  locked, the old cell object put back reading again: why versions must expire); `extent_bucket`
   `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `cladefs`
   `remote::tests::stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache`; Linux:
   `tests/control.rs` `sealed_stores_served_and_shredded_through_the_control_api`.
@@ -593,7 +595,7 @@ configuration.
   the maker writes the cell's object, keeping the wrapped KEK, only after it returns; so no sealed
   cell's object is in the bucket without its tenant's marker, whatever crashes. A crash between
   leaves a marker of a tenant with a KEK and no sealed cell, which says nothing false. A host that
-  wrote or saw the marker writes it no more (`keys::Kms`'s markers): one PUT per host per tenant,
+  wrote or saw the marker writes it no more (`keys::CachingKms`'s markers): one PUT per host per tenant,
   with its first sealed cell.
 - **Read** when the KMS says the tenant has no KEK (`Kms::new_kek` heard `NoSuchTenant`, now or
   within `KEKLESS_FOR`): a HEAD of the marker. There: the tenant is refused as destroyed, naming it
@@ -650,9 +652,9 @@ refuses to start) and removed plaintext (One sealed mode).
 - **What it is not.** BYOK (Goal 1): the tenant holds no key of its own; one wanting that brings a
   real KMS. Goal 3 holds while the master key stays out of the bucket: a reader of the bucket finds
   every tenant's KEK there, wrapped by a key it lacks. Goal 2, shredding, holds as below.
-- **Choosing it** (`extent_remote::bucket_kms::from_env`, the one function every process that
+- **Choosing it** (`extent_bucket::bucket_kms::from_env`, the one function every process that
   opens stores asks: extentd, cladefsctl and the cladefs CLI's FUSE mounts through
-  `cladefs::remote::kms`, and `cladefs-gc`). `CLADEFS_KMS`, if it names one, is the host's KMS (a master
+  `cladefs::bucket::kms`, and `cladefs-gc`). `CLADEFS_KMS`, if it names one, is the host's KMS (a master
   key also given is unused, and warned of); else, given master keys, the bucket KMS over the
   host's bucket: `CLADEFS_EXTENTD_REMOTE`'s for cladefs's processes, the bucket collected for
   `cladefs-gc`; else none. Master keys given that can't be had (malformed, both variables set, an
@@ -695,7 +697,7 @@ refuses to start) and removed plaintext (One sealed mode).
   its object once `FRESH_FOR` (60 s) old, so that the bucket is asked once a tenant a minute at
   most, however many cells' KEKs the host wraps and unwraps, and a tenant shredded elsewhere is
   refused within a minute by a host told nothing. `Kms::forget` (a method every KMS has now, doing
-  nothing but here) drops it at once, which `keys::Kms::revoked` calls: every `ForgetTenantKeys`,
+  nothing but here) drops it at once, which `keys::CachingKms::revoked` calls: every `ForgetTenantKeys`,
   `ShredTenant`, and refusal heard.
 - **Refusals**, each naming the tenant, so `Error::Kms`, `EACCES`:
 
@@ -720,7 +722,7 @@ refuses to start) and removed plaintext (One sealed mode).
   and failing, any under none of the keys given. Run again, it rewraps nothing. (3) Give hosts NEW
   alone. With versioning on, OLD still opens the objects' non-current versions until they expire.
 - **Shredding a tenant** (`ShredTenant`, `cladefsctl shred-tenant TENANT`, through each host's
-  daemon; `cladefs::remote::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
+  daemon; `cladefs::bucket::shred_tenant`; `bucket_kms::destroy`, which needs no master key): the
   tenant's KEK object is replaced by a tombstone, by a conditional update (or created one, a tenant
   never given a KEK: it is never made one), then the host forgets the tenant's keys as
   `ForgetTenantKeys` does (What TASK-411.7 made). Call it on every host: the first shreds, the

@@ -8,7 +8,7 @@
 //!
 //! A store's framed files, its closed segments' and its large extents', say they are encrypted in
 //! their trailers (`extent_frame::Encryption`), and its segments' logs are headed [`LOG_MAGIC`]: a framed
-//! file whose trailer's encrypt is of kind 0 (`extent_frame::in_the_clear`), and a log headed
+//! file whose trailer's encryption is of kind 0 (`extent_frame::in_the_clear`), and a log headed
 //! [`CLEAR_LOG_MAGIC`], are in the clear, as stores wrote them before every store was encrypted
 //! (TASK-411.28), which no reader reads now. Raw files (open segments, open large extents) say nothing:
 //! encrypted, they are as random bytes (TASK-411.5), which only a search for what was written in

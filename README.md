@@ -184,7 +184,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   DIR MOUNTPOINT` is one mount for any number of stores (TASK-302): its control
   API (`proto/cladefs/mount/v1/mount.proto`; `cladefs-mount attach`,
   `create-volume`, `detach`, `list`) takes a tenant's cell of the bucket
-  (TASK-364), its volumes' leases with it, each Fxfs volume into
+  (TASK-364), taking its volumes' heads with it, each Fxfs volume into
   `DIR/TENANT/CELL/VOLUME` and shown at `MOUNTPOINT/TENANT/CELL/VOLUME`, and
   detaches the cell once the kernel lets go of it, written back. macOS has no
   open-source FUSE, so no mounts there.
@@ -303,8 +303,8 @@ imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 `<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
 connection's tenant is the socket it came in on, and it names stores in the
 tenant's directory alone. The stores in its directory are volumes of its own
-cells, and its VM processes open no store of another tenant's cell, but restore
-from the points of others' its VM manager gives it. Revoked, a tenant's socket
+cells, and its VM processes open no store of another tenant's cell, but fork
+the points of others' its VM manager gives it. Revoked, a tenant's socket
 goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's, ID 0, which is granted
 nothing and has no limits of its own, only every tenant's: its connections name
@@ -600,7 +600,7 @@ suites' `unsupported` check pins deduplication's and `MAP_SYNC`'s):
   makes) can't be shared: a reflink of them fails with `EOPNOTSUPP`.
 - `MAP_SYNC` mmaps fail with `EOPNOTSUPP`: the DAX window is the host's
   memory, not persistent memory, and what is stored through it is in a private
-  page until writeback writes it to the store, and durable once an fsync
+  page until writeback writes it to the store, and ordered once an fsync
   commits it, never at the fault.
 - chattr's other flags (`FS_IOC_FSSETXATTR`'s project IDs and extent sizes,
   synchronous, compressed, no-COW) fail with `EOPNOTSUPP`.

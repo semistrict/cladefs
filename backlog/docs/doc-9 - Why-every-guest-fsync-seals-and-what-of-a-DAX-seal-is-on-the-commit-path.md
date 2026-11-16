@@ -3,7 +3,7 @@ id: doc-9
 title: 'Why every guest fsync seals, and what of a DAX seal is on the commit path'
 type: other
 created_date: '2026-10-28 03:23'
-updated_date: '2026-11-06 06:43'
+updated_date: '2026-11-16 04:07'
 ---
 # Why every guest fsync seals, and what of a DAX seal is on the commit path
 
@@ -31,11 +31,11 @@ extents were rejected. What depends on it:
 
 - **Durability is of whole extents.** A commit writes its open extents' data to the store, and the
   host packs sealed extents, in commit order, into segments it uploads and indexes by extent ID
-  (doc-4, The host's storage; doc-7). An extent still open after a durable commit would have bytes
-  in one segment and later bytes in another, and the index, cleaning and object storage would have
+  (doc-4, The host's storage; doc-7). An extent still open after a local commit would have bytes
+  in one segment and later bytes in another, and the index, the collector and the bucket would have
   to version extents.
 - **Sharing is by ID.** Forks, snapshots and followers name the extents they share; the host's
-  page cache maps one copy of an extent into every VM that reads it. Both are safe only because an
+  extent cache maps one copy of an extent into every VM that reads it. Both are safe only because an
   extent never changes once a commit has named it. An extent left open past a commit is one the
   writer can still change under whoever shares it.
 - **Immutability has to be enforced, not trusted.** After the barrier the host makes the window's
@@ -44,7 +44,7 @@ extents were rejected. What depends on it:
   prefix of an open extent would need the same protection, against the same guest, before anything
   else could map it.
 
-Fxfs never rewrites a committed block in place, so a *durable-but-open* staging extent is
+Fxfs never rewrites a committed block in place, so a *committed-but-open* staging extent is
 conceivable: commit its written prefix, keep the rest writable, seal on fork, snapshot, reclaim or
 when it is full. It would save the restage (a new staging extent and its MAP) and the evacuation
 after each fsync. It costs a store format whose extents grow across commits, prefix-level

@@ -43,15 +43,15 @@ otherwise. A store or bucket format change means its stores are made again, not 
 3. **Stop the daemon with SIGTERM.** It drains, then exits (`cladefs::extentd::drain`, TASK-141.4):
    - its health service reports NOT_SERVING;
    - its VM sockets refuse connections, and its control API refuses calls with `UNAVAILABLE`;
-   - any VM still connected is cut off and exits 158, its last commits made durable and its store
+   - any VM still connected is cut off and exits 158, its last commits made local and its store
      closed;
    - the points it kept open for forks are closed;
-   - every store's uploader uploads what its store made durable, and stops.
+   - every store's uploader uploads what its store made local, and stops.
 
    It does all of that within `CLADEFS_EXTENTD_DRAIN` seconds (60 by default). If it finishes, it logs
    "drained in ...: every store closed" and exits 0. If not, it logs "not drained within Ns: ...
    left", naming how many connections, control calls and uploaders were left, and exits 1. Then the
-   stores' durable commits are still on the host's disk, and the next daemon to open each store
+   stores' local commits are still on the host's disk, and the next daemon to open each store
    uploads the rest.
 4. **Install the new daemon and Firecracker together.** They are one build. A guest kernel is
    upgraded as its VM next boots, with the Firecracker it boots on. It isn't part of this.

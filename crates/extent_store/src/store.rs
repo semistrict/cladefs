@@ -1286,7 +1286,7 @@ impl<D: Dir> Store<D> {
     }
 
     /// cladefs: its keys, its branch's and its ancestors' DEKs, which it encrypts and reads under
-    /// (TASK-411.3): every store's encrypt (TASK-411.28).
+    /// (TASK-411.3): every store's encrypted (TASK-411.28).
     pub fn keys(&self) -> &Arc<Ring> {
         &self.keys
     }

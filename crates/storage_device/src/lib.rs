@@ -120,7 +120,7 @@ pub trait Device: Send + Sync {
 
     /// cladefs: the lowest sequence number the filesystem may mint from: the device's branch may hold
     /// extents another writer minted below it that the device doesn't hold (backlog doc-7,
-    /// Fencing). Minting starts past it, and past `next_sequence`, which alone bounds the extents
+    /// The head). Minting starts past it, and past `next_sequence`, which alone bounds the extents
     /// the device holds.
     async fn sequence_floor(&self) -> Result<u64, Error> {
         Ok(0)

@@ -61,8 +61,8 @@ request also has `cladefs.errno`.
 | `store.commit` | every commit of a writer's store | the request, or whatever commits | `branch`, `durable` |
 | `commit.seal` | sealing the extents written since the last commit | `store.commit` | `extents`, `bytes` copied |
 | `commit.write` | recording the commit in the open segment and queuing its flush | `store.commit` | `epoch` |
-| `store.flush` | making ordered commits durable: syncs and log appends | `store.commit` if the commit is durable; root for the daemon's 50 ms flushes | `branch`, `commits` |
-| `commit.upload_wait` | a commit waiting for object storage (durable: uploaded; ordered: within its lag) | `store.commit` | `epoch` |
+| `store.flush` | making ordered commits local: syncs and log appends | `store.commit` if the commit waits for local or uploaded; root for the daemon's 50 ms flushes | `branch`, `commits` |
+| `commit.upload_wait` | a commit waiting for the bucket (uploaded: until uploaded; otherwise: within its lag) | `store.commit` | `epoch` |
 | `store.open`, `store.create` | opening a store, or making a new one | the request or control call | `store`, `branch` |
 | `store.fork` | a fork or point of a store | the request or control call | `branch`, `child`, `point` |
 | `cache.page_in` | reading a part of a cached extent into memory | the fault or read that needed it | `branch`, `extent`, `arena`, `bytes` |
@@ -72,7 +72,7 @@ request also has `cladefs.errno`.
 | `bucket.get`, `bucket.get_range`, `bucket.head`, `bucket.list`, `bucket.list_delimited`, `bucket.create`, `bucket.update`, `bucket.overwrite`, `bucket.delete`, `bucket.delete_batch` | each object-store request (a batch of deletes: one request where the store deletes in batches, as S3's DeleteObjects) | the upload, checkpoint, page-in, open or collector pass that made it | `object_key`, `bytes`, `objects` (listings, batches of deletes), `prefixes` (listings by delimiter) |
 
 Uploads run behind commits, so an upload is a trace of its own rather than a child of the commit
-it carries. A durable commit's `commit.upload_wait` span shows how long the commit waited for
+it carries. An uploaded commit's `commit.upload_wait` span shows how long the commit waited for
 that upload.
 
 ### Request IDs
@@ -95,7 +95,7 @@ attribute is ever computed. The request path adds one more load per request, in
 
 ## Tests
 
-- `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and a durable commit through
+- `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and an uploaded commit through
   extentd into OpenTelemetry's in-memory exporter. It checks the span tree and its attributes, and
   that nothing is exported while tracing is off.
 - `crates/cladefs/tests/tracing.rs` runs the `cladefs-extentd` binary against an OTLP/HTTP collector
