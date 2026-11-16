@@ -52,7 +52,7 @@ use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
 use extent_remote::wal::Taken;
-use extent_remote::{Body, Objects, Writer, branch, cell};
+use extent_remote::{Body, Objects, Recovered, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
@@ -1037,9 +1037,10 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             // cladefs: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
             None => None,
             Some(record) if record.is_point() => {
-                let (state, keys) = self.point(bucket, branch, record).await?;
+                let (Recovered { state, layer, .. }, keys) =
+                    self.point(bucket, branch, record).await?;
                 let opening =
-                    Opening { state, taken: None, cache, keys: keys.clone(), held: parts };
+                    Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
                 let store = blocking(|| recovering.open(options, opening))?;
                 let _ = self.store.set(Arc::new(store));
                 self.hold_ring(&keys);
@@ -1147,8 +1148,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         };
         let writer = Arc::new(writer.uploading_within(self.uploads.clone()));
         let keys = writer.keys().clone();
-        let (state, taken) = (writer.state(), Some(writer.taken().clone()));
-        let opening = Opening { state, taken, cache, keys: keys.clone(), held: parts };
+        let (state, layer, taken) = (writer.state(), writer.layer(), Some(writer.taken().clone()));
+        let opening = Opening { state, layer, taken, cache, keys: keys.clone(), held: parts };
         let store = blocking(|| recovering.open(options, opening))?;
         let _ = self.store.set(Arc::new(store));
         self.hold_ring(&keys);
@@ -1206,7 +1207,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
-    /// changes. No lease: nothing the store does goes to the bucket but its forks' records.
+    /// changes, as recovered, with the decoded state it shares (TASK-453). No lease: nothing the
+    /// store does goes to the bucket but its forks' records.
     /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
     /// (TASK-411.3).
     async fn point(
@@ -1214,7 +1216,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         bucket: &Arc<B>,
         branch: Branch,
         record: Record,
-    ) -> Result<(extent_remote::State, Arc<Ring>), Failure> {
+    ) -> Result<(Recovered, Arc<Ring>), Failure> {
         if record.deleted {
             return Err(Failure::PointDeleted);
         }
@@ -1225,9 +1227,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
         let recovering =
             extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
-        let state = recovering.await?.state;
+        let recovered = recovering.await?;
         let _ = self.point.set(Point { branch, origin });
-        Ok((state, keys))
+        Ok((recovered, keys))
     }
 
     /// Adds the segments of the store's write-ahead log whose commits are durable to the writer, to

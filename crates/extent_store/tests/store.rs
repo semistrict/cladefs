@@ -62,7 +62,7 @@ fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<Me
     let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
     let taken = extent_remote::Taken::of(head, &state, chain);
     let keys = extent_remote::keys::Ring::clear();
-    let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
+    let opening = Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 

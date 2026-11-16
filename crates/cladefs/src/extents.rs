@@ -1143,11 +1143,11 @@ impl ExtentStore {
         self.remote.as_ref()
     }
 
-    /// cladefs: a copy of the map its store holds its branch's extents in, for a benchmark to weigh
-    /// (`extent_store::Store::extents_copy`, TASK-443.2).
+    /// cladefs: whether its store's map of the extents the bucket holds of its branch is `other`'s,
+    /// one map shared (`extent_store::Store::shares_extents_with`, TASK-453).
     #[cfg(test)]
-    pub(crate) fn extents_copy(&self) -> impl Sized + use<> {
-        self.store.extents_copy().unwrap()
+    pub(crate) fn shares_extents_with(&self, other: &Self) -> bool {
+        self.store.shares_extents_with(&other.store).unwrap()
     }
 
     /// The branch whose extents the guest mints, by its ID, in its cell.

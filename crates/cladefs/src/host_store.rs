@@ -148,6 +148,20 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<Bucket>> {
     Ok(bucket)
 }
 
+/// cladefs: what the decoded states of the branches this process's buckets keep, or its stores hold
+/// as the maps of the extents they share, hold: each once, however many stores share it
+/// (`extent_remote::recovery::Decoded::held`, TASK-453).
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn decoded_held() -> extent_remote::recovery::Held {
+    let buckets = BUCKETS.lock().unwrap();
+    let mut held = extent_remote::recovery::Held::default();
+    for decoded in buckets.values().filter_map(|bucket| extent_remote::Bucket::decoded(&**bucket)) {
+        let of = decoded.held();
+        (held.states, held.entries) = (held.states + of.states, held.entries + of.entries);
+    }
+    held
+}
+
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the
 /// buckets they put themselves in front of; unless it is already, the same.
 #[cfg(test)]
