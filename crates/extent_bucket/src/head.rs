@@ -102,7 +102,14 @@ pub async fn take_from(
             Some(object) => match Head::decode(&object.bytes)? {
                 head if head.epoch == Head::FINAL => return Err(Error::Deleted),
                 head if rules().tokens && head.token > token => return Err(Error::Stale),
-                head => Head { epoch: head.epoch + 1, holder, token, ..head },
+                // cladefs: naming what it named, its versions among them (rule `versions_carried`,
+                // TASK-476); without the rule, as a test shows it needed, none.
+                head => match rules().versions_carried {
+                    true => Head { epoch: head.epoch + 1, holder, token, ..head },
+                    false => {
+                        Head { epoch: head.epoch + 1, holder, token, versions: Vec::new(), ..head }
+                    }
+                },
             },
         };
         let version = found.as_ref().map(|object| object.meta.version.clone());
@@ -136,7 +143,8 @@ pub async fn swap(
 /// takes, as `holder` of the placement whose fencing token is `token`, unless a later placement
 /// took it ([`Error::Stale`]). What it names, it keeps: the head the deletion recovers the branch
 /// from, which nothing swaps after, so that every deletion of the branch finds the same forks
-/// (TASK-183). Starts from `found`, what a read of it found ([`read`]). Returns it.
+/// (TASK-183); but its versions, which go with the branch (doc-18, TASK-476). Starts from `found`,
+/// what a read of it found ([`read`]). Returns it.
 pub(crate) async fn end(
     bucket: &impl Bucket,
     branch: Branch,
@@ -157,7 +165,8 @@ pub(crate) async fn end(
         if rules().delete_tokens && head.token > token {
             return Err(Error::Stale);
         }
-        let ended = Head { epoch: Head::FINAL, holder, token: u64::MAX, ..head };
+        let ended =
+            Head { epoch: Head::FINAL, holder, token: u64::MAX, versions: Vec::new(), ..head };
         let version = found.as_ref().map(|object| object.meta.version.clone());
         match write(bucket, &key, &ended, version).await {
             Ok(held) => return Ok(held.head),

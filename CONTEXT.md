@@ -236,6 +236,14 @@ _Avoid_: snapshot for the point itself
 A point other tenants' cells may fork.
 _Avoid_: public (public is a base's)
 
+**Version**:
+A named state of a vdisk its head keeps, in its own cell, of no record: cut local, then uploaded, and dropped by its writer.
+_Avoid_: snapshot (VMs' and Fxfs's), point (a point has its record), checkpoint
+
+**Cut**:
+The commit that makes a version, of a quiescent store, closing its segment; a **cell cut** makes a version of each of a cell's vdisks at one moment.
+_Avoid_: freeze (the guest's), barrier (any commit is one)
+
 **Base**:
 A store VMs boot forks of, such as an imported container image.
 _Avoid_: template, golden image

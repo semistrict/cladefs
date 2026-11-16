@@ -251,6 +251,29 @@
 (*   write it after, the fork made, deleted and its cell removed. A resume *)
 (*   finding it made writes none. Without it, retired unmarked, it stands  *)
 (*   for good (ReferencesRetiredMarked; TASK-455's review).                *)
+(* - versionsKept (NoVersionsKept): a pass keeps, for each version a live  *)
+(*   branch's head names, the branch's state at it whole, and what         *)
+(*   recovering it reads, as for a fork point (TASK-476, doc-18). Without  *)
+(*   it, a checkpoint since covers the version's segments, which the pass  *)
+(*   deletes (NothingNeededGone).                                          *)
+(* - versionsCarried (NoVersionsCarried): a takeover's swap names the      *)
+(*   versions the head named, as it names its segments. Without it, they   *)
+(*   are gone though no writer dropped them (VersionsStay).                *)
+(* - versionsAcked (NoVersionsAcked): a head names a version only with the *)
+(*   segment its cut closed, by the acknowledgement naming that segment.   *)
+(*   Without it, a swap names it as its cut is committed, before its       *)
+(*   segment lands, a state the head does not hold (NothingNeededGone).    *)
+(*                                                                         *)
+(* Versions (TASK-476, doc-18): a version is a name for a branch's state  *)
+(* as of a segment its head names, kept while the head names it, in the   *)
+(* branch's own cell and of no record. Its cut is a commit closing a      *)
+(* segment whose footer names it (its ID, the commit's tag here); the     *)
+(* acknowledgement naming the segment names it in the head; its writer    *)
+(* drops it by a swap; a deletion's final head names none. A restore of   *)
+(* one is a point's fork's steps, the branch's head read in place of the  *)
+(* point's record. A version's cut is of a quiescent store, and seals     *)
+(* nothing. Cells' cuts, versions of several vdisks cut at one moment,    *)
+(* are a host's work alone (doc-18): not modelled.                        *)
 (*                                                                         *)
 (* Gone with the head (TASK-407), with what they guarded: a create where   *)
 (* nothing is as a writer's fence, the fence segment a takeover made, gaps *)
@@ -329,12 +352,14 @@ AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "reco
              "wholeCommitsKept", "references", "referencesFirst", "forksReferFirst",
              "referencesHeld", "referencesRelisted", "forkPointsKept", "forksRecordFirst",
              "referencesTakenBack", "retirementsMarked", "movesByPass", "idsGivenOnce",
-             "forksMadeUnmarked", "fencesKept", "resumesRefer", "resumesMarked"}
+             "forksMadeUnmarked", "fencesKept", "resumesRefer", "resumesMarked",
+             "versionsKept", "versionsCarried", "versionsAcked"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "fork", "point", "restore", "unfork",
            "contest", "delete", "deletePoints", "place", "checkpoint", "collect", "compact",
            "compactMoves", "crash", "disk", "staleTake", "overlap", "span", "spanOn", "cut",
-           "forkOwn", "deleteRoot", "landInOrder", "forkNext", "deleteEarly", "resume"}
+           "forkOwn", "deleteRoot", "landInOrder", "forkNext", "deleteEarly", "resume",
+           "version", "dropVersion", "restoreVersion"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Can \subseteq AllCan
@@ -377,9 +402,10 @@ VARIABLES
     own,        \* the extents stored on their own: [b, e, s, x], at the key of writer e's segment s
     ckpt,       \* ckpt[b][s][e]: b's checkpoint as of segment s by the writer of epoch e, or None
     rec,        \* rec[b]: b's record, or None
-    head,       \* head[b]: [epoch, token, holder, end, chain, ckpt], or None: the holder its
+    head,       \* head[b]: [epoch, token, holder, end, chain, ckpt, vers], or None: the holder its
                 \* taking's, unique; the segments 0..end-1 committed, chain[s + 1] the epoch of s;
-                \* ckpt the newest checkpoint, <<s, e>>, or <<>>
+                \* ckpt the newest checkpoint, <<s, e>>, or <<>>; vers its versions, each [id, at]:
+                \* the ID its cut's footer names (its commit's tag), and the segment it is at
     moves,      \* moves[b][s][e][p]: the moves the collector's passes p made of segment <<s, e>> of
                 \* b: p = <<i>>, pass i's moves of the segment; <<i, j>>, pass j's of those; or None.
                 \* Each [pass, names]: its pass, and the extents it holds
@@ -447,12 +473,13 @@ Nameable(c) == rec[c] = None /\ (R("idsGivenOnce") => c \notin Given)
 Owner(o) == IF R("recordsOwned") THEN o ELSE <<"anyone">>
 
 \* A record: its kind ("root", "fork", "point", "forking", "claim"), its origin <<parent, at>>,
-\* the point a fork being made is of, its owner, whether deleted, and, of a fork of a point,
-\* whether another than the restore that began it resumed it (resumesMarked); and, not in the
-\* bucket's bytes, the commit its branch starts from and the making it is of.
+\* the point a fork being made is of, or the version, <<branch, id>> (<<>> if none), its owner,
+\* whether deleted, and, of a fork of a point or a version, whether another than the restore that
+\* began it resumed it (resumesMarked); and, not in the bucket's bytes, the commit its branch
+\* starts from and the making it is of.
 Record(kind, origin, point, o, base) ==
-    [kind |-> kind, origin |-> origin, point |-> point, owner |-> Owner(o), deleted |-> FALSE,
-     resumed |-> FALSE, base |-> base, maker |-> o]
+    [kind |-> kind, origin |-> origin, point |-> point, ver |-> <<>>, owner |-> Owner(o),
+     deleted |-> FALSE, resumed |-> FALSE, base |-> base, maker |-> o]
 
 \* Whether r is the record of the child of the fork whose owner is o.
 ChildOf(r, o) == r.kind # "root" /\ r.owner = Owner(o)
@@ -558,6 +585,11 @@ End(b) == IF head[b] = None THEN 0 ELSE head[b].end
 Chain(b) == IF head[b] = None THEN <<>> ELSE head[b].chain
 HeadCkpt(b) == IF head[b] = None THEN <<>> ELSE head[b].ckpt
 HeadEpoch(b) == IF head[b] = None THEN 0 ELSE head[b].epoch
+HeadVers(b) == IF head[b] = None THEN {} ELSE head[b].vers
+
+\* Whether the version v, <<branch, id>>, is gone: its branch's head names it no more, dropped by
+\* its writer or ended by a deletion, or never did.
+VersionGone(v) == ~\E x \in HeadVers(v[1]) : x.id = v[2]
 
 \* b's checkpoints listed as of segment `at` or before: <<s, e>>.
 CkptsTo(b, at) == {k \in Seqs \X Epochs : k[1] <= at /\ ckpt[b][k[1]][k[2]] # None}
@@ -763,7 +795,7 @@ Unrecorded(b, st, s) ==
 
 \* The head the writer whose session is s writes: its taking, with what it committed.
 HeadOf(s) == [epoch |-> s.epoch, token |-> s.token, holder |-> s.gen, end |-> s.end,
-              chain |-> s.chain, ckpt |-> s.hckpt]
+              chain |-> s.chain, ckpt |-> s.hckpt, vers |-> s.vers]
 
 \* s, the session of a writer of b, its recovery started from b's head H as it swapped it: from
 \* the head's checkpoint, or its origin's state; stopped, what that needs gone.
@@ -772,7 +804,8 @@ Started(s, b, H) ==
         newest == IF H = None THEN <<>> ELSE H.ckpt
         s1 == [s EXCEPT !.end = IF H = None THEN 0 ELSE H.end,
                         !.chain = IF H = None THEN <<>> ELSE H.chain,
-                        !.hckpt = newest]
+                        !.hckpt = newest,
+                        !.vers = IF H = None \/ ~R("versionsCarried") THEN {} ELSE H.vers]
     IN IF newest # <<>> THEN
           IF Obj(CkptKey(b, newest[1], newest[2])) = None THEN [s1 EXCEPT !.pc = "stopped"]
           ELSE [s1 EXCEPT !.pc = "read", !.st = Obj(CkptKey(b, newest[1], newest[2])),
@@ -799,9 +832,11 @@ Open(h, b) ==
                  origin |-> rec[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
                  hckpt |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
                  recorded |-> {}, reffed |-> {}, reading |-> {}, ckptThrough |-> -1,
-                 ckptPut |-> None, durable |-> None]
+                 ckptPut |-> None, durable |-> None, vers |-> {}]
        IN /\ head' = [head EXCEPT ![b] = [epoch |-> e, token |-> tok[h][b], holder |-> gen + 1,
-                                          end |-> End(b), chain |-> Chain(b), ckpt |-> HeadCkpt(b)]]
+                                          end |-> End(b), chain |-> Chain(b), ckpt |-> HeadCkpt(b),
+                                          vers |-> IF R("versionsCarried") THEN HeadVers(b)
+                                                   ELSE {}]]
           /\ ses' = [ses EXCEPT ![h][b] = IF rec[b].deleted THEN [s EXCEPT !.pc = "stopped"]
                                           ELSE Started(s, b, head[b])]
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
@@ -821,7 +856,7 @@ OpenGone(h, b) ==
     /\ b \in gone /\ rec[b] = None /\ head[b] = None
     /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
     /\ head' = [head EXCEPT ![b] = [epoch |-> 1, token |-> tok[h][b], holder |-> gen + 1, end |-> 0,
-                                    chain |-> <<>>, ckpt |-> <<>>]]
+                                    chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]]
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
@@ -971,7 +1006,8 @@ Mint(h, b) ==
        /\ UNCHANGED <<commits, nextTag, acked, makers, doomed, taken, placed, errors>>
        /\ UNCHANGED <<gen, takes, passes, places, crashes>>
 
-\* What a commit does, besides committing: seal an open extent into its segment or on its own,
+\* What a commit does, besides committing: cut a version, the store quiescent, seal an open
+\* extent into its segment or on its own,
 \* free an extent its guest holds, fork the branch (a point, or not) to a child with no record,
 \* with "forkOwn" sealing an open extent on its own too, in the fork's segment (a store's segment
 \* holds the commits before the fork it ends, their extents stored on their own among them:
@@ -996,6 +1032,8 @@ Ops(h, b) ==
         \* an allocator gives them out, for models whose choice of ID would only multiply states.
         free == {c \in Branches \ {b, Root} : Nameable(c)}
     IN (IF "commit" \in Can THEN {op("plain", None, 0, FALSE)} ELSE {})
+       \* A version's cut (TASK-476): of a quiescent store, sealing nothing.
+       \cup (IF "version" \in Can /\ s.open = {} THEN {op("version", None, 0, FALSE)} ELSE {})
        \cup {op("seg", x, 0, FALSE) : x \in IF "seg" \in Can THEN s.open ELSE {}}
        \cup {op("own", x, 0, FALSE) : x \in IF "own" \in Can THEN s.open ELSE {}}
        \cup {op("free", x, 0, FALSE) : x \in IF "free" \in Can THEN DOMAIN v.ext ELSE {}}
@@ -1021,7 +1059,7 @@ Commit(h, b) ==
                 cont(i) == [commit |-> t, ext |-> op.xs[i]]
                 part(i) == [s |-> s.seq + i - 1,
                             o |-> [epoch |-> s.epoch, commit |-> 0, ext |-> None, own |-> None,
-                                   free |-> None, next |-> s.next, fork |-> None,
+                                   free |-> None, next |-> s.next, fork |-> None, ver |-> None,
                                    cont |-> cont(i + on)]]
                 before == IF op.on THEN [ws EXCEPT ![Len(ws)].o.cont = cont(1)] ELSE ws
                 o == [epoch |-> s.epoch,
@@ -1031,18 +1069,26 @@ Commit(h, b) ==
                       free |-> IF op.k = "free" THEN op.x ELSE None,
                       next |-> s.next,
                       fork |-> IF op.k = "fork" THEN f ELSE None,
+                      ver |-> IF op.k = "version" THEN t ELSE None,
                       cont |-> None]
                 xs == {op.xs[i] : i \in DOMAIN op.xs}
+                \* Without versionsAcked, the version named as its cut is committed: by the next
+                \* swap of the head, whatever it acknowledges.
+                early == IF op.k = "version" /\ ~R("versionsAcked")
+                         THEN {[id |-> t, at |-> s.seq + n]} ELSE {}
             IN /\ s.seq + n < Segs
                /\ wal' = [wal EXCEPT ![h][b] = before \o [i \in 1..n |-> part(i)]
                                                  \o <<[s |-> s.seq + n, o |-> o]>>]
                /\ ses' = [ses EXCEPT ![h][b] =
-                            [s EXCEPT !.seq = @ + n + 1, !.open = @ \ ({op.x} \cup xs)]]
+                            [s EXCEPT !.seq = @ + n + 1, !.open = @ \ ({op.x} \cup xs),
+                                      !.vers = @ \cup early]]
                /\ commits' = [commits EXCEPT ![t] = [branch |-> b, parent |-> View(h, b).tip,
                                                       seals |-> IF op.k \in {"seg", "own"}
                                                                    \/ op.x # None
                                                                 THEN {op.x} ELSE xs,
-                                                      free |-> o.free]]
+                                                      free |-> o.free,
+                                                      ver |-> op.k = "version",
+                                                      dropped |-> FALSE]]
                \* Without recordsAfterAck, the child's record at once, and its reference.
                /\ rec' = IF op.k = "fork" /\ ~R("recordsAfterAck")
                          THEN [rec EXCEPT ![op.c] = Record(IF op.point THEN "point" ELSE "fork",
@@ -1100,9 +1146,14 @@ Ack(h, b) ==
         n == Max({k \in 0..Len(ws) : /\ \A i \in 1..k : ws[i].s \in s.done
                                      /\ k = 0 \/ ws[k].o.cont = None \/ ~R("acksBetweenCommits")})
         P == SubSeq(ws, 1, n)
+        \* The versions the segments name, named with them (versionsAcked).
+        V == IF R("versionsAcked")
+             THEN {[id |-> P[i].o.ver, at |-> P[i].s] : i \in {i \in 1..n : P[i].o.ver # None}}
+             ELSE {}
         s2 == [s EXCEPT !.st = ApplyAll(s.st, b, P),
                         !.end = P[n].s + 1,
-                        !.chain = @ \o [i \in 1..n |-> P[i].o.epoch]]
+                        !.chain = @ \o [i \in 1..n |-> P[i].o.epoch],
+                        !.vers = @ \cup V]
     IN /\ Ready(h, b) /\ n > 0
        /\ IF R("headSwap") /\ ~Taking(s, b) THEN
              Stopped(h, b) /\ UNCHANGED <<head, wal, acked>>
@@ -1115,6 +1166,22 @@ Ack(h, b) ==
        /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, tok,
                       proc, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed, errors>>
+
+\* The writer drops a version (Writer::drop_versions): the head swapped to name it no more, with
+\* the condition that it is the writer's taking still (headSwap); failing, the writer stops. A
+\* window's oldest dropped as an acknowledgement names a new version is this, in that swap.
+DropVersion(h, b) ==
+    LET s == ses[h][b] IN
+    /\ "dropVersion" \in Can /\ Ready(h, b)
+    /\ \E v \in s.vers :
+         IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED <<head, commits>>
+         ELSE LET s2 == [s EXCEPT !.vers = @ \ {v}] IN
+              /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
+              /\ ses' = [ses EXCEPT ![h][b] = s2]
+              /\ commits' = [commits EXCEPT ![v.id].dropped = TRUE]
+    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone,
+                   wal, tok, proc, gc, countVars>>
+    /\ UNCHANGED <<nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
 
 \* A checkpoint as of the last segment acknowledged: the extents the collector moved where they
 \* went, the forks whose children were deleted dropped; its PUT then made. The writer names
@@ -1174,7 +1241,7 @@ WriterNext ==
     \E h \in Hosts, b \in Branches :
         \/ Open(h, b) \/ OpenGone(h, b) \/ RecoverRead(h, b) \/ RecordForks(h, b) \/ Mint(h, b) \/ Commit(h, b)
         \/ Upload(h, b) \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b)
-        \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b)
+        \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b) \/ DropVersion(h, b)
 
 -----------------------------------------------------------------------------
 (* Hosts and placements. *)
@@ -1243,7 +1310,7 @@ StartDelete(h, b) ==
        \/ "deleteRoot" \in Can /\ b = Root
     /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", c |-> 0, p |-> 0,
                                     at |-> 0, ep |-> 0, o |-> <<>>, live |-> FALSE,
-                                    tk |-> tok[h][b], fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0]]
+                                    tk |-> tok[h][b], fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0, v |-> <<>>]]
     /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {rec[b].maker} ELSE doomed
     /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
@@ -1261,7 +1328,7 @@ StartDeleteEarly(h, b) ==
        /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", c |-> 0, p |-> 0,
                                        at |-> 0, ep |-> 0, o |-> <<>>, live |-> FALSE,
                                        tk |-> tok[h][b], fs |-> {}, ws |-> {}, og |-> <<>>,
-                                       bs |-> 0]]
+                                       bs |-> 0, v |-> <<>>]]
        /\ doomed' = doomed \cup {f.owner : f \in F}
        /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
@@ -1278,7 +1345,7 @@ StartUnfork(h, b) ==
                                             c |-> w.o.fork.child, p |-> b, at |-> w.s,
                                             ep |-> w.o.epoch, o |-> w.o.fork.owner,
                                             live |-> FALSE, tk |-> tok[h][w.o.fork.child],
-                                            fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0]]
+                                            fs |-> {}, ws |-> {}, og |-> <<>>, bs |-> 0, v |-> <<>>]]
             /\ doomed' = doomed \cup {w.o.fork.owner}
        /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
@@ -1290,32 +1357,52 @@ StartUnfork(h, b) ==
 \* the records were read (BucketOverlap found it).
 PointForkRefs(q) == IF R("references") THEN {RefOf(q.og[1], q.og[2], q.c)} ELSE {}
 
-\* The record of the child of the restore q, being made (forksPending).
-Forking(q) == Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p, q.o, q.bs)
+\* The record of the child of the restore q, being made (forksPending), of its point or version.
+Forking(q) == [Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p, q.o, q.bs)
+                   EXCEPT !.ver = q.v]
 
-\* A fork of point P to C (fork_point), of the origin P names: first C's record, saying it is
-\* being made (forksPending), then its reference (forksRecordFirst), before it reads P's
-\* (forksReferFirst); without forksRecordFirst, the reference first. From a host's copy of P,
-\* stale perhaps. C is an ID an allocator gives (Given), or one a guest names; never one given
-\* before, its cell removed (gone).
-StartRestore(h, c, p) ==
-    LET q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0, ep |-> 0,
-              o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c], fs |-> {},
-              ws |-> {}, og |-> rec[p].origin, bs |-> rec[p].base]
-        refers == R("forksReferFirst") /\ PointForkRefs(q) # {}
+\* Whether what the restore q forks is gone, as its check reads it: the point's record deleted,
+\* or none; the version named by its branch's head no more (TASK-476).
+Unforkable(q) == IF q.v # <<>> THEN VersionGone(q.v) ELSE rec[q.p] = None \/ rec[q.p].deleted
+
+\* The restore q, to C, begun on h: first C's record, saying it is being made (forksPending), then
+\* its reference (forksRecordFirst), before it reads what it forks (forksReferFirst); without
+\* forksRecordFirst, the reference first.
+Restoring(h, q) ==
+    LET refers == R("forksReferFirst") /\ PointForkRefs(q) # {}
         first == refers /\ ~R("forksRecordFirst")
-    IN /\ "restore" \in Can /\ proc[h] = None
-       /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p} \cup gone
-       /\ IF first THEN
+    IN /\ IF first THEN
              /\ refs' = refs \cup PointForkRefs(q)
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = "fork"]]
              /\ UNCHANGED rec
           ELSE
-             /\ rec' = [rec EXCEPT ![c] = Forking(q)]
+             /\ rec' = [rec EXCEPT ![q.c] = Forking(q)]
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
              /\ UNCHANGED refs
        /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, truthVars, countVars>>
+
+\* A fork of point P to C (fork_point), of the origin P names, from a host's copy of P, stale
+\* perhaps. C is an ID an allocator gives (Given), or one a guest names; never one given before,
+\* its cell removed (gone).
+StartRestore(h, c, p) ==
+    /\ "restore" \in Can /\ proc[h] = None
+    /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p} \cup gone
+    /\ Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0,
+                     ep |-> 0, o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c],
+                     fs |-> {}, ws |-> {}, og |-> rec[p].origin, bs |-> rec[p].base, v |-> <<>>])
+
+\* A restore of a version of b to C (TASK-476): of b at the version's segment, its base the
+\* version's cut, a version b's head names as the restore begins (one named and dropped since is
+\* a restore begun before the drop). Its record names the version, not a point.
+StartRestoreVersion(h, c, b) ==
+    /\ "restoreVersion" \in Can /\ proc[h] = None
+    /\ rec[c] = None /\ c \notin {Root, b} \cup gone
+    /\ \E v \in HeadVers(b) :
+         Restoring(h, [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> 0, at |-> 0,
+                       ep |-> 0, o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c],
+                       fs |-> {}, ws |-> {}, og |-> <<b, v.at>>, bs |-> v.id,
+                       v |-> <<b, v.id>>])
 
 \* With "resume", the fork of a point to c, being made, resumed by another than the restore that
 \* began it: a store opening c, its restore's host dead or slow (upload.rs's record). Its record
@@ -1326,7 +1413,7 @@ ResumeRestore(h, c) ==
     LET r == rec[c]
         q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> r.point, at |-> 0,
               ep |-> 0, o |-> r.maker, live |-> FALSE, tk |-> tok[h][c], fs |-> {}, ws |-> {},
-              og |-> r.origin, bs |-> r.base]
+              og |-> r.origin, bs |-> r.base, v |-> r.ver]
         refers == R("resumesRefer") /\ R("forksReferFirst") /\ PointForkRefs(q) # {}
     IN /\ "resume" \in Can /\ proc[h] = None
        /\ r # None /\ r.kind = "forking" /\ ~r.deleted
@@ -1339,12 +1426,14 @@ Done(h) == proc' = [proc EXCEPT ![h] = None]
 \* A deletion of the branch proc[h] names, after a failed fork's or restore's.
 Deleting(h) == proc' = [proc EXCEPT ![h] = [@ EXCEPT !.op = "delete", !.pc = "end"]]
 
-\* b's head swapped to the final epoch, what it names kept: made so, if b has none.
+\* b's head swapped to the final epoch, what it names kept, but its versions, which go with it
+\* (doc-18): made so, if b has none.
 Ended(b) ==
     head' = [head EXCEPT ![b] = IF @ = None
                                 THEN [epoch |-> Final, token |-> 0, holder |-> 0, end |-> 0,
-                                      chain |-> <<>>, ckpt |-> <<>>]
-                                ELSE [@ EXCEPT !.epoch = Final, !.token = 0, !.holder = 0]]
+                                      chain |-> <<>>, ckpt |-> <<>>, vers |-> {}]
+                                ELSE [@ EXCEPT !.epoch = Final, !.token = 0, !.holder = 0,
+                                               !.vers = {}]]
 
 ProcStep(h) ==
     LET q == proc[h]
@@ -1474,9 +1563,10 @@ ProcStep(h) ==
                     ELSE Done(h) /\ UNCHANGED rec
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "check" ->
-                 \* The point's record, read after the child's (forksCheckPoints): deleted, the
-                 \* fork fails, and its host deletes the child.
-                 /\ IF R("forksCheckPoints") /\ (rec[q.p] = None \/ rec[q.p].deleted)
+                 \* The point's record, or the version's branch's head, read after the child's
+                 \* record (forksCheckPoints): the point deleted, or the version named no more,
+                 \* the fork fails, and its host deletes the child.
+                 /\ IF R("forksCheckPoints") /\ Unforkable(q)
                     THEN Deleting(h)
                     ELSE proc' = [proc EXCEPT ![h].pc = "make"]
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
@@ -1490,7 +1580,7 @@ ProcStep(h) ==
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, errors>>
        /\ doomed' = IF q.op = "restore" /\ q.pc = "check" /\ R("forksCheckPoints")
-                       /\ (rec[q.p] = None \/ rec[q.p].deleted)
+                       /\ Unforkable(q)
                     THEN doomed \cup {q.o} ELSE doomed
        \* A deletion's references of the forks it found, as their records read (record_fork):
        \* taken back, those records another's (referencesTakenBack), or written, in a step after,
@@ -1520,7 +1610,7 @@ HostNext ==
     \/ \E h \in Hosts : Crash(h) \/ ProcStep(h)
     \/ \E h \in Hosts, b \in Branches : Place(h, b) \/ StartDelete(h, b) \/ StartUnfork(h, b)
                                      \/ StartDeleteEarly(h, b) \/ ResumeRestore(h, b)
-    \/ \E h \in Hosts, c, p \in Branches : StartRestore(h, c, p)
+    \/ \E h \in Hosts, c, p \in Branches : StartRestore(h, c, p) \/ StartRestoreVersion(h, c, p)
     \/ \E c \in Branches : Contest(c)
     \/ \E m \in inflight : Land(m)
 
@@ -1596,7 +1686,11 @@ RecoverAll(queue, recs, acc) ==
              found == IF R("forksFromStates") THEN r.st.forks ELSE {}
              kids == {<<f.child, <<b, f.at>>>> :
                         f \in {f \in found : ~Cross(b, f.child) /\ recs[f.child] = None}}
+             \* Its fork points to other cells, and its versions the head it recovered from
+             \* names (versionsKept), each a state kept whole.
              fps == {ForkPoint(b, f.at) : f \in {f \in found : Cross(b, f.child)}}
+                    \cup (IF R("versionsKept") THEN {ForkPoint(b, v.at) : v \in HeadVers(b)}
+                          ELSE {})
          IN IF Recovered(acc, q) THEN RecoverAll(rest, recs, acc)
             ELSE IF r.ok /\ \E fp \in fps : ~fp.ok THEN [acc EXCEPT !.lost = TRUE]
             ELSE IF r.ok THEN
@@ -1658,9 +1752,12 @@ GcRecover(i) ==
     LET g == gc[i]
         pointRec(p) == IF CellOf[p] = g.cell THEN g.recs[p] ELSE rec[p]
         pointGone(p) == pointRec(p) = None \/ pointRec(p).deleted
+        \* What a fork being made forks gone: its point's record deleted, or its version named by
+        \* its branch's head no more, a GET of that head (TASK-476).
+        forkedGone(r) == IF r.ver # <<>> THEN VersionGone(r.ver) ELSE pointGone(r.point)
         ab == IF R("collectorAbandons")
               THEN {b \in Branches : g.recs[b] # None /\ ~g.recs[b].deleted
-                                     /\ g.recs[b].kind = "forking" /\ pointGone(g.recs[b].point)}
+                                     /\ g.recs[b].kind = "forking" /\ forkedGone(g.recs[b])}
               ELSE {}
         rec1 == [b \in Branches |-> IF b \in ab /\ rec[b] # None /\ rec[b].kind = "forking"
                                        THEN [rec[b] EXCEPT !.deleted = TRUE] ELSE rec[b]]
@@ -1904,7 +2001,7 @@ Init ==
     /\ proc = [h \in Hosts |-> None]
     /\ gc = [i \in 1..MaxPasses |-> GcIdle]
     /\ commits = [t \in 1..MaxCommits |-> [branch |-> 0, parent |-> 0, seals |-> {},
-                                             free |-> None]]
+                                             free |-> None, ver |-> FALSE, dropped |-> FALSE]]
     /\ nextTag = 1
     /\ acked = [b \in Branches |-> {}]
     /\ minted = {}
@@ -1930,28 +2027,50 @@ HostPerms == Permutations(Hosts)
 LiveRecs == {b \in Branches : LiveRec(b)}
 
 \* Nothing a live branch needs is deleted: it recovers from its head, every extent it names reads
-\* back as itself, and a head a writer took is there; and the writer whose taking the head is
-\* reads every extent its guest holds where its state acknowledged says it is.
+\* back as itself, and a head a writer took is there; so does its state at each version its head
+\* names (TASK-476); and the writer whose taking the head is reads every extent its guest holds
+\* where its state acknowledged says it is.
 NothingNeededGone ==
     /\ \A b \in LiveRecs :
           LET r == Recover(b, rec[b].origin) IN
           /\ r.ok
           /\ \A x \in DOMAIN r.st.ext : Readable(x, r.st.ext[x])
           /\ taken[b] >= 0 => head[b] # None
+    /\ \A b \in LiveRecs : \A v \in HeadVers(b) :
+          LET r == StateAt(b, v.at) IN
+          /\ r.ok
+          /\ \A x \in DOMAIN r.st.ext : Readable(x, r.st.ext[x])
     /\ \A h \in Hosts, b \in LiveRecs :
           (Ready(h, b) /\ Taking(ses[h][b], b)) =>
               \A x \in DOMAIN ses[h][b].st.ext \cap DOMAIN View(h, b).ext :
                   Readable(x, ses[h][b].st.ext[x])
 
 \* Each live branch's history is a path of its own commits from the commit it started from,
-\* every one applied once, holding what they made.
+\* every one applied once, holding what they made; and its state at each version its head names
+\* is that history to the version's cut (TASK-476).
 HistoriesOwn ==
-    \A b \in LiveRecs :
-        LET r == Recover(b, rec[b].origin) IN
-        r.ok => /\ OwnStart(b, r.st.tip) = rec[b].base
-                /\ ~r.st.dup
-                /\ r.st.hist = Anc(r.st.tip)
-                /\ DOMAIN r.st.ext = MadeBy(Path(r.st.tip), {})
+    /\ \A b \in LiveRecs :
+          LET r == Recover(b, rec[b].origin) IN
+          r.ok => /\ OwnStart(b, r.st.tip) = rec[b].base
+                  /\ ~r.st.dup
+                  /\ r.st.hist = Anc(r.st.tip)
+                  /\ DOMAIN r.st.ext = MadeBy(Path(r.st.tip), {})
+    /\ \A b \in LiveRecs : \A v \in HeadVers(b) :
+          LET r == StateAt(b, v.at) IN
+          r.ok => /\ r.st.tip = v.id
+                  /\ ~r.st.dup
+                  /\ r.st.hist = Anc(v.id)
+                  /\ DOMAIN r.st.ext = MadeBy(Path(v.id), {})
+
+\* A version a writer of its branch acknowledged stays named by the branch's head until a writer
+\* drops it, or a deletion ends the head (TASK-476): takeovers carry it, and no other swap names
+\* it no more.
+VersionsStay ==
+    \A b \in Branches :
+        head[b] # None /\ head[b].epoch # Final =>
+            \A t \in acked[b] :
+                commits[t].ver /\ commits[t].branch = b /\ ~commits[t].dropped =>
+                    \E v \in head[b].vers : v.id = t
 
 \* No acknowledged commit is lost: each is in its branch's history, and in the guest's of the
 \* writer whose taking the head is.
@@ -2049,6 +2168,7 @@ NamedEpochsStay ==
 \* once it is deleted.
 ReferencesStand ==
     \A b \in LiveRecs :
-        rec[b].origin # <<>> /\ (Cross(rec[b].origin[1], b) \/ rec[b].point # 0) =>
+        rec[b].origin # <<>>
+        /\ (Cross(rec[b].origin[1], b) \/ rec[b].point # 0 \/ rec[b].ver # <<>>) =>
             RefOf(rec[b].origin[1], rec[b].origin[2], b) \in refs
 =============================================================================

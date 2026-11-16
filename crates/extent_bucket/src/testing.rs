@@ -684,6 +684,11 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
                 pending.insert((branch, fork.at, fork.child));
             }
         }
+        // cladefs: its versions, each its state at the segment its head names it at, kept whole as
+        // a fork point is (TASK-476).
+        for version in recovered.head.iter().flat_map(|head| &head.versions) {
+            points.insert(Origin { parent: branch, at: version.at });
+        }
         touched.extend(recovered.touched.iter().cloned());
         needed.extend(recovered.touched);
         // Its writer may name its extents anywhere on their ways from where they were sealed,

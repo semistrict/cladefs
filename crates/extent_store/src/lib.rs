@@ -199,8 +199,8 @@ pub use segments::{
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
 pub use store::{
-    BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, Opening, Options, Recovering,
-    SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, NotQuiescent, Opening, Options,
+    Recovering, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use sync::Rules;
 #[cfg(feature = "shuttle")]
