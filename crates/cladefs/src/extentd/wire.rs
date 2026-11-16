@@ -74,10 +74,10 @@ impl Header {
 /// moves. `the_wire_is_its_version` (codec.rs) fails on a change to the wire without a new one.
 /// Version 4: a request may say the guest request it is a call for ([`REQUEST`], TASK-260).
 /// Version 5: a commit may complete once local, synced to the host's disk ([`COMMIT_LOCAL`],
-/// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite volume of its cell
-/// ([`OPEN_SQLITE`], TASK-364), and stores are cells' volumes, in their cells' prefixes. Version
+/// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite vdisk of its cell
+/// ([`OPEN_SQLITE`], TASK-364), and stores are cells' vdisks, in their cells' prefixes. Version
 /// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364). Version 8:
-/// an [`OPEN`] may make a memory volume of its cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
+/// an [`OPEN`] may make a memory vdisk of its cell ([`OPEN_MEMORY`], TASK-456.2). Version 9: the
 /// flags doc-4 has too are at doc-4's bits, under its names ([`COMMIT_UPLOADED`], [`COMMIT_ROOT`],
 /// [`MAP_ZEROS`], [`WRITE_UPLOADED`], [`WRITE_ROOT`], TASK-474).
 pub(crate) const VERSION: u64 = 9;
@@ -148,7 +148,7 @@ pub(crate) const ACK: u32 = 12;
 /// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
 /// directory at the path the payload holds, nothing there (`EEXIST`)
 /// ([`ExtentStore::fork`](crate::ExtentStore)): a fork the daemon serves, sharing its extents'
-/// pages with the store's. cladefs: the one volume of a new cell of the store's tenant's, its ID the
+/// pages with the store's. cladefs: the one vdisk of a new cell of the store's tenant's, its ID the
 /// bucket's to give (`extent_bucket::objectid`, TASK-364), which the reply's `args[0]` is. With
 /// [`FORK_QUIESCENT`], it fails with `EBUSY` unless nothing is open
 /// ([`ExtentStore::is_quiescent`](crate::ExtentStore::is_quiescent)), and the fork is a point
@@ -261,10 +261,10 @@ pub(crate) const STAGE_COUNTS_EVERY: std::time::Duration = std::time::Duration::
 pub(crate) const OPEN_CREATE: u32 = 1 << 0;
 pub(crate) const OPEN_FORK_FROM: u32 = 1 << 1;
 pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
-/// cladefs: with [`OPEN_CREATE`], the store made is a SQLite volume of its cell, which the
+/// cladefs: with [`OPEN_CREATE`], the store made is a SQLite vdisk of its cell, which the
 /// sqlite_extents VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
-/// cladefs: with [`OPEN_CREATE`], the store made is a memory volume of its cell, a VM's memory
+/// cladefs: with [`OPEN_CREATE`], the store made is a memory vdisk of its cell, a VM's memory
 /// (TASK-456.2), not an Fxfs one.
 pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
 /// cladefs: doc-4's `MAP_ZEROS`, at its bit. Bit 0 was writable DAX's; doc-4's bits 1 and 2,

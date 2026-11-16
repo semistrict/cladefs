@@ -139,7 +139,7 @@ pub fn tenant_of_prefix(prefix: &str) -> Option<u64> {
     hex(prefix.strip_prefix(TENANTS)?.strip_suffix('/')?)
 }
 
-/// cladefs: the object of `cell` itself: who holds it, and its volumes ([`crate::cell`]).
+/// cladefs: the object of `cell` itself: who holds it, and its vdisks ([`crate::cell`]).
 pub fn cell(cell: Cell) -> String {
     format!("{}cell", cell.prefix())
 }

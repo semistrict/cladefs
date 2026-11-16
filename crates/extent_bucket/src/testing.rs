@@ -773,7 +773,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut left = Vec::new();
     for key in &keys {
         // cladefs: cells' objects stay, as their branches' records do, their epochs fencing their
-        // volumes' heads; blocks of object IDs taken, for good (TASK-364); and the collector's
+        // vdisks' heads; blocks of object IDs taken, for good (TASK-364); and the collector's
         // leases and marks, and references not yet retirable (TASK-395).
         let alone = |cell: layout::Cell| {
             let prefix = cell.prefix();

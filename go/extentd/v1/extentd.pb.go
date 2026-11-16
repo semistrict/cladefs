@@ -80,8 +80,8 @@
 // fails with UNIMPLEMENTED. Errnos keep their codes. A change that breaks a caller is v2, served
 // beside v1 until callers move.
 //
-// Cells (TASK-364): every branch is a volume of a tenant's cell, kept under the cell's prefix in
-// the bucket, and a host takes a cell whole, the heads of its volumes' branches with it. A branch
+// Cells (TASK-364): every branch is a vdisk of a tenant's cell, kept under the cell's prefix in
+// the bucket, and a host takes a cell whole, the heads of its vdisks' branches with it. A branch
 // is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
 // Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
 // tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
@@ -111,56 +111,56 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// What a volume of a cell holds.
-type VolumeKind int32
+// What a vdisk of a cell holds.
+type VdiskKind int32
 
 const (
 	// An Fxfs filesystem: a VM's disk, or a host's mount's.
-	VolumeKind_VOLUME_KIND_FXFS VolumeKind = 0
+	VdiskKind_VDISK_KIND_FXFS VdiskKind = 0
 	// A database of sqlite_extents, which its VFS alone opens.
-	VolumeKind_VOLUME_KIND_SQLITE VolumeKind = 1
-	// A VM's memory: an extent_files volume of one file, its image (TASK-456).
-	VolumeKind_VOLUME_KIND_MEMORY VolumeKind = 2
+	VdiskKind_VDISK_KIND_SQLITE VdiskKind = 1
+	// A VM's memory: an extent_files file set of one file, its image (TASK-456).
+	VdiskKind_VDISK_KIND_MEMORY VdiskKind = 2
 )
 
-// Enum value maps for VolumeKind.
+// Enum value maps for VdiskKind.
 var (
-	VolumeKind_name = map[int32]string{
-		0: "VOLUME_KIND_FXFS",
-		1: "VOLUME_KIND_SQLITE",
-		2: "VOLUME_KIND_MEMORY",
+	VdiskKind_name = map[int32]string{
+		0: "VDISK_KIND_FXFS",
+		1: "VDISK_KIND_SQLITE",
+		2: "VDISK_KIND_MEMORY",
 	}
-	VolumeKind_value = map[string]int32{
-		"VOLUME_KIND_FXFS":   0,
-		"VOLUME_KIND_SQLITE": 1,
-		"VOLUME_KIND_MEMORY": 2,
+	VdiskKind_value = map[string]int32{
+		"VDISK_KIND_FXFS":   0,
+		"VDISK_KIND_SQLITE": 1,
+		"VDISK_KIND_MEMORY": 2,
 	}
 )
 
-func (x VolumeKind) Enum() *VolumeKind {
-	p := new(VolumeKind)
+func (x VdiskKind) Enum() *VdiskKind {
+	p := new(VdiskKind)
 	*p = x
 	return p
 }
 
-func (x VolumeKind) String() string {
+func (x VdiskKind) String() string {
 	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
 }
 
-func (VolumeKind) Descriptor() protoreflect.EnumDescriptor {
+func (VdiskKind) Descriptor() protoreflect.EnumDescriptor {
 	return file_cladefs_extentd_v1_extentd_proto_enumTypes[0].Descriptor()
 }
 
-func (VolumeKind) Type() protoreflect.EnumType {
+func (VdiskKind) Type() protoreflect.EnumType {
 	return &file_cladefs_extentd_v1_extentd_proto_enumTypes[0]
 }
 
-func (x VolumeKind) Number() protoreflect.EnumNumber {
+func (x VdiskKind) Number() protoreflect.EnumNumber {
 	return protoreflect.EnumNumber(x)
 }
 
-// Deprecated: Use VolumeKind.Descriptor instead.
-func (VolumeKind) EnumDescriptor() ([]byte, []int) {
+// Deprecated: Use VdiskKind.Descriptor instead.
+func (VdiskKind) EnumDescriptor() ([]byte, []int) {
 	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{0}
 }
 
@@ -179,17 +179,17 @@ type CreateStoreRequest struct {
 	// last writer's of the branch to take, or the take fails (FAILED_PRECONDITION, ESTALE). A point
 	// has no writer, and needs none.
 	Token *uint64 `protobuf:"varint,4,opt,name=token,proto3,oneof" json:"token,omitempty"`
-	// The tenant whose cell the branch is a volume of. Of a new cell in a granted tenant's
+	// The tenant whose cell the branch is a vdisk of. Of a new cell in a granted tenant's
 	// directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
 	// (PERMISSION_DENIED, EPERM). A point of another tenant's there is the VM manager's to give: the
 	// tenant's VM processes restore from it, each restore a cell of their tenant's, if the point is
 	// shared (SharePoint); otherwise each restore fails (PERMISSION_DENIED, EACCES).
 	Tenant uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell, or 0 for a new one: the store is a new volume of it, named as `path`'s last name
+	// The cell, or 0 for a new one: the store is a new vdisk of it, named as `path`'s last name
 	// is, unless it takes a branch it has.
 	Cell uint64 `protobuf:"varint,6,opt,name=cell,proto3" json:"cell,omitempty"`
-	// What the volume holds, which says what opens it.
-	Kind          VolumeKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.extentd.v1.VolumeKind" json:"kind,omitempty"`
+	// What the vdisk holds, which says what opens it.
+	Kind          VdiskKind `protobuf:"varint,7,opt,name=kind,proto3,enum=cladefs.extentd.v1.VdiskKind" json:"kind,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -266,11 +266,11 @@ func (x *CreateStoreRequest) GetCell() uint64 {
 	return 0
 }
 
-func (x *CreateStoreRequest) GetKind() VolumeKind {
+func (x *CreateStoreRequest) GetKind() VdiskKind {
 	if x != nil {
 		return x.Kind
 	}
-	return VolumeKind_VOLUME_KIND_FXFS
+	return VdiskKind_VDISK_KIND_FXFS
 }
 
 // The store made.
@@ -350,7 +350,7 @@ type ImportImageRequest struct {
 	Image string `protobuf:"bytes,3,opt,name=image,proto3" json:"image,omitempty"`
 	// The image in the layout to import, by its reference; empty for its only image.
 	Reference string `protobuf:"bytes,4,opt,name=reference,proto3" json:"reference,omitempty"`
-	// The tenant of the new cell the store is the one volume of. In a granted tenant's directory,
+	// The tenant of the new cell the store is the one vdisk of. In a granted tenant's directory,
 	// that tenant's ID, or 0 for it; another is refused (PERMISSION_DENIED, EPERM).
 	Tenant        uint64 `protobuf:"varint,5,opt,name=tenant,proto3" json:"tenant,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -429,7 +429,7 @@ type ImportImageResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, of which it is the one volume.
+	// Its cell, a new one, of which it is the one vdisk.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -578,7 +578,7 @@ type ForkStoreResponse struct {
 	Branch uint64 `protobuf:"varint,1,opt,name=branch,proto3" json:"branch,omitempty"`
 	// Its tenant: `from`'s.
 	Tenant uint64 `protobuf:"varint,2,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// Its cell, a new one, of which it is the one volume.
+	// Its cell, a new one, of which it is the one vdisk.
 	Cell          uint64 `protobuf:"varint,3,opt,name=cell,proto3" json:"cell,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1430,9 +1430,9 @@ type StatStoreResponse struct {
 	// How long the oldest commit not yet in the bucket has waited, in milliseconds, to within the
 	// uploader's interval (a second): 0 if none waits.
 	OldestPendingMs uint64 `protobuf:"varint,16,opt,name=oldest_pending_ms,json=oldestPendingMs,proto3" json:"oldest_pending_ms,omitempty"`
-	// The tenant whose cell its branch is a volume of (TASK-364).
+	// The tenant whose cell its branch is a vdisk of (TASK-364).
 	Tenant uint64 `protobuf:"varint,17,opt,name=tenant,proto3" json:"tenant,omitempty"`
-	// The cell its branch is a volume of.
+	// The cell its branch is a vdisk of.
 	Cell uint64 `protobuf:"varint,18,opt,name=cell,proto3" json:"cell,omitempty"`
 	// How many extents it holds that its branch wrote: those whose bytes are `own` (TASK-454). What
 	// the daemon holds in memory for a store open grows with all it holds, own and inherited: a few
@@ -2462,7 +2462,7 @@ func (x *ObjectStorageStats) GetFailures() map[string]uint64 {
 type GrantRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
-	// its directory are volumes of its cells, under its prefix, and its VM processes open no store of
+	// its directory are vdisks of its cells, under its prefix, and its VM processes open no store of
 	// another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in hexadecimal:
 	// `<tenant>.sock`.
 	Tenant uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
@@ -3628,15 +3628,15 @@ var File_cladefs_extentd_v1_extentd_proto protoreflect.FileDescriptor
 
 const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\n" +
-	" cladefs/extentd/v1/extentd.proto\x12\x12cladefs.extentd.v1\"\xe1\x01\n" +
+	" cladefs/extentd/v1/extentd.proto\x12\x12cladefs.extentd.v1\"\xe0\x01\n" +
 	"\x12CreateStoreRequest\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x1a\n" +
 	"\bcapacity\x18\x02 \x01(\x04R\bcapacity\x12\x16\n" +
 	"\x06branch\x18\x03 \x01(\x04R\x06branch\x12\x19\n" +
 	"\x05token\x18\x04 \x01(\x04H\x00R\x05token\x88\x01\x01\x12\x16\n" +
 	"\x06tenant\x18\x05 \x01(\x04R\x06tenant\x12\x12\n" +
-	"\x04cell\x18\x06 \x01(\x04R\x04cell\x122\n" +
-	"\x04kind\x18\a \x01(\x0e2\x1e.cladefs.extentd.v1.VolumeKindR\x04kindB\b\n" +
+	"\x04cell\x18\x06 \x01(\x04R\x04cell\x121\n" +
+	"\x04kind\x18\a \x01(\x0e2\x1d.cladefs.extentd.v1.VdiskKindR\x04kindB\b\n" +
 	"\x06_token\"Y\n" +
 	"\x13CreateStoreResponse\x12\x16\n" +
 	"\x06branch\x18\x01 \x01(\x04R\x06branch\x12\x16\n" +
@@ -3885,12 +3885,11 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
 	"\x04kept\x18\x03 \x01(\rR\x04kept\x12\x18\n" +
 	"\aextents\x18\x04 \x01(\x04R\aextents\x12\x14\n" +
-	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*R\n" +
-	"\n" +
-	"VolumeKind\x12\x14\n" +
-	"\x10VOLUME_KIND_FXFS\x10\x00\x12\x16\n" +
-	"\x12VOLUME_KIND_SQLITE\x10\x01\x12\x16\n" +
-	"\x12VOLUME_KIND_MEMORY\x10\x022\xab\x13\n" +
+	"\x05bytes\x18\x05 \x01(\x04R\x05bytes*N\n" +
+	"\tVdiskKind\x12\x13\n" +
+	"\x0fVDISK_KIND_FXFS\x10\x00\x12\x15\n" +
+	"\x11VDISK_KIND_SQLITE\x10\x01\x12\x15\n" +
+	"\x11VDISK_KIND_MEMORY\x10\x022\xab\x13\n" +
 	"\aExtentd\x12^\n" +
 	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
 	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +
@@ -3939,7 +3938,7 @@ func file_cladefs_extentd_v1_extentd_proto_rawDescGZIP() []byte {
 var file_cladefs_extentd_v1_extentd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_cladefs_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
 var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
-	(VolumeKind)(0),                   // 0: cladefs.extentd.v1.VolumeKind
+	(VdiskKind)(0),                    // 0: cladefs.extentd.v1.VdiskKind
 	(*CreateStoreRequest)(nil),        // 1: cladefs.extentd.v1.CreateStoreRequest
 	(*CreateStoreResponse)(nil),       // 2: cladefs.extentd.v1.CreateStoreResponse
 	(*ImportImageRequest)(nil),        // 3: cladefs.extentd.v1.ImportImageRequest
@@ -4010,7 +4009,7 @@ var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
 	nil,                               // 68: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
-	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VolumeKind
+	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VdiskKind
 	27, // 1: cladefs.extentd.v1.ListStoresResponse.stores:type_name -> cladefs.extentd.v1.ListedStore
 	24, // 2: cladefs.extentd.v1.ListedStore.stat:type_name -> cladefs.extentd.v1.StatStoreResponse
 	35, // 3: cladefs.extentd.v1.GetCountersResponse.object_storage:type_name -> cladefs.extentd.v1.ObjectStorageStats

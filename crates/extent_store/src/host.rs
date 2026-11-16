@@ -8,7 +8,7 @@
 //! a fork ([`Store::commit_fork`]).
 
 use crate::dir::{Dir as _, HostDir};
-use crate::layout::{DESCRIPTION, Description, StoreFile, Volume};
+use crate::layout::{DESCRIPTION, Description, StoreFile, Vdisk};
 use crate::store::{Store, UNMADE};
 use anyhow::{Context as _, Error};
 use extent_frame::segment::Branch;
@@ -19,15 +19,15 @@ use std::path::Path;
 /// as every host's store's does (TASK-165.6); it is unmade until its maker says it is whole
 /// ([`Store::made`], TASK-196). Its description is made last: until it is durable, the directory
 /// is no store, whatever else is in it. Opening it takes its branch in the bucket
-/// ([`Store::recover`], `crate::upload`), and its branch's cell, of which it is `volume`
+/// ([`Store::recover`], `crate::upload`), and its branch's cell, of which it is `vdisk`
 /// (TASK-364).
 pub fn create_host(
     path: &Path,
     description: Description,
     bucket: &str,
-    volume: Volume,
+    vdisk: Vdisk,
 ) -> Result<(), Error> {
-    Store::make(&HostDir::new(path)?, description, Some(bucket), Some(volume))
+    Store::make(&HostDir::new(path)?, description, Some(bucket), Some(vdisk))
 }
 
 /// cladefs: the store at `path` is whole, as its maker made it ([`Store::made`], TASK-196): the file
@@ -307,7 +307,7 @@ mod tests {
             &path,
             description,
             BUCKET,
-            crate::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
+            crate::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
         )
         .unwrap();
         let store = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();

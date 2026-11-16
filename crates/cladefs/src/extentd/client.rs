@@ -694,7 +694,7 @@ impl DaemonConnection {
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a SQLite volume of its new cell, which the sqlite_extents VFS alone opens, rather
+    /// exist, a SQLite vdisk of its new cell, which the sqlite_extents VFS alone opens, rather
     /// than an Fxfs one (TASK-364).
     pub fn open_sqlite(
         self,
@@ -705,7 +705,7 @@ impl DaemonConnection {
     }
 
     /// cladefs: the store at `store`, as [`DaemonConnection::open`] has it, made, if it doesn't
-    /// exist, a memory volume of its new cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
+    /// exist, a memory vdisk of its new cell, a VM's memory (TASK-456.2), rather than an Fxfs one.
     pub fn open_memory(
         self,
         store: impl AsRef<Path>,

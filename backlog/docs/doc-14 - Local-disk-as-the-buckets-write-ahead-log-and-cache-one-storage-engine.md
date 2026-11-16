@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-16 04:09'
+updated_date: '2026-11-16 11:25'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -65,7 +65,7 @@ Per store directory (one branch, `<b>` its ID; `extent_store::layout`):
 
 | Path | What | Lives until |
 |---|---|---|
-| `store` | the description (`layout::FORMAT`, local format 11): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the volume of its cell it is, by name and kind (`volume`, `kind`), which its opening adds to the cell | the store is deleted |
+| `store` | the description (`layout::FORMAT`, local format 12): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the vdisk of its cell it is, by name and kind (`vdisk`, `kind`), which its opening adds to the cell | the store is deleted |
 | `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the store is whole; opening refuses a store holding it (TASK-196) | the store is whole |
 | `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: an encrypted store's encrypted, AES-256-XTS by 4 KiB sector (doc-16, TASK-411.5) | it closes and its framed file is synced |
 | `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit local, whether the segment is open or being framed; cladefs: an encrypted store's header names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16) | as above |
@@ -350,10 +350,10 @@ image's own bucket.
 - Footers and checkpoints gain the capacity; `layout::FORMAT` becomes 2 (11 now, TASK-407), and a
   reader refuses objects of other formats, older ones too (`Error::Format`).
 - Local stores: a new format, 6 at TASK-165.6, 7 at TASK-165.7 and 8 at TASK-165.9, described
-  above (`extent_store::layout::FORMAT`, "cladefs extent store 11", whose footers and logs'
+  above (`extent_store::layout::FORMAT`, "cladefs extent store 12", whose footers and logs'
   records name the runs of a commit spanning segments in each it spans, TASK-92.41, whose
   logs' headers name their segments, TASK-341, and whose description names its branch with its
-  tenant's cell, TASK-364). Stores of
+  tenant's cell, TASK-364, and the vdisk of its cell it is as `vdisk NAME`, TASK-482). Stores of
   another format are not opened, and nothing converts them.
 
 No migration: nothing uses cladefs yet (AGENTS.md).

@@ -27,7 +27,7 @@
 //! cladefsctl shred-cell TENANT/CELL
 //! cladefsctl forget-tenant-keys TENANT
 //! cladefsctl mount attach TENANT CELL [TOKEN]
-//! cladefsctl mount create-volume TENANT CELL NAME CAPACITY
+//! cladefsctl mount create-vdisk TENANT CELL NAME CAPACITY
 //! cladefsctl mount detach [--force] TENANT CELL
 //! cladefsctl mount list
 //! cladefsctl --version
@@ -43,10 +43,10 @@
 //! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
-//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one volume of a
+//! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one vdisk of a
 //! new cell of the default tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in hex,
-//! a volume of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
+//! a vdisk of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! extentd opens it,
 //! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
@@ -115,7 +115,7 @@
 //! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
 //! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
 //! the cell TENANT/CELL (each in hex): takes its wrapped KEKs out of its object in the daemon's
-//! bucket, so that its volumes' keys unwrap no more, and has the daemon forget what it holds of
+//! bucket, so that its vdisks' keys unwrap no more, and has the daemon forget what it holds of
 //! them, halting its stores open there (`EACCES`); run it against every host's daemon, the first
 //! shredding, each forgetting. A bucket that keeps object versions keeps the KEKs in the cell
 //! object's older versions until a lifecycle rule expires them. `forget-tenant-keys` has the daemon
@@ -125,15 +125,15 @@
 //!
 //! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
 //! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in hex.
-//! `attach` takes CELL (0 for a new one, of no volumes) from the daemon's bucket, at the placement
-//! whose fencing token is TOKEN if given, the daemon's otherwise, and shows each Fxfs volume of it
-//! at `MOUNT/TENANT/CELL/VOLUME`; it prints the cell, then each volume, `NAME BRANCH`, a line each.
-//! `create-volume` makes a new Fxfs volume NAME of a cell attached, of CAPACITY bytes, its
-//! filesystem empty, and prints its branch. `detach` takes the cell's volumes away, and returns once
+//! `attach` takes CELL (0 for a new one, of no vdisks) from the daemon's bucket, at the placement
+//! whose fencing token is TOKEN if given, the daemon's otherwise, and shows each Fxfs vdisk of it
+//! at `MOUNT/TENANT/CELL/VDISK`; it prints the cell, then each vdisk, `NAME BRANCH`, a line each.
+//! `create-vdisk` makes a new Fxfs vdisk NAME of a cell attached, of CAPACITY bytes, its
+//! filesystem empty, and prints its branch. `detach` takes the cell's vdisks away, and returns once
 //! their stores are unmounted and written back: once nothing has a file of them open, or a
 //! directory of them as its current one; with `--force`, at once, what is open of them failing
 //! from then on. `list` prints the cells attached, a line each, `TENANT CELL`, and under each its
-//! volumes, `NAME BRANCH`, and `detaching` for one being detached.
+//! vdisks, `NAME BRANCH`, and `detaching` for one being detached.
 
 use anyhow::{Context as _, bail};
 use cladefs::ExtentStore;
@@ -151,7 +151,7 @@ fn usage() -> anyhow::Error {
          cladefsctl stats [--json] | cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
          cladefsctl forget-tenant-keys TENANT | cladefsctl mount attach TENANT CELL [TOKEN] | \
-         cladefsctl mount create-volume TENANT CELL NAME CAPACITY | \
+         cladefsctl mount create-vdisk TENANT CELL NAME CAPACITY | \
          cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
          cladefsctl --version"
     )
@@ -271,8 +271,8 @@ enum Command {
 enum Mount {
     /// A cell attached, a new one of its tenant's if its ID is 0, at `token`'s placement if given.
     Attach { cell: cladefs::Cell, token: Option<u64> },
-    /// A new Fxfs volume of a cell attached.
-    CreateVolume { cell: cladefs::Cell, name: String, capacity: u64 },
+    /// A new Fxfs vdisk of a cell attached.
+    CreateVdisk { cell: cladefs::Cell, name: String, capacity: u64 },
     /// A cell detached, at once if `force`.
     Detach { cell: cladefs::Cell, force: bool },
     /// The cells attached.
@@ -297,7 +297,7 @@ impl Mount {
                     .transpose()
                     .context("TOKEN must be a number")?,
             },
-            ["create-volume", tenant, id, name, capacity] => Self::CreateVolume {
+            ["create-vdisk", tenant, id, name, capacity] => Self::CreateVdisk {
                 cell: cell(tenant, id)?,
                 name: (*name).to_owned(),
                 capacity: capacity.parse().context("CAPACITY must be a number")?,
@@ -315,31 +315,31 @@ impl Mount {
 #[cfg(target_os = "linux")]
 impl Mount {
     /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
-    /// it answers: `attach`, the cell, then each volume shown, `NAME BRANCH`, a line each;
-    /// `create-volume`, the volume's branch; `list`, each cell, `TENANT CELL`, and under it its
-    /// volumes, `detaching` after one being detached. IDs in 16 hexadecimal digits.
+    /// it answers: `attach`, the cell, then each vdisk shown, `NAME BRANCH`, a line each;
+    /// `create-vdisk`, the vdisk's branch; `list`, each cell, `TENANT CELL`, and under it its
+    /// vdisks, `detaching` after one being detached. IDs in 16 hexadecimal digits.
     fn through(self, socket: &Path) -> anyhow::Result<()> {
         let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
         let mount = cladefs::fuse::control::Client::connect(socket).map_err(failed)?;
         match self {
             Self::Attach { cell, token } => {
-                let (cell, volumes) = mount.attach(cell, token).map_err(failed)?;
+                let (cell, vdisks) = mount.attach(cell, token).map_err(failed)?;
                 println!("{:016x}", cell.id);
-                for volume in volumes {
-                    println!("{} {:016x}", volume.name, volume.branch);
+                for vdisk in vdisks {
+                    println!("{} {:016x}", vdisk.name, vdisk.branch);
                 }
             }
-            Self::CreateVolume { cell, name, capacity } => {
-                let made = mount.create_volume(cell, &name, capacity).map_err(failed)?;
+            Self::CreateVdisk { cell, name, capacity } => {
+                let made = mount.create_vdisk(cell, &name, capacity).map_err(failed)?;
                 println!("{:016x}", made.id);
             }
             Self::Detach { cell, force } => mount.detach(cell, force).map_err(failed)?,
             Self::List => {
                 for cell in mount.list().map_err(failed)? {
                     println!("{:016x} {:016x}", cell.tenant, cell.cell);
-                    for volume in cell.volumes {
-                        let detaching = if volume.detaching { " detaching" } else { "" };
-                        println!("  {} {:016x}{detaching}", volume.name, volume.branch);
+                    for vdisk in cell.vdisks {
+                        let detaching = if vdisk.detaching { " detaching" } else { "" };
+                        println!("  {} {:016x}{detaching}", vdisk.name, vdisk.branch);
                     }
                 }
             }
@@ -541,7 +541,7 @@ impl Command {
             }
             Self::Fork { src, dst, point, shared } => {
                 let store = ExtentStore::open(&src)?;
-                // The one volume of a new cell of the store's tenant's (TASK-364).
+                // The one vdisk of a new cell of the store's tenant's (TASK-364).
                 let cell = cladefs::new_cell(store.branch().cell.tenant);
                 let branch = match point {
                     true => store.point(&dst, cell)?,

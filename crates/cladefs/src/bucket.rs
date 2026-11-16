@@ -74,8 +74,8 @@ impl Host {
 /// one a later placement holds, which a placement cut off takes back no more, or one another
 /// writer moved on from this host's write-ahead log, which the store opens no more until
 /// `cladefsctl take` drops it, `ESTALE`; a branch, or a point, gone, `ENOENT`; a fork's child's ID
-/// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell, or a volume of one,
-/// gone, `ENOENT`; a volume's name taken, `EEXIST`, or no volume's, `EINVAL` (TASK-364); a fork of
+/// taken, `EEXIST`; a branch of a newer format, `ENOTSUP`. cladefs: a cell, or a vdisk of one,
+/// gone, `ENOENT`; a vdisk's name taken, `EEXIST`, or no vdisk's, `EINVAL` (TASK-364); a fork of
 /// another tenant's point not shared, `EACCES`, and sharing what is no point, `EINVAL`
 /// (TASK-395.7). None for
 /// what the store failed to read or write, here or in object storage, which is the caller's `EIO`,
@@ -86,10 +86,10 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     match failure {
         Failure::Bucket(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
-        Failure::Bucket(Error::NoBranch | Error::NoCell | Error::NoVolume(_))
+        Failure::Bucket(Error::NoBranch | Error::NoCell | Error::NoVdisk(_))
         | Failure::PointDeleted => Some(Errno::ENOENT),
-        Failure::Bucket(Error::IdTaken(_) | Error::VolumeExists(_)) => Some(Errno::EEXIST),
-        Failure::Bucket(Error::VolumeName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
+        Failure::Bucket(Error::IdTaken(_) | Error::VdiskExists(_)) => Some(Errno::EEXIST),
+        Failure::Bucket(Error::VdiskName(_) | Error::NotPoint(_)) => Some(Errno::EINVAL),
         Failure::Bucket(Error::NotShared(_)) => Some(Errno::EACCES),
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
@@ -2819,9 +2819,9 @@ mod tests {
         std::fs::create_dir(path).unwrap();
         let description =
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
-        let volume =
-            extent_store::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs };
-        extent_store::create_host(path, description, &url_of(bucket), volume).unwrap();
+        let vdisk =
+            extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs };
+        extent_store::create_host(path, description, &url_of(bucket), vdisk).unwrap();
         extent_store::made_host(path).unwrap();
     }
 

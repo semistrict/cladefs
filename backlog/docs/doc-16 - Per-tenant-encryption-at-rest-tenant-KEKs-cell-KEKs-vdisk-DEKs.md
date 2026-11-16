@@ -1,11 +1,11 @@
 ---
 id: doc-16
-title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs'
+title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-16 04:13'
+updated_date: '2026-11-16 11:25'
 ---
-# Per-tenant encryption at rest: tenant KEKs, cell KEKs, volume DEKs
+# Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs
 
 Design, 2026-11-14. The user's decisions of that day are marked *(decided)*. TASK-411.1 (keys, KMS), TASK-411.2 (frame FORMAT 2), TASK-411.3 (cell KEKs, DEKs, rings, below: **What TASK-411.3 made**), TASK-411.4 (forks into other cells, pools; below: **What TASK-411.4 made**), TASK-411.5 (open segments and large extents' raw files encrypted, logs authenticated, below: **What TASK-411.5 made**), TASK-411.6 (the collector's compaction, below: **What TASK-411.6 made**), TASK-411.7 (shredding through the control API, below: **What TASK-411.7 made**), TASK-411.9 (recovery frames nothing before keys), TASK-411.10 (a tenant's missing KEK believed for a minute), TASK-411.13 (locked cells skipped while their KEK stays refused) and TASK-411.14 (`cladefs-gc --delete-branch` under `CLADEFS_KMS`) are implemented.
 
@@ -30,17 +30,17 @@ it is not this design.
 ```
 tenant KEK   in the KMS; never leaves it. Destroying it shreds the tenant.
   cell KEK     random; wrapped by the tenant KEK; kept in the cell's object (<C>cell)
-    volume DEK   random; wrapped by the cell KEK; kept in the branch's record (<C>branches/<b>)
+    vdisk DEK    random; wrapped by the cell KEK; kept in the branch's record (<C>branches/<b>)
       object subkey = HKDF-SHA256(DEK, salt || object key); salt random per object, in its trailer
 ```
 
-*(decided: tenant, cell, volume)* Each level is a unit the bucket already has (doc-7, Layout):
+*(decided: tenant, cell, vdisk)* Each level is a unit the bucket already has (doc-7, Layout):
 
-- **Volume DEK, one per branch.** A branch is the only writer of its objects
+- **Vdisk DEK, one per branch.** A branch is the only writer of its objects
   (`segments/<branch>/`, `extents/<branch>/`, `checkpoints/<branch>/`), and recovery reads its
   record and its ancestors' records already.
 - **Cell KEK.** The cell is the unit of placement: a host taking a cell unwraps its KEK with one
-  KMS call and holds every volume's DEK from then on. It also scopes forks' rewrapping (below).
+  KMS call and holds every vdisk's DEK from then on. It also scopes forks' rewrapping (below).
 - **Tenant KEK.** The only key the KMS holds; BYOK and shredding act on it.
 
 A DEK has generations: a record keeps a list of `(generation, wrapped DEK)`, a new writer may add one,
@@ -90,7 +90,7 @@ GCM's authentication key. A salt per object makes every subkey new, whatever key
   clear says so, its MACs and tags zeros; as its `encryption` is not authenticated, a reader of a branch
   with a DEK refuses its objects in the clear (TASK-411.3), or a bucket writer could downgrade one.
 - **Local disk:** closed segments in the WAL and the part cache hold the stored bytes, so they are
-  encrypted with nothing more. *(decided)* **The open segment is encrypted too**, under the volume
+  encrypted with nothing more. *(decided)* **The open segment is encrypted too**, under the vdisk
   DEK, so that shredding covers hosts' disks without counting on their disk encryption. Its pieces
   are read back by offset until the segment is framed, so it needs a length-preserving, random-access
   cipher: AES-256-XTS per 4 KiB sector (the workspace has `storage_xts`), tweak the sector, key
@@ -111,7 +111,7 @@ GCM's authentication key. A salt per object makes every subkey new, whatever key
 
 | Process | Keys | Why |
 |---|---|---|
-| extentd, a cell's holder | the cell's KEK; its volumes' DEKs; inherited DEKs | reads and writes the volumes |
+| extentd, a cell's holder | the cell's KEK; its vdisks' DEKs; inherited DEKs | reads and writes the vdisks |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
 | `cladefs-gc`, marking | none | reads metadata only |
 | `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
@@ -146,7 +146,7 @@ dropped with its pool, never written out unwrapped.
   `NoncurrentVersionExpiration`; GCS versioning off or a lifecycle delete of non-current
   versions), or the old wrapped KEK stays unwrappable while the tenant's KEK lives. With
   versioning off, nothing more is needed. The README says it for operators, doc-7 for the bucket.
-- **A volume:** deleting it, as now; its record stays (records stay, doc-7) and could have its
+- **A vdisk:** deleting it, as now; its record stays (records stay, doc-7) and could have its
   wrapped DEKs cleared once the collector has removed the branch's objects.
 
 ## Decided later the same day
@@ -192,7 +192,7 @@ dropped with its pool, never written out unwrapped.
   count the calls.
 - **Taking a cell** unwraps its KEK once per taking (`keys::CachingKms`, keyed by cell, generation and
   the taking's epoch and holder; a writer's recovery, which reads before it holds the cell,
-  predicts the taking it makes, `CellKeys::to_hold`), however many volumes open: a test counts one
+  predicts the taking it makes, `CellKeys::to_hold`), however many vdisks open: a test counts one
   unwrap for three. A cell the host made unwraps nothing. Branch DEKs are unwrapped locally.
 - **Rings.** Opening a store builds a `keys::Ring`: its branch's DEK generations (the newest encrypts
   new objects) and its ancestors' along their origins, read from their records and unwrapped under
@@ -339,7 +339,7 @@ dropped with its pool, never written out unwrapped.
   the record, nothing is given and the pooled KEK goes back (`Inheriting` gives it back when
   dropped unused); the record made, the keys not given: the directory left unmade is deleted,
   deleting the child, and any opener of the child gives them itself, crossing once; the cell made
-  and the keys not given: a keyed cell of no volume stays, as cells' objects do, and the child's
+  and the keys not given: a keyed cell of no vdisk stays, as cells' objects do, and the child's
   opener uses its KEK; keys given: as any fork. A give racing a deletion or another give is
   conditional: `Deleted` fails the fork, another's keys stand.
 - **specs/bucket** is unchanged: it models records by their kinds, origins and deletion, the
@@ -435,7 +435,7 @@ dropped with its pool, never written out unwrapped.
   `EACCES` to callers and the collector's locked path, marking and deleting on, its encrypted objects
   left uncompacted, not a corrupt pass), and so is `add_kek`. `CellKeys` of a shredded cell are
   encrypted and refuse their KEKs naming the cell: no branch of it is written in the clear, no DEK is
-  given. Its holder, if any, goes on changing its volumes until told: every change keeps the mark.
+  given. Its holder, if any, goes on changing its vdisks until told: every change keeps the mark.
 - **A host told** (`cladefs::bucket::forget(Scope, why)`, `keys::Scope::{Tenant, Cell}`), by the
   control API (`ShredCell`, which shreds then forgets, idempotent, to be called on every host;
   `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
@@ -463,9 +463,9 @@ dropped with its pool, never written out unwrapped.
   cache (GCM), and a shredded cell's objects stay in the bucket, ciphertext, until its branches are
   deleted. A race: a store opening on a host as it is told may finish opening; telling it again
   halts it.
-- **Tests.** `extent_store` `upload::encrypted::shredded_tenants_leave_none_of_their_volumes_readable_on_any_host`
+- **Tests.** `extent_store` `upload::encrypted::shredded_tenants_leave_none_of_their_vdisks_readable_on_any_host`
   (two hosts, open segment, part cache on disk, a cross-tenant fork reading on) and
-  `shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable` (the collector
+  `shredded_cells_leave_their_vdisks_unreadable_and_the_tenants_others_readable` (the collector
   locked, the old cell object put back reading again: why versions must expire); `extent_bucket`
   `keys::tests::shredded_cells_refuse_their_keys_and_hosts_told_forget_them`; `cladefs`
   `bucket::tests::stores_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache`; Linux:

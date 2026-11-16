@@ -13,7 +13,7 @@ use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
     Change, DESCRIPTION, Data, Description, EXTENTS, Extent, FileKey, KINDS, LOGS, OPEN_EXTENTS,
-    OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Volume, add_piece, branch_dir,
+    OPEN_SEGMENTS, Piece, Place, SEGMENTS, SegmentId, StoreFile, Vdisk, add_piece, branch_dir,
     create_branch_dirs, extent_path, files_of, list_numbers, log_path, open_extent_path,
     open_segment_path, segment_path, spare_path,
 };
@@ -223,8 +223,8 @@ pub struct Store<D: Dir> {
     /// fork's child takes one, as an extent's ID names its branch by its ID alone, and branches
     /// are unique by theirs only within their cells (TASK-364).
     lineage: BTreeSet<u64>,
-    /// cladefs: the volume of its branch's cell it is, if its description names one (TASK-364).
-    volume: Option<Volume>,
+    /// cladefs: the vdisk of its branch's cell it is, if its description names one (TASK-364).
+    vdisk: Option<Vdisk>,
     /// cladefs: the URL of the bucket its branch is kept in, if its description names one.
     bucket: Option<String>,
     /// Its directory, taken for this process ([`Dir::take`]), and claimed for its opening
@@ -796,9 +796,9 @@ impl<D: Dir> Recovering<D> {
         self.file.token
     }
 
-    /// cladefs: the volume of its branch's cell it is, if its description names one (TASK-364).
-    pub fn volume(&self) -> Option<&Volume> {
-        self.file.volume.as_ref()
+    /// cladefs: the vdisk of its branch's cell it is, if its description names one (TASK-364).
+    pub fn vdisk(&self) -> Option<&Vdisk> {
+        self.file.vdisk.as_ref()
     }
 
     /// The branch's commit its write-ahead log goes on from: the last the bucket acknowledged of
@@ -878,7 +878,7 @@ impl<D: Dir> Recovering<D> {
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
-        let StoreFile { block_size, branch, bucket, capacity, volume, .. } = file;
+        let StoreFile { block_size, branch, bucket, capacity, vdisk, .. } = file;
         let Opening { state, layer, taken: found, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // cladefs: the segments its recovery closed again framed, first, under its keys, as nothing
@@ -1028,7 +1028,7 @@ impl<D: Dir> Recovering<D> {
             branch,
             lineage,
             bucket,
-            volume,
+            vdisk,
             opened: SharedLock::new("store opening", Mutex::new(Some((claim, taken)))),
             unpacked: Unpacked::default(),
             options,
@@ -1139,15 +1139,15 @@ fn leave<D: Dir>(dir: &D, cache: Option<&Cache>, leaving: Vec<(String, Option<St
 impl<D: Dir> Store<D> {
     /// cladefs: makes a new store's directory in `dir`, which holds no store, as `description`
     /// describes, its description naming `bucket`, the URL of the bucket its branch is kept in,
-    /// if given ([`Store::bucket`]), and `volume`, the volume of its branch's cell it is, if given
-    /// ([`Store::volume`], TASK-364); unmade until its maker says it is whole ([`Store::made`]).
+    /// if given ([`Store::bucket`]), and `vdisk`, the vdisk of its branch's cell it is, if given
+    /// ([`Store::vdisk`], TASK-364); unmade until its maker says it is whole ([`Store::made`]).
     /// The description is made last: until it is durable, the directory is no store either. Its
     /// branch is the bucket's, which opening it takes ([`Store::recover`]).
     pub fn make(
         dir: &D,
         description: Description,
         bucket: Option<&str>,
-        volume: Option<Volume>,
+        vdisk: Option<Vdisk>,
     ) -> Result<(), Error> {
         let Description { block_size, capacity, branch } = description;
         ensure!(
@@ -1164,7 +1164,7 @@ impl<D: Dir> Store<D> {
             dir.create(UNMADE, false)?.sync()?;
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
-            let described = StoreFile { block_size, branch, bucket, capacity, token: None, volume };
+            let described = StoreFile { block_size, branch, bucket, capacity, token: None, vdisk };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
             file.sync()?;
@@ -1268,9 +1268,9 @@ impl<D: Dir> Store<D> {
         self.bucket.as_deref()
     }
 
-    /// cladefs: the volume of its branch's cell it is, as its description names it (TASK-364).
-    pub fn volume(&self) -> Option<&Volume> {
-        self.volume.as_ref()
+    /// cladefs: the vdisk of its branch's cell it is, as its description names it (TASK-364).
+    pub fn vdisk(&self) -> Option<&Vdisk> {
+        self.vdisk.as_ref()
     }
 
     /// cladefs: its keys, its branch's and its ancestors' DEKs, which it encrypts and reads under

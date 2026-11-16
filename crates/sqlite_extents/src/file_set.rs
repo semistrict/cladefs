@@ -2,20 +2,20 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A volume as SQLite uses it: an extent_files volume (TASK-456.1), whose files are the databases'
-//! files, with what SQLite needs besides of a VFS: its lock levels on each file, and its journals
-//! and temporary files.
+//! A file set as SQLite uses it: an extent_files file set (TASK-456.1), whose files are the
+//! databases' files, with what SQLite needs besides of a VFS: its lock levels on each file, and its
+//! journals and temporary files.
 //!
 //! **Memory files.** Journals and temporary files live in memory: a database's file changes only
 //! at its commits, whole, so that no crash needs a journal to roll it back.
 //!
 //! **Commits.** A transaction is committed as SQLite syncs the database's file, or, if told not
-//! to (`synchronous=OFF`), as a writer lowers its lock: the files' volume commits the file alone
+//! to (`synchronous=OFF`), as a writer lowers its lock: the file set commits the file alone
 //! (`extent_files`).
 
 use crate::locks::{Level, Locks};
 use anyhow::{Error, bail};
-use extent_files::{NotFound, Options, VolumeWindow};
+use extent_files::{FileSetWindow, NotFound, Options};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use storage_device::{DeviceHolder, ExtentId};
@@ -23,7 +23,7 @@ use storage_device::{DeviceHolder, ExtentId};
 /// A file in memory, a journal or a temporary file.
 pub type MemoryFile = Arc<Mutex<Vec<u8>>>;
 
-/// What SQLite holds of a volume besides its files, under one lock.
+/// What SQLite holds of a file set besides its files, under one lock.
 #[derive(Default)]
 struct Held {
     /// The connections' locks of each database's file.
@@ -32,30 +32,30 @@ struct Held {
     memory: HashMap<String, MemoryFile>,
 }
 
-/// A volume of SQLite's databases. See the module docs.
-pub struct Volume {
-    files: Arc<extent_files::Volume>,
+/// A file set of SQLite's databases. See the module docs.
+pub struct FileSet {
+    files: Arc<extent_files::FileSet>,
     held: Mutex<Held>,
 }
 
-impl Volume {
-    fn new(files: Arc<extent_files::Volume>) -> Arc<Self> {
+impl FileSet {
+    fn new(files: Arc<extent_files::FileSet>) -> Arc<Self> {
         Arc::new(Self { files, held: Mutex::default() })
     }
 
-    /// The volume on `device`, made if the device's root is empty.
+    /// The file set on `device`, made if the device's root is empty.
     pub fn open(device: DeviceHolder, options: Options) -> Result<Arc<Self>, Error> {
-        Ok(Self::new(extent_files::Volume::open(device, options)?))
+        Ok(Self::new(extent_files::FileSet::open(device, options)?))
     }
 
-    /// The volume on `device`, as [`Volume::open`] opens it, its files mapped into `window`, a
+    /// The file set on `device`, as [`FileSet::open`] opens it, its files mapped into `window`, a
     /// region each, as many regions as `options` says.
     pub fn open_mapped(
         device: DeviceHolder,
-        window: Box<dyn VolumeWindow>,
+        window: Box<dyn FileSetWindow>,
         options: Options,
     ) -> Result<Arc<Self>, Error> {
-        Ok(Self::new(extent_files::Volume::open_mapped(device, window, options)?))
+        Ok(Self::new(extent_files::FileSet::open_mapped(device, window, options)?))
     }
 
     /// Closes the device: every commit is durable already.
@@ -94,17 +94,17 @@ impl Volume {
     }
 
     /// Where the `len` bytes of file `name` at `offset` are in the window, if it maps them as
-    /// they read: for SQLite to read in place until it gives them back ([`Volume::unfetch`]).
+    /// they read: for SQLite to read in place until it gives them back ([`FileSet::unfetch`]).
     pub fn fetch(&self, name: &str, offset: u64, len: u64) -> Result<Option<*const u8>, Error> {
         self.files.fetch(name, offset, len)
     }
 
-    /// How many times SQLite fetched pages to read in place ([`Volume::fetch`]).
+    /// How many times SQLite fetched pages to read in place ([`FileSet::fetch`]).
     pub fn fetched(&self) -> u64 {
         self.files.fetched()
     }
 
-    /// Gives back a page of file `name` fetched ([`Volume::fetch`]).
+    /// Gives back a page of file `name` fetched ([`FileSet::fetch`]).
     pub fn unfetch(&self, name: &str) {
         self.files.unfetch(name)
     }
@@ -138,7 +138,7 @@ impl Volume {
     }
 
     /// Lowers a connection's lock of file `name`, `held`, to `want`, committing what it changed
-    /// first if it was writing, unless the volume failed: SQLite syncs at a transaction's end
+    /// first if it was writing, unless the file set failed: SQLite syncs at a transaction's end
     /// unless told not to (`synchronous=OFF`), and the transaction is committed then.
     pub fn unlock_file(&self, name: &str, held: &mut Level, want: Level) -> Result<(), Error> {
         let mut locks = self.held.lock().unwrap();
@@ -184,14 +184,14 @@ impl Volume {
         }
     }
 
-    /// Fails unless the volume is usable: what its users see as an error of their own.
+    /// Fails unless the file set is usable: what its users see as an error of their own.
     pub fn check(&self) -> Result<(), Error> {
         self.files.check()
     }
 }
 
-impl std::fmt::Debug for Volume {
+impl std::fmt::Debug for FileSet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Volume").field("files", &self.files).finish_non_exhaustive()
+        f.debug_struct("FileSet").field("files", &self.files).finish_non_exhaustive()
     }
 }

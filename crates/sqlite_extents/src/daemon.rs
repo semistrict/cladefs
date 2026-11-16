@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A volume on a store the host's extent daemon serves (TASK-300): its reads, and its window's
+//! A file set on a store the host's extent daemon serves (TASK-300): its reads, and its window's
 //! pages, are the daemon's cache's, the one copy of each extent every store and VM it serves
 //! shares; its writes and commits are the daemon's requests, as a VM's are.
 //!
@@ -10,16 +10,16 @@
 //! maps its cache's pages there, read-only, and this process's faults there go to it, through
 //! userfaultfd. So a page SQLite reads in place is the cache's page itself.
 
-use crate::{Options, Volume};
+use crate::{FileSet, Options};
 use anyhow::{Context as _, Error, ensure};
 use cladefs::{DaemonDevice, DaemonExtentStore, MappingContents, WindowMapping};
-use extent_files::{Contents, Run, VolumeWindow};
+use extent_files::{Contents, FileSetWindow, Run};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use storage_device::{Device, DeviceHolder};
 
-/// A volume on the store at `store` that the daemon listening at `socket` serves, made with
+/// A file set on the store at `store` that the daemon listening at `socket` serves, made with
 /// `capacity` bytes if it doesn't exist, its files mapped into a window of `window` bytes of this
 /// process's address space, which takes memory only as the daemon maps its pages there.
 pub fn open(
@@ -28,8 +28,8 @@ pub fn open(
     capacity: u64,
     window: u64,
     options: Options,
-) -> Result<Arc<Volume>, Error> {
-    // A SQLite volume of its cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
+) -> Result<Arc<FileSet>, Error> {
+    // A SQLite vdisk of its cell, if the daemon makes it (TASK-364): one the FUSE mounts of its
     // cell leave be, as no filesystem's.
     let opened = cladefs::DaemonConnection::connect(socket)
         .and_then(|daemon| daemon.open_sqlite(store, capacity));
@@ -39,7 +39,7 @@ pub fn open(
     let store = Arc::new(store);
     let window = DaemonWindow::new(store.clone(), window)?;
     let device = DeviceHolder::new(DaemonDevice::new(store)?);
-    Volume::open_mapped(device, Box::new(window), options)
+    FileSet::open_mapped(device, Box::new(window), options)
 }
 
 /// A store's DAX window in this process's memory. See the module docs.
@@ -90,7 +90,7 @@ impl DaemonWindow {
     }
 }
 
-impl VolumeWindow for DaemonWindow {
+impl FileSetWindow for DaemonWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
         (self.memory, self.size)
     }

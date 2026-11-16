@@ -338,7 +338,7 @@ fn attaching_and_detaching_are_send() {
 
 /// cladefs: stores attached at paths are under directories of the server's own, one a name a path
 /// goes through, made as the first store under it is attached and gone with the last: as a host's
-/// mount shows cells' volumes at `TENANT/CELL/VOLUME` (TASK-364). Those directories are the
+/// mount shows cells' vdisks at `TENANT/CELL/VDISK` (TASK-364). Those directories are the
 /// server's, `OWNER`'s, 0755, given for no time, nothing made in them nor moved in or out of them;
 /// each store's root's parent is the directory it is in. A path through a store's root, or ending
 /// at a directory of the server's, or another store's, is refused; one with an empty name too.

@@ -186,7 +186,7 @@ pub(super) fn stop_accepting() {
 /// Its arena goes, and the extents cached in it, once it is gone, as its VM processes are, and the
 /// stores opened in its arena, and what reads into the extent cache for them (`pages::Arena`).
 pub struct Tenant {
-    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are volumes of, which names
+    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are vdisks of, which names
     /// it in every call of the control API: a granted tenant's, its grant's; the default tenant's,
     /// [`DEFAULT_TENANT`](crate::host_store::DEFAULT_TENANT).
     id: u64,
@@ -337,7 +337,7 @@ impl Tenant {
         self.dir().map(|_| self.id)
     }
 
-    /// cladefs: `EACCES` if it is granted and the store at `path` is a volume of another tenant's
+    /// cladefs: `EACCES` if it is granted and the store at `path` is a vdisk of another tenant's
     /// cell (TASK-364), as its description says, read before it is opened, which would take its
     /// branch from its writer: the daemon makes its own cells' stores alone in its directory, but
     /// for the points of others' its VM manager gives it, which it restores from, as forks of its
@@ -1388,7 +1388,7 @@ impl Connection {
                 // cladefs: a VM snapshot's point, refused while the window holds private pages,
                 // whose bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
                 // here, as the VMM's error can't (TASK-92.14).
-                // cladefs: the one volume of a new cell of the store's tenant, of an ID of the
+                // cladefs: the one vdisk of a new cell of the store's tenant, of an ID of the
                 // bucket's giving, which the reply says (TASK-364).
                 let cell = crate::host_store::fork_cell(store.branch());
                 let forked =

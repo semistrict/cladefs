@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! SQLite's file locks, among the connections of one process: a volume's device is its process's
+//! SQLite's file locks, among the connections of one process: a file set's device is its process's
 //! alone, so no other process takes them.
 //!
 //! A connection holds one of SQLite's levels: none, shared (reading), reserved (about to write),

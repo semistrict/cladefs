@@ -85,7 +85,7 @@ pub(crate) async fn store_keeping(
     make_store(path.as_ref(), (capacity, tenant), keeping, filled).await
 }
 
-/// Makes a store at `path`, which must not exist, of `capacity` bytes, the one volume of a new cell
+/// Makes a store at `path`, which must not exist, of `capacity` bytes, the one vdisk of a new cell
 /// of `tenant`'s, which `fill` fills. A store
 /// that `fill` fails to fill, or panics filling, is deleted, as is one whose making is given up
 /// on, its future dropped as `fill` fills it.

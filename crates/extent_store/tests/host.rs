@@ -32,7 +32,7 @@ fn create(path: &Path) -> extent_store::Store<HostDir> {
         path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap();
     let store = Store::recover_unmade(HostDir::new(path).unwrap()).unwrap();
@@ -93,7 +93,7 @@ fn stores_unmade_refuse_to_open() {
         &path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap();
     let making = Store::recover_unmade(HostDir::new(&path).unwrap()).unwrap();
@@ -127,7 +127,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
         &path,
         description,
         "memory:///host",
-        extent_store::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
+        extent_store::Vdisk { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs },
     )
     .unwrap_err();
     scenario.teardown();

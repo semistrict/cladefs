@@ -4,7 +4,7 @@
 
 //! cladefsd, cladefs's daemon, one a host (TASK-475): serves the extent stores of the VMs on this
 //! host, from one memory, to VM processes that connect to its socket (`cladefs::extentd`); and, if
-//! told to, mounts tenants' cells with FUSE (`cladefs::extentd::mount`). A cell's volumes are held
+//! told to, mounts tenants' cells with FUSE (`cladefs::extentd::mount`). A cell's vdisks are held
 //! by this one process, whichever serves them.
 //!
 //! ```sh
@@ -58,15 +58,15 @@
 //! (TASK-302, TASK-364, TASK-475.2), and serves its Mount service on the control socket
 //! (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount`), which `CLADEFSD_GRPC` must name.
 //! Attaching a cell (`Attach`; a cell of 0, a new one) takes it from the daemon's bucket, at the
-//! placement of the token the call gives, the daemon's if none, and every Fxfs volume of it into
-//! a store at `STORES/TENANT/CELL/VOLUME`, shown at `MOUNT/TENANT/CELL/VOLUME`, TENANT and CELL
-//! in 16 hexadecimal digits; its other volumes, its SQLite databases and what VMs attach, are not
-//! shown. `CreateVolume` makes a new Fxfs volume of a cell attached; `Detach` takes a cell's
-//! volumes away once nothing uses them, written back, or at once if forced; `List` says what is
+//! placement of the token the call gives, the daemon's if none, and every Fxfs vdisk of it into
+//! a store at `STORES/TENANT/CELL/VDISK`, shown at `MOUNT/TENANT/CELL/VDISK`, TENANT and CELL
+//! in 16 hexadecimal digits; its other vdisks, its SQLite databases and what VMs attach, are not
+//! shown. `CreateVdisk` makes a new Fxfs vdisk of a cell attached; `Detach` takes a cell's
+//! vdisks away once nothing uses them, written back, or at once if forced; `List` says what is
 //! attached. The mount is the daemon's user's; with `CLADEFSD_MOUNT_ALLOW_OTHER=1`, other users may
 //! use it as its permissions say (for a user other than root, `/etc/fuse.conf` must have
 //! `user_allow_other`). Root mounts with mount(2), any other user through libfuse's
-//! `fusermount3`. The drain closes it: unmounted lazily, its volumes written back and their
+//! `fusermount3`. The drain closes it: unmounted lazily, its vdisks written back and their
 //! stores closed once nothing uses it, within the drain's bound.
 //!
 //! With `CLADEFSD_METRICS` naming an address (`HOST:PORT`), the daemon serves its metrics

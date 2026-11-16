@@ -9,7 +9,7 @@
 //! no KEK is in the clear, and so are its branches' objects, their records keeping no DEK.
 //!
 //! **Taking a cell** unwraps its KEK with one call of the KMS, which a host's [`CachingKms`] keeps
-//! for that taking, whatever number of the cell's volumes it opens: its branches' DEKs are
+//! for that taking, whatever number of the cell's vdisks it opens: its branches' DEKs are
 //! unwrapped with it locally ([`CellKeys`]). A cell made by a host gets a KEK the host wrapped
 //! before, which it keeps in a pool for the cells it makes: none is unwrapped then. A cell is made
 //! encrypted iff the host has a KMS and the cell's tenant has a KEK there
@@ -1435,7 +1435,7 @@ impl std::fmt::Display for Scope {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cell::{self, Kind as Volume};
+    use crate::cell;
     use crate::layout::{Origin, TEST_CELL, test_branch};
     use crate::record::Kind;
     use crate::testing::{Direct, SimBucket};
@@ -1521,8 +1521,8 @@ mod tests {
         let kek = block_on(new_cell_kek(Some(&kms), TEST_CELL.tenant)).unwrap();
         let (secret, wrapped) = kek.as_ref().map(|(secret, kek)| (secret.expose(), kek)).unwrap();
         let making = (true, Some(wrapped));
-        let volume = Some(("root", cell::Volume { branch: 7, kind: Volume::Fxfs }));
-        let (_, object) = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), making, volume)).unwrap();
+        let vdisk = Some(("root", cell::Vdisk { branch: 7, kind: cell::Kind::Fxfs }));
+        let (_, object) = block_on(cell::hold(&bucket, TEST_CELL, (5, 5), making, vdisk)).unwrap();
         assert_eq!(&object.keks, std::slice::from_ref(wrapped));
         assert!(!holds(&crate::layout::encode(&object), secret));
         let made = held(Some(&kms), TEST_CELL, object.clone(), kek);

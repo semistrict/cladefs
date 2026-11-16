@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What a volume keeps on its device: the root, and the nodes of each file's tree.
+//! What a file set keeps on its device: the root, and the nodes of each file's tree.
 //!
 //! **Refs.** A block of an extent is named by a ref of 24 bytes: the extent's branch and sequence
 //! number, the block's index in it, and how many blocks the extent holds, which no ref to an
@@ -36,7 +36,7 @@ const TRAILER_BYTES: usize = 16;
 /// What a node's trailer starts with.
 const NODE_MAGIC: u32 = u32::from_le_bytes(*b"FXSN");
 
-/// What a volume's root starts with.
+/// What a file set's root starts with.
 const ROOT_MAGIC: &[u8; 8] = b"FXSQLVOL";
 
 /// The version of the root's format: 3 since extents end with their blocks' owners, and files
@@ -183,10 +183,10 @@ pub(crate) struct FileRoot {
     pub sparse: Vec<(ExtentId, u32)>,
 }
 
-/// A volume's root.
+/// A file set's root.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Root {
-    /// Where minting goes on from: every extent the volume wrote is below it.
+    /// Where minting goes on from: every extent the file set wrote is below it.
     pub minted: u64,
     /// The extents to free once the root is durable: what its commit left unreferenced, and what
     /// earlier frees didn't free.
@@ -258,9 +258,9 @@ impl Root {
             return Ok(None);
         }
         let mut reader = Reader(bytes);
-        ensure!(reader.take(ROOT_MAGIC.len())? == ROOT_MAGIC, "the device holds no volume");
+        ensure!(reader.take(ROOT_MAGIC.len())? == ROOT_MAGIC, "the device holds no file set");
         let version = reader.u32()?;
-        ensure!(version == ROOT_VERSION, "a volume of version {version}");
+        ensure!(version == ROOT_VERSION, "a file set of version {version}");
         let minted = reader.u64()?;
         let dying = (0..reader.u64()?)
             .map(|_| Ok(ExtentId::new(reader.u64()?, reader.u64()?)))
@@ -372,6 +372,6 @@ mod tests {
         assert_eq!(list.len(), 8192);
         assert_eq!(decode_list(&list, 300).unwrap(), listed);
         let error = Root::decode(b"something else").unwrap_err();
-        assert_eq!(error.to_string(), "the device holds no volume");
+        assert_eq!(error.to_string(), "the device holds no file set");
     }
 }

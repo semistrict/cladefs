@@ -6332,9 +6332,9 @@ mod tests {
             let bucket = store();
             let kek = keys::new_cell_kek(Some(&host), layout::TEST_CELL.tenant).await.unwrap();
             let making = (true, kek.as_ref().map(|(_, kek)| kek));
-            let volume = crate::cell::Volume { branch: 1, kind: crate::cell::Kind::Fxfs };
+            let vdisk = crate::cell::Vdisk { branch: 1, kind: crate::cell::Kind::Fxfs };
             let (_, object) =
-                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(("a", volume)))
+                crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(("a", vdisk)))
                     .await
                     .unwrap();
             assert_eq!(object.keks.len(), 1);

@@ -190,7 +190,7 @@ pub use host::{
     create_host, delete_host, host_branch, host_bucket, host_token, made_host, place_host,
     unmade_host,
 };
-pub use layout::{Description, Format, Place, Volume};
+pub use layout::{Description, Format, Place, Vdisk};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
 pub use raw::{RawFile, SECTOR};
 pub use segments::{

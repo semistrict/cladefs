@@ -184,11 +184,11 @@ of these stands in with the items the code copied from Fuchsia uses:
   naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
   number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
   control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
-  attach`, `create-volume`, `detach`, `list`), takes a tenant's cell of the
-  bucket (TASK-364), taking its volumes' heads with it, each Fxfs volume into
-  `DIR/TENANT/CELL/VOLUME` and shown at `MOUNTPOINT/TENANT/CELL/VOLUME`, and
+  attach`, `create-vdisk`, `detach`, `list`), takes a tenant's cell of the
+  bucket (TASK-364), taking its vdisks' heads with it, each Fxfs vdisk into
+  `DIR/TENANT/CELL/VDISK` and shown at `MOUNTPOINT/TENANT/CELL/VDISK`, and
   detaches the cell once the kernel lets go of it, written back; the daemon's
-  drain closes the mount. A cell's volumes are so held by one process, whether
+  drain closes the mount. A cell's vdisks are so held by one process, whether
   VMs or the mount serve them. macOS has no open-source FUSE, so no mounts
   there.
 - `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory cladefs only
@@ -305,7 +305,7 @@ imports, forks, places, syncs, resizes and deletes stores, and grants tenants
 64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
 `<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
 connection's tenant is the socket it came in on, and it names stores in the
-tenant's directory alone. The stores in its directory are volumes of its own
+tenant's directory alone. The stores in its directory are vdisks of its own
 cells, and its VM processes open no store of another tenant's cell, but fork
 the points of others' its VM manager gives it. Revoked, a tenant's socket
 goes, and once its VM processes do, its arena and cached pages.
