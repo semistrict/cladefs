@@ -200,13 +200,13 @@ pub(crate) fn token() -> Result<u64, Failure> {
 }
 
 /// How a store this process opens where no host's daemon serves it keeps its branch in its bucket:
-/// its uploader's options, as a copy never placed takes its branch's lease here ([`token`]).
+/// its uploader's options, as a copy never placed takes its branch's head here ([`token`]).
 pub(crate) fn keeping() -> Result<upload::Options, Failure> {
     Ok(upload::Options { token: token()?, ..Default::default() })
 }
 
 /// A store opened ([`open`]), with the bucket its description names, which its branch is kept in,
-/// and its uploader, which took the branch's lease, or holds its point (TASK-165.9).
+/// and its uploader, which took the branch's head, or holds its point (TASK-165.9).
 pub(crate) struct Opened {
     pub store: Arc<Store<HostDir>>,
     pub bucket: Arc<Bucket>,
@@ -313,7 +313,7 @@ pub(crate) fn create_unmade(
 }
 
 /// Opens the store at `path` as of its last commit, with the bucket it names: its uploader, as
-/// `keeping` says, takes its branch's lease, with the token its placement names or `keeping`'s,
+/// `keeping` says, takes its branch's head, with the token its placement names or `keeping`'s,
 /// and recovers it, the store's write-ahead log put after its end (`extent_store::upload::open`,
 /// TASK-165.9). Fails as that does: a log another writer's commits moved past (`ESTALE`), a branch
 /// deleted (`ENOENT`) or a later placement's (`ESTALE`); and a store never made whole (`Unmade`).
@@ -615,7 +615,7 @@ mod tests {
         let first = made(&one, new());
         let second = made(&two, new());
         assert_eq!(second.id, first.id + 1);
-        let block = first.id / extent_remote::objectid::BLOCK;
+        let block = first.id / extent_remote::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = extent_remote::layout::objectid_block(block);
         assert!(upload::block_on(extent_remote::bucket::get(&*bucket, &taken)).unwrap().is_some());

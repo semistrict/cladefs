@@ -81,7 +81,7 @@ impl Host {
     }
 
     /// The store `recovering` recovered, opened by an uploader uploading every `interval`, as
-    /// holder `holder` of its branch's lease.
+    /// holder `holder` of its branch's head.
     fn open(
         &self,
         recovering: Recovering<MemDir>,
@@ -330,7 +330,7 @@ const HOUR: Duration = Duration::from_secs(3600);
 /// workload's when it crashed, whether the store opened from its disk held commits the bucket
 /// lacked, whether its collector was cut in a pass, and whether its passes compacted and deleted
 /// objects before the crash.
-pub struct Kept {
+pub struct Found {
     pub acknowledged: bool,
     pub ahead: bool,
     pub cut: bool,
@@ -339,7 +339,7 @@ pub struct Kept {
 }
 
 /// Round `round` of the kept rounds (see the module's docs).
-pub fn kept(round: u64) -> Kept {
+pub fn kept(round: u64) -> Found {
     let host = Host::new();
     let mut rng = StdRng::seed_from_u64(round);
     let interval = Duration::from_millis(rng.random_range(1..=20));
@@ -372,7 +372,7 @@ pub fn kept(round: u64) -> Kept {
     let reopened = reopened(&host, round, &crashed, crashed.dir.clone(), 3, (*durable).max(epoch));
     collected_alone(&host, round);
     let (compacted, deleted) = (collected.0 > 0, collected.1 > 0);
-    Kept {
+    Found {
         acknowledged: acknowledged > first,
         ahead: reopened > epoch,
         cut: *cut,
@@ -403,7 +403,7 @@ fn collected_alone(host: &Host, round: u64) {
 /// Round `round` of the cut openings: the store a kept round's first crash left opened again, its
 /// file system failing at each of the opening's writes in turn, the host crashing there; opened
 /// again after, it holds a prefix at least as late as its last durable commit, whatever the cut
-/// opening wrote: a segment closed again from its log, the WAL's base moved on past what the
+/// opening wrote: a segment closed again from its log, the WAL's start moved on past what the
 /// bucket acknowledged, the files that left for the bucket, a capacity restated. Returns how many
 /// writes the opening made.
 pub fn cut(round: u64) -> u64 {

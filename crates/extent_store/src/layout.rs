@@ -49,8 +49,8 @@ pub struct Description {
 /// URL of the bucket its branch is kept in, which every store in a host's directory names
 /// (`create_host`, TASK-165.6), and a store of memory's need not; the capacity its branch has
 /// until a commit sets one, as a branch made for it, or taken into it, says none; and the fencing
-/// token of its placement, if it was placed (TASK-39.7), which takes the branch's lease
-/// (TASK-165.9).
+/// token of its placement, if it was placed (TASK-39.7), which takes the branch's cell,
+/// and so its head (TASK-165.9, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct StoreFile {
     pub block_size: u32,

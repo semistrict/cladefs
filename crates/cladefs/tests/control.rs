@@ -57,7 +57,7 @@ fn stores_through_the_control_api() {
             own_extents: 1,
             inherited_extents: 0,
             committed: 1,
-            // Closed, the stat opens it, as the daemon opens any store, taking its branch's lease
+            // Closed, the stat opens it, as the daemon opens any store, taking its branch's head
             // after its making's and its VM's (TASK-165.9): what it committed, uploaded.
             uploading: true,
             lease_token: 1,
@@ -103,10 +103,10 @@ fn stores_through_the_control_api() {
     assert!(object_storage.uploaded_bytes.values().sum::<u64>() >= 64 << 10, "{object_storage:?}");
 }
 
-/// TASK-50.5: the stores VM processes have open are listed, with their branches' leases, as this
+/// TASK-50.5: the stores VM processes have open are listed, with their branches' takings, as this
 /// host's placement took them, and their uploads: synced, nothing waits.
 #[test]
-fn open_stores_are_listed_with_their_leases_and_uploads() {
+fn open_stores_are_listed_with_their_takings_and_uploads() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (first, second) = (dir.path().join("first"), dir.path().join("second"));

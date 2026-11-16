@@ -12,7 +12,7 @@
 //! is asked of it here, not of its flags where it is read; and every change of one goes through
 //! [`crate::branch`]'s one transition.
 
-use crate::keys::{Dek, Inherited};
+use crate::keys::{Dek, InheritedDek};
 use crate::layout::{Branch, FORMAT, Origin, decode};
 use crate::{Error, rules};
 use serde::{Deserialize, Serialize};
@@ -33,7 +33,7 @@ pub enum Kind {
     /// ([`crate::branch::fork_point`]).
     Fork(Origin),
     /// A point, from its first: no branch to write, but a name of its origin's state, which any
-    /// number of hosts read and fork. It has no lease, no segment and no checkpoint, and no writer
+    /// number of hosts read and fork. It has no head, no segment and no checkpoint, and no writer
     /// takes it ([`Error::Point`]; doc-7, Points).
     Point(Origin),
     /// A fork of `point`, naming the point's origin as its own, until the fork is made
@@ -106,7 +106,7 @@ pub struct Record {
     /// DEKs holds all it inherits from other cells, its readers needing no other cell's KEK, nor
     /// another tenant's KMS. By its fork's host, as it makes the fork
     /// ([`crate::keys::give_inherited`]), or its first writer ([`crate::keys::with_dek`]).
-    pub inherited: Vec<Inherited>,
+    pub inherited: Vec<InheritedDek>,
 }
 
 impl Record {
@@ -197,7 +197,7 @@ struct Flags {
     /// cladefs: [`Record::deks`].
     deks: Vec<Dek>,
     /// cladefs: [`Record::inherited`].
-    inherited: Vec<Inherited>,
+    inherited: Vec<InheritedDek>,
 }
 
 impl From<Record> for Flags {

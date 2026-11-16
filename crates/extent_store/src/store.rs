@@ -5,8 +5,8 @@
 //! The store. See the crate's docs.
 
 use crate::dir::{Dir, File, not_found, read_file};
-use crate::durability::{Batch, Durability, FileSyncs, Syncs};
-use crate::framed::{Aligned, Framed, Packed, Part, Source, Unpacked, read_aligned};
+use crate::durability::{Due, Durability, FileSyncs, Syncs};
+use crate::framed::{Aligned, Framed, Located, Packed, Source, Unpacked, read_aligned};
 use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
 use crate::kept::{Kept, KeptExtents};
@@ -23,7 +23,7 @@ use crate::segments::{
 };
 use crate::shared::{Shared, SharedLock};
 use crate::state::{
-    Framing, Gate, Holding, Job, Life, Locked, OwnFiles, Placement, Readable, Reader, Space,
+    Framing, Gate, Holding, Job, Life, Locked, OwnFiles, Packing, Readable, Reader, Space,
     Standing, State, Uncommitted, Unreferenced, Writable,
 };
 use crate::sync::{Condvar, Mutex, MutexGuard, rules, spawn_or_return, thread};
@@ -31,7 +31,7 @@ use crate::timings::{self, Flush, Waits, flush};
 use crate::uploads::Closed;
 use crate::views::{Limits, Sealed, View, Views};
 use crate::wal::{
-    BaseFile, LOG_HEADER, LogRecord, Queue, Queued, Recovered, Runs, SegmentLog, log_salt,
+    LOG_HEADER, LogRecord, Queue, Queued, Recovered, Runs, SegmentLog, StartFile, log_salt,
 };
 use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
@@ -67,7 +67,7 @@ pub struct ForkCommitted {
 /// the branch holds: its child's extents' IDs would be theirs (TASK-364).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the fork's child {0} has the ID of its parent's or of a branch it inherits from")]
-pub struct Inherited(pub Branch);
+pub struct InheritedId(pub Branch);
 
 /// The error of a capacity smaller than what the store holds: its extents' bytes, and those that
 /// writes in progress may add.
@@ -82,7 +82,7 @@ pub struct TooSmall {
 /// sealed and freed (TASK-79.6): an extent's ID is its branch's to write once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0:?} was written before: an extent's ID is written once")]
-pub struct Spent(pub ExtentId);
+pub struct SpentExtent(pub ExtentId);
 
 /// cladefs: the error of a read of an extent the store holds whose data is in the bucket, at
 /// `location` ([`Store::adopt`]): what the store's user reads it from.
@@ -210,7 +210,7 @@ pub struct Usage {
 }
 
 /// cladefs: a store's directory, taken and claimed for its opening, until it closes.
-type Opened<D> = Option<(Claim<D>, Arc<Taken<D>>)>;
+type Opened<D> = Option<(Claim<D>, Arc<TakenDir<D>>)>;
 
 /// An extent store, open. See the crate's docs.
 pub struct Store<D: Dir> {
@@ -244,9 +244,9 @@ pub struct Store<D: Dir> {
     /// Held by a flush: commits become durable in order. cladefs: and the logs flushes append
     /// records to, of the open segment, and of those closed since whose commits wait (TASK-165.9).
     flushing: SharedLock<Mutex<Logs<D::File>>>,
-    /// cladefs: the base of its write-ahead log, written as segments are acknowledged, before their
-    /// files leave (TASK-165.9).
-    base: SharedLock<Mutex<BaseFile>>,
+    /// cladefs: the start of its write-ahead log, written as segments are acknowledged, before
+    /// their files leave (TASK-165.9).
+    start: SharedLock<Mutex<StartFile>>,
     /// cladefs: the host's cache of the bucket's objects, if it has one: what the bucket acknowledged
     /// of the store's goes into it (TASK-165.8).
     cache: Option<Arc<Cache>>,
@@ -265,9 +265,9 @@ pub struct Store<D: Dir> {
 }
 
 /// A store's directory, taken for this process ([`Dir::take`]): let go of once dropped.
-struct Taken<D: Dir>(Arc<D>);
+struct TakenDir<D: Dir>(Arc<D>);
 
-impl<D: Dir> Drop for Taken<D> {
+impl<D: Dir> Drop for TakenDir<D> {
     fn drop(&mut self) {
         self.0.let_go();
     }
@@ -286,7 +286,7 @@ impl<D: Dir> Drop for Claim<D> {
 /// cladefs: a hold of a store's directory, taken for this process until it is dropped
 /// ([`Store::hold_dir`]).
 pub struct DirHold<D: Dir> {
-    _taken: Arc<Taken<D>>,
+    _taken: Arc<TakenDir<D>>,
 }
 
 /// What a commit ordered but not yet durable leaves for the flush that makes it durable.
@@ -728,19 +728,19 @@ pub struct Unmade;
 
 /// cladefs: what the bucket holds of the branch a store opens (doc-14, Opening a store;
 /// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
-/// found taking it ([`extent_remote::Taken`]), the head, which the store's write-ahead log is put
-/// after, and its writer's chain there, which stamps the store's footers from then on; or, for a
-/// point, its state alone, which nothing writes. And the host's cache of the bucket's objects, if
+/// found taking it ([`extent_remote::TakenBranch`]), the head, which the store's write-ahead log is
+/// put after, and its writer's chain there, which stamps the store's footers from then on; or, for
+/// a point, its state alone, which nothing writes. And the host's cache of the bucket's objects, if
 /// it has one, which what the bucket acknowledged of the store's goes into. cladefs: and the
 /// store's keys, its branch's and its ancestors' DEKs, which its segments and extents stored on
-/// their own are encrypted and read under (`extent_remote::keys`, TASK-411.3): none, in the clear.
-/// And what holds the parts of its segments packed as they fill, which the process's stores share,
-/// so that what governs the process's memory lets them go as it runs short (`crate::held`,
-/// TASK-400); without, one of the store's own, which nothing makes let go. An encrypted store holds
-/// none (TASK-411.5).
+/// their own are encrypted and read under (`extent_remote::keys`, TASK-411.3): none, in the clear. And
+/// what holds the parts of its segments packed as they fill, which the process's stores share, so
+/// that what governs the process's memory lets them go as it runs short (`crate::held`, TASK-400);
+/// without, one of the store's own, which nothing makes let go. An encrypted store holds none
+/// (TASK-411.5).
 pub struct Opening {
     pub state: extent_remote::State,
-    pub taken: Option<extent_remote::Taken>,
+    pub taken: Option<extent_remote::TakenBranch>,
     pub cache: Option<Arc<Cache>>,
     pub keys: Arc<Ring>,
     pub held: Option<Arc<HeldParts>>,
@@ -748,23 +748,23 @@ pub struct Opening {
 
 impl Opening {
     /// The opening of `branch`, which the bucket holds nothing of: no commit of it there, and a
-    /// writer's chain from its first segment, of lease epoch 0. Its store's write-ahead log
+    /// writer's chain from its first segment, of epoch 0. Its store's write-ahead log
     /// follows only if it never had anything acknowledged ([`extent_remote::Error::Diverged`]):
     /// a store of the store's own tests, of a bucket it never reaches.
     pub fn new(branch: Branch) -> Self {
         let chain = Chain::new(branch, 0, 0, 0);
         let state = extent_remote::State::new(branch);
-        let taken = extent_remote::Taken::of(Default::default(), &state, chain);
+        let taken = extent_remote::TakenBranch::of(Default::default(), &state, chain);
         Self { state, taken: Some(taken), cache: None, keys: Ring::clear(), held: None }
     }
 }
 
 /// cladefs: a store's directory, taken for this process and claimed for its opening, its write-ahead
 /// log recovered from it ([`Store::recover`]), to be opened as what the bucket holds of its branch
-/// says ([`Recovering::open`]): its branch's writer takes the lease meanwhile, and recovers it.
+/// says ([`Recovering::open`]): its branch's writer takes the head meanwhile, and recovers it.
 pub struct Recovering<D: Dir> {
     dir: Arc<D>,
-    taken: Arc<Taken<D>>,
+    taken: Arc<TakenDir<D>>,
     claim: Claim<D>,
     file: StoreFile,
     wal: Recovered,
@@ -793,22 +793,22 @@ impl<D: Dir> Recovering<D> {
 
     /// The branch's commit its write-ahead log goes on from: the last the bucket acknowledged of
     /// its commits, if it acknowledged any.
-    pub fn base(&self) -> Option<u64> {
-        self.wal.base
+    pub fn start(&self) -> Option<u64> {
+        self.wal.start
     }
 
-    /// cladefs: whether `commit`, a branch's last, is its write-ahead log's base or one of its
+    /// cladefs: whether `commit`, a branch's last, is its write-ahead log's start or one of its
     /// commits: a branch whose last commit is never moved on from the log, which then diverged
     /// not ([`extent_remote::Error::Diverged`], TASK-345).
     pub fn holds_commit(&self, commit: Option<u64>) -> bool {
         let wal = self.wal();
         let mut commits = wal.segments().flat_map(|(footer, _)| &footer.contents.commits);
-        commit == wal.base() || commit.is_some_and(|commit| commits.any(|&own| own == commit))
+        commit == wal.start() || commit.is_some_and(|commit| commits.any(|&own| own == commit))
     }
 
     /// The write-ahead log, as its directory holds it: stamped as it was.
     fn wal(&self) -> Wal<u64> {
-        Wal::of(self.wal.base, self.wal.segments.iter().cloned())
+        Wal::of(self.wal.start, self.wal.segments.iter().cloned())
     }
 
     /// Whether its write-ahead log holds nothing.
@@ -820,12 +820,12 @@ impl<D: Dir> Recovering<D> {
     /// unless the branch moved on from it ([`extent_remote::Error::Diverged`]). What a store asks
     /// of the branch as recovery found it before taking its head, so that a store plainly stale
     /// fences no writer.
-    pub fn follows(&self, taken: &extent_remote::Taken) -> bool {
+    pub fn follows(&self, taken: &extent_remote::TakenBranch) -> bool {
         self.wal().rebase(taken).is_ok()
     }
 
     /// Drops its write-ahead log, the commits it holds never acknowledged lost: what `cladefsctl
-    /// take` does of a store whose log diverged (doc-14, Opening a store). Its base goes with it:
+    /// take` does of a store whose log diverged (doc-14, Opening a store). Its start goes with it:
     /// an empty log follows any branch. Durably, before the store opens past it: a crash after
     /// brings none of it back, whose commits the branch moved on from, to upload after the store's
     /// own since (TASK-295).
@@ -841,9 +841,9 @@ impl<D: Dir> Recovering<D> {
         for kind in [SEGMENTS, EXTENTS] {
             dir.sync_dir(&branch_dir(kind, branch.id))?;
         }
-        self.wal.base_file.write(dir, None)?;
+        self.wal.start_file.write(dir, None)?;
         dir.barrier()?;
-        self.wal.base = None;
+        self.wal.start = None;
         Ok(())
     }
 
@@ -862,7 +862,7 @@ impl<D: Dir> Recovering<D> {
     /// Opens the store as `opening` says the bucket holds its branch (doc-14, Opening a store):
     /// its write-ahead log put after the branch's end, by its commits, those of its segments that
     /// landed acknowledged, their files into the host's cache, and the rest stamped anew on the
-    /// writer's chain ([`Wal::rebase`]), its base written first; or refused, if the branch moved
+    /// writer's chain ([`Wal::rebase`]), its start written first; or refused, if the branch moved
     /// on from it ([`extent_remote::Error::Diverged`]). The branch's state is the bucket's, its
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A point's store holds its state alone, and no log.
@@ -895,12 +895,12 @@ impl<D: Dir> Recovering<D> {
         // Stamped as the directory holds them: those the rebase stamps anew upload so.
         let stamped: BTreeMap<u64, Footer> =
             recovered.segments.iter().map(|(footer, number)| (*number, footer.clone())).collect();
-        let mut wal = Wal::of(recovered.base, recovered.segments);
-        let mut base_file = recovered.base_file;
+        let mut wal = Wal::of(recovered.start, recovered.segments);
+        let mut start_file = recovered.start_file;
         let (Rebased { landed }, chain) = match &found {
             Some(found) => {
                 let rebased = wal.rebase(found)?;
-                base_file.write(&*dir, wal.base())?;
+                start_file.write(&*dir, wal.start())?;
                 // Its footers from now on follow those stamped anew.
                 let mut chain = found.chain;
                 for (footer, _) in wal.segments() {
@@ -918,7 +918,7 @@ impl<D: Dir> Recovering<D> {
         let mut leaving = Vec::new();
         for (footer, number) in landed {
             let segment = SegmentId { branch: branch.id, number };
-            let key = extent_remote::layout::segment(branch, footer.seq, footer.epoch);
+            let key = extent_remote::layout::segment(branch, footer.segment, footer.epoch);
             leaving.push((segment_path(segment), Some(key)));
             leaving.extend(footer.own().map(|(extent, at)| (extent_path(extent), Some(at.key))));
         }
@@ -933,9 +933,9 @@ impl<D: Dir> Recovering<D> {
         });
         let mut named_own = BTreeSet::new();
         for (footer, number) in wal.segments() {
-            let key = extent_remote::layout::segment(branch, footer.seq, footer.epoch);
+            let key = extent_remote::layout::segment(branch, footer.segment, footer.epoch);
             replay.extents.segments.insert(key, SegmentId { branch: branch.id, number: *number });
-            replay.apply_contents(footer.seq, footer.epoch, &footer.contents);
+            replay.apply_contents(footer.segment, footer.epoch, &footer.contents);
             named_own.extend(footer.own().map(|(extent, _)| extent));
         }
         // cladefs: a log ends with no commit unended (`wal::recover`, TASK-92.41).
@@ -1040,7 +1040,7 @@ impl<D: Dir> Recovering<D> {
                         (options.open_files, keys.clone()),
                     ),
                     unreferenced: Unreferenced::default(),
-                    wal: Queue::new(wal.base(), queued),
+                    wal: Queue::new(wal.start(), queued),
                     point: found.is_none(),
                     kept: KeptExtents::default(),
                     sealed: Sealed::default(),
@@ -1057,7 +1057,7 @@ impl<D: Dir> Recovering<D> {
                 "store flush",
                 Mutex::new(Logs { by_segment: log, unsynced: Syncs::default() }),
             ),
-            base: SharedLock::new("store log base", Mutex::new(base_file)),
+            start: SharedLock::new("store log start", Mutex::new(start_file)),
             cache,
             held: held.unwrap_or_default(),
             idle: Arc::new(Condvar::new()),
@@ -1216,7 +1216,7 @@ impl<D: Dir> Store<D> {
         dir.take().context("taking the store's directory")?;
         let dir = Arc::new(dir);
         // Dropped, as an opening that fails drops them, they let the directory go.
-        let taken = Arc::new(Taken(dir.clone()));
+        let taken = Arc::new(TakenDir(dir.clone()));
         dir.claim().context("taking the store's directory")?;
         let claim = Claim(dir.clone());
         let file = {
@@ -1229,7 +1229,7 @@ impl<D: Dir> Store<D> {
     }
 
     /// cladefs: the sequence numbers of the branch's own extents it freed once sealed, which it
-    /// writes no more ([`Spent`], TASK-79.6).
+    /// writes no more ([`SpentExtent`], TASK-79.6).
     pub fn spent(&self) -> Result<extent_frame::spent::Spent, Error> {
         Ok(self.state()?.spent.clone())
     }
@@ -1286,7 +1286,7 @@ impl<D: Dir> Store<D> {
     /// [`ForkCommitted`]: the segment names the fork, as a host crashing then would leave it.
     pub fn commit_fork(&self, child: Child) -> Result<u64, Error> {
         if self.lineage.contains(&child.branch.id) {
-            bail!(Inherited(child.branch));
+            bail!(InheritedId(child.branch));
         }
         let committing = self.committing.with(Mutex::lock);
         self.writable()?.segments.close_for_fork(child);
@@ -1418,8 +1418,8 @@ impl<D: Dir> Store<D> {
         state: &mut State<D::File>,
         extent: ExtentId,
     ) -> Result<Source<D::File>, Error> {
-        match state.uncommitted.placement(extent) {
-            Some(Placement::Own(file)) => Ok(Source::Raw(file.clone())),
+        match state.uncommitted.packing(extent) {
+            Some(Packing::Own(file)) => Ok(Source::Raw(file.clone())),
             _ => Ok(Source::Framed(state.own_files.file(&*self.dir, extent)?)),
         }
     }
@@ -1481,13 +1481,13 @@ impl<D: Dir> Store<D> {
 
     /// cladefs: fails unless `extent`, the branch's, whose life in `state` is `life`, may be opened,
     /// as a write opens it: unless it is open, or never sealed by the branch, held or freed
-    /// ([`Spent`], TASK-79.6). One kept, freed, is spent if it was the branch's own.
+    /// ([`SpentExtent`], TASK-79.6). One kept, freed, is spent if it was the branch's own.
     fn check_opens(state: &State<D::File>, life: &Life<'_>, extent: ExtentId) -> Result<(), Error> {
         match life {
             Life::Open(_) | Life::Unknown => Ok(()),
             Life::Held(_) => bail!(SealedExtent(extent)),
-            Life::Spent => bail!(Spent(extent)),
-            Life::Kept(_) if state.spent.contains(extent.sequence) => bail!(Spent(extent)),
+            Life::Spent => bail!(SpentExtent(extent)),
+            Life::Kept(_) if state.spent.contains(extent.sequence) => bail!(SpentExtent(extent)),
             Life::Kept(_) => Ok(()),
         }
     }
@@ -1507,8 +1507,8 @@ impl<D: Dir> Store<D> {
             Self::check_opens(&state, &life, extent)?;
             let current = life.held();
             let grows = end.saturating_sub(current.map_or(0, |entry| entry.len));
-            let to_segment = match state.uncommitted.placement(extent) {
-                Some(placement) => matches!(placement, Placement::Segment),
+            let to_segment = match state.uncommitted.packing(extent) {
+                Some(packing) => matches!(packing, Packing::Segment),
                 None => end < self.options.large_extent,
             };
             // cladefs: what it writes over, in a segment, takes room too (TASK-79.2), as the writes
@@ -1530,22 +1530,22 @@ impl<D: Dir> Store<D> {
         if to_segment {
             self.make_room(&mut state, len)?;
         }
-        let (placement, opening) = match state.uncommitted.opening(extent) {
+        let (packing, opening) = match state.uncommitted.opening(extent) {
             Some(opened) => opened,
             None => {
-                let placement = if end >= self.options.large_extent {
+                let packing = if end >= self.options.large_extent {
                     // Raw until it is sealed, when it is framed in its own file.
-                    Placement::Own(Arc::new(self.create_raw(extent)?))
+                    Packing::Own(Arc::new(self.create_raw(extent)?))
                 } else {
-                    Placement::Segment
+                    Packing::Segment
                 };
-                let opening = state.uncommitted.open(extent, placement.clone());
-                (placement, opening)
+                let opening = state.uncommitted.open(extent, packing.clone());
+                (packing, opening)
             }
         };
-        let (file, file_offset, segment) = match placement {
-            Placement::Own(file) => (file, offset, None),
-            Placement::Segment => {
+        let (file, file_offset, segment) = match packing {
+            Packing::Own(file) => (file, offset, None),
+            Packing::Segment => {
                 let (number, file, at) = state.segments.reserve(len)?;
                 (file, at, Some(number))
             }
@@ -1788,7 +1788,7 @@ impl<D: Dir> Store<D> {
         extent: ExtentId,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<Part<D::File>>, Error> {
+    ) -> Result<Vec<Located<D::File>>, Error> {
         self.locate_entry(extent, offset, len, Reader::Store)
     }
 
@@ -1799,7 +1799,7 @@ impl<D: Dir> Store<D> {
         offset: u64,
         len: u64,
         reader: Reader,
-    ) -> Result<Vec<Part<D::File>>, Error> {
+    ) -> Result<Vec<Located<D::File>>, Error> {
         self.check_io(offset, len)?;
         let mut state = self.state()?;
         let entry = state.entry_for(extent, reader)?;
@@ -1814,7 +1814,7 @@ impl<D: Dir> Store<D> {
         entry: &Extent,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<Part<D::File>>, Error> {
+    ) -> Result<Vec<Located<D::File>>, Error> {
         let end = offset + len;
         let held_end = end.min(entry.len).max(offset);
         let unpacked = &self.unpacked;
@@ -1830,7 +1830,7 @@ impl<D: Dir> Store<D> {
             Data::Pieces(pieces) => {
                 for (start, end, source) in paint(pieces, offset, held_end) {
                     match source {
-                        None => parts.push(Part::Zeros(end - start)),
+                        None => parts.push(Located::Zeros(end - start)),
                         Some((number, at)) => {
                             let source = self.segment_file(state, number)?;
                             source.locate(at, end - start, unpacked, &mut parts)?;
@@ -1840,31 +1840,31 @@ impl<D: Dir> Store<D> {
             }
         }
         if end > held_end {
-            parts.push(Part::Zeros(end - held_end));
+            parts.push(Located::Zeros(end - held_end));
         }
         Ok(parts)
     }
 
     /// Reads `parts` into `buf`, as long as they are.
-    fn read_parts(&self, parts: Vec<Part<D::File>>, buf: &mut [u8]) -> Result<(), Error> {
+    fn read_parts(&self, parts: Vec<Located<D::File>>, buf: &mut [u8]) -> Result<(), Error> {
         let mut at = 0;
         for part in parts {
             let len = part.len() as usize;
             let out = &mut buf[at..at + len];
             match part {
-                Part::Data { file, offset, len } => {
+                Located::Data { file, offset, len } => {
                     let mut data = Aligned::new(len as usize);
                     file.read_cached(data.as_mut_slice(), offset)?;
                     out.copy_from_slice(data.as_slice());
                 }
-                Part::Packed { part, skip, .. } => {
+                Located::Packed { part, skip, .. } => {
                     let bytes = self.read_packed(&part)?;
                     out.copy_from_slice(&bytes[skip as usize..skip as usize + len]);
                 }
-                Part::Unpacked { bytes, skip, .. } => {
+                Located::Unpacked { bytes, skip, .. } => {
                     out.copy_from_slice(&bytes[skip as usize..skip as usize + len]);
                 }
-                Part::Zeros(_) => out.fill(0),
+                Located::Zeros(_) => out.fill(0),
             }
             at += len;
         }
@@ -1887,14 +1887,14 @@ impl<D: Dir> Store<D> {
     pub fn free(&self, extent: ExtentId) -> Result<(), Error> {
         let mut state = self.writable()?;
         let state = &mut *state;
-        let placement = state.uncommitted.remove(extent);
-        if let Some(Placement::Own(_)) = placement {
+        let packing = state.uncommitted.remove(extent);
+        if let Some(Packing::Own(_)) = packing {
             // Its raw file, which it is not sealed from, or a write abandoned created.
             state.unreferenced.doomed.push(open_extent_path(extent));
         }
         let Some(entry) = state.extents.remove(&extent) else { return Ok(()) };
         // cladefs: sealed, the branch's own is written no more (TASK-79.6).
-        if placement.is_none() && extent.branch == self.branch.id {
+        if packing.is_none() && extent.branch == self.branch.id {
             state.spent.insert(extent.sequence);
         }
         state.space.removed(entry.len, extent.branch == self.branch.id);
@@ -1907,7 +1907,7 @@ impl<D: Dir> Store<D> {
         // go of, which would take the file the extent's next opening seals at that path
         // (TASK-79.1). What it took of either its writer wasted, until the next commit
         // (TASK-79.2).
-        if placement.is_none() {
+        if packing.is_none() {
             state.segments.displace(extent, &entry.data);
             // cladefs: for the bucket, until the commit that frees it is acknowledged there, as the
             // segment holding its seal is by then (TASK-165.9).
@@ -2102,12 +2102,12 @@ impl<D: Dir> Store<D> {
         extent: ExtentId,
     ) -> Option<(seals::Why, u64, usize)> {
         let entry = state.extents.get(&extent)?;
-        match (&entry.data, state.uncommitted.placement(extent)) {
-            (Data::Own, Some(Placement::Own(_))) => Some((seals::Why::Own, entry.len, 1)),
+        match (&entry.data, state.uncommitted.packing(extent)) {
+            (Data::Own, Some(Packing::Own(_))) => Some((seals::Why::Own, entry.len, 1)),
             (Data::Pieces(pieces), _) => {
                 let large = entry.len >= self.options.large_extent;
-                let stage = |segment| state.segments.stage(segment);
-                let why = seals::Why::of_pieces(pieces, entry.len, stage, large);
+                let standing = |segment| state.segments.standing(segment);
+                let why = seals::Why::of_pieces(pieces, entry.len, standing, large);
                 Some((why, entry.len, pieces.len()))
             }
             _ => None,
@@ -2161,7 +2161,7 @@ impl<D: Dir> Store<D> {
             // nothing, and goes now, as the commit waited for the writes in progress; not with the
             // commit's flush, which the extent's next write, making another, may come before
             // (TASK-79.5). Opening the store removes it, failing here.
-            if let Some(Placement::Own(_)) = state.uncommitted.placement(extent) {
+            if let Some(Packing::Own(_)) = state.uncommitted.packing(extent) {
                 let path = open_extent_path(extent);
                 if let Err(err) = self.dir.remove(&path) {
                     log::warn!("extent store: failed to remove {path}: {err}");
@@ -2170,10 +2170,10 @@ impl<D: Dir> Store<D> {
             return Ok(0);
         };
         let large = entry.len >= self.options.large_extent;
-        match (&entry.data, state.uncommitted.placement(extent)) {
+        match (&entry.data, state.uncommitted.packing(extent)) {
             (Data::Remote(_), _) => return Ok(0),
             // Written to a raw file of its own, which it is framed from, or in.
-            (Data::Own, Some(Placement::Own(raw))) => {
+            (Data::Own, Some(Packing::Own(raw))) => {
                 let raw = raw.clone();
                 return self.seal_own(state, extent, raw, entry.len);
             }
@@ -2665,7 +2665,7 @@ impl<D: Dir> Store<D> {
     /// footer names, are read there from now on ([`RemoteData`]), and their files leave the store
     /// for the host's cache, or go: the extents' own files, and the segment's, once no extent's
     /// data is in it here (TASK-165.8). The frees of its commits are the bucket's to keep. The
-    /// log's base, its last commit from now on, is durable first, so that the store opened again
+    /// log's start, its last commit from now on, is durable first, so that the store opened again
     /// puts what is left of the log after the branch (TASK-165.9).
     ///
     /// cladefs: once its framing ended, its framed file durable, which its upload waited for no
@@ -2675,17 +2675,17 @@ impl<D: Dir> Store<D> {
     /// cache, where reads of its extents in the bucket find it, and its raw file and log go.
     pub fn acknowledged(&self, number: u64) -> Result<(), Error> {
         self.wait_framed_through(number)?;
-        let mut base = self.base.with(Mutex::lock);
+        let mut start = self.start.with(Mutex::lock);
         let after = {
             let state = self.state()?;
             match state.wal.first() {
                 Some(queued) if queued.number == number => {
-                    queued.footer.contents.commits.last().copied().or(state.wal.base())
+                    queued.footer.contents.commits.last().copied().or(state.wal.start())
                 }
                 _ => bail!("segment {number:#x} is not the first of the write-ahead log"),
             }
         };
-        if let Err(err) = base.write(&*self.dir, after) {
+        if let Err(err) = start.write(&*self.dir, after) {
             let err = err.context("recording an acknowledgement");
             self.lock().fail(&err);
             return Err(err);
@@ -2703,7 +2703,7 @@ impl<D: Dir> Store<D> {
             let mut leaving = Vec::new();
             for queued in whole {
                 let footer = &queued.footer;
-                let key = extent_remote::layout::segment(self.branch, footer.seq, footer.epoch);
+                let key = extent_remote::layout::segment(self.branch, footer.segment, footer.epoch);
                 let own: Vec<_> = footer.own().collect();
                 let segment = SegmentId { branch: self.branch.id, number: queued.number };
                 leaving.extend(state.acknowledge(segment, (&key, !queued.restamped), &own));
@@ -2756,7 +2756,7 @@ impl<D: Dir> Store<D> {
         let appended = batch.is_some();
         let durable = match batch {
             None => self.durability.with(Mutex::lock).durable(),
-            Some(Batch { last, mut commits }) => {
+            Some(Due { last, mut commits }) => {
                 if let Err(error) = self.make_durable(logs, &mut commits, timed) {
                     let error = error.context("committing the extent store");
                     self.lock().fail(&error);
@@ -3178,7 +3178,7 @@ impl<D: Dir> Store<D> {
         extent: ExtentId,
         offset: u64,
         len: u64,
-    ) -> Result<Vec<Part<D::File>>, Error> {
+    ) -> Result<Vec<Located<D::File>>, Error> {
         self.views.check(view)?;
         self.locate_entry(extent, offset, len, self.view_reader(view, extent))
     }

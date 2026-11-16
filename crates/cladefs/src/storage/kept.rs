@@ -4,7 +4,7 @@
 
 //! An image's store kept in its bucket (backlog doc-14, TASK-165.6): as every store's branch is,
 //! in the bucket its description names, an image's own file bucket where it was made on no host
-//! of cladefs's system (`host_store::create`). An uploader takes the branch's lease and uploads the
+//! of cladefs's system (`host_store::create`). An uploader takes the branch's head and uploads the
 //! image's commits behind them, as the extent daemon's stores' are (`crate::remote`); the image's
 //! commits are durable once in its store, as before, and closing it waits for them to be uploaded.
 //! An image's fork forks its branch in the bucket, as the daemon's forks do (`host_store::fork`).
@@ -58,7 +58,7 @@ impl KeptImage {
     }
 
     /// The image at `dir`, or the fork at `dir`, a store of its own holding its branch alone
-    /// (TASK-165.7): its uploader takes its branch's lease as a copy never placed takes it where
+    /// (TASK-165.7): its uploader takes its branch's head as a copy never placed takes it where
     /// this process is no host's daemon ([`host_store::keeping`]).
     pub fn open(dir: &Path) -> anyhow::Result<Self> {
         let keeping = host_store::keeping().map_err(anyhow_of)?;

@@ -8,7 +8,7 @@
 //! cells. Records were once keyed by IDs alone, a second branch of an ID refused by its record's
 //! create; under cells, they are not, and this is what keeps IDs apart.
 //!
-//! An [`Allocator`] gives IDs out of a block of [`BLOCK`] of them it took: a block is taken by
+//! An [`Allocator`] gives IDs out of a block of [`ID_BLOCK`] of them it took: a block is taken by
 //! creating its object, `objectid/<block>` ([`layout::objectid_block`]), which only one taking
 //! does, and kept for good, so that no other allocator takes it again, of any process. The IDs of a
 //! block go in order, each once: an ID costs no request but its block's first, and a block's
@@ -22,16 +22,16 @@ use std::sync::Mutex;
 
 /// How many IDs a block holds: an ID's low bits number it in its block, its high bits name the
 /// block.
-pub const BLOCK: u64 = 1 << 24;
+pub const ID_BLOCK: u64 = 1 << 24;
 
 /// How many blocks there are: none holds `u64::MAX`, which names no branch.
-const BLOCKS: u64 = u64::MAX / BLOCK;
+const ID_BLOCKS: u64 = u64::MAX / ID_BLOCK;
 
 /// What a block's object holds: its taker, a random number its allocator chose, so that the
 /// taking's create, landed though its answer was lost, is its own when tried again
 /// ([`bucket::create`]).
 #[derive(Serialize, Deserialize)]
-struct Taken {
+struct BlockTaker {
     taker: u64,
 }
 
@@ -65,7 +65,7 @@ impl Allocator {
             let mut block = self.block.lock().unwrap();
             // Another call's taking may have come first, its block given out by now or not: this
             // one's is given out next, its own wasted otherwise, which no ID of is given.
-            if block.is_none_or(|(_, next)| next == BLOCK) {
+            if block.is_none_or(|(_, next)| next == ID_BLOCK) {
                 *block = Some((taken, first(taken)));
             }
         }
@@ -74,8 +74,8 @@ impl Allocator {
     /// The next ID of its block, if it has one with any left.
     fn given(&self) -> Option<u64> {
         let mut block = self.block.lock().unwrap();
-        let (taken, next) = block.as_mut().filter(|(_, next)| *next < BLOCK)?;
-        let id = *taken * BLOCK + *next;
+        let (taken, next) = block.as_mut().filter(|(_, next)| *next < ID_BLOCK)?;
+        let id = *taken * ID_BLOCK + *next;
         *next += 1;
         Some(id)
     }
@@ -88,9 +88,9 @@ fn first(block: u64) -> u64 {
 
 /// Takes a block of `bucket`'s that no allocator took, at random, and returns it.
 async fn take(bucket: &impl Bucket) -> u64 {
-    let bytes = layout::encode(&Taken { taker: rand::random() });
+    let bytes = layout::encode(&BlockTaker { taker: rand::random() });
     loop {
-        let block = rand::random::<u64>() % BLOCKS;
+        let block = rand::random::<u64>() % ID_BLOCKS;
         match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await {
             Created::Created => return block,
             // Another's: another block.
@@ -120,20 +120,20 @@ mod tests {
             let first = one.next(&bucket).await;
             assert_eq!(one.next(&bucket).await, first + 1);
             let theirs = other.next(&bucket).await;
-            assert_ne!(theirs / BLOCK, first / BLOCK, "two allocators took one block");
+            assert_ne!(theirs / ID_BLOCK, first / ID_BLOCK, "two allocators took one block");
             // Its block given out, the next ID is another block's.
-            one.block.lock().unwrap().as_mut().unwrap().1 = BLOCK - 1;
+            one.block.lock().unwrap().as_mut().unwrap().1 = ID_BLOCK - 1;
             let last = one.next(&bucket).await;
-            assert_eq!(last, first / BLOCK * BLOCK + BLOCK - 1);
+            assert_eq!(last, first / ID_BLOCK * ID_BLOCK + ID_BLOCK - 1);
             let next = one.next(&bucket).await;
-            assert_ne!(next / BLOCK, first / BLOCK);
+            assert_ne!(next / ID_BLOCK, first / ID_BLOCK);
             let blocks: BTreeSet<u64> = (bucket::list(&bucket, "objectid/").await.into_iter())
                 .map(|meta| match layout::kind(&meta.key) {
                     layout::Kind::ObjectIds { block } => block,
                     kind => panic!("{} is a {kind:?}", meta.key),
                 })
                 .collect();
-            let expected = BTreeSet::from([first / BLOCK, theirs / BLOCK, next / BLOCK]);
+            let expected = BTreeSet::from([first / ID_BLOCK, theirs / ID_BLOCK, next / ID_BLOCK]);
             assert_eq!(blocks, expected);
         });
     }

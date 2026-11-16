@@ -66,7 +66,8 @@ impl World {
     fn host(&self, token: u64) -> Host {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
-        let keys = keys::Host { kms: Some(keys::Kms::new(kms)), ring: memory.keys().clone() };
+        let keys =
+            keys::Host { kms: Some(keys::CachingKms::new(kms)), ring: memory.keys().clone() };
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
@@ -81,8 +82,10 @@ impl World {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
         let pooling = keys::Pooling { low: 2, batch: 4, handle: self.runtime.handle().clone() };
-        let keys =
-            keys::Host { kms: Some(keys::Kms::pooled(kms, pooling)), ring: memory.keys().clone() };
+        let keys = keys::Host {
+            kms: Some(keys::CachingKms::pooled(kms, pooling)),
+            ring: memory.keys().clone(),
+        };
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },

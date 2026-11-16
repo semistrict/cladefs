@@ -383,7 +383,7 @@ fn commands_through_the_daemon() {
     assert_eq!(base.info().unwrap().capacity, 134217728);
     assert!(base.is_public());
     // The fork's store names its branch, which deleting the store that took it deleted in the
-    // bucket: it opens no more (TASK-165.9: opening takes the branch's lease).
+    // bucket: it opens no more (TASK-165.9: opening takes the branch's head).
     assert_eq!(extent_store::host_branch(&fork).unwrap().to_string(), branch);
     let refused = ExtentStore::open(&fork).err().and_then(|err| err.errno());
     assert_eq!(refused, Some(cladefs::Errno::EROFS));

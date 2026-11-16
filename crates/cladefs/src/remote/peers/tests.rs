@@ -255,7 +255,7 @@ fn peers_set_again_stay_as_they_were() {
     assert!(member().health.up_at(Instant::now()), "down, added again");
 }
 
-/// Only parts of framed objects are asked of peers: never a branch's record, a lease, or a cell's
+/// Only parts of framed objects are asked of peers: never a branch's record, a head, or a cell's
 /// object, which change in place. And a host asks no peer for what it owns.
 #[test]
 fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {

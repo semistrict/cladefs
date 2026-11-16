@@ -41,10 +41,10 @@
 //!   sealed, if large from their first write. cladefs: one none of whose parts compresses is framed
 //!   in place, its raw file renamed its framed file, its tail appended: its data written once
 //!   (TASK-310);
-//! - `index/<branch>/<n>`: the branch's index, which maps its extents to their data, with its
-//!   root, its one mutable record, its capacity, and its next sequence number: a checkpoint, a
-//!   table in the format of checkpoints in object storage (`extent_frame::table`), then the changes
-//!   (deltas) each commit made since, each a record checked by its hash.
+//! - `logs/<branch>/<n>`: each segment's log of the commits made in it, a record each, appended as
+//!   they are made durable, until it is framed and they are; and `wal`, its write-ahead log's
+//!   start, the branch's commit its first segment goes on from (TASK-165.9: the `wal` module has
+//!   the write-ahead log).
 //!
 //! A store is opened by one process at a time ([`Dir::take`]), and once in it. Stores in
 //! directories of the host's are made, opened and deleted with [`create_host`], [`open_host`] and
@@ -57,34 +57,25 @@
 //! what comes after. Its durability follows ([`Store::flush`], or
 //! [`Store::commit`], which waits for it): commits become durable in order, several at once,
 //! which syncs the data written since the last flush, and the directories whose entries changed,
-//! then writes the commits' deltas to the index and syncs that. Only then does it remove the files
-//! they made unreferenced: extents' own files freed, segments whose extents were all freed or
-//! moved, and index files replaced by a checkpoint, which a commit writes in a new file once its
-//! file holds `Options::checkpoint_after` of deltas. cladefs: the commit, holding the branch's state,
-//! takes what the checkpoint holds; its flush makes its file and encodes it there, holding none of
-//! the store's locks but its own, so that writes do not wait for that (TASK-92.56).
+//! then appends the commits' records to the logs of the segments they were made in and syncs
+//! those. Only then do the files they made unreferenced go.
 //!
-//! **Recovery.** Opening a store reads the newest index file whose checkpoint is whole, and the
-//! deltas after it that are whole and follow on, which is the branch as of a commit. Commits not
-//! durable leave at most a torn delta, which ends the index, and data and files no extent is in,
-//! which opening the store removes. A segment left open, or closed by a commit not
-//! durable, is closed again with no footer, from its raw file, which goes once that is durable.
-//! cladefs: a closed segment's raw file goes only once the commits its footer names are durable, so
-//! that one closed by a commit not durable has it still, holding what the commits durable wrote,
-//! whatever its framed file holds (TASK-79.33), and opening a branch reads none whose raw file is
-//! gone (TASK-92.16). So a crash at any point leaves each branch as of a prefix of its commits, one
-//! at least as late as the last made durable.
-//! Opening a branch writes a new index file, with a checkpoint of what it recovered, and writes go
-//! to a new segment. A branch is also its newest checkpoint and the footers of its closed segments
-//! after it ([`Store::rebuild`]), as in object storage: so a closed segment no extent is in any
-//! more goes only once a checkpoint covers its footer, which a commit writes once such segments
-//! take a segment's room.
+//! **Recovery.** Opening a store recovers its write-ahead log from its directory (the `wal`
+//! module): the segments framed whole, and those a crash left open or torn closed again from their
+//! raw data and the records of their logs that are whole, which are the commits made durable, at
+//! least. Its branch is the bucket's, recovered by its uploader, after whose end the log is put
+//! by its commits ([`Recovering::open`], `extent_remote::Wal::rebase`); the store's state is the
+//! branch's and its log's segments' after it. cladefs: a closed segment's raw file goes only once
+//! the commits its footer names are durable, so that one closed by a commit not durable has it
+//! still, holding what the commits durable wrote, whatever its framed file holds (TASK-79.33). So
+//! a crash at any point leaves each branch as of a prefix of its commits, one at least as late as
+//! the last made durable.
 //!
 //! **Footers.** A closed segment's footer is the one segments in object storage have
 //! (`extent_frame::segment`), so that a closed segment is the object its branch keeps there, byte
-//! for byte (doc-7, decision 1). Given a writer's chain by an uploader ([`Store::upload`]), the
+//! for byte (doc-7, decision 1). Given a writer's chain by an uploader ([`Recovering::open`]), the
 //! store's footers are the writer's (`extent_frame::segment::Chain`): numbered on from where the
-//! chain is, each following the one before, their commits tagged with the writer's lease epoch,
+//! chain is, each following the one before, their commits tagged with the writer's epoch,
 //! their extents of their own at the writer's keys; and it keeps each closed segment for the
 //! uploader until it is acknowledged in the bucket ([`Store::closed`], [`Store::acknowledged`]). The uploader may have
 //! it close its open segment between commits ([`Store::close_now`]): cladefs: framed holding none of
@@ -94,12 +85,12 @@
 //! ([`Store::acknowledged`], TASK-165.8), the extents sealed in it, and those stored on their own
 //! its footer names, held or kept, are the bucket's: read there ([`RemoteData`]), and their files
 //! leave the store, into the host's cache of the bucket's objects if the uploader gave one, the
-//! segment's once no write is in progress in it. Durably: the index records it after the commits
-//! durable so far. So the branch's files are what is not acknowledged yet, and the open segment:
-//! what the upload lag bound bounds, with the segment's room, and the cache's capacity. Nothing
-//! cleans the branch's segments here: what no extent is in leaves with them, the bucket's
-//! collector's to take back. What writes since the last commit wasted, writing over what they
-//! wrote, or writing extents freed before the commit, counts as used once it is past the
+//! segment's once no write is in progress in it. Durably: the write-ahead log's start records it,
+//! after the commits durable so far. So the branch's files are what is not acknowledged yet, and
+//! the open segment: what the upload lag bound bounds, with the segment's room, and the cache's
+//! capacity. Nothing cleans the branch's segments here: what no extent is in leaves with them, the
+//! bucket's collector's to take back. What writes since the last commit wasted, writing over what
+//! they wrote, or writing extents freed before the commit, counts as used once it is past the
 //! capacity's worth, which the commit takes back: a writer's that never commits. What the commits
 //! leave freed takes none of the branch's room, however much, which the writer could neither make
 //! room for nor know of.
@@ -114,7 +105,7 @@
 //! ones read the parts their bytes are in, whole, checked against their CRCs, and decompress those
 //! stored compressed. The parts unpacked lately are kept, as reads are mostly of their
 //! neighbours'. [`Store::locate`] says where bytes are for a reader that reads files itself
-//! ([`Part`]).
+//! ([`Located`]).
 //!
 //! The store works in a [`Dir`]: a directory of the host's ([`HostDir`]), or of memory
 //! ([`MemDir`]), which simulates crashes for tests.
@@ -192,7 +183,7 @@ pub use cached::{CachedDir, CachedFile};
 pub use dir::{Dir, DiskDir, DiskFile, File, HostDir, HostFile};
 /// cladefs: where a store's branch is: its tenant's cell, and its ID there (TASK-364).
 pub use extent_frame::segment::{Branch, Cell};
-pub use framed::{Aligned, Packed, Part, read_object, read_whole, unpacks};
+pub use framed::{Aligned, Located, Packed, read_object, read_whole, unpacks};
 pub use host::{
     create_host, delete_host, host_branch, host_bucket, host_token, made_host, place_host,
     unmade_host,
@@ -206,8 +197,8 @@ pub use segments::{
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
 pub use store::{
-    DirHold, ForkCommitted, Info, Inherited, NoSpace, Opening, Options, Recovering, RemoteData,
-    Spent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    DirHold, ForkCommitted, Info, InheritedId, NoSpace, Opening, Options, Recovering, RemoteData,
+    SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use sync::Rules;
 #[cfg(feature = "shuttle")]

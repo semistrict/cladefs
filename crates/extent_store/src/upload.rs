@@ -8,16 +8,16 @@
 //! errno mapping.
 //!
 //! **Opening a store** ([`open`]) is the same whether its branch was here, elsewhere or never
-//! anywhere (doc-14, Opening a store): the branch's writer takes its lease, with the token the
-//! store's placement names, or the host's, recovers it and fences its end
+//! anywhere (doc-14, Opening a store): the branch's writer takes its head, with the epoch of
+//! its cell's taking by the store's placement, or the host's, recovers it and fences its end
 //! (`extent_remote::Writer`); the store opens as the bucket holds the branch, its write-ahead log
 //! put after the branch's end by its commits, what of it landed acknowledged and the rest stamped
 //! anew on the writer's chain ([`Recovering::open`]). A log another writer's commits moved past
 //! refuses to open (`extent_remote::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
-//! one that plainly diverged before the lease is taken refuses before, fencing no writer. A branch
+//! one that plainly diverged before the head is taken refuses before, fencing no writer. A branch
 //! with no record is made, a root (`extent_remote::branch::create`).
 //!
-//! **A point** takes no lease (doc-7, Points): its store holds its state, recovered, which nothing
+//! **A point** takes no head (doc-7, Points): its store holds its state, recovered, which nothing
 //! writes, and no log; nothing it does goes to the bucket but its forks' records
 //! ([`Remote::forked`], `extent_remote::branch::fork_point`). Any number of hosts hold one at once.
 //!
@@ -25,7 +25,7 @@
 //! ([`Store::closed`]), to the writer (`Writer::add_segment`), each the object it is in the bucket,
 //! or stamped anew after a takeover; uploads them, [`IN_FLIGHT`] at once at most, each read only as
 //! its upload goes, within the host's budget; and acknowledges them in order once a read of the
-//! lease shows them the branch's ([`Store::acknowledged`]): their extents are the bucket's from then
+//! head shows them the branch's ([`Store::acknowledged`]): their extents are the bucket's from then
 //! on, their files the host's cache's. The store closes its open segment for the uploader when a
 //! commit waits for its upload, at a fork, as its interval runs out, and as the uploader stops:
 //! dropping it uploads what the store made durable, its open segment's commits too (TASK-192).
@@ -51,7 +51,7 @@ use extent_remote::keys::{self, CellKeys, Ring, RingHold};
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
-use extent_remote::wal::Taken;
+use extent_remote::wal::TakenBranch;
 use extent_remote::{Body, Objects, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
@@ -128,16 +128,16 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 /// (TASK-39.4). Deleting it again does nothing. A later placement's branch, whose token is higher,
 /// is not deleted (`extent_remote::Error::Stale`, TASK-45.1).
 ///
-/// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from
-/// deleting nothing (`Stale`), and the cell's other volumes' writers going on; then the volume
-/// naming it is taken out of the cell (`extent_remote::cell::forget`, TASK-364). An encrypted
-/// branch's forks to other cells it records get its checkpoint at their fork points under its keys,
-/// its cell's KEK unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
+/// cladefs: its head ended at its cell's epoch, a placement a later one took the cell from deleting
+/// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
+/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). An encrypted branch's forks to
+/// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
+/// unwrapped by `kms`, the host's (`branch::delete_under`, TASK-411.4).
 pub fn delete_branch(
     bucket: &Bucket,
     branch: Branch,
     token: u64,
-    kms: Option<&Arc<keys::Kms>>,
+    kms: Option<&Arc<keys::CachingKms>>,
 ) -> Result<(), Failure> {
     Ok(block_on(async {
         branch::delete_under(bucket, branch, rand::random(), token, kms).await?;
@@ -253,7 +253,7 @@ impl Default for Options {
 }
 
 /// Opens the store `recovering` recovered, keeping its branch in `bucket` (see the module's
-/// docs): as `holder` of the branch's lease, which must differ from every other taking's, with
+/// docs): as `holder` of the branch's head, which must differ from every other taking's, with
 /// `store_options`, its uploader uploading as `options` say, on `runtime`. Returns the store and
 /// its uploader; or why it can't be opened: its log diverged, its branch deleted, a later
 /// placement's, or out of reach.
@@ -317,7 +317,7 @@ pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = Bucket> {
     store: std::sync::OnceLock<Arc<Store<D>>>,
     /// The branch's writer, once it took the branch, and as it takes it again (TASK-204).
     writer: Mutex<Option<Arc<Writer<B>>>>,
-    /// The fencing token its writers take the branch's lease with, once one did.
+    /// The fencing token its writers take the branch's head with, once one did.
     token: std::sync::OnceLock<u64>,
     /// The point the store is of, if it is one.
     point: std::sync::OnceLock<Point>,
@@ -344,7 +344,7 @@ pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = Bucket> {
     held: Mutex<Option<RingHold>>,
 }
 
-/// The holders an uploader's takings of its branch's lease after the first take, and the owners of
+/// The holders an uploader's takings of its branch's head after the first take, and the owners of
 /// what it makes, each to differ from every other taking's or maker's: a sequence the first
 /// taking's holder, which its caller drew, seeds (SplitMix64, a bijection of its state, which steps
 /// by an odd constant), as unlikely to meet another's as a draw of their own; and the same in a
@@ -413,20 +413,21 @@ struct Progress {
     /// Whether, stopping, it stops at once: uploading nothing more, its uploads in flight given up
     /// on, no checkpoint written ([`Remote::cut_short`]).
     cut: bool,
-    /// The branch's lease, once its writer took it.
-    lease: Option<Lease>,
+    /// The writer's taking of the branch's head, once it took it.
+    taking: Option<Taking>,
     /// The store's latest commits not uploaded, as the uploader saw them, and when it did: the
     /// first is when the oldest commit waiting was seen first (TASK-50.5).
     seen: VecDeque<(u64, SystemTime)>,
 }
 
-/// A branch's lease, as its writer took it: with its placement's fencing token, of the epoch, and
-/// when.
+/// A writer's taking of its branch's head: with the fencing token it took it with, of the epoch,
+/// and when.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Lease {
-    /// The fencing token of the placement that took it.
+pub struct Taking {
+    /// The fencing token it was taken with: the epoch of its cell's taking by this placement
+    /// (`extent_remote::cell::Held::epoch`, TASK-364).
     pub token: u64,
-    /// Its epoch: one more than the lease's before.
+    /// Its epoch: one more than the taking's before.
     pub epoch: u64,
     /// When the writer took it.
     pub taken: SystemTime,
@@ -435,8 +436,8 @@ pub struct Lease {
 /// What a store's uploader has done, and has left to do (TASK-50.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UploadStatus {
-    /// Its branch's lease, once taken.
-    pub lease: Option<Lease>,
+    /// Its writer's taking of its branch's head, once taken.
+    pub taking: Option<Taking>,
     /// The epoch of the store's latest commit uploaded.
     pub uploaded: u64,
     /// The bytes of its write-ahead log not yet acknowledged.
@@ -516,7 +517,7 @@ impl<D: Dir> Remote<D> {
         let pending_bytes = self.store().wal_bytes()?;
         let progress = shared.progress.lock().unwrap();
         Ok(UploadStatus {
-            lease: progress.lease,
+            taking: progress.taking,
             uploaded: progress.uploaded,
             pending_bytes,
             oldest_pending: progress.seen.front().map(|(_, seen)| *seen),
@@ -1011,8 +1012,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
 
     /// Opens the store `recovering` recovered, as the bucket holds its branch (see the module's
     /// docs), and returns its writer, none for a point. Its log is checked to follow the branch as
-    /// recovery finds it before the lease is taken, so that a store plainly stale fences no writer;
-    /// then, the lease taken, the writer recovers it on from there (TASK-92.6) and the store opens
+    /// recovery finds it before the head is taken, so that a store plainly stale fences no writer;
+    /// then, the head taken, the writer recovers it on from there (TASK-92.6) and the store opens
     /// as the writer found its end, which another writer may have moved on meanwhile.
     async fn start(
         &self,
@@ -1031,7 +1032,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let found = match found? {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
-            None if recovering.base().is_some() => {
+            None if recovering.start().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
             // cladefs: made once its cell is held, which gives it its DEK, if encrypted
@@ -1070,7 +1071,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 // Where the writer's chain would go: the log's restamping, not looked at here.
                 let chain = Chain::new(branch, 0, recovered.end(), 0);
                 let head = recovered.head.clone().unwrap_or_default();
-                let found = Taken::of(head, &recovered.state, chain);
+                let found = TakenBranch::of(head, &recovered.state, chain);
                 if !recovering.follows(&found) {
                     return Err(extent_remote::Error::Diverged.into());
                 }
@@ -1083,7 +1084,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         {
             return Err(extent_remote::Error::Deleted.into());
         }
-        // cladefs: its cell, held by this placement, whose epoch is the token the branch's lease is
+        // cladefs: its cell, held by this placement, whose epoch is the token the branch's head is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
         // branch whose cell has no object yet, new or a fork's child, makes it; one deleted takes
         // no writer (`Deleted`). The store, a volume of its cell, is one of its volumes from now
@@ -1120,7 +1121,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             kms.refill(branch.cell.tenant);
         }
         let token = held.epoch;
-        // Its state, once it holds the lease, recovered on from what was found before. cladefs:
+        // Its state, once it holds the head, recovered on from what was found before. cladefs:
         // under its keys, its DEK given it first if its cell is encrypted and it has none: a new
         // branch's, or a fork's child's, whose recovery, read holding no key, it recovers anew
         // under them (TASK-411.3).
@@ -1196,9 +1197,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             }
         });
         *self.writer.lock().unwrap() = Some(writer.clone());
-        let lease = Lease { token, epoch: writer.epoch(), taken: SystemTime::now() };
+        let taking = Taking { token, epoch: writer.epoch(), taken: SystemTime::now() };
         let mut progress = self.progress.lock().unwrap();
-        (progress.next_sequence, progress.lease) = (writer.chain().next_sequence(), Some(lease));
+        (progress.next_sequence, progress.taking) = (writer.chain().next_sequence(), Some(taking));
         if let Some(last) = writer.state().last_commit {
             progress.uploaded_through(epoch_of(last));
             progress.forked_through(epoch_of(last));
@@ -1208,7 +1209,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 
     /// Opens the store of `branch` as a point, whose record is `record`: its state, which never
-    /// changes. No lease: nothing the store does goes to the bucket but its forks' records.
+    /// changes. No taking: nothing the store does goes to the bucket but its forks' records.
     /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
     /// (TASK-411.3).
     async fn point(
@@ -1280,12 +1281,12 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             let footer = closed.footer.clone();
             let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
             let closed = Arc::new(closed);
-            let segment = Body::new(size, move || blocking(|| closed.bytes()));
-            let seq = writer.add_segment(Objects { footer, segment, own })?;
+            let body = Body::new(size, move || blocking(|| closed.bytes()));
+            let segment = writer.add_segment(Objects { footer, segment: body, own })?;
             // Where each fork it ends is, which a fork failing deletes its child by.
-            let origin = Origin { parent: writer.branch(), at: seq };
+            let origin = Origin { parent: writer.branch(), at: segment };
             self.forks.lock().unwrap().extend(forks.iter().map(|&child| (child, origin)));
-            segments.push(Uploading { seq, number, tag, forks: !forks.is_empty() });
+            segments.push(Uploading { segment, number, tag, forks: !forks.is_empty() });
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
@@ -1370,7 +1371,7 @@ struct Gathered {
 /// A segment uploading: its number in the branch, and in the store; the tag of the store's commit
 /// it ends with; and whether forks are made at its end.
 struct Uploading {
-    seq: u64,
+    segment: u64,
     number: u64,
     tag: u64,
     forks: bool,
@@ -1400,10 +1401,10 @@ impl InFlight {
         writer: &Arc<Writer<B>>,
         segments: Vec<Uploading>,
     ) {
-        for segment in segments {
-            let (writer, seq) = (writer.clone(), segment.seq);
-            self.uploads.push_back(async move { writer.upload(seq).await }.boxed());
-            self.segments.push_back(segment);
+        for uploading in segments {
+            let (writer, segment) = (writer.clone(), uploading.segment);
+            self.uploads.push_back(async move { writer.upload(segment).await }.boxed());
+            self.segments.push_back(uploading);
         }
     }
 
@@ -1416,7 +1417,8 @@ impl InFlight {
 
     /// The segments the writer acknowledged, `through` the last, which upload no more.
     fn acknowledged(&mut self, through: Option<u64>) -> Vec<Uploading> {
-        let taken = |segment: &&Uploading| through.is_some_and(|through| segment.seq <= through);
+        let taken =
+            |uploading: &&Uploading| through.is_some_and(|through| uploading.segment <= through);
         let count = self.segments.iter().take_while(taken).count();
         self.segments.drain(..count).collect()
     }
@@ -1462,8 +1464,8 @@ mod tests {
     }
 
     /// TASK-364: a store opened takes its branch's cell, making it for a new branch, and is its
-    /// volume from then on; its branch's lease is taken with the cell's epoch. A later placement's
-    /// taking of the cell, and of the branch's lease with the epoch it took it at, fences the
+    /// volume from then on; its branch's head is taken with the cell's epoch. A later placement's
+    /// taking of the cell, and of the branch's head with the epoch it took it at, fences the
     /// store's writer: its next commit's upload fails, and a placement of a lower token takes the
     /// cell back no more.
     #[test]

@@ -21,7 +21,7 @@ use super::io::{Done, Io, IoFile, Op};
 use super::kept::KeptImage;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
-use extent_store::{Aligned, Description, HostDir, HostFile, Part, SECTOR, Store};
+use extent_store::{Aligned, Description, HostDir, HostFile, Located, SECTOR, Store};
 use std::path::Path;
 use std::sync::Arc;
 use storage_device::buffer::{BufferFuture, BufferRef, MutableBufferRef};
@@ -226,7 +226,7 @@ impl Device for ImageDevice {
                 // in-process image's, which imports, host tools and tests use; guests' reads are
                 // extentd's, through the store's. cladefs: the sectors they are in, decrypted, if the
                 // store is encrypted (TASK-411.5).
-                Part::Data { file, offset, len, .. } => {
+                Located::Data { file, offset, len, .. } => {
                     let range = file.read_range(offset, len);
                     let read_len = (range.end - range.start) as usize;
                     let mut read =
@@ -238,7 +238,7 @@ impl Device for ImageDevice {
                     at += len;
                 }
                 // Its stored bytes, in whole blocks, to check and unpack.
-                Part::Packed { part, skip, len } => {
+                Located::Packed { part, skip, len } => {
                     let range = part.read_range();
                     let read_len = (range.end - range.start) as usize;
                     let needed = part.stored().len as usize;
@@ -249,13 +249,13 @@ impl Device for ImageDevice {
                     part.copy_from_slice(&bytes[skip..skip + len]);
                     at += len;
                 }
-                Part::Unpacked { bytes, skip, len } => {
+                Located::Unpacked { bytes, skip, len } => {
                     let (skip, len) = (skip as usize, len as usize);
                     let mut part = buffer.reborrow().subslice_mut(at..at + len);
                     part.copy_from_slice(&bytes[skip..skip + len]);
                     at += len;
                 }
-                Part::Zeros(len) => {
+                Located::Zeros(len) => {
                     buffer.reborrow().subslice_mut(at..at + len as usize).fill(0);
                     at += len as usize;
                 }

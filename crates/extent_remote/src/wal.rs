@@ -9,9 +9,9 @@
 //!
 //! A writer taking the branch over, here after a crash or elsewhere, puts the log after the
 //! branch's end ([`Wal::rebase`]), as the head it took names it (doc-7, The head; TASK-407), by
-//! commits: the log keeps its base, the branch's last commit before its first segment, and the
+//! commits: the log keeps its start, the branch's last commit before its first segment, and the
 //! branch's last commit says how far the log landed. If it is one of the log's, the log's segments
-//! to it are the branch's; if it is that one, or the base, the rest are stamped again on the new
+//! to it are the branch's; if it is that one, or the start, the rest are stamped again on the new
 //! writer's chain, after the head's end; otherwise another writer's commits moved the branch on,
 //! and the log diverged ([`Error::Diverged`]): its commits, never acknowledged, are lost once
 //! `cladefsctl take` drops it. By commits, not by the keys the head names: a log stamped again on a
@@ -30,14 +30,14 @@ use std::collections::{BTreeSet, VecDeque};
 ///
 /// [`Writer::taken`]: crate::Writer::taken
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Taken {
+pub struct TakenBranch {
     pub head: Head,
     pub last_commit: Option<u64>,
     pub forks: BTreeSet<(Branch, u64)>,
     pub chain: Chain,
 }
 
-impl Taken {
+impl TakenBranch {
     /// What a writer whose chain is `chain` found taking a branch whose head is `head`, `state` the
     /// branch's state as it names it.
     pub fn of(head: Head, state: &crate::State, chain: Chain) -> Self {
@@ -54,31 +54,31 @@ pub struct Rebased<T> {
     pub landed: Vec<(Footer, T)>,
 }
 
-/// A host's write-ahead log of a branch: its base, the branch's last commit before its first
+/// A host's write-ahead log of a branch: its start, the branch's last commit before its first
 /// segment, which the guest's history goes on from; then its segments, in order, by their footers,
 /// with what the host keeps of each, `T`: its data, or the files holding it.
 #[derive(Clone, Debug)]
 pub struct Wal<T> {
-    base: Option<u64>,
+    start: Option<u64>,
     segments: VecDeque<(Footer, T)>,
 }
 
 impl<T> Wal<T> {
-    /// An empty log, whose next segment goes on from `base`.
-    pub fn new(base: Option<u64>) -> Self {
-        Self { base, segments: VecDeque::new() }
+    /// An empty log, whose next segment goes on from `start`.
+    pub fn new(start: Option<u64>) -> Self {
+        Self { start, segments: VecDeque::new() }
     }
 
-    /// cladefs: the log a host's disk held, after `base`, of `segments`, in order, stamped as they
+    /// cladefs: the log a host's disk held, after `start`, of `segments`, in order, stamped as they
     /// were, which needn't follow each other: what follows the branch is the log's commits, and
     /// [`Wal::rebase`] stamps it anew (TASK-165.9).
-    pub fn of(base: Option<u64>, segments: impl IntoIterator<Item = (Footer, T)>) -> Self {
-        Self { base, segments: segments.into_iter().collect() }
+    pub fn of(start: Option<u64>, segments: impl IntoIterator<Item = (Footer, T)>) -> Self {
+        Self { start, segments: segments.into_iter().collect() }
     }
 
     /// The branch's last commit before its first segment.
-    pub fn base(&self) -> Option<u64> {
-        self.base
+    pub fn start(&self) -> Option<u64> {
+        self.start
     }
 
     /// Its segments, in order.
@@ -90,7 +90,7 @@ impl<T> Wal<T> {
         self.segments.is_empty()
     }
 
-    /// The guest's last commit: the last its segments make, or its base.
+    /// The guest's last commit: the last its segments make, or its start.
     pub fn head(&self) -> Option<u64> {
         self.heads().last().copied().flatten()
     }
@@ -98,30 +98,35 @@ impl<T> Wal<T> {
     /// Adds a segment its writer closed, the next of its chain.
     pub fn push(&mut self, footer: Footer, data: T) {
         if let Some((last, _)) = self.segments.back() {
-            debug_assert_eq!((footer.seq, footer.epoch), (last.seq + 1, last.epoch), "a chain's");
+            debug_assert_eq!(
+                (footer.segment, footer.epoch),
+                (last.segment + 1, last.epoch),
+                "a chain's"
+            );
         }
         self.segments.push_back((footer, data));
     }
 
-    /// Takes out its segments to number `through`, acknowledged, and returns them: its base is
+    /// Takes out its segments to number `through`, acknowledged, and returns them: its start is
     /// then the last commit they make.
     pub fn acknowledge(&mut self, through: u64) -> Vec<(Footer, T)> {
-        let count = self.segments.iter().take_while(|(footer, _)| footer.seq <= through).count();
+        let count =
+            self.segments.iter().take_while(|(footer, _)| footer.segment <= through).count();
         self.take(count)
     }
 
-    /// Takes out its first `count` segments, and returns them: its base is then the last commit
+    /// Takes out its first `count` segments, and returns them: its start is then the last commit
     /// they make.
     fn take(&mut self, count: usize) -> Vec<(Footer, T)> {
-        self.base = self.heads()[count];
+        self.start = self.heads()[count];
         self.segments.drain(..count).collect()
     }
 
     /// The guest's last commit as of each of its first `n` segments, `n` from none to all: its
-    /// base, then the last commit each makes, or the one before's, for a segment that makes none
+    /// start, then the last commit each makes, or the one before's, for a segment that makes none
     /// (its fork's alone).
     fn heads(&self) -> Vec<Option<u64>> {
-        let mut head = self.base;
+        let mut head = self.start;
         let mut heads = vec![head];
         for (footer, _) in &self.segments {
             head = footer.contents.commits.last().copied().or(head);
@@ -137,12 +142,12 @@ impl<T> Wal<T> {
     /// that a fork's alone, after them, is the branch's as its fork is); and stamps the rest again
     /// on the writer's chain, after the head's end, their data as it was and their extents of their
     /// own at the writer's keys; the writer then takes them as it takes any segment it closed. The
-    /// log's base is then the branch's last commit, which what it stamped again follows.
+    /// log's start is then the branch's last commit, which what it stamped again follows.
     ///
     /// Fails with [`Error::Diverged`], the log unchanged, if another writer's commits moved the
-    /// branch on (`wal_follows`): its last commit is neither one of the log's nor its base. An
+    /// branch on (`wal_follows`): its last commit is neither one of the log's nor its start. An
     /// empty log never diverges: taking a branch with one is how a host takes it, wherever it was.
-    pub fn rebase(&mut self, taken: &Taken) -> Result<Rebased<T>, Error> {
+    pub fn rebase(&mut self, taken: &TakenBranch) -> Result<Rebased<T>, Error> {
         let last = taken.last_commit;
         let heads = self.heads();
         let landed = match heads.iter().position(|&head| head == last) {
@@ -166,7 +171,7 @@ impl<T> Wal<T> {
         for (footer, _) in &mut self.segments {
             *footer = chain.close(footer.contents.clone());
         }
-        self.base = taken.last_commit;
+        self.start = taken.last_commit;
         Ok(Rebased { landed })
     }
 }
@@ -174,7 +179,7 @@ impl<T> Wal<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch::{Batch, Commit, Data, Unframed};
+    use crate::batch::{Commit, Data, SegmentBuilder, Unframed};
     use crate::layout::test_branch;
     use crate::layout::{self, Contents, Continued, child};
     use crate::store::Store;
@@ -210,16 +215,17 @@ mod tests {
 
     /// Closes `batch` into the next segment of `writer`, which takes it, and of `wal`: returns its
     /// number.
-    fn close(writer: &Writer<Store>, wal: &mut Wal<Data>, batch: impl Into<Batch>) -> u64 {
+    fn close(writer: &Writer<Store>, wal: &mut Wal<Data>, batch: impl Into<SegmentBuilder>) -> u64 {
         let Unframed { footer, data } = batch.into().close(&mut writer.chain());
-        let seq = writer.add_segment(data.frame(&footer)).unwrap();
+        let segment = writer.add_segment(data.frame(&footer)).unwrap();
         wal.push(footer, data);
-        seq
+        segment
     }
 
-    /// Uploads `writer`'s segment `seq` and acknowledges it, with those before it, as the host does.
-    async fn land(writer: &Writer<Store>, seq: u64) {
-        writer.upload(seq).await.unwrap();
+    /// Uploads `writer`'s segment `segment` and acknowledges it, with those before it, as the host
+    /// does.
+    async fn land(writer: &Writer<Store>, segment: u64) {
+        writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
     }
 
@@ -228,8 +234,8 @@ mod tests {
     async fn rebase(writer: &Writer<Store>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
-            let seq = writer.add_segment(data.frame(footer)).unwrap();
-            land(writer, seq).await;
+            let segment = writer.add_segment(data.frame(footer)).unwrap();
+            land(writer, segment).await;
         }
         wal.acknowledge(writer.state().through.unwrap());
         Ok(landed.iter().flat_map(|(footer, _)| footer.contents.commits.clone()).collect())
@@ -240,8 +246,8 @@ mod tests {
     async fn history(bucket: &Arc<Store>) -> Vec<u64> {
         let named = head::get(&**bucket, test_branch(1)).await.unwrap().unwrap_or_default();
         let mut commits = Vec::new();
-        for (seq, epoch) in named.segments(0) {
-            let key = layout::segment(test_branch(1), seq, epoch);
+        for (segment, epoch) in named.segments(0) {
+            let key = layout::segment(test_branch(1), segment, epoch);
             let object = crate::bucket::get(&**bucket, &key).await.unwrap();
             commits.extend(layout::Segment::footer(&object.bytes).unwrap().contents.commits);
         }
@@ -257,14 +263,14 @@ mod tests {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
-            let seqs = [close(&first, &mut wal, commit(1)), close(&first, &mut wal, commit(2))];
-            for seq in seqs {
-                first.upload(seq).await.unwrap();
+            let segments = [close(&first, &mut wal, commit(1)), close(&first, &mut wal, commit(2))];
+            for segment in segments {
+                first.upload(segment).await.unwrap();
             }
             let second = open(&bucket, 11).await;
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert!(wal.is_empty());
-            assert_eq!(wal.base(), Some(2));
+            assert_eq!(wal.start(), Some(2));
             assert_eq!(history(&bucket).await, [1, 2]);
         });
     }
@@ -279,10 +285,10 @@ mod tests {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
-            let seq = close(&first, &mut wal, commit(1));
-            land(&first, seq).await;
+            let segment = close(&first, &mut wal, commit(1));
+            land(&first, segment).await;
             let elsewhere = open(&bucket, 11).await;
-            assert_eq!(elsewhere.checkpoint().await.unwrap(), Some(seq));
+            assert_eq!(elsewhere.checkpoint().await.unwrap(), Some(segment));
             let third = open(&bucket, 12).await;
             assert_eq!(rebase(&third, &mut wal).await, Ok(vec![1]));
             assert!(wal.is_empty());
@@ -323,20 +329,20 @@ mod tests {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
-            let seq = close(&first, &mut wal, commit(1));
-            let second_seq = close(&first, &mut wal, commit(2));
-            land(&first, seq).await;
-            first.upload(second_seq).await.unwrap();
+            let segment = close(&first, &mut wal, commit(1));
+            let second_segment = close(&first, &mut wal, commit(2));
+            land(&first, segment).await;
+            first.upload(second_segment).await.unwrap();
             let second = open(&bucket, 11).await;
             let chain = second.taken().chain;
-            assert_eq!(chain.next_seq(), seq + 1, "the head's end");
+            assert_eq!(chain.next_segment(), segment + 1, "the head's end");
             assert_eq!(wal.rebase(second.taken()).map(|rebased| rebased.landed.len()), Ok(1));
             let [(footer, _)] = &wal.segments().collect::<Vec<_>>()[..] else {
                 panic!("{} segments stamped again", wal.segments().len())
             };
-            let place = (footer.seq, footer.epoch, footer.contents.commits.clone());
-            assert_eq!(place, (chain.next_seq(), second.epoch(), vec![2]));
-            assert_eq!(wal.base(), Some(1));
+            let place = (footer.segment, footer.epoch, footer.contents.commits.clone());
+            assert_eq!(place, (chain.next_segment(), second.epoch(), vec![2]));
+            assert_eq!(wal.start(), Some(1));
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1, 2]);
             assert_eq!(second.last_commit(), Some(2));
@@ -356,12 +362,12 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let seq = first.add_segment(data.frame(&footer)).unwrap();
+                let segment = first.add_segment(data.frame(&footer)).unwrap();
                 wal.push(footer, data);
-                seq
+                segment
             };
             let continued = Continued { commit: 1, extents: vec![(extent(1), 0, 4096)] };
-            let seq =
+            let segment =
                 close_contents(Contents { continued: Some(continued), ..Contents::default() });
             let ending = Contents {
                 commits: vec![1],
@@ -370,9 +376,9 @@ mod tests {
                 ..Contents::default()
             };
             close_contents(ending);
-            first.upload(seq).await.unwrap();
+            first.upload(segment).await.unwrap();
             let second = open(&bucket, 11).await;
-            assert_eq!(second.taken().chain.next_seq(), seq, "the head names neither");
+            assert_eq!(second.taken().chain.next_segment(), segment, "the head names neither");
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1]);
             let sealed: Vec<ExtentId> = second.state().extents.keys().copied().collect();
@@ -395,12 +401,12 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let seq = first.add_segment(data.frame(&footer)).unwrap();
+                let segment = first.add_segment(data.frame(&footer)).unwrap();
                 wal.push(footer, data);
-                seq
+                segment
             };
             let continued = Continued { commit: 2, extents: vec![(extent(2), 4096, 4096)] };
-            let seq = close_contents(Contents {
+            let segment = close_contents(Contents {
                 commits: vec![1],
                 extents: vec![(extent(1), 0, 4096)],
                 next_sequence: 2,
@@ -414,7 +420,7 @@ mod tests {
                 ..Contents::default()
             };
             close_contents(ending);
-            first.upload(seq).await.unwrap();
+            first.upload(segment).await.unwrap();
             assert_eq!(first.acknowledge().await, Ok(None), "no whole commit to acknowledge");
             let second = open(&bucket, 11).await;
             assert_eq!(second.taken().last_commit, None);
@@ -435,10 +441,10 @@ mod tests {
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
             close(&first, &mut wal, commit(1));
-            let seq = close(&first, &mut wal, commit(2));
-            first.upload(seq).await.unwrap();
+            let segment = close(&first, &mut wal, commit(2));
+            first.upload(segment).await.unwrap();
             let second = open(&bucket, 11).await;
-            assert_eq!(second.taken().chain.next_seq(), seq - 1, "the head names neither");
+            assert_eq!(second.taken().chain.next_segment(), segment - 1, "the head names neither");
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
             assert_eq!(history(&bucket).await, [1, 2]);
         });
@@ -461,7 +467,7 @@ mod tests {
             let second = open(&bucket, 11).await;
             assert_eq!(wal.rebase(second.taken()).map(|rebased| rebased.landed.len()), Ok(0));
             let (footer, _) = wal.segments().next().unwrap();
-            let key = layout::extent(layout::TEST_CELL, second.epoch(), footer.seq, own);
+            let key = layout::extent(layout::TEST_CELL, second.epoch(), footer.segment, own);
             assert_eq!(footer.own().map(|(_, location)| location.key).collect::<Vec<_>>(), [key]);
             assert_eq!(footer.contents.next_sequence, second.chain().next_sequence());
             assert_eq!(rebase(&second, &mut wal).await, Ok(vec![]));
@@ -476,7 +482,7 @@ mod tests {
         });
     }
 
-    /// A log after whose base another writer's commit came, acknowledged, diverged: unchanged,
+    /// A log after whose start another writer's commit came, acknowledged, diverged: unchanged,
     /// its commits put after no other's.
     #[test]
     fn logs_another_writer_moved_on_from_diverge() {
@@ -486,12 +492,12 @@ mod tests {
             let mut wal = log(&first);
             close(&first, &mut wal, commit(1));
             let elsewhere = open(&bucket, 11).await;
-            let seq = close(&elsewhere, &mut log(&elsewhere), commit(3));
-            land(&elsewhere, seq).await;
+            let segment = close(&elsewhere, &mut log(&elsewhere), commit(3));
+            land(&elsewhere, segment).await;
             let third = open(&bucket, 12).await;
             assert_eq!(rebase(&third, &mut wal).await, Err(Error::Diverged));
             let commits: Vec<_> = wal.segments().map(|(f, _)| f.contents.commits.clone()).collect();
-            assert_eq!((wal.base(), commits), (None, vec![vec![1]]));
+            assert_eq!((wal.start(), commits), (None, vec![vec![1]]));
             assert_eq!(history(&bucket).await, [3]);
         });
     }
@@ -512,7 +518,7 @@ mod tests {
         });
     }
 
-    /// An empty log never diverges, wherever the branch went: its base is the branch's last
+    /// An empty log never diverges, wherever the branch went: its start is the branch's last
     /// commit.
     #[test]
     fn empty_logs_go_on_from_the_branchs_end() {
@@ -521,11 +527,11 @@ mod tests {
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
             let elsewhere = open(&bucket, 11).await;
-            let seq = close(&elsewhere, &mut log(&elsewhere), commit(3));
-            land(&elsewhere, seq).await;
+            let segment = close(&elsewhere, &mut log(&elsewhere), commit(3));
+            land(&elsewhere, segment).await;
             let third = open(&bucket, 12).await;
             assert_eq!(rebase(&third, &mut wal).await, Ok(vec![]));
-            assert_eq!((wal.base(), wal.head()), (Some(3), Some(3)));
+            assert_eq!((wal.start(), wal.head()), (Some(3), Some(3)));
         });
     }
 
@@ -539,13 +545,13 @@ mod tests {
             let bucket = bucket().await;
             let first = open(&bucket, 10).await;
             let mut wal = log(&first);
-            let seq = close(&first, &mut wal, commit(1));
+            let segment = close(&first, &mut wal, commit(1));
             let Unframed { footer, data } =
-                Batch::default().fork(child(test_branch(2)), &mut first.chain());
+                SegmentBuilder::default().fork(child(test_branch(2)), &mut first.chain());
             first.add_segment(data.frame(&footer)).unwrap();
             wal.push(footer, data);
             close(&first, &mut wal, commit(3));
-            land(&first, seq).await;
+            land(&first, segment).await;
             let second = open(&bucket, 11).await;
             let landed = wal.rebase(second.taken()).unwrap().landed;
             let commits: Vec<_> = landed.iter().map(|(f, _)| f.contents.commits.clone()).collect();
@@ -555,8 +561,8 @@ mod tests {
         });
     }
 
-    /// Acknowledging takes out the segments to the number acknowledged; the base is the last
-    /// commit they make, or, those making none, the base before.
+    /// Acknowledging takes out the segments to the number acknowledged; the start is the last
+    /// commit they make, or, those making none, the start before.
     #[test]
     fn acknowledged_segments_leave_the_log() {
         let mut chain = Chain::new(test_branch(1), 2, 5, 0);
@@ -568,16 +574,16 @@ mod tests {
         push(vec![8, 9]);
         push(vec![]);
         push(vec![10]);
-        assert_eq!((wal.base(), wal.head()), (Some(7), Some(10)));
+        assert_eq!((wal.start(), wal.head()), (Some(7), Some(10)));
         let numbers = |taken: Vec<(Footer, ())>| -> Vec<u64> {
-            taken.iter().map(|(footer, _)| footer.seq).collect()
+            taken.iter().map(|(footer, _)| footer.segment).collect()
         };
         assert_eq!(numbers(wal.acknowledge(5)), [5]);
-        assert_eq!(wal.base(), Some(7));
+        assert_eq!(wal.start(), Some(7));
         assert_eq!(numbers(wal.acknowledge(7)), [6, 7]);
-        assert_eq!((wal.base(), wal.head()), (Some(9), Some(10)));
+        assert_eq!((wal.start(), wal.head()), (Some(9), Some(10)));
         assert_eq!(numbers(wal.acknowledge(7)), Vec::<u64>::new());
         assert_eq!(numbers(wal.acknowledge(20)), [8]);
-        assert_eq!((wal.base(), wal.head(), wal.is_empty()), (Some(10), Some(10), true));
+        assert_eq!((wal.start(), wal.head(), wal.is_empty()), (Some(10), Some(10), true));
     }
 }

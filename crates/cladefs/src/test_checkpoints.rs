@@ -19,7 +19,7 @@ pub(crate) fn newest(bucket: &Bucket, branch: crate::Branch) -> Option<u64> {
     let listed = futures::executor::block_on(extent_remote::Bucket::list(bucket, &prefix));
     (listed.unwrap().iter())
         .filter_map(|meta| match extent_remote::layout::kind(&meta.key) {
-            extent_remote::layout::Kind::Checkpoint { seq, .. } => Some(seq),
+            extent_remote::layout::Kind::Checkpoint { segment, .. } => Some(segment),
             _ => None,
         })
         .max()

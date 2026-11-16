@@ -26,7 +26,7 @@ use std::os::unix::fs::FileExt as _;
 use std::path::Path;
 
 /// The block that direct I/O moves, and aligns memory to: the largest a host's disks have.
-pub const BLOCK: u64 = 4096;
+pub const DIRECT_BLOCK: u64 = 4096;
 
 /// Makes I/O on `file`, at `path`, bypass the host's page cache, or fails, naming `path`, if its
 /// file system refuses (`InvalidInput`): nothing is read or written through the host's cache. The
@@ -58,7 +58,7 @@ pub fn bypass(file: &File, path: &Path) -> io::Result<()> {
     }
 }
 
-/// Memory aligned to [`BLOCK`], zeroed, a whole number of blocks long.
+/// Memory aligned to [`DIRECT_BLOCK`], zeroed, a whole number of blocks long.
 struct Aligned {
     ptr: *mut u8,
     len: usize,
@@ -70,8 +70,9 @@ unsafe impl Send for Aligned {}
 impl Aligned {
     /// `blocks` blocks, zeroed.
     fn zeroed(blocks: u64) -> Self {
-        let len = (blocks.max(1) * BLOCK) as usize;
-        let layout = Layout::from_size_align(len, BLOCK as usize).expect("a block-aligned layout");
+        let len = (blocks.max(1) * DIRECT_BLOCK) as usize;
+        let layout =
+            Layout::from_size_align(len, DIRECT_BLOCK as usize).expect("a block-aligned layout");
         // SAFETY: The layout is of a non-zero size.
         let ptr = unsafe { alloc_zeroed(layout) };
         if ptr.is_null() {
@@ -93,7 +94,7 @@ impl Aligned {
 
 impl Drop for Aligned {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(self.len, BLOCK as usize).expect("its layout");
+        let layout = Layout::from_size_align(self.len, DIRECT_BLOCK as usize).expect("its layout");
         // SAFETY: Allocated with this layout by `zeroed`.
         unsafe { dealloc(self.ptr, layout) };
     }
@@ -101,8 +102,8 @@ impl Drop for Aligned {
 
 /// The blocks around `range`: from the block it starts in to the end of the block it ends in.
 fn blocks(range: &Range<u64>) -> Range<u64> {
-    let start = range.start / BLOCK * BLOCK;
-    start..range.end.div_ceil(BLOCK) * BLOCK
+    let start = range.start / DIRECT_BLOCK * DIRECT_BLOCK;
+    start..range.end.div_ceil(DIRECT_BLOCK) * DIRECT_BLOCK
 }
 
 /// Reads all of `buf` at `offset` in `file`, zeros past its end.
@@ -128,14 +129,14 @@ fn read_fully(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()
 /// the blocks around them, into memory aligned to them. Bytes past the file's end read as zeros.
 pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let range = offset..offset + buf.len() as u64;
-    let aligned_already = offset % BLOCK == 0
-        && buf.len() as u64 % BLOCK == 0
-        && (buf.as_ptr() as usize) % BLOCK as usize == 0;
+    let aligned_already = offset % DIRECT_BLOCK == 0
+        && buf.len() as u64 % DIRECT_BLOCK == 0
+        && (buf.as_ptr() as usize) % DIRECT_BLOCK as usize == 0;
     if buf.is_empty() || aligned_already {
         return read_fully(file, buf, offset);
     }
     let around = blocks(&range);
-    let mut bounce = Aligned::zeroed((around.end - around.start) / BLOCK);
+    let mut bounce = Aligned::zeroed((around.end - around.start) / DIRECT_BLOCK);
     read_fully(file, bounce.bytes_mut(), around.start)?;
     let from = (offset - around.start) as usize;
     buf.copy_from_slice(&bounce.bytes()[from..from + buf.len()]);
@@ -169,14 +170,14 @@ pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::
     let range = offset..offset + bytes.len() as u64;
     let around = blocks(&range);
     let len = file.metadata()?.len();
-    let mut buf = Aligned::zeroed((around.end - around.start) / BLOCK);
+    let mut buf = Aligned::zeroed((around.end - around.start) / DIRECT_BLOCK);
     // The edges' blocks, what this doesn't write of them: as held, or as on the disk; none past
     // the file's end, zeros there. One block alone is read once.
-    let (first, last) = (around.start, around.end - BLOCK);
+    let (first, last) = (around.start, around.end - DIRECT_BLOCK);
     if range.start > first {
         merge_from(file, tail, len, &mut buf, around.start, first)?;
     }
-    if range.end < last + BLOCK && !(last == first && range.start > first) {
+    if range.end < last + DIRECT_BLOCK && !(last == first && range.start > first) {
         merge_from(file, tail, len, &mut buf, around.start, last)?;
     }
     let from = (offset - around.start) as usize;
@@ -187,10 +188,10 @@ pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::
     if around.end > end {
         file.set_len(end)?;
     }
-    let last = around.end - BLOCK;
-    tail.held = (range.end % BLOCK != 0).then(|| {
+    let last = around.end - DIRECT_BLOCK;
+    tail.held = (range.end % DIRECT_BLOCK != 0).then(|| {
         let at = (last - around.start) as usize;
-        (last, buf.bytes()[at..at + BLOCK as usize].into())
+        (last, buf.bytes()[at..at + DIRECT_BLOCK as usize].into())
     });
     Ok(())
 }
@@ -208,7 +209,7 @@ fn merge_from(
     if at >= len {
         return Ok(());
     }
-    let place = (at - start) as usize..(at - start + BLOCK) as usize;
+    let place = (at - start) as usize..(at - start + DIRECT_BLOCK) as usize;
     match tail.block(at) {
         Some(held) => buf.bytes_mut()[place].copy_from_slice(held),
         None => read_fully(file, &mut buf.bytes_mut()[place], at)?,

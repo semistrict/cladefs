@@ -110,16 +110,16 @@ struct Queues {
 struct Waiter {
     ticket: u64,
     bytes: u64,
-    go: oneshot::Sender<Grant>,
+    go: oneshot::Sender<Slot>,
 }
 
 /// A request's place in its budget, given up when it is dropped.
-pub(crate) struct Grant {
+pub(crate) struct Slot {
     budget: Option<Arc<Budget>>,
     bytes: u64,
 }
 
-impl Drop for Grant {
+impl Drop for Slot {
     fn drop(&mut self) {
         if let Some(budget) = self.budget.take() {
             let mut queues = budget.queues.lock().unwrap();
@@ -153,15 +153,15 @@ impl Budget {
         self: &Arc<Self>,
         priority: Priority,
         bytes: u64,
-    ) -> (u64, impl Future<Output = Grant> + Send + use<>) {
-        let (go, granted) = oneshot::channel();
+    ) -> (u64, impl Future<Output = Slot> + Send + use<>) {
+        let (go, given) = oneshot::channel();
         let mut queues = self.queues.lock().unwrap();
         queues.tickets += 1;
         let ticket = queues.tickets;
         queues.waiting[priority as usize].push_back(Waiter { ticket, bytes, go });
         self.admit(&mut queues);
-        // Its sender goes only with a grant, and the budget, which holds it, outlives this.
-        (ticket, async move { granted.await.expect("a waiter is granted its place") })
+        // Its sender goes only with a slot, and the budget, which holds it, outlives this.
+        (ticket, async move { given.await.expect("a waiter is given its place") })
     }
 
     /// Moves the request of `ticket`, if it waits behind demand, up to it.
@@ -188,10 +188,10 @@ impl Budget {
             queues.requests += 1;
             queues.bytes += bytes;
             queues.peak = queues.peak.max(queues.bytes);
-            let grant = Grant { budget: Some(self.clone()), bytes };
+            let slot = Slot { budget: Some(self.clone()), bytes };
             // Its reader gave up: its place goes to the next.
-            if let Err(mut grant) = waiter.go.send(grant) {
-                grant.budget = None;
+            if let Err(mut slot) = waiter.go.send(slot) {
+                slot.budget = None;
                 queues.requests -= 1;
                 queues.bytes -= bytes;
             }
@@ -438,7 +438,7 @@ type Flight<T> = Shared<BoxFuture<'static, Result<T, Error>>>;
 
 /// A part of an object, read by its tail.
 #[derive(Clone)]
-enum Part {
+enum FetchedPart {
     /// Its bytes.
     Data(Arc<Fetched>),
     /// The object is gone.
@@ -570,7 +570,7 @@ struct Waited {
     budget: Arc<Budget>,
     ticket: u64,
     readers: usize,
-    flight: Flight<Part>,
+    flight: Flight<FetchedPart>,
 }
 
 /// Reads extents from a bucket by parts, under a budget.
@@ -723,10 +723,10 @@ impl<B: Bucket> Fetcher<B> {
         let mut bytes = Vec::with_capacity((end - start) as usize);
         for (number, part) in numbers.zip(parts) {
             let part = match part {
-                Part::Data(fetched) => {
+                FetchedPart::Data(fetched) => {
                     fetched.unpacked(&part_of(&opened, key, number)?, key, number)?
                 }
-                Part::Gone => return Ok(Found::Gone),
+                FetchedPart::Gone => return Ok(Found::Gone),
             };
             let at = start + bytes.len() as u64;
             let from = ((at % PART) as usize).min(part.len());
@@ -816,8 +816,8 @@ impl<B: Bucket> Fetcher<B> {
             return Ok(Some(fetched.bytes.clone()));
         }
         match self.flight(key, part, &tail, Priority::Demand, None).await? {
-            Part::Data(fetched) => Ok(Some(fetched.bytes.clone())),
-            Part::Gone => Ok(None),
+            FetchedPart::Data(fetched) => Ok(Some(fetched.bytes.clone())),
+            FetchedPart::Gone => Ok(None),
         }
     }
 
@@ -831,9 +831,9 @@ impl<B: Bucket> Fetcher<B> {
         part: u64,
         tail: &Arc<Tail>,
         priority: Priority,
-    ) -> Result<Part, Error> {
+    ) -> Result<FetchedPart, Error> {
         if let Some(fetched) = self.shared.recent_part(key, part) {
-            return Ok(Part::Data(fetched));
+            return Ok(FetchedPart::Data(fetched));
         }
         let owner = self.shared.peers.as_ref().and_then(|peers| peers.owner(key, part));
         self.flight(key, part, tail, priority, owner).await
@@ -850,7 +850,7 @@ impl<B: Bucket> Fetcher<B> {
         tail: &Arc<Tail>,
         priority: Priority,
         owner: Option<Arc<dyn Peer>>,
-    ) -> Result<Part, Error> {
+    ) -> Result<FetchedPart, Error> {
         tail.part(key, part)?;
         let id: Flown = (key.to_owned(), part, owner.is_some());
         let parts = &self.shared.memory.parts;
@@ -858,9 +858,9 @@ impl<B: Bucket> Fetcher<B> {
             let mut parts = parts.lock().unwrap();
             let waited = parts.flights.entry(id.clone()).or_insert_with(|| {
                 let budget = self.shared.budget.clone();
-                let (ticket, granted) = budget.enter(priority, PART);
+                let (ticket, given) = budget.enter(priority, PART);
                 let (shared, tail, key) = (self.shared.clone(), tail.clone(), key.to_owned());
-                let flight = async move { shared.part(&key, part, &tail, granted, owner).await };
+                let flight = async move { shared.part(&key, part, &tail, given, owner).await };
                 Waited { budget, ticket, readers: 0, flight: flight.boxed().shared() }
             });
             if priority == Priority::Demand {
@@ -907,7 +907,7 @@ impl Drop for Reading<'_> {
 impl<B: Bucket> Fetching<B> {
     /// Part `part` of the object at `key`, whose tail is `tail`, checked against the CRC the tail
     /// gives: kept, in memory, as one fetched since its first reader looked there is, or in the
-    /// cache; or fetched once `granted` lets its GET go, from `owner`, the host that owns it, if
+    /// cache; or fetched once `given` lets its GET go, from `owner`, the host that owns it, if
     /// another does, or from the bucket ([`Fetching::fetch`]), and kept then; unpacked only once a
     /// read wants it ([`Fetched`]).
     async fn part(
@@ -915,21 +915,21 @@ impl<B: Bucket> Fetching<B> {
         key: &str,
         part: u64,
         tail: &Tail,
-        granted: impl Future<Output = Grant>,
+        given: impl Future<Output = Slot>,
         owner: Option<Arc<dyn Peer>>,
-    ) -> Result<Part, Error> {
+    ) -> Result<FetchedPart, Error> {
         let opened = tail.part(key, part)?;
         let stored = opened.stored;
         if let Some(fetched) = self.recent_part(key, part) {
-            return Ok(Part::Data(fetched));
+            return Ok(FetchedPart::Data(fetched));
         }
         let bytes = match self.kept(key, part) {
             Some(bytes) => bytes,
             None => {
-                let grant = granted.await;
+                let slot = given.await;
                 let fetched = self.fetch(key, part, &stored, owner).await;
-                drop(grant);
-                let Some(fetched) = fetched? else { return Ok(Part::Gone) };
+                drop(slot);
+                let Some(fetched) = fetched? else { return Ok(FetchedPart::Gone) };
                 self.keep(key, part, &fetched);
                 fetched
             }
@@ -938,7 +938,7 @@ impl<B: Bucket> Fetching<B> {
         if let Some(mut recent) = self.recent() {
             recent.put(key, part, fetched.clone());
         }
-        Ok(Part::Data(fetched))
+        Ok(FetchedPart::Data(fetched))
     }
 
     /// The stored bytes of part `part` of the object at `key`, stored as `stored` says, checked
@@ -1040,9 +1040,9 @@ impl<B: Bucket> Fetching<B> {
         let tail = match self.kept_tail(key) {
             Some(tail) => tail,
             None => {
-                let grant = self.budget.enter(Priority::Demand, TAIL).1.await;
+                let slot = self.budget.enter(Priority::Demand, TAIL).1.await;
                 let read = object::tail(&*self.bucket, key).await;
-                drop(grant);
+                drop(slot);
                 let Some(tail) = read? else { return Ok(None) };
                 self.keep_tail(key, &tail);
                 tail
@@ -1247,14 +1247,14 @@ mod tests {
         Budget::new(Limits { requests, bytes: u64::MAX })
     }
 
-    /// Enters a GET of `bytes` on demand into `budget`: its grant, if it went at once, or the wait
+    /// Enters a GET of `bytes` on demand into `budget`: its slot, if it went at once, or the wait
     /// for it.
-    fn enter(budget: &Arc<Budget>, bytes: u64) -> Result<Grant, BoxFuture<'static, Grant>> {
-        let (_, granted) = budget.enter(Priority::Demand, bytes);
-        let mut granted = granted.boxed();
-        match (&mut granted).now_or_never() {
-            Some(grant) => Ok(grant),
-            None => Err(granted),
+    fn enter(budget: &Arc<Budget>, bytes: u64) -> Result<Slot, BoxFuture<'static, Slot>> {
+        let (_, given) = budget.enter(Priority::Demand, bytes);
+        let mut given = given.boxed();
+        match (&mut given).now_or_never() {
+            Some(slot) => Ok(slot),
+            None => Err(given),
         }
     }
 
@@ -1302,7 +1302,7 @@ mod tests {
         assert_eq!(in_flight(&budget), (0, 0));
     }
 
-    /// A GET whose read gave up waiting gives its place, once granted it, to the next.
+    /// A GET whose read gave up waiting gives its place, once given it, to the next.
     #[test]
     fn gets_given_up_give_back_their_places() {
         let budget = Budget::new(Limits { requests: 1, bytes: 100 });
@@ -1399,7 +1399,7 @@ mod tests {
 
         let first = reads.read(&fetcher, location.clone(), 0, 1, Priority::Demand);
         let waiting = reads.read(&fetcher, location.clone(), PART, 1, Priority::Ahead);
-        let granted = reads.read(&fetcher, location.clone(), 2 * PART, 1, Priority::Ahead);
+        let given = reads.read(&fetcher, location.clone(), 2 * PART, 1, Priority::Ahead);
         reads.abandon(waiting);
         assert_eq!(fetcher.shared.memory.parts.lock().unwrap().flights.len(), 2);
         // The first's GET went, and its answer comes to none; its place goes to the next.
@@ -1408,7 +1408,7 @@ mod tests {
         let order = complete_all(&bucket, &mut reads);
         let get = |part: u64| format!("get {KEY} {}..{}", part * PART, (part + 1) * PART);
         assert_eq!(order, [get(0), get(2)]);
-        assert_eq!(reads.result(granted), Some(Ok(data[2 * PART as usize..][..1].to_vec())));
+        assert_eq!(reads.result(given), Some(Ok(data[2 * PART as usize..][..1].to_vec())));
         assert!(fetcher.shared.memory.parts.lock().unwrap().flights.is_empty());
     }
 
