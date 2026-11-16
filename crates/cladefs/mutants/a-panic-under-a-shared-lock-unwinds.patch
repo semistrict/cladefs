@@ -13,4 +13,4 @@
 +            if false && !held.is_empty() {
                  let locks = held.join(", ");
                  log::error!(
-                     "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no fence \
+                     "cladefs: {ABORTING} ({locks}), shared beyond one store: aborting, as no halt \
