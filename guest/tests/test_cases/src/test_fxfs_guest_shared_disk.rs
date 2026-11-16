@@ -273,11 +273,11 @@ mod host {
                 (full - pressure.1) as f64 / 1e6,
             );
             let lag = [
-                "durable_lag_count",
-                "durable_lag_within_50ms",
-                "durable_lag_p50_ms",
-                "durable_lag_p99_ms",
-                "durable_lag_max_us",
+                "local_lag_count",
+                "local_lag_within_50ms",
+                "local_lag_p50_ms",
+                "local_lag_p99_ms",
+                "local_lag_max_us",
             ]
             .map(|name| format!("{name}={}", stats.get(name).copied().unwrap_or(0)));
             eprintln!("shared-disk: {}", lag.join(" "));

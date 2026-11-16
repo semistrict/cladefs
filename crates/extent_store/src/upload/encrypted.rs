@@ -211,7 +211,7 @@ fn noise(seed: u64, len: usize) -> Vec<u8> {
 fn written(store: &Store<MemDir>, uploader: &Uploader<MemDir>, extent: ExtentId, data: &[u8]) {
     store.write(extent, 0, data).unwrap();
     store.commit(None).unwrap();
-    uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
 }
 
 /// The data of `extent`, `len` bytes, as `store` reads it: through `host`'s fetchers, if its data
@@ -513,7 +513,7 @@ fn own_extents_copied_to_another_key_are_refused() {
     store.write(one, 0, &noise(1, large)).unwrap();
     store.write(other, 0, &noise(2, large)).unwrap();
     store.commit(None).unwrap();
-    uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
     let (at_one, at_other) = (location(&store, one), location(&store, other));
     assert!(matches!(layout::kind(&at_one.key), layout::Kind::Extent { .. }), "{}", at_one.key);
     assert_eq!(read(&world, &host, &store, other, large), Ok(noise(2, large)));
@@ -945,7 +945,7 @@ fn segments_closed_again_are_never_in_the_clear() {
     };
     assert!(attempts > 10, "the opening took {attempts} operations");
     assert_eq!(read(&world, &host, &store, extent, data.len()), Ok(data.clone()));
-    uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+    uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
     let mut segments = 0;
     for (key, bytes) in world.objects() {
         assert!(!holds(&bytes, &data[..64]), "{key} holds the data");
@@ -1171,7 +1171,7 @@ fn encrypted_stores_frame_in_place_writing_what_clear_stores_write() {
             store.read(extent, 0, &mut buf).unwrap();
             assert!(buf == data, "{extent:?} read back");
         }
-        uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
         {
             assert_eq!(clear_files(&dir, &all), Vec::<String>::new());
             assert_eq!(in_the_clear(world.objects(), &all), Vec::<String>::new());
@@ -1549,7 +1549,7 @@ fn shredded_cells_leave_their_volumes_unreadable_and_the_tenants_others_readable
         written(&store, &uploader, kept, &noise(branch.id, 4096));
         store.free(freed).unwrap();
         store.commit(None).unwrap();
-        uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
         let location = location(&store, kept);
         let _held = reader.memory.keys().hold(store.keys().clone());
         assert_eq!(fetched_by(&world, &fetcher, kept, &location, 4096), Ok(noise(branch.id, 4096)));

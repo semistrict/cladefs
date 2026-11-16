@@ -139,7 +139,7 @@ jobs:
   # The workspace's suite and the Shuttle suites on macOS, scripts/test.sh's parts as a Mac runs
   # them: what cladefs compiles for macOS alone, and its tests, ran on laptops alone, so a regression
   # there landed green (TASK-149.20.2): physmem's physical map, extent_store's syncs (F_FULLFSYNC),
-  # extent_remote's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
+  # extent_bucket's cache, cladefs's storage I/O. The guest's, the VMM's and the daemon's are Linux's.
   macos:
     name: macos (${{ matrix.parts }})
     runs-on: macos-15

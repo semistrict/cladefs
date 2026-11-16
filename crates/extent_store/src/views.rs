@@ -57,8 +57,8 @@ pub struct View {
 }
 
 impl View {
-    /// The epoch of the commit it is as of.
-    pub fn epoch(&self) -> u64 {
+    /// The number of the commit it is as of.
+    pub fn commit(&self) -> u64 {
         self.epoch
     }
 

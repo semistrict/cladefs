@@ -320,15 +320,15 @@ fn keeps_object_storage_and_follower_stats() {
     let mut expected: Vec<String> =
         crate::stats::stats().named().map(|(name, _)| name.to_owned()).into();
     let lags = [
-        "durable_lag_count",
-        "durable_lag_max_us",
-        "durable_lag_p50_ms",
-        "durable_lag_p99_ms",
-        "durable_lag_within_50ms",
+        "local_lag_count",
+        "local_lag_max_us",
+        "local_lag_p50_ms",
+        "local_lag_p99_ms",
+        "local_lag_within_50ms",
     ];
     expected.extend(lags.map(str::to_owned));
-    expected.extend((0..15).map(|bucket| format!("durable_lag_le_{}ms", 1 << bucket)));
-    expected.push("durable_lag_gt_16384ms".to_owned());
+    expected.extend((0..15).map(|bucket| format!("local_lag_le_{}ms", 1 << bucket)));
+    expected.push("local_lag_gt_16384ms".to_owned());
     // And how long its flushes and framings took, phase by phase; and making the segments framed
     // durable, how many (TASK-310); the slowest's, each phase's longest and each phase summed,
     // with their threads' waits to run (TASK-336).
@@ -374,7 +374,7 @@ fn keeps_object_storage_and_follower_stats() {
     expected.extend(held.map(|name| format!("held_parts_{name}")));
     expected.extend(["io_write_bytes", "io_cancelled_write_bytes"].map(str::to_owned));
     assert_eq!(names, expected, "{kept}");
-    assert_eq!(count(&daemon, "durable_lag_count"), Some(3), "{kept}");
+    assert_eq!(count(&daemon, "local_lag_count"), Some(3), "{kept}");
     // The guest's write, to the open segment, once; its commit's records, in the segment's log.
     assert_eq!(count(&daemon, "written_raw_bytes"), Some(2 * BLOCK as u64), "{kept}");
     assert_eq!(count(&daemon, "written_copied_bytes"), Some(0), "{kept}");

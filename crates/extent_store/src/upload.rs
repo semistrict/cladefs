@@ -825,7 +825,7 @@ impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
 
     /// Notes the store's latest commit, if it isn't uploaded, as seen now.
     fn observe(&self) -> Result<(), Failure> {
-        let epoch = self.store().epoch()?;
+        let epoch = self.store().last_commit()?;
         let mut progress = self.progress.lock().unwrap();
         let newer = progress.seen.back().is_none_or(|(seen, _)| *seen < epoch);
         if epoch > progress.uploaded && newer {
@@ -1487,7 +1487,7 @@ mod tests {
 
         store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; 4096]).unwrap();
         store.commit(None).unwrap();
-        uploader.wait_uploaded(store.epoch().unwrap()).unwrap();
+        uploader.wait_uploaded(store.last_commit().unwrap()).unwrap();
         // Another placement takes the cell, and its writer the branch with the cell's epoch,
         // fencing it (TASK-371).
         let taken = runtime.block_on(async {
@@ -1502,7 +1502,7 @@ mod tests {
         assert_eq!(taken.epoch, 2);
         store.write(ExtentId::new(BRANCH.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
-        let fenced = uploader.wait_uploaded(store.epoch().unwrap());
+        let fenced = uploader.wait_uploaded(store.last_commit().unwrap());
         assert!(matches!(fenced, Err(Failure::Bucket(extent_bucket::Error::Fenced))), "{fenced:?}");
         let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), None, None));
         assert_eq!(back.map(|(held, _)| held), Err(extent_bucket::Error::Stale));
@@ -1551,7 +1551,7 @@ mod tests {
             });
         }
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
-        assert_eq!(uploader.last_uploaded(), store.epoch().unwrap());
+        assert_eq!(uploader.last_uploaded(), store.last_commit().unwrap());
         drop(uploader);
         let state = runtime.block_on(extent_bucket::recover(&*bucket, BRANCH, None)).unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
@@ -1820,12 +1820,12 @@ mod shuttle_tests {
 
         /// Asks the uploader for what the store committed.
         fn ask(&self) {
-            self.uploader.ask(self.store.epoch().unwrap(), false).unwrap();
+            self.uploader.ask(self.store.last_commit().unwrap(), false).unwrap();
         }
 
         /// The uploader uploads all the store made durable, and stops; and the store closes.
         fn end(self) -> Result<BTreeMap<ExtentId, Vec<u8>>, String> {
-            let last = self.store.epoch().unwrap();
+            let last = self.store.last_commit().unwrap();
             self.uploader.stop();
             self.running.join().unwrap();
             drop(self.store);
@@ -1876,7 +1876,7 @@ mod shuttle_tests {
         parent.ask();
         parent.write(3, 1);
         parent.store.commit_fork(Child { branch: CHILD, owner: 9, point: false }).unwrap();
-        let fork = parent.store.epoch().unwrap();
+        let fork = parent.store.last_commit().unwrap();
         parent.ask();
         until(|| parent.uploader.forked() >= fork);
         // The child, made by the fork, whose record the collector may not have read yet: what its
@@ -1946,10 +1946,10 @@ mod shuttle_tests {
         parent.write(1, 3);
         parent.store.commit_ordered(None).unwrap();
         parent.ask();
-        let before = parent.store.epoch().unwrap();
+        let before = parent.store.last_commit().unwrap();
         until(|| parent.uploader.last_uploaded() >= before);
         parent.store.commit_fork(Child { branch: CHILD, owner: 9, point: false }).unwrap();
-        let fork = parent.store.epoch().unwrap();
+        let fork = parent.store.last_commit().unwrap();
         bucket.gate.arm();
         let passing = {
             let bucket = bucket.clone();
@@ -1967,7 +1967,7 @@ mod shuttle_tests {
         child.free(parent.extent(0));
         child.store.commit_ordered(None).unwrap();
         child.ask();
-        let committed = child.store.epoch().unwrap();
+        let committed = child.store.last_commit().unwrap();
         until(|| child.uploader.last_uploaded() >= committed);
         bucket.gate.open();
         passing.join().unwrap()?;

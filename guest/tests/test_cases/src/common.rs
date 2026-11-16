@@ -265,7 +265,7 @@ impl Measured {
 
 /// cladefs: fails unless the daemon named `name` the test spawned made half its stores' commits
 /// durable within extentd's turn, 50 ms, at least, as its stats file says: doc-12's median
-/// (`durable_lag_within_50ms`, TASK-221).
+/// (`local_lag_within_50ms`, TASK-221).
 pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Result<()> {
     let path = test_setup.tmp_dir.join(format!("{name}-stats.txt"));
     let kept = fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
@@ -275,7 +275,7 @@ pub fn check_durable_median(test_setup: &TestSetup, name: &str) -> anyhow::Resul
         let value = daemon.split(' ').find_map(|field| field.strip_prefix(name)?.strip_prefix('='));
         Ok(value.with_context(|| format!("no {name}"))?.parse()?)
     };
-    let (count, within) = (field("durable_lag_count")?, field("durable_lag_within_50ms")?);
+    let (count, within) = (field("local_lag_count")?, field("local_lag_within_50ms")?);
     anyhow::ensure!(
         2 * within >= count,
         "{within} of {count} commits durable within 50 ms: doc-12's median is 50 ms"

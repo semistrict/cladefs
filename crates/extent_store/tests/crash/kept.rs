@@ -276,7 +276,7 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
         host.open(Store::recover_unmade(dir.clone()).unwrap(), 1, interval).unwrap();
     store.made().unwrap();
     // The commits opening it made, the branch's capacity set, hold nothing.
-    let first = store.epoch().unwrap() as usize;
+    let first = store.last_commit().unwrap() as usize;
     let mut epochs = vec![Model::default(); first + 1];
     let cut = Arc::new(Cut { bucket: host.bucket(), left: rng.random_range(0..400).into() });
     let passes = Passes::start(cut.clone(), interval);
@@ -309,7 +309,7 @@ fn reopened(
         .open(recovering, holder, HOUR)
         .unwrap_or_else(|err| panic!("round {round}: the store doesn't open: {err}"));
     let epochs = &crashed.epochs;
-    let epoch = store.epoch().unwrap() as usize;
+    let epoch = store.last_commit().unwrap() as usize;
     let Crashed { durable, acknowledged, .. } = crashed;
     assert!(
         (least..epochs.len()).contains(&epoch),
@@ -357,7 +357,7 @@ pub fn kept(round: u64) -> Found {
     let recovering = Store::recover_unmade(elsewhere).unwrap();
     let (taken, uploader) = host.open(recovering, 2, interval).unwrap();
     taken.made().unwrap();
-    let epoch = taken.epoch().unwrap() as usize;
+    let epoch = taken.last_commit().unwrap() as usize;
     assert!(
         (*acknowledged..epochs.len()).contains(&epoch),
         "round {round}: taken at epoch {epoch}, of {acknowledged}..{}",

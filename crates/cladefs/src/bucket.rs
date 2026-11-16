@@ -1062,7 +1062,7 @@ mod tests {
         let store = &opened.store;
         store.write(super::ExtentId::new(7, 1), 0, &pattern(1, EXTENT)).unwrap();
         store.commit_ordered(None).unwrap();
-        let epoch = store.epoch().unwrap();
+        let epoch = store.last_commit().unwrap();
         // The most a segment holds, its last extent past it, and no commit with them.
         for sequence in 2..98 {
             let extent = super::ExtentId::new(7, sequence);

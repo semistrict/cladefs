@@ -93,7 +93,7 @@ impl KeptImage {
         if let Some(failed) = self.uploader.failed() {
             return Err(anyhow::Error::new(failed).context("the image's branch is not uploaded"));
         }
-        self.uploader.wait_lag(self.store.epoch()?)?;
+        self.uploader.wait_lag(self.store.last_commit()?)?;
         if let Some(collecting) = &self.collecting {
             collecting.after_commit();
         }
@@ -103,7 +103,7 @@ impl KeptImage {
     /// Waits until the store's commits are uploaded: so a closed image's branch is whole in its
     /// bucket.
     pub fn wait_uploaded(&self) -> anyhow::Result<()> {
-        Ok(self.uploader.wait_uploaded(self.store.epoch()?)?)
+        Ok(self.uploader.wait_uploaded(self.store.last_commit()?)?)
     }
 
     /// Forks the store's branch, as of its last commit, to a new branch, the one volume of a new

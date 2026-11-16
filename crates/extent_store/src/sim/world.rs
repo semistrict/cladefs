@@ -937,7 +937,7 @@ impl World {
         let session = &self.hosts[host].sessions[&branch];
         let (token, lineage, uploader) = (session.token, session.lineage, session.uploader.clone());
         let writer = uploader.writer().expect("a writer took the branch");
-        let epoch = match store.epoch() {
+        let epoch = match store.last_commit() {
             Ok(epoch) => epoch,
             Err(err) => return self.violation(format!("branch {branch:x}'s store: {err:#}")),
         };
@@ -1111,7 +1111,7 @@ impl World {
         for host in &self.hosts {
             for (&branch, session) in &host.sessions {
                 let Some(store) = &session.store else { continue };
-                let epoch = store.epoch().unwrap();
+                let epoch = store.last_commit().unwrap();
                 let _ = session.uploader.ask(epoch, false);
                 asked.push((branch, Arc::downgrade(&session.uploader), epoch));
             }
@@ -1181,7 +1181,7 @@ impl World {
 
     /// The store's epoch of the commit `store` just made, which follows `before`'s.
     fn committed(&mut self, branch: u64, store: &Store<MemDir>, before: u64) -> Option<u64> {
-        let epoch = store.epoch().ok()?;
+        let epoch = store.last_commit().ok()?;
         if epoch <= before {
             self.violation(format!("branch {branch:x}'s commit after {before} made epoch {epoch}"));
             return None;
@@ -1238,7 +1238,7 @@ impl World {
         let store = session.store.clone().unwrap();
         let parent = session.guest.head;
         let committing = || -> anyhow::Result<u64> {
-            let before = store.epoch()?;
+            let before = store.last_commit()?;
             for extent in &frees {
                 store.free(*extent)?;
             }
@@ -1267,7 +1267,7 @@ impl World {
         let session = &self.hosts[host].sessions[&branch];
         let (store, parent) = (session.store.clone().unwrap(), session.guest.head);
         let resizing = || -> anyhow::Result<u64> {
-            let before = store.epoch()?;
+            let before = store.last_commit()?;
             store.set_capacity(capacity)?;
             Ok(before)
         };
@@ -1296,7 +1296,7 @@ impl World {
         }
         let (store, uploader) = (session.store.clone().unwrap(), session.uploader.clone());
         let asked =
-            store.epoch().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
+            store.last_commit().map_err(Failure::from).and_then(|epoch| uploader.ask(epoch, false));
         if let Err(failure) = asked {
             drop(uploader);
             self.store_failed(host, branch, store, anyhow::Error::new(failure));
@@ -1336,7 +1336,8 @@ impl World {
         let (store, uploader, parent) =
             (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
         let forked = Child { branch: sim_branch(child), owner, point };
-        let before = store.epoch().and_then(|before| store.commit_fork(forked).map(|_| before));
+        let before =
+            store.last_commit().and_then(|before| store.commit_fork(forked).map(|_| before));
         let before = match before {
             Ok(before) => before,
             Err(err) => {
@@ -2477,7 +2478,7 @@ impl World {
                 let Some(store) = session.store.clone() else { continue };
                 let parent = session.guest.head;
                 let tag = self.id();
-                let before = store.epoch().unwrap();
+                let before = store.last_commit().unwrap();
                 if let Err(err) = store.commit(None) {
                     self.violation(format!("branch {branch:x}'s last store: {err:#}"));
                     return;

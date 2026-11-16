@@ -52,7 +52,7 @@ Decided without you (rest of the scan):
 - **base**: a store VMs fork, public or attached. The WAL's base becomes its **start**
   (`wal::START`); MakePublic's `generation` flag becomes `attach_only`, so **generation** is keys'
   (and GCS's) alone. *Instead:* keep `generation` for both.
-- **Default tenant**: `NO_TENANT` becomes `DEFAULT_TENANT`; prose says default tenant, not tenant 0.
+- **Default tenant**: `DEFAULT_TENANT` (was `NO_TENANT`); prose says default tenant, not tenant 0.
 - **acknowledged**: a segment's, by the bucket. A VM process's taking in the daemon's window
   changes is **confirmed**.
 - **Wire flags**: the extentd wire uses virtio's bits for `COMMIT_*` and `MAP_ZEROS`, one set, as

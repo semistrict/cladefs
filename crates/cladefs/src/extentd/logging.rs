@@ -415,7 +415,7 @@ mod tests {
         assert_eq!(levels.level_of("cladefs::extentd::server"), log::LevelFilter::Warn);
         assert_eq!(levels.level_of("extent_bucket::object_bucket"), log::LevelFilter::Debug);
         assert_eq!(levels.level_of("extent_bucket::cache"), log::LevelFilter::Error);
-        assert_eq!(levels.level_of("extent_remote_other"), log::LevelFilter::Warn);
+        assert_eq!(levels.level_of("extent_bucket_other"), log::LevelFilter::Warn);
         assert_eq!(levels.max_level(), log::LevelFilter::Debug);
         assert_eq!(
             Settings::from_vars(vars(None, Some("loud"))),

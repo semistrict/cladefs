@@ -141,7 +141,7 @@ fn reads_what_was_written<D: Dir>(dir: D, reopen: impl Fn(&D) -> D) {
     let store = Store::open(dir, OPTIONS).unwrap();
     check(&store);
     assert_eq!(store.root().unwrap(), b"root");
-    assert!(store.epoch().unwrap() >= 1);
+    assert!(store.last_commit().unwrap() >= 1);
 }
 
 #[test]
@@ -481,7 +481,7 @@ fn commits_reopen_from_their_logs() {
     // next's, placed ahead of it, holding nothing (TASK-384).
     assert_eq!(logs(&store), (1, false, 1));
     assert_eq!(store.root().unwrap(), b"root 199");
-    assert_eq!(store.epoch().unwrap(), 200);
+    assert_eq!(store.last_commit().unwrap(), 200);
     let held: Vec<u64> =
         store.extents().unwrap().iter().map(|(extent, _)| extent.sequence).collect();
     assert_eq!(held, (0..200).filter(|sequence| sequence % 3 != 0).collect::<Vec<_>>());
@@ -500,7 +500,7 @@ fn closed_state<D: Dir>(store: &Store<D>) -> Held {
     store.commit(None).unwrap();
     settled(store);
     let next_sequence = store.info().unwrap().next_sequence;
-    let (epoch, root) = (store.epoch().unwrap(), store.root().unwrap());
+    let (epoch, root) = (store.last_commit().unwrap(), store.root().unwrap());
     (epoch, root, next_sequence, store.places().unwrap(), store.spent().unwrap())
 }
 
@@ -517,7 +517,7 @@ fn settled<D: Dir>(store: &Store<D>) {
 fn reopened_state(store: Store<MemDir>, dir: &MemDir) -> (Held, Store<MemDir>) {
     let store = reopened(store, dir);
     let next_sequence = store.info().unwrap().next_sequence;
-    let (epoch, root) = (store.epoch().unwrap(), store.root().unwrap());
+    let (epoch, root) = (store.last_commit().unwrap(), store.root().unwrap());
     let held = (epoch, root, next_sequence, store.places().unwrap(), store.spent().unwrap());
     (held, store)
 }
@@ -676,7 +676,7 @@ fn closed_segments_reopen_on_the_host() {
     let store = Store::open(open(), OPTIONS).unwrap();
     assert_eq!(read(&store, extent(1), 0, 3 * BLOCK), pattern(1, 0, 3 * BLOCK));
     assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
-    assert!(store.epoch().unwrap() > state.0);
+    assert!(store.last_commit().unwrap() > state.0);
     let state = closed_state(&store);
     drop(store);
     let store = Store::open(open(), OPTIONS).unwrap();
@@ -895,7 +895,7 @@ fn segments_closed_between_commits_keep_their_raw_files_until_a_commit_after_is_
         assert!(dir.open(&path("logs"), false).is_err(), "seed {seed}: the log stays");
         drop(store);
         let store = Store::open(crashed.clone(), OPTIONS).unwrap();
-        assert_eq!(store.epoch().unwrap(), 2, "seed {seed}");
+        assert_eq!(store.last_commit().unwrap(), 2, "seed {seed}");
         assert_eq!(read(&store, extent(2), 0, BLOCK), pattern(2, 0, BLOCK));
         let framed = extent_store::read_whole(&crashed.open(&path("segments"), true).unwrap());
         let footer =
@@ -959,10 +959,10 @@ fn resizes_are_commits_of_their_own() {
         closed_one(store).footer.contents.capacity
     };
     store.write(extent(1), 0, &pattern(1, 0, BLOCK)).unwrap();
-    let epoch = store.epoch().unwrap();
+    let epoch = store.last_commit().unwrap();
     store.set_capacity(2 << 20).unwrap();
     store.set_capacity(3 << 20).unwrap();
-    assert_eq!(store.epoch().unwrap(), epoch + 2);
+    assert_eq!(store.last_commit().unwrap(), epoch + 2);
     // Open still: written on, sealed by a commit.
     assert_eq!(store.extent(extent(1)).unwrap(), Some((BLOCK as u64, true)));
     store.write(extent(1), BLOCK as u64, &pattern(1, BLOCK, BLOCK)).unwrap();
@@ -1274,7 +1274,7 @@ fn commits_in_segments_being_framed_are_durable_in_their_raw_files_and_logs() {
     store.flush().unwrap();
     for seed in 0..16 {
         let reopened = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(reopened.epoch().unwrap(), 2, "seed {seed}");
+        assert_eq!(reopened.last_commit().unwrap(), 2, "seed {seed}");
         for sequence in 1..=2 {
             assert_eq!(
                 read(&reopened, extent(sequence), 0, BLOCK),
@@ -1305,7 +1305,7 @@ fn raw_files_and_logs_stay_until_their_framed_files_are_synced() {
     assert!(!held("open-segments") && !held("logs"), "segment 0's raw file or log stayed, framed");
     for seed in 0..16 {
         let reopened = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(reopened.epoch().unwrap(), 2, "seed {seed}");
+        assert_eq!(reopened.last_commit().unwrap(), 2, "seed {seed}");
         for sequence in 1..=2 {
             assert_eq!(
                 read(&reopened, extent(sequence), 0, BLOCK),
@@ -1362,7 +1362,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     drop(store);
     for seed in 0..16 {
         let reopened = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(reopened.epoch().unwrap(), 1, "seed {seed}");
+        assert_eq!(reopened.last_commit().unwrap(), 1, "seed {seed}");
         assert!(read(&reopened, extent(1), 0, data.len()) == data, "seed {seed}");
     }
 }
@@ -1417,7 +1417,7 @@ fn bursts_past_a_segment_between_commits_are_sealed_where_they_are() {
     drop(store);
     for seed in 0..4 {
         let reopened = Store::open(dir.crash(seed), options).unwrap();
-        assert_eq!(reopened.epoch().unwrap(), 2, "seed {seed}");
+        assert_eq!(reopened.last_commit().unwrap(), 2, "seed {seed}");
         for sequence in 2..=extents as u64 {
             let read = read(&reopened, extent(sequence), 0, len);
             assert!(read == noise(sequence, len), "seed {seed}, {sequence}");
@@ -1579,7 +1579,7 @@ fn segments_framed_in_copies_take_their_parts_held() {
         assert_eq!(crashes.len(), 4);
         for (seed, crashed) in crashes.into_iter().enumerate() {
             let reopened = Store::open(crashed, options).unwrap();
-            assert_eq!(reopened.epoch().unwrap(), 1, "seed {seed}");
+            assert_eq!(reopened.last_commit().unwrap(), 1, "seed {seed}");
             for sequence in 1..=7 {
                 let read = read(&reopened, extent(sequence), 0, data(sequence).len());
                 assert!(read == data(sequence), "seed {seed}, evicted {evicted}, {sequence}");
@@ -1709,7 +1709,11 @@ fn extents_framed_in_place_survive_crashes_framing_them() {
             assert!(read(&reopened, extent(1), 0, len) == first, "{at}: extent 1");
             let mut read = vec![0; len];
             let intact = reopened.read(extent(2), 0, &mut read).is_ok() && read == second;
-            assert_eq!(reopened.epoch().unwrap() == 2, intact, "{at}: extent 2, durable or not");
+            assert_eq!(
+                reopened.last_commit().unwrap() == 2,
+                intact,
+                "{at}: extent 2, durable or not"
+            );
         }
         drop(store);
         if committed.is_ok() {
@@ -1750,7 +1754,7 @@ fn segments_framed_in_place_survive_crashes_framing_them() {
             });
             let at = format!("stopped after {operations} operations, seed {seed}");
             assert!(read(&reopened, extent(1), 0, BLOCK) == first, "{at}: extent 1");
-            let durable = reopened.epoch().unwrap() == 2;
+            let durable = reopened.last_commit().unwrap() == 2;
             for sequence in 2..=extents as u64 {
                 let mut read = vec![0; len];
                 let intact = reopened.read(extent(sequence), 0, &mut read).is_ok()
@@ -1810,7 +1814,7 @@ fn segments_made_durable_together_survive_crashes_making_them_durable() {
             });
             let at = format!("stopped after {operations} operations, seed {seed}");
             assert!(read(&reopened, extent(1), 0, BLOCK) == first, "{at}: extent 1");
-            let durable = reopened.epoch().unwrap() == 2;
+            let durable = reopened.last_commit().unwrap() == 2;
             for sequence in 2..2 + extents {
                 let mut read = vec![0; len];
                 let intact =
@@ -1887,7 +1891,7 @@ fn framings_wait_for_no_other_framings_syncs() {
     assert_eq!(after.durable_segments - before.durable_segments, 2);
     for seed in 0..16 {
         let reopened = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(reopened.epoch().unwrap(), 3, "seed {seed}");
+        assert_eq!(reopened.last_commit().unwrap(), 3, "seed {seed}");
         for sequence in 1..=3 {
             assert_eq!(
                 read(&reopened, extent(sequence), 0, BLOCK),
@@ -3106,7 +3110,7 @@ fn branches_opened_again_after_a_failed_flush_keep_what_they_hold() {
     dir.fail_after(None);
     drop(store);
     let store = Store::open(dir.clone(), OPTIONS).unwrap();
-    assert_eq!(store.epoch().unwrap(), 1);
+    assert_eq!(store.last_commit().unwrap(), 1);
     store.commit(None).unwrap();
     assert_eq!(read(&store, extent(1), 0, 40 << 10), pattern(1, 0, 40 << 10));
 }
@@ -3185,7 +3189,7 @@ fn newer_commits_are_heard_of() {
     for _ in 0..3 {
         store.commit(None).unwrap();
     }
-    let epoch = store.epoch().unwrap();
+    let epoch = store.last_commit().unwrap();
     assert_eq!(store.newer(epoch, std::time::Duration::ZERO), None);
     store.commit(None).unwrap();
     store.commit(None).unwrap();
@@ -3331,7 +3335,7 @@ fn forks_give_their_commits_epoch() {
     let forked =
         Child { branch: extent_bucket::layout::test_branch(BRANCH.id + 1), owner: 0, point: false };
     assert_eq!(store.commit_fork(forked).unwrap(), 2);
-    assert_eq!(store.epoch().unwrap(), 2);
+    assert_eq!(store.last_commit().unwrap(), 2);
     let forking = closed_one(&store);
     assert_eq!((forking.last(), forking.footer.contents.forks.clone()), (2, vec![forked]));
 }
@@ -3349,7 +3353,7 @@ fn forks_take_no_id_of_their_lineage() {
     let forked = Child { branch: child, owner: 0, point: false };
     let refused = store.commit_fork(forked).unwrap_err();
     assert_eq!(refused.downcast_ref(), Some(&extent_store::InheritedId(child)));
-    assert_eq!(store.epoch().unwrap(), 1);
+    assert_eq!(store.last_commit().unwrap(), 1);
     let other =
         Child { branch: extent_bucket::layout::Branch { id: BRANCH.id + 1, ..child }, ..forked };
     assert_eq!(store.commit_fork(other).unwrap(), 2);
@@ -3623,7 +3627,7 @@ fn commits_failing_part_way_fail_the_store() {
             let failed = "the extent store failed: the file system crashed";
             assert_eq!(failure(store.commit(None)), failed);
             assert_eq!(failure(store.read(extent(1), 0, &mut [0; BLOCK])), failed);
-            assert_eq!(failure(store.epoch().map(drop)), failed);
+            assert_eq!(failure(store.last_commit().map(drop)), failed);
         }
     }
 }
@@ -3636,7 +3640,7 @@ fn logs_failing_in_their_flushes_fail_the_store() {
     let dir = MemDir::new();
     let store = create(dir.clone(), 1 << 20);
     store.commit_ordered(Some(b"ordered")).unwrap();
-    assert_eq!(Store::open(dir.crash(0), OPTIONS).unwrap().epoch().unwrap(), 0);
+    assert_eq!(Store::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap(), 0);
     dir.fail_after(Some(0));
     let failure = |result: Result<(), anyhow::Error>| result.unwrap_err().to_string();
     assert_eq!(failure(store.flush()), "committing the extent store");
