@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 03:35'
+updated_date: '2026-11-16 04:03'
 labels:
   - perf
   - review-2026-11-15
@@ -73,4 +73,6 @@ AC #2 left unchecked: the counts are now honest bounds (asserted on macOS), but 
 doc-7 budget paragraph and docs/measurements/macos-fork-extent-memory-shared-2026-11-15/note.md updated.
 
 2026-11-15: Linux, ubu1 under fxjob, TASK-453 before its review fixes (t453-int on main 21f042594-era): scripts/test.sh clippy and workspace, 2819 passed, 83 skipped; process.rs's AnonBudget code compiled and ran there. The review fixes (164f4eed2) need their own Linux run.
+
+2026-11-15: Linux, ubu1 under fxjob, TASK-453 with its review fixes on main (t453-int2 996e1bac6): scripts/test.sh clippy and workspace, 2824 passed, 84 skipped; process.rs's AnonBudget extents part compiled and ran. Pushed to main.
 <!-- SECTION:NOTES:END -->
