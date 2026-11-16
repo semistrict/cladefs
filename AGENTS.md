@@ -1,5 +1,11 @@
 # Working on cladefs
 
+## Words: CONTEXT.md
+
+`CONTEXT.md` is the project's glossary: one word per concept, and the words to avoid. Use its
+terms in new code, docs and tasks; where it lists a word as ambiguous, say the qualified form.
+A new term of art, or one that changed meaning, goes into it with the change.
+
 ## Batch Rust changes; compile and test once per batch
 
 Write a large batch of changes before compiling or testing anything: several features or
