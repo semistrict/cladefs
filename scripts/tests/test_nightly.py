@@ -3,9 +3,9 @@
 # found in the LICENSE file.
 
 """Tests of the nightly (TASK-441.1, TASK-441.2), end to end: scripts/nightly-host.sh as cron runs
-it, in the nightly's clone of an origin, on this machine as its local host (scripts/lib/host.sh's
-CLADEFS_HOST=local), with fake_ssh.py's host tools (fxjob, which says whether a job measured, sudo,
-setsid, timeout, flock), a backlog CLI of its own (FAKE_BACKLOG) and a host script in the
+it, in the nightly's clone of an origin, on this machine as its local test host
+(scripts/lib/host.sh's CLADEFS_TEST_HOST=local), with fake_ssh.py's host tools (fxjob, which says
+whether a job measured, sudo, setsid, timeout, flock), a backlog CLI of its own (FAKE_BACKLOG) and a host script in the
 bench-ab-linux-host.sh's place (FAKE_AB) whose rounds are fixtures shaped as ubu1's
 (test_ab_rounds.write_round). And scripts/nightly-install.sh's cron entry."""
 
@@ -31,7 +31,7 @@ FAKE_AB = """#!/bin/bash
 set -euo pipefail
 tools=$1 results=$2 a_source=$3 b_source=$4
 source "$tools/scripts/lib/measurement.sh"
-phase=${CLADEFS_HOST_PHASE:-all} where=work
+phase=${CLADEFS_TEST_HOST_PHASE:-all} where=work
 if measuring; then where=bench; fi
 echo "$phase $where $(sed -n 1p "$a_source/source-revision.txt") $(sed -n 1p "$b_source/source-revision.txt")" >> "$results/jobs.txt"
 if [[ $phase == build ]]; then
@@ -114,7 +114,7 @@ class Ubu1:
         self.environment = {
             "PATH": f"{bin_}:/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
-            "CLADEFS_HOST_SCRATCH": str(self.dir / "scratch"),
+            "CLADEFS_TEST_HOST_SCRATCH": str(self.dir / "scratch"),
             "CLADEFS_NIGHTLY_KEEP": str(self.dir / "keep"),
             "BACKLOG_STATE": str(self.backlog),
             **IDENTITY,

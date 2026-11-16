@@ -300,7 +300,7 @@ mod host {
             let extentd = match self.mode {
                 Mode::Migrate | Mode::TenantMigrate => {
                     // In the temporary directory, as a socket's path is short (SUN_LEN), and a
-                    // test's directory, a round's of a soak, may not be.
+                    // test's directory, a repeat's of a soak, may not be.
                     let socket = std::env::temp_dir()
                         .join(format!("cladefs-{}-extentd.sock", std::process::id()));
                     let named = std::env::var_os("CLADEFS_EXTENTD_REMOTE")

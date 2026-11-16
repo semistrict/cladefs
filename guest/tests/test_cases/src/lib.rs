@@ -206,7 +206,7 @@ tags! {
     /// The nightly's (.github/workflows/nightly.yml), as production runs them: e2e's and
     /// kernel's, every other case cheap enough on a release kernel, and xfstests.
     Nightly = "nightly",
-    /// scripts/dax-gate.sh's suites, rounds of each, in its first run.
+    /// scripts/dax-gate.sh's suites, repeats of each, in its first run.
     DaxGate = "dax-gate",
     /// scripts/soak-workloads-host.sh's crash group: the VM stopped mid-workload.
     SoakCrash = "soak-crash",

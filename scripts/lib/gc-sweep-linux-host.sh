@@ -6,7 +6,7 @@
 # Measure cladefs-gc's sweeps over a bucket of files of many cells (scripts/gc-sweep.sh) on an x86-64
 # Linux host, as root, into RESULTS (scripts/gc-sweep-host.sh), its buckets in the work directory:
 # this tree's cladefs-gc, or, given SIDE=TREEs, each TREE's, by this tree's scripts (TASK-395.17).
-# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
+# CLADEFS_TEST_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds the
 # binaries and fills the buckets, as work (gc-sweep.sh --prepare); `measure` sweeps them, building
 # nothing (--prepared); unset, both (scripts/gc-sweep-host.sh runs the two as jobs of their own,
 # TASK-368).

@@ -3,27 +3,28 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Qualify cladefs as LangSmith's sandboxes run it, before a pin is handed to them (TASK-330): the
-# sandboxes' run (scripts/sandboxes.sh, TASK-330.1) in CLADEFS_QUALIFY_SANDBOXES's mode (long, the
-# default, a quarter hour on ubu1 under fxjob --bench; or short), then guests writing all the while
-# against a bucket that slows, fails and answers again, for CLADEFS_QUALIFY_SOAK_SECS seconds
-# (fxfs-guest-bucket-soak, TASK-330.3, RustFS's bucket through a degrading proxy; default 1800,
-# 1200 at least; 0 for none); every extent daemon of both held to its design's budgets
-# (scripts/budgets.py, TASK-330.2). On Linux with KVM, as root, as
-# scripts/test-e2e.sh runs guests; what that takes from the environment passes through, such as
-# CLADEFS_GUEST_KERNEL, and CLADEFS_E2E_PREBUILT with CLADEFS_E2E_HARNESS, this tree's harness driving
-# another's build (a pin's from before the cases). CLADEFS_SANDBOX_DISK is the sandboxes' disk,
-# ext4 (default: RESULTS's).
+# Qualify cladefs as LangSmith's sandboxes run it, before a candidate is handed to them (TASK-330):
+# the sandboxes' run (scripts/sandboxes.sh, TASK-330.1) in CLADEFS_QUALIFY_SANDBOXES's mode (long,
+# the default, a quarter hour on ubu1 under fxjob --bench; or short), then guests writing all the
+# while against a bucket that slows, fails and answers again, for CLADEFS_QUALIFY_SOAK_SECS seconds
+# (fxfs-guest-bucket-soak, TASK-330.3, RustFS's bucket through a degrading proxy; default 1800, 1200
+# at least; 0 for none); every extent daemon of both held to its design's budgets
+# (scripts/budgets.py, TASK-330.2). On Linux with KVM, as root, as scripts/test-e2e.sh runs guests;
+# what that takes from the environment passes through, such as CLADEFS_GUEST_KERNEL, and
+# CLADEFS_E2E_PREBUILT with CLADEFS_E2E_HARNESS, this tree's harness driving another's build
+# (LangSmith's pin's, from before the cases). CLADEFS_SANDBOX_DISK is the sandboxes' disk, ext4
+# (default: RESULTS's).
 #
 #   qualify.sh RESULTS
 #
 # RESULTS gets each part's results (sandboxes/, soak/) and what was measured, as the fs bench's
 # results are (bench-*.json): the cases' measurements and the checks they failed, and the
 # daemons' budgets' (bench-budgets.json, scripts/qualify-budgets.py), which scripts/bench-ab.py
-# compares, a pin's rounds against the next's (scripts/bench-ab-host.sh's CLADEFS_AB_SUITE=qualify,
-# TASK-330.4). Not the stores, images and caches a failed case leaves, gigabytes of them.
-# What others wrote to its disk meanwhile is its caller's to record, the A/B's each round
-# (scripts/contamination.py, TASK-375); by hand: `contamination.py run RESULTS -- qualify.sh RESULTS`.
+# compares, LangSmith's pin's rounds against the candidate's (scripts/bench-ab-host.sh's
+# CLADEFS_AB_SUITE=qualify, TASK-330.4). Not the stores, images and caches a failed case leaves,
+# gigabytes of them. What others wrote to its disk meanwhile is its caller's to record, the A/B's
+# each round (scripts/contamination.py, TASK-375); by hand: `contamination.py run RESULTS --
+# qualify.sh RESULTS`.
 #
 # A part that leaves no result of its own (its bench-*.json) didn't run, whatever it said: that is
 # a failed check of its own (PART.not-run, in the part's place), said loudly, never a metric left

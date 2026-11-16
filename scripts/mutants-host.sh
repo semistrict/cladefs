@@ -3,9 +3,9 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
-# Mutation testing (scripts/mutants.sh, TASK-44.1) on an x86-64 Linux host of one's own, over ssh
-# (CLADEFS_HOST, ubu1 by default; scripts/lib/host.sh), where cladefs's Linux-only code (the extent
-# daemon, the DAX window's userfaultfd) builds and its tests run
+# Mutation testing (scripts/mutants.sh, TASK-44.1) on the test host, an x86-64 Linux machine of
+# one's own, over ssh (CLADEFS_TEST_HOST, ubu1 by default; scripts/lib/host.sh), where cladefs's
+# Linux-only code (the extent daemon, the DAX window's userfaultfd) builds and its tests run
 # (scripts/lib/mutants-linux-host.sh). Each crate's report comes back to RESULTS (default:
 # docs/measurements/HOST-mutants-<time>-<mark>, the run's mark).
 #
@@ -14,9 +14,10 @@
 #
 # CLADEFS_MUTANTS_CRATES names the crates, separated by spaces (default: scripts/mutants.sh's),
 # CLADEFS_MUTANTS_SHARD the shard (K/N) and CLADEFS_MUTANTS_JOBS the mutants at once (default: a third
-# of the host's CPUs); CLADEFS_MUTANTS_LIST a file in the repository listing the mutants to run alone
-# (scripts/mutants.sh). Shard a sweep longer than a run's limit (CLADEFS_HOST_LIMIT, default 7h).
-# Every other CLADEFS_* and PJDFSTEST_* variable set here reaches the host too (scripts/lib/host.sh).
+# of the test host's CPUs); CLADEFS_MUTANTS_LIST a file in the repository listing the mutants to run
+# alone (scripts/mutants.sh). Shard a sweep longer than a run's limit (CLADEFS_TEST_HOST_LIMIT,
+# default 7h). Every other CLADEFS_* and PJDFSTEST_* variable set here reaches the test host too
+# (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

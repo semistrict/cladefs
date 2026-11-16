@@ -5,7 +5,8 @@
 
 """The qualification's budgets (scripts/qualify.sh, TASK-330.4): what scripts/budgets.py found of
 each part's extent daemons (the part's budgets.json), in the fs bench's shape, which
-scripts/bench-ab.py compares, a pin's rounds against the next's (RESULTS/bench-budgets.json):
+scripts/bench-ab.py compares, LangSmith's pin's rounds against the candidate's
+(RESULTS/bench-budgets.json):
 
 - of each part, the most anonymous memory one of its daemons held (`budgets.PART.max_anon`, MiB),
   what its daemons had their kernels write for each byte their guests wrote
@@ -13,10 +14,10 @@ scripts/bench-ab.py compares, a pin's rounds against the next's (RESULTS/bench-b
   (`budgets.PART.cpu_per_guest_mib`, ms), of the daemons that say them;
 - as failures, each budget a daemon passed (`budgets.BUDGET`); a part whose daemons spent more CPU
   for each guest MiB than CPU_BUDGETS gives it (`budgets.cpu`, TASK-382); each daemon that says
-  nothing its budgets weigh, as a pin's from before them does (`budgets.unreported`, TASK-330.2),
-  whose costs the cases' own measurements, its kernel's counts, still say; and each part whose run
-  left no budgets.json (`budgets.not-run`): it didn't run, which scripts/bench-ab.py fails the A/B
-  on.
+  nothing its budgets weigh, as LangSmith's pin's from before them does (`budgets.unreported`,
+  TASK-330.2), whose costs the cases' own measurements, its kernel's counts, still say; and each
+  part whose run left no budgets.json (`budgets.not-run`): it didn't run, which scripts/bench-ab.py
+  fails the A/B on.
 
     qualify-budgets.py RESULTS PART...    exits 1 if a budget failed, a daemon said none, or a part
                                           has no budgets.json

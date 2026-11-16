@@ -59,7 +59,7 @@ are overcommitted on purpose), so no bound holds for every round.
 
 scripts/bench-ab.py leaves a contaminated round's timings out of its comparison (`skewed`: every
 unit but a count's or a size's, which a load beside the round doesn't move), and says which rounds
-were not checked.
+were unchecked.
 """
 
 import json
@@ -498,7 +498,7 @@ def said(record):
 def run(results, disks, command, host, bounds, every=60.0, clock=time.monotonic):
     """Runs `command`, a round, sampling `host` as it starts, every `every` seconds and as it
     ends, and writes the round's record in `results`; returns the command's status. A record that
-    can't be made is a round not checked, saying why: the round's results are still its results."""
+    can't be made is an unchecked round, saying why: the round's results are still its results."""
     results = Path(results)
     results.mkdir(parents=True, exist_ok=True)
     failed, samples, layout, group = "", [], Layout(), Cgroup()

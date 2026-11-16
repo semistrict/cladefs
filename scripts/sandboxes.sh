@@ -11,9 +11,9 @@
 #   sandboxes.sh [short|long]
 #
 # short (the default) is for every push, minutes; long, LangSmith's 16 VMs, eight at a time, a
-# quarter hour, is the qualification's before each pin, on ubu1 (scripts/qualify.sh). The disk is
-# CLADEFS_SANDBOX_DISK's (default: TMPDIR's), which must be ext4: the run's directory there holds the
-# bucket's data, which RustFS serves (scripts/test-e2e-rustfs.sh, which runs the case), and
+# quarter hour, is the qualification's before each candidate, on ubu1 (scripts/qualify.sh). The disk
+# is CLADEFS_SANDBOX_DISK's (default: TMPDIR's), which must be ext4: the run's directory there holds
+# the bucket's data, which RustFS serves (scripts/test-e2e-rustfs.sh, which runs the case), and
 # scripts/test-e2e.sh's results (CLADEFS_E2E_RESULTS, by default in the run's directory), the case's
 # stores and the daemons' part caches among them; and RustFS's log (rustfs.log) and what the host
 # and the run spend (resources.log, scripts/lib/resources.sh). What test-e2e.sh takes from the
