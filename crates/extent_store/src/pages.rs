@@ -18,9 +18,10 @@
 //!   file at a time (`I_SYNC`): a sync, the flusher and a writer writing back take turns, each
 //!   waiting for the last to end, which carries what it covers ([`Shared::writeback`]). A page
 //!   written while its write-back is in flight is dirty again, and written again after: writers
-//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back what has been
-//!   dirty longer than [`Options::expire`], and the oldest first while more than
-//!   [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
+//!   never wait on write-back (no stable pages). The flusher ([`PageCache`]'s thread) writes back
+//!   first what a writer asked it to begin ([`Cached::write_behind`], as `sync_file_range`'s
+//!   `SYNC_FILE_RANGE_WRITE` begins it), then what has been dirty longer than
+//!   [`Options::expire`], and the oldest first while more than [`Options::background`] is dirty. A cache with no flusher ([`PageCache::without_flusher`]),
 //!   as a directory whose I/O is all its callers' has ([`crate::Dir::concurrent`]), has the writer
 //!   that takes it past [`Options::background`] write back itself, as Linux's writers did before
 //!   per-device flushers: what it writes, and when, is then a function of the writes alone.
@@ -44,7 +45,7 @@
 
 use crate::dir::File;
 use crate::sync::{Condvar, Mutex, MutexGuard};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -117,6 +118,9 @@ pub struct PageCache {
     /// Each use's number, which says which files were used least recently.
     uses: AtomicU64,
     files: Mutex<Vec<Weak<dyn Paged>>>,
+    /// The ranges of files writers asked to be written back, waiting for none of it, in the order
+    /// asked: the flusher's to begin before anything else ([`Cached::write_behind`]).
+    begun: Mutex<VecDeque<(Weak<dyn Paged>, Range<u64>)>>,
     /// Wakes the flusher.
     flush: Condvar,
     flushing: Mutex<bool>,
@@ -164,6 +168,7 @@ impl PageCache {
             writes: AtomicU64::new(0),
             uses: AtomicU64::new(0),
             files: Mutex::default(),
+            begun: Mutex::default(),
             flush: Condvar::new(),
             flushing: Mutex::new(false),
             drained: Condvar::new(),
@@ -248,6 +253,16 @@ impl PageCache {
         self.flush.notify_one();
     }
 
+    /// Has the flusher begin writing back `range` of `file`, before anything else it writes back,
+    /// if it has one; with none, nothing: its writers write back past [`Options::background`].
+    fn begin(&self, file: Weak<dyn Paged>, range: Range<u64>) {
+        if !self.flusher {
+            return;
+        }
+        self.begun.lock().unwrap().push_back((file, range));
+        self.wake();
+    }
+
     /// Writes back, on the caller's thread, the files dirty the longest, a few chunks of each in
     /// turn, until no more than `dirty` bytes are dirty, or a write-back fails, which the file's
     /// next sync reports.
@@ -306,7 +321,8 @@ impl PageCache {
     }
 }
 
-/// The flusher: while the cache is there, it writes back what has been dirty longer than
+/// The flusher: while the cache is there, it writes back the ranges writers asked it to begin
+/// ([`PageCache::begin`]), in the order asked; then what has been dirty longer than
 /// [`Options::expire`], and, while more than [`Options::background`] is dirty, the files dirty
 /// the longest, a [`CHUNK`]'s worth of writes each in turn.
 fn flush_while(cache: Weak<PageCache>) {
@@ -318,6 +334,13 @@ fn flush_while(cache: Weak<PageCache>) {
             let (mut woken, _) =
                 cache.flush.wait_timeout_while(woken, interval, |woken| !*woken).unwrap();
             *woken = false;
+        }
+        loop {
+            let Some((file, range)) = cache.begun.lock().unwrap().pop_front() else { break };
+            let Some(file) = file.upgrade() else { continue };
+            if let Err(err) = file.write_range(range) {
+                log::warn!("extent store: writing back a range of a file's pages: {err}");
+            }
         }
         let now = Instant::now();
         let mut files = cache.files();
@@ -343,6 +366,8 @@ trait Paged: Send + Sync {
     fn dirtied(&self) -> Option<Instant>;
     /// Writes back up to `most` bytes of its dirty pages, in its order.
     fn write_back(&self, most: u64) -> io::Result<()>;
+    /// Writes back its dirty pages in `range`.
+    fn write_range(&self, range: Range<u64>) -> io::Result<()>;
     /// Drops its clean pages.
     fn evict_clean(&self);
     /// Writes back all its dirty pages, waiting for every write-back of it in flight.
@@ -675,6 +700,10 @@ impl<F: File> Paged for Shared<F> {
         self.write_runs(0..u64::MAX, None, Some(most))
     }
 
+    fn write_range(&self, range: Range<u64>) -> io::Result<()> {
+        self.flush(range, None)
+    }
+
     fn write_back_all(&self) -> io::Result<()> {
         self.flush(0..u64::MAX, None)
     }
@@ -782,8 +811,17 @@ impl<F: File> File for Cached<F> {
         self.shared.file.write_back(offset, len)
     }
 
-    fn write_behind(&self, _offset: u64, _len: u64) -> io::Result<()> {
-        self.shared.cache.wake();
+    /// Has the flusher begin writing back the pages in the range, waiting for none of it, before
+    /// anything else it writes back, as `sync_file_range`'s `SYNC_FILE_RANGE_WRITE` has the host's
+    /// begin it: so that the writer's [`File::write_back`] of the range after, which waits, finds
+    /// it written, or in flight, rather than write it all itself then (TASK-433.8). Until then
+    /// this woke the flusher alone, which wrote nothing under [`Options::background`]: the writer
+    /// then wrote back every range it waited for, a MiB at a time, store-bench `burst`'s writes
+    /// 2.3x slower and its commit 5x on ubu1 against the host's page cache. A failure is the
+    /// file's next sync's. With no flusher, nothing: its writers write back as they go.
+    fn write_behind(&self, offset: u64, len: u64) -> io::Result<()> {
+        let paged: Arc<dyn Paged> = self.shared.clone();
+        self.shared.cache.begin(Arc::downgrade(&paged), offset..offset + len);
         Ok(())
     }
 
@@ -918,6 +956,27 @@ mod tests {
         let mut under = vec![0; 2 * PAGE as usize];
         file.file().read_at(&mut under, 0).unwrap();
         assert_eq!(under, pattern(7, 2 * PAGE as usize));
+    }
+
+    /// A range written behind is written back by the flusher, ahead of any threshold or expiry,
+    /// waiting for none of it: the rest of the file stays dirty (TASK-433.8).
+    #[test]
+    fn ranges_written_behind_are_written_back_by_the_flusher() {
+        let dir = MemDisk::new();
+        let cache = cache(Options { expire: Duration::from_secs(3600), ..Options::default() });
+        let file = Cached::new(dir.create("f", true).unwrap(), &cache).unwrap();
+        let data = pattern(9, 2 * PAGE as usize);
+        file.write_at(&data, 0).unwrap();
+        file.write_behind(0, PAGE).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while cache.usage().dirty > PAGE && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert_eq!(cache.usage().dirty, PAGE);
+        let mut under = vec![1; 2 * PAGE as usize];
+        file.file().read_at(&mut under, 0).unwrap();
+        assert_eq!(&under[..PAGE as usize], &data[..PAGE as usize]);
+        assert_eq!(&under[PAGE as usize..], &vec![0; PAGE as usize][..], "the rest unwritten");
     }
 
     /// A file's pages dropped, the dirty ones unwritten, as a removed file's are.
