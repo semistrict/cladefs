@@ -151,7 +151,9 @@ compile_error!(
 mod cached;
 mod dir;
 mod durability;
+mod extents;
 pub use durability::{LAG_BUCKETS, Lags, durability_lags};
+pub use extents::{OWN_ENTRY_BYTES, Own, own_held};
 mod framed;
 mod framing;
 mod held;

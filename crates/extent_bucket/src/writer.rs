@@ -113,6 +113,9 @@ pub struct Writer<B: Bucket> {
     mover: std::sync::OnceLock<Mover>,
     /// cladefs: the keys it reads and encrypts under (TASK-411.3).
     keys: Arc<Ring>,
+    /// cladefs: the decoded state its recovery started from, if any ([`Recovered::layer`]), which
+    /// its state's map shares, as the store opened with its state does (TASK-453).
+    layer: Option<Arc<State>>,
 }
 
 struct Inner {
@@ -235,8 +238,7 @@ impl<B: Bucket> Writer<B> {
         if found?.is_none_or(|record| record.deleted) {
             return Err(Error::Deleted);
         }
-        let recovered = recovered?;
-        let state = recovered.state;
+        let Recovered { state, layer, .. } = recovered?;
         // Its sequences minted from its epoch's range, past every earlier writer's: what it
         // recovered is what the head it took names, no later writer's segment among it.
         let floor = if rules().epoch_sequences { epoch << EPOCH_SHIFT } else { 0 };
@@ -262,6 +264,7 @@ impl<B: Bucket> Writer<B> {
             }),
             mover: std::sync::OnceLock::new(),
             keys,
+            layer,
         };
         // Forks acknowledged by the writers before, whose children may lack their records.
         writer.record_forks().await?;
@@ -307,6 +310,12 @@ impl<B: Bucket> Writer<B> {
     /// log is put after ([`Wal::rebase`](crate::Wal::rebase)), before the writer takes a segment.
     pub fn taken(&self) -> &TakenBranch {
         &self.taken
+    }
+
+    /// cladefs: the decoded state its recovery started from, if it started from one, whose map of
+    /// the extents its state shares ([`Recovered::layer`], TASK-453).
+    pub fn layer(&self) -> Option<Arc<State>> {
+        self.layer.clone()
     }
 
     /// The branch's state as of the last segment acknowledged.

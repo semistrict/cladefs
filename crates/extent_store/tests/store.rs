@@ -62,7 +62,7 @@ fn opened_on(dir: MemDir, state: extent_bucket::State, chain: Chain) -> Store<Me
     let head = extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
     let taken = extent_bucket::TakenBranch::of(head, &state, chain);
     let keys = extent_bucket::keys::Ring::clear();
-    let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
+    let opening = Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
 

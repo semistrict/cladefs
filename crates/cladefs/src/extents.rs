@@ -1144,11 +1144,29 @@ impl ExtentStore {
         self.uploader.as_ref()
     }
 
-    /// cladefs: a copy of the map its store holds its branch's extents in, for a benchmark to weigh
-    /// (`extent_store::Store::extents_copy`, TASK-443.2).
+    /// cladefs: whether its store's map of the extents the bucket holds of its branch is `other`'s,
+    /// one map shared (`extent_store::Store::shares_extents_with`, TASK-453).
     #[cfg(test)]
-    pub(crate) fn extents_copy(&self) -> impl Sized + use<> {
-        self.store.extents_copy().unwrap()
+    pub(crate) fn shares_extents_with(&self, other: &Self) -> bool {
+        self.store.shares_extents_with(&other.store).unwrap()
+    }
+
+    /// cladefs: `extent`'s length, and whether it is open, if its store holds it, as reads ask
+    /// (`extent_store::Store::extent`).
+    #[cfg(test)]
+    pub(crate) fn stored_extent(&self, extent: ExtentId) -> Result<Option<(u64, bool)>> {
+        self.store.extent(extent.into()).map_err(errno)
+    }
+
+    /// cladefs: a read's of `extent` from the extent cache ([`ExtentStore::read_cached`]).
+    #[cfg(test)]
+    pub(crate) fn read_from_cache(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        data: &mut [u8],
+    ) -> Result<bool> {
+        self.read_cached(extent, offset, data)
     }
 
     /// The branch whose extents the guest mints, by its ID, in its cell.
