@@ -1,13 +1,13 @@
 ---
 id: TASK-337
 title: >-
-  extentd::tests::a_store_after_a_workers_write_waits_for_one_lift ran 70+ min
+  cladefsd::tests::a_store_after_a_workers_write_waits_for_one_lift ran 70+ min
   and grew to 5.5 GB under memory.high throttling: the worker's store waits in
   handle_userfault, not EFAULT, while the fault server is throttled
 status: To Do
 assignee: []
 created_date: '2026-11-10 23:39'
-updated_date: '2026-11-10 23:42'
+updated_date: '2026-11-16 22:53'
 labels:
   - testing
   - dax

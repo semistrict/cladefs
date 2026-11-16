@@ -3,7 +3,7 @@ id: doc-13
 title: Copy-on-write DAX
 type: specification
 created_date: '2026-11-04 07:55'
-updated_date: '2026-11-16 04:07'
+updated_date: '2026-11-16 22:52'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -189,9 +189,9 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   punches, not allocation.
 - **What went** (stage 4): open extents' sources in windows (`Source::is_open`, the open extent's
   memory in `crate::cache`), the commit's sealing of windows' mappings (`commit_seal_ns`, `make_read_only`),
-  the open-page pin budget and its `ENOMEM` (`extentd/memory.rs`, `physmem::pin` for open extents;
+  the open-page pin budget and its `ENOMEM` (`cladefsd/memory.rs`, `physmem::pin` for open extents;
   both stay, the tenants' limits and the reservation of `private_max`),
-  asking guests to seal (`extentd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
+  asking guests to seal (`cladefsd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
   half (an extent open in memory, a VMO the window maps).
 - **What stays:** the window, its second stage (the VM process's, userfaultfd), `MAP_MANY`,
   `MAP_PREFAULT`, sealed extents' shared pages, the pool, relief of clean pages, 159 for stores the
@@ -311,7 +311,7 @@ Nothing new: the page cache's path already allocates at writeback (TASK-80).
 
 Unchanged in substance: an fsync that returned is *ordered*: its pages' bytes `WRITE`n, then the
 transaction, then its barrier. What changes: dirty data lives in private host pages, as the page
-cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or extentd:
+cache's lives in guest RAM, and every crash loses what wasn't written back (guest, VMM or cladefsd:
 the private pages go with the device). The window plays no part in recovery. doc-12's "a store
 through a mapping ... may reach the store before that, whole page by whole page" becomes: reaches
 the store only by writeback (fsync, msync, sync, the flusher at ~30 s, the budget), each page as
@@ -406,7 +406,7 @@ private.
 - **Writes:** created files are exactly the no-DAX path: pgbench on a database made in the run
   should match `fxfs-guest-pgbench` (1,736 tps against DAX's 1,012). Files read in pay a host fault
   for each page's first store (~54-110 µs nested) and nothing after; fsync is the no-DAX path's,
-  with no write-protect at the seal (58 µs of extentd's 126 a commit today) and no evacuation.
+  with no write-protect at the seal (58 µs of cladefsd's 126 a commit today) and no evacuation.
 - **Measured, and accepted (the user, 2026-11-06):** pgbench on a fork of a base's database runs at
   0.836 and 0.854 of no DAX (GCE r650, TASK-164.10), not the 0.9-1.0 expected here: each page's first
   store in the fork is a `PRIVATE`, ~486 µs nested a request (the daemon 83 µs, the VM process's run

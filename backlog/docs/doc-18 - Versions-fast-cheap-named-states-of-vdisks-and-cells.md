@@ -3,7 +3,7 @@ id: doc-18
 title: 'Versions: fast, cheap named states of vdisks and cells'
 type: specification
 created_date: '2026-11-16 13:05'
-updated_date: '2026-11-16 14:44'
+updated_date: '2026-11-16 22:52'
 ---
 # Versions: fast, cheap named states of vdisks and cells
 
@@ -199,7 +199,7 @@ gives the segments' keys: no request beyond those a pass makes now, but the foot
 The daemon holds every vdisk of a cell it serves (TASK-475): VMs' and the FUSE mount's alike
 (TASK-475.3, `Entry::Mounted`).
 
-- **The daemon's vdisks of a cell** (`extentd::stores::cell(tenant, cell)`, TASK-476 AC #5). It
+- **The daemon's vdisks of a cell** (`cladefsd::stores::cell(tenant, cell)`, TASK-476 AC #5). It
   lists every store of the cell the daemon holds, VM-served or mounted, each with a handle
   (`Vdisk`): its name and kind in the cell, its store, and `pause()`. That returns a guard under
   which the store takes no write and makes no commit: they wait. Requests in progress end first.
@@ -306,7 +306,7 @@ kills (`mutants.sh`).
   the cut is local; `VERSIONS` (the store's, local or uploaded). `virtio_extent`'s
   `Device::take_snapshot` makes a version, and the device's saved state names it (branch, version)
   in place of a point's path and branch. A restore forks from the version.
-- **Control API** (`extentd.proto`): `Snapshot`, `ListVersions`, `WaitVersion`, `DeleteVersion`,
+- **Control API** (`cladefsd.proto`): `Snapshot`, `ListVersions`, `WaitVersion`, `DeleteVersion`,
   `ShareVersion`, `RestoreVersion`; `SnapshotCell`, `ListCuts`, `DeleteCut`. `DeleteStore` gains
   `with_versions`. `cladefsctl` and the Go client follow.
 - **Points stay** for what outlives its vdisk: a base image's point, shared across tenants

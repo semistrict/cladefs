@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 04:04'
+updated_date: '2026-11-16 22:52'
 labels:
   - perf
   - review-2026-11-15
@@ -22,14 +22,14 @@ ordinal: 849000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Measured by TASK-443.2 (docs/measurements/macos-fork-extent-memory-2026-11-15/note.md; cladefs remote::tests::bench_fork_extent_memory, heap counted exactly). Every open, idle fork holds a private HashMap of every extent its branch inherited, each entry with an owned key String (extent_store Recovering::open): 238 B an extent at 32,768 extents (130 B table, 107 B key), 221 B at 300,000. A fork of a live store (a checkpoint of its own per fork) also holds its writer's map unshared, 230 B an extent more: 468 B (451 B at 300,000); forks of a point share that one. Measured: 100 forks of a 32,768-extent base hold 0.78 GB (point) or 1.41 GB (live); of a 300,000-extent base 6.6 GB or 12.4 GB. Extrapolated to 400 forks: 3.1 / 6.1 GB at 32,768, 26 / 54 GB at 300,000. None of it is counted: the memory governor counts extent-cache pages and held parts only, and the anon budget (extentd/process.rs AnonBudget) has no part for it while adding 288 MiB per open store for framing, so it would not flag it either; the daemon is OOM-killed with every VM. extent_remote's Decoded cache also keeps 16 decoded states whatever their size (16 x 69 MB at 300,000 extents). TASK-242 names the same copy for open time (measured here: 6-9 ms a fork at 32,768 extents, 40-80 ms at 300,000, sim profile).
+Measured by TASK-443.2 (docs/measurements/macos-fork-extent-memory-2026-11-15/note.md; cladefs remote::tests::bench_fork_extent_memory, heap counted exactly). Every open, idle fork holds a private HashMap of every extent its branch inherited, each entry with an owned key String (extent_store Recovering::open): 238 B an extent at 32,768 extents (130 B table, 107 B key), 221 B at 300,000. A fork of a live store (a checkpoint of its own per fork) also holds its writer's map unshared, 230 B an extent more: 468 B (451 B at 300,000); forks of a point share that one. Measured: 100 forks of a 32,768-extent base hold 0.78 GB (point) or 1.41 GB (live); of a 300,000-extent base 6.6 GB or 12.4 GB. Extrapolated to 400 forks: 3.1 / 6.1 GB at 32,768, 26 / 54 GB at 300,000. None of it is counted: the memory governor counts extent-cache pages and held parts only, and the anon budget (cladefsd/process.rs AnonBudget) has no part for it while adding 288 MiB per open store for framing, so it would not flag it either; the daemon is OOM-killed with every VM. extent_remote's Decoded cache also keeps 16 decoded states whatever their size (16 x 69 MB at 300,000 extents). TASK-242 names the same copy for open time (measured here: 6-9 ms a fork at 32,768 extents, 40-80 ms at 300,000, sim profile).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 bench_fork_extent_memory: an idle fork of a base of 32,768 and of 300,000 extents holds heap that does not grow with the base's extents (per fork, of a point and of a live store), the numbers recorded beside TASK-443.2's
 - [x] #2 What the daemon still holds per extent, once per base, is counted by something the governor or the anon budget sees, or bounded
-- [ ] #3 extentd's serves_hundreds_of_forks_of_a_base runs at 32,768 extents on Linux and bounds resident memory per fork
+- [ ] #3 cladefsd's serves_hundreds_of_forks_of_a_base runs at 32,768 extents on Linux and bounds resident memory per fork
 <!-- AC:END -->
 
 ## Definition of Done

@@ -3,7 +3,7 @@ id: doc-9
 title: 'Why every guest fsync seals, and what of a DAX seal is on the commit path'
 type: other
 created_date: '2026-10-28 03:23'
-updated_date: '2026-11-16 04:07'
+updated_date: '2026-11-16 22:52'
 ---
 # Why every guest fsync seals, and what of a DAX seal is on the commit path
 
@@ -63,10 +63,10 @@ What a DAX commit itself costs, against no DAX:
 | Per commit | DAX | No DAX |
 |---|---|---|
 | The guest's `COMMIT` round trip (`device_commits_ns`) | ~430 us | ~263 us |
-| extentd's commit | 126 us: writing open extents 44, store commit 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
+| cladefsd's commit | 126 us: writing open extents 44, store commit 15, sealing the windows' mappings 58, waiting for uploads 9 | ~25 us |
 | The rest: transport, and the VM process's window changes before the reply | ~304 us | ~238 us |
 
-So on the commit path DAX adds ~100 us in extentd, of which writing the data the guest stored
+So on the commit path DAX adds ~100 us in cladefsd, of which writing the data the guest stored
 through the window (44 us) replaces the `WRITE`s a commit without DAX follows, and ~66 us of window
 changes the reply waits for: its own write-protects, and whatever else the VM process's one
 thread had queued ahead of it. Sealing is ~0.43 ms against ~0.26 ms, but both spend ~19 s of a
@@ -96,7 +96,7 @@ So the levers, cheapest first:
      file has data there, so they read as holes.
 2. **Order only what must be ordered** in the VM process's window changes: a commit's reply needs
    its own write-protects, not other requests' changes (~66 us at most).
-3. **Cheaper seals in extentd**: 58 us a commit, of which finding or making the cached extents
+3. **Cheaper seals in cladefsd**: 58 us a commit, of which finding or making the cached extents
    11.3, the read-only remap 20.3, handing the pages over 8.7, mapping them again 6.4 (stats
    commit-seal-*-ns, 7ac00fa2a). Its write phase went 44 -> 36 us (9048fe2a8).
 4. **Cheaper window changes** (TASK-91.16, TASK-109): ~25 us a stage operation nested.
@@ -105,8 +105,8 @@ So the levers, cheapest first:
 
 ## 3. What sets the no-DAX ceiling?
 
-Not extentd: its commit is ~25 us of the ~263 us the guest waits. The rest is the round trip under
-nested virtualization: the guest's notification exit, the VMM's worker, its socket to extentd and
+Not cladefsd: its commit is ~25 us of the ~263 us the guest waits. The rest is the round trip under
+nested virtualization: the guest's notification exit, the VMM's worker, its socket to cladefsd and
 back, and the interrupt injected. TASK-91.13 (spinning for completions), TASK-91.15 (MMIO exits
 per completion) and TASK-91.17 (segment closes inside commits) work on it. Once DAX's extra
 ~170 us is gone, that round trip is DAX's limit too.

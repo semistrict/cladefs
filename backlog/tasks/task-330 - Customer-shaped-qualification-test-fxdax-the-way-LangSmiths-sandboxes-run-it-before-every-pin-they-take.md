@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 14:00'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 22:52'
 labels:
   - testing
 dependencies: []
@@ -17,11 +17,11 @@ ordinal: 729000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-LangSmith's sandbox CI found four problems our suites didn't: TASK-310 (write-behind doubles disk writes; framing stalls for seconds on a shared disk), TASK-311 (guest oops then soft lockups in 8-vCPU docker builds), TASK-317 (extentd memory grows to 6 GB under an upload backlog) and TASK-314 (a failing bucket hangs commits silently).
+LangSmith's sandbox CI found four problems our suites didn't: TASK-310 (write-behind doubles disk writes; framing stalls for seconds on a shared disk), TASK-311 (guest oops then soft lockups in 8-vCPU docker builds), TASK-317 (cladefsd memory grows to 6 GB under an upload backlog) and TASK-314 (a failing bucket hangs commits silently).
 
 Why we missed them:
-1. Our runs have the shape we imagine, not theirs. Ours: one VM, a dedicated disk, a fast bucket in memory or on its own disk, an idle host. Theirs: 2 extentd hosts and many VMs on one disk, RustFS on that same disk, and 8 vCPUs per VM on an 8-CPU runner.
-2. Perf work measures the metric being tuned, not the resources it costs. TASK-221 tuned durable_lag and declared done; nothing checked extentd's bytes written per guest byte, or its memory.
+1. Our runs have the shape we imagine, not theirs. Ours: one VM, a dedicated disk, a fast bucket in memory or on its own disk, an idle host. Theirs: 2 cladefsd hosts and many VMs on one disk, RustFS on that same disk, and 8 vCPUs per VM on an 8-CPU runner.
+2. Perf work measures the metric being tuned, not the resources it costs. TASK-221 tuned durable_lag and declared done; nothing checked cladefsd's bytes written per guest byte, or its memory.
 3. Nothing runs long against a slow or failing dependency. The simulation checks failure correctness; nothing checks resource use over time.
 4. Workloads are filesystem-semantic (xfstests, fsx, pgbench), not what customers run (docker build and export, compilers, git).
 5. No CPU overcommit (TASK-149.19 is filed and not done).

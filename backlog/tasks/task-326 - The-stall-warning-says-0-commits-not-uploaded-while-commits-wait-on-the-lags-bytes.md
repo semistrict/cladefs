@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 11:54'
+updated_date: '2026-11-16 22:53'
 labels: []
 dependencies: []
 priority: low
@@ -16,7 +17,7 @@ ordinal: 727000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Found in TASK-317's backlog runs on ubu1: extentd logged 'commits wait for object storage: 1184763904 bytes not uploaded, 111022080 past the lag bound of 1073741824; 0 commits not uploaded, the oldest seen 5326 ms ago'. extent_store::upload::Shared::ask computes the commits from the epoch Remote::wait_lag passes, already less Options::max_lag, so a stall on bytes always says 0 commits; an operator reads that as nothing waiting.
+Found in TASK-317's backlog runs on ubu1: cladefsd logged 'commits wait for object storage: 1184763904 bytes not uploaded, 111022080 past the lag bound of 1073741824; 0 commits not uploaded, the oldest seen 5326 ms ago'. extent_store::upload::Shared::ask computes the commits from the epoch Remote::wait_lag passes, already less Options::max_lag, so a stall on bytes always says 0 commits; an operator reads that as nothing waiting.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

@@ -3,7 +3,7 @@ id: doc-14
 title: 'Local disk as the bucket''s write-ahead log and cache: one storage engine'
 type: specification
 created_date: '2026-11-05 03:13'
-updated_date: '2026-11-16 11:25'
+updated_date: '2026-11-16 22:52'
 ---
 # Local disk as the bucket's write-ahead log and cache: one storage engine
 
@@ -79,7 +79,7 @@ to it, what it was forked from (`ancestry`), the branches marked public (`public
 profiles, each written whole and synced. An image's own file bucket is beside its directory,
 `<image>.bucket`, which its forks share and which outlives it (Decisions).
 
-Per host (`CLADEFS_EXTENTD_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
+Per host (`CLADEFSD_CACHE`), shared by every store: `cladefs-parts/<key>`, the part cache
 (`extent_bucket::cache`), kept across restarts and taking whole objects in (`Cache::adopt`).
 
 Gone from a store's directory: `branches/`, `segments/`, `extents/`, `index/`, `open-segments/`,
@@ -423,7 +423,7 @@ origin), which it models fixed (`deletionsFence`: a deletion fences the end it r
 | remote.rs, forks: records lost, segments landing late, parents taken (TASK-79.20, 79.72) | 10 | the fork recorded by the parent's next writer, or never made; in the simulation's `crashes_anywhere`, and two extent_store tests with a crash after the fork's commit |
 | remote.rs, failed forks and claims (TASK-79.78, 79.82) | 12 | `IdTaken` makes nothing; a fenced fork's `delete_fork`; twins (the simulation's `failed_forks_deleted_anywhere`) |
 | `fork_faults.rs` (14), `restore_faults.rs` (8) | 22 | kept: each step of a fork and of a point's fork failing, its host dying, the collector meeting each write; the steps are fewer (no claim, no handle) |
-| extentd tests through a bucket | 22 | kept, through the daemon's API; `stores_are_cleaned_behind_their_guests_commits` and `..._once_the_forks_sharing_*` become the collector compacting what a guest freed |
+| cladefsd tests through a bucket | 22 | kept, through the daemon's API; `stores_are_cleaned_behind_their_guests_commits` and `..._once_the_forks_sharing_*` become the collector compacting what a guest freed |
 | extent_store, lineage (`tests/lineage.rs`, shuttle lineage, `forks_*`, `deleting_*`) | ~40 | go; what they assert of forks (constant time, sharing, independence) is asserted of bucket forks in extent_store's tests |
 | extent_store, cleaning | ~20 | go; the collector's compaction tests stay |
 
@@ -434,7 +434,7 @@ holds, and each step's notes list what each removed test became.
 
 Each lands green (macOS `scripts/test.sh` with `workspace shuttle`, Linux in Docker or GCE), with
 its own tests. 1 to 5 change nothing a guest sees and don't wait for TASK-164; 6 to 9 do, and touch
-`cladefs/src/extents.rs` and `extentd/stores.rs`, so they start after TASK-164 and TASK-160.8 land.
+`cladefs/src/extents.rs` and `cladefsd/stores.rs`, so they start after TASK-164 and TASK-160.8 land.
 
 1. **The local-filesystem bucket** (TASK-165.1): `file://`, the bucket conformance suite.
 2. **TLA+ of doc-7 with the WAL** (TASK-165.2).
@@ -495,11 +495,11 @@ Taken on the way, each in OPEN_QUESTIONS.md under `# Decisions` with what else w
 
 ## Where this meets other work
 
-- TASK-160.8 (extentd's store table): steps 7 to 9 change how extentd makes, takes, places,
-  forks and deletes stores (`extentd/stores.rs`); they start once 160.8 has landed.
+- TASK-160.8 (cladefsd's store table): steps 7 to 9 change how cladefsd makes, takes, places,
+  forks and deletes stores (`cladefsd/stores.rs`); they start once 160.8 has landed.
 - TASK-164 (copy-on-write DAX) and its guest work (160.2, 160.4): `cladefs/src/extents.rs` and
   `crate::cache` change in both; this waits for 164, as the task says.
-- TASK-157 (fork tests failing under load): `fork_faults.rs` and the extentd fork tests are
+- TASK-157 (fork tests failing under load): `fork_faults.rs` and the cladefsd fork tests are
   rewritten in step 7.
 - TASK-44.5: step 2 is its AC #1; its trace validation (AC #2) and mutants (AC #3) stay its own.
 - TASK-160.15: step 3 is its AC #2.

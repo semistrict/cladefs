@@ -70,8 +70,8 @@ func NewClient(socket string, opts ...grpc.DialOption) (*Client, error) {
 	}
 	return &Client{
 		CladefsdClient: NewCladefsdClient(conn),
-		Health:        healthpb.NewHealthClient(conn),
-		conn:          conn,
+		Health:         healthpb.NewHealthClient(conn),
+		conn:           conn,
 	}, nil
 }
 

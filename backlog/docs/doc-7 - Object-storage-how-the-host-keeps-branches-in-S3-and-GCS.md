@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-16 14:44'
+updated_date: '2026-11-16 22:52'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -38,7 +38,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   or a directory of the host's (`file:///DIR`, `extent_bucket::local`). Its simulation and a TLA+
   spec check it (Testing).
 - **Every store has a bucket**, which its description names (TASK-165.6): on a host of cladefs's
-  system, the host's (`CLADEFS_EXTENTD_REMOTE`); an image of the cladefs CLI's, or a test's, a file
+  system, the host's (`CLADEFSD_REMOTE`); an image of the cladefs CLI's, or a test's, a file
   bucket of its own beside its directory (`<image>.bucket`), which its forks share. A store's
   directory holds one branch.
 - **On the host** (doc-14, `crates/extent_store`): the guest's writes go to the store's open
@@ -57,7 +57,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   file into the host's **part cache** (`Cache::adopt`), or removes it. Commits stall at a lag bound
   in commits (4,096) and in bytes of WAL (1 GiB). What waits is on the host's disk; of it, the
   host holds in memory only what it uploads at once, its **upload memory** (512 MiB,
-  `CLADEFS_EXTENTD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
+  `CLADEFSD_UPLOAD_MEMORY`), however far behind the bucket is (Uploads, Memory).
 - **Opening a store**, here or anywhere, the first time or after a crash, is one recovery (doc-14,
   Opening a store): its writer takes the branch's head with the placement's token and recovers the
   branch from what the head names; a segment left open is closed again from its log; the
@@ -70,7 +70,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
 - **Reading** (TASK-28.9): by 1 MiB parts of objects, each checked against the CRC its object
   carries; one GET per part however many reads want it; a host's GETs bounded (64 requests,
   64 MiB), demand before read-ahead; parts kept in the host's part cache
-  (`CLADEFS_EXTENTD_CACHE`, within `CLADEFS_EXTENTD_CACHE_BYTES`), across restarts, read least
+  (`CLADEFSD_CACHE`, within `CLADEFSD_CACHE_BYTES`), across restarts, read least
   recently evicted first by punching holes, with a floor of free space; read-ahead doubling along
   sequential reads, to 16 parts; a part another host owns asked of it before the bucket
   (Reading).
@@ -79,7 +79,7 @@ checkpoints and segments' footers, and lineage is in the bucket alone.
   of 1 MiB, each compressed with zstd (level 1) on its own, or raw where that is no smaller, at
   4 KiB-aligned offsets, with a table of where each is stored. A segment is written raw while open
   (`open-segments/`), and framed when it closes; an extent of its own, raw until sealed
-  (`open-extents/`). Guests never map store files: DAX windows map extentd's memory, which reads
+  (`open-extents/`). Guests never map store files: DAX windows map cladefsd's memory, which reads
   fill, so all data on disk and in the bucket is compressed, and memory holds it uncompressed.
   Reads decompress the parts they touch, a host fetches each part with one GET of its stored
   bytes, and its cache keeps them as stored.
@@ -132,7 +132,7 @@ Settled with the user on 2026-10-16:
    its parent (Points).
 7. **Compression, no encryption** in this milestone. *Revised 2026-10-17 (TASK-29):* the first
    ruling, no compression, held because compressed bytes cannot land straight in DAX pages. They
-   need not: the DAX window maps extentd's memory, which the pager fills by reading the store, and
+   need not: the DAX window maps cladefsd's memory, which the pager fills by reading the store, and
    never maps store files. So each 1 MiB part of an object is compressed with zstd on its own
    (Segments), and a read decompresses only the parts it touches. *Level 1, measured 2026-10-19
    (TASK-29.4,* docs/measurements/gce-fs-bench-zstd-{0,1,3} and gce-fs-bench-pgbench-zstd-{0,1},
@@ -500,7 +500,7 @@ Each branch's commits go through:
 4. **Uploaded:** segments and extents of their own upload in parallel, each a single create-only
    PUT (an extent is 64 MiB at most; no multipart upload), extents before the segments that name
    them, up to 16 segments of a store at once within the host's upload budget (64 requests, its
-   upload memory: 512 MiB unless `CLADEFS_EXTENTD_UPLOAD_MEMORY` says otherwise; Memory, below).
+   upload memory: 512 MiB unless `CLADEFSD_UPLOAD_MEMORY` says otherwise; Memory, below).
 5. **Acknowledged:** once every segment before it is uploaded too, by the head's swap naming it
    (The head, TASK-407); a segment going on with a commit, with the segment ending it (Segments,
    TASK-92.41). Then `COMMIT_UPLOADED` waiters up to it complete, the WAL's
@@ -527,7 +527,7 @@ took the branch again until TASK-407: no segment lands where another's goes now.
 host disk, not memory: what waits is the stores' write-ahead logs, synced to its disk (decision 3),
 within the lag bound, and the uploader takes at most `IN_FLIGHT` segments of a store's at a time,
 reading none until its upload goes. What a host's extent daemon holds in memory for it is bounded
-by its **upload memory**, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (512 MiB by default, 64 MiB at least, an
+by its **upload memory**, `CLADEFSD_UPLOAD_MEMORY` (512 MiB by default, 64 MiB at least, an
 extent's most, which goes alone), every store's uploads together: each object read only once that
 budget has room for it (`extent_bucket::fetch::Budget`), held once while its PUT goes, however
 often it is retried (`Bucket::put` takes `bytes::Bytes`, which each try shares), and let go as it
@@ -535,16 +535,16 @@ lands. Besides, the daemon holds, whatever the backlog, each store's framing of 
 data and its framed bytes (~2-4 segments' size, TASK-325), the host's fetches (64 MiB in flight,
 64 MiB of tails, 64 MiB of parts recent), its tenants' bytes in flight (doc-4) and its extent cache
 (`MEMORY_BYTES`, shared memory). The stats line's `uploads:` says what the uploads hold, the most
-they held and the budget, and so do the metrics `cladefs_extentd_upload_held_bytes`,
-`cladefs_extentd_upload_held_max_bytes` and `cladefs_extentd_upload_memory_bytes`.
+they held and the budget, and so do the metrics `cladefsd_upload_held_bytes`,
+`cladefsd_upload_held_max_bytes` and `cladefsd_upload_memory_bytes`.
 
 What the daemon frees, it gives back: glibc's allocator maps each allocation of 1 MiB or more on
-its own and unmaps it as it is freed (`extentd::memory::return_large_allocations`, mallopt's
+its own and unmaps it as it is freed (`cladefsd::memory::return_large_allocations`, mallopt's
 `M_MMAP_THRESHOLD`). By default glibc raises that threshold to the largest buffer freed, up to
 32 MiB, and keeps buffers below it in its arenas, one a thread, up to eight times the CPUs.
 *Measured on ubu1* (fxfs-guest-docker-build-dax, 8 vCPUs, three builds of 512 MiB; `MEMORY_BYTES`
 2 GiB; a file bucket on disk behind 300 ms a request; commits stalled at the lag bound 8 times,
-extentd in a systemd scope of its own, scripts/test-e2e.sh's `CLADEFS_EXTENTD_MEMORY_MAX`): before,
+cladefsd in a systemd scope of its own, scripts/test-e2e.sh's `CLADEFSD_MEMORY_MAX`): before,
 its anonymous memory reached 5.9 GB (4.4 GB under heaptrack, and 4.8 GB idle after that run),
 its heap 1.3 GB at most: its 512 MiB of uploads held twice, a copy for each PUT's try, and 2.6 GB
 in 134 of glibc's per-thread arenas of 64 MiB, buffers freed; the host's OOM killer took it at
@@ -553,7 +553,7 @@ in 134 of glibc's per-thread arenas of 64 MiB, buffers freed; the host's OOM kil
 cache included, with no kill.
 
 *Added 2026-11-10 (TASK-330.2):* the daemon holds itself to that sum, its **anonymous memory's
-budget** (`cladefs::extentd::process`): its upload memory, a store's framing and sealing for each
+budget** (`cladefs::cladefsd::process`): its upload memory, a store's framing and sealing for each
 store written at once, the most so far (twice a segment and an extent, TASK-325's whole-segment
 framing, and a commit's copy of an extent, 288 MiB), its fetches (192 MiB), its
 tenants' bytes in flight, as much as they held at most, the stores' maps of their extents (TASK-453: each
@@ -566,11 +566,11 @@ entry's 512 or 1,024 bytes), and its own
 (64 MiB). It samples its anonymous
 memory (`RssAnon`) as it keeps its stats, every 200 ms, against that budget as of then, and counts
 the samples past it: the stats line's `process:` (`max-anon`, `anon-budget`, `over-budget`), and
-the metrics `cladefs_extentd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
+the metrics `cladefsd_process_anon_bytes`, `_anon_max_bytes`, `_anon_budget_bytes` and
 `_anon_over_budget_total`, what an operator alerts on. A sample past it is memory no part holds, a
 copy no budget counts or what the allocator kept: both of TASK-317's bugs. The guest tests fail a
 run whose daemon passed it (`scripts/budgets.py`), and the daemon's soak against a degraded bucket
-holds it to it (`extentd::tests::soak`, TASK-330.3).
+holds it to it (`cladefsd::tests::soak`, TASK-330.3).
 
 **Recovery on the same host** *(rewritten 2026-11-07; doc-14, Opening a store)* is opening the
 store: its writer takes the branch's head; a segment left open is closed again from the
@@ -902,18 +902,18 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
   read where it went. Every part is checked against its CRC; one that fails is corrupt, `EIO`
   (TASK-407.4: a key names one object for good, so a part failing its tail's CRC is no other
   object's; until then, it was read again, once, by its object's tail fetched anew).
-- **The part cache** (`extent_bucket::cache`, `CLADEFS_EXTENTD_CACHE`), one per host, shared by its
+- **The part cache** (`extent_bucket::cache`, `CLADEFSD_CACHE`), one per host, shared by its
   stores: sparse copies of objects at their keys (`cladefs-parts/<key>`), their tails and the parts
   kept, as stored (compressed), at their real offsets, filled by fetches and by acknowledged WAL
   files moved in whole (`Cache::adopt`), and emptied by punching holes. It keeps no index file:
   opening it rebuilds what it keeps from its files' tails, each checked, so a host's restart
   refetches nothing it had (TASK-165.4). The parts read least recently go first (a clock of uses,
-  `by_use`), an object's tail with its last part, to keep within its capacity (extentd:
-  `CLADEFS_EXTENTD_CACHE_BYTES`, unbounded if unset, TASK-406.1) and a floor of the filesystem's
-  space free (extentd: 4 GiB, `CACHE_FLOOR`). It holds copies of
-  what the bucket has, never data the bucket lacks. Without a cache (`CLADEFS_EXTENTD_CACHE` empty),
+  `by_use`), an object's tail with its last part, to keep within its capacity (cladefsd:
+  `CLADEFSD_CACHE_BYTES`, unbounded if unset, TASK-406.1) and a floor of the filesystem's
+  space free (cladefsd: 4 GiB, `CACHE_FLOOR`). It holds copies of
+  what the bucket has, never data the bucket lacks. Without a cache (`CLADEFSD_CACHE` empty),
   every page-in of an extent in the bucket is a GET.
-- **Peers** (TASK-406.2, `extent_bucket::peer`, `cladefs::bucket::peers`, `cladefs::extentd::peers`):
+- **Peers** (TASK-406.2, `extent_bucket::peer`, `cladefs::bucket::peers`, `cladefs::cladefsd::peers`):
   hosts sharing a bucket serve each other parts, so that a part many hosts read, as a popular base
   booting on many cold hosts is, comes from the bucket about once for them all, not once each.
   Each part has one owner, by rendezvous hashing (SipHash-1-3 of fixed keys) of each host's
@@ -928,8 +928,8 @@ removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
   peer past its deadline (1 s to connect, 5 s a request) falls back to the bucket and puts the
   peer down for 30 s, its parts going to the bucket meanwhile, never to another peer. Tails are
   always the bucket's own: a tail is what checks a part. gRPC over TCP, unauthenticated, on the hosts' own network
-  (`proto/cladefs/peer/v1/peer.proto`): every host reads the whole bucket anyway. extentd:
-  `CLADEFS_EXTENTD_PEER_ADDRESS` (this host's address, listened at), `CLADEFS_EXTENTD_PEERS` (the
+  (`proto/cladefs/peer/v1/peer.proto`): every host reads the whole bucket anyway. cladefsd:
+  `CLADEFSD_PEER_ADDRESS` (this host's address, listened at), `CLADEFSD_PEERS` (the
   list at start, comma-separated), `SetPeers` (the list at any time); it needs a part cache. The
   stats file's `peers:` line counts what was asked, given, missing, failed and served.
 - **Read-ahead** follows each object's reads (1,024 objects at most): along sequential reads its
@@ -1400,7 +1400,7 @@ operator to see what the collector would do before trusting it with a bucket:
   moves both, and every marks object, until an operator collects for real or removes them. The
   collector never takes `<C>gc/` for a candidate, nor for a branch's.
   - **Readers warn.** Every reader of a bucket reads it through `object_bucket::ObjectBucket`
-    (extentd's stores, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
+    (cladefsd's stores, writers recovering, cladefsctl, the collector). A mark-only pass writes `gc/marking`
     first, which a reader reads every 60 s, a HEAD, alongside one of its reads; only while it is
     there does the reader hold the newest marks' keys of each cell it reads, read again every 60 s
     by a listing of the cell's `gc/marks/` (and a read once it changed) alongside one of its reads
@@ -1409,7 +1409,7 @@ operator to see what the collector would do before trusting it with a bucket:
     listing a minute for every cell each host reads was thousands a second at a million VMs). An
     operator removes `gc/marking` with the marks. A GET, ranged GET or HEAD of a marked key logs a `warn`
     with the key, its kind (naming its branch), the request, the marks' epoch and the current span's
-    trace and span IDs; in extentd the log names the guest request too (`request_id`). A read costs
+    trace and span IDs; in cladefsd the log names the guest request too (`request_id`). A read costs
     one load with no marks, one set lookup with some. Listings are logged at `debug` only: they name
     what callers pass over (older checkpoints, segments a checkpoint covers) as well as what they go
     by, which they read, and which is warned of. A warning is a bug in the collector, unless the

@@ -3,7 +3,7 @@ id: doc-16
 title: 'Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs'
 type: specification
 created_date: '2026-11-14 18:32'
-updated_date: '2026-11-16 11:25'
+updated_date: '2026-11-16 22:52'
 ---
 # Per-tenant encryption at rest: tenant KEKs, cell KEKs, vdisk DEKs
 
@@ -71,7 +71,7 @@ say of the clear:
   > master key; every store is sealed (doc-16): set CLADEFS_KMS to a KMS's URL, or CLADEFS_MASTER_KEY
   > to a master key (openssl rand -hex 32) to keep tenants' KEKs in the bucket
 
-  `cladefs::remote::require_kms` (`the host's KMS: ...`) is asked as cladefs-extentd starts (after its
+  `cladefs::remote::require_kms` (`the host's KMS: ...`) is asked as cladefsd starts (after its
   host's environment is read), as cladefsctl acts on stores itself (`locally`), and as `cladefs-mount`
   mounts; the guest tests' runner asks it before any case (`test_cases::sealed::require_kms`).
   `cladefs-gc` needs a KMS to collect (`--delete`, `--mark-only`) and for `--delete-branch`,
@@ -200,7 +200,7 @@ GCM's authentication key. A salt per object makes every subkey new, whatever key
 
 | Process | Keys | Why |
 |---|---|---|
-| extentd, a cell's holder | the cell's KEK; its vdisks' DEKs; inherited DEKs | reads and writes the vdisks |
+| cladefsd, a cell's holder | the cell's KEK; its vdisks' DEKs; inherited DEKs | reads and writes the vdisks |
 | A host opening a point or a follower (doc-8) | the DEKs of the branch and its ancestors | reads only |
 | `cladefs-gc`, marking | none | reads metadata only |
 | `cladefs-gc --delete-branch` | the branch's cell's KEK, through the KMS, only to record a fork into another cell whose child has no record yet | its checkpoint at the fork point is authenticated under the branch's DEK, which the child requires (TASK-411.4, TASK-411.14) |
@@ -265,7 +265,7 @@ dropped with its pool, never written out unwrapped.
   footer under the MAC.
 - **The KMS and how a cell chooses.** `CLADEFS_KMS=local:///DIR` (a `LocalKms` directory, the only
   backend; `extent_keys::kms::from_url`), read by every process that opens stores through
-  `cladefs::bucket::runtime()`: extentd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
+  `cladefs::bucket::runtime()`: cladefsd, the cladefs CLI's FUSE mounts, cladefsctl; and `cladefs-gc`, to
   compact sealed cells (TASK-411.6; marking keyless). *(TASK-411.28: every cell is made sealed, a
   process with no KMS refusing to start; `NoSuchTenant` refuses the cell as destroyed: One sealed
   mode.)* A cell was made sealed iff
@@ -539,7 +539,7 @@ dropped with its pool, never written out unwrapped.
   `ForgetTenantKeys`, once the operator destroyed or revoked the tenant's KEK in the KMS) or
   cladefsctl (`shred-cell`, `forget-tenant-keys`):
   - halts every store of the scope open in the process (`halt::halt_stores`, halts listed by
-    branch): each request fails with `EACCES` from then on, as its reopening does; extentd refuses
+    branch): each request fails with `EACCES` from then on, as its reopening does; cladefsd refuses
     its VM process's requests so;
   - takes the scope's stores out of the extent cache's holders (`cache::forget`): an extent no
     other open store holds goes, its pages evicted, unmapped from every window, and no page-in
@@ -653,12 +653,12 @@ refuses to start) and removed plaintext (One sealed mode).
   real KMS. Goal 3 holds while the master key stays out of the bucket: a reader of the bucket finds
   every tenant's KEK there, wrapped by a key it lacks. Goal 2, shredding, holds as below.
 - **Choosing it** (`extent_bucket::bucket_kms::from_env`, the one function every process that
-  opens stores asks: extentd, cladefsctl and the cladefs CLI's FUSE mounts through
+  opens stores asks: cladefsd, cladefsctl and the cladefs CLI's FUSE mounts through
   `cladefs::bucket::kms`, and `cladefs-gc`). `CLADEFS_KMS`, if it names one, is the host's KMS (a master
   key also given is unused, and warned of); else, given master keys, the bucket KMS over the
-  host's bucket: `CLADEFS_EXTENTD_REMOTE`'s for cladefs's processes, the bucket collected for
+  host's bucket: `CLADEFSD_REMOTE`'s for cladefs's processes, the bucket collected for
   `cladefs-gc`; else none. Master keys given that can't be had (malformed, both variables set, an
-  unreadable file, no `CLADEFS_EXTENTD_REMOTE`) make the host's KMS refuse every call, naming why, as
+  unreadable file, no `CLADEFSD_REMOTE`) make the host's KMS refuse every call, naming why, as
   a bad `CLADEFS_KMS` does (cladefs-gc stops): no cell is made in the clear for want of it. A process
   keeping stores in other buckets (the cladefs CLI's own file buckets) keeps their tenants' KEKs in
   the host's bucket all the same: a cell's KEK, wrapped, is in its cell's object wherever that is.
@@ -752,7 +752,7 @@ refuses to start) and removed plaintext (One sealed mode).
   on one host, taken and read on another, no object holding the master key, the cell's KEK or the
   data, a collector sweep leaving the KEK object and its tombstone, no host opening it shredded);
   `cladefs` `remote::tests::hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms`
-  (`CLADEFS_MASTER_KEY` and `CLADEFS_EXTENTD_REMOTE` alone: every store sealed; `shred_tenant` fences
+  (`CLADEFS_MASTER_KEY` and `CLADEFSD_REMOTE` alone: every store sealed; `shred_tenant` fences
   and refuses, another tenant reading on) and `hosts_of_another_kms_shred_no_tenant`; Linux:
   `tests/control.rs` `tenants_sealed_under_the_bucket_kms_and_shredded_through_the_control_api`.
   Hand mutants (no marker read, a racing create keeping its own KEK, no tombstone written) each

@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-10-24 15:24'
-updated_date: '2026-11-15 11:36'
+updated_date: '2026-11-16 22:53'
 labels: []
 dependencies: []
 priority: low
@@ -33,7 +33,7 @@ Settled with the user in a design interview on 2026-10-24. These are decisions, 
 - **Idle branches:** after an idle time, the writer uploads everything, releases the lease and its peer, and keeps its SSD copy as a cache, evicted under pressure. The next open anywhere claims the lease again, warm if it lands here.
 - **History:** any commit can be pinned as a named snapshot, kept until deleted; unpinned commits stay readable for a retention window, for point-in-time restore (a fork from that epoch). Garbage collection respects both.
 - **Garbage collection:** a separate `cladefs-gc` process per bucket prefix, as today.
-- **Process shape:** one daemon per machine (extentd, generalized) owns the SSD, the caches, the uploads, the peer log and the leases.
+- **Process shape:** one daemon per machine (cladefsd, generalized) owns the SSD, the caches, the uploads, the peer log and the leases.
 - **Protocol:** one framed binary protocol: a core that every client gets, and cladefs's VM attachment (MAP, window, faults, stage ops) as a negotiated extension on the same connection. It runs over the local Unix socket, and over TCP for remote clients and between daemons (the peer log, readers' tails, handoff).
 - **Tenancy and trust:** a daemon serves isolated tenants (grants, memory and disk caps, as in TASK-43 and TASK-94). Encryption and authentication are the infrastructure's (a mesh, WireGuard), which hands the daemon each connection's verified identity; the daemon maps identity to tenant and enforces grants.
 - **Bucket layout:** a fresh layout, no compatibility (there are no existing buckets to keep): leases gain the writer's address, its peer and the renewal time; `members/` and the name mapping are new.
@@ -41,7 +41,7 @@ Settled with the user in a design interview on 2026-10-24. These are decisions, 
 
 Left as parameters, not decisions: the lease time T and the skew bound, the upload-lag bounds, the retention window, and the idle time.
 
-Prior art in the repo: doc-7 (object storage layout, leases, fencing, forks, collection), doc-8 (followers), doc-4 (the device protocol), crates/extent_store, crates/extent_remote, crates/cladefs/src/extentd (wire.rs, the gRPC control API in crates/cladefs/proto).
+Prior art in the repo: doc-7 (object storage layout, leases, fencing, forks, collection), doc-8 (followers), doc-4 (the device protocol), crates/extent_store, crates/extent_remote, crates/cladefs/src/cladefsd (wire.rs, the gRPC control API in crates/cladefs/proto).
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

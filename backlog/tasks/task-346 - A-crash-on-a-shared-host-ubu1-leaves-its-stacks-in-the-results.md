@@ -4,7 +4,7 @@ title: A crash on a shared host (ubu1) leaves its stacks in the results
 status: To Do
 assignee: []
 created_date: '2026-11-11 08:03'
-updated_date: '2026-11-15 11:35'
+updated_date: '2026-11-16 22:53'
 labels:
   - testing
 dependencies: []
@@ -20,7 +20,7 @@ scripts/lib/test-linux-host.sh sets kernel.core_pattern to the run's results and
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A VMM or extentd crash in a run on ubu1 leaves its threads' stacks in RESULTS/cores, without changing kernel.core_pattern
+- [ ] #1 A VMM or cladefsd crash in a run on ubu1 leaves its threads' stacks in RESULTS/cores, without changing kernel.core_pattern
 - [ ] #2 A test proves it with a process made to crash in a run
 <!-- AC:END -->
 

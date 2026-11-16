@@ -54,9 +54,12 @@ esac
 [[ $# -le 1 ]] || usage
 
 # Perl that renames the text it is given, a line or a whole file (-0777), as $ARGV, the file's
-# path, says: a few renames are of one Firecracker file alone.
+# path, says: a few renames are of one Firecracker file alone. First the names TASK-475.1 renamed
+# (scripts/rename-to-cladefsd.sh), which text older than it says, so that they become cladefsd
+# too, not CLADEFS_CLADEFSD.
 # shellcheck disable=SC2016
 rename='
+s/cladefs-extentd/cladefsd/g; s/CLADEFS_EXTENTD/CLADEFSD/g; s/cladefs_extentd/cladefsd/g;
 s/"extentd request"/"cladefsd reqs"/g; s/"extentd control"/"cladefsd ctl"/g;
 s/"extentd metrics"/"cladefsd metric"/g; s/"extentd signals"/"cladefsd signal"/g;
 s/extentd/cladefsd/g; s/Extentd/Cladefsd/g; s/EXTENTD/CLADEFSD/g;
@@ -171,6 +174,8 @@ if [[ $mode == repo ]]; then
     # length-prefixed, which a rename of the text would break.
     git ls-files -z -- '*.pb.go' | xargs -0 -r git rm -qf --
     go/generate.sh
+    # And the hand-written Go, whose longer names may move a column, as scripts/test.sh checks it.
+    gofmt -w go
     git add -A go
     left=$({ git grep -cIE 'extentd|Extentd|EXTENTD' -- "${paths[@]}" || [[ $? == 1 ]]; } |
         awk -F: '{n += $NF} END {print n + 0}')

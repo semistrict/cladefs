@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 12:24'
-updated_date: '2026-11-15 13:31'
+updated_date: '2026-11-16 22:52'
 labels:
   - perf
   - review-2026-11-15
@@ -26,7 +26,7 @@ PRIVATE_MAX_DEFAULT is 1 GiB (crates/virtio_extent/src/config.rs); CopyOnWrite::
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Idle VMs with the default config are started on one host until WINDOW fails, logging pinned bytes and the allowance; and cladefs_extentd_vm_window_private_pages is read after a write burst and five idle minutes
+- [ ] #1 Idle VMs with the default config are started on one host until WINDOW fails, logging pinned bytes and the allowance; and cladefsd_vm_window_private_pages is read after a write burst and five idle minutes
 - [ ] #2 The notes give the measured cost and the workload size at which a customer would feel it; a fix, if needed, is filed as its own task
 <!-- AC:END -->
 

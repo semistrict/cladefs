@@ -3,7 +3,7 @@ id: doc-10
 title: 'Shared volumes: Fxfs volumes over read-only bases'
 type: specification
 created_date: '2026-10-30 09:08'
-updated_date: '2026-11-16 04:15'
+updated_date: '2026-11-16 22:52'
 ---
 # Shared volumes: Fxfs volumes over read-only bases
 
@@ -32,7 +32,7 @@ Ramon's, 2026-10-30 and 2026-10-31:
 | Scope | Any repo, attached at runtime | Repos known at sandbox start, on a second boot device: no runtime attach, no mixing of generations |
 | Reading a base outside the branch's lineage | A device read-through to a pinned fork of the base: one device, one DAX window | A second read-only device, which needs per-extent routing in `dax.c` and is fixed at boot; a multi-parent graft, which changes the lineage, the bucket layout and collection |
 | Tenancy | Public repos in public bases; each tenant's private repos in its own bases; no sharing across tenants otherwise | Public repos only at first |
-| Attach authorization | The sandbox manager alone, through the host control API. The guest cannot ask | The guest asking through the device, with extentd checking grants |
+| Attach authorization | The sandbox manager alone, through the host control API. The guest cannot ask | The guest asking through the device, with cladefsd checking grants |
 | Repos mounted at once | Hundreds per sandbox: opening volumes on first use, expiring idle mounts and constant-cost reads are required | Tens, which would leave those as follow-ups; thousands, which would budget per-volume memory and flush loops too |
 | Moving to a newer generation | Git level first: `git fetch` reaches a new generation's objects through alternates, and `git pull` writes what changed into the writable layers | An in-place swap of base layers now, which stays possible later if measurements justify it |
 | What the feature is | Generic shared volumes, which Git happens to use | A feature that knows of Git |

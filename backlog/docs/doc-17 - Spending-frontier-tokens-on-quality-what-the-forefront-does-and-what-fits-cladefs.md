@@ -5,7 +5,7 @@ title: >-
   cladefs
 type: guide
 created_date: '2026-11-15 12:32'
-updated_date: '2026-11-16 04:14'
+updated_date: '2026-11-16 22:52'
 ---
 Web research of 2026-11-15 (four parallel research agents, ~200 searches and fetches), checked
 against main (36f194bbc). The ranked list in §2 is what to do; §1 is the evidence; §3 what not to
@@ -145,7 +145,7 @@ item 10 is TASK-149.4, filed before.
    Agents write mutants from a list of concerns drawn from the backlog's bug classes, an
    equivalence filter drops no-ops, survivors become tasks under TASK-149 with a killing test.
 8. **Assumptions as assertions on hostile and lifetime paths.** An agent walks virtio request
-   decoding, extentd's codec, the window and uffd paths and dax.c, and writes each "this is safe
+   decoding, cladefsd's codec, the window and uffd paths and dax.c, and writes each "this is safe
    because" as an assertion; fuzzers, the hostile tests, guest/sim and the hunt run with them on.
    Includes structure-aware generators for coverage plateaus in the cargo-fuzz targets.
 9. **Guardrails for agent work, as hooks.** Implementer agents can't edit tests, specs or mutation

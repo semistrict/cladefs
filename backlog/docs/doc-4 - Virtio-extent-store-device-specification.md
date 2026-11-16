@@ -3,7 +3,7 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-16 04:22'
+updated_date: '2026-11-16 22:52'
 ---
 # The virtio extent-store device
 
@@ -493,14 +493,14 @@ is the host's lag, bounded by its configuration (doc-2, requirement 11).
 
 ## When the host's daemon goes
 
-A host's extent daemon (cladefs's `cladefs-extentd`) serves every VM's device on the host; the VMM
+A host's extent daemon (cladefs's `cladefsd`) serves every VM's device on the host; the VMM
 holds nothing of a store itself. If the daemon goes, by a crash, a kill or running out of memory,
 each VM sees it as follows (TASK-50.2):
 
 - **At once:** the device's connection to the daemon closes. Every request waiting fails, as does
   every one made after, with `EIO`; the DAX window's faults are no longer served.
 - **The VM stops.** The VMM is told as the connection closes, and stops the VM, with an exit
-  status of its own (cladefs's Firecracker: 158, `ExtentdLost`), rather than let the guest go on
+  status of its own (cladefs's Firecracker: 158, `CladefsdLost`), rather than let the guest go on
   with a disk whose every request fails. Its host's VM manager sees the VMM exit, and why.
 - **What the guest committed** is what the daemon made local: everything before some barrier
   (see Ordering and durability), as after any crash. A store whose daemon went is opened again by

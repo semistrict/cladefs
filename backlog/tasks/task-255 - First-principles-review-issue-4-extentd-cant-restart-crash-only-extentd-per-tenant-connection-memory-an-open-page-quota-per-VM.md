@@ -1,11 +1,12 @@
 ---
 id: TASK-255
 title: >-
-  First-principles review issue #4: extentd can't restart (crash-only extentd,
+  First-principles review issue #4: cladefsd can't restart (crash-only cladefsd,
   per-tenant connection memory, an open-page quota per VM)
 status: To Do
 assignee: []
 created_date: '2026-11-08 10:18'
+updated_date: '2026-11-16 22:53'
 labels:
   - task
 dependencies: []

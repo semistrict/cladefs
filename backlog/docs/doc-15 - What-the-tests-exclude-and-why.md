@@ -3,7 +3,7 @@ id: doc-15
 title: 'What the tests exclude, and why'
 type: specification
 created_date: '2026-11-07 13:38'
-updated_date: '2026-11-16 04:14'
+updated_date: '2026-11-16 22:52'
 ---
 # What the tests exclude, and why (TASK-149.20, 2026-11-07)
 
@@ -21,7 +21,7 @@ Verdicts: **kept** (still justified, reason named), **fixed** (stale: runs again
 | extent_bucket `object_bucket::tests::rustfs`, cladefs `rustfs_branches_survive_their_hosts_loss`, `rustfs_forks_and_takes_branches`, `rustfs_places_and_syncs_stores` | Need an S3 server | kept, reason added; **fixed**: nothing ran them. `rustfs_places_and_syncs_stores` failed: a real bug, `cladefsctl take DIR CAP BRANCH TOKEN` of a new copy took the branch's lease with the host's token before the placement's, so a later placement couldn't take a branch over (`ESTALE`); fixed in `ExtentStore::take_with`. The two branch tests now also run in every suite run on a file bucket; CI's new object-stores job runs the S3 ones against RustFS 1.0.4 in a container (scripts/test-rustfs.sh, which ran `scripts/test.sh` with `--run-ignored only`, every part, and needed a RustFS built from source) |
 | extent_bucket `object_bucket::tests::azurite` | Needs Azurite | kept, reason added; **fixed**: CI's object-stores job runs it (scripts/test-azurite.sh, which took a podman installed but not running, and whose readiness probe gave up on an empty reply) |
 | extent_bucket `object_bucket::tests::gcs` | Needs a GCS bucket and credentials | kept, reason added; **filed** TASK-149.20.5 (runs nowhere) |
-| cladefs `import::child_dies_importing`, extentd `child_maps_an_extent`, `child_changes_its_window`, `child_leaves_its_socket_to_a_child`, `child_opens_a_store` | Child processes of other tests | kept (named already) |
+| cladefs `import::child_dies_importing`, cladefsd `child_maps_an_extent`, `child_changes_its_window`, `child_leaves_its_socket_to_a_child`, `child_opens_a_store` | Child processes of other tests | kept (named already) |
 | fuchsia-async `test_support` ×2 (should_panic under LSAN, fxbug 42138715), `runtime` cfg_attr(asan) ignore; fuchsia_merkle `test_very_large_verification`; fxfs `test_seek_is_log_n_complexity` (flaky upstream) | Upstream Fuchsia's, in Fuchsia's files | kept: upstream's ways (the check exempts Fuchsia's files) |
 
 ## Filters, cfg gates, parts
@@ -33,7 +33,7 @@ Verdicts: **kept** (still justified, reason named), **fixed** (stale: runs again
 | shuttle part: extent_store, physmem, cladefs, follower, follower_sim | Every crate whose Shuttle tests exist; fuchsia-async, fuchsia-sync and fxfs have the feature as plumbing alone | kept |
 | hunt.yml's `-E` filters | Hunting jobs aim at the model and corrupt tests, and one test's seeds | kept |
 | No nextest config, no default-filter | — | — |
-| `#![cfg(target_os = "linux")]` on 12 cladefs integration tests (extentd, FUSE, seccomp…) | Linux-only features; CI runs Linux | kept |
+| `#![cfg(target_os = "linux")]` on 12 cladefs integration tests (cladefsd, FUSE, seccomp…) | Linux-only features; CI runs Linux | kept |
 | macOS-only code and tests (physmem's physmap, extent_store dir.rs syncs, extent_bucket cache, storage io.rs) | CI runs no macOS | **filed** TASK-149.20.2 |
 | Features gating tests: `shuttle` (its part), `audit`, `failpoints`, `testing` (enabled by dev-dependencies); `migration`, `vdso_next`, `kernel`, `tracing` (upstream's) | — | kept |
 | .cargo/mutants.toml excludes (cladefs-gets, shuttle test modules, import's fixtures) | Measurement program; test code cargo-mutants doesn't see | kept |
