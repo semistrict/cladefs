@@ -243,7 +243,7 @@ fn crashed_round(round: u64, dir: MemDir) -> (MemDir, Vec<Model>, usize, StdRng)
 /// What a directory holds: each file's path, with its length and a hash of its contents; and each
 /// directory's, with neither. cladefs: of a framed file's data, opened under the store's keys
 /// (`UNKEPT_DEK`'s); of no other file's, its length alone: every raw file, log and framed object is
-/// sealed under salts drawn at random (TASK-411.28), so their bytes differ from run to run, but not
+/// encrypted under salts drawn at random (TASK-411.28), so their bytes differ from run to run, but not
 /// their lengths, nor what they hold.
 type Digest = BTreeMap<String, Option<(u64, u64)>>;
 

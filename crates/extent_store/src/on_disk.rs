@@ -3,13 +3,13 @@
 // found in the LICENSE file.
 
 //! cladefs: what of a store's directory is in the clear, as a reader holding no key tells
-//! (TASK-411.15): for tests that a sealed store leaves none of its files so, the guest tests'
+//! (TASK-411.15): for tests that an encrypted store leaves none of its files so, the guest tests'
 //! harness's among them, which knows nothing of a store's directory but this.
 //!
-//! A store's framed files, its closed segments' and its large extents', say they are sealed in
-//! their trailers (`extent_frame::Seal`), and its segments' logs are headed [`LOG_MAGIC`]: a framed
-//! file whose trailer's seal is of kind 0 (`extent_frame::in_the_clear`), and a log headed
-//! [`CLEAR_LOG_MAGIC`], are in the clear, as stores wrote them before every store was sealed
+//! A store's framed files, its closed segments' and its large extents', say they are encrypted in
+//! their trailers (`extent_frame::Encryption`), and its segments' logs are headed [`LOG_MAGIC`]: a framed
+//! file whose trailer's encrypt is of kind 0 (`extent_frame::in_the_clear`), and a log headed
+//! [`CLEAR_LOG_MAGIC`], are in the clear, as stores wrote them before every store was encrypted
 //! (TASK-411.28), which no reader reads now. Raw files (open segments, open large extents) say nothing:
 //! encrypted, they are as random bytes (TASK-411.5), which only a search for what was written in
 //! them tells from the clear.
@@ -21,7 +21,7 @@ use extent_frame::segment::Branch;
 use extent_frame::{Frame, TRAILER};
 use std::io;
 
-/// What a segment's log in the clear was headed (TASK-411.5), before every store was sealed
+/// What a segment's log in the clear was headed (TASK-411.5), before every store was encrypted
 /// (TASK-411.28): no segment's log now.
 pub const CLEAR_LOG_MAGIC: &[u8; 8] = b"FXLOG\0\0\x02";
 

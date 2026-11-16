@@ -53,7 +53,7 @@ fn pace() -> Pace {
     PACE
 }
 
-/// A collector of `options`, which compacts the objects of images' cells, every one sealed, under
+/// A collector of `options`, which compacts the objects of images' cells, every one encrypted, under
 /// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, it would compact none.
 fn new_collector(options: Options) -> Collector {
     Collector::new(options).kms(Some(crate::remote::kms().inner().clone()))
@@ -224,11 +224,12 @@ fn pass(collector: &mut Collector, bucket: &Bucket) -> Report {
                 locked,
                 uncompacted,
             } = report;
-            // Sealed objects it leaves uncompacted, its collector having no KMS (TASK-411.6).
+            // Encrypted objects it leaves uncompacted, its collector having no KMS (TASK-411.6).
             log::info!(
                 "cladefs: an image's bucket collected: deleted {deleted} ({deleted_bytes} bytes), \
                  compacted {compacted} ({compacted_bytes} bytes), retired {retired} references, \
-                 {skipped} cells unchanged, {uncompacted} sealed left uncompacted in {locked} cells"
+                 {skipped} cells unchanged, {uncompacted} encrypted left uncompacted in {locked} \
+                 cells"
             );
             return report;
         }

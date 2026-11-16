@@ -64,9 +64,9 @@ pub struct Sweep {
     /// or all of them the sweep's own task's, one at a time between their requests (tests, a
     /// runtime of one thread).
     pub spawned: bool,
-    /// cladefs: the KMS its passes unwrap their cells' KEKs through to compact what is sealed, if
-    /// any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not to
-    /// be had at a pass before is now ([`Heard`], TASK-411.13).
+    /// cladefs: the KMS its passes unwrap their cells' KEKs through to compact what is encrypted,
+    /// if any ([`Collector::kms`], TASK-411.6); and ask, once a tenant a sweep, whether a KEK not
+    /// to be had at a pass before is now ([`Heard`], TASK-411.13).
     pub kms: Option<extent_keys::kms::Shared>,
 }
 
@@ -437,8 +437,9 @@ mod tests {
                 commits.push(Commit { tag: 4, frees: vec![large], ..Commit::default() });
             }
             for commit in commits {
-                let segment =
-                    Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
+                let segment = Batch::from(commit)
+                    .close(&mut writer.chain())
+                    .frame(writer.keys().encrypting());
                 let seq = writer.add_segment(segment).unwrap();
                 writer.upload(seq).await.unwrap();
                 writer.acknowledge().await.unwrap();

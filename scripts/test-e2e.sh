@@ -38,7 +38,7 @@
 # The guests' extent stores are served by cladefs's extent daemon, which this
 # starts, as CLADEFS_EXTENTD tells the tests; its control API is beside it, at
 # extentd.control, in a directory of their own under /tmp. CLADEFS_EXTENTD_MEMORY
-# caps its memory, in bytes. cladefs: every store of the run is sealed, under a local KMS of the
+# caps its memory, in bytes. cladefs: every store of the run is encrypted, under a local KMS of the
 # run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
 # below). LIBCLANG_PATH names libclang's directory where
 # llvm-config cannot, and DAX needs access to /dev/userfaultfd (see the README).
@@ -356,15 +356,15 @@ sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)
 chmod 755 "$sockets"
 socket="$sockets/extentd.sock"
 control="$sockets/extentd.control"
-# cladefs: the run's stores sealed, as production's tenants' are (TASK-411.15, doc-16): the guest
+# cladefs: the run's stores encrypted, as production's tenants' are (TASK-411.15, doc-16): the guest
 # tests run encrypted only, plaintext covered by the host's suites. A local KMS, beside the
 # sockets, gone with them, not in the results, which runs keep, holding a KEK for every tenant the
 # cases use, the default tenant (0) among them (the runner's `kms`); CLADEFS_KMS names it to every
 # process of the run, the daemon, the cases' own daemons, cladefsctl, cladefs-gc and FUSE mounts, unless
-# it names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_SEALED has the
-# runner check each case's stores, once it passed, holding no key (test_cases::sealed): its cells'
-# KEKs, its records' DEKs, its objects' and files' seals, and no known plaintext anywhere; and the
-# run's own bucket and part cache at its end. Every store is sealed since TASK-411.28: its daemon,
+# it names one already, whose tenants' KEKs are the caller's to make. CLADEFS_E2E_ENCRYPTED has the
+# runner check each case's stores, once it passed, holding no key (test_cases::encrypted): its cells'
+# KEKs, its records' DEKs, its objects' and files' encrypts, and no known plaintext anywhere; and the
+# run's own bucket and part cache at its end. Every store is encrypted since TASK-411.28: its daemon,
 # cladefsctl, cladefs-gc, FUSE mounts and runner refuse to start without a KMS. A daemon and harness
 # both built before encryption (an A/B's old side, CLADEFS_E2E_PREBUILT, CLADEFS_E2E_ROOT, of an old
 # pin) run in the clear, unchecked, saying so; one of them old and the other not is refused, as
@@ -377,7 +377,7 @@ if [[ -n $old_daemon && -n $old_runner ]]; then
     echo "clear: $extentd_bin and $runner predate encryption (no CLADEFS_KMS, no \`runner kms\`)" \
         > "$results/encryption.txt"
 elif [[ -n $old_daemon$old_runner ]]; then
-    echo "$extentd_bin and $runner: one predates encryption, the other seals every store" \
+    echo "$extentd_bin and $runner: one predates encryption, the other encrypts every store" \
         "(TASK-411.28): run a daemon and a harness of one pin" >&2
     exit 1
 else
@@ -385,8 +385,8 @@ else
         "$runner" kms "$kms_dir"
         export CLADEFS_KMS="local://$kms_dir"
     fi
-    export CLADEFS_E2E_SEALED=1
-    echo "sealed: $CLADEFS_KMS" > "$results/encryption.txt"
+    export CLADEFS_E2E_ENCRYPTED=1
+    echo "encrypted: $CLADEFS_KMS" > "$results/encryption.txt"
 fi
 echo "encryption: $(cat "$results/encryption.txt")" >&2
 # A host keeps stores in a bucket, CLADEFS_EXTENTD_REMOTE's or a file bucket in memory, on tmpfs,
@@ -481,13 +481,13 @@ for test in "${tests[@]}"; do
         echo "$test: $rounds rounds passed" >&2
     fi
 done
-# cladefs: the run's own bucket, whole, and its part cache, sealed and holding no known plaintext,
+# cladefs: the run's own bucket, whole, and its part cache, encrypted and holding no known plaintext,
 # as each case's stores were (TASK-411.15).
-if [[ -n ${CLADEFS_E2E_SEALED:-} ]] &&
-    ! "$runner" sealed --bucket "${CLADEFS_EXTENTD_REMOTE:-file://$bucket_dir}" \
-        ${cache_dir:+"$cache_dir"} 2> "$results/sealed.txt"; then
-    echo "the run's bucket or part cache isn't sealed: see $results/sealed.txt; the first:" >&2
-    sed -n 1,3p "$results/sealed.txt" >&2
+if [[ -n ${CLADEFS_E2E_ENCRYPTED:-} ]] &&
+    ! "$runner" encrypted --bucket "${CLADEFS_EXTENTD_REMOTE:-file://$bucket_dir}" \
+        ${cache_dir:+"$cache_dir"} 2> "$results/encrypted.txt"; then
+    echo "the run's bucket or part cache isn't encrypted: see $results/encrypted.txt; the first:" >&2
+    sed -n 1,3p "$results/encrypted.txt" >&2
     status=1
 fi
 if [[ $seccomp == log ]]; then

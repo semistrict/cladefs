@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what a fork into a new cell costs, sealed, as every cell is (TASK-411.4, backlog
+//! cladefs's own: what a fork into a new cell costs, encrypted, as every cell is (TASK-411.4, backlog
 //! doc-16): N forks (200) of a store of 64 extents of 64 KiB, each into a new cell of its tenant's,
 //! as every fork a host makes is, timed each, on a memory bucket of the process's, so that what is
 //! timed is the host's own work, the protocol's and the keys'; and the bucket's requests each fork
@@ -14,7 +14,7 @@
 //! ```
 //!
 //! Under a KMS of its own (a `local:///` one, `CLADEFS_KMS`, keeping tenant 5's KEK), it forks a
-//! store of tenant 5, sealed, whose forks keep the DEKs they inherit rewrapped under their own
+//! store of tenant 5, encrypted, whose forks keep the DEKs they inherit rewrapped under their own
 //! cells' KEKs, taken from the host's pool. (Forks in the clear, before TASK-411.28: an old pin's,
 //! `--no-kms` there.) Each request
 //! of the bucket's waits `CLADEFS_REMOTE_LATENCY_MS` more, if set, as a bucket elsewhere's round
@@ -41,7 +41,7 @@ fn main() {
         std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
         std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display()));
     }
-    let tenants: &[(u64, &str)] = &[(5, "sealed")];
+    let tenants: &[(u64, &str)] = &[(5, "encrypted")];
     println!(
         "{forks} forks into new cells of a store of {EXTENTS} extents of {} KiB",
         EXTENT >> 10

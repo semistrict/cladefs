@@ -16,14 +16,14 @@ use storage_device::ExtentId;
 
 pub use extent_frame::table::BLOCK;
 
-/// The checkpoint of `state`. cladefs: authenticated, not sealed, under the DEK `sealing` gives:
+/// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting` gives:
 /// metadata, which the collector reads holding no key (doc-16, TASK-411.3).
-pub fn encode(state: &State, sealing: layout::Sealing<'_>) -> Vec<u8> {
+pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
     let entries = (state.extents.iter()).map(|(extent, location)| {
         ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
     });
-    table::encode(entries, layout::encode(&rest), sealing)
+    table::encode(entries, layout::encode(&rest), encrypting)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
@@ -38,7 +38,7 @@ pub fn decode(bytes: &[u8]) -> Result<State, Error> {
 }
 
 /// cladefs: the state a checkpoint holds, read by a reader holding `keys`: checked against its tags
-/// and MACs if they hold its key, and refused if they hold its branch sealed and not its key
+/// and MACs if they hold its key, and refused if they hold its branch encrypted and not its key
 /// (TASK-411.3).
 pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State, Error> {
     let (footer, entries) = table::decode(bytes, keys)?;
@@ -96,9 +96,9 @@ mod tests {
     use std::future::Future;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// How the tests' checkpoints are authenticated: under the tests' DEK (`testing::sealing`).
-    fn sealing() -> layout::Sealing<'static> {
-        crate::testing::sealing(test_branch(1))
+    /// How the tests' checkpoints are authenticated: under the tests' DEK (`testing::encrypting`).
+    fn encrypting() -> layout::EncryptionKey<'static> {
+        crate::testing::encrypting(test_branch(1))
     }
 
     fn state(extents: u64) -> State {
@@ -123,9 +123,9 @@ mod tests {
     fn checkpoints_hold_states() {
         for extents in [0, 1, 1819, 1820, 1821, 10_000] {
             let state = state(extents);
-            assert_eq!(decode(&encode(&state, sealing())).unwrap(), state);
+            assert_eq!(decode(&encode(&state, encrypting())).unwrap(), state);
         }
-        let mut bytes = encode(&state(3000), sealing());
+        let mut bytes = encode(&state(3000), encrypting());
         bytes[100] ^= 1;
         assert!(decode(&bytes).is_err());
     }
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn tables_hold_the_rest_of_the_state() {
         let state = state(3000);
-        let bytes = encode(&state, sealing());
+        let bytes = encode(&state, encrypting());
         let footer = extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap();
         let table = Table::decode(footer).unwrap();
         assert_eq!(*table.state(), State { extents: Default::default(), ..state });
@@ -244,7 +244,7 @@ mod tests {
         use crate::fetch::{Budget, Fetcher, Limits, Memory};
         use crate::object::TAIL;
         let state = state_in(2_000_000, 250);
-        let bytes = encode(&state, sealing());
+        let bytes = encode(&state, encrypting());
         let key = layout::checkpoint(test_branch(3), 7, 1);
         let bucket = Counting {
             bucket: Direct(SimBucket::new()),

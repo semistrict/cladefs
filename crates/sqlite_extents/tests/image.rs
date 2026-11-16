@@ -13,7 +13,7 @@ use sqlite_extents::{Options, Registration, Volume, register};
 use std::path::Path;
 use std::sync::Arc;
 
-/// A database on an image survives closing; and, every store sealed (TASK-411.28), under the
+/// A database on an image survives closing; and, every store encrypted (TASK-411.28), under the
 /// tests' KMS here, no file of the image, its store's nor its bucket's, holds its data in the clear.
 #[test]
 fn a_database_on_an_image_survives_closing() {
@@ -24,13 +24,13 @@ fn a_database_on_an_image_survives_closing() {
 /// KMS the host names survives closing, and no file of the image, its store's nor its bucket's,
 /// holds its data in the clear.
 #[test]
-fn a_sealed_database_on_an_image_survives_closing() {
+fn an_encrypted_database_on_an_image_survives_closing() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     // The tenant of the images `Storage` makes: the common tenant's, 0.
     kms.create(0).unwrap();
     cladefs::remote::set_kms(Arc::new(kms)).unwrap();
-    assert_eq!(survives_closing("sealed"), Vec::<String>::new());
+    assert_eq!(survives_closing("encrypted"), Vec::<String>::new());
 }
 
 /// Data that compresses not, which a file holding it in the clear holds as it is.

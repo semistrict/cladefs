@@ -13,7 +13,7 @@
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
 //! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
 //! (`CLADEFS_EXTENTD_REMOTE`), made on each tenant's first use (TASK-411.27); else none, which every
-//! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is sealed.
+//! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
 use extent_remote::bucket_kms::BucketKms;
@@ -97,11 +97,11 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
         Failure::Remote(Error::Kms(_)) => Some(Errno::EACCES),
-        // cladefs: a sealed branch inherited by one whose record holds not its keys (TASK-411.4).
+        // cladefs: an encrypted branch inherited by one whose record holds not its keys (TASK-411.4).
         Failure::Remote(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Remote(Error::Format { .. }) => Some(Errno::ENOTSUP),
-        // The collector's alone (TASK-395.5). cladefs: data sealed under a key the host doesn't
+        // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
         Failure::Remote(
             Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
@@ -157,7 +157,7 @@ fn host_keys() -> &'static Result<HostKeys, String> {
         Ok(chosen) => {
             Ok(HostKeys { kms: host_kms(chosen.shared()), bucket: chosen.bucket().cloned() })
         }
-        // cladefs: this crate's own unit tests, given no KMS, seal under the tests' KMS, each
+        // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
         // tenant's KEK made on its first use, which the tests' readers share
         // (`extent_remote::keys::testing`, TASK-411.28).
         #[cfg(test)]
@@ -165,8 +165,8 @@ fn host_keys() -> &'static Result<HostKeys, String> {
             let kms = extent_remote::keys::testing::kms();
             Ok(HostKeys { kms: host_kms(kms), bucket: None })
         }
-        // cladefs: its integration tests, and the processes they start, given no KMS, seal under
-        // the tests' KMS, every tenant's KEK one known key (`testing::sealed`, TASK-411.28).
+        // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
+        // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
         #[cfg(all(feature = "tests-kms", not(test)))]
         Err(why) if why == extent_remote::bucket_kms::no_kms() => Ok(testing::host_keys()),
         Err(why) => {
@@ -207,20 +207,20 @@ pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
 /// cladefs: the host's KMS ([`host_keys`]).
 static KMS: std::sync::OnceLock<Result<HostKeys, String>> = std::sync::OnceLock::new();
 
-/// cladefs: the KMS tests' and benches' processes seal under, their environment naming none
-/// (TASK-411.28): every store is sealed, and a process given no KMS opens none.
+/// cladefs: the KMS tests' and benches' processes encrypt under, their environment naming none
+/// (TASK-411.28): every store is encrypted, and a process given no KMS opens none.
 #[cfg(any(test, feature = "testing"))]
 pub mod testing {
     use super::{HostKeys, host_kms};
     use std::sync::Arc;
 
-    /// Has this process's stores seal under the tests' KMS, every tenant's KEK one known key
+    /// Has this process's stores encrypt under the tests' KMS, every tenant's KEK one known key
     /// (`extent_keys::testing::KnownKms`), unless its environment names a KMS (`CLADEFS_KMS`) or
     /// gives a master key (`CLADEFS_MASTER_KEY`, `CLADEFS_MASTER_KEY_FILE`): a bench's first step,
     /// which measures a host's work, a real host's KMS adding its calls. cladefs's tests have it
     /// whatever they do, and the processes they start (the `tests-kms` feature). Before any store
     /// opens.
-    pub fn sealed() {
+    pub fn encrypted() {
         let named = ["CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE"]
             .into_iter()
             .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
@@ -264,7 +264,7 @@ pub struct Forgotten {
 /// memory: a fenced store's own ring, and its open segment's key, until whoever holds it closes it
 /// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
 /// the pages of extents other stores hold too (a shared point's clone, a public base). On disk,
-/// everything of the scope's is as its keys sealed it: open segments, write-ahead logs, the part
+/// everything of the scope's is as its keys encrypted it: open segments, write-ahead logs, the part
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     let fenced = format!("as {scope}'s keys are forgotten: {why}");
@@ -726,7 +726,7 @@ mod tests {
         for tag in [1, 2] {
             let commit = Commit { tag, ..Commit::default() };
             let objects =
-                Batch::from(commit).close(&mut before.chain()).frame(before.keys().sealing());
+                Batch::from(commit).close(&mut before.chain()).frame(before.keys().encrypting());
             seqs.push(before.add_segment(objects).unwrap());
         }
         // A store takes the branch over, opening, its fence after the writer's.
@@ -2736,7 +2736,7 @@ mod tests {
         let cell = sizes[&layout::cell(branch.cell)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
         // holder's as it was and naming the branch (TASK-364), and read before for the KEK its
-        // recovery unwraps the branch's DEK under, every branch sealed (TASK-411.28, TASK-460);
+        // recovery unwraps the branch's DEK under, every branch encrypted (TASK-411.28, TASK-460);
         // the head, read, then swapped to take it. The segments' tails it names, all at once: no
         // listing (TASK-407).
         assert_eq!(
@@ -3123,11 +3123,11 @@ mod tests {
     /// TASK-411.4: `points_fork_into_other_tenants_cells_while_shared`, both tenants' KEKs in the
     /// host's KMS: the point's clone into the other tenant's cell keeps the DEK it inherits
     /// rewrapped under its own cell's KEK. The point deleted, the collector run (compacting
-    /// nothing: compaction of sealed objects is TASK-411.6's), and the point's tenant's KEK
+    /// nothing: compaction of encrypted objects is TASK-411.6's), and the point's tenant's KEK
     /// destroyed, the host told so: the clone still reads all it inherited, and the source forks
     /// no more.
     #[test]
-    fn sealed_points_fork_into_other_tenants_cells_while_shared() {
+    fn encrypted_points_fork_into_other_tenants_cells_while_shared() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {
@@ -3190,7 +3190,7 @@ mod tests {
 
     /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS has forgotten (answering
     /// as for a tenant that never had one), and a tenant that never had one, get no store opened
-    /// here, sealed or in the clear: `EACCES`, the cell not made.
+    /// here, encrypted or in the clear: `EACCES`, the cell not made.
     #[test]
     fn tenants_with_no_kek_in_the_kms_open_no_store() {
         let keys = tempfile::tempdir().unwrap();
@@ -3309,12 +3309,12 @@ mod tests {
     }
 
     /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its
-    /// tenants' KEKs in its bucket: every tenant's store is sealed, its KEK made on its first use
+    /// tenants' KEKs in its bucket: every tenant's store is encrypted, its KEK made on its first use
     /// at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, fences its store
     /// (`EACCES`), which opens no more, nor any new store of the tenant's, nothing made; another
     /// tenant's reads on. Shredding it again finds it so.
     #[test]
-    fn hosts_given_a_master_key_alone_seal_every_store_under_the_bucket_kms() {
+    fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
         use extent_remote::bucket_kms::Destroyed;
         use extent_remote::layout;
         let url = "memory:///bucket-kms";

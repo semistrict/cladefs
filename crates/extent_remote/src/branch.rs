@@ -796,7 +796,7 @@ mod tests {
             let forking = Batch::from(Commit { tag: 1, ..Commit::default() });
             let objects = forking
                 .fork(owned(test_branch(3), 0x33), &mut parent.chain())
-                .frame(parent.keys().sealing());
+                .frame(parent.keys().encrypting());
             let at = parent.add_segment(objects).unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
@@ -1314,7 +1314,7 @@ mod tests {
                 .add_segment(
                     forking
                         .fork(child(test_branch(2)), &mut parent.chain())
-                        .frame(parent.keys().sealing()),
+                        .frame(parent.keys().encrypting()),
                 )
                 .unwrap();
             parent.upload(at).await.unwrap();
@@ -1346,7 +1346,9 @@ mod tests {
             for tag in 1..=3 {
                 let commit = Batch::from(Commit { tag, ..Commit::default() });
                 let seq = parent
-                    .add_segment(commit.close(&mut parent.chain()).frame(parent.keys().sealing()))
+                    .add_segment(
+                        commit.close(&mut parent.chain()).frame(parent.keys().encrypting()),
+                    )
                     .unwrap();
                 parent.upload(seq).await.unwrap();
                 parent.acknowledge().await.unwrap();
@@ -1436,14 +1438,14 @@ mod tests {
                 .add_segment(
                     forking
                         .fork(child(test_branch(2)), &mut parent.chain())
-                        .frame(parent.keys().sealing()),
+                        .frame(parent.keys().encrypting()),
                 )
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
             let freeing = Batch::from(Commit { tag: 2, frees: vec![extent], ..Commit::default() });
             let seq = parent
-                .add_segment(freeing.close(&mut parent.chain()).frame(parent.keys().sealing()))
+                .add_segment(freeing.close(&mut parent.chain()).frame(parent.keys().encrypting()))
                 .unwrap();
             parent.upload(seq).await.unwrap();
             parent.acknowledge().await.unwrap();

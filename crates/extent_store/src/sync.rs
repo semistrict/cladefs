@@ -15,7 +15,7 @@
 #[cfg(feature = "shuttle")]
 pub(crate) use shuttle::sync::{Condvar, Mutex, MutexGuard};
 
-/// cladefs: the salt of a new raw file (`raw::Sealer::new`, TASK-411.5): drawn from the system's
+/// cladefs: the salt of a new raw file (`raw::RawEncryption::new`, TASK-411.5): drawn from the system's
 /// generator; under Shuttle, from its generator, seeded as its schedule is, so that a test's run
 /// is a function of its seed (tests/shuttle/crash.rs). What a crash leaves of a raw file unwritten,
 /// a page the cache held dirty, reads as the decryption of zeros under the file's key, as unlike

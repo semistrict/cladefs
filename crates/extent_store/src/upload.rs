@@ -92,8 +92,8 @@ macro_rules! failing {
 /// bytes, [`UPLOAD_BYTES`], so that a host whose stores are far behind holds no more than these
 /// at once, whatever their number (TASK-79.19), and in number.
 ///
-/// cladefs: and the keys it seals and reads under (TASK-411.3): its KMS, if it has one, and the keys
-/// its fetchers share, which each store's are held in while it is open.
+/// cladefs: and the keys it encrypts and reads under (TASK-411.3): its KMS, if it has one, and the
+/// keys its fetchers share, which each store's are held in while it is open.
 #[derive(Clone)]
 pub struct Runtime {
     pub handle: tokio::runtime::Handle,
@@ -130,7 +130,7 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
 ///
 /// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). A sealed branch's forks to
+/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). An encrypted branch's forks to
 /// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
 /// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
@@ -716,7 +716,7 @@ impl<D: Dir> Drop for Remote<D> {
 
 impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
-    /// `clock`: started by [`Shared::run`]. cladefs: sealing and reading under `keys`, the host's
+    /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the host's
     /// (TASK-411.3).
     pub(crate) fn new(
         options: Options,
@@ -1084,7 +1084,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         // on, under the name its description gives it unless the cell names its branch already:
         // all in one compare-and-swap of the cell's object, a read alone when nothing changes. Not
         // a point's, which no writer takes, and any number of hosts open at once. cladefs: a cell
-        // made gets a KEK, wrapped by its tenant's ahead: every cell is sealed (TASK-411.28); one
+        // made gets a KEK, wrapped by its tenant's ahead: every cell is encrypted (TASK-411.28); one
         // of a branch with DEKs is there already (TASK-411.3).
         let volume = recovering.volume().map(|volume| {
             (volume.name.as_str(), cell::Volume { branch: branch.id, kind: volume.kind })
@@ -1214,7 +1214,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let recovering =
             extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
         let recovered = recovering.await?;
-        // cladefs: its store's open segment, which nothing writes, sealed as every store's is
+        // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
         // (TASK-411.28).
         let keys = keys.for_point(branch);
         let _ = self.point.set(Point { branch, origin });

@@ -1565,7 +1565,7 @@ pub(crate) mod tests {
     fn add<B: Bucket>(writer: &Writer<B>, commit: Commit) -> u64 {
         writer
             .add_segment(
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing()),
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting()),
             )
             .unwrap()
     }
@@ -1589,7 +1589,7 @@ pub(crate) mod tests {
         assert_eq!(first.acknowledge().await, Ok(Some(seq)));
         let forking = Batch::default()
             .fork(crate::layout::child(test_branch(child)), &mut first.chain())
-            .frame(first.keys().sealing());
+            .frame(first.keys().encrypting());
         let fork = first.add_segment(forking).unwrap();
         first.upload(fork).await.unwrap();
         first.acknowledge().await.unwrap();

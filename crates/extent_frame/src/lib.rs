@@ -7,19 +7,19 @@
 //! no smaller, at an offset that is a multiple of [`ALIGN`]; then its footer; then a table of where
 //! each part is stored, its stored length, the CRC32C of its stored bytes, its encoding and its
 //! tag; then a [`TRAILER`] of the lengths of the data, the parts stored and the footer, the CRC of
-//! the footer, the object's [`Seal`], the MACs of its footer and of its table, and the CRC of its
-//! table. A store's closed segments and sealed extents are framed so, as are the objects a branch
-//! keeps in object storage: a reader reads and decompresses only the parts it needs, each checked
-//! against its CRC before it is decompressed.
+//! the footer, the object's [`Encryption`], the MACs of its footer and of its table, and the CRC of
+//! its table. A store's closed segments and sealed extents are framed so, as are the objects a
+//! branch keeps in object storage: a reader reads and decompresses only the parts it needs, each
+//! checked against its CRC before it is decompressed.
 //!
-//! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). Every object is sealed, or, metadata,
+//! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). Every object is encrypted, or, metadata,
 //! authenticated, under its branch's DEK, as its trailer says: none is in the clear (TASK-411.28),
-//! a trailer saying so corrupt. Sealed, each of its parts is compressed first, then sealed
+//! a trailer saying so corrupt. Encrypted, each of its parts is compressed first, then encrypted
 //! with AES-256-GCM under a subkey of the object's own: its branch's DEK's, of the generation its
 //! trailer names, derived with a salt drawn at random for the object and kept in its trailer
 //! ([`Secret::derive`]); the nonce is the part's index, and the associated data its index,
 //! encoding and lengths. The table's entry holds the part's tag; the CRC stays, over the bytes
-//! stored, sealed, so that a reader holding no key, the collector, checks them as before, and a
+//! stored, encrypted, so that a reader holding no key, the collector, checks them as before, and a
 //! part corrupt is told from one under another key. The footer, the table and the trailer stay in
 //! the clear, authenticated by HMAC-SHA256 under a second subkey from the same salt, which a
 //! reader holding the key checks ([`Keys`]), and one holding none does not.
@@ -35,17 +35,18 @@
 //! number and epoch, `segment::Footer`).
 //!
 //! A branch's checkpoints, locally and in object storage, are such objects: tables of where its
-//! extents are ([`table`]). cladefs: authenticated, not sealed, under their branch's DEK (TASK-411.3,
-//! [`Seal::Authenticated`]): metadata, which the collector reads holding no key (doc-16, What is
-//! encrypted), each part's tag a GMAC of its stored bytes, which a reader holding the key checks.
+//! extents are ([`table`]). cladefs: authenticated, not encrypted, under their branch's DEK
+//! (TASK-411.3, [`Encryption::Authenticated`]): metadata, which the collector reads holding no key
+//! (doc-16, What is encrypted), each part's tag a GMAC of its stored bytes, which a reader holding
+//! the key checks.
 //!
-//! cladefs: no object is in the clear (TASK-411.28): a trailer whose seal is of kind 0, as one whose
-//! seal, MACs and tags are zeroed, is corrupt to every reader, holding keys or none. (Before, a
-//! cell with no KEK wrote in the clear, and a reader of a sealed branch refused its objects in the
-//! clear, TASK-411.3: the trailer's seal is not authenticated, and one who can write the bucket
-//! could otherwise zero an object's seal, MACs and tags, and have it read as its branch's.)
+//! cladefs: no object is in the clear (TASK-411.28): a trailer whose encrypt is of kind 0, as one whose
+//! encrypt, MACs and tags are zeroed, is corrupt to every reader, holding keys or none. (Before, a
+//! cell with no KEK wrote in the clear, and a reader of an encrypted branch refused its objects in the
+//! clear, TASK-411.3: the trailer's encrypt is not authenticated, and one who can write the bucket
+//! could otherwise zero an object's encrypt, MACs and tags, and have it read as its branch's.)
 //!
-//! cladefs: an object framed in place from a sealed store's raw file ([`Seal::Sectors`],
+//! cladefs: an object framed in place from an encrypted store's raw file ([`Encryption::Sectors`],
 //! TASK-411.23): every part stored raw, as its raw file holds it, AES-256-XTS a sector at a time
 //! ([`SECTOR`]), the sector's place in the object its tweak, under the raw file's own key, which
 //! the trailer names the DEK and salt of ([`ObjectKey::sectors`]); each part tagged, its tag the
@@ -53,8 +54,8 @@
 //! same DEK and salt, of its index, encoding and lengths and its stored bytes: encrypt-then-MAC, so
 //! that a reader holding the key checks a part before it decrypts it, and one holding none checks
 //! its CRC, as for any object. Framing a segment or a large extent in place so writes none of its
-//! data again, sealed as in the clear (TASK-310). Such an object's parts are all raw and whole
-//! sectors; one that compresses is framed in a copy, sealed with AES-GCM as above: no object mixes
+//! data again, encrypted as in the clear (TASK-310). Such an object's parts are all raw and whole
+//! sectors; one that compresses is framed in a copy, encrypted with AES-GCM as above: no object mixes
 //! the two.
 
 pub mod segment;
@@ -83,16 +84,16 @@ const _: () = assert!(ALIGN.is_multiple_of(SECTOR as u64) && PART.is_multiple_of
 
 /// The bytes of the table for each part: its offset, stored length, CRC32C and encoding, and its
 /// tag. cladefs: one size for every kind of object (TASK-411.2), so that where a table is, and how a
-/// reader of a suffix finds it, never depends on the seal its trailer names.
+/// reader of a suffix finds it, never depends on the encrypt its trailer names.
 pub const ENTRY: u64 = 8 + 4 + 4 + 1 + TAG_LEN as u64;
 
 /// A part's tag, which its table's entry holds: AES-256-GCM's, or a truncated HMAC's.
 type Tag = [u8; TAG_LEN];
 
-/// The bytes of a trailer's [`Seal`]: its kind, a byte, 1 sealed, 2 authenticated, 3 a raw file's
+/// The bytes of a trailer's [`Encryption`]: its kind, a byte, 1 encrypted, 2 authenticated, 3 a raw file's
 /// sectors (0, in the clear, is refused: TASK-411.28); the branch and generation of the DEK its
 /// subkeys came from; and its salt.
-const SEAL_LEN: usize = 1 + 8 + 4 + SALT_LEN;
+const ENCRYPTION_LEN: usize = 1 + 8 + 4 + SALT_LEN;
 
 /// Where each piece of a trailer is in it.
 mod at {
@@ -102,8 +103,8 @@ mod at {
     pub const STORED_LEN: usize = 8;
     pub const FOOTER_LEN: usize = 16;
     pub const FOOTER_CRC: usize = 24;
-    pub const SEAL: usize = 28;
-    pub const FOOTER_MAC: usize = SEAL + super::SEAL_LEN;
+    pub const ENCRYPTION: usize = 28;
+    pub const FOOTER_MAC: usize = ENCRYPTION + super::ENCRYPTION_LEN;
     /// The MAC of the table and the trailer before it.
     pub const MAC: usize = FOOTER_MAC + MAC_LEN;
     /// The CRC of the table and the trailer before it.
@@ -112,15 +113,15 @@ mod at {
 }
 
 /// The bytes after an object's table: the lengths of its data, its parts stored and its footer;
-/// the CRC32C of its footer; its [`Seal`]; the MACs of its footer and of its table and trailer
+/// the CRC32C of its footer; its [`Encryption`]; the MACs of its footer and of its table and trailer
 /// before that MAC; the CRC32C of its table and trailer before it; and
 /// [`MAGIC`].
 pub const TRAILER: u64 = (at::MAGIC + MAGIC.len()) as u64;
 
 /// The format of the frames this crate writes and reads, the last byte of [`MAGIC`], as a digit:
 /// a frame says its format, and a reader of another names it rather than call it corrupt (doc-11,
-/// rule 1; TASK-141.2). cladefs: 2 since objects may be sealed (TASK-411.2); a reader of 2 reads no
-/// frame of 1, nothing having been kept that needs it (the user's decision of 2026-11-14).
+/// rule 1; TASK-141.2). cladefs: 2 since objects may be encrypted (TASK-411.2); a reader of 2 reads
+/// no frame of 1, nothing having been kept that needs it (the user's decision of 2026-11-14).
 pub const FORMAT: u8 = 2;
 
 /// An object's last bytes: the frame's [`FORMAT`] after them.
@@ -159,8 +160,8 @@ pub fn crc(bytes: &[u8]) -> u32 {
     crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, bytes) as u32
 }
 
-/// An object that is not as its frame says: corrupt, or, sealed, tampered with or opened under
-/// another key than it was sealed under.
+/// An object that is not as its frame says: corrupt, or, encrypted, tampered with or opened under
+/// another key than it was encrypted under.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct Corrupt(pub String);
@@ -169,14 +170,14 @@ fn corrupt(what: impl std::fmt::Display) -> Corrupt {
     Corrupt(format!("an object's {what}"))
 }
 
-/// cladefs: why an object's data can't be read (TASK-411.2): it is corrupt, or sealed under a key
-/// its reader doesn't hold.
+/// cladefs: why an object's data can't be read (TASK-411.2): it is corrupt, or encrypted under a
+/// key its reader doesn't hold.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
     Corrupt(#[from] Corrupt),
     #[error(
-        "an object sealed under branch {:x}'s key of generation {}, which its reader doesn't hold",
+        "an object encrypted under branch {:x}'s key of generation {}, which its reader doesn't hold",
         .0.branch,
         .0.generation
     )]
@@ -198,11 +199,11 @@ pub trait Keys {
     fn dek(&self, id: KeyId) -> Option<&Secret>;
 
     /// cladefs: whether its reader holds the objects it reads under their branch's DEK, as every
-    /// reader holding keys does, every branch being sealed (TASK-411.3, TASK-411.28): one
+    /// reader holding keys does, every branch being encrypted (TASK-411.3, TASK-411.28): one
     /// authenticated under a key it doesn't hold is unread ([`Error::NoKey`]), not read as stored.
     /// None by default: a reader of metadata alone, as the collector's marking is, which checks
     /// CRCs.
-    fn sealed(&self) -> bool {
+    fn encrypted(&self) -> bool {
         false
     }
 }
@@ -224,30 +225,30 @@ impl Keys for HashMap<KeyId, Secret> {
     }
 }
 
-/// cladefs: how an object's parts are sealed, as its trailer says, under which DEK's subkeys, from
+/// cladefs: how an object's parts are encrypted, as its trailer says, under which DEK's subkeys, from
 /// which salt (TASK-411.2). None is in the clear (TASK-411.28).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Seal {
-    /// Its parts sealed with AES-256-GCM, its footer and table authenticated with HMAC-SHA256,
+pub enum Encryption {
+    /// Its parts encrypted with AES-256-GCM, its footer and table authenticated with HMAC-SHA256,
     /// under subkeys HKDF-SHA256 derives from the DEK `key` names and `salt`.
-    Sealed { key: KeyId, salt: Salt },
+    Encrypted { key: KeyId, salt: Salt },
     /// cladefs: its parts in the clear, as stored, each tagged with AES-256-GCM's GMAC of them, its
-    /// footer and table authenticated as a sealed object's are (TASK-411.3): metadata, a branch's
-    /// checkpoints, which a reader holding no key reads, checked against their CRCs, as the
-    /// collector does, and one holding the key checks against their tags and MACs.
+    /// footer and table authenticated as an encrypted object's are (TASK-411.3): metadata, a
+    /// branch's checkpoints, which a reader holding no key reads, checked against their CRCs, as
+    /// the collector does, and one holding the key checks against their tags and MACs.
     Authenticated { key: KeyId, salt: Salt },
-    /// cladefs: framed in place from a sealed store's raw file (TASK-411.23): its parts stored raw,
+    /// cladefs: framed in place from an encrypted store's raw file (TASK-411.23): its parts stored raw,
     /// its raw file's AES-256-XTS sectors, under the subkeys of the DEK `key` names and `salt`, the
     /// raw file's, each tagged with a truncated HMAC-SHA256 of them; its footer and table
-    /// authenticated as a sealed object's are.
+    /// authenticated as an encrypted object's are.
     Sectors { key: KeyId, salt: Salt },
 }
 
-impl Seal {
+impl Encryption {
     /// The key its subkeys came from, and its salt.
     pub fn keyed(&self) -> (KeyId, Salt) {
         match *self {
-            Self::Sealed { key, salt }
+            Self::Encrypted { key, salt }
             | Self::Authenticated { key, salt }
             | Self::Sectors { key, salt } => (key, salt),
         }
@@ -255,16 +256,16 @@ impl Seal {
 }
 
 /// cladefs: how a writer frames an object under its branch's DEK, the key it names (TASK-411.3):
-/// its parts sealed, as data is, or authenticated alone, as metadata the collector reads is; or
+/// its parts encrypted, as data is, or authenticated alone, as metadata the collector reads is; or
 /// left where a raw file holds them, its XTS sectors, tagged (TASK-411.23).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Keyed {
-    Sealed,
+    Encrypted,
     Authenticated,
     Sectors,
 }
 
-/// What HKDF derives an object's subkey that seals its parts with, as its info.
+/// What HKDF derives an object's subkey that encrypts its parts with, as its info.
 const PARTS_INFO: &[u8] = b"cladefs frame parts";
 
 /// What HKDF derives an object's subkey that authenticates its footer and table with, as its info.
@@ -278,9 +279,9 @@ const RAW_FILE_INFO: &[u8] = b"cladefs raw file";
 /// with, as its info (TASK-411.23).
 const RAW_PART_TAG_INFO: &[u8] = b"cladefs raw part tag";
 
-/// cladefs: an object's subkeys, derived from its DEK and its salt (TASK-411.2): one that seals and
+/// cladefs: an object's subkeys, derived from its DEK and its salt (TASK-411.2): one that encrypts and
 /// opens its parts, and one that authenticates its footer and table. A packer draws a salt of its
-/// own for each object it packs ([`Packer::new`]), so that no two objects' parts are sealed under
+/// own for each object it packs ([`Packer::new`]), so that no two objects' parts are encrypted under
 /// one subkey, as nonces, the parts' indices, repeat across objects. Shared by the threads that
 /// pack an object's parts ([`PartPacker::pack`]) and by its readers. cladefs: of an object of a raw
 /// file's sectors, the raw file's own, from the salt drawn for it, which encrypts the file as it is
@@ -288,16 +289,16 @@ const RAW_PART_TAG_INFO: &[u8] = b"cladefs raw part tag";
 pub struct ObjectKey {
     id: KeyId,
     salt: Salt,
-    /// cladefs: whether its parts are sealed, or authenticated alone (TASK-411.3); or a raw file's
+    /// cladefs: whether its parts are encrypted, or authenticated alone (TASK-411.3); or a raw file's
     /// sectors (TASK-411.23).
     keyed: Keyed,
     parts: PartKey,
     mac: Secret,
 }
 
-/// cladefs: what an object's parts are sealed, tagged or encrypted under, as it is keyed.
+/// cladefs: what an object's parts are encrypted, tagged or encrypted under, as it is keyed.
 enum PartKey {
-    /// AES-256-GCM: its parts sealed, or tagged alone (TASK-411.2, TASK-411.3).
+    /// AES-256-GCM: its parts encrypted, or tagged alone (TASK-411.2, TASK-411.3).
     Aead(Aead),
     /// AES-256-XTS by sector, and HMAC-SHA256 tagging each part's ciphertext (TASK-411.23): its
     /// two key schedules boxed, so that a key of the other kind takes none of their room.
@@ -307,7 +308,7 @@ enum PartKey {
 impl ObjectKey {
     fn new(dek: &Secret, id: KeyId, salt: Salt, keyed: Keyed) -> Self {
         let parts = match keyed {
-            Keyed::Sealed | Keyed::Authenticated => {
+            Keyed::Encrypted | Keyed::Authenticated => {
                 PartKey::Aead(Aead::new(&dek.derive(&salt, &[PARTS_INFO])))
             }
             Keyed::Sectors => PartKey::Sectors {
@@ -318,10 +319,10 @@ impl ObjectKey {
         Self { id, salt, keyed, parts, mac: dek.derive(&salt, &[MAC_INFO]) }
     }
 
-    /// cladefs: the key of a sealed store's raw file, under `dek`, which `id` names, from `salt`,
+    /// cladefs: the key of an encrypted store's raw file, under `dek`, which `id` names, from `salt`,
     /// drawn for the file (TASK-411.5): its sectors encrypted with AES-256-XTS
     /// ([`ObjectKey::encrypt_sectors`]); and, framed in place, the key of the object it is
-    /// ([`Packer::in_place`], [`Seal::Sectors`], TASK-411.23).
+    /// ([`Packer::in_place`], [`Encryption::Sectors`], TASK-411.23).
     pub fn sectors(dek: &Secret, id: KeyId, salt: Salt) -> Self {
         Self::new(dek, id, salt, Keyed::Sectors)
     }
@@ -336,22 +337,22 @@ impl ObjectKey {
         self.salt
     }
 
-    fn seal(&self) -> Seal {
+    fn encryption(&self) -> Encryption {
         let (key, salt) = (self.id, self.salt);
         match self.keyed {
-            Keyed::Sealed => Seal::Sealed { key, salt },
-            Keyed::Authenticated => Seal::Authenticated { key, salt },
-            Keyed::Sectors => Seal::Sectors { key, salt },
+            Keyed::Encrypted => Encryption::Encrypted { key, salt },
+            Keyed::Authenticated => Encryption::Authenticated { key, salt },
+            Keyed::Sectors => Encryption::Sectors { key, salt },
         }
     }
 
-    /// cladefs: whether its parts are sealed with AES-GCM, not authenticated alone, nor a raw
+    /// cladefs: whether its parts are encrypted with AES-GCM, not authenticated alone, nor a raw
     /// file's sectors.
-    fn seals(&self) -> bool {
-        self.keyed == Keyed::Sealed
+    fn encrypts(&self) -> bool {
+        self.keyed == Keyed::Encrypted
     }
 
-    /// cladefs: its AES-256-GCM key, of an object sealed or authenticated.
+    /// cladefs: its AES-256-GCM key, of an object encrypted or authenticated.
     fn aead(&self) -> &Aead {
         match &self.parts {
             PartKey::Aead(aead) => aead,
@@ -381,7 +382,7 @@ impl ObjectKey {
     }
 
     /// cladefs: the tag of `stored`, the stored bytes of part `index`, of a raw file's sectors: its
-    /// associated data, as a sealed part's, then its bytes, under its tagging subkey
+    /// associated data, as an encrypted part's, then its bytes, under its tagging subkey
     /// ([`Secret::tag`], TASK-411.23).
     fn tag_sectors(&self, index: u64, stored: &[u8]) -> Tag {
         let len = stored.len() as u64;
@@ -422,15 +423,15 @@ impl ObjectKey {
         aad
     }
 
-    /// Seals `bytes` in place, part `index`, of `len` bytes, packed `encoding`: its tag.
-    fn seal_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &mut [u8]) -> Tag {
+    /// Encrypts `bytes` in place, part `index`, of `len` bytes, packed `encoding`: its tag.
+    fn encrypt_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &mut [u8]) -> Tag {
         let aad = Self::aad(index, encoding, bytes.len(), len);
         self.aead().seal(index, &aad, bytes)
     }
 
     /// cladefs: the tag of `bytes`, part `index`, of `len` bytes, packed `encoding`, authenticated
-    /// alone: AES-256-GCM's GMAC, of nothing sealed, its associated data the part's and its bytes
-    /// (TASK-411.3).
+    /// alone: AES-256-GCM's GMAC, of nothing encrypted, its associated data the part's and its
+    /// bytes (TASK-411.3).
     fn tag_part(&self, index: u64, encoding: Encoding, len: u64, bytes: &[u8]) -> Tag {
         let aad = [&Self::aad(index, encoding, bytes.len(), len)[..], bytes].concat();
         self.aead().seal(index, &aad, &mut [])
@@ -449,7 +450,7 @@ impl ObjectKey {
         (self.aead().open(index, &aad, &mut [], tag)).map_err(|_| corrupt("part, by its tag"))
     }
 
-    /// Opens in place what [`ObjectKey::seal_part`] sealed, given its tag.
+    /// Opens in place what [`ObjectKey::encrypt_part`] encrypted, given its tag.
     fn open_part(
         &self,
         index: u64,
@@ -473,38 +474,40 @@ impl std::fmt::Debug for ObjectKey {
 /// cladefs: how a reader opens an object's parts and checks its footer and table (TASK-411.2).
 #[derive(Clone, Debug)]
 enum Opening {
-    /// It is sealed, or authenticated, under a key the reader holds: its subkeys.
+    /// It is encrypted, or authenticated, under a key the reader holds: its subkeys.
     Open(Arc<ObjectKey>),
-    /// It is sealed under a key the reader doesn't hold: its parts are checked, not opened.
+    /// It is encrypted under a key the reader doesn't hold: its parts are checked, not opened.
     Locked(KeyId),
-    /// cladefs: it is authenticated under a key the reader doesn't hold, which holds none sealed
-    /// ([`Keys::sealed`]): its parts are read as they are stored, checked against their CRCs alone,
-    /// as the collector reads a checkpoint (TASK-411.3).
+    /// cladefs: it is authenticated under a key the reader doesn't hold, which holds none encrypted
+    /// ([`Keys::encrypted`]): its parts are read as they are stored, checked against their CRCs
+    /// alone, as the collector reads a checkpoint (TASK-411.3).
     Unchecked(KeyId),
 }
 
 impl Opening {
-    /// How a reader holding `keys` opens an object sealed as `seal` says: refused, if it is
+    /// How a reader holding `keys` opens an object encrypted as `encryption` says: refused, if it is
     /// authenticated under a key the reader doesn't hold, and the reader holds its objects
-    /// sealed (TASK-411.3).
-    fn of(seal: Seal, keys: &dyn Keys) -> Result<Self, Error> {
-        Ok(match seal {
-            // cladefs: a raw file's sectors as a sealed object's parts (TASK-411.23).
-            Seal::Sealed { key, salt } | Seal::Sectors { key, salt } => match keys.dek(key) {
-                Some(dek) => {
-                    let keyed = match seal {
-                        Seal::Sectors { .. } => Keyed::Sectors,
-                        _ => Keyed::Sealed,
-                    };
-                    Self::Open(Arc::new(ObjectKey::new(dek, key, salt, keyed)))
+    /// encrypted (TASK-411.3).
+    fn of(encryption: Encryption, keys: &dyn Keys) -> Result<Self, Error> {
+        Ok(match encryption {
+            // cladefs: a raw file's sectors as an encrypted object's parts (TASK-411.23).
+            Encryption::Encrypted { key, salt } | Encryption::Sectors { key, salt } => {
+                match keys.dek(key) {
+                    Some(dek) => {
+                        let keyed = match encryption {
+                            Encryption::Sectors { .. } => Keyed::Sectors,
+                            _ => Keyed::Encrypted,
+                        };
+                        Self::Open(Arc::new(ObjectKey::new(dek, key, salt, keyed)))
+                    }
+                    None => Self::Locked(key),
                 }
-                None => Self::Locked(key),
-            },
-            Seal::Authenticated { key, salt } => match keys.dek(key) {
+            }
+            Encryption::Authenticated { key, salt } => match keys.dek(key) {
                 Some(dek) => {
                     Self::Open(Arc::new(ObjectKey::new(dek, key, salt, Keyed::Authenticated)))
                 }
-                None if keys.sealed() => return Err(Error::NoKey(key)),
+                None if keys.encrypted() => return Err(Error::NoKey(key)),
                 None => Self::Unchecked(key),
             },
         })
@@ -578,8 +581,8 @@ impl Stored {
     }
 }
 
-/// Decodes `packed`, a part's packed bytes, opened if it was sealed, stored `encoding`, into `out`,
-/// which is as long as the part.
+/// Decodes `packed`, a part's packed bytes, opened if it was encrypted, stored `encoding`, into
+/// `out`, which is as long as the part.
 fn decode(encoding: Encoding, packed: &[u8], out: &mut [u8]) -> Result<(), Corrupt> {
     match encoding {
         Encoding::Raw if packed.len() == out.len() => out.copy_from_slice(packed),
@@ -623,7 +626,7 @@ impl Part {
         self.stored.encoding == Encoding::Raw && matches!(self.opening, Opening::Unchecked(_))
     }
 
-    /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is sealed; cladefs:
+    /// Opens `bytes` in place, its stored bytes checked against its CRC, if it is encrypted; cladefs:
     /// checks them against its tag, if it is authenticated under a key its reader holds
     /// (TASK-411.3); checks them against its tag and decrypts them, if a raw file's sectors
     /// (TASK-411.23). Authenticated under a key its reader doesn't hold, as they are.
@@ -633,7 +636,7 @@ impl Part {
             Opening::Unchecked(_) => Ok(()),
             Opening::Locked(key) => Err(Error::NoKey(*key)),
             Opening::Open(key) => Ok(match key.keyed {
-                Keyed::Sealed => key.open_part(index, encoding, self.len(), bytes, &self.tag),
+                Keyed::Encrypted => key.open_part(index, encoding, self.len(), bytes, &self.tag),
                 Keyed::Authenticated => {
                     key.check_part(index, encoding, self.len(), bytes, &self.tag)
                 }
@@ -643,7 +646,7 @@ impl Part {
     }
 
     /// Its packed bytes, from `stored`, its stored bytes and any after them: checked against its
-    /// CRC, and opened in place, if it is sealed. Raw, they are its data; else compressed.
+    /// CRC, and opened in place, if it is encrypted. Raw, they are its data; else compressed.
     pub fn open<'a>(&self, stored: &'a mut [u8]) -> Result<&'a [u8], Error> {
         let stored =
             stored.get_mut(..self.stored.len as usize).ok_or_else(|| corrupt("part, cut short"))?;
@@ -655,14 +658,14 @@ impl Part {
     }
 
     /// Unpacks it from `stored`, its stored bytes and any after them, opened in place if it is
-    /// sealed ([`Part::open`]), into `out`, which is as long as it is.
+    /// encrypted ([`Part::open`]), into `out`, which is as long as it is.
     pub fn unpack_into(&self, stored: &mut [u8], out: &mut [u8]) -> Result<(), Error> {
         let packed = self.open(stored)?;
         Ok(decode(self.stored.encoding, packed, out)?)
     }
 
     /// It, unpacked from `stored`, its stored bytes and any after them, checked against its CRC,
-    /// and opened, if sealed, in a copy of them.
+    /// and opened, if encrypted, in a copy of them.
     pub fn unpack(&self, stored: &[u8]) -> Result<Vec<u8>, Error> {
         let mut out = vec![0; self.len() as usize];
         let checked = self.stored.check(stored)?;
@@ -702,9 +705,9 @@ fn pack_part(data: &[u8], compressor: &mut zstd::bulk::Compressor<'_>) -> Option
 }
 
 /// cladefs: a part of an object's data, packed on its own ([`PartPacker::pack`]): compressed, if that
-/// shrinks it, or raw; sealed, or tagged, under its object's key; the CRC of its bytes as stored,
-/// and its tag (TASK-336, TASK-411.2). Or compressed alone, in memory, to be sealed once its
-/// object's key is drawn ([`PartPacker::compress`], [`PackedPart::sealed`], TASK-421): no object
+/// shrinks it, or raw; encrypted, or tagged, under its object's key; the CRC of its bytes as stored,
+/// and its tag (TASK-336, TASK-411.2). Or compressed alone, in memory, to be encrypted once its
+/// object's key is drawn ([`PartPacker::compress`], [`PackedPart::encrypted`], TASK-421): no object
 /// takes it so ([`Packer::push_stored`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackedPart {
@@ -735,7 +738,7 @@ impl PackedPart {
         self.stored.as_deref().unwrap_or(part)
     }
 
-    /// cladefs: its bytes as stored, unless they are the part's own, raw: compressed, or sealed.
+    /// cladefs: its bytes as stored, unless they are the part's own, raw: compressed, or encrypted.
     /// What a store holds of a part compressed as its segment fills, with the part's bytes if these
     /// are none (TASK-400).
     pub fn stored_bytes(&self) -> Option<&[u8]> {
@@ -747,8 +750,8 @@ impl PackedPart {
         self.stored.as_ref().map_or(0, Vec::capacity)
     }
 
-    /// cladefs: lets go of what the buffer of [`PackedPart::stored_bytes`] holds past them: a part's
-    /// room, which compressing took (TASK-400).
+    /// cladefs: lets go of what the buffer of [`PackedPart::stored_bytes`] holds past them: a
+    /// part's room, which compressing took (TASK-400).
     pub fn shrink_to_fit(&mut self) {
         if let Some(stored) = &mut self.stored {
             stored.shrink_to_fit();
@@ -756,17 +759,17 @@ impl PackedPart {
     }
 
     /// cladefs: it, compressed alone ([`PartPacker::compress`]), of `len` bytes of data, `stored` its
-    /// bytes as stored then ([`PackedPart::stored_bytes`], or the part's own), sealed under `key`,
+    /// bytes as stored then ([`PackedPart::stored_bytes`], or the part's own), encrypted under `key`,
     /// its object's: as [`PartPacker::pack`] packs the part under `key`, byte for byte. What a
     /// store's framing in a copy makes of a part packed ahead and held in memory, as the extent
-    /// cache holds data, sealed only once its framing draws its object's key (TASK-421).
-    pub fn sealed(&self, len: u64, stored: &[u8], key: &ObjectKey) -> PackedPart {
+    /// cache holds data, encrypted only once its framing draws its object's key (TASK-421).
+    pub fn encrypted(&self, len: u64, stored: &[u8], key: &ObjectKey) -> PackedPart {
         assert_eq!(self.keyed, None, "a part compressed alone");
-        assert!(key.seals(), "sealed under a sealed object's key");
+        assert!(key.encrypts(), "encrypted under an encrypted object's key");
         let mut bytes = stored.to_vec();
-        let tag = key.seal_part(self.index, self.encoding, len, &mut bytes);
+        let tag = key.encrypt_part(self.index, self.encoding, len, &mut bytes);
         let crc = crc(&bytes);
-        let (index, encoding, keyed) = (self.index, self.encoding, Some(Keyed::Sealed));
+        let (index, encoding, keyed) = (self.index, self.encoding, Some(Keyed::Encrypted));
         PackedPart { index, encoding, stored: Some(bytes), crc, tag, keyed }
     }
 }
@@ -789,8 +792,8 @@ impl RawPart {
     }
 }
 
-/// cladefs: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that a
-/// store packs a segment's parts on threads of its own, each part read there, rather than all its
+/// cladefs: packs parts of an object's data one at a time, as [`Packer::push`] packs each: so that
+/// a store packs a segment's parts on threads of its own, each part read there, rather than all its
 /// data read on one thread first (TASK-336).
 pub struct PartPacker {
     /// None at level 0, which stores parts raw.
@@ -810,16 +813,16 @@ impl PartPacker {
         Self::default()
     }
 
-    /// `part`, part `index` of an object's data, packed, as [`Packer::push`] packs it: sealed under
-    /// `key`, its object's ([`Packer::key`]), if it is sealed (TASK-411.2); cladefs: tagged under it,
+    /// `part`, part `index` of an object's data, packed, as [`Packer::push`] packs it: encrypted under
+    /// `key`, its object's ([`Packer::key`]), if it is encrypted (TASK-411.2); cladefs: tagged under it,
     /// if it is authenticated (TASK-411.3).
     pub fn pack(&mut self, index: u64, part: &[u8], key: &ObjectKey) -> PackedPart {
         let (encoding, compressed) = self.compressed(part);
         let len = part.len() as u64;
         let (stored, tag) = match key.keyed {
-            Keyed::Sealed => {
+            Keyed::Encrypted => {
                 let mut stored = compressed.unwrap_or_else(|| part.to_vec());
-                let tag = key.seal_part(index, encoding, len, &mut stored);
+                let tag = key.encrypt_part(index, encoding, len, &mut stored);
                 (Some(stored), tag)
             }
             Keyed::Authenticated => {
@@ -834,7 +837,7 @@ impl PartPacker {
 
     /// cladefs: `part`, part `index` of an object's data, compressed alone, in memory, as
     /// [`PartPacker::pack`] would compress it: what a store holds of a part packed ahead of its
-    /// framing, sealed only once that draws its object's key ([`PackedPart::sealed`], TASK-421).
+    /// framing, encrypted only once that draws its object's key ([`PackedPart::encrypted`], TASK-421).
     /// No object takes it as it is.
     pub fn compress(&mut self, index: u64, part: &[u8]) -> PackedPart {
         let (encoding, stored) = self.compressed(part);
@@ -852,7 +855,7 @@ impl PartPacker {
 
     /// cladefs: the bytes `part`, a part of an object's data, or a piece of one, is stored in:
     /// compressed, or raw if that is no smaller. What a store samples a segment's parts by, to tell
-    /// whether compressing them is worth writing it again (TASK-310). Sealing adds no byte.
+    /// whether compressing them is worth writing it again (TASK-310). Encryption adds no byte.
     pub fn packed_len(&mut self, part: &[u8]) -> u64 {
         let compressor = self.compressor.as_mut();
         let packed = compressor.and_then(|compressor| pack_part(part, compressor));
@@ -901,14 +904,14 @@ pub struct Packer {
 }
 
 impl Packer {
-    /// A packer of an object sealed, given its branch's DEK and which it is, `seal`, under subkeys
+    /// A packer of an object encrypted, given its branch's DEK and which it is, `encrypt`, under subkeys
     /// of the DEK from a salt drawn for it alone (TASK-411.2).
     pub fn new((dek, id): (&Secret, KeyId)) -> Self {
-        Self::keyed((dek, id, Keyed::Sealed))
+        Self::keyed((dek, id, Keyed::Encrypted))
     }
 
     /// cladefs: a packer of an object, given its branch's DEK, which it is, and how, `keyed` under
-    /// subkeys of the DEK from a salt drawn for it alone: sealed, or authenticated alone
+    /// subkeys of the DEK from a salt drawn for it alone: encrypted, or authenticated alone
     /// (TASK-411.3).
     pub fn keyed((dek, id, keyed): (&Secret, KeyId, Keyed)) -> Self {
         assert_ne!(keyed, Keyed::Sectors, "a raw file's sectors are framed in place");
@@ -932,15 +935,15 @@ impl Packer {
         self.end
     }
 
-    /// cladefs: its subkeys: what the threads that pack its parts seal them under
+    /// cladefs: its subkeys: what the threads that pack its parts encrypt them under
     /// ([`PartPacker::pack`], TASK-411.2).
     pub fn key(&self) -> &ObjectKey {
         &self.key
     }
 
-    /// cladefs: how the object is sealed, as its trailer will say (TASK-411.2).
-    pub fn seal(&self) -> Seal {
-        self.key.seal()
+    /// cladefs: how the object is encrypted, as its trailer will say (TASK-411.2).
+    pub fn encryption(&self) -> Encryption {
+        self.key.encryption()
     }
 
     /// cladefs: the index of the object's next part (TASK-411.2).
@@ -970,7 +973,7 @@ impl Packer {
     /// cladefs: its key, of an object framed in place, raw: a raw file's sectors key
     /// ([`Packer::in_place`]).
     fn raw_key(&self) -> &ObjectKey {
-        assert_eq!(self.key.keyed, Keyed::Sectors, "a sealed object's bytes are not its data");
+        assert_eq!(self.key.keyed, Keyed::Sectors, "an encrypted object's bytes are not its data");
         &self.key
     }
 
@@ -1004,13 +1007,13 @@ impl Packer {
 
     /// cladefs: packs `part`, the object's next part, as `packed`, [`PartPacker::pack`]'s of it,
     /// says, appending the object's next bytes to `bytes` (TASK-336). A whole part, but for the
-    /// object's last; packed as the object's next, sealed under its key if it is sealed.
+    /// object's last; packed as the object's next, encrypted under its key if it is encrypted.
     pub fn push_part(&mut self, bytes: &mut Vec<u8>, part: &[u8], packed: &PackedPart) {
         self.push_stored(bytes, part.len() as u64, packed.stored(part), packed);
     }
 
     /// cladefs: [`Packer::push_part`], of a part of `len` bytes of data given by its bytes as stored,
-    /// `stored`: compressed or sealed if `packed` is, else the part's own. So that a store packs a
+    /// `stored`: compressed or encrypted if `packed` is, else the part's own. So that a store packs a
     /// part as its segment fills, and holds it compressed, its data gone, until the segment's
     /// framing (TASK-400).
     pub fn push_stored(
@@ -1022,7 +1025,7 @@ impl Packer {
     ) {
         assert!(self.data_len.is_multiple_of(PART), "parts follow a part cut short");
         assert_eq!(packed.index, self.next_part(), "a part packed as the object's next");
-        assert_eq!(packed.keyed, Some(self.key.keyed), "a part sealed as its object is");
+        assert_eq!(packed.keyed, Some(self.key.keyed), "a part encrypted as its object is");
         match &packed.stored {
             Some(packed) => debug_assert!(packed[..] == *stored, "a part packed, stored so"),
             None => assert_eq!(stored.len() as u64, len, "a raw part, stored as it is"),
@@ -1063,7 +1066,7 @@ struct Table<'a> {
 }
 
 /// The last bytes of an object of `data_len` bytes of data, whose parts are as `table` says, ending
-/// at `end`, sealed under `key`: `footer`, the table, and the trailer.
+/// at `end`, encrypted under `key`: `footer`, the table, and the trailer.
 fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKey) -> Vec<u8> {
     let mut bytes = footer.to_vec();
     let start = bytes.len();
@@ -1078,18 +1081,18 @@ fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKe
     bytes.extend_from_slice(&end.to_le_bytes());
     bytes.extend_from_slice(&(footer.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&crc(footer).to_le_bytes());
-    let mut seal = [0; SEAL_LEN];
-    seal[0] = match key.keyed {
-        Keyed::Sealed => 1,
+    let mut encryption = [0; ENCRYPTION_LEN];
+    encryption[0] = match key.keyed {
+        Keyed::Encrypted => 1,
         Keyed::Authenticated => 2,
         Keyed::Sectors => 3,
     };
-    seal[1..9].copy_from_slice(&key.id.branch.to_le_bytes());
-    seal[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
-    seal[13..].copy_from_slice(&key.salt.0);
-    bytes.extend_from_slice(&seal);
+    encryption[1..9].copy_from_slice(&key.id.branch.to_le_bytes());
+    encryption[9..13].copy_from_slice(&key.id.generation.to_le_bytes());
+    encryption[13..].copy_from_slice(&key.salt.0);
+    bytes.extend_from_slice(&encryption);
     bytes.extend_from_slice(&key.mac.mac(footer));
-    // The table's MAC covers the trailer before it: the footer's MAC, the seal, the lengths.
+    // The table's MAC covers the trailer before it: the footer's MAC, the encrypt, the lengths.
     let mac = key.mac.mac(&bytes[start..]);
     bytes.extend_from_slice(&mac);
     // And its CRC, the MAC too.
@@ -1098,14 +1101,14 @@ fn tail(table: Table<'_>, data_len: u64, end: u64, footer: &[u8], key: &ObjectKe
     bytes
 }
 
-/// cladefs: the whole object `object`, of `footer` in place of its own: its parts as they are, stored
-/// where they are, then a tail anew, so that its data reads as it did, nothing unpacked or packed
-/// again. What a host's write-ahead log uploads of a segment its writer's chain stamped anew after
-/// a takeover (doc-14, Opening a store; TASK-165.9). Fails if `object` is not a whole object. A
-/// sealed object's new footer and table are authenticated under its own subkeys, from its salt,
-/// which its parts stay sealed under: so `keys` must hold its DEK, its table checked against its
-/// MAC first, or it fails ([`Error::NoKey`], TASK-411.2); cladefs: an authenticated one's alike
-/// (TASK-411.3).
+/// cladefs: the whole object `object`, of `footer` in place of its own: its parts as they are,
+/// stored where they are, then a tail anew, so that its data reads as it did, nothing unpacked or
+/// packed again. What a host's write-ahead log uploads of a segment its writer's chain stamped anew
+/// after a takeover (doc-14, Opening a store; TASK-165.9). Fails if `object` is not a whole object.
+/// An encrypted object's new footer and table are authenticated under its own subkeys, from its
+/// salt, which its parts stay encrypted under: so `keys` must hold its DEK, its table checked
+/// against its MAC first, or it fails ([`Error::NoKey`], TASK-411.2); cladefs: an authenticated
+/// one's alike (TASK-411.3).
 pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
     let parts = Parts::of(object, keys)?;
     let key = match &parts.opening {
@@ -1118,10 +1121,10 @@ pub fn restamp(object: &[u8], footer: &[u8], keys: &dyn Keys) -> Result<Vec<u8>,
     Ok(bytes)
 }
 
-/// The bytes of an object of `data` and `footer`, sealed under the DEK `seal` gives, and which it
+/// The bytes of an object of `data` and `footer`, encrypted under the DEK `encrypt` gives, and which it
 /// is ([`Packer::new`]).
 pub fn framed(data: &[u8], footer: &[u8], (dek, id): (&Secret, KeyId)) -> Vec<u8> {
-    framed_keyed(data, footer, (dek, id, Keyed::Sealed))
+    framed_keyed(data, footer, (dek, id, Keyed::Encrypted))
 }
 
 /// cladefs: the bytes of an object of `data` and `footer`, keyed as `keyed` says: under its DEK,
@@ -1141,8 +1144,8 @@ pub struct Frame {
     pub stored_len: u64,
     pub footer_len: u64,
     footer_crc: u32,
-    /// cladefs: whether its parts are sealed, and how (TASK-411.2).
-    pub seal: Seal,
+    /// cladefs: whether its parts are encrypted, and how (TASK-411.2).
+    pub encryption: Encryption,
     footer_mac: [u8; MAC_LEN],
     mac: [u8; MAC_LEN],
     table_crc: u32,
@@ -1172,7 +1175,9 @@ impl Frame {
             stored_len: u64_at(trailer, at::STORED_LEN),
             footer_len: u64_at(trailer, at::FOOTER_LEN),
             footer_crc: u32_at(trailer, at::FOOTER_CRC),
-            seal: Self::seal_of(&trailer[at::SEAL..at::SEAL + SEAL_LEN])?,
+            encryption: Self::encryption_of(
+                &trailer[at::ENCRYPTION..at::ENCRYPTION + ENCRYPTION_LEN],
+            )?,
             footer_mac: mac(at::FOOTER_MAC),
             mac: mac(at::MAC),
             table_crc: u32_at(trailer, at::TABLE_CRC),
@@ -1186,21 +1191,22 @@ impl Frame {
         Ok(frame)
     }
 
-    /// The seal a trailer's [`SEAL_LEN`] bytes say.
-    fn seal_of(seal: &[u8]) -> Result<Seal, Corrupt> {
-        match seal[0] {
+    /// The encryption a trailer's [`ENCRYPTION_LEN`] bytes say.
+    fn encryption_of(encryption: &[u8]) -> Result<Encryption, Corrupt> {
+        match encryption[0] {
             // cladefs: no object is in the clear (TASK-411.28).
-            0 => Err(corrupt("trailer: a seal in the clear, which no object has")),
+            0 => Err(corrupt("trailer: an encryption in the clear, which no object has")),
             kind @ 1..=3 => {
-                let key = KeyId { branch: u64_at(seal, 1), generation: u32_at(seal, 9) };
-                let salt = Salt(seal[13..].try_into().unwrap());
+                let key =
+                    KeyId { branch: u64_at(encryption, 1), generation: u32_at(encryption, 9) };
+                let salt = Salt(encryption[13..].try_into().unwrap());
                 Ok(match kind {
-                    1 => Seal::Sealed { key, salt },
-                    2 => Seal::Authenticated { key, salt },
-                    _ => Seal::Sectors { key, salt },
+                    1 => Encryption::Encrypted { key, salt },
+                    2 => Encryption::Authenticated { key, salt },
+                    _ => Encryption::Sectors { key, salt },
                 })
             }
-            kind => Err(corrupt(format_args!("trailer: a seal of kind {kind}"))),
+            kind => Err(corrupt(format_args!("trailer: an encryption of kind {kind}"))),
         }
     }
 
@@ -1250,11 +1256,11 @@ impl Frame {
     }
 
     /// The footer in `bytes`, checked against its CRC; and against its MAC, if the object is
-    /// sealed under a key `keys` holds (TASK-411.2). A footer read with its trailer alone, not its
-    /// table, is checked so: its MAC, under the object's subkeys, says the object's writer wrote it
-    /// with that trailer. cladefs: refused as [`Opening`] refuses an object (TASK-411.3).
+    /// encrypted under a key `keys` holds (TASK-411.2). A footer read with its trailer alone, not
+    /// its table, is checked so: its MAC, under the object's subkeys, says the object's writer
+    /// wrote it with that trailer. cladefs: refused as [`Opening`] refuses an object (TASK-411.3).
     pub fn check_footer<'a>(&self, bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Error> {
-        Ok(self.check_footer_opened(bytes, &Opening::of(self.seal, keys)?)?)
+        Ok(self.check_footer_opened(bytes, &Opening::of(self.encryption, keys)?)?)
     }
 
     /// The footer in `bytes`, checked against its CRC, and its MAC, if `opening` opens it.
@@ -1306,8 +1312,8 @@ impl Frame {
                 Encoding::Zstd => entry_stored.len > 0 && entry_stored.len < len,
             };
             // cladefs: a raw file's sectors, whole, as they are (TASK-411.23).
-            let sectors = match self.seal {
-                Seal::Sectors { .. } => {
+            let sectors = match self.encryption {
+                Encryption::Sectors { .. } => {
                     encoding == Encoding::Raw && entry_stored.len.is_multiple_of(SECTOR as u64)
                 }
                 _ => true,
@@ -1343,7 +1349,7 @@ pub struct Parts {
 impl Parts {
     /// The parts of the object whose last bytes are `suffix`, which must hold its table, read by a
     /// reader holding `keys`: its table checked against its CRC, and against its MAC if it is
-    /// sealed under a key `keys` holds (TASK-411.2).
+    /// encrypted under a key `keys` holds (TASK-411.2).
     pub fn of_suffix(suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         Self::in_suffix(Frame::of_trailer(suffix)?, suffix, keys)
     }
@@ -1355,7 +1361,7 @@ impl Parts {
 
     fn in_suffix(frame: Frame, suffix: &[u8], keys: &dyn Keys) -> Result<Self, Error> {
         let (stored, tags, table) = frame.stored_in(suffix)?;
-        let opening = Opening::of(frame.seal, keys)?;
+        let opening = Opening::of(frame.encryption, keys)?;
         if let Some(key) = opening.key() {
             let trailer = suffix.len() - TRAILER as usize;
             let authenticated = &suffix[table..trailer + at::MAC];
@@ -1410,8 +1416,8 @@ impl Parts {
     }
 }
 
-/// The data of a whole object [`framed`], each part checked against its CRC, and opened, if sealed,
-/// under a key `keys` holds.
+/// The data of a whole object [`framed`], each part checked against its CRC, and opened, if
+/// encrypted, under a key `keys` holds.
 pub fn data(bytes: &[u8], keys: &dyn Keys) -> Result<Vec<u8>, Error> {
     let parts = Parts::of(bytes, keys)?;
     parts.read(0..parts.frame.data_len, |range| {
@@ -1438,15 +1444,15 @@ pub fn check(bytes: &[u8]) -> Result<(), Corrupt> {
 }
 
 /// cladefs: whether `suffix`, an object's last bytes, its trailer at their end, is a frame of this
-/// format whose seal says it is in the clear, kind 0, as objects were before TASK-411.28: what a
+/// format whose encrypt says it is in the clear, kind 0, as objects were before TASK-411.28: what a
 /// checker of a store's files, holding no key, tells one left so by, which every reader refuses as
 /// corrupt ([`Frame::of_trailer`]).
 pub fn in_the_clear(suffix: &[u8]) -> bool {
     let Some(at) = suffix.len().checked_sub(TRAILER as usize) else { return false };
-    suffix.ends_with(&MAGIC) && suffix[at + at::SEAL] == 0
+    suffix.ends_with(&MAGIC) && suffix[at + at::ENCRYPTION] == 0
 }
 
-/// The footer of a whole object [`framed`], checked against its CRC, and its MAC if it is sealed
+/// The footer of a whole object [`framed`], checked against its CRC, and its MAC if it is encrypted
 /// under a key `keys` holds.
 pub fn footer<'a>(bytes: &'a [u8], keys: &dyn Keys) -> Result<&'a [u8], Error> {
     let parts = Parts::of(bytes, keys)?;
@@ -1459,7 +1465,7 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
-    /// The DEK of the tests' sealed objects, and which it is.
+    /// The DEK of the tests' encrypted objects, and which it is.
     const ID: KeyId = KeyId { branch: 0x7b, generation: 2 };
 
     fn dek() -> Secret {
@@ -1489,10 +1495,10 @@ mod tests {
             .collect()
     }
 
-    /// A packer of an object sealed under [`dek`] with `salt`, as no packer outside the tests is:
+    /// A packer of an object encrypted under [`dek`] with `salt`, as no packer outside the tests is:
     /// so that two pack alike.
-    fn sealed_with(salt: Salt) -> Packer {
-        Packer::with(Arc::new(ObjectKey::new(&dek(), ID, salt, Keyed::Sealed)))
+    fn encrypted_with(salt: Salt) -> Packer {
+        Packer::with(Arc::new(ObjectKey::new(&dek(), ID, salt, Keyed::Encrypted)))
     }
 
     /// Recomputes the CRCs of `bytes`, an object's, its footer's and its table's, as one who
@@ -1525,7 +1531,7 @@ mod tests {
         bytes.windows(piece.len()).any(|window| window == piece)
     }
 
-    /// cladefs: parts packed one at a time pack as `push` packs them all (TASK-336), sealed and
+    /// cladefs: parts packed one at a time pack as `push` packs them all (TASK-336), encrypted and
     /// authenticated (TASK-411.2, TASK-411.3); and raw parts of a raw file's sectors given one at a
     /// time as all at once (TASK-411.23).
     #[test]
@@ -1543,9 +1549,10 @@ mod tests {
             let key = ObjectKey::new(&dek(), ID, salt, Keyed::Authenticated);
             Packer::with(Arc::new(key))
         };
-        for (mut all, mut one) in
-            [(sealed_with(salt), sealed_with(salt)), (authenticated(salt), authenticated(salt))]
-        {
+        for (mut all, mut one) in [
+            (encrypted_with(salt), encrypted_with(salt)),
+            (authenticated(salt), authenticated(salt)),
+        ] {
             let pushed = all.push(&data);
             let (mut bytes, mut packer) = (Vec::new(), PartPacker::new());
             for (index, part) in data.chunks(PART as usize).enumerate() {
@@ -1571,35 +1578,35 @@ mod tests {
     #[test]
     #[should_panic(expected = "a part packed as the object's next")]
     fn parts_packed_out_of_order_are_refused() {
-        let mut packer = sealed_with(Salt([3; SALT_LEN]));
+        let mut packer = encrypted_with(Salt([3; SALT_LEN]));
         let packed = PartPacker::new().pack(1, b"part", packer.key());
         packer.push_part(&mut Vec::new(), b"part", &packed);
     }
 
     #[test]
-    #[should_panic(expected = "a part sealed as its object is")]
+    #[should_panic(expected = "a part encrypted as its object is")]
     fn parts_compressed_alone_are_refused() {
         let packed = PartPacker::new().compress(0, b"part");
-        sealed_with(Salt([3; SALT_LEN])).push_part(&mut Vec::new(), b"part", &packed);
+        encrypted_with(Salt([3; SALT_LEN])).push_part(&mut Vec::new(), b"part", &packed);
     }
 
     #[test]
-    #[should_panic(expected = "a part sealed as its object is")]
-    fn parts_authenticated_into_sealed_objects_are_refused() {
+    #[should_panic(expected = "a part encrypted as its object is")]
+    fn parts_authenticated_into_encrypted_objects_are_refused() {
         let key = ObjectKey::new(&dek(), ID, Salt([3; SALT_LEN]), Keyed::Authenticated);
         let packed = PartPacker::new().pack(0, b"part", &key);
-        sealed_with(Salt([3; SALT_LEN])).push_part(&mut Vec::new(), b"part", &packed);
+        encrypted_with(Salt([3; SALT_LEN])).push_part(&mut Vec::new(), b"part", &packed);
     }
 
-    /// TASK-411.2: a sealed object's bytes are never its data as they are.
+    /// TASK-411.2: an encrypted object's bytes are never its data as they are.
     #[test]
-    #[should_panic(expected = "a sealed object's bytes are not its data")]
-    fn sealed_objects_store_no_parts_as_they_are() {
-        sealed_with(Salt([3; SALT_LEN])).push_raw(b"data");
+    #[should_panic(expected = "an encrypted object's bytes are not its data")]
+    fn encrypted_objects_store_no_parts_as_they_are() {
+        encrypted_with(Salt([3; SALT_LEN])).push_raw(b"data");
     }
 
     /// Objects hold their data in parts, compressed, each where the table says, and their footers;
-    /// cladefs: sealed, their trailers saying so (TASK-411.2, TASK-411.28).
+    /// cladefs: encrypted, their trailers saying so (TASK-411.2, TASK-411.28).
     #[test]
     fn objects_hold_their_parts() {
         let data = pattern(3 * PART + 7);
@@ -1608,7 +1615,7 @@ mod tests {
         let parts = Parts::of(&bytes, &keys).unwrap();
         let frame = parts.frame;
         assert_eq!((frame.data_len, frame.footer_len, frame.parts()), (3 * PART + 7, 6, 4));
-        assert!(matches!(frame.seal, Seal::Sealed { key: ID, .. }));
+        assert!(matches!(frame.encryption, Encryption::Encrypted { key: ID, .. }));
         assert!(parts.opens());
         assert_eq!(frame.part(3), 3 * PART..3 * PART + 7);
         assert_eq!(frame.size(), bytes.len() as u64);
@@ -1641,8 +1648,10 @@ mod tests {
         assert_eq!(super::data(&empty, &keys).unwrap(), Vec::<u8>::new());
 
         // Written in pieces, front to back, it is the same object.
-        let Seal::Sealed { salt, .. } = frame.seal else { unreachable!("sealed") };
-        let mut packer = sealed_with(salt);
+        let Encryption::Encrypted { salt, .. } = frame.encryption else {
+            unreachable!("encrypted")
+        };
+        let mut packer = encrypted_with(salt);
         let mut pieces = packer.push(&data[..2 * PART as usize]);
         assert_eq!(packer.end(), pieces.len() as u64);
         pieces.extend(packer.push(&data[2 * PART as usize..]));
@@ -1652,31 +1661,31 @@ mod tests {
         assert_eq!(written, parts);
     }
 
-    /// TASK-411.2: a sealed object holds none of its data's bytes, nor those its parts compress
-    /// to; its parts are as long as compressing them makes them, sealing adding nothing but their
+    /// TASK-411.2: an encrypted object holds none of its data's bytes, nor those its parts compress
+    /// to; its parts are as long as compressing them makes them, encrypting adding nothing but their
     /// tags; its trailer names its key and salt; it reads back, whole and by parts, under its key,
     /// and its footer with it; written in pieces it is the same object.
     #[test]
-    fn sealed_objects_hold_no_plaintext_and_read_back_under_their_key() {
+    fn encrypted_objects_hold_no_plaintext_and_read_back_under_their_key() {
         let data = [pattern(2 * PART + 5), random(PART + 9)].concat();
         let salt = Salt([9; SALT_LEN]);
-        let mut packer = sealed_with(salt);
+        let mut packer = encrypted_with(salt);
         let mut bytes = packer.push(&data[..PART as usize]);
         bytes.extend(packer.push(&data[PART as usize..]));
         bytes.extend(packer.finish(b"footer"));
-        let mut once = sealed_with(salt);
+        let mut once = encrypted_with(salt);
         let mut whole = once.push(&data);
         let (tail, written) = once.finish_parts(b"footer");
         whole.extend(tail);
         assert_eq!(bytes, whole);
 
         let keys = holding(dek());
-        let sealed = Parts::of(&bytes, &keys).unwrap();
+        let encrypted = Parts::of(&bytes, &keys).unwrap();
         // Its writer reads it as a reader holding its key does.
-        assert_eq!(written, sealed);
-        assert_eq!(sealed.frame.seal, Seal::Sealed { key: ID, salt });
-        assert!(sealed.opens());
-        // Each part as long as compressing it makes it: sealing adds nothing but its tag.
+        assert_eq!(written, encrypted);
+        assert_eq!(encrypted.frame.encryption, Encryption::Encrypted { key: ID, salt });
+        assert!(encrypted.opens());
+        // Each part as long as compressing it makes it: encrypting adds nothing but its tag.
         let mut compressing = PartPacker::new();
         let compressed: Vec<PackedPart> = (data.chunks(PART as usize).zip(0..))
             .map(|(part, index)| compressing.compress(index, part))
@@ -1685,7 +1694,7 @@ mod tests {
             .map(|(packed, part)| (packed.encoding(), packed.stored(part).len() as u64))
             .collect();
         let encodings: Vec<(Encoding, u64)> =
-            sealed.stored.iter().map(|stored| (stored.encoding, stored.len)).collect();
+            encrypted.stored.iter().map(|stored| (stored.encoding, stored.len)).collect();
         assert_eq!(encodings, encoded);
         assert_eq!(
             encoded.iter().map(|(encoding, _)| *encoding).collect::<Vec<_>>(),
@@ -1700,8 +1709,8 @@ mod tests {
         }
         assert_eq!(super::data(&bytes, &keys).unwrap(), data);
         assert_eq!(footer(&bytes, &keys).unwrap(), b"footer");
-        for index in 0..sealed.frame.parts() {
-            let part = sealed.part(index).unwrap();
+        for index in 0..encrypted.frame.parts() {
+            let part = encrypted.part(index).unwrap();
             assert!(!part.as_is());
             let expected = &data[part.place.start as usize..part.place.end as usize];
             let stored = &bytes[part.stored.offset as usize..];
@@ -1712,29 +1721,29 @@ mod tests {
             assert_eq!(out, expected, "part {index}, opened in place");
         }
         // Its table is found from a suffix holding it, checked against its MAC.
-        let suffix = &bytes[sealed.frame.table().start as usize - 1..];
-        assert_eq!(Parts::of_suffix(suffix, &keys).unwrap(), sealed);
-        let read = sealed.read(PART - 3..2 * PART + 2, |range| {
+        let suffix = &bytes[encrypted.frame.table().start as usize - 1..];
+        assert_eq!(Parts::of_suffix(suffix, &keys).unwrap(), encrypted);
+        let read = encrypted.read(PART - 3..2 * PART + 2, |range| {
             Ok::<_, Error>(bytes[range.start as usize..range.end as usize].to_vec())
         });
         assert_eq!(read.unwrap(), &data[PART as usize - 3..2 * PART as usize + 2]);
 
-        // A sealed object of no data: its trailer alone, sealed.
+        // An encrypted object of no data: its trailer alone, encrypted.
         let empty = framed(&[], b"", (&dek(), ID));
         assert_eq!(empty.len() as u64, TRAILER);
         assert_eq!(super::data(&empty, &keys).unwrap(), Vec::<u8>::new());
         // Each object's salt its own.
         let (one, other) = (framed(b"x", b"", (&dek(), ID)), framed(b"x", b"", (&dek(), ID)));
-        assert_ne!(Frame::of(&one).unwrap().seal, Frame::of(&other).unwrap().seal);
+        assert_ne!(Frame::of(&one).unwrap().encryption, Frame::of(&other).unwrap().encryption);
     }
 
-    /// TASK-411.2: a sealed object read by a reader not holding its key: its footer and table read
-    /// and checked against their CRCs, its parts' stored bytes checked, as the collector reads
+    /// TASK-411.2: an encrypted object read by a reader not holding its key: its footer and table
+    /// read and checked against their CRCs, its parts' stored bytes checked, as the collector reads
     /// them; its data read by none, refused naming its key, never given as it is stored; restamped
     /// by none. Under another key of the same name: refused, by its MAC first, by its parts' tags
     /// past it.
     #[test]
-    fn sealed_objects_open_under_their_key_alone() {
+    fn encrypted_objects_open_under_their_key_alone() {
         let data = [random(PART), pattern(PART / 2)].concat();
         let bytes = framed(&data, b"footer", (&dek(), ID));
         let locked = Parts::of(&bytes, &NoKeys).unwrap();
@@ -1744,7 +1753,7 @@ mod tests {
         let no_key = Error::NoKey(ID);
         assert_eq!(
             no_key.to_string(),
-            "an object sealed under branch 7b's key of generation 2, which its reader doesn't hold"
+            "an object encrypted under branch 7b's key of generation 2, which its reader doesn't hold"
         );
         assert_eq!(super::data(&bytes, &NoKeys), Err(no_key.clone()));
         let other_generation = HashMap::from([(KeyId { generation: 3, ..ID }, dek())]);
@@ -1766,11 +1775,13 @@ mod tests {
         assert_eq!(super::data(&bytes, &wrong), Err(by_mac.clone().into()));
         assert_eq!(corrupt_of(footer(&bytes, &wrong)), Err(by_mac.clone()));
         assert_eq!(restamp(&bytes, b"another", &wrong), Err(by_mac.into()));
-        let Seal::Sealed { salt, .. } = locked.frame.seal else { panic!("sealed") };
+        let Encryption::Encrypted { salt, .. } = locked.frame.encryption else {
+            panic!("encrypted")
+        };
         let keys = holding(dek());
         let opened = Parts::of(&bytes, &keys).unwrap();
         let wrong_key =
-            Opening::Open(Arc::new(ObjectKey::new(&wrong[&ID], ID, salt, Keyed::Sealed)));
+            Opening::Open(Arc::new(ObjectKey::new(&wrong[&ID], ID, salt, Keyed::Encrypted)));
         let by_tag = Error::Corrupt(Corrupt("an object's part, by its tag".into()));
         for index in 0..2 {
             let part = Part { opening: wrong_key.clone(), ..opened.part(index).unwrap() };
@@ -1784,16 +1795,16 @@ mod tests {
         assert_eq!(corrupt_of(frame.check_footer(footer_bytes, &wrong)), by_footer_mac);
     }
 
-    /// A reader holding `keys`, which holds the objects it reads sealed: a reader of a branch whose
-    /// record has a DEK (TASK-411.3).
-    struct Sealing(HashMap<KeyId, Secret>);
+    /// A reader holding `keys`, which holds the objects it reads encrypted: a reader of a branch
+    /// whose record has a DEK (TASK-411.3).
+    struct Encrypting(HashMap<KeyId, Secret>);
 
-    impl Keys for Sealing {
+    impl Keys for Encrypting {
         fn dek(&self, id: KeyId) -> Option<&Secret> {
             self.0.get(&id)
         }
 
-        fn sealed(&self) -> bool {
+        fn encrypted(&self) -> bool {
             true
         }
     }
@@ -1802,7 +1813,7 @@ mod tests {
     /// unencrypted, tagged: read alike by a reader holding no key, which checks their CRCs alone,
     /// as the collector reads a checkpoint, and by one holding its key, which checks their tags
     /// and its MACs too, and refuses a part changed, its CRC made to match. Restamped under its key
-    /// alone. A reader holding its objects sealed refuses one authenticated under a key it doesn't
+    /// alone. A reader holding its objects encrypted refuses one authenticated under a key it doesn't
     /// hold.
     #[test]
     fn authenticated_objects_read_keyless_and_check_under_their_key() {
@@ -1810,7 +1821,7 @@ mod tests {
         let keys = holding(dek());
         let bytes = framed_keyed(&data, b"footer", (&dek(), ID, Keyed::Authenticated));
         let parts = Parts::of(&bytes, &keys).unwrap();
-        assert!(matches!(parts.frame.seal, Seal::Authenticated { key: ID, .. }));
+        assert!(matches!(parts.frame.encryption, Encryption::Authenticated { key: ID, .. }));
         let mut compressing = PartPacker::new();
         for ((part, index), stored) in data.chunks(PART as usize).zip(0..).zip(&parts.stored) {
             let compressed = compressing.compress(index, part);
@@ -1843,44 +1854,44 @@ mod tests {
             Ok(PART as usize / 2 + 3)
         );
 
-        // Restamped under its key, as a sealed one is; by no reader not holding it.
+        // Restamped under its key, as an encrypted one is; by no reader not holding it.
         let restamped = restamp(&bytes, b"another", &keys).unwrap();
         assert_eq!(footer(&restamped, &keys).unwrap(), b"another");
         assert_eq!(super::data(&restamped, &keys).unwrap(), data);
         assert_eq!(restamp(&bytes, b"another", &NoKeys), Err(Error::NoKey(ID)));
 
-        // A reader holding its objects sealed refuses one authenticated under a key it lacks.
-        let sealing = Sealing(HashMap::from([(ID, dek())]));
-        assert_eq!(super::data(&bytes, &sealing).unwrap(), data);
+        // A reader holding its objects encrypted refuses one authenticated under a key it lacks.
+        let encrypting = Encrypting(HashMap::from([(ID, dek())]));
+        assert_eq!(super::data(&bytes, &encrypting).unwrap(), data);
         let other = KeyId { generation: 9, ..ID };
         let authenticated = framed_keyed(&data, b"footer", (&dek(), other, Keyed::Authenticated));
-        assert_eq!(super::data(&authenticated, &sealing), Err(Error::NoKey(other)));
+        assert_eq!(super::data(&authenticated, &encrypting), Err(Error::NoKey(other)));
         assert_eq!(super::data(&authenticated, &NoKeys).unwrap(), data);
     }
 
-    /// TASK-411.28: no object is in the clear. One whose seal, MACs and tags were zeroed, its CRCs
+    /// TASK-411.28: no object is in the clear. One whose encryption, MACs and tags were zeroed, its CRCs
     /// made to match, as one who can write the bucket, holding no key, would, to have it read in
     /// the clear (a downgrade), is corrupt to every reader, holding its key or none, by its
     /// trailer: whole, by its suffix, its footer, its data, a restamping, the keyless check.
     #[test]
     fn objects_in_the_clear_are_corrupt() {
         let data = pattern(PART + 1);
-        let sealing = Sealing(HashMap::from([(ID, dek())]));
-        let sealed = framed(&data, b"footer", (&dek(), ID));
-        assert_eq!(super::data(&sealed, &sealing).unwrap(), data);
-        let mut zeroed = sealed.clone();
+        let encrypting = Encrypting(HashMap::from([(ID, dek())]));
+        let encrypted = framed(&data, b"footer", (&dek(), ID));
+        assert_eq!(super::data(&encrypted, &encrypting).unwrap(), data);
+        let mut zeroed = encrypted.clone();
         let frame = Frame::of(&zeroed).unwrap();
         let trailer = zeroed.len() - TRAILER as usize;
-        zeroed[trailer + at::SEAL..trailer + at::TABLE_CRC].fill(0);
+        zeroed[trailer + at::ENCRYPTION..trailer + at::TABLE_CRC].fill(0);
         for part in 0..frame.parts() {
             let tag = entry(&frame, part) + 17;
             zeroed[tag..tag + TAG_LEN].fill(0);
         }
         recrc(&mut zeroed);
-        let clear = corrupt("trailer: a seal in the clear, which no object has");
+        let clear = corrupt("trailer: an encryption in the clear, which no object has");
         assert_eq!(Frame::of(&zeroed), Err(clear.clone()));
         assert_eq!(check(&zeroed), Err(clear.clone()));
-        for keys in [&sealing as &dyn Keys, &holding(dek()), &NoKeys] {
+        for keys in [&encrypting as &dyn Keys, &holding(dek()), &NoKeys] {
             assert_eq!(corrupt_of(Parts::of(&zeroed, keys)), Err(clear.clone()));
             let suffix = &zeroed[frame.table().start as usize..];
             assert_eq!(corrupt_of(Parts::of_suffix(suffix, keys)), Err(clear.clone()));
@@ -1890,12 +1901,12 @@ mod tests {
         }
     }
 
-    /// TASK-411.2: a sealed part changed, its CRC with it or not, its tag changed, or moved to
+    /// TASK-411.2: an encrypted part changed, its CRC with it or not, its tag changed, or moved to
     /// another index or another object of the same key, never reads as data: the CRC finds a part
     /// changed by itself; its tag, one whose CRC was made to match; the table's MAC, a table made
     /// to say any of it; each layer alone.
     #[test]
-    fn sealed_parts_changed_or_moved_fail() {
+    fn encrypted_parts_changed_or_moved_fail() {
         let data = random(3 * PART);
         let keys = holding(dek());
         let bytes = framed(&data, b"footer", (&dek(), ID));
@@ -1974,13 +1985,13 @@ mod tests {
         assert_eq!(super::data(&another, &keys).unwrap(), data);
     }
 
-    /// The key of a raw file of [`dek`]'s, from `salt`, as a sealed store's (TASK-411.5).
+    /// The key of a raw file of [`dek`]'s, from `salt`, as an encrypted store's (TASK-411.5).
     fn raw_file_key(salt: Salt) -> Arc<ObjectKey> {
         Arc::new(ObjectKey::sectors(&dek(), ID, salt))
     }
 
-    /// The bytes of a sealed raw file holding `data`, whole sectors, under `key`, then its tail,
-    /// framed in place, as a sealed store frames a segment or a large extent (TASK-411.23).
+    /// The bytes of an encrypted raw file holding `data`, whole sectors, under `key`, then its tail,
+    /// framed in place, as an encrypted store frames a segment or a large extent (TASK-411.23).
     fn sectors_of(data: &[u8], footer: &[u8], key: &Arc<ObjectKey>) -> Vec<u8> {
         let mut bytes = data.to_vec();
         key.encrypt_sectors(0, &mut bytes);
@@ -1991,7 +2002,7 @@ mod tests {
         bytes
     }
 
-    /// TASK-411.23: an object framed in place from a sealed raw file is the raw file's sectors as
+    /// TASK-411.23: an object framed in place from an encrypted raw file is the raw file's sectors as
     /// AES-256-XTS encrypted them under the raw file's key, `Xts::derive(dek, salt, "cladefs raw
     /// file")`, the sector's place its tweak, then its tail: its trailer names the DEK and the raw
     /// file's salt; it holds none of its data; it reads back under its key, whole, by parts, by
@@ -2013,7 +2024,7 @@ mod tests {
         }
         let keys = holding(dek());
         let parts = Parts::of(&bytes, &keys).unwrap();
-        assert_eq!(parts.frame.seal, Seal::Sectors { key: ID, salt });
+        assert_eq!(parts.frame.encryption, Encryption::Sectors { key: ID, salt });
         assert!(parts.opens());
         let lens: Vec<(Encoding, u64)> =
             parts.stored.iter().map(|stored| (stored.encoding, stored.len)).collect();
@@ -2143,20 +2154,20 @@ mod tests {
         assert_eq!(super::data(&another, &keys).unwrap(), data);
     }
 
-    /// TASK-421: a part compressed alone, as a store holds one packed ahead in memory, sealed
+    /// TASK-421: a part compressed alone, as a store holds one packed ahead in memory, encrypted
     /// under an object's key, is the part packed under that key, byte for byte, compressed or raw.
     #[test]
-    fn parts_compressed_alone_seal_as_parts_packed_sealed() {
+    fn parts_compressed_alone_encrypt_as_parts_packed_encrypted() {
         let salt = Salt([8; SALT_LEN]);
-        let sealing = sealed_with(salt);
-        let key = sealing.key();
+        let encrypting = encrypted_with(salt);
+        let key = encrypting.key();
         let mut packer = PartPacker::new();
         for (index, part) in [pattern(PART), random(PART), random(5000)].iter().enumerate() {
             let index = index as u64;
             let compressed = packer.compress(index, part);
             let stored = compressed.stored(part).to_vec();
-            let sealed = compressed.sealed(part.len() as u64, &stored, key);
-            assert_eq!(sealed, packer.pack(index, part, key), "part {index}");
+            let encrypted = compressed.encrypted(part.len() as u64, &stored, key);
+            assert_eq!(encrypted, packer.pack(index, part, key), "part {index}");
         }
     }
 
@@ -2165,15 +2176,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "framed in place under a raw file's sectors key")]
     fn objects_framed_in_place_under_aes_gcm_keys_are_refused() {
-        let key = Arc::new(ObjectKey::new(&dek(), ID, Salt([3; SALT_LEN]), Keyed::Sealed));
+        let key = Arc::new(ObjectKey::new(&dek(), ID, Salt([3; SALT_LEN]), Keyed::Encrypted));
         Packer::in_place(key);
     }
 
-    /// TASK-411.2: a sealed object's footer, table or trailer changed, their CRCs made to match,
+    /// TASK-411.2: an encrypted object's footer, table or trailer changed, their CRCs made to match,
     /// as one holding no key would: its readers holding its key refuse it, by its MAC; one holding
     /// none reads it, as the collector would, as doc-16 accepts.
     #[test]
-    fn sealed_metadata_changed_fails_by_its_mac() {
+    fn encrypted_metadata_changed_fails_by_its_mac() {
         let bytes = framed(&pattern(PART + 1), b"footer", (&dek(), ID));
         let frame = Frame::of(&bytes).unwrap();
         let trailer = bytes.len() - TRAILER as usize;
@@ -2245,7 +2256,7 @@ mod tests {
         let keys = holding(dek());
         let salt = Salt([4; SALT_LEN]);
         let empty = |footer: &[u8]| {
-            let packer = sealed_with(salt);
+            let packer = encrypted_with(salt);
             packer.finish(footer)
         };
         assert_eq!(restamp(&empty(b"one"), b"two", &keys).unwrap(), empty(b"two"));
@@ -2253,11 +2264,11 @@ mod tests {
         let cut = Err(Corrupt("an object's trailer, by its magic".into()).into());
         assert_eq!(restamp(&object[..object.len() - 1], b"cut short", &keys), cut);
 
-        let mut packer = sealed_with(salt);
+        let mut packer = encrypted_with(salt);
         let mut object = packer.push(&data);
         object.extend(packer.finish(b"footer of the first writer"));
         let restamped = restamp(&object, b"a later writer's", &keys).unwrap();
-        let mut packer = sealed_with(salt);
+        let mut packer = encrypted_with(salt);
         let mut expected = packer.push(&data);
         expected.extend(packer.finish(b"a later writer's"));
         assert_eq!(restamped, expected);
@@ -2265,7 +2276,7 @@ mod tests {
         let (before, after) =
             (Parts::of(&object, &keys).unwrap(), Parts::of(&restamped, &keys).unwrap());
         assert_eq!((after.stored, after.tags), (before.stored, before.tags));
-        assert_eq!(after.frame.seal, Seal::Sealed { key: ID, salt });
+        assert_eq!(after.frame.encryption, Encryption::Encrypted { key: ID, salt });
         assert_eq!(super::data(&restamped, &keys).unwrap(), data);
         assert_eq!(
             &restamped[..before.frame.stored_len as usize],
@@ -2279,14 +2290,14 @@ mod tests {
     fn parts_compressing_little_are_stored_compressed() {
         let mut data = random(128 << 10);
         data[..8 << 10].copy_from_slice(&pattern(8 << 10));
-        let mut packer = sealed_with(Salt([3; SALT_LEN]));
+        let mut packer = encrypted_with(Salt([3; SALT_LEN]));
         let packed = packer.push(&data);
         assert!(!packer.stored_raw(), "stored raw");
         assert!(packed.len() > data.len() - data.len() / 8, "{} of {}", packed.len(), data.len());
     }
 
     /// Parts that zstd does not shrink are stored raw: incompressible data costs the table, and
-    /// nothing more; cladefs: sealed, the same (TASK-411.2).
+    /// nothing more; cladefs: encrypted, the same (TASK-411.2).
     #[test]
     fn incompressible_data_costs_its_table() {
         let data = random(2 * PART + 4096);
@@ -2301,7 +2312,7 @@ mod tests {
 
     /// A frame says its format, last: one of another format than the reader's is refused, naming
     /// it, rather than called corrupt (TASK-141.2); cladefs: a frame of format 1, the last before
-    /// objects were sealed, among them, of any length, the shortest as long as its trailer was,
+    /// objects were encrypted, among them, of any length, the shortest as long as its trailer was,
     /// shorter than a trailer is now (TASK-411.2).
     #[test]
     fn frames_of_other_formats_are_named() {
@@ -2356,11 +2367,11 @@ mod tests {
         assert_eq!(format_1(&[], b"").len(), 40);
     }
 
-    /// TASK-411.2: a trailer's seal is sealed, authenticated or a raw file's sectors, as its kind
+    /// TASK-411.2: a trailer's encrypt is encrypted, authenticated or a raw file's sectors, as its kind
     /// says; of another kind, or in the clear (TASK-411.28), it is corrupt, to a reader holding no
     /// key too.
     #[test]
-    fn seals_are_as_their_kinds_say() {
+    fn encrypts_are_as_their_kinds_say() {
         let bytes = framed(&random(4096), b"footer", (&dek(), ID));
         let trailer = bytes.len() - TRAILER as usize;
         let refused = |at: usize, value: u8| {
@@ -2370,25 +2381,28 @@ mod tests {
             corrupt_of(Parts::of(&changed, &NoKeys).map(|_| ()))
         };
         let corrupt = |what: &str| Err(Corrupt(format!("an object's {what}")));
-        assert_eq!(refused(trailer + at::SEAL, 4), corrupt("trailer: a seal of kind 4"));
         assert_eq!(
-            refused(trailer + at::SEAL, 0),
-            corrupt("trailer: a seal in the clear, which no object has")
+            refused(trailer + at::ENCRYPTION, 4),
+            corrupt("trailer: an encryption of kind 4")
+        );
+        assert_eq!(
+            refused(trailer + at::ENCRYPTION, 0),
+            corrupt("trailer: an encryption in the clear, which no object has")
         );
         for kind in 1..=3 {
-            assert_eq!(refused(trailer + at::SEAL, kind), Ok(()), "kind {kind}");
+            assert_eq!(refused(trailer + at::ENCRYPTION, kind), Ok(()), "kind {kind}");
         }
     }
 
     /// Objects cut short, or with any byte of them changed, fail to read, without panicking:
-    /// cladefs: sealed and authenticated (TASK-411.2, TASK-411.3).
+    /// cladefs: encrypted and authenticated (TASK-411.2, TASK-411.3).
     #[test]
     fn corrupt_objects_fail() {
         let data = [pattern(PART + 100), random(PART / 2)].concat();
         let keys = holding(dek());
-        let sealed = framed(&data, b"footer", (&dek(), ID));
+        let encrypted = framed(&data, b"footer", (&dek(), ID));
         let authenticated = framed_keyed(&data, b"footer", (&dek(), ID, Keyed::Authenticated));
-        for bytes in [sealed, authenticated] {
+        for bytes in [encrypted, authenticated] {
             let read = |bytes: &[u8]| -> Result<(Vec<u8>, Vec<u8>), Error> {
                 let parts = Parts::of(bytes, &keys)?;
                 let data = parts.read(0..parts.frame.data_len, |range| {
@@ -2489,7 +2503,7 @@ mod tests {
                 tags,
                 data_len: PART + 8192,
                 end: 4096 + 8192,
-                ..sealed_with(Salt([3; SALT_LEN]))
+                ..encrypted_with(Salt([3; SALT_LEN]))
             };
             let tail = packer.finish(b"f");
             Frame::of_trailer(&tail).unwrap().stored_in(&tail).map(|(stored, ..)| stored)

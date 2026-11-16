@@ -371,7 +371,7 @@ pub async fn shred(bucket: &impl Bucket, cell: Cell) -> Result<usize, Error> {
 }
 
 /// cladefs: the refusal of a shredded cell, `cell`: as a KMS's refusal, naming its tenant, its
-/// stores opening no more (`EACCES`), and the collector leaving its sealed objects uncompacted.
+/// stores opening no more (`EACCES`), and the collector leaving its encrypted objects uncompacted.
 pub fn shredded(cell: Cell) -> Error {
     Error::Kms(format!("tenant {}: cell {cell} is shredded, its KEK gone", cell.tenant))
 }

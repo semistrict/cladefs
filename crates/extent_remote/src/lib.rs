@@ -126,21 +126,21 @@ pub enum Error {
     Lost(String),
     #[error("corrupt: {0}")]
     Corrupt(String),
-    /// cladefs: an object's data, sealed under a DEK its reader doesn't hold (TASK-411.2): its key
-    /// unwrapped by none, or revoked; or the collector's marking, which reads none of the data of
-    /// objects sealed, its compaction reading them under their keys (TASK-411.6).
+    /// cladefs: an object's data, encrypted under a DEK its reader doesn't hold (TASK-411.2): its
+    /// key unwrapped by none, or revoked; or the collector's marking, which reads none of the data
+    /// of objects encrypted, its compaction reading them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
     /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
-    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are sealed, and its
+    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are encrypted, and its
     /// record holds not `from`'s keys (TASK-411.4): it was given its own without them. A fork so
     /// is refused before anything of it is made (`keys::inheriting`).
     #[error(
-        "branch {branch} inherits from branch {from}, of another cell, whose objects are sealed, \
-         and its record holds not their keys"
+        "branch {branch} inherits from branch {from}, of another cell, whose objects are \
+         encrypted, and its record holds not their keys"
     )]
     Inherited { branch: layout::Branch, from: layout::Branch },
     /// The branch's record says its objects are of another format than this one's, newer or

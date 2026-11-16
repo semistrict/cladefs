@@ -39,7 +39,7 @@
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
 //! a thread; a sandbox's memory starting from its base's and its point's objects, which it reads.
-//! Sealed, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
+//! Encrypted, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
 //! it (`extent_remote::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
 //! `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to start.
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
@@ -213,7 +213,7 @@ fn host_kms(dir: &std::path::Path) -> Result<Arc<Kms>, String> {
     Ok(Kms::new(kms.shared()))
 }
 
-/// Fills `args`' directory, made if missing and empty, as `args` say, sealing its cells under
+/// Fills `args`' directory, made if missing and empty, as `args` say, encrypting its cells under
 /// `kms`.
 fn run(args: &Args, kms: &Arc<Kms>) -> Result<Filled, String> {
     let &Args { tenants, cells, segments, largest, kind, .. } = args;
@@ -397,7 +397,7 @@ async fn write(
             }
             None => batch.close(&mut writer.chain()),
         };
-        let seq = writer.add_segment(segment.frame(writer.keys().sealing())).map_err(failed)?;
+        let seq = writer.add_segment(segment.frame(writer.keys().encrypting())).map_err(failed)?;
         writer.upload(seq).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
         if let Some(point) = point {

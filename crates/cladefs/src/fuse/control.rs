@@ -219,7 +219,7 @@ impl proto::mount_server::Mount for Control {
                         Some(token) => token,
                         None => crate::host_store::token().map_err(Error::new)?,
                     };
-                    // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is sealed
+                    // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is encrypted
                     // (TASK-411.3, TASK-411.28).
                     let holding = async {
                         let kms = crate::remote::kms();

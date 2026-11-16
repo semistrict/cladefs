@@ -27,7 +27,7 @@ results=${2:?results directory required}
 shift 2
 (( $# > 0 )) || { echo "Name a LABEL=TREE to time" >&2; exit 2; }
 source "$(dirname "${BASH_SOURCE[0]}")/linux-host-setup.sh"
-# cladefs: the daemon's stores sealed under the bucket KMS of a test master key, unless the environment
+# cladefs: the daemon's stores encrypted under the bucket KMS of a test master key, unless the environment
 # names a KMS (TASK-411.28).
 source "$(dirname "${BASH_SOURCE[0]}")/test-kms.sh"
 test_master_key

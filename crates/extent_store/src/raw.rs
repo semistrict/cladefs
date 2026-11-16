@@ -5,16 +5,16 @@
 //! cladefs: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
 //! hold a guest's writes until they are framed, read back by offset meanwhile. Every store is
-//! sealed (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
+//! encrypted (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
 //! tweak, under a key of the file's own: derived from the branch's DEK, the newest, and a salt
-//! drawn for the file ([`Sealer`]). Every write reaching such a file is whole sectors
+//! drawn for the file ([`RawEncryption`]). Every write reaching such a file is whole sectors
 //! (TASK-411.8), so none reads, changes and writes a sector again. An open segment's salt and DEK
 //! are in its log's header, which is MACed, as its records are, under another subkey of the same
 //! DEK and salt (`wal::LogHeader`); a large extent's raw file never outlives its process (opening
 //! a store removes those left), so its salt is kept in memory alone.
 //!
 //! cladefs: the file's key is an object's ([`extent_frame::ObjectKey::sectors`], TASK-411.23): a
-//! sealed raw file framed in place is an object of its sectors as they are, its trailer naming the
+//! encrypted raw file framed in place is an object of its sectors as they are, its trailer naming the
 //! DEK and the salt, each part tagged under another subkey of them ([`RawFile::sectors`]).
 
 use crate::dir::File;
@@ -25,8 +25,8 @@ use std::io;
 use std::ops::Range;
 use std::sync::Arc;
 
-/// The bytes of a sector of a raw file: what a sealed one is encrypted by, each alone, its place
-/// in the file its tweak. What reaches an open segment is whole sectors (TASK-411.8).
+/// The bytes of a sector of a raw file: what an encrypted one is encrypted by, each alone, its
+/// place in the file its tweak. What reaches an open segment is whole sectors (TASK-411.8).
 pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 
 /// The most a raw file's write encrypts at once, through a buffer of its own ([`RawFile`]'s
@@ -34,24 +34,24 @@ pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 const ENCRYPTING_MOST: usize = 1 << 20;
 const _: () = assert!((ENCRYPTING_MOST as u64).is_multiple_of(SECTOR));
 
-/// cladefs: how a sealed store's raw file is encrypted, and its log authenticated: under subkeys of
+/// cladefs: how an encrypted store's raw file is encrypted, and its log authenticated: under subkeys of
 /// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
 /// the key of the object the file is once framed in place (TASK-411.23).
-pub(crate) struct Sealer {
+pub(crate) struct RawEncryption {
     pub key: KeyId,
     pub salt: Salt,
     sectors: Arc<ObjectKey>,
     mac: Secret,
 }
 
-impl Sealer {
-    /// The sealer of a new raw file, under `dek`, which `key` names, from a salt drawn now
+impl RawEncryption {
+    /// The encryption of a new raw file, under `dek`, which `key` names, from a salt drawn now
     /// ([`crate::sync::salt`]).
     pub fn new(dek: &Secret, key: KeyId) -> Self {
         Self::of(dek, key, crate::sync::salt())
     }
 
-    /// The sealer of a raw file encrypted under `dek`, which `key` names, from `salt`.
+    /// The encryption of a raw file encrypted under `dek`, which `key` names, from `salt`.
     pub fn of(dek: &Secret, key: KeyId, salt: Salt) -> Self {
         let sectors = Arc::new(ObjectKey::sectors(dek, key, salt));
         Self { key, salt, sectors, mac: dek.derive(&salt, &[b"cladefs raw file log mac"]) }
@@ -63,7 +63,7 @@ impl Sealer {
         self.mac.mac(&at_bytes(at, bytes))
     }
 
-    /// Checks `mac` is the MAC of `bytes` at `at` in the file's log ([`Sealer::mac`]).
+    /// Checks `mac` is the MAC of `bytes` at `at` in the file's log ([`RawEncryption::mac`]).
     pub fn verify(&self, at: u64, bytes: &[u8], mac: &[u8; MAC_LEN]) -> bool {
         self.mac.verify(&at_bytes(at, bytes), mac).is_ok()
     }
@@ -73,7 +73,7 @@ impl Sealer {
         self.sectors.encrypt_sectors(at / SECTOR, sectors);
     }
 
-    /// Decrypts `sectors` in place, as [`Sealer::encrypt`] encrypted them.
+    /// Decrypts `sectors` in place, as [`RawEncryption::encrypt`] encrypted them.
     pub fn decrypt(&self, at: u64, sectors: &mut [u8]) {
         self.sectors.decrypt_sectors(at / SECTOR, sectors);
     }
@@ -93,7 +93,7 @@ fn at_bytes(at: u64, bytes: &[u8]) -> Vec<u8> {
 /// What it stores, as stored, is [`RawFile::file`]'s.
 pub struct RawFile<F> {
     file: Arc<F>,
-    sealer: Arc<Sealer>,
+    encryption: Arc<RawEncryption>,
 }
 
 impl<F> RawFile<F> {
@@ -101,14 +101,14 @@ impl<F> RawFile<F> {
     /// sectors as they are, each tagged under it ([`extent_frame::Packer::in_place`],
     /// TASK-411.23).
     pub(crate) fn sectors(&self) -> &Arc<ObjectKey> {
-        &self.sealer.sectors
+        &self.encryption.sectors
     }
 }
 
 impl<F: File> RawFile<F> {
-    /// `file`, raw, sealed by `sealer`.
-    pub(crate) fn new(file: F, sealer: Arc<Sealer>) -> Self {
-        Self { file: Arc::new(file), sealer }
+    /// `file`, raw, encrypted by `encryption`.
+    pub(crate) fn new(file: F, encryption: Arc<RawEncryption>) -> Self {
+        Self { file: Arc::new(file), encryption }
     }
 
     /// The file as it stores the bytes, encrypted: for a reader of them as stored, as a
@@ -129,17 +129,17 @@ impl<F: File> RawFile<F> {
     /// Decrypts `bytes` in place, read as stored at `at`, the start of a [`RawFile::read_range`]:
     /// whole sectors.
     pub fn decrypt(&self, at: u64, bytes: &mut [u8]) {
-        self.sealer.decrypt(at, bytes);
+        self.encryption.decrypt(at, bytes);
     }
 
     /// Encrypts `bytes` in place, to be written at `at`: whole sectors, refused otherwise.
     pub(crate) fn encrypt(&self, at: u64, bytes: &mut [u8]) -> io::Result<()> {
         if !at.is_multiple_of(SECTOR) || !(bytes.len() as u64).is_multiple_of(SECTOR) {
             let len = bytes.len();
-            let error = format!("{len} bytes at {at}: not whole sectors of a sealed raw file");
+            let error = format!("{len} bytes at {at}: not whole sectors of an encrypted raw file");
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
-        self.sealer.encrypt(at, bytes);
+        self.encryption.encrypt(at, bytes);
         Ok(())
     }
 
@@ -179,12 +179,12 @@ impl<F: File> File for RawFile<F> {
     /// that much more, not its own size again, outside what its caller bounds (the extent daemon's
     /// room for requests' buffers). A crash may leave some pieces written, as it may of any write.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        let mut sealed = Aligned::new(buf.len().min(ENCRYPTING_MOST));
+        let mut encrypted = Aligned::new(buf.len().min(ENCRYPTING_MOST));
         for (piece, at) in buf.chunks(ENCRYPTING_MOST).zip((offset..).step_by(ENCRYPTING_MOST)) {
-            let sealed = &mut sealed.as_mut_slice()[..piece.len()];
-            sealed.copy_from_slice(piece);
-            self.encrypt(at, sealed)?;
-            self.file.write_at(sealed, at)?;
+            let encrypted = &mut encrypted.as_mut_slice()[..piece.len()];
+            encrypted.copy_from_slice(piece);
+            self.encrypt(at, encrypted)?;
+            self.file.write_at(encrypted, at)?;
         }
         Ok(())
     }
@@ -215,9 +215,9 @@ mod tests {
     use super::*;
     use crate::{Dir as _, MemDir};
 
-    fn sealer() -> Arc<Sealer> {
+    fn encryption() -> Arc<RawEncryption> {
         let key = KeyId { branch: 7, generation: 1 };
-        Arc::new(Sealer::new(&Secret::from_bytes(&[5; 32]), key))
+        Arc::new(RawEncryption::new(&Secret::from_bytes(&[5; 32]), key))
     }
 
     /// A write larger than [`ENCRYPTING_MOST`], encrypted and written a piece at a time, stores
@@ -227,7 +227,7 @@ mod tests {
         let dir = MemDir::new();
         let len = 2 * ENCRYPTING_MOST + 3 * SECTOR as usize;
         let data: Vec<u8> = (0..len).map(|at| (at % 253) as u8).collect();
-        let raw = RawFile::new(dir.create("sealed", true).unwrap(), sealer());
+        let raw = RawFile::new(dir.create("encrypted", true).unwrap(), encryption());
         raw.write_at(&data, SECTOR).unwrap();
         let mut whole = data.clone();
         raw.encrypt(SECTOR, &mut whole).unwrap();
@@ -239,13 +239,13 @@ mod tests {
         assert!(read == data, "read back otherwise than written");
     }
 
-    /// A sealed raw file stores no byte of what was written, and reads it back, at any offset and
+    /// An encrypted raw file stores no byte of what was written, and reads it back, at any offset and
     /// length, whole sectors or not; refuses writes of parts of sectors.
     #[test]
-    fn sealed_raw_files_store_ciphertext_and_read_plaintext() {
+    fn encrypted_raw_files_store_ciphertext_and_read_plaintext() {
         let dir = MemDir::new();
         let data: Vec<u8> = (0..3 * SECTOR as usize).map(|at| (at % 251) as u8).collect();
-        let raw = RawFile::new(dir.create("sealed", true).unwrap(), sealer());
+        let raw = RawFile::new(dir.create("encrypted", true).unwrap(), encryption());
         raw.write_at(&data, SECTOR).unwrap();
         let mut stored = vec![0; 4 * SECTOR as usize];
         raw.file().read_at(&mut stored, 0).unwrap();
@@ -264,7 +264,7 @@ mod tests {
         assert_eq!(refused.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(
             refused.to_string(),
-            "512 bytes at 4096: not whole sectors of a sealed raw file"
+            "512 bytes at 4096: not whole sectors of an encrypted raw file"
         );
     }
 }

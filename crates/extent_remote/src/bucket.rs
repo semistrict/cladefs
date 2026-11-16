@@ -766,7 +766,7 @@ mod tests {
         let long = layout::with_footer(
             &data,
             &vec![2u8; crate::object::TAIL as usize + 5000],
-            crate::testing::sealing(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_branch(1)),
         );
         let tail = Frame::of(&long).unwrap().tail();
         let short = long[(tail.end - tail.start) as usize..].to_vec();

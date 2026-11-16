@@ -66,9 +66,9 @@ async fn apply(importer: &mut Importer, name: &str, layer: &[u8], count: usize, 
 }
 
 fn main() {
-    // cladefs: its stores sealed, under the tests' KMS unless its environment names a KMS or gives
+    // cladefs: its stores encrypted, under the tests' KMS unless its environment names a KMS or gives
     // a master key: a real host's KMS adds its calls (TASK-411.28).
-    cladefs::remote::testing::sealed();
+    cladefs::remote::testing::encrypted();
     let mut args = std::env::args().skip(1);
     let files: usize = args.next().map_or(20_000, |n| n.parse().unwrap());
     let large_mib: usize = args.next().map_or(256, |n| n.parse().unwrap());

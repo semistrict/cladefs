@@ -390,7 +390,7 @@ used by more than one process, or across a daemon's restarts, needs a file or
 cloud bucket. cladefsctl, without the daemon, changes existing stores'
 branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
-**Encryption and shredding** (backlog doc-16). Every store is sealed, always:
+**Encryption and shredding** (backlog doc-16). Every store is encrypted, always:
 the bucket, the stores' directories and the part cache hold its data encrypted,
 under its cell's KEK, which its tenant's KEK wraps. Every process that opens
 stores (extentd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
@@ -427,7 +427,7 @@ in memory until its VM process closes it.
 host given a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex
 32`) or `CLADEFS_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text),
 keeps each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
-master key and made on the tenant's first use: every tenant's cells are sealed,
+master key and made on the tenant's first use: every tenant's cells are encrypted,
 with no setup per tenant. Every process that opens stores (extentd, cladefsctl,
 mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs and
 errors name it only by its ID, a short hash. To rotate it, give every host

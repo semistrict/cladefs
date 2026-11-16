@@ -583,9 +583,9 @@ fn each_write_of_a_restore_going_wrong() {
 }
 
 /// TASK-411.4: the host's KMS holding the common tenant's KEK, which every store, point and
-/// restore here is of: their cells sealed, each restore's child keeping the keys it inherits
+/// restore here is of: their cells encrypted, each restore's child keeping the keys it inherits
 /// rewrapped under its own cell's KEK. Returns what keeps the KMS's directory.
-fn sealed() -> tempfile::TempDir {
+fn encrypted() -> tempfile::TempDir {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(crate::host_store::NO_TENANT).unwrap();
@@ -593,12 +593,12 @@ fn sealed() -> tempfile::TempDir {
     keys
 }
 
-/// TASK-411.4: `restores_with_nothing_going_wrong`, sealed: every restore's child keeps the keys
-/// it inherits, and reads, as what must hold checks.
+/// TASK-411.4: `restores_with_nothing_going_wrong`, encrypted: every restore's child keeps the
+/// keys it inherits, and reads, as what must hold checks.
 #[test]
-fn sealed_restores_with_nothing_going_wrong() {
+fn encrypted_restores_with_nothing_going_wrong() {
     host();
-    let _kms = sealed();
+    let _kms = encrypted();
     let restored = all((0..HOSTS).map(|host| (host, None, Leftover::Deleted)));
     assert_eq!(restored, vec![Ok(()); HOSTS]);
     let hosts = Hosts::new();
@@ -611,11 +611,11 @@ fn sealed_restores_with_nothing_going_wrong() {
     assert_eq!((record.deks.len(), inherited), (1, vec![source]));
 }
 
-/// TASK-411.4: `restores_failing_at_each_step_on_each_host`, sealed.
+/// TASK-411.4: `restores_failing_at_each_step_on_each_host`, encrypted.
 #[test]
-fn sealed_restores_failing_at_each_step_on_each_host() {
+fn encrypted_restores_failing_at_each_step_on_each_host() {
     host();
-    let _kms = sealed();
+    let _kms = encrypted();
     let cases = RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Fails(step)));
     let cases: Vec<_> = cases.collect();
     let restored = all(cases.clone());
@@ -623,11 +623,11 @@ fn sealed_restores_failing_at_each_step_on_each_host() {
     assert_eq!(made.count(), 0, "restores made though a step of them failed");
 }
 
-/// TASK-411.4: `hosts_dying_at_each_step_of_a_restore`, sealed: what a host dying in the middle
-/// of a sealed restore leaves, its child's keys given or not, breaks nothing.
+/// TASK-411.4: `hosts_dying_at_each_step_of_a_restore`, encrypted: what a host dying in the
+/// middle of an encrypted restore leaves, its child's keys given or not, breaks nothing.
 #[test]
-fn sealed_hosts_dying_at_each_step_of_a_restore() {
+fn encrypted_hosts_dying_at_each_step_of_a_restore() {
     host();
-    let _kms = sealed();
+    let _kms = encrypted();
     all(RESTORE_STEPS.into_iter().flat_map(|step| on_each_host(Fault::Dies(step))));
 }

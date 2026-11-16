@@ -1352,7 +1352,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.commit(None).unwrap();
     // cladefs: its footer names it (TASK-411.3).
     let footer = extent_remote::layout::encode(&extent(1));
-    let framed = extent_frame::framed(&data, &footer, extent_remote::testing::sealing(BRANCH));
+    let framed = extent_frame::framed(&data, &footer, extent_remote::testing::encrypting(BRANCH));
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1593,7 +1593,7 @@ fn segments_framed_in_copies_take_their_parts_held() {
     let (evicted_bytes, evicted_read_back, _, evicted_after) = framed(true, MemDir::serial());
     assert_eq!(evicted_read_back, 6 * MIB as u64 + BLOCK as u64, "every part read back");
     assert_eq!((evicted_after.evicted_parts, evicted_after.taken), (6, 0));
-    // Each framing sealed under a salt of its own (TASK-411.28): alike once opened.
+    // Each framing encrypted under a salt of its own (TASK-411.28): alike once opened.
     let opened = |bytes: &[u8]| {
         let keys = extent_remote::testing::ring([BRANCH]);
         let keys = keys.of(BRANCH.id);
@@ -1668,7 +1668,8 @@ fn compressible_large_extents_are_framed_in_copies() {
         let before = extent_store::written();
         store.commit(None).unwrap();
         let footer = extent_remote::layout::encode(&extent(sequence));
-        let framed = extent_frame::framed(data, &footer, extent_remote::testing::sealing(BRANCH));
+        let framed =
+            extent_frame::framed(data, &footer, extent_remote::testing::encrypting(BRANCH));
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -3543,7 +3544,7 @@ fn writes_to_segments_are_whole_sectors() {
         store.place(extent(1)).unwrap(),
         Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
     );
-    // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, sealed, takes
+    // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, encrypted, takes
     // them alone (TASK-411.5).
     let large = OPTIONS.large_extent as usize + BLOCK;
     let unsectored = store.write(extent(2), 0, &vec![2; large + 512]).expect_err("succeeded");

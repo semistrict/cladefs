@@ -24,7 +24,7 @@ async-trait.workspace = true
 extent_keys.workspace = true
 extent_store.workspace = true
 rand.workspace = true
-# Its tests' stores sealed under the tests' KMS, their environment naming none (TASK-411.28).
+# Its tests' stores encrypted under the tests' KMS, their environment naming none (TASK-411.28).
 cladefs = { path = "../cladefs", features = ["testing", "tests-kms"] }
 tempfile.workspace = true
 extent_remote.workspace = true

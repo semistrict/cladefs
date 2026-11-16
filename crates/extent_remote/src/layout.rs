@@ -35,7 +35,7 @@ pub use extent_frame::segment::{
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
 /// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
 /// a KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
-/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, sealed under their branch's DEK
+/// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their branch's DEK
 /// (none in the clear since TASK-411.28, which changed no format), own extents' footers naming
 /// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is
 /// written once (TASK-407): segments' and checkpoints' keys name their writers' epochs, a branch's
@@ -738,25 +738,29 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, crate::Error> {
 
 pub use extent_frame::{Frame, PART, TRAILER, crc};
 
-/// How a writer seals what it frames: under its branch's DEK, the newest, and which it is
-/// ([`crate::keys::Ring::sealing`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
-pub type Sealing<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
+/// How a writer encrypts what it frames: under its branch's DEK, the newest, and which it is
+/// ([`crate::keys::Ring::encrypting`], TASK-411.3). Nothing is framed in the clear (TASK-411.28).
+pub type EncryptionKey<'a> = (&'a extent_frame::Secret, extent_frame::KeyId);
 
 /// The bytes of an object of `data` and `footer`, framed (`extent_frame`): the data's parts,
-/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: sealed
-/// as `sealing` says (TASK-411.3).
-pub fn with_footer<T: Serialize>(data: &[u8], footer: &T, sealing: Sealing<'_>) -> Vec<u8> {
-    extent_frame::framed(data, &encode(footer), sealing)
+/// compressed, the footer, the table of where the parts are, then the [`TRAILER`]. cladefs: encrypted
+/// as `encrypting` says (TASK-411.3).
+pub fn with_footer<T: Serialize>(
+    data: &[u8],
+    footer: &T,
+    encrypting: EncryptionKey<'_>,
+) -> Vec<u8> {
+    extent_frame::framed(data, &encode(footer), encrypting)
 }
 
 /// cladefs: the object of `extent`, stored on its own, of `data`: its footer names it, so that one
-/// copied to another key, sealed, is refused (TASK-411.3), sealed as `sealing` says.
-pub fn own_extent(extent: ExtentId, data: &[u8], sealing: Sealing<'_>) -> Vec<u8> {
-    with_footer(data, &extent, sealing)
+/// copied to another key, encrypted, is refused (TASK-411.3), encrypted as `encrypting` says.
+pub fn own_extent(extent: ExtentId, data: &[u8], encrypting: EncryptionKey<'_>) -> Vec<u8> {
+    with_footer(data, &extent, encrypting)
 }
 
 /// The data of a whole object [`with_footer`] made, checked against its CRCs, by a reader holding
-/// `keys` (TASK-411.3): none of an object sealed under a key not of them ([`crate::Error::NoKey`]).
+/// `keys` (TASK-411.3): none of an object encrypted under a key not of them ([`crate::Error::NoKey`]).
 pub fn data_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<Vec<u8>, crate::Error> {
     Ok(extent_frame::data(bytes, keys)?)
 }
@@ -777,9 +781,9 @@ pub fn footer_under<T: DeserializeOwned>(
 }
 
 impl Segment {
-    /// Its object, cladefs: sealed as `sealing` says (TASK-411.3).
-    pub fn encode(&self, sealing: Sealing<'_>) -> Vec<u8> {
-        with_footer(&self.data, &self.footer, sealing)
+    /// Its object, cladefs: encrypted as `encrypting` says (TASK-411.3).
+    pub fn encode(&self, encrypting: EncryptionKey<'_>) -> Vec<u8> {
+        with_footer(&self.data, &self.footer, encrypting)
     }
 
     /// The footer of a segment's object.
@@ -951,13 +955,13 @@ mod tests {
         assert_eq!(objectid_block(0x2a), "objectid/000000000000002a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
-        assert_eq!(kind("tenants/2a/sealed"), Kind::Unknown);
+        assert_eq!(kind("tenants/2a/encrypted"), Kind::Unknown);
         assert_eq!(kek(0x2a), "tenants/000000000000002a/kek");
         assert_eq!(kind(&kek(0x2a)), Kind::Kek { tenant: 0x2a });
         assert_eq!((kind(&kek(0x2a)).name(), owner(&kek(0x2a))), ("kek", None));
         assert_eq!(kind("tenants/2a/kek"), Kind::Unknown);
         assert_eq!(kind(&format!("{}kek", cell.prefix())), Kind::Unknown);
-        assert_eq!(kind(&format!("{}sealed", cell.prefix())), Kind::Unknown);
+        assert_eq!(kind(&format!("{}encrypted", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&gc_lease(cell)), Kind::GcLease { cell });
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
@@ -1093,10 +1097,10 @@ mod tests {
             },
         };
         let segment = Segment { data: b"abc".to_vec(), footer: footer.clone() };
-        let bytes = segment.encode(crate::testing::sealing(test_branch(1)));
+        let bytes = segment.encode(crate::testing::encrypting(test_branch(1)));
         let keys = crate::testing::ring([test_branch(1)]);
         assert_eq!(data_under(&bytes, &keys.of(1)).unwrap(), b"abc");
-        assert!(!bytes.windows(3).any(|bytes| bytes == b"abc"), "sealed");
+        assert!(!bytes.windows(3).any(|bytes| bytes == b"abc"), "encrypted");
         assert_eq!(Segment::footer(&bytes).unwrap(), footer);
         assert!(Segment::footer(&bytes[..bytes.len() - 1]).is_err());
     }
@@ -1104,8 +1108,8 @@ mod tests {
     /// Objects' footers are found by their frames.
     #[test]
     fn objects_hold_their_footers() {
-        let sealing = crate::testing::sealing(test_branch(1));
-        let bytes = with_footer(&[1; 5000], &"footer", sealing);
+        let encrypting = crate::testing::encrypting(test_branch(1));
+        let bytes = with_footer(&[1; 5000], &"footer", encrypting);
         assert_eq!(footer::<String>(&bytes).unwrap(), "footer");
         let keys = crate::testing::ring([test_branch(1)]);
         let keys = keys.of(1);

@@ -135,13 +135,13 @@ def unexpected(found, listed, dirs):
     return unlisted, gone
 
 
-# cladefs: the master key the mounts' stores are sealed under, the tests', known to all
+# cladefs: the master key the mounts' stores are encrypted under, the tests', known to all
 # (scripts/lib/test-kms.sh), unless the environment names a KMS (TASK-411.28).
 TEST_MASTER_KEY = "7e" * 32
 
 
-def sealed_env(dir):
-    """The environment of a mount of a new store in `dir`: every store is sealed, and cladefs-mount
+def encrypted_env(dir):
+    """The environment of a mount of a new store in `dir`: every store is encrypted, and cladefs-mount
     refuses to start with no KMS (TASK-411.28). Unless the environment names one, a host's: its
     bucket a directory in `dir`, placement 1, and the bucket KMS of the tests' master key."""
     env = dict(os.environ)
@@ -163,7 +163,7 @@ def mounted(cladefs_mount, dir):
     # Other users' too, which pjdfstest's tests become (`-u`, `-g`): a FUSE mount is its mounting
     # user's alone otherwise.
     command = [cladefs_mount, "--allow-other", "--new", str(CAPACITY), str(store), str(mountpoint)]
-    process = subprocess.Popen(command, env=sealed_env(dir),
+    process = subprocess.Popen(command, env=encrypted_env(dir),
                                stdout=subprocess.PIPE, stderr=log, text=True)
     said = process.stdout.readline().strip()
     if said != str(mountpoint):

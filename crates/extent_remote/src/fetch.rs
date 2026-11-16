@@ -30,10 +30,10 @@
 //! moves say. The footer and the table are tied to one version of an object by their CRCs, which
 //! the trailer and the table hold, and the parts by theirs, which the table holds.
 //!
-//! cladefs: what a host's fetchers keep, they keep as stored, sealed, as a reader holding no key
+//! cladefs: what a host's fetchers keep, they keep as stored, encrypted, as a reader holding no key
 //! reads it, and open with the keys of every store the host serves ([`Memory::keys`],
 //! `keys::HostRing`, TASK-411.3): an object's tail is opened, its MACs checked, once the host holds
-//! its key, and a part unpacked by the tail so opened; a part sealed under a key the host doesn't
+//! its key, and a part unpacked by the tail so opened; a part encrypted under a key the host doesn't
 //! hold yet is unread ([`Error::NoKey`]), and read once it does. An object in the clear is corrupt
 //! (TASK-411.28); and an extent's own object whose footer names another extent than its key, or a
 //! moves' that names another object than its key's, is no object of theirs.
@@ -78,7 +78,7 @@ impl Limits {
 /// read once, by a fetcher of its own that keeps nothing and bounds no GET: a ranged read of its
 /// object's tail, and of each part it is in, checked and decompressed. A host reads through its
 /// [`Fetcher`], which keeps the parts it fetches, under its budget. cladefs: holding `keys`, its
-/// store's ring: every object's data is sealed (TASK-411.28).
+/// store's ring: every object's data is encrypted (TASK-411.28).
 pub async fn read<B: Bucket>(
     bucket: &Arc<B>,
     keys: &Arc<keys::Ring>,
@@ -269,8 +269,8 @@ impl Tail {
 
     /// cladefs: its parts, as a reader holding `ring`, the host's keys now, reads them: opened, its
     /// table and footer checked against their MACs, under its key if `ring` holds it, and kept so;
-    /// as read otherwise, a sealed one's unread. Refused if it is authenticated under a key it
-    /// doesn't hold, and `ring` holds the object's branch sealed (TASK-411.3).
+    /// as read otherwise, an encrypted one's unread. Refused if it is authenticated under a key it
+    /// doesn't hold, and `ring` holds the object's branch encrypted (TASK-411.3).
     fn opened(&self, ring: &HostRing, key: &str) -> Result<Cow<'_, extent_frame::Parts>, Error> {
         if let Some(opened) = self.opened.get() {
             return Ok(Cow::Borrowed(opened));
@@ -449,7 +449,7 @@ enum Part {
 
 /// A part's stored bytes, checked against its CRC, unpacked once a read wants them: a read ahead
 /// never does, so that a part is unpacked once, by the read that wants it (TASK-92.21). cladefs:
-/// opened then, if sealed, in a copy: its stored bytes are what the cache keeps and peers are
+/// opened then, if encrypted, in a copy: its stored bytes are what the cache keeps and peers are
 /// served (TASK-411.2); by the part as its tail is opened then, under the host's keys, a read
 /// failing so, its key not held yet, kept for none (TASK-411.3).
 struct Fetched {
@@ -1088,8 +1088,8 @@ mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    /// The keys of a host serving the tests' branch: the tests' DEK (`testing::sealing`), which
-    /// their objects are sealed under (TASK-411.28).
+    /// The keys of a host serving the tests' branch: the tests' DEK (`testing::encrypting`), which
+    /// their objects are encrypted under (TASK-411.28).
     fn ring() -> Arc<keys::Ring> {
         crate::testing::ring([test_branch(1)])
     }
@@ -1129,7 +1129,7 @@ mod tests {
         let contents = layout::Contents { extents, ..layout::Contents::default() };
         let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
         layout::Segment { data: data.to_vec(), footer }
-            .encode(crate::testing::sealing(test_branch(1)))
+            .encode(crate::testing::encrypting(test_branch(1)))
     }
 
     /// A segment's object of `data`, all of which is [`EXTENT`].
@@ -1149,7 +1149,7 @@ mod tests {
         holding(whole(data))
     }
 
-    /// The bytes `bucket` holds at [`KEY`]: each segment framed sealed under a salt of its own
+    /// The bytes `bucket` holds at [`KEY`]: each segment framed encrypted under a salt of its own
     /// (TASK-411.28), the object a test made, as it is.
     fn stored_at(bucket: &Arc<SimBucket>) -> Vec<u8> {
         block_on(Direct(bucket.clone()).get(KEY)).unwrap().bytes.to_vec()
@@ -1499,7 +1499,7 @@ mod tests {
         let part = format!("get {KEY} 0..{PART}");
         assert_eq!(complete_all(&bucket, &mut reads), std::slice::from_ref(&part));
         assert_eq!(reads.result(read), Some(Ok(data[..10].to_vec())));
-        // As stored, sealed.
+        // As stored, encrypted.
         let object = stored_at(&bucket);
         let stored = extent_frame::Parts::of(&object, &extent_frame::NoKeys).unwrap().stored[0];
         let stored = object[stored.range().start as usize..stored.range().end as usize].to_vec();
@@ -1629,7 +1629,7 @@ mod tests {
         let moves = layout::with_footer(
             &moved,
             &Moves { of: KEY.to_owned(), extents: vec![(EXTENT, to)] },
-            crate::testing::sealing(layout::test_branch(1)),
+            crate::testing::encrypting(layout::test_branch(1)),
         );
         block_on(direct.put(&layout::moves(KEY, 1).unwrap(), moves.into(), PutMode::Create))
             .unwrap();
@@ -1735,7 +1735,7 @@ mod tests {
         state.extents.insert(EXTENT, location.clone());
         let checkpoint = layout::checkpoint(test_branch(1), 3, 1);
         let bytes =
-            crate::checkpoint::encode(&state, crate::testing::sealing(layout::test_branch(1)));
+            crate::checkpoint::encode(&state, crate::testing::encrypting(layout::test_branch(1)));
         let bucket = SimBucket::new();
         block_on(Direct(bucket.clone()).put(&checkpoint, bytes.clone().into(), PutMode::Create))
             .unwrap();

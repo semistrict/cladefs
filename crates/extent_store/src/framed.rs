@@ -236,8 +236,8 @@ impl<K: Copy + Eq + Hash, F: File> Files<K, F> {
 
 /// A file of extents' data, open.
 pub(crate) enum Source<F> {
-    /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the store
-    /// is sealed, which reads decrypt (TASK-411.5).
+    /// Raw, as written: an open segment's, or an open extent's own. cladefs: encrypted, if the
+    /// store is, which reads decrypt (TASK-411.5).
     Raw(Arc<RawFile<F>>),
     /// Framed: a closed segment's, or a sealed extent's own.
     Framed(Arc<Framed<F>>),
@@ -315,10 +315,10 @@ fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<RawFile<F>>, offset: u64, l
 pub enum Part<F> {
     /// cladefs: bytes of a raw file, which the store wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
-    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: a
-    /// sealed store's are encrypted, a sector at a time: a reader of the file's stored bytes reads
-    /// [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the [`RawFile`]
-    /// itself does (TASK-411.5).
+    /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: an
+    /// encrypted store's are encrypted, a sector at a time: a reader of the file's stored bytes
+    /// reads [`RawFile::read_range`] and decrypts it ([`RawFile::decrypt`]), as reading the
+    /// [`RawFile`] itself does (TASK-411.5).
     Data {
         file: Arc<RawFile<F>>,
         offset: u64,
@@ -353,7 +353,7 @@ impl<F> Part<F> {
 }
 
 /// A part of a framed file, stored raw or compressed: read whole, to be checked against its CRC,
-/// opened if sealed, and unpacked.
+/// opened if encrypted, and unpacked.
 pub struct Packed<F> {
     pub file: Arc<F>,
     /// cladefs: the part, as its file's tail says it is stored and opened (TASK-411.2).
@@ -376,7 +376,7 @@ impl<F> Packed<F> {
     }
 
     /// The part, unpacked from `stored`, its stored bytes and any after them, read from its file,
-    /// checked against its CRC, opened in place if sealed (TASK-411.2), and kept in `unpacked`:
+    /// checked against its CRC, opened in place if encrypted (TASK-411.2), and kept in `unpacked`:
     /// one stored compressed unpacked into what keeps it, rather than copied there (TASK-92.19);
     /// one stored raw kept in the buffer it was read into, which a page-in reads all of, uncopied
     /// (TASK-153.11).
@@ -414,8 +414,8 @@ impl<F> Packed<F> {
 static UNPACKS: AtomicU64 = AtomicU64::new(0);
 
 /// cladefs: why a part of a framed file was not read, as the store's reads fail: a part corrupt by
-/// [`Corrupt`] alone, as before parts were sealed; one sealed under a key the store doesn't hold
-/// by `extent_frame::Error::NoKey` (TASK-411.2).
+/// [`Corrupt`] alone, as before parts were encrypted; one encrypted under a key the store doesn't
+/// hold by `extent_frame::Error::NoKey` (TASK-411.2).
 fn unread(error: extent_frame::Error) -> Error {
     match error {
         extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
@@ -492,7 +492,7 @@ mod tests {
         let bytes = extent_frame::framed(
             &[7; 4096],
             &[],
-            extent_remote::testing::sealing(extent_remote::layout::test_branch(1)),
+            extent_remote::testing::encrypting(extent_remote::layout::test_branch(1)),
         );
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
@@ -521,7 +521,7 @@ mod tests {
             let bytes = extent_frame::framed(
                 &[key as u8; 4096],
                 &[],
-                extent_remote::testing::sealing(extent_remote::layout::test_branch(1)),
+                extent_remote::testing::encrypting(extent_remote::layout::test_branch(1)),
             );
             file.write_at(&bytes, 0).unwrap();
             Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))

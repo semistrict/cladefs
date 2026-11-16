@@ -293,7 +293,7 @@ struct Host {
     /// daemon's do (`crate::held`, TASK-400).
     held: Arc<crate::HeldParts>,
     /// cladefs: its keys, its KMS the tests' and its fetchers' keys its own, which its stores share,
-    /// as a daemon's do: every store sealed (TASK-411.28).
+    /// as a daemon's do: every store encrypted (TASK-411.28).
     keys: extent_remote::keys::Host,
 }
 
@@ -1996,7 +1996,7 @@ impl World {
                 .sum(),
             // Which passes skipped their cells, unchanged, the bucket can't tell (TASK-395.6).
             skipped: reported.skipped,
-            // Its cells are sealed under the tests' KMS, which its collectors hold: nothing is
+            // Its cells are encrypted under the tests' KMS, which its collectors hold: nothing is
             // left locked (TASK-411.6, TASK-411.28).
             locked: 0,
             uncompacted: 0,

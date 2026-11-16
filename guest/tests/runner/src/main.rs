@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tempdir::TempDir;
 use test_cases::{
-    Report, Shard, ShouldRun, Tag, Test, TestCase, TestOutcome, TestSetup, sealed, test_cases,
+    Report, Shard, ShouldRun, Tag, Test, TestCase, TestOutcome, TestSetup, encrypted, test_cases,
 };
 
 struct TestResult {
@@ -404,19 +404,19 @@ fn run_single_test(
     // Runs after check() regardless of outcome, so leaked processes are
     // cleaned up even if the test crashed.
     kill_cleanup_pids(&test_dir);
-    // cladefs: a test that passed fails if the run's stores are to be sealed and its are not
+    // cladefs: a test that passed fails if the run's stores are to be encrypted and its are not
     // (TASK-411.15): checked once its processes are gone, before its directory is.
     let outcome = match outcome {
-        TestOutcome::Pass | TestOutcome::Report(_) if env::var_os(sealed::SEALED).is_some() => {
-            match sealed::case(&test_dir) {
+        TestOutcome::Pass | TestOutcome::Report(_) if env::var_os(encrypted::ENCRYPTED).is_some() => {
+            match encrypted::case(&test_dir) {
                 Ok(report) => match report.verdict() {
                     Ok(()) => {
-                        eprint!("[sealed: {}] ", report.summary());
+                        eprint!("[encrypted: {}] ", report.summary());
                         outcome
                     }
                     Err(err) => TestOutcome::Fail(format!("{err:#}")),
                 },
-                Err(err) => TestOutcome::Fail(format!("checking its stores are sealed: {err:#}")),
+                Err(err) => TestOutcome::Fail(format!("checking its stores are encrypted: {err:#}")),
             }
         }
         outcome => outcome,
@@ -816,11 +816,11 @@ enum CliCommand {
         tmp_dir: PathBuf,
     },
     /// cladefs: makes a local KMS in DIR holding a KEK for each tenant the cases use, for a run's
-    /// stores to be sealed under (CLADEFS_KMS=local://DIR, TASK-411.15)
+    /// stores to be encrypted under (CLADEFS_KMS=local://DIR, TASK-411.15)
     Kms { dir: PathBuf },
     /// cladefs: checks, holding no key, that the stores under DIRS and the buckets BUCKETS, whole,
-    /// are sealed: the run's own bucket and part cache, at its end (TASK-411.15)
-    Sealed {
+    /// are encrypted: the run's own bucket and part cache, at its end (TASK-411.15)
+    Encrypted {
         /// A bucket, by its URL, checked whole
         #[arg(long = "bucket", value_name = "URL")]
         buckets: Vec<String>,
@@ -909,19 +909,19 @@ fn main() -> anyhow::Result<()> {
     match command {
         CliCommand::StartVm { test_case, tmp_dir } => start_vm(TestSetup { test_case, tmp_dir }),
         CliCommand::List { tags, names, shard } => list(&names, &tags, shard),
-        CliCommand::Kms { dir } => sealed::kms(&dir),
-        CliCommand::Sealed { buckets, dirs } => {
-            let report = sealed::run(&buckets, &dirs)?;
+        CliCommand::Kms { dir } => encrypted::kms(&dir),
+        CliCommand::Encrypted { buckets, dirs } => {
+            let report = encrypted::run(&buckets, &dirs)?;
             report.verdict()?;
-            eprintln!("sealed: {}", report.summary());
+            eprintln!("encrypted: {}", report.summary());
             Ok(())
         }
         CliCommand::Test { test_case, base_dir, keep_all, github_summary, outcome, run, round } => {
             sockets_fit(&std::env::temp_dir())?;
-            // cladefs: the stores its cases make and open in its own processes are sealed under the
+            // cladefs: the stores its cases make and open in its own processes are encrypted under the
             // host's KMS: none named (CLADEFS_KMS, CLADEFS_MASTER_KEY), it refuses to start, as every
             // process that opens stores does (TASK-411.28); scripts/test-e2e.sh names one.
-            sealed::require_kms()?;
+            encrypted::require_kms()?;
             let record = outcome.map(|outcome| Record { outcome, run, round });
             run_tests(&test_case, base_dir, keep_all, github_summary, record)
         }

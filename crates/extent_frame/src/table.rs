@@ -7,9 +7,9 @@
 //! with a CRC32C; after them, a footer of the rest of the state, the keys of the objects the
 //! entries name, and an index of the blocks; framed as objects are ([`crate::framed`]). A reader
 //! after every extent reads the table whole; one after a single extent reads the footer, and one
-//! block. cladefs: under its branch's DEK, if it has one, authenticated, not sealed
-//! ([`crate::Seal::Authenticated`], TASK-411.3): metadata, which the collector reads holding no
-//! key (doc-16, What is encrypted).
+//! block. cladefs: under its branch's DEK, if it has one, authenticated, not encrypted
+//! ([`crate::Encryption::Authenticated`], TASK-411.3): metadata, which the collector reads holding
+//! no key (doc-16, What is encrypted).
 
 use crate::{Corrupt, Error, KeyId, Keyed, Keys, Secret, crc};
 use serde::{Deserialize, Serialize};
@@ -207,17 +207,17 @@ mod tests {
     }
 
     fn encoded(entries: &[Entry]) -> Vec<u8> {
-        sealed(entries, (&dek(), ID))
+        encrypted(entries, (&dek(), ID))
     }
 
     /// The table of `entries`, authenticated under `key`.
-    fn sealed(entries: &[Entry], key: (&Secret, KeyId)) -> Vec<u8> {
+    fn encrypted(entries: &[Entry], key: (&Secret, KeyId)) -> Vec<u8> {
         let rows =
             entries.iter().map(|entry| (entry.id, entry.key.as_str(), entry.offset, entry.len));
         encode(rows, b"rest".to_vec(), key)
     }
 
-    /// A reader holding `keys`, which holds its objects sealed: a reader of a branch with a DEK.
+    /// A reader holding `keys`, which holds its objects encrypted: a reader of a branch with a DEK.
     struct Holding<'a>(&'a std::collections::HashMap<KeyId, Secret>);
 
     impl Keys for Holding<'_> {
@@ -225,14 +225,14 @@ mod tests {
             self.0.get(&id)
         }
 
-        fn sealed(&self) -> bool {
+        fn encrypted(&self) -> bool {
             true
         }
     }
 
     /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; cladefs:
     /// authenticated under a key, read alike by readers holding it or none, and refused, changed,
-    /// by one holding it; a reader holding its objects sealed reads it under the key, and refuses
+    /// by one holding it; a reader holding its objects encrypted reads it under the key, and refuses
     /// it without (TASK-411.3).
     #[test]
     fn tables_hold_their_entries() {
@@ -241,7 +241,7 @@ mod tests {
         let key = (&keys[&id], id);
         for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
             let entries = entries(count);
-            let bytes = sealed(&entries, key);
+            let bytes = encrypted(&entries, key);
             let (footer, decoded) = decode(&bytes, &keys).unwrap();
             assert_eq!((footer.rest.as_slice(), &decoded), (&b"rest"[..], &entries), "{count}");
             assert_eq!(decode(&bytes, &crate::NoKeys), Ok((footer.clone(), entries)));
@@ -249,14 +249,16 @@ mod tests {
             let expected: Vec<Id> = (0..blocks).map(|block| (3, block * 1820)).collect();
             assert_eq!(firsts, expected, "{count}");
         }
-        let mut bytes = sealed(&entries(3000), key);
+        let mut bytes = encrypted(&entries(3000), key);
         bytes[100] ^= 1;
         assert!(decode(&bytes, &keys).is_err());
         // Authenticated: its entries unencrypted, as stored; a part's tag changed, its table's CRC
         // made to match, read by a reader holding no key, refused by one holding it.
-        let bytes = sealed(&entries(10), key);
+        let bytes = encrypted(&entries(10), key);
         let frame = crate::Frame::of(&bytes).unwrap();
-        assert!(matches!(frame.seal, crate::Seal::Authenticated { key, .. } if key == id));
+        assert!(
+            matches!(frame.encryption, crate::Encryption::Authenticated { key, .. } if key == id)
+        );
         let mut tampered = bytes.clone();
         tampered[(frame.table().start + 17) as usize] ^= 1;
         let trailer = tampered.len() - crate::TRAILER as usize;
@@ -267,7 +269,7 @@ mod tests {
             decode(&tampered, &keys).map(|_| ()),
             Err(Corrupt("an object's table, by its MAC".into()).into())
         );
-        // A reader holding its objects sealed reads it under the key, and refuses it without.
+        // A reader holding its objects encrypted reads it under the key, and refuses it without.
         assert_eq!(decode(&bytes, &Holding(&keys)).map(|(_, entries)| entries), Ok(entries(10)));
         let none = std::collections::HashMap::new();
         assert_eq!(decode(&bytes, &Holding(&none)).map(|_| ()), Err(Error::NoKey(id)));

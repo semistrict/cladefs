@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every store sealed
+//! cladefs-gc, the program: a pass over a bucket, and its usage. cladefs: every store encrypted
 //! (TASK-411.28), the program given a master key, its bucket KMS keeping the tests' tenants' KEKs
 //! in the bucket ([`MASTER_KEY`]), as their writers' are ([`host_kms`]).
 
@@ -13,7 +13,7 @@ use std::sync::Arc;
 const MASTER_KEY: &str = "7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e";
 
 /// A host's KMS over `bucket`, as the program's environment chooses it: the bucket KMS, given
-/// [`MASTER_KEY`], which the tests' writers seal under.
+/// [`MASTER_KEY`], which the tests' writers encrypt under.
 fn host_kms<B: extent_remote::Bucket>(bucket: &Arc<B>) -> Arc<extent_remote::keys::Kms> {
     use extent_keys::kms::master::MasterKeys;
     let key = extent_keys::Secret::from_bytes(&[0x7e; 32]);
@@ -72,7 +72,7 @@ fn collects_a_bucket_once() {
 }
 
 /// TASK-411.28: with no KMS, neither `CLADEFS_KMS` nor a master key given, it refuses to collect or
-/// to delete a branch, before it touches the bucket, naming both variables: every cell is sealed,
+/// to delete a branch, before it touches the bucket, naming both variables: every cell is encrypted,
 /// and compacting needs its KEK. What reads no data, a dry run, `--branches`, `--usage`, needs
 /// none.
 #[test]
@@ -161,7 +161,7 @@ fn collects_a_file_bucket() {
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
             let segment =
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -245,7 +245,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
             let segment =
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -388,7 +388,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
             let segment =
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().sealing());
+                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting());
             let seq = writer.add_segment(segment).unwrap();
             writer.upload(seq).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -509,14 +509,14 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     assert_eq!(after, listed);
 }
 
-/// TASK-411.14: `--delete-branch` of a sealed branch whose fork into another cell has no record
+/// TASK-411.14: `--delete-branch` of an encrypted branch whose fork into another cell has no record
 /// yet, its writer dead between the fork's acknowledgement and recording it, records the fork, its
 /// checkpoint at the fork point authenticated under the branch's DEK, its cell's KEK unwrapped by
 /// the KMS `CLADEFS_KMS` names. TASK-411.28: without a KMS, it refuses to start, naming
 /// `CLADEFS_KMS` and `CLADEFS_MASTER_KEY`, the branch as it was; run again with one, it deletes it.
 #[test]
-fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms() {
-    use extent_frame::{Frame, KeyId, Seal};
+fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
+    use extent_frame::{Encryption, Frame, KeyId};
     use extent_keys::kms::LocalKms;
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::layout::{self, Branch, Cell, Child, Origin};
@@ -553,7 +553,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let written = Batch::from(written).close(&mut writer.chain());
-        let seq = writer.add_segment(written.frame(ring.sealing())).unwrap();
+        let seq = writer.add_segment(written.frame(ring.encrypting())).unwrap();
         writer.upload(seq).await.unwrap();
         writer.acknowledge().await.unwrap();
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
@@ -561,7 +561,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
         let forked = Child { branch: child, owner: 0x109, point: false };
         let forking = forking.fork(forked, &mut writer.chain());
-        let at = writer.add_segment(forking.frame(ring.sealing())).unwrap();
+        let at = writer.add_segment(forking.frame(ring.encrypting())).unwrap();
         writer.upload(at).await.unwrap();
         let head = extent_remote::head::get(&*bucket, parent).await.unwrap().unwrap();
         let named = layout::encode(&head.holding(writer.epoch(), at + 1));
@@ -602,8 +602,10 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     let checkpoint = layout::checkpoint(parent, at, 1);
     assert_eq!(checkpoints(), std::slice::from_ref(&checkpoint));
     let bytes = block_on(bucket.get(&checkpoint)).unwrap().bytes;
-    let seal = Frame::of(&bytes).unwrap().seal;
-    let Seal::Authenticated { key, .. } = seal else { panic!("{checkpoint}: {seal:?}") };
+    let encryption = Frame::of(&bytes).unwrap().encryption;
+    let Encryption::Authenticated { key, .. } = encryption else {
+        panic!("{checkpoint}: {encryption:?}")
+    };
     assert_eq!(key, KeyId { branch: 1, generation: keys::FIRST });
 }
 

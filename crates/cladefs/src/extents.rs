@@ -2532,14 +2532,14 @@ mod tests {
     }
 
     /// TASK-411.3: a store of a tenant whose KEK the host's KMS holds (`CLADEFS_KMS`, set here as
-    /// the test's process's): its cell made sealed, its branch given a DEK, and no byte of what it
-    /// wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
+    /// the test's process's): its cell made encrypted, its branch given a DEK, and no byte of what
+    /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
     /// inherits. TASK-411.28: a tenant with no KEK there gets no store, refused as destroyed
     /// (`EACCES`), and the store, the common tenant's, forks into no cell of its (`EACCES`), nothing
     /// made.
     #[test]
-    fn sealed_stores_serve_follow_reopen_and_fork_into_sealed_cells_alone() {
+    fn encrypted_stores_serve_follow_reopen_and_fork_into_encrypted_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
@@ -2599,7 +2599,7 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
-        // The common tenant's, sealed, into a cell of a tenant with no KEK.
+        // The common tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
         let common =
             ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));
@@ -2618,13 +2618,13 @@ mod tests {
     }
 
     /// TASK-411.18: a store of a tenant whose KEK is a key in Google Cloud KMS, `CLADEFS_KMS` naming
-    /// it as a host is configured (`gcp-kms://...`): its cell made sealed, its KEK wrapped by the
+    /// it as a host is configured (`gcp-kms://...`): its cell made encrypted, its KEK wrapped by the
     /// tenant's key, which unwraps it to the KEK its branch's DEK is wrapped under; written, read
-    /// back, opened again and forked into a sealed cell. Skipped, saying why, without an access
+    /// back, opened again and forked into an encrypted cell. Skipped, saying why, without an access
     /// token (`extent_keys::testing::gcp`).
     #[test]
-    fn sealed_stores_open_through_google_cloud_kms() {
-        let test = "sealed_stores_open_through_google_cloud_kms";
+    fn encrypted_stores_open_through_google_cloud_kms() {
+        let test = "encrypted_stores_open_through_google_cloud_kms";
         let Some(admin) = extent_keys::testing::gcp::Admin::from_env(test) else { return };
         let url = admin.url("fxdax-test-{tenant}", None);
         extent_store::upload::block_on(admin.key("fxdax-test-5")).unwrap();
@@ -2634,7 +2634,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
-        let dek = *store.store.keys().sealing().0.expose();
+        let dek = *store.store.keys().encrypting().0.expose();
         let a = id(&store, 1);
         let data = crate::test_data::noise(1, 2 * BLOCK);
         write(&store, a, 0, &data).unwrap();

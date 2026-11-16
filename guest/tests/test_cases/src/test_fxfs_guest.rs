@@ -231,7 +231,7 @@ fn pattern(len: usize, seed: u8) -> Vec<u8> {
 
 /// What the guest writes, which the host reads back: more than one of the kernel's
 /// chunks of writes, and not a whole number of blocks, then an append. cladefs: the guest tests'
-/// known plaintext (`crate::canary`), which no file of a sealed run's stores holds (TASK-411.15).
+/// known plaintext (`crate::canary`), which no file of an encrypted run's stores holds (TASK-411.15).
 fn written() -> Vec<u8> {
     let mut data = crate::canary::stream((3 << 20) + 777);
     data.extend_from_slice(b"appended\n");

@@ -31,7 +31,7 @@
 //! sweep after that collects them. A pass that fails says so and stops none of the others; the next
 //! pass tries it again. A compacted object goes, and moves no state names, a grace period after (60
 //! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
-//! Every cell's objects are sealed (TASK-411.28), and compacted under its keys (TASK-411.6): its
+//! Every cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its
 //! KEK unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
 //! (`extent_remote::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
 //! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket, TASK-411.27),
@@ -552,8 +552,8 @@ fn requests_text(requests: &Requests) -> String {
 
 /// What a pass that deleted, compacted or retired something, or failed, says of `passed`: none
 /// for one that did nothing, skipping its cell or not, or left its cell to another; nor for one
-/// skipping a cell whose pass before left objects sealed uncompacted, which it leaves so, its KEK
-/// still not to be had: that pass said so, and the sweep's line counts it (TASK-411.13). A
+/// skipping a cell whose pass before left objects encrypted uncompacted, which it leaves so, its
+/// KEK still not to be had: that pass said so, and the sweep's line counts it (TASK-411.13). A
 /// mark-only pass says what it marked whatever it did.
 fn passed_line(passed: &Ran) -> Option<String> {
     let Ran { cell, outcome, requests, took } = passed;
@@ -588,15 +588,17 @@ fn did(report: &Report) -> String {
     )
 }
 
-/// What passes that left objects sealed uncompacted, as `report` says, their cells' KEKs not to
+/// What passes that left objects encrypted uncompacted, as `report` says, their cells' KEKs not to
 /// be had, say of them (TASK-411.6): nothing if none did. Each warned of its cell and why.
 fn locked(report: &Report) -> String {
     let Report { locked, uncompacted, .. } = report;
     match locked {
         0 => String::new(),
-        1 => format!(", left {uncompacted} sealed uncompacted, without their cell's KEK"),
+        1 => format!(", left {uncompacted} encrypted uncompacted, without their cell's KEK"),
         _ => {
-            format!(", left {uncompacted} sealed uncompacted in {locked} cells, without their KEKs")
+            format!(
+                ", left {uncompacted} encrypted uncompacted in {locked} cells, without their KEKs"
+            )
         }
     }
 }
@@ -666,7 +668,7 @@ impl Histogram {
 ///   `skipped` (unchanged since its last pass, TASK-395.6), `failed`, `held` (left to a pass
 ///   holding it), `swept` (left to a pass that went over it since).
 /// - `cladefs_gc_sweep_objects{action}` and `cladefs_gc_sweep_bytes{action}`: what its passes
-///   `deleted`, `compacted` and `marked`, as listed, and the objects sealed they left
+///   `deleted`, `compacted` and `marked`, as listed, and the objects encrypted they left
 ///   `uncompacted`, without their cells' KEKs (TASK-411.6); `cladefs_gc_sweep_retired_references`,
 ///   `cladefs_gc_sweep_locked_cells`, the cells those were of, and
 ///   `cladefs_gc_sweep_resurrected_objects`.
@@ -758,7 +760,7 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
     family(
         "cladefs_gc_sweep_locked_cells",
         "gauge",
-        "The cells its last sweep's passes left sealed objects uncompacted in, without their KEKs.",
+        "The cells its last sweep's passes left encrypted objects uncompacted in, without their KEKs.",
         &one(report.locked.to_string()),
     );
     family(
@@ -1335,7 +1337,7 @@ mod tests {
             swept_lines(Mode::Delete, &swept),
             (
                 "cladefs-gc: deleted 3 (3000 bytes), compacted 2 (200 bytes), retired 1 references, \
-                 left 5 sealed uncompacted in 2 cells, without their KEKs, over 7 cells (4 \
+                 left 5 encrypted uncompacted in 2 cells, without their KEKs, over 7 cells (4 \
                  unchanged), 2 held by other passes, 3 swept by them since, 1 failed; requests: \
                  get 40, list-delimited 9, delete-batch 2"
                     .to_owned(),
@@ -1389,14 +1391,14 @@ mod tests {
                  retired 1 references, in 0.012 s; requests: list 2"
             )
         );
-        // TASK-411.6: one that left objects sealed uncompacted, its cell's KEK not to be had, says
-        // so, whatever else it did.
+        // TASK-411.6: one that left objects encrypted uncompacted, its cell's KEK not to be had,
+        // says so, whatever else it did.
         let locked = Report { locked: 1, uncompacted: 3, ..Report::default() };
         assert_eq!(
             passed_line(&passed(Outcome::Collected(locked))).as_deref(),
             Some(
                 "cladefs-gc: cell 1/2: deleted 0 (0 bytes), compacted 0 (0 bytes), retired 0 \
-                 references, left 3 sealed uncompacted, without their cell's KEK, in 0.012 s; \
+                 references, left 3 encrypted uncompacted, without their cell's KEK, in 0.012 s; \
                  requests: list 2"
             )
         );
@@ -1476,7 +1478,7 @@ cladefs_gc_sweep_bytes{action=\"marked\"} 0
 # HELP cladefs_gc_sweep_retired_references The references its last sweep's passes retired.
 # TYPE cladefs_gc_sweep_retired_references gauge
 cladefs_gc_sweep_retired_references 0
-# HELP cladefs_gc_sweep_locked_cells The cells its last sweep's passes left sealed objects uncompacted in, without their KEKs.
+# HELP cladefs_gc_sweep_locked_cells The cells its last sweep's passes left encrypted objects uncompacted in, without their KEKs.
 # TYPE cladefs_gc_sweep_locked_cells gauge
 cladefs_gc_sweep_locked_cells 1
 # HELP cladefs_gc_sweep_resurrected_objects What its last sweep's mark-only passes found kept that the marks before named.

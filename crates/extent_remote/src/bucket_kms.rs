@@ -11,13 +11,13 @@
 //! - **Made on a tenant's first wrap** ([`BucketKms`]): no setup a tenant. A host finding no KEK
 //!   object makes a random KEK and creates its object, create-only; hosts racing to make one all
 //!   take the one that landed, a create finding another's object there using it, its own KEK
-//!   dropped unused. Every tenant is so sealed.
+//!   dropped unused. Every tenant is so encrypted.
 //! - **Shredding a tenant** ([`destroy`]) replaces its KEK object by a tombstone: every key wrapped
 //!   under its KEK unwraps no more, and the tenant reads as destroyed, never made a KEK again, on
 //!   every host. Only as strong as the bucket keeps no older version of the object, as for a cell
 //!   shredded (doc-16, Shredding). A KEK object deleted outright, not by [`destroy`], loses what
 //!   its KEK wrapped as shredding does, its keys refused as another KEK's; the tenant's next wrap
-//!   makes it a new KEK, never a cell in the clear (TASK-411.28: no cell is; the sealed marker
+//!   makes it a new KEK, never a cell in the clear (TASK-411.28: no cell is; the encrypted marker
 //!   that refused such a tenant, TASK-411.19, went). But a host's cells made after from KEKs it
 //!   pooled, or wrapped under the old KEK it held, are under the old KEK, and lost with it at
 //!   their next taking, what was written to them too (TASK-411.29).
@@ -31,7 +31,7 @@
 //!   the tenant's keys are revoked or destroyed calls (`keys::Kms::revoked`).
 //! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
 //!   key, this one, over the host's bucket; else none, which every process opening stores refuses
-//!   to start with, naming both (TASK-411.28: every store is sealed).
+//!   to start with, naming both (TASK-411.28: every store is encrypted).
 
 use crate::bucket::{self, Bucket, Created, Updated};
 use crate::layout;
@@ -285,12 +285,12 @@ impl<B: Bucket> HostKms<B> {
     }
 }
 
-/// Why a host has no KMS ([`from_env`]): neither variable gives one. Every store is sealed
+/// Why a host has no KMS ([`from_env`]): neither variable gives one. Every store is encrypted
 /// (TASK-411.28), so a process that opens stores refuses to start so, saying this.
 pub fn no_kms() -> String {
     format!(
         "no KMS: {KMS_VAR} names none, and neither {MASTER_KEY_VAR} nor {MASTER_KEY_FILE_VAR} \
-         gives a master key; every store is sealed (doc-16): set {KMS_VAR} to a KMS's URL, or \
+         gives a master key; every store is encrypted (doc-16): set {KMS_VAR} to a KMS's URL, or \
          {MASTER_KEY_VAR} to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
          bucket"
     )
@@ -300,7 +300,7 @@ pub fn no_kms() -> String {
 /// (extentd, cladefsctl, the cladefs CLI's mounts through `cladefs::remote::kms`; `cladefs-gc`): the KMS
 /// [`KMS_VAR`] names, if it names one; else, given master keys (`CLADEFS_MASTER_KEY` or
 /// `CLADEFS_MASTER_KEY_FILE`), the bucket KMS over `bucket()`, the host's bucket; else refused
-/// ([`no_kms`]), as every store is sealed (TASK-411.28). A KMS named, or master keys given, that
+/// ([`no_kms`]), as every store is encrypted (TASK-411.28). A KMS named, or master keys given, that
 /// can't be had is refused, saying why, never what a key holds.
 pub fn from_env<B: Bucket>(
     bucket: impl FnOnce() -> Result<Arc<B>, String>,
@@ -582,7 +582,7 @@ mod tests {
 
     /// AC #3 (TASK-411.27), as TASK-411.28 left it: a KEK object deleted outright, not shredded,
     /// loses what its KEK wrapped: keys under it are refused, as destroyed until a wrap makes the
-    /// tenant a new KEK, then as another KEK's. Its new cells are sealed under the new one: no cell
+    /// tenant a new KEK, then as another KEK's. Its new cells are encrypted under the new one: no cell
     /// is ever in the clear, so no marker refuses the tenant (TASK-411.19's went).
     #[test]
     fn kek_objects_deleted_outright_lose_what_they_wrapped() {
@@ -734,7 +734,7 @@ mod tests {
         assert_eq!(
             kind(&chosen(Some(&bucket))),
             "no KMS: CLADEFS_KMS names none, and neither CLADEFS_MASTER_KEY nor CLADEFS_MASTER_KEY_FILE \
-             gives a master key; every store is sealed (doc-16): set CLADEFS_KMS to a KMS's URL, or \
+             gives a master key; every store is encrypted (doc-16): set CLADEFS_KMS to a KMS's URL, or \
              CLADEFS_MASTER_KEY to a master key (openssl rand -hex 32) to keep tenants' KEKs in the \
              bucket"
         );

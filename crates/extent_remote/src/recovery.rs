@@ -20,7 +20,7 @@
 //! head again: if it changed, a newer checkpoint may cover what went, and the reader starts again.
 //!
 //! cladefs: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
-//! checkpoints are checked against their MACs under the keys it holds, and one whose seal says the
+//! checkpoints are checked against their MACs under the keys it holds, and one whose encrypt says the
 //! clear is corrupt (TASK-411.28). The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Meta};
@@ -1155,9 +1155,9 @@ fn state_at<'a, B: Bucket>(
 /// further along their moves than a reader names them. One there stands, any writer's (TASK-407.6).
 /// [`Error::Lost`] if the state there is gone: no reader recovers a fork from there either.
 ///
-/// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are sealed, as its
-/// writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in the
-/// clear (TASK-411.4). Asked for only if it is to be written.
+/// cladefs: authenticated under the DEK `keys` give, `branch`'s, if its objects are encrypted, as
+/// its writers' checkpoints are: a fork's child reading it holding `branch`'s keys refuses one in
+/// the clear (TASK-411.4). Asked for only if it is to be written.
 pub(crate) async fn checkpoint_at(
     bucket: &impl Bucket,
     branch: Branch,
@@ -1174,12 +1174,12 @@ pub(crate) async fn checkpoint_at(
         return Ok(());
     }
     let keys = keys.ring(bucket, branch).await?;
-    debug_assert_eq!(keys.sealing().1.branch, branch.id);
+    debug_assert_eq!(keys.encrypting().1.branch, branch.id);
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
         match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell, false).await {
             Ok(state) => {
-                let checkpoint = crate::checkpoint::encode(&state, keys.sealing());
+                let checkpoint = crate::checkpoint::encode(&state, keys.encrypting());
                 bucket::create(bucket, &key, checkpoint).await;
                 return Ok(());
             }
@@ -1333,7 +1333,7 @@ mod tests {
         for tag in tag..tag + count {
             let objects = Batch::from(Commit { tag, ..Commit::default() })
                 .close(&mut writer.chain())
-                .frame(writer.keys().sealing());
+                .frame(writer.keys().encrypting());
             let seq = writer.add_segment(objects).unwrap();
             bucket.served(writer.upload(seq)).0.unwrap();
             bucket.served(writer.acknowledge()).0.unwrap();
@@ -1416,8 +1416,9 @@ mod tests {
             let landed = async |writer: &Writer<Store>, contents: Contents| {
                 let footer = writer.chain().close(contents);
                 let data = vec![7; 8192];
-                let segment =
-                    Segment { data, footer: footer.clone() }.encode(writer.keys().sealing()).into();
+                let segment = Segment { data, footer: footer.clone() }
+                    .encode(writer.keys().encrypting())
+                    .into();
                 let seq = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
                 writer.upload(seq).await.unwrap();
                 (seq, writer.acknowledge().await.unwrap())
@@ -1493,15 +1494,15 @@ mod tests {
             };
             let forked = resize(1, 1 << 20)
                 .fork(child(test_branch(2)), &mut parent.chain())
-                .frame(parent.keys().sealing());
+                .frame(parent.keys().encrypting());
             let forked = Origin { parent: test_branch(1), at: landed(&parent, forked).await };
             let point = Child { branch: test_branch(3), owner: 0, point: true };
             let pointed =
-                Batch::default().fork(point, &mut parent.chain()).frame(parent.keys().sealing());
+                Batch::default().fork(point, &mut parent.chain()).frame(parent.keys().encrypting());
             let pointed = Origin { parent: test_branch(1), at: landed(&parent, pointed).await };
             landed(
                 &parent,
-                resize(2, 2 << 20).close(&mut parent.chain()).frame(parent.keys().sealing()),
+                resize(2, 2 << 20).close(&mut parent.chain()).frame(parent.keys().encrypting()),
             )
             .await;
             let capacity = async |branch, origin| {
@@ -1519,7 +1520,7 @@ mod tests {
             assert_eq!(child.state().capacity, Some(1 << 20));
             landed(
                 &child,
-                resize(3, 4 << 20).close(&mut child.chain()).frame(child.keys().sealing()),
+                resize(3, 4 << 20).close(&mut child.chain()).frame(child.keys().encrypting()),
             )
             .await;
             child.checkpoint().await.unwrap();
@@ -1545,7 +1546,7 @@ mod tests {
                 .add_segment(
                     batch
                         .fork(child(test_branch(2)), &mut parent.chain())
-                        .frame(parent.keys().sealing()),
+                        .frame(parent.keys().encrypting()),
                 )
                 .unwrap();
             parent.upload(at).await.unwrap();
@@ -1562,7 +1563,7 @@ mod tests {
             assert_eq!(child.checkpoint().await, Ok(None));
             let commit = Batch::from(Commit { tag: 2, ..Commit::default() });
             let seq = child
-                .add_segment(commit.close(&mut child.chain()).frame(child.keys().sealing()))
+                .add_segment(commit.close(&mut child.chain()).frame(child.keys().encrypting()))
                 .unwrap();
             child.upload(seq).await.unwrap();
             child.acknowledge().await.unwrap();

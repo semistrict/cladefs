@@ -31,4 +31,4 @@
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 // Its raw parts before are no parts of a copy's, sealed with AES-GCM: framed anew,
+                 // Its raw parts before are no parts of a copy's, encrypted with AES-GCM: framed anew,

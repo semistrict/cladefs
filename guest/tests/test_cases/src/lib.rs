@@ -22,7 +22,7 @@ pub fn posix_acl(entries: &[(u16, u16, u32)]) -> Vec<u8> {
 // clear (TASK-411.15).
 pub mod canary;
 #[cfg(feature = "host")]
-pub mod sealed;
+pub mod encrypted;
 
 mod test_pjdfstest;
 use test_pjdfstest::TestPjdfstest;

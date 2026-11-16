@@ -79,9 +79,9 @@ impl<K: Kms> Kms for Counted<K> {
     }
 }
 
-/// cladefs: the tests' KMS by default (TASK-411.28: every store sealed, every test too): each
+/// cladefs: the tests' KMS by default (TASK-411.28: every store encrypted, every test too): each
 /// tenant's KEK made on its first wrap and kept in memory, as the bucket KMS makes them in the
-/// bucket (`extent_remote::bucket_kms`), so that any tenant a test names is sealed with no setup.
+/// bucket (`extent_remote::bucket_kms`), so that any tenant a test names is encrypted with no setup.
 /// Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]). A tenant [`MemoryKms::destroy`]ed
 /// is refused for good, as a tenant whose KEK object is a tombstone; an unwrap for a tenant with
 /// no KEK is refused as destroyed, what it names gone. Hosts of one test share one, as they share
@@ -136,7 +136,7 @@ impl Kms for MemoryKms {
 }
 
 /// A KMS whose every tenant's KEK is one known key, [`KnownKms::KEK`], in every process, never a
-/// host's: what cladefs's tests' processes, and those they start, seal under when their environment
+/// host's: what cladefs's tests' processes, and those they start, encrypt under when their environment
 /// names no KMS, agreeing with no state shared, whatever bucket each keeps its stores in (cladefs's
 /// `tests-kms`, TASK-411.28). Its wraps are the bucket KMS's ([`crate::kms::bucket::wrap`]), each
 /// under a key derived for its tenant alone: one tenant's key unwraps for no other. No tenant's is

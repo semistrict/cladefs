@@ -5,7 +5,7 @@
 //! cladefs: a branch's record: what made it, which is what it is ([`Kind`]), whose it is, whether
 //! it was deleted (doc-7, Layout; TASK-160.14), and, of a point, whether other tenants may fork it
 //! ([`Record::shared`], TASK-395.7); cladefs: and its DEKs, wrapped by its cell's KEK, if its cell
-//! is sealed ([`Record::deks`], doc-16, TASK-411.3).
+//! is encrypted ([`Record::deks`], doc-16, TASK-411.3).
 //!
 //! In object storage a record is flags, as doc-7 lists them; read, it is decoded once, into the
 //! one kind its flags say, and refused if they say none ([`Error::Corrupt`]). What a record allows

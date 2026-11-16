@@ -7,8 +7,8 @@
 //! effect, or after whoever made them has gone; a writer's creates of segments, if it says, only
 //! once an object at their keys was deleted; and the collector's moves, which a test follows as a
 //! reader does ([`MovesMaps`]). extent_store's simulation of doc-7's protocol runs on it, as this
-//! crate's own tests do. cladefs: and a DEK objects framed outside a writer are sealed under, and a
-//! ring holding it ([`sealing`], [`ring`]): nothing is framed in the clear (TASK-411.28).
+//! crate's own tests do. cladefs: and a DEK objects framed outside a writer are encrypted under, and a
+//! ring holding it ([`encrypting`], [`ring`]): nothing is framed in the clear (TASK-411.28).
 
 use crate::bucket::{Bucket, ByteRange, Error, Listing, Meta, Object, Page, PutMode, Version};
 use crate::layout::{self, Branch, Kind};
@@ -253,8 +253,8 @@ impl Op {
     }
 
     /// As [`Op::describe_key`], a put's with its bytes' length and its mode, as the journal keeps
-    /// it. cladefs: not a hash of its bytes, as before every object was sealed (TASK-411.28): each
-    /// is sealed under keys and salts drawn at random, a run's bytes not another's, their lengths
+    /// it. cladefs: not a hash of its bytes, as before every object was encrypted (TASK-411.28): each
+    /// is encrypted under keys and salts drawn at random, a run's bytes not another's, their lengths
     /// the same.
     fn describe(&self) -> String {
         match self {
@@ -510,7 +510,7 @@ pub async fn live(
 /// over a dead cell retires the references that kept what its parents' cells reclaim at their next,
 /// and a pass retiring them again deletes nothing (TASK-395.4). It fails as a sweep fails, and
 /// panics after [`SWEEPS`]: passes that never settle are a bug. cladefs: compacting under the tests'
-/// KMS (`keys::testing`), which every test writer seals under (TASK-411.28).
+/// KMS (`keys::testing`), which every test writer encrypts under (TASK-411.28).
 pub async fn collect_until_quiet(
     bucket: &impl Bucket,
     options: &crate::collector::Options,
@@ -768,20 +768,20 @@ pub fn dek() -> &'static extent_frame::Secret {
 
 /// cladefs: how a test frames an object of `branch` outside a writer: under [`dek`], as the branch's
 /// DEK of the first generation.
-pub fn sealing(branch: Branch) -> layout::Sealing<'static> {
+pub fn encrypting(branch: Branch) -> layout::EncryptionKey<'static> {
     (dek(), extent_frame::KeyId { branch: branch.id, generation: crate::keys::FIRST })
 }
 
 /// cladefs: a ring holding [`dek`] as the DEK of each of `branches`, which a test's reader reads
-/// what [`sealing`] sealed under, sealing as the first's writer.
+/// what [`encrypting`] encrypted under, encrypting as the first's writer.
 pub fn ring(branches: impl IntoIterator<Item = Branch>) -> Arc<crate::keys::Ring> {
     let mut branches = branches.into_iter();
     let first = branches.next().expect("a branch, at least");
-    let key = |branch: Branch| sealing(branch).1;
+    let key = |branch: Branch| encrypting(branch).1;
     let others =
         branches.map(|branch| (key(branch), extent_frame::Secret::from_bytes(dek().expose())));
     let dek = extent_frame::Secret::from_bytes(dek().expose());
-    crate::keys::Ring::sealing_for_tests(first.id, crate::keys::FIRST, dek, others)
+    crate::keys::Ring::encrypting_for_tests(first.id, crate::keys::FIRST, dek, others)
 }
 
 /// cladefs: the branch whose object is at `key`, by its key: of a moves', the object's they are of.
@@ -797,7 +797,7 @@ fn branch_of_key(key: &str) -> Option<Branch> {
 
 /// cladefs: the ring a reader of `branch`'s store holds, as a host opening it reads it: its record,
 /// and its cell's object, its KEK unwrapped by the tests' KMS (`keys::testing`), which every test
-/// writer seals under (TASK-411.28).
+/// writer encrypts under (TASK-411.28).
 pub async fn ring_of(
     bucket: &impl Bucket,
     branch: Branch,
@@ -863,7 +863,7 @@ mod tests {
         bucket.hold(test_branch(2), 1);
         let key = layout::segment(test_branch(2), 4, 1);
         let footer = layout::Chain::new(test_branch(2), 1, 4, 0).close(layout::Contents::default());
-        let stale = layout::Segment { data: Vec::new(), footer }.encode(sealing(test_branch(1)));
+        let stale = layout::Segment { data: Vec::new(), footer }.encode(encrypting(test_branch(1)));
         let created = bucket.put(&key, stale.into(), PutMode::Create);
         assert_eq!(bucket.waiting(), 0);
         let deleted = bucket.delete(&key);

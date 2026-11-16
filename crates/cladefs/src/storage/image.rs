@@ -130,7 +130,7 @@ impl ImageDevice {
     }
 
     /// Writes `data`, the bytes of `write`, to its file, from a buffer of the I/O's own, as
-    /// `read_file` reads. cladefs: as the file stores them, encrypted once if the store is sealed
+    /// `read_file` reads. cladefs: as the file stores them, encrypted once if the store is
     /// (`Write::stored`, TASK-411.5); a write stopping short is written again from the last whole
     /// sector it wrote, so that what is written again is whole sectors of the same bytes.
     async fn write_file(
@@ -225,7 +225,7 @@ impl Device for ImageDevice {
                 // that is dirty yet, which is slower, not other bytes. This device is an
                 // in-process image's, which imports, host tools and tests use; guests' reads are
                 // extentd's, through the store's. cladefs: the sectors they are in, decrypted, if the
-                // store is sealed (TASK-411.5).
+                // store is encrypted (TASK-411.5).
                 Part::Data { file, offset, len, .. } => {
                     let range = file.read_range(offset, len);
                     let read_len = (range.end - range.start) as usize;
@@ -581,13 +581,13 @@ mod tests {
         assert_eq!(device.store.info().unwrap().used, (MIB + 2 * BLOCK as usize) as u64);
     }
 
-    /// cladefs: an image of a sealed cell (TASK-411.5): its device writes extents' data, in its open
-    /// segment's raw file and a large extent's own, by I/O of its own, encrypted
+    /// cladefs: an image of an encrypted cell (TASK-411.5): its device writes extents' data, in its
+    /// open segment's raw file and a large extent's own, by I/O of its own, encrypted
     /// (`Write::stored`), and reads them back decrypted, open, sealed and after reopening; no file
     /// of the image holds them in the clear at any of those points, each once the image does
     /// nothing behind its device's callers ([`quiesced`]).
     #[test]
-    fn sealed_images_hold_no_plaintext() {
+    fn encrypted_images_hold_no_plaintext() {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
@@ -598,7 +598,7 @@ mod tests {
         let made = (64 * MIB as u64, crate::host_store::BranchOf::New(cell), true);
         let keeping = crate::host_store::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
-        assert!(device.store.keys().seals());
+        assert!(device.store.keys().encrypts());
         let branch = device.branch();
         let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);

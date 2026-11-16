@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: whether a run's stores are sealed (TASK-411.15, doc-16), as the guest tests run
+//! cladefs: whether a run's stores are encrypted (TASK-411.15, doc-16), as the guest tests run
 //! encrypted only: scripts/test-e2e.sh gives every process of the run a KMS holding a KEK for every
-//! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_SEALED`), and this checks, holding no key, what
+//! tenant the cases use (`CLADEFS_KMS`, `CLADEFS_E2E_ENCRYPTED`), and this checks, holding no key, what
 //! their stores left:
 //!
 //! - **The buckets**: every cell has a wrapped KEK (or was shredded); every record of a branch
 //!   that wrote anything, but points' and deleted ones', has a DEK; every framed object (segments,
-//!   own extents, checkpoints, moves) says in its trailer it is sealed or authenticated, none in
+//!   own extents, checkpoints, moves) says in its trailer it is encrypted or authenticated, none in
 //!   the clear.
 //! - **The stores' directories**: no framed file in the clear, no segment's log headed so
 //!   (`extent_store::on_disk`).
@@ -18,8 +18,8 @@
 //!   into their guests' filesystems.
 //!
 //! The runner checks each case's directory once it passes (`runner test`, with
-//! `CLADEFS_E2E_SEALED`), and test-e2e.sh the run's own bucket and part cache at its end
-//! (`runner sealed`).
+//! `CLADEFS_E2E_ENCRYPTED`), and test-e2e.sh the run's own bucket and part cache at its end
+//! (`runner encrypted`).
 
 use anyhow::Context as _;
 use extent_remote::Bucket as _;
@@ -28,16 +28,16 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-/// The variable scripts/test-e2e.sh sets when the run's stores are to be sealed, which the runner
+/// The variable scripts/test-e2e.sh sets when the run's stores are to be encrypted, which the runner
 /// checks each case's are.
-pub const SEALED: &str = "CLADEFS_E2E_SEALED";
+pub const ENCRYPTED: &str = "CLADEFS_E2E_ENCRYPTED";
 
 /// The tenants a run's KMS holds a KEK for ([`kms`]): the default tenant, 0, whose stores are the
 /// daemon's own socket's and those the cases make in processes of their own (cladefs's `Storage`,
 /// cladefsctl's `create`), and granted ones, of IDs up to 15 (fxfs-guest-migrate-tenant-dax's 1-4).
 pub const TENANTS: std::ops::RangeInclusive<u64> = 0..=15;
 
-/// Whether this process has a KMS to seal and open stores under (`CLADEFS_KMS`, `CLADEFS_MASTER_KEY`):
+/// Whether this process has a KMS to encrypt and open stores under (`CLADEFS_KMS`, `CLADEFS_MASTER_KEY`):
 /// what the runner asks before it runs any case, refusing to start with none, naming both, as
 /// every process that opens stores does (TASK-411.28; `cladefs::remote::require_kms`).
 pub fn require_kms() -> anyhow::Result<()> {
@@ -95,7 +95,7 @@ impl Report {
             return Ok(());
         }
         const SHOWN: usize = 20;
-        let mut said = format!("not sealed: {}", self.summary());
+        let mut said = format!("not encrypted: {}", self.summary());
         for line in self.clear.iter().take(SHOWN) {
             said += &format!("\n  {line}");
         }
@@ -397,7 +397,7 @@ mod tests {
     /// offset; the others, and a store-less directory, find nothing.
     #[test]
     fn files_holding_known_plaintext_are_named() {
-        let dir = tempdir::TempDir::new("sealed").unwrap();
+        let dir = tempdir::TempDir::new("encrypted").unwrap();
         let clean: Vec<u8> = crate::canary::stream(10_000).iter().map(|byte| !byte).collect();
         std::fs::write(dir.path().join("clean"), clean).unwrap();
         let mut held = vec![0u8; CHUNK - 3];
