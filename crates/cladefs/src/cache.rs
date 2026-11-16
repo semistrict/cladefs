@@ -22,7 +22,7 @@
 
 use crate::dax::{Origin, Source, Window};
 use crate::error::{Errno, Result};
-use crate::extents::{ExtentId, PublicReach};
+use crate::extents::PublicReach;
 use crate::pages::{ArenaId, page_size};
 use crate::profile::Recorder;
 use crate::stats::{self, Counter};
@@ -34,6 +34,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
+use storage_device::ExtentId;
 use storage_device::NoExtent;
 
 /// The process's cache of sealed extents (see the module docs): its pager's threads, which read
@@ -129,7 +130,7 @@ impl Holders {
     }
 
     /// Whether one open still, but `store`, holds `extent`.
-    fn another_holds(&self, store: &Arc<Store<HostDir>>, extent: storage_device::ExtentId) -> bool {
+    fn another_holds(&self, store: &Arc<Store<HostDir>>, extent: ExtentId) -> bool {
         (self.open().into_iter())
             .filter(|(holder, _)| !Arc::ptr_eq(holder, store))
             .any(|(holder, _)| holder.extent(extent).is_ok_and(|held| held.is_some()))
@@ -410,7 +411,7 @@ pub(crate) fn freed(
             extents.get(&key).map(|cached| (cached.extent.clone(), cached.holders.clone()))?;
         (key, cached, holders)
     };
-    if !holders.another_holds(store, extent.into()) {
+    if !holders.another_holds(store, extent) {
         let mut extents = cache.extents.with(Mutex::lock);
         let same = extents.get(&key).is_some_and(|now| Arc::ptr_eq(&now.extent, &cached));
         let removed = same.then(|| extents.remove(&key));
@@ -523,10 +524,9 @@ impl StoredExtent {
         extent: ExtentId,
         recorder: Option<Arc<Recorder>>,
     ) -> Self {
-        let id: storage_device::ExtentId = extent.into();
         // Its offset in the data of the object it is in: a segment's, its own file's, or the one
         // object storage holds it in.
-        let offset = match store.place(id) {
+        let offset = match store.place(extent) {
             Ok(Some(extent_store::Place::Run { offset, .. })) => offset,
             Ok(Some(extent_store::Place::Remote(location))) => location.offset,
             _ => 0,
@@ -548,7 +548,7 @@ impl Contents for StoredExtent {
         if let Some(recorder) = &self.recorder {
             recorder.record(self.extent, offset, buf.len() as u64);
         }
-        let id: storage_device::ExtentId = self.extent.into();
+        let id = self.extent;
         // Through the first of the stores that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));
         for (store, remote) in self.holders.open() {

@@ -181,8 +181,8 @@ pub use extent_remote::layout::{Branch, Cell};
 #[cfg(target_os = "linux")]
 pub use extentd::{DaemonConnection, RemoteDevice, RemoteExtentStore};
 pub use extents::{
-    Commit, ExtentId, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess,
-    StoreHolding, StoreRole, Whose, WindowMapping, WriteBarriers,
+    Commit, ExtentInfo, ExtentStore, MappingContents, OpenBase, Opening, StoreAccess, StoreHolding,
+    StoreRole, Whose, WindowMapping, WriteBarriers,
 };
 pub use filesystem::{Filesystem, Node, Options};
 pub use host_store::{BranchOf, new_cell};
@@ -192,6 +192,7 @@ pub use node::{
     Attr, DirEntry, FileType, Inode, Owner, RenameFlags, SetAttr, SetTime, StatFs, XattrMode,
 };
 pub use storage::Storage;
+pub use storage_device::ExtentId;
 
 /// cladefs: the commit this build is of, as scripts/build-commit.sh said at build time (build.rs):
 /// a commit, with `-dirty` if a tracked file differed from it, or `unknown`. What extentd's

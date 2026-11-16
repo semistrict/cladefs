@@ -45,22 +45,7 @@ use extent_store::{
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
-use storage_device::{NoExtent, OtherBranch, SealedExtent};
-
-/// An extent's ID: the branch that wrote it, and the sequence number that branch gave it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct ExtentId {
-    /// The branch that wrote it: the store's, or one it was forked from.
-    pub branch: u64,
-    /// Its sequence number, which its branch gives each extent it writes once.
-    pub sequence: u64,
-}
-
-impl From<ExtentId> for storage_device::ExtentId {
-    fn from(id: ExtentId) -> Self {
-        Self::new(id.branch, id.sequence)
-    }
-}
+use storage_device::{ExtentId, NoExtent, OtherBranch, SealedExtent};
 
 /// What a store holds, as doc-4's `INFO` reports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -848,12 +833,12 @@ impl ExtentStore {
         if self.bases.routes(extent.branch) {
             return Ok(());
         }
-        self.view()?.pin(extent.into()).map_err(errno)
+        self.view()?.pin(extent).map_err(errno)
     }
 
     /// cladefs: lets go of `extent`, pinned.
     pub fn unpin(&self, extent: ExtentId) -> Result<()> {
-        self.view()?.unpin(extent.into());
+        self.view()?.unpin(extent);
         Ok(())
     }
 
@@ -1241,7 +1226,7 @@ impl ExtentStore {
         if self.following.is_some() {
             return Ok(false);
         }
-        let Some((len, false)) = self.store.extent(extent.into()).map_err(errno)? else {
+        let Some((len, false)) = self.store.extent(extent).map_err(errno)? else {
             return Ok(false);
         };
         let end = offset.checked_add(data.len() as u64).ok_or(Errno::EINVAL)?;
@@ -1273,16 +1258,16 @@ impl ExtentStore {
         let read = match &self.following {
             Some(following) => {
                 let view = following.view.lock(&self.halt)?;
-                self.store.read_view(&view, extent.into(), offset, data)
+                self.store.read_view(&view, extent, offset, data)
             }
-            None => self.store.read(extent.into(), offset, data),
+            None => self.store.read(extent, offset, data),
         };
         match read {
             Err(ref error)
                 if let Some(remote) = error.downcast_ref::<extent_store::RemoteData>() =>
             {
                 let (location, len) = (remote.location.clone(), data.len() as u64);
-                let fetched = self.fetcher().read(extent.into(), location, offset, len);
+                let fetched = self.fetcher().read(extent, location, offset, len);
                 let fetched = futures::executor::block_on(fetched).map_err(|failure| {
                     match failure {
                         // cladefs: a follower's of an extent its writer freed since its view's
@@ -1342,7 +1327,7 @@ impl ExtentStore {
         let fill = |at: u64, piece: &mut [u8]| {
             gather(buffers, at as usize, piece);
         };
-        let written = self.store.write_with(extent.into(), offset, len as u64, Self::PIECE, fill);
+        let written = self.store.write_with(extent, offset, len as u64, Self::PIECE, fill);
         written.map_err(errno)
     }
 
@@ -1351,7 +1336,7 @@ impl ExtentStore {
         self.access().may_write()?;
         // cladefs: nothing a panic went through is changed (`crate::halt`).
         self.halt.check()?;
-        self.store.free(extent.into()).map_err(errno)?;
+        self.store.free(extent).map_err(errno)?;
         // cladefs: its pages, unless another store that asked for them holds it still, which reads
         // them through itself (TASK-79.7): one that holds it reads them anew.
         let Some(cached) = cache::freed(&self.store, self.arenas.of(extent), extent) else {
@@ -1675,11 +1660,11 @@ impl ExtentStore {
             // A follower's view holds sealed extents alone.
             (None, Some(following)) => {
                 let view = following.view.lock(&self.halt)?;
-                self.store.view_extent(&view, extent.into()).map_err(errno)?
+                self.store.view_extent(&view, extent).map_err(errno)?
             }
             // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
             // (`open_maps_refused`).
-            (None, None) => match self.store.extent(extent.into()).map_err(errno)? {
+            (None, None) => match self.store.extent(extent).map_err(errno)? {
                 Some((_, true)) => return Err(refuse_open_map(extent)),
                 Some((len, false)) => len,
                 None => return Err(Errno::ENOENT),
@@ -1823,7 +1808,7 @@ impl ExtentStore {
         let MappingContents::Extent { extent, offset } = mapping.contents else {
             return format!("zeros, {:#x} bytes from {:#x}", mapping.len, mapping.window_offset);
         };
-        let stored = self.store.extent(extent.into()).map(|stored| {
+        let stored = self.store.extent(extent).map(|stored| {
             stored.map(|(len, open)| {
                 format!("{len:#x} bytes, {}", if open { "open" } else { "sealed" })
             })
@@ -1959,7 +1944,7 @@ impl ExtentStore {
         if !self.is_public() {
             return None;
         }
-        let held = self.store.extent(extent.into());
+        let held = self.store.extent(extent);
         matches!(held, Ok(Some((_, false)))).then_some(PublicReach(extent))
     }
 
@@ -2030,7 +2015,7 @@ impl ExtentStore {
         let Some(bases) = self.bases.of(extent.branch) else { return Ok(None) };
         for base in bases {
             let store = base.store(self)?;
-            if let Some((len, false)) = store.store.extent(extent.into()).map_err(errno)? {
+            if let Some((len, false)) = store.store.extent(extent).map_err(errno)? {
                 return Ok(Some((store, len)));
             }
         }
@@ -2195,8 +2180,7 @@ fn replay(
         let fetcher = fetcher.clone();
         let spawned = std::thread::Builder::new().name("cladefs replay".into()).spawn(move || {
             for unit in units.iter().skip(first).step_by(REPLAY_THREADS) {
-                let id: storage_device::ExtentId = unit.extent.into();
-                let Ok(Some((len, false))) = store.extent(id) else { continue };
+                let Ok(Some((len, false))) = store.extent(unit.extent) else { continue };
                 let arena = arenas.of(unit.extent);
                 let fetcher = Some(fetcher.clone());
                 let cached_in = CachedIn::Arena(arena);
@@ -2227,7 +2211,7 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     /// An error of a read of `extent`, whose data is in the bucket.
-    fn remote_data(extent: storage_device::ExtentId) -> extent_store::RemoteData {
+    fn remote_data(extent: ExtentId) -> extent_store::RemoteData {
         let location = extent_frame::segment::Location { key: "k".to_owned(), offset: 0, len: 1 };
         extent_store::RemoteData { extent, location }
     }
@@ -2236,7 +2220,7 @@ mod tests {
     /// context or not; any other is EIO (TASK-160.12).
     #[test]
     fn each_store_error_has_its_errno() {
-        let extent = ExtentId { branch: 1, sequence: 2 }.into();
+        let extent = ExtentId { branch: 1, sequence: 2 };
         let cases: [(anyhow::Error, Errno); 13] = [
             (extent_store::CutOff.into(), Errno::ESTALE),
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
@@ -2421,7 +2405,7 @@ mod tests {
         let branch = store.branch().id;
         let held = store.store.extents().unwrap();
         let own: Vec<_> = held.iter().filter(|(extent, _)| extent.branch == branch).collect();
-        let bytes = |held: &mut dyn Iterator<Item = &(storage_device::ExtentId, u64)>| -> u64 {
+        let bytes = |held: &mut dyn Iterator<Item = &(ExtentId, u64)>| -> u64 {
             held.map(|(_, len)| len).sum()
         };
         let (own_bytes, all_bytes) = (bytes(&mut own.iter().copied()), bytes(&mut held.iter()));
@@ -2458,7 +2442,6 @@ mod tests {
                         let held = store.store.extents().unwrap();
                         if !held.is_empty() {
                             let (extent, _) = held[pick.index(held.len())];
-                            let extent = ExtentId { branch: extent.branch, sequence: extent.sequence };
                             store.free(extent).unwrap();
                         }
                     }
@@ -4389,7 +4372,7 @@ mod tests {
         assert_eq!(store.map(open, 0, ps, 0), Err(Errno::EPERM));
         assert_eq!(open_maps_refused(), 1, "an open extent's MAP uncounted");
         assert_eq!(store.map(never, 0, ps, 0), Err(Errno::ENOENT));
-        assert_eq!(store.store.extent(open.into()).map_err(errno), Ok(Some((BLOCK as u64, true))));
+        assert_eq!(store.store.extent(open).map_err(errno), Ok(Some((BLOCK as u64, true))));
         assert_eq!(read(&store, open, 0, BLOCK), Ok(pattern(2, BLOCK)));
 
         store.map(sealed, 0, ps, 0).unwrap();

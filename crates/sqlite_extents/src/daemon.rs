@@ -101,13 +101,9 @@ impl Window for DaemonWindow {
                 window_offset: run.at,
                 len: run.len,
                 contents: match run.contents {
-                    Contents::Extent { extent, offset } => MappingContents::Extent {
-                        extent: cladefs::ExtentId {
-                            branch: extent.branch,
-                            sequence: extent.sequence,
-                        },
-                        offset,
-                    },
+                    Contents::Extent { extent, offset } => {
+                        MappingContents::Extent { extent, offset }
+                    }
                     Contents::Zeros => MappingContents::Zeros,
                 },
             })
