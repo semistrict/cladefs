@@ -25,7 +25,7 @@
 //! write: a store to a page gives the window a private copy of it (`crate::dax`), which no extent
 //! names, so that no commit changes anything in a window.
 
-use crate::cache::{self, CachedExtent, Placement};
+use crate::cache::{self, CachedExtent, CachedIn};
 use crate::dax::{Dax, DaxMapping, DaxWindow, SecondStage, Source};
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
@@ -1946,11 +1946,11 @@ impl ExtentStore {
     fn cached(&self, extent: ExtentId, len: u64) -> Result<Arc<CachedExtent>> {
         let remote = Some(self.fetcher());
         let recorder = self.profiling.as_ref().map(|(recorder, _)| recorder.clone());
-        let placement = match self.public_reach(extent) {
-            Some(reach) => Placement::Public(reach),
-            None => Placement::Arena(self.arenas.of(extent)),
+        let cached_in = match self.public_reach(extent) {
+            Some(reach) => CachedIn::Public(reach),
+            None => CachedIn::Arena(self.arenas.of(extent)),
         };
-        cache::cached(&self.store, placement, remote, recorder, extent, len)
+        cache::cached(&self.store, cached_in, remote, recorder, extent, len)
     }
 
     /// cladefs: that `extent` is reachable from a published generation, if it is: the store is
@@ -2053,7 +2053,7 @@ impl ExtentStore {
 /// generation or a base, holds it, so that every tenant attaching or forking it may read it. Only
 /// a store makes one, having found so ([`ExtentStore::public_reach`]): its field is this module's.
 /// The extent cache moves a tenant's copy of an extent to the default arena, which every VM
-/// process maps, only with one naming that extent (`cache::Placement::Public`).
+/// process maps, only with one naming that extent (`cache::CachedIn::Public`).
 pub(crate) struct PublicReach(ExtentId);
 
 impl PublicReach {
@@ -2199,8 +2199,8 @@ fn replay(
                 let Ok(Some((len, false))) = store.extent(id) else { continue };
                 let arena = arenas.of(unit.extent);
                 let fetcher = Some(fetcher.clone());
-                let placement = Placement::Arena(arena);
-                let extent = cache::cached(&store, placement, fetcher, None, unit.extent, len);
+                let cached_in = CachedIn::Arena(arena);
+                let extent = cache::cached(&store, cached_in, fetcher, None, unit.extent, len);
                 let Ok(extent) = extent else { continue };
                 match extent.read(unit.offset, &mut [0; 1]) {
                     Ok(()) => stats::add(Counter::Prefetches, 1),
@@ -3853,8 +3853,8 @@ mod tests {
         store.map(id(&store, 1), 0, ps, 0).unwrap();
         for sequence in 2..=20 {
             let extent = id(&store, sequence);
-            let placement = Placement::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, placement, None, None, extent, ps).unwrap());
+            let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
+            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
         }
         let mut kept: Vec<u64> = cache::keys().iter().map(|(_, extent)| extent.sequence).collect();
         kept.sort_unstable();
@@ -3883,8 +3883,8 @@ mod tests {
         let before = stats::stats();
         for sequence in mapped + 1..=mapped + looked_up {
             let extent = id(&store, sequence);
-            let placement = Placement::Arena(ArenaId::DEFAULT);
-            drop(cache::cached(&store.store, placement, None, None, extent, ps).unwrap());
+            let cached_in = CachedIn::Arena(ArenaId::DEFAULT);
+            drop(cache::cached(&store.store, cached_in, None, None, extent, ps).unwrap());
         }
         let trims = stats::stats().since(&before).cache_trims;
         assert!(trims <= looked_up / (MOST as u64 / 8) + 1, "{trims} trims of the cache");
@@ -4236,8 +4236,8 @@ mod tests {
         let (reached, other) = (id(&store, 1), id(&store, 2));
         write(&store, other, 0, &[1; BLOCK]).unwrap();
         store.commit(None).unwrap();
-        let placement = Placement::Public(PublicReach(reached));
-        drop(cache::cached(&store.store, placement, None, None, other, BLOCK as u64));
+        let cached_in = CachedIn::Public(PublicReach(reached));
+        drop(cache::cached(&store.store, cached_in, None, None, other, BLOCK as u64));
     }
 
     /// doc-10: what a generation pins stays, whatever its store does next.

@@ -280,7 +280,7 @@ pub(crate) fn forget(scope: impl Fn(crate::Branch) -> bool) -> (u64, u64) {
 /// Which arena an extent's pages are of, and whether a tenant's copy of it may move to the default
 /// arena: only an extent reachable from a published generation may (TASK-234), as every VM process
 /// maps the default arena, and a tenant's pages there would be every tenant's to read.
-pub(crate) enum Placement {
+pub(crate) enum CachedIn {
     /// Of `arena`: a tenant's, or the default for a store of none, which takes no other arena's
     /// copy.
     Arena(ArenaId),
@@ -289,21 +289,21 @@ pub(crate) enum Placement {
     Public(PublicReach),
 }
 
-impl Placement {
+impl CachedIn {
     fn arena(&self) -> ArenaId {
         match self {
-            Placement::Arena(arena) => *arena,
-            Placement::Public(_) => ArenaId::DEFAULT,
+            CachedIn::Arena(arena) => *arena,
+            CachedIn::Public(_) => ArenaId::DEFAULT,
         }
     }
 }
 
-/// The sealed `extent`, of `len` bytes, in the cache, of `placement`'s arena, cached from `store` if it isn't:
+/// The sealed `extent`, of `len` bytes, in the cache, of `cached_in`'s arena, cached from `store` if it isn't:
 /// read from it, or from `remote`, with its page-ins recorded by `recorder`, if any; and from any
 /// other store that asked for it, which `store` is one of from now on (TASK-79.7).
 pub(crate) fn cached(
     store: &Arc<Store<HostDir>>,
-    placement: Placement,
+    cached_in: CachedIn,
     remote: Option<Arc<crate::remote::Fetcher>>,
     recorder: Option<Arc<Recorder>>,
     extent: ExtentId,
@@ -311,13 +311,13 @@ pub(crate) fn cached(
 ) -> Result<Arc<CachedExtent>> {
     let cache = extent_cache();
     let mut extents = cache.extents.with(Mutex::lock);
-    let key = held_key(&extents, placement.arena(), extent);
+    let key = held_key(&extents, cached_in.arena(), extent);
     let mut moved = None;
     if !extents.contains_key(&key) {
         let holders = Arc::new(Holders::default());
         let stored = StoredExtent::new(holders.clone(), store, extent, recorder);
         let mut contents: Box<dyn Contents> = Box::new(stored);
-        if let Placement::Public(reach) = &placement {
+        if let CachedIn::Public(reach) = &cached_in {
             // A tenant's copy, which moves here (TASK-234): of this extent alone.
             assert_eq!(reach.extent(), extent, "a tenant's copy moved for another extent");
             let arenas = cache.arenas.with(Mutex::lock);
