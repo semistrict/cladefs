@@ -46,7 +46,7 @@
 //! extentd opens it,
 //! with `CLADEFS_EXTENTD_REMOTE` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
-//! snapshot's point it reads, taking no lease, as any number of hosts do at once. `place`
+//! snapshot's point it reads, taking no head, as any number of hosts do at once. `place`
 //! places the store at DIR at the placement whose fencing token,
 //! its boot ID, is TOKEN (TASK-39.7): its writer takes its branch in object storage with that token
 //! from then on, which a later placement's exceeds, so that a placement cut off takes no branch

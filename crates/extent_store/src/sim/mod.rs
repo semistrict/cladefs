@@ -352,7 +352,7 @@ fn collected() -> Profile {
 
 test_holds!(forks_racing_collection, collected());
 
-/// Forks whose children open soon after, while collectors run: a child's record and lease come
+/// Forks whose children open soon after, while collectors run: a child's record and head come
 /// while a pass reads branches.
 fn children() -> Profile {
     weights(|weights| {

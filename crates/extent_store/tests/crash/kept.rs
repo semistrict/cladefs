@@ -81,7 +81,7 @@ impl Host {
     }
 
     /// The store `recovering` recovered, opened by an uploader uploading every `interval`, as
-    /// holder `holder` of its branch's lease.
+    /// holder `holder` of its branch's head.
     fn open(
         &self,
         recovering: Recovering<MemDir>,

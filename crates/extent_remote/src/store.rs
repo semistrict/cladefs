@@ -144,7 +144,7 @@ pub enum Upload {
     Checkpoints,
     /// The collector's moves of what it compacted.
     Moves,
-    /// Branches' records and leases, and whatever else.
+    /// Branches' records and heads, and whatever else.
     Other,
 }
 
@@ -1507,7 +1507,7 @@ pub(crate) mod tests {
     fn keys_are_under_the_prefix() {
         let store = memory();
         futures::executor::block_on(async {
-            for key in ["segments/01/00", "segments/01/01", "segments/02/00", "leases/01"] {
+            for key in ["segments/01/00", "segments/01/01", "segments/02/00", "heads/01"] {
                 store.put(key, key.as_bytes().to_vec().into(), PutMode::Create).await.unwrap();
             }
             let listed: Vec<String> = store
@@ -1519,15 +1519,15 @@ pub(crate) mod tests {
                 .collect();
             assert_eq!(listed, ["segments/01/00", "segments/01/01"]);
             assert_eq!(store.list("").await.unwrap().len(), 4);
-            let object = store.get("leases/01").await.unwrap();
+            let object = store.get("heads/01").await.unwrap();
             assert_eq!(
                 (object.bytes.as_slice(), object.meta.key.as_str()),
-                (&b"leases/01"[..], "leases/01")
+                (&b"heads/01"[..], "heads/01")
             );
-            assert_eq!(store.get("leases/02").await.map(|_| ()), Err(Error::NotFound));
-            store.delete("leases/01").await.unwrap();
-            store.delete("leases/01").await.unwrap();
-            assert_eq!(store.head("leases/01").await.map(|_| ()), Err(Error::NotFound));
+            assert_eq!(store.get("heads/02").await.map(|_| ()), Err(Error::NotFound));
+            store.delete("heads/01").await.unwrap();
+            store.delete("heads/01").await.unwrap();
+            assert_eq!(store.head("heads/01").await.map(|_| ()), Err(Error::NotFound));
         });
     }
 

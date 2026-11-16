@@ -768,7 +768,7 @@ mod tests {
         assert_eq!((after.visited, after.held, after.swept, after.failed), (12, 0, 0, 0));
         assert_eq!(after.report.deleted, 6);
         let left = block_on(sizes(&*bucket));
-        let leases = cells.iter().map(|&cell| layout::gc_lease(cell));
+        let leases = cells.iter().map(|&cell| layout::collector_lease(cell));
         let deleted =
             |key: &&String| matches!(layout::kind(key), layout::Kind::Segment { seq: 0..=1, .. });
         let kept: BTreeSet<String> =

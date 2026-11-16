@@ -8,11 +8,11 @@
 //! which placement's fencing token, and what volumes it has.
 //!
 //! Taking a cell is one compare-and-swap of its object, to the next epoch, refused to a placement
-//! of a lower token than the one holding it ([`Error::Stale`]), as a branch's lease is. The taker
-//! then takes each volume's branch's lease with the cell's epoch as its token: a later taking of
+//! of a lower token than the one holding it ([`Error::Stale`]), as a branch's head is. The taker
+//! then takes each volume's branch's head with the cell's epoch as its token: a later taking of
 //! the cell, of a higher epoch, takes them from it, and its volumes' writers learn of it as any
 //! writer taken over does, at their next upload; it can take none back, its epoch lower. So a cell
-//! moves whole, fenced by the branches' own leases, which nothing about cells changes.
+//! moves whole, fenced by the branches' own heads, which nothing about cells changes.
 //!
 //! The volumes a cell has change only by its holder, each change conditional on the object being
 //! as its holder last took or changed it: another's taking since fails it ([`Error::Fenced`]).
@@ -86,7 +86,7 @@ pub struct Object {
     /// The format of the cell's objects, its branches' among them ([`FORMAT`]), first, so that a
     /// reader of any format reads it before the rest.
     pub format: u32,
-    /// The epoch of its holder's taking, the token its volumes' leases are taken with.
+    /// The epoch of its holder's taking, the token its volumes' heads are taken with.
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
@@ -135,11 +135,11 @@ impl Object {
     }
 }
 
-/// A taking of a cell: what changing it, and taking its volumes' leases, goes by.
+/// A taking of a cell: what changing it, and taking its volumes' heads, goes by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Held {
     pub cell: Cell,
-    /// The epoch of the taking: the token its volumes' leases are taken with.
+    /// The epoch of the taking: the token its volumes' heads are taken with.
     pub epoch: u64,
     pub holder: u64,
 }
@@ -485,7 +485,7 @@ mod tests {
             layout::cell(cells[2]),
             layout::record(branch(cells[0], 4)),
             layout::segment(branch(cells[0], 4), 0, 1),
-            layout::gc_lease(cells[1]),
+            layout::collector_lease(cells[1]),
             layout::objectid_block(1),
         ];
         for key in keys {

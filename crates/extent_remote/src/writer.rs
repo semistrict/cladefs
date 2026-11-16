@@ -1019,7 +1019,7 @@ mod tests {
         let second = second.unwrap();
         assert_eq!(second.epoch(), 2);
         assert_eq!(rounds[0], [format!("put {head}")]);
-        // A read of the lease, then another writer's taking of it, then the opening.
+        // A read of the head, then another writer's taking of it, then the opening.
         let (record, before, read) = found();
         let (third, _) = bucket.served(Writer::open(bucket.clone(), test_branch(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);

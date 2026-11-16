@@ -232,7 +232,7 @@ pub(crate) struct Segments<F> {
     /// What the commits since it opened changed, which its footer records.
     window: Window,
     /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
-    /// store opened, which stamps each footer with its place: its number, its writer's lease epoch
+    /// store opened, which stamps each footer with its place: its number, its writer's epoch
     /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
     /// numbered on from the segment open as the branch was opened, one for each segment closed.
     chain: Chain,

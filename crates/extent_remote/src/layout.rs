@@ -30,7 +30,7 @@ pub use extent_frame::segment::{
 /// late ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
-/// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`gc_lease`],
+/// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
 /// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's lease
 /// were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in a
@@ -67,7 +67,7 @@ pub fn segments(branch: Branch) -> String {
     format!("{}segments/{:016x}/", branch.cell.prefix(), branch.id)
 }
 
-/// Segment `seq` of `branch` by the writer of lease epoch `epoch`: `seq` counts from 0 without
+/// Segment `seq` of `branch` by the writer of epoch `epoch`: `seq` counts from 0 without
 /// gaps, and a writer writes each of its numbers once, so that no key is written twice; the segment
 /// is the branch's once its head names it ([`Head`], TASK-407). The epoch first, as an extent's
 /// key has it: a writer's keys share all but their numbers, which a checkpoint's table, keeping
@@ -96,7 +96,7 @@ pub fn checkpoints(branch: Branch) -> String {
     format!("{}checkpoints/{:016x}/", branch.cell.prefix(), branch.id)
 }
 
-/// The checkpoint of `branch` as of its segment `seq`, by the writer of lease epoch `epoch`: the
+/// The checkpoint of `branch` as of its segment `seq`, by the writer of epoch `epoch`: the
 /// branch's newest once its head names it ([`Head::checkpoint`], TASK-407).
 pub fn checkpoint(branch: Branch, seq: u64, epoch: u64) -> String {
     format!("{}{:016x}.{seq:016x}", checkpoints(branch), keyed(epoch))
@@ -111,7 +111,7 @@ pub fn record(branch: Branch) -> String {
     format!("{}{:016x}", records(branch.cell), branch.id)
 }
 
-/// The head of `branch` ([`Head`]): its writer's lease, the segments it holds and its newest
+/// The head of `branch` ([`Head`]): its writer's taking, the segments it holds and its newest
 /// checkpoint, swapped with a condition (TASK-407).
 pub fn head(branch: Branch) -> String {
     format!("{}heads/{:016x}", branch.cell.prefix(), branch.id)
@@ -201,9 +201,9 @@ pub fn moved_from(key: &str) -> Option<String> {
 }
 
 /// cladefs: the collector's lease over `cell`, which its passes over the cell take (doc-7, Garbage
-/// collection; TASK-395.2), a [`crate::passed::GcLease`]: passes over other cells run beside them,
-/// unfenced.
-pub fn gc_lease(cell: Cell) -> String {
+/// collection; TASK-395.2), a [`crate::passed::CollectorLease`]: passes over other
+/// cells run beside them, unfenced.
+pub fn collector_lease(cell: Cell) -> String {
     format!("{}{GC_LEASE}", cell.prefix())
 }
 
@@ -340,8 +340,8 @@ pub enum Kind<'a> {
     ObjectIds {
         block: u64,
     },
-    /// cladefs: the collector's lease over a cell ([`gc_lease`]).
-    GcLease {
+    /// cladefs: the collector's lease over a cell ([`collector_lease`]).
+    CollectorLease {
         cell: Cell,
     },
     /// cladefs: a mark-only pass's word that it marks the bucket ([`MARKING`]).
@@ -386,7 +386,7 @@ impl Kind<'_> {
             Self::Head { .. } => "head",
             Self::Cell { .. } => "cell",
             Self::ObjectIds { .. } => "objectid",
-            Self::GcLease { .. } => "gc-lease",
+            Self::CollectorLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
             Self::Marking => "marking",
             Self::Moves { .. } => "moves",
@@ -409,7 +409,7 @@ pub fn owner(key: &str) -> Option<Cell> {
         | Kind::Head { branch }
         | Kind::Reference { parent: branch, .. }
         | Kind::Retired { parent: branch, .. } => Some(branch.cell),
-        Kind::Cell { cell } | Kind::GcLease { cell } | Kind::Marks { cell, .. } => Some(cell),
+        Kind::Cell { cell } | Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => Some(cell),
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. } | Kind::Marking | Kind::Unknown => None,
     }
@@ -438,7 +438,7 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some(rest) = rest.strip_prefix(GC) {
             if rest == GC_LEASE.strip_prefix(GC)? {
-                return Some(Kind::GcLease { cell });
+                return Some(Kind::CollectorLease { cell });
             }
             let epoch = rest.strip_prefix(GC_MARKS.strip_prefix(GC)?)?;
             return Some(Kind::Marks { cell, epoch: hex(epoch)? });
@@ -550,21 +550,22 @@ pub struct Origin {
     pub at: u64,
 }
 
-/// A branch's head (TASK-407): its writer's lease, the taking of the epoch after its last, by
-/// `holder`, of the placement whose fencing token is `token`; and what the branch holds, its
-/// segments to `end` and its newest checkpoint. Swapped with a condition (S3 If-Match, GCS
-/// generation), by its writer alone while it holds it: a segment or a checkpoint is the branch's
-/// only once the head names it, so that one its writer uploaded, taken over before it swapped the
-/// head, never is, nor ever will be, and the collector deletes it. A takeover swaps it to the next
-/// epoch, which fences the writer before: its next swap fails. A head of [`Head::FINAL`] is a
-/// deleted branch's: no writer takes it again. Heads are never deleted.
+/// A branch's head (TASK-407): its writer's taking, of the epoch after the taking before, by
+/// `holder`, with the fencing token `token`; and what the branch holds, its segments to `end` and
+/// its newest checkpoint. Swapped with a condition (S3 If-Match, GCS generation), by its writer
+/// alone while it holds it: a segment or a checkpoint is the branch's only once the head names it,
+/// so that one its writer uploaded, taken over before it swapped the head, never is, nor ever will
+/// be, and the collector deletes it. A takeover swaps it to the next epoch, which fences the writer
+/// before: its next swap fails. A head of [`Head::FINAL`] is a deleted branch's: no writer takes it
+/// again. Heads are never deleted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
-    /// The fencing token of the placement that took it: a branch's writer's placement's boot ID,
-    /// which a later placement's exceeds, and which no lower one takes the head from (TASK-39.7).
+    /// The fencing token it was taken with, which no lower one takes the head from (TASK-39.7): the
+    /// epoch of the taking of the branch's cell by its writer's placement ([`crate::cell::Held`],
+    /// TASK-364), which a later taking of the cell exceeds; `u64::MAX` once deleted.
     pub token: u64,
     /// The number of segments the branch holds: 0 to `end`, without gaps.
     pub end: u64,
@@ -825,7 +826,7 @@ mod tests {
             self::cell(cell),
             moves(&segment(branch, 7, 2)),
             moves(&moves(&segment(branch, 7, 2))),
-            gc_lease(cell),
+            collector_lease(cell),
             marks(cell, 2),
             reference(branch, 7, elsewhere),
         ] {
@@ -847,7 +848,7 @@ mod tests {
                  0000000000000001/0000000000000001"
             )
         );
-        assert_eq!(gc_lease(cell), format!("{prefix}gc/lease"));
+        assert_eq!(collector_lease(cell), format!("{prefix}gc/lease"));
         assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000000002a"));
         assert_eq!(
             reference(branch, 7, elsewhere),
@@ -943,7 +944,7 @@ mod tests {
         assert_eq!(objectid_block(0x2a), "objectid/000000000000002a");
         assert_eq!(kind(&objectid_block(0x2a)), Kind::ObjectIds { block: 0x2a });
         assert_eq!(kind("objectid/2a"), Kind::Unknown);
-        assert_eq!(kind(&gc_lease(cell)), Kind::GcLease { cell });
+        assert_eq!(kind(&collector_lease(cell)), Kind::CollectorLease { cell });
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
@@ -1005,7 +1006,7 @@ mod tests {
             self::cell(cell),
             moves(&segment(branch, 7, 2)),
             moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
-            gc_lease(cell),
+            collector_lease(cell),
             marks(cell, 1),
             reference(branch, 7, child),
             retired(branch, 7, child),

@@ -2456,7 +2456,7 @@ fn stores_are_deleted_while_their_forks_are_open() {
 /// is: an Fxfs one, or, made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite
 /// one, which a host's FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory
 /// (TASK-456.2). The cell's object, under its tenant's prefix in the bucket, says so; and the
-/// store's branch's lease was taken with the cell's epoch.
+/// store's branch's head was taken with the cell's epoch.
 #[test]
 fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
     host();
@@ -2604,7 +2604,7 @@ fn earlier_placements_open_no_stores() {
     store.commit(Some(b"placed at 5")).unwrap();
     drop(store);
 
-    // A copy of the branch's made here, not opened, which would take its lease: placed before.
+    // A copy of the branch's made here, not opened, which would take its head: placed before.
     std::fs::create_dir(&earlier).unwrap();
     let description =
         extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 24, branch };
@@ -2620,9 +2620,9 @@ fn earlier_placements_open_no_stores() {
 }
 
 /// TASK-266: a store the control API makes of a branch, at a placement (`CreateStore`, as
-/// `cladefsctl take` through the daemon's), takes the branch's lease with that placement's token as
-/// it is made, not the daemon's: a copy placed later than the one that took the branch last, on
-/// another host, takes it over, in a file bucket as in any.
+/// `cladefsctl take` through the daemon's), takes the branch's cell, and so its head, with that
+/// placement's token as it is made, not the daemon's: a copy placed later than the one that took
+/// the branch last, on another host, takes it over, in a file bucket as in any.
 #[test]
 fn control_takes_branches_at_the_placements_given() {
     host();
@@ -4358,7 +4358,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
     made.fork_quiescent(&point).unwrap();
     drop(made);
 
-    let left = ["fork::made", "branch::lease_ended"];
+    let left = ["fork::made", "branch::head_ended"];
     let failing = left.map(|step| fail::FailGuard::new(step, "1*return").unwrap());
     let forked = fork_store(&point, &restored).map_err(|err| err.errno());
     drop(failing);

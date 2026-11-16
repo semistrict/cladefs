@@ -569,7 +569,7 @@ pub(super) async fn attach(
 /// The store at `path`, as `open` opens it with the daemon's uploader's options ([`keeping`]),
 /// keeping its branch in the bucket its description names: the daemon's, for the stores it made,
 /// or another's, as an image's file bucket, for one it serves (TASK-165.6). Its opening takes the
-/// branch's lease (TASK-165.9).
+/// branch's head (TASK-165.9).
 fn attached<T>(
     path: &Path,
     open: impl FnOnce(extent_store::upload::Options) -> Result<T, crate::Error>,
@@ -629,9 +629,9 @@ pub(super) fn errno_of(what: std::fmt::Arguments<'_>, err: crate::Error) -> Errn
 /// Makes an empty store at `path`, which must not exist (`EEXIST`), of `capacity` bytes, and
 /// returns its branch: a new one, or `branch`, if given, whose store kept in the daemon's bucket
 /// the daemon takes once it opens it (`cladefsctl take`); placed at `token` if given ([`place`]).
-/// cladefs: made as [`ExtentStore::create_placed`] makes it, its lease taken with `token`, not the
+/// cladefs: made as [`ExtentStore::create_placed`] makes it, its head taken with `token`, not the
 /// daemon's, so that a copy placed later than the one on another host that took the branch last
-/// takes it over (TASK-266: `ESTALE`, its lease taken with the daemon's token before it was
+/// takes it over (TASK-266: `ESTALE`, its head taken with the daemon's token before it was
 /// placed).
 pub(super) async fn create(
     path: PathBuf,

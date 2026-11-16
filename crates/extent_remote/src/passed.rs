@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a cell's collector lease (`<C>gc/lease`, [`layout::gc_lease`]): which pass holds the
+//! cladefs: a cell's collector lease (`<C>gc/lease`, [`layout::collector_lease`]): which pass holds the
 //! cell, for how long, and what the last pass over it to end recorded for the passes after it, and
 //! what the cell takes in the bucket (doc-7, Garbage collection; TASK-395.5, TASK-395.6,
 //! TASK-395.8). One object, so that a pass learns all of it by the read that takes the lease.
@@ -11,7 +11,7 @@
 //! holds it, unexpired, or ended since the taker's sweep began, when the taker leaves the cell to
 //! it ([`Error::Left`], [`Holding`]). A pass holding its cell for a time renews the lease between
 //! its steps and lets it go as it ends ([`change`]); a pass of a process gone holds it until it
-//! expires. A taking fences every pass before it, as a branch's lease does: a pass fenced deletes
+//! expires. A taking fences every pass before it, as a branch's taking of its head does: a pass fenced deletes
 //! nothing, and writes nothing to the lease.
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
@@ -38,15 +38,15 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
-/// A cell's collector lease ([`layout::gc_lease`]): the format of the bucket's objects, first, as a
-/// cell's object says it; the epoch of its last taking, and who took it, as a branch's lease
-/// ([`layout::Lease`]); until when that pass holds the cell, and when the last pass to go through
+/// A cell's collector lease ([`layout::collector_lease`]): the format of the bucket's objects, first, as a
+/// cell's object says it; the epoch of its last taking, and who took it, as a branch's head
+/// does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go through
 /// ended; and what the last pass over the cell that ran to its end recorded, carried from each
 /// taking to the next ([`Passed`]). Time is the store's clock as each pass read it
 /// ([`Bucket::now`]), in milliseconds: a pass's clock ahead takes a cell early, fencing the pass
 /// holding it, which then deletes nothing; never wrong, only late.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GcLease {
+pub struct CollectorLease {
     pub format: u32,
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
@@ -60,7 +60,7 @@ pub struct GcLease {
     pub passed: Option<Passed>,
 }
 
-impl GcLease {
+impl CollectorLease {
     /// The lease of `cell` `bytes` encode: [`Error::Format`] if it is of another format.
     pub fn decode(cell: Cell, bytes: &[u8]) -> Result<Self, Error> {
         let format: u32 = layout::decode(bytes.get(..4).unwrap_or(bytes))?;
@@ -90,7 +90,7 @@ impl GcLease {
 /// The name of the kind of a cell's collector lease ([`layout::Kind::name`]).
 const GC_LEASE: &str = "gc-lease";
 
-/// What a pass over a cell that ran to its end recorded ([`GcLease::passed`]).
+/// What a pass over a cell that ran to its end recorded ([`CollectorLease::passed`]).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Passed {
     /// The digest of the listing of the cell it decided by, but the collector's own objects under
@@ -224,7 +224,7 @@ pub(crate) async fn list(bucket: &impl Bucket, cell: Cell) -> Listed {
     let measured = bucket.now();
     let mut listed = bucket::list(bucket, &cell.prefix()).await;
     listed.sort_by(|a, b| a.key.cmp(&b.key));
-    let (own, lease) = (layout::collectors(cell), layout::gc_lease(cell));
+    let (own, lease) = (layout::collectors(cell), layout::collector_lease(cell));
     let mut digest = Sha256::new();
     let mut usage = Usage { measured, ..Usage::default() };
     let mut objects = BTreeMap::new();
@@ -278,7 +278,7 @@ pub(crate) struct Taken {
 /// The collector lease of `cell` as a read finds it, if there is one, for a taking of it after
 /// ([`take`]).
 pub(crate) async fn found(bucket: &impl Bucket, cell: Cell) -> Option<bucket::Object> {
-    bucket::get(bucket, &layout::gc_lease(cell)).await
+    bucket::get(bucket, &layout::collector_lease(cell)).await
 }
 
 /// Takes the collector lease of `cell` as `holder`, holding it as `holding` says, at the epoch
@@ -294,8 +294,8 @@ pub(crate) async fn take(
     holding: Holding,
 ) -> Result<Taken, Error> {
     let start = branch::Start::Found(found);
-    let decode = |bytes: &[u8]| GcLease::decode(cell, bytes);
-    branch::transition(bucket, &layout::gc_lease(cell), start, decode, |found| {
+    let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
+    branch::transition(bucket, &layout::collector_lease(cell), start, decode, |found| {
         // The time as it decides, after its read: a lease's expiry is never taken for later than
         // the read found it.
         let now = bucket.now();
@@ -315,7 +315,7 @@ pub(crate) async fn take(
             0 => 0,
             lease => now.saturating_add(lease),
         };
-        let lease = GcLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
+        let lease = CollectorLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
         Ok(branch::Step::Write(lease, Taken { epoch, holder, passed }))
     })
     .await
@@ -327,10 +327,10 @@ pub(crate) async fn change(
     bucket: &impl Bucket,
     cell: Cell,
     taken: &Taken,
-    change: impl Fn(GcLease) -> GcLease,
+    change: impl Fn(CollectorLease) -> CollectorLease,
 ) -> Result<bool, Error> {
-    let decode = |bytes: &[u8]| GcLease::decode(cell, bytes);
-    let key = layout::gc_lease(cell);
+    let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
+    let key = layout::collector_lease(cell);
     branch::transition(bucket, &key, branch::Start::Read, decode, |found| match found {
         Some(lease) if (lease.epoch, lease.holder) == (taken.epoch, taken.holder) => {
             Ok(branch::Step::Write(change(lease).counting_itself(), true))
@@ -341,8 +341,8 @@ pub(crate) async fn change(
 }
 
 /// The collector lease of `cell`, if there is one: [`Error::Format`] if of another format.
-pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<GcLease>, Error> {
-    found(bucket, cell).await.map(|object| GcLease::decode(cell, &object.bytes)).transpose()
+pub async fn read(bucket: &impl Bucket, cell: Cell) -> Result<Option<CollectorLease>, Error> {
+    found(bucket, cell).await.map(|object| CollectorLease::decode(cell, &object.bytes)).transpose()
 }
 
 /// The epoch of the last taking of the collector lease of `cell`: 0 if none took it.
@@ -405,22 +405,22 @@ mod tests {
             uncompacted: 3,
         };
         let passed = Some(passed);
-        let lease = GcLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
+        let lease = CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
         let lease = lease.counting_itself();
         let len = layout::encode(&lease).len() as u64;
         let usage = &lease.passed.as_ref().unwrap().usage;
         assert_eq!(usage.kinds[GC_LEASE], Sum { objects: 1, bytes: len });
         assert_eq!(usage.total(), Sum { objects: 2, bytes: 40 + len });
-        assert_eq!(GcLease::decode(TEST_CELL, &layout::encode(&lease)), Ok(lease));
+        assert_eq!(CollectorLease::decode(TEST_CELL, &layout::encode(&lease)), Ok(lease));
     }
 
     /// A lease of another format is refused by name, before the rest of it is read.
     #[test]
     fn leases_of_other_formats_are_refused() {
         for format in [FORMAT + 1, 8] {
-            let lease = GcLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
+            let lease = CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
             let refused = Error::Format { branch: Branch { cell: TEST_CELL, id: 0 }, format };
-            assert_eq!(GcLease::decode(TEST_CELL, &layout::encode(&lease)), Err(refused));
+            assert_eq!(CollectorLease::decode(TEST_CELL, &layout::encode(&lease)), Err(refused));
         }
     }
 }

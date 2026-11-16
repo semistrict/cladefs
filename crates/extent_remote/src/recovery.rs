@@ -174,7 +174,7 @@ impl<P: Places> State<P> {
         self.apply_contents(footer.seq, footer.epoch, &footer.contents);
     }
 
-    /// Applies `contents`, those of the branch's segment `seq`, of the writer of lease epoch
+    /// Applies `contents`, those of the branch's segment `seq`, of the writer of epoch
     /// `epoch`: what its commits sealed, where they sealed it, then what they freed; the root they
     /// set, their last commit, the branch's next sequence number, the largest named, the forks at
     /// its end, and the capacity they set. Every free of the branch's own extents spends it, as

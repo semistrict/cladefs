@@ -20,7 +20,7 @@ pub struct Location {
 }
 
 /// cladefs: a tenant's cell, its unit of placement: one host at a time writes all the branches in it,
-/// under its one lease, and keeps them under its prefix in the bucket (TASK-364). Tenants and cells
+/// under its one taking, and keeps them under its prefix in the bucket (TASK-364). Tenants and cells
 /// are IDs alone; what they stand for, their callers keep.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Cell {
@@ -117,7 +117,7 @@ pub struct Child {
 pub struct Footer {
     pub branch: Branch,
     pub seq: u64,
-    /// The epoch of its writer's lease, which its key names too: a segment is the branch's only
+    /// The epoch of its writer's taking, which its key names too: a segment is the branch's only
     /// once the branch's head names it, by its number and epoch (doc-7, The head; TASK-407).
     pub epoch: u64,
     /// What its commits made.
@@ -210,7 +210,7 @@ impl Contents {
     }
 
     /// The extents sealed on their own, `branch`'s, and where each is, in segment `seq` of the
-    /// writer of lease epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
+    /// writer of epoch `epoch`: the object that writer uploaded before it ([`extent_key`]).
     pub fn own_at(
         &self,
         branch: Branch,
@@ -225,7 +225,7 @@ impl Contents {
 }
 
 /// One writer's footers, in the order its segments close (doc-7, The head): numbered on without
-/// gaps from the branch's end as its head named it; all of the writer's lease epoch, their extents
+/// gaps from the branch's end as its head named it; all of the writer's epoch, their extents
 /// of their own at its keys; the next sequence number each names never below its floor nor the one
 /// before's. Whatever closes a writer's segments, a store
 /// or the writer, stamps their footers with the writer's chain, and the writer admits each footer
@@ -241,7 +241,7 @@ pub struct Chain {
 }
 
 impl Chain {
-    /// The chain of the writer of lease epoch `epoch` of `branch`, whose next segment is numbered
+    /// The chain of the writer of epoch `epoch` of `branch`, whose next segment is numbered
     /// `next_seq`; the footers it stamps name `next_sequence`, the writer's floor, as the branch's
     /// next sequence number at least.
     pub const fn new(branch: Branch, epoch: u64, next_seq: u64, next_sequence: u64) -> Self {
@@ -252,7 +252,7 @@ impl Chain {
         self.branch
     }
 
-    /// The epoch of its writer's lease.
+    /// The epoch of its writer's taking.
     pub fn epoch(&self) -> u64 {
         self.epoch
     }
@@ -313,7 +313,7 @@ impl Chain {
 /// writers' commits share one.
 pub const TAG_SHIFT: u32 = 40;
 
-/// The tag of the store's commit `epoch` that the writer of lease epoch `writer` uploads.
+/// The tag of the store's commit `epoch` that the writer of epoch `writer` uploads.
 pub fn tag(writer: u64, epoch: u64) -> u64 {
     (writer << TAG_SHIFT) | epoch
 }
@@ -323,12 +323,12 @@ pub fn epoch_of(tag: u64) -> u64 {
     tag & ((1 << TAG_SHIFT) - 1)
 }
 
-/// The lease epoch of the writer that uploads the commit a tag names.
+/// The epoch of the writer that uploads the commit a tag names.
 pub fn writer_of(tag: u64) -> u64 {
     tag >> TAG_SHIFT
 }
 
-/// The key of the object of an extent stored on its own, uploaded by the writer of lease epoch
+/// The key of the object of an extent stored on its own, uploaded by the writer of epoch
 /// `epoch` before its segment `seq`, whose footer names it. cladefs: the segment's number tells the
 /// collector whether the object is ahead of its segment, which may yet land, or a landed one's,
 /// which no state naming it frees it: what the branch's next sequence number can't tell, as its

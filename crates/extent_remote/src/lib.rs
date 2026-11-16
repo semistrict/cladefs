@@ -5,7 +5,7 @@
 //! cladefs's own: branches of extent stores kept in object storage (backlog doc-7, TASK-28).
 //!
 //! A branch is a VM's filesystem: extents its guest wrote, in segments whose footers say what
-//! each commit did, with checkpoints of its index. A writer holds the branch's lease; its segments,
+//! each commit did, with checkpoints of its index. A writer holds the branch's head; its segments,
 //! created only where none is, are numbered without gaps, and each names the one it follows, so a
 //! writer taken over can add nothing to the branch once the next one's first segment, its fence,
 //! is in it. Forks
@@ -103,7 +103,7 @@ pub enum Error {
     Fenced,
     #[error("the branch was deleted")]
     Deleted,
-    /// A later placement, whose fencing token is higher, holds the branch's lease: this one, cut off
+    /// A later placement, whose fencing token is higher, holds the branch's head: this one, cut off
     /// from it, takes it back no more (TASK-39.7).
     #[error("a later placement holds the branch")]
     Stale,
@@ -184,7 +184,7 @@ pub enum Error {
     #[error("branch {0} is no point")]
     NotPoint(layout::Branch),
     /// cladefs: a pass of the collector over a cell left it to another pass, as the cell's lease
-    /// said ([`passed::GcLease`], TASK-395.5): nothing failed.
+    /// said ([`passed::CollectorLease`], TASK-395.5): nothing failed.
     #[error("the cell is left to another pass of the collector, which {0}")]
     Left(Left),
 }
@@ -274,7 +274,7 @@ pub struct Rules {
     /// TLA+: `specs/bucket/mutations/NoDeleteTokens.cfg`.
     pub delete_tokens: bool,
     /// The deletion of a failed fork takes its child's ID with a record, before it ends the child's
-    /// lease, though its fork's segment never went (TASK-79.82).
+    /// head, though its fork's segment never went (TASK-79.82).
     /// TLA+: `specs/bucket/mutations/NoForkClaimsIds.cfg`.
     pub fork_claims_ids: bool,
     /// That record says the child lives only if the branch it was forked from holds the fork's
@@ -306,14 +306,14 @@ pub struct Rules {
     pub records_owned: bool,
     /// The collector keeps every moves on the way to an extent from where it was sealed, not only
     /// from where the branch's state says it is, unless that state's checkpoint is by the writer
-    /// holding the branch's lease, read after the checkpoint was: a checkpoint of another writer's,
+    /// holding the branch's head, read after the checkpoint was: a checkpoint of another writer's,
     /// landing after the writer recovered the branch, or an inherited state, may name the extent
     /// further along its moves than the writer does (TASK-175).
     /// TLA+: `specs/bucket/mutations/NoWaysFromSeals.cfg`.
     pub ways_from_seals: bool,
     /// A writer names the extents its checkpoint records as moved where they went before it
     /// creates the checkpoint, not once it is created: the collector trusts a checkpoint of the
-    /// writer holding the lease to name nothing further along its way than the writer does
+    /// writer holding the head to name nothing further along its way than the writer does
     /// (TASK-175).
     /// TLA+: `specs/bucket/mutations/NoMovesTakenFirst.cfg`.
     pub moves_taken_first: bool,

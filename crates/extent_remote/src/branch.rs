@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! Branches' records and leases: creating a branch, forking one, taking one over, deleting one.
+//! Branches' records: creating a branch, forking one, taking one over, deleting one.
 //!
 //! A fork of a branch with a writer is the writer's commit ([`record_fork`] gives its child its
 //! record once the commit is acknowledged). A fork of a point is its child's record alone, which
 //! writes nothing of the point's, so that any number of hosts fork one at once ([`fork_point`]).
 //!
-//! cladefs: every change of a record or a lease is a [`transition`], one compare-and-swap loop, of
-//! what it found to what it writes (TASK-160.14).
+//! cladefs: every change of a record, a cell's object or a collector lease is a [`transition`],
+//! one compare-and-swap loop, of what it found to what it writes (TASK-160.14).
 
 use crate::bucket::{self, Bucket, Created, Object, Updated};
 use crate::head;
@@ -43,10 +43,10 @@ pub(crate) enum Start {
 /// Changes the object at `key`, which `decode` reads, as `step` says of what is there, if anything,
 /// starting from `start`: by a create where nothing is, and a conditional update otherwise, given
 /// to `step` again, from what is there then, whenever another's write came first, until it writes
-/// nothing or what it writes lands. Every change of a branch's record or lease is one, its rules
-/// in its `step`. A write of it that landed though its answer was lost is taken for its own
-/// ([`bucket::create`], [`bucket::update`]), so that what `step` writes must differ from every
-/// other writer's: a record names its owner, a lease its holder.
+/// nothing or what it writes lands. Every change of a branch's record, a cell's object or a
+/// collector lease is one, its rules in its `step`. A write of it that landed though its answer
+/// was lost is taken for its own ([`bucket::create`], [`bucket::update`]), so that what `step`
+/// writes must differ from every other writer's: a record names its owner, the others their holders.
 pub(crate) async fn transition<T: Serialize, R>(
     bucket: &impl Bucket,
     key: &str,
@@ -569,7 +569,7 @@ pub async fn delete_under(
     kms: Option<&std::sync::Arc<crate::keys::Kms>>,
 ) -> Result<(), Error> {
     let ended = end_head(bucket, branch, holder, token).await?;
-    failpoint!("branch::lease_ended");
+    failpoint!("branch::head_ended");
     // A fork's child before its record, or no branch: either way none is, from now, unless its
     // record came meanwhile. Its owner the deletion's, which no other's is.
     let deleted = Record { deleted: true, ..Kind::Own.of(owner(holder)) };
@@ -647,12 +647,12 @@ async fn end_head(
     head::end(bucket, branch, read, holder, token).await
 }
 
-/// cladefs: the token a deletion by the placement of `token` ends `branch`'s lease with, as its
-/// writers take it with their cell's epoch (TASK-364): the cell's epoch now, which takes the lease
+/// cladefs: the token a deletion by the placement of `token` ends `branch`'s head with, as its
+/// writers take it with their cell's epoch (TASK-364): the cell's epoch now, which takes the head
 /// from its holder's writer, and from none a later taking of the cell made; refused if a later
 /// placement holds the cell ([`Error::Stale`]). The deletion takes nothing of the cell, its other
 /// volumes' writers going on. `token` itself where the cell has no object, or was deleted, as then
-/// no writer took the branch's lease by its cell; and the highest token there is, an operator's,
+/// no writer took the branch's head by its cell; and the highest token there is, an operator's,
 /// whichever placement took the branch last.
 async fn deleting_token(bucket: &impl Bucket, branch: Branch, token: u64) -> Result<u64, Error> {
     if token == u64::MAX {
@@ -689,8 +689,8 @@ async fn mark_deleted(bucket: &impl Bucket, branch: Branch) -> Result<(), Error>
 /// left as it is (TASK-79.82); so is a branch deleted already, whoever's. Returns whether the
 /// fork's branch is gone, deleted now or before: `false` for another's.
 ///
-/// A child with no record yet gets one first, before the deletion ends its lease: created only if
-/// no record is there, which another branch taking the ID meanwhile has, whose lease the deletion
+/// A child with no record yet gets one first, before the deletion ends its head: created only if
+/// no record is there, which another branch taking the ID meanwhile has, whose head the deletion
 /// took otherwise (TASK-79.82). Its record taken, the ID is no other's, and a deletion that stops
 /// goes on as the fork's; it had no record before, nor children with none, as [`delete`] deletes
 /// such a branch. The record is the one its fork would give it ([`record_fork`]), live, so that a
@@ -703,7 +703,7 @@ async fn mark_deleted(bucket: &impl Bucket, branch: Branch) -> Result<(), Error>
 /// first, for good: no other placement took a branch nothing of which landed; and a segment
 /// landing after finds it so. So is a fork of a point with no record, which holds nothing, a
 /// create of its record, a dead host's landing late, finding it so too; and a point with none: no
-/// placement refuses a deletion of what has no lease, and a stale copy finds no live record naming
+/// placement refuses a deletion of what has no head, and a stale copy finds no live record naming
 /// a segment that may not be its fork's.
 pub async fn delete_fork(
     bucket: &impl Bucket,
@@ -788,7 +788,7 @@ pub async fn delete_fork_under(
     }
     failpoint!("branch::claimed");
     end_head(bucket, child, holder, token).await?;
-    failpoint!("branch::claim_lease_ended");
+    failpoint!("branch::claim_head_ended");
     if live {
         mark_deleted(bucket, child).await?;
     }
@@ -1094,15 +1094,15 @@ mod tests {
     }
 
     /// TASK-79.82: a branch that takes a failed fork's child's ID after the fork's deletion found
-    /// it free, before the deletion takes the child's lease, is left be: its record taken and its
-    /// lease kept, not the deletion's.
+    /// it free, before the deletion takes the child's head, is left be: its record taken and its
+    /// head kept, not the deletion's.
     #[test]
     fn forks_deleted_leave_a_branch_taking_their_childs_id_meanwhile() {
         use crate::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
         use std::future::Future;
         use std::sync::atomic::{AtomicBool, Ordering};
 
-        /// A bucket in which branch `child` is created, its lease taken, as its record is first
+        /// A bucket in which branch `child` is created, its head taken, as its record is first
         /// found missing.
         struct Racing {
             bucket: Direct,

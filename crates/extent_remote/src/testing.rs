@@ -58,7 +58,7 @@ struct Inner {
     clock: u64,
     queue: Vec<Request>,
     /// The writers whose creates of segments are held ([`SimBucket::hold`]): of each branch, those
-    /// of this lease epoch and before.
+    /// of this epoch and before.
     held: BTreeMap<Branch, u64>,
     /// The creates held, out of the queue, each until an object at its key is deleted.
     parked: Vec<Request>,
@@ -98,7 +98,7 @@ impl SimBucket {
         self.inner.lock().unwrap().queue.len()
     }
 
-    /// Holds the creates of segments of `branch` by its writers of lease epoch `epoch` and before,
+    /// Holds the creates of segments of `branch` by its writers of epoch `epoch` and before,
     /// those waiting and those to come, each until a delete of an object at its key takes effect,
     /// when it waits again: a writer taken over, whose creates are in flight while the next one's
     /// segments take their places, which the collector compacts and deletes, landing then
@@ -720,12 +720,12 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
     let mut left = Vec::new();
     for key in &keys {
         // cladefs: cells' objects stay, as their branches' records do, their epochs fencing their
-        // volumes' leases; blocks of object IDs taken, for good (TASK-364); and the collector's
+        // volumes' heads; blocks of object IDs taken, for good (TASK-364); and the collector's
         // leases and marks, and references not yet retirable (TASK-395).
         let kept = match layout::kind(key) {
             Kind::Cell { .. }
             | Kind::ObjectIds { .. }
-            | Kind::GcLease { .. }
+            | Kind::CollectorLease { .. }
             | Kind::Marks { .. }
             | Kind::Marking
             | Kind::Retired { .. } => true,

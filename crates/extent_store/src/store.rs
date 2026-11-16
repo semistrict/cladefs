@@ -746,7 +746,7 @@ pub struct Opening {
 
 impl Opening {
     /// The opening of `branch`, which the bucket holds nothing of: no commit of it there, and a
-    /// writer's chain from its first segment, of lease epoch 0. Its store's write-ahead log
+    /// writer's chain from its first segment, of epoch 0. Its store's write-ahead log
     /// follows only if it never had anything acknowledged ([`extent_remote::Error::Diverged`]):
     /// a store of the store's own tests, of a bucket it never reaches.
     pub fn new(branch: Branch) -> Self {
@@ -759,7 +759,7 @@ impl Opening {
 
 /// cladefs: a store's directory, taken for this process and claimed for its opening, its write-ahead
 /// log recovered from it ([`Store::recover`]), to be opened as what the bucket holds of its branch
-/// says ([`Recovering::open`]): its branch's writer takes the lease meanwhile, and recovers it.
+/// says ([`Recovering::open`]): its branch's writer takes the head meanwhile, and recovers it.
 pub struct Recovering<D: Dir> {
     dir: Arc<D>,
     taken: Arc<Taken<D>>,

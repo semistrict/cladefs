@@ -33,7 +33,7 @@ pub enum Kind {
     /// ([`crate::branch::fork_point`]).
     Fork(Origin),
     /// A point, from its first: no branch to write, but a name of its origin's state, which any
-    /// number of hosts read and fork. It has no lease, no segment and no checkpoint, and no writer
+    /// number of hosts read and fork. It has no head, no segment and no checkpoint, and no writer
     /// takes it ([`Error::Point`]; doc-7, Points).
     Point(Origin),
     /// A fork of `point`, naming the point's origin as its own, until the fork is made

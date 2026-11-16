@@ -606,7 +606,7 @@ mod tests {
     /// doc-7, The head: a store taking a branch over from a writer still uploading, two segments
     /// of it in flight, commits on. The writer's segments land at keys naming its epoch, which the
     /// store's never are, and its head swap fails (`Fenced`): what it wrote, no head names, and the
-    /// store keeps its lease. Before (TASK-407), its late segment landed where the store's first
+    /// store keeps its head. Before (TASK-407), its late segment landed where the store's first
     /// went, and the store took the branch again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
@@ -635,13 +635,13 @@ mod tests {
             before.upload(seqs[0]).await.unwrap();
             assert_eq!(before.acknowledge().await, Err(extent_remote::Error::Fenced));
         });
-        // The store's commit is the branch's, its lease as it was.
+        // The store's commit is the branch's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
-        let epoch = store.remote().unwrap().status().unwrap().lease.unwrap().epoch;
+        let epoch = store.remote().unwrap().status().unwrap().taking.unwrap().epoch;
         let committed = store.commit(Some(b"after"));
         let remote = store.remote().unwrap();
         assert_eq!((committed, remote.failed()), (Ok(()), None));
-        assert_eq!(remote.status().unwrap().lease.unwrap().epoch, epoch);
+        assert_eq!(remote.status().unwrap().taking.unwrap().epoch, epoch);
         let after = (vec![(1, pattern(1, BLOCK))], Some(b"after".to_vec()));
         assert_eq!(uploaded(&bucket, branch), after);
     }
@@ -1441,13 +1441,13 @@ mod tests {
         let options = extent_store::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let lease = futures::executor::block_on(extent_remote::head::get(&*bucket, store.branch()));
-        let lease = lease.unwrap().unwrap();
-        // cladefs: its cell taken with the host's token, its branch's lease with the cell's epoch
+        let head = futures::executor::block_on(extent_remote::head::get(&*bucket, store.branch()));
+        let head = head.unwrap().unwrap();
+        // cladefs: its cell taken with the host's token, its branch's head with the cell's epoch
         // (TASK-364).
         let cell = extent_remote::cell::read(&*bucket, store.branch().cell);
         let cell = futures::executor::block_on(cell).unwrap().unwrap();
-        assert_eq!((cell.token, cell.holder, cell.epoch, lease.token), (9, 9, 1, 1));
+        assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
     }
 
     /// TASK-165.9: a store whose bucket acknowledged commits of its branch, opened where the
@@ -2148,7 +2148,7 @@ mod tests {
     }
 
     /// TASK-92.6: a store taking a branch its host lost, the branch's segments since its last
-    /// checkpoint many, recovers the branch once, its lease taken between the start and the rest:
+    /// checkpoint many, recovers the branch once, its head taken between the start and the rest:
     /// by the tails of its segments, which hold their footers, a window of them at once, not by
     /// the segments whole. The bucket, which the lost host's store probed, it probes not again.
     /// TASK-165.11: what a durable commit, an open, a fork and a fork's first open cost on a real
@@ -2229,7 +2229,7 @@ mod tests {
     /// TASK-165.11: a durable commit, as a guest's sync makes one, costs the bucket what doc-7's
     /// The head say it needs: the create of the segment its commit closes, then the swap of the
     /// branch's head that names it, which acknowledges it (TASK-407: before, the create alone, the
-    /// fencing; TASK-371: before that, a read of the lease after it); nothing else, as no
+    /// fencing; TASK-371: before that, a read of the head after it); nothing else, as no
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
     fn durable_commits_cost_a_create_and_a_head_swap() {
@@ -2488,11 +2488,11 @@ mod tests {
         extent_store::made_host(path).unwrap();
     }
 
-    /// TASK-79.4: a store opening takes the branch as of its lease, not as of what it found
+    /// TASK-79.4: a store opening takes the branch as of its taking of the head, not as of what it found
     /// before: the commit another writer made meanwhile, which frees the extent the branch held
     /// before and writes another, is the branch's, and the store's.
     #[test]
-    fn takes_take_what_the_branch_holds_once_leased() {
+    fn takes_take_what_the_branch_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(Bucket::new(gated.clone(), ""));
@@ -2520,12 +2520,12 @@ mod tests {
     }
 
     /// TASK-79.4, TASK-165.9: a store whose write-ahead log holds commits the branch moved past
-    /// refuses to open (`ESTALE`), those commits never acknowledged: before its lease is taken, its
+    /// refuses to open (`ESTALE`), those commits never acknowledged: before its head is taken, its
     /// log diverged as recovery first finds the branch; and once it holds it, another writer having
     /// committed between the two (`wal_follows`), having fenced that writer, whose commits stay the
     /// branch's. `ExtentStore::take` drops the log, and opens the store as the branch is.
     #[test]
-    fn stores_whose_branch_moved_on_before_their_lease_refuse() {
+    fn stores_whose_branch_moved_on_before_their_taking_refuse() {
         let dir = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
         let gated = Arc::new(Gated::over(memory.clone()));
@@ -2567,7 +2567,7 @@ mod tests {
         assert_eq!(extents.len(), 2);
         assert_eq!(root, Some(b"meanwhile".to_vec()));
         drop(taken);
-        // Plainly diverged now, before the lease.
+        // Plainly diverged now, before the taking.
         assert_eq!(
             reopened(&path, idle()).err().and_then(|err| err.errno()),
             Some(crate::Errno::ESTALE)
@@ -3128,7 +3128,7 @@ mod tests {
 
     /// TASK-141.2: a branch whose record says a format newer than this daemon's is refused, naming
     /// the branch and the format, before anything of it is read or written: no store takes it, its
-    /// lease is as it was, and no segment of it is written.
+    /// head is as it was, and no segment of it is written.
     #[test]
     fn branches_of_newer_formats_are_refused() {
         use extent_remote::Bucket as _;

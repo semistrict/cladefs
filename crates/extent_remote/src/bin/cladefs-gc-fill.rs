@@ -10,7 +10,7 @@
 //! ```
 //!
 //! DIR, a directory, made if missing and empty, becomes a bucket of files (`file:///DIR/`) of
-//! TENANTS tenants of CELLS cells each, each cell's object and one branch, its record, its lease,
+//! TENANTS tenants of CELLS cells each, each cell's object and one branch, its record, its head,
 //! SEGMENTS segments and a checkpoint covering them all: SEGMENTS + 5 objects a cell, but the first
 //! cell of tenant 1, the largest, whose branch has LARGEST segments (SEGMENTS by default). Each
 //! segment holds four extents of 1 KiB, and the next frees three of them, every other one all
@@ -26,7 +26,7 @@
 //!
 //! With `--deleted`, every cell's branch is deleted once written, as its host deletes it
 //! (TASK-443.4): cells nothing lives in, of which a pass keeps the cell's object, its branch's
-//! record and head, and its own lease, for good.
+//! record and head, and its collector lease, for good.
 //!
 //! With `--clones`, the cells are sandboxes made and deleted (TASK-443.4). Each tenant's first cell
 //! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, forked at its last
@@ -523,7 +523,7 @@ mod tests {
             let branch = Branch { cell, id: 1 };
             let mut keys = [
                 layout::cell(cell),
-                layout::gc_lease(cell),
+                layout::collector_lease(cell),
                 layout::head(branch),
                 layout::record(branch),
             ];

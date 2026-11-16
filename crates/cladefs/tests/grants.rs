@@ -662,7 +662,7 @@ fn points_are_resized_nowhere() {
     }
 }
 
-/// TASK-158: a point has no lease, so that a host needs no placement to restore it, however late
+/// TASK-158: a point has no head, so that a host needs no placement to restore it, however late
 /// the placement that took it. (It pinned the limit this removed, as
 /// `points_of_later_placements_are_taken_placed`: a restore refused with ESTALE until CreateStore
 /// named the token.) Placing a copy changes nothing.

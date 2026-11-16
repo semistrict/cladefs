@@ -436,7 +436,7 @@ pub struct World {
     /// Each history of commits a store held, by the store's epoch of each: what the tags of the
     /// commits its writers upload name ([`World::truth_of`]).
     lineages: HashMap<u64, BTreeMap<u64, u64>>,
-    /// The history the commits each writer uploads are of, by its branch and lease epoch: a writer
+    /// The history the commits each writer uploads are of, by its branch and epoch: a writer
     /// uploads one store's.
     stamps: HashMap<(u64, u64), u64>,
     /// The forks the guests made, by their children: of which branch, as each guest named it. Its
@@ -648,7 +648,7 @@ impl World {
             },
             Event::Deleted { branch, stale: true, result } => match result {
                 Err(Error::Stale) => {}
-                // It found the branch's lease final, which only its latest placement's delete,
+                // It found the branch's head final, which only its latest placement's delete,
                 // begun since, writes: the branch is deleted, by that, as deletes are idempotent.
                 Ok(()) if self.branches[&branch].deleting => {}
                 Ok(()) => self.violation(format!("a placement cut off deleted branch {branch:x}")),
@@ -756,7 +756,7 @@ impl World {
     // The stores and their uploaders.
 
     /// Takes in what each session's uploader did since: its store opened, or refused to; its
-    /// uploader stopped; the lease epoch of its writer, which the tags of the commits it uploads
+    /// uploader stopped; the epoch of its writer, which the tags of the commits it uploads
     /// name; where it put the forks of the segments it took; and the commits it uploaded, which
     /// their guests are told are durable. Returns whether a session opened, ended or started anew,
     /// which the next run of the tasks may go on with.
@@ -1012,7 +1012,7 @@ impl World {
     }
 
     /// The commit the guests made that `tag`, a commit's in a footer or a state of `branch`'s,
-    /// names: the tag names the lease epoch of the writer that uploaded it, which says which
+    /// names: the tag names the epoch of the writer that uploaded it, which says which
     /// store's history it is of, and the store's epoch of it there. A fork's child names its
     /// parent's commits until it has its own.
     fn truth_of(&self, branch: u64, tag: Option<u64>) -> Result<Option<u64>, String> {
@@ -1282,7 +1282,7 @@ impl World {
     }
 
     /// A writer whose session stopped checkpoints, as one running on unaware of it would: a later
-    /// writer's, or none, holding its branch's lease.
+    /// writer's, or none, holding its branch's head.
     fn stale_checkpoint(&mut self) {
         if self.stale.is_empty() {
             return;
@@ -2119,7 +2119,7 @@ impl World {
         let direct = Arc::new(Direct(self.bucket.clone()));
         let mut violations = Vec::new();
         let keys: BTreeSet<String> = self.bucket.keys().into_iter().collect();
-        // Nothing writes a point: no segment of its, no checkpoint, no lease but its deletion's.
+        // Nothing writes a point: no segment of its, no checkpoint, no head but its deletion's.
         for (&id, _) in self.branches.iter().filter(|(_, branch)| branch.point) {
             let written = |prefix: String| keys.iter().any(|key| key.starts_with(&prefix));
             if written(layout::segments(sim_branch(id)))
@@ -2164,9 +2164,9 @@ impl World {
             // and its head with the cell's epoch, which no taking of the cell by a later
             // placement lowers (TASK-364).
             let cell = block_on(extent_remote::cell::read(&*direct, sim_branch(id).cell));
-            let lease = block_on(extent_remote::head::get(&*direct, sim_branch(id)));
-            match (cell, lease) {
-                (Ok(Some(cell)), Ok(Some(lease))) => {
+            let head = block_on(extent_remote::head::get(&*direct, sim_branch(id)));
+            match (cell, head) {
+                (Ok(Some(cell)), Ok(Some(head))) => {
                     if cell.token < branch.taken {
                         violations.push(format!(
                             "branch {id:x}'s cell is an earlier placement's: token {} after {}",
@@ -2174,19 +2174,19 @@ impl World {
                         ));
                     }
                     // A deletion's head, final, is taken with the highest token there is.
-                    if lease.epoch != layout::Head::FINAL && lease.token > cell.epoch {
+                    if head.epoch != layout::Head::FINAL && head.token > cell.epoch {
                         violations.push(format!(
-                            "branch {id:x}'s lease was taken at epoch {} of its cell, of epoch {}",
-                            lease.token, cell.epoch
+                            "branch {id:x}'s head was taken at epoch {} of its cell, of epoch {}",
+                            head.token, cell.epoch
                         ));
                     }
                 }
                 (Ok(_), Ok(None)) if branch.taken > 0 => {
-                    violations.push(format!("branch {id:x}, taken, has no lease"));
+                    violations.push(format!("branch {id:x}, taken, has no head"));
                 }
                 (Ok(_), Ok(_)) => {}
                 (Err(error), _) | (_, Err(error)) => {
-                    violations.push(format!("branch {id:x}'s cell or lease: {error}"));
+                    violations.push(format!("branch {id:x}'s cell or head: {error}"));
                 }
             }
             let recovered =
@@ -2289,8 +2289,8 @@ impl World {
                 else {
                     continue;
                 };
-                let lease = block_on(extent_remote::head::epoch(&*direct, sim_branch(id)));
-                if writer.stopped().is_some() || lease != Ok(writer.epoch()) {
+                let head = block_on(extent_remote::head::epoch(&*direct, sim_branch(id)));
+                if writer.stopped().is_some() || head != Ok(writer.epoch()) {
                     continue;
                 }
                 if session.uploader.failed().is_some() {

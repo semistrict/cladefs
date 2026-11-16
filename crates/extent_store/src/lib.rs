@@ -84,7 +84,7 @@
 //! (`extent_frame::segment`), so that a closed segment is the object its branch keeps there, byte
 //! for byte (doc-7, decision 1). Given a writer's chain by an uploader ([`Store::upload`]), the
 //! store's footers are the writer's (`extent_frame::segment::Chain`): numbered on from where the
-//! chain is, each following the one before, their commits tagged with the writer's lease epoch,
+//! chain is, each following the one before, their commits tagged with the writer's epoch,
 //! their extents of their own at the writer's keys; and it keeps each closed segment for the
 //! uploader until it is acknowledged in the bucket ([`Store::closed`], [`Store::acknowledged`]). The uploader may have
 //! it close its open segment between commits ([`Store::close_now`]): cladefs: framed holding none of

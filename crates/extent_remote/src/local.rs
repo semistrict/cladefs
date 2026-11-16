@@ -297,7 +297,7 @@ mod tests {
             tokio::runtime::Builder::new_multi_thread().worker_threads(8).build().unwrap();
         runtime.block_on(async {
             let buckets = [file(dir.path()), file(dir.path())];
-            let key = "leases/0000000000000001";
+            let key = "heads/0000000000000001";
             let version =
                 buckets[0].put(key, b"first".to_vec().into(), PutMode::Create).await.unwrap();
             let updates = (0..32u8).map(|n| {

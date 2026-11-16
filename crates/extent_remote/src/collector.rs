@@ -15,7 +15,7 @@
 //! ([`crate::sweep`]); the cells are found by delimiter listings, a page at a time, listing none
 //! of their objects ([`crate::cell::listed`]).
 //!
-//! cladefs: a pass holds its cell by the cell's lease (`<C>gc/lease`, [`passed::GcLease`],
+//! cladefs: a pass holds its cell by the cell's lease (`<C>gc/lease`, [`passed::CollectorLease`],
 //! TASK-395.5) for as long as its collector's [`Holding`] says, renewing it as it goes and letting
 //! it go as it ends: another pass, of this process or another, finds the cell held and leaves it,
 //! as it leaves one whose last pass ended since its sweep began, without waiting ([`Error::Left`]).
@@ -85,7 +85,7 @@
 //! writer made, landing after the writer recovered the branch (one it took the branch from, which
 //! knew nothing of it), or the state of the parent a branch inherited them from, which its writer
 //! read as it was then. So a state's way to an extent starts where the extent was sealed, its
-//! moves all kept, unless the state's checkpoint is that of the writer holding the branch's lease,
+//! moves all kept, unless the state's checkpoint is that of the writer holding the branch's head,
 //! read after the checkpoint was listed: a writer taking the branch after that recovers from that
 //! checkpoint or a later one, and the writer that made it took its moves first (TASK-175).
 //!
@@ -116,7 +116,7 @@ use crate::bucket::{self, Bucket, ByteRange, Created, Meta, Version};
 use crate::keys::{self, CellKeys, Ring};
 use crate::layout::{self, Branch, Cell, Frame, Kind, Location, Marked, Marks, Moves, Origin};
 use crate::moves::{Moved, MovesMaps};
-use crate::passed::{self, Decided, Deferred, GcLease, Listed, Passed, Taken, Usage};
+use crate::passed::{self, Decided, Deferred, CollectorLease, Listed, Passed, Taken, Usage};
 use crate::record::{self, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
@@ -552,7 +552,7 @@ impl Collector {
             return Ok(true);
         }
         let until = bucket.now().saturating_add(self.holding.lease);
-        passed::change(bucket, cell, taken, |found| GcLease { until, ..found }).await
+        passed::change(bucket, cell, taken, |found| CollectorLease { until, ..found }).await
     }
 
     /// cladefs: lets `cell`'s lease go, which the pass that took it as `taken` says holds, if it
@@ -576,11 +576,11 @@ impl Collector {
             return Ok(());
         }
         let now = bucket.now();
-        let release = |found: GcLease| {
+        let release = |found: CollectorLease| {
             let ended = if holds && went_through { now } else { found.ended };
             let until = if holds { 0 } else { found.until };
             let passed = passed.clone().or(found.passed);
-            GcLease { until, ended, passed, ..found }
+            CollectorLease { until, ended, passed, ..found }
         };
         passed::change(bucket, cell, taken, release).await.map(drop)
     }
@@ -1862,7 +1862,7 @@ impl Pass {
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
                 // (TASK-395.13). cladefs: a cell's object, which says who holds it, stays as its
                 // records do, and a block of object IDs taken for good (TASK-364).
-                Kind::GcLease { .. }
+                Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
                 | Kind::Reference { .. }
@@ -1943,7 +1943,7 @@ mod tests {
     async fn keys(bucket: &impl Bucket) -> Vec<String> {
         (bucket::list(bucket, "").await.into_iter())
             .map(|meta| meta.key)
-            .filter(|key| !matches!(layout::kind(key), Kind::GcLease { .. }))
+            .filter(|key| !matches!(layout::kind(key), Kind::CollectorLease { .. }))
             .collect()
     }
 
@@ -2361,7 +2361,7 @@ mod tests {
     }
 
     /// TASK-178: a deletion that finds a branch live, as a placement cut off does once the latest
-    /// placement's deletion ended the lease, recovers it to give its forks' children their records;
+    /// placement's deletion ended the head, recovers it to give its forks' children their records;
     /// that other deletion finishing meanwhile, and a pass reclaiming what recovering the branch
     /// needed, a fork's, its parent's segments up to the fork among it, the deletion is done, as
     /// the other gave the children their records. Found by the simulation, seed 3953 of its
@@ -2734,7 +2734,7 @@ mod tests {
 
     /// TASK-174: a root that took the ID of a fork's child, and was deleted, keeps its record:
     /// the fork's parent's writer, which acknowledged the fork before the parent's deletion ended
-    /// its lease and was slow to record the child, finds it deleted once a pass ran, and makes
+    /// its head and was slow to record the child, finds it deleted once a pass ran, and makes
     /// none. Found by specs/bucket's TLA+ (TASK-165.2), the model BucketForks.
     #[test]
     fn deleted_roots_keep_their_records_from_slow_writers_forking_to_their_ids() {
@@ -2777,7 +2777,7 @@ mod tests {
         let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         writer.upload(at).await.unwrap();
-        // The lease read, the fork's child's record waits.
+        // The head read, the fork's child's record waits.
         let mut acknowledging = Box::pin(writer.acknowledge());
         assert!((&mut acknowledging).now_or_never().is_none());
         branch::delete(&*direct, test_branch(PARENT), 12, 0).await.unwrap();
@@ -4060,7 +4060,7 @@ mod tests {
             branch::create(&*direct, test_branch(1), 0).await.unwrap();
             // As the dry run reads the lease again, at its end.
             let during =
-                Hooked::new(direct.clone(), Hook::Getting(layout::gc_lease(layout::TEST_CELL), 2));
+                Hooked::new(direct.clone(), Hook::Getting(layout::collector_lease(layout::TEST_CELL), 2));
             let passing = direct.clone();
             *during.then.lock().unwrap() = Some(Box::new(move || {
                 let pass = collect(&*passing, 9, &KEEP).now_or_never();
@@ -4111,7 +4111,7 @@ mod tests {
             let after = held(&*bucket).await;
             let kept = |held: &[(Meta, Vec<u8>)]| -> Vec<(Meta, Vec<u8>)> {
                 held.iter()
-                    .filter(|(meta, _)| meta.key != layout::gc_lease(layout::TEST_CELL))
+                    .filter(|(meta, _)| meta.key != layout::collector_lease(layout::TEST_CELL))
                     .cloned()
                     .collect()
             };
@@ -4990,7 +4990,7 @@ mod tests {
         let branch = Branch { cell: celled, id: 0 };
         assert_eq!(refused, Err(Error::Format { branch, format: 8 }));
         let leases: Vec<String> = (bucket.0.keys().into_iter())
-            .filter(|key| matches!(layout::kind(key), Kind::GcLease { .. }))
+            .filter(|key| matches!(layout::kind(key), Kind::CollectorLease { .. }))
             .collect();
         assert_eq!(leases, Vec::<String>::new());
     }
@@ -5417,7 +5417,7 @@ mod tests {
     /// What a pass over `cell` asks that skips it, deleting nothing: its lease, read and taken, and
     /// a listing of the cell.
     fn idle(cell: Cell) -> Vec<String> {
-        let lease = layout::gc_lease(cell);
+        let lease = layout::collector_lease(cell);
         vec![format!("get {lease}"), format!("put {lease}"), format!("list {}", cell.prefix())]
     }
 
@@ -5561,7 +5561,7 @@ mod tests {
         bucket.advance(1);
         let (report, asked) = pass(&mut collector);
         assert_eq!(report, Report { deleted: SEGMENTS as usize, skipped: 1, ..report });
-        let lease = layout::gc_lease(cell);
+        let lease = layout::collector_lease(cell);
         let mut expected = idle(cell);
         expected.push(format!("get {lease}"));
         expected.extend(segments.iter().map(|segment| format!("delete {segment}")));

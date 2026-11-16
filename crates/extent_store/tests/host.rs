@@ -140,7 +140,7 @@ fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
 }
 
 /// cladefs: a store's placement's token is its description's, placed durably, which opening it
-/// takes its branch's lease with (TASK-39.7, TASK-165.9); none, never placed.
+/// takes its branch's cell with (TASK-39.7, TASK-165.9); none, never placed.
 #[test]
 fn placements_name_their_token_in_the_description() {
     let dir = tempfile::tempdir().unwrap();
