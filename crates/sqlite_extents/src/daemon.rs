@@ -13,7 +13,7 @@
 use crate::{Options, Volume};
 use anyhow::{Context as _, Error, ensure};
 use cladefs::{MappingContents, RemoteDevice, RemoteExtentStore, WindowMapping};
-use extent_files::{Contents, Run, Window};
+use extent_files::{Contents, Run, VolumeWindow};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -90,7 +90,7 @@ impl DaemonWindow {
     }
 }
 
-impl Window for DaemonWindow {
+impl VolumeWindow for DaemonWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
         (self.memory, self.size)
     }

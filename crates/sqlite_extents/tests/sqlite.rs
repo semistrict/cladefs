@@ -8,7 +8,7 @@ mod common;
 
 use futures::executor::block_on;
 use rusqlite::{Connection, OpenFlags, params};
-use sqlite_extents::{Contents, Options, Registration, Run, Volume, Window, register};
+use sqlite_extents::{Contents, Options, Registration, Run, Volume, VolumeWindow, register};
 use std::alloc::Layout;
 use std::collections::BTreeMap;
 use std::ptr::NonNull;
@@ -66,7 +66,7 @@ impl Drop for CopyingWindow {
     }
 }
 
-impl Window for CopyingWindow {
+impl VolumeWindow for CopyingWindow {
     fn memory(&self) -> (NonNull<u8>, u64) {
         (self.memory, self.size)
     }

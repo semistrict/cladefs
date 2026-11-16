@@ -21,4 +21,4 @@ mod volume;
 mod window;
 
 pub use volume::{Failed, NotFound, Options, Volume};
-pub use window::{Contents, Run, Window};
+pub use window::{Contents, Run, VolumeWindow};

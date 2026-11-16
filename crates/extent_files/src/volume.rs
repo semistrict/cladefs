@@ -36,7 +36,7 @@
 
 use crate::format::{self, Root};
 use crate::pages::{Failure, Pages, Plan};
-use crate::window::{Run, Window};
+use crate::window::{Run, VolumeWindow};
 use anyhow::{Context as _, Error, bail};
 use futures::executor::block_on;
 use std::collections::BTreeMap;
@@ -125,7 +125,7 @@ pub struct Volume {
     options: Options,
     inner: Mutex<Inner>,
     /// The window, if any, and the bytes of each of its regions.
-    window: Option<(Box<dyn Window>, u64)>,
+    window: Option<(Box<dyn VolumeWindow>, u64)>,
     /// How many times pages were fetched to read in place.
     fetched: AtomicU64,
 }
@@ -166,7 +166,7 @@ impl Volume {
     /// region each, as many regions as `options` says.
     pub fn open_mapped(
         device: DeviceHolder,
-        window: Box<dyn Window>,
+        window: Box<dyn VolumeWindow>,
         options: Options,
     ) -> Result<Arc<Self>, Error> {
         assert!(options.max_extent_blocks > 0 && options.window_regions > 0);
