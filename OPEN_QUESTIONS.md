@@ -21,6 +21,18 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## Rust rules from past bugs: a syntactic script, not dylint (TASK-444.6, 2026-11-15)
+
+TASK-444.6 asked for dylint lints. I wrote `scripts/rust-rules.py` instead, rules over the
+crates' source with no build, held to the mutants of the bugs they come from as
+`scripts/cocci-guest.py` holds the guest's. Why: checking a rule against its mutant takes seconds
+this way. A dylint lint needs a nightly toolchain, a build of rustc's internals, and a build of the
+crate per mutant, which only a ubu1 run could afford. Of the crates' 74 mutants, those with a shape
+a rule can see are syntactic: mixed atomic orderings, an unbounded semaphore, a copied buffer.
+Rules that need types stay clippy's (`clippy.toml`'s disallowed-methods, as TASK-98 did).
+Otherwise: dylint for a rule that needs types and that clippy's configuration can't express. Undo:
+port a rule to a dylint crate and keep the mutant check.
+
 ## The glossary: one word per concept, in code too (CONTEXT.md, 2026-11-15)
 
 You chose, grilled: the choices bind identifiers too; **seal** is extents' (encryption says

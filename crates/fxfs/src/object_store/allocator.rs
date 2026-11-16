@@ -1745,7 +1745,7 @@ impl Allocator {
     pub fn check_base_branches(&self, branches: &[u64]) -> Result<(), Error> {
         let branches: HashSet<u64> = branches.iter().copied().collect();
         ensure!(
-            !branches.contains(&self.branch.load(Ordering::Relaxed))
+            !branches.contains(&self.branch())
                 && !self.inner.lock().extents.holds_any_of(&branches),
             FxfsError::InvalidArgs
         );
