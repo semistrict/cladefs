@@ -1024,6 +1024,7 @@ fn segments_close_for_the_writer_of_their_chain() {
                 // Its first commit sets its capacity, which the bucket said none of.
                 capacity: Some(1 << 20),
                 continued: None,
+                versions: vec![],
             },
         }
     );
@@ -1200,7 +1201,7 @@ fn framings_write_back_as_they_go() {
     let size = framed.size().unwrap();
     assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
     // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
-    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 603 + 32);
+    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 611 + 32);
     for sequence in 1..=1536 {
         assert_eq!(read(&store, extent(sequence), 0, len), data(sequence));
     }

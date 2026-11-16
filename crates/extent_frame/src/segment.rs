@@ -164,6 +164,26 @@ pub struct Contents {
     pub forks: Vec<Child>,
     pub capacity: Option<u64>,
     pub continued: Option<Continued>,
+    /// cladefs: the versions cut at its end, which the acknowledgement naming it names in the
+    /// branch's head ([`VersionCut`], TASK-476).
+    pub versions: Vec<VersionCut>,
+}
+
+/// cladefs: a version cut at a segment's end (doc-18, TASK-476): a name for its branch's state as of
+/// the segment, of no record, kept for as long as the branch's head names it, which the
+/// acknowledgement naming the segment does, in the same swap. Its ID is random, unique to its
+/// making, as an owner is: the segment's number may change, as a WAL is put after the branch's end
+/// (a store's `Wal::rebase`), its ID never. The commit cutting it seals nothing, its store
+/// quiescent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct VersionCut {
+    pub id: u64,
+    /// The ID of the cut of its cell's vdisks it is part of, if any: cut at one moment with the
+    /// versions of the cut's other vdisks, which its cell's object names once all are uploaded.
+    pub cell_cut: Option<u64>,
+    /// The versions of its branch its snapshot asked to keep, itself among them, the newest: once
+    /// the head names it, the others are dropped, in the same swap. None, all.
+    pub keep_last: Option<u32>,
 }
 
 /// cladefs: the runs a commit sealed in a segment's data, past the commits the segment ends, which
@@ -385,6 +405,7 @@ mod tests {
                     commit: tag(4, 13),
                     extents: vec![(ExtentId { branch: 2, sequence: 14 }, 4096, 8192)],
                 }),
+                versions: vec![VersionCut { id: 0xbe, cell_cut: Some(0xce), keep_last: Some(3) }],
             },
         };
         let bytes = footer.encode();

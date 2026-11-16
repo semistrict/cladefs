@@ -1249,11 +1249,13 @@ pub async fn taking(
 /// The keys of a fork's parent that whoever records the fork authenticates the parent's checkpoint
 /// at the fork point under, if the child is of another cell (TASK-411.4): those its writer holds;
 /// or, for its deletion, or a failed fork's claim, the host's KMS, with the parent's record if
-/// read, asked only once a checkpoint is to be written ([`writing`]).
+/// read, asked only once a checkpoint is to be written ([`writing`]); or none, for a fork of a
+/// point, which writes no checkpoint of its parent's (`branch::fork_point`).
 #[derive(Clone, Copy)]
 pub enum Parents<'a> {
     Held(&'a Arc<Ring>),
     Kms(&'a Arc<CachingKms>, Option<&'a Record>),
+    Unasked,
 }
 
 impl Parents<'_> {
@@ -1268,6 +1270,10 @@ impl Parents<'_> {
                 let record = record.ok_or_else(|| Error::Lost(layout::record(parent)))?;
                 writing(bucket, kms, parent, &record).await
             }
+            Self::Unasked => Err(Error::Corrupt(format!(
+                "branch {parent}'s keys, asked of a fork of a point, which writes no checkpoint of \
+                 its parent's"
+            ))),
         }
     }
 }

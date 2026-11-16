@@ -121,7 +121,7 @@ use crate::keys::{self, CellKeys, Ring};
 use crate::layout::{self, Branch, Cell, Frame, Kind, Location, Marked, Marks, Moves, Origin};
 use crate::moves::{Moved, MovesMaps};
 use crate::passed::{self, CollectorLease, Decided, Deferred, LeaseTaking, Listed, Passed, Usage};
-use crate::record::{self, Record};
+use crate::record::{self, Forked, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
 use extent_frame::Keys as _;
@@ -842,9 +842,10 @@ impl Remembered {
         };
         drop(checkpoints);
         // What a pass listing the cell as it did decides as it did, unless it went by more than the
-        // cell: a point of another cell's record, read for a clone being made.
+        // cell: a point of another cell's record, or a version's branch's head, read for a clone
+        // being made.
         let forking_elsewhere = (records.iter()).any(|(_, record)| {
-            !record.deleted && record.forking().is_some_and(|point| point.cell != cell)
+            !record.deleted && forked_from(record).is_some_and(|from| from.cell != cell)
         });
         let settled = early && !live.unsettled && !forking_elsewhere;
         let listed = match listed {
@@ -1049,21 +1050,24 @@ async fn fenced(bucket: &impl Bucket, cell: Cell, epoch: u64) -> Result<bool, Er
 /// Gives up on the forks being made of points that were deleted, as `records` say, which it says
 /// are deleted then, or made, if that came first ([`branch::abandon`]); without `writes`, takes them
 /// as deleted, writing nothing. cladefs: a point of another cell's than the pass's, it reads where it
-/// is.
+/// is; and so, of a fork of a version, its branch's head, which must name it still (TASK-476).
 async fn abandon(
     bucket: &impl Bucket,
     records: &mut BTreeMap<Branch, Record>,
     writes: Writes,
 ) -> Result<(), Error> {
-    let forking: Vec<(Branch, Branch)> = (records.iter())
+    let forking: Vec<(Branch, Origin, Forked)> = (records.iter())
         .filter(|(_, record)| !record.deleted)
-        .filter_map(|(&child, record)| Some((child, record.forking()?)))
+        .filter_map(|(&child, record)| Some((child, record.origin()?, record.forking()?)))
         .collect();
-    for (child, point) in forking {
-        let gone = match records.get(&point) {
-            Some(record) => record.deleted,
-            None if point.cell == child.cell => true,
-            None => gone(bucket, point).await?,
+    for (child, origin, of) in forking {
+        let gone = match of {
+            Forked::Point(point) => match records.get(&point) {
+                Some(record) => record.deleted,
+                None if point.cell == child.cell => true,
+                None => gone(bucket, point).await?,
+            },
+            Forked::Version(id) => version_gone(bucket, origin, id).await?,
         };
         if !gone {
             continue;
@@ -1080,6 +1084,23 @@ async fn abandon(
 /// cladefs: whether `point`, of another cell's, is gone: its record deleted, or none.
 async fn gone(bucket: &impl Bucket, point: Branch) -> Result<bool, Error> {
     Ok(branch::record(bucket, point).await?.is_none_or(|record| record.deleted))
+}
+
+/// cladefs: whether the version `id` of the branch `origin` names, at the segment it names, is gone:
+/// that branch's head names it no more, dropped by its writer or ended by a deletion (TASK-476).
+async fn version_gone(bucket: &impl Bucket, origin: Origin, id: u64) -> Result<bool, Error> {
+    let head = crate::head::get(bucket, origin.parent).await?;
+    let named = head.as_ref().and_then(|head| head.version(id));
+    Ok(named.is_none_or(|version| version.at != origin.at))
+}
+
+/// cladefs: the branch whose object a fork being made reads as it is made, `record`'s: its point's,
+/// or its version's branch's, whose head it reads.
+fn forked_from(record: &Record) -> Option<Branch> {
+    match record.forking()? {
+        Forked::Point(point) => Some(point),
+        Forked::Version(_) => Some(record.origin()?.parent),
+    }
 }
 
 /// The record of `branch` at the key of `meta`, which a listing gave, if there is one, and the
@@ -1284,6 +1305,15 @@ async fn recover_live(
                 }
                 queue.insert((Some(origin), fork.child));
             }
+            // cladefs: its versions' states, kept as fork points' are (rule `versions_kept`,
+            // TASK-476): each the branch's state at the segment its head names it at.
+            if rules().versions_kept
+                && let Some(head) = &recovered.head
+            {
+                points.extend(
+                    head.versions.iter().map(|version| Origin { parent: branch, at: version.at }),
+                );
+            }
             checkpointed |= recovered.checkpoint().is_some();
             live.add(recovered, &mut inherited);
         }
@@ -1309,11 +1339,21 @@ async fn lost_is_ok(bucket: &impl Bucket, branch: Branch, writes: Writes) -> Res
         }
         return Ok(true);
     }
-    let Some(point) = record.forking().filter(|_| rules().collector_abandons) else {
+    let Some(of) = record.forking().filter(|_| rules().collector_abandons) else {
         return Ok(false);
     };
-    if !gone(bucket, point).await? {
-        return Ok(false);
+    let gone = match (of, record.origin()) {
+        (Forked::Point(point), _) => gone(bucket, point).await?,
+        (Forked::Version(id), Some(origin)) => version_gone(bucket, origin, id).await?,
+        (Forked::Version(_), None) => false,
+    };
+    // cladefs: a restore of a version into another cell, being made, recovers through its version's
+    // branch's checkpoint at the version, by its key, which the restore writes after its reference,
+    // before it makes the restore (`branch::fork_version`): none there yet, it holds nothing, nothing
+    // relies on it, and its reference keeps what it would inherit in that branch's cell. Lost
+    // nothing; decided again by the next pass (TASK-476).
+    if !gone {
+        return Ok(matches!(of, Forked::Version(_)));
     }
     match writes {
         Writes::Some => Ok(branch::abandon(bucket, branch).await?.deleted),
@@ -3343,10 +3383,9 @@ mod tests {
         let (slow, open) = Gated::new(direct.clone(), Gate::Put(reference.clone()));
         let mut forking = Box::pin(branch::fork_point(&slow, clone, celled(2, 2), origin, 0x33));
         assert!((&mut forking).now_or_never().is_none());
-        branch::resume_point_fork(&*direct, clone).await.unwrap();
-        branch::delete(&*direct, clone, 20, u64::MAX, &crate::keys::testing::host_kms())
-            .await
-            .unwrap();
+        let kms = crate::keys::testing::host_kms();
+        branch::resume_point_fork(&*direct, clone, keys::Parents::Kms(&kms, None)).await.unwrap();
+        branch::delete(&*direct, clone, 20, u64::MAX, &kms).await.unwrap();
         let options = Options { compact_below: 0.0, grace: 0 };
         crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
         assert_eq!(bucket::list(&*direct, &clone.cell.prefix()).await, Vec::new());
@@ -3395,7 +3434,7 @@ mod tests {
         // The host dies there.
         drop(forking);
         drop(never);
-        branch::resume_point_fork(&*direct, clone).await.unwrap();
+        branch::resume_point_fork(&*direct, clone, keys::Parents::Unasked).await.unwrap();
         let referred = bucket::get(&*direct, &reference).await.is_some();
         // The point deleted, the base's checkpoint after drops its fork to it.
         branch::delete(&*direct, celled(2, 2), 20, 0, &crate::keys::testing::host_kms())
@@ -5208,6 +5247,116 @@ mod tests {
         assert!(passed.is_ok(), "{passed:?}");
     }
 
+    /// TASK-476: a version keeps its branch's state at it, which its branch freed since and
+    /// checkpointed past, the checkpoint covering the segments recovering the version reads; once
+    /// its writer drops it, the next sweep reclaims it.
+    #[test]
+    fn versions_keep_what_they_name_until_dropped() {
+        assert_eq!(block_on(read_a_version(Dropped::No)), Ok(b"held".to_vec()));
+        let read = block_on(read_a_version(Dropped::Yes));
+        assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
+    /// Without the rule `versions_kept`, a pass keeps the branch's state alone, and reclaims what
+    /// its version names.
+    #[test]
+    fn versions_keeping_what_they_name_need_versions_kept() {
+        crate::set_rules(crate::Rules { versions_kept: false, ..crate::Rules::ALL });
+        let read = block_on(read_a_version(Dropped::No));
+        crate::set_rules(crate::Rules::ALL);
+        assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Dropped {
+        No,
+        Yes,
+    }
+
+    /// What a version of a branch reads of an extent the branch sealed before it and freed after,
+    /// the branch checkpointed past it, sweeps having run until they did nothing more, the version
+    /// dropped first if `dropped` says so: read by a reader of another host's.
+    async fn read_a_version(dropped: Dropped) -> Result<Vec<u8>, Error> {
+        let objects: Arc<InMemory> = Arc::new(InMemory::new());
+        let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
+        let branch = celled(1, 1);
+        branch::create(&*bucket, branch, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let extent = ExtentId::new(1, writer.chain().next_sequence());
+        commit(
+            &writer,
+            Commit { tag: 1, extents: vec![(extent, b"held".to_vec())], ..Commit::default() },
+        )
+        .await;
+        let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
+        let cutting = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
+        let at = writer
+            .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
+        writer.upload(at).await.unwrap();
+        writer.acknowledge().await.unwrap();
+        commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
+        writer.checkpoint().await.unwrap();
+        if dropped == Dropped::Yes {
+            writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
+        }
+        sweep(&*bucket).await?;
+        let reader = Arc::new(ObjectBucket::new(objects, ""));
+        let checkpoints = Checkpoints::new(&*reader, 0);
+        let (state, _) = recovery::recover_at(&checkpoints, branch, at).await?;
+        let location = state.extents.get(&extent).cloned();
+        let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
+        crate::testing::read(&reader, extent, &location).await
+    }
+
+    /// TASK-476: a pass gives up on a restore of a version being made, its host dead, once the
+    /// version's branch's head names it no more: its record deleted, it keeps nothing, and the
+    /// pass, recovering it, fails not.
+    #[test]
+    fn restores_being_made_of_versions_dropped_are_given_up_on() {
+        let (report, record) = block_on(sweep_past_a_restore_of_a_dropped_version());
+        assert_eq!(report.map(drop), Ok(()));
+        assert!(record.deleted, "{record:?}: given up");
+    }
+
+    /// Without the rule `collector_abandons`, the pass recovers that restore, through what a pass
+    /// before reclaimed of the version's branch, and fails.
+    #[test]
+    fn restores_being_made_of_versions_dropped_given_up_on_need_collector_abandons() {
+        crate::set_rules(crate::Rules { collector_abandons: false, ..crate::Rules::ALL });
+        let (report, record) = block_on(sweep_past_a_restore_of_a_dropped_version());
+        crate::set_rules(crate::Rules::ALL);
+        assert!(matches!(report, Err(Error::Lost(_))), "{report:?}");
+        assert!(!record.deleted, "{record:?}");
+    }
+
+    /// A restore of a version left being made, its host dead before its reference, the version then
+    /// dropped and its branch checkpointed past it, swept: what the sweeps reported, and the
+    /// restore's record after.
+    async fn sweep_past_a_restore_of_a_dropped_version() -> (Result<(), Error>, Record) {
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let (branch, clone) = (celled(1, 1), celled(2, 2));
+        branch::create(&*bucket, branch, 0).await.unwrap();
+        let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+        let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
+        let cutting = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
+        let at = writer
+            .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
+        writer.upload(at).await.unwrap();
+        writer.acknowledge().await.unwrap();
+        let origin = Origin { parent: branch, at };
+        let forking = record::Kind::Forking { origin, of: Forked::Version(0xa) }.of(0x33);
+        let key = layout::record(clone);
+        bucket::create(&*bucket, &key, layout::encode(&forking)).await;
+        writer.drop_versions(&BTreeSet::from([0xa])).await.unwrap();
+        commit(&writer, Commit { tag: 2, ..Commit::default() }).await;
+        writer.checkpoint().await.unwrap();
+        let swept = sweep(&*bucket).await;
+        let record = branch::record(&*bucket, clone).await.unwrap().unwrap();
+        (swept, record)
+    }
+
     /// What a fork to another cell reads of what it inherited, its parent having freed it,
     /// checkpointed and been deleted, sweeps having run until they did nothing more: read by a
     /// reader of another host's, whose bucket kept none of what it read decoded (TASK-407).
@@ -6498,7 +6647,7 @@ mod tests {
             .0;
         let origin = Origin { parent: origin_branch, at };
         // The clone's record, being made: its host died before it was.
-        let forking = crate::record::Kind::Forking { origin, point }.of(0x33);
+        let forking = crate::record::Kind::Forking { origin, of: Forked::Point(point) }.of(0x33);
         let reference = layout::reference(origin_branch, at, clone);
         bucket.served(async {
             let bytes = layout::encode(&layout::Reference::of(0x33));

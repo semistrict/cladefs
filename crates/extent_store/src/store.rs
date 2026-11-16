@@ -41,7 +41,9 @@ use extent_bucket::keys::Ring;
 use extent_bucket::recovery::{Places, Seal};
 use extent_bucket::trace;
 use extent_bucket::wal::{Rebased, Wal};
-use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
+use extent_frame::segment::{
+    Branch, Chain, Child, Contents, Footer, Location, VersionCut, epoch_of,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -69,6 +71,12 @@ pub struct ForkCommitted {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("the fork's child {0} has the ID of its parent's or of a branch it inherits from")]
 pub struct InheritedId(pub Branch);
+
+/// cladefs: the error of a version cut of a store that is not quiescent: extents written since its
+/// last commit, which a version holds not, as its guest committed them not (TASK-476).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("a version of a store holding extents written since its last commit")]
+pub struct NotQuiescent;
 
 /// The error of a capacity smaller than what the store holds: its extents' bytes, and those that
 /// writes in progress may add.
@@ -225,6 +233,12 @@ pub struct Store<D: Dir> {
     lineage: BTreeSet<u64>,
     /// cladefs: the vdisk of its branch's cell it is, if its description names one (TASK-364).
     vdisk: Option<Vdisk>,
+    /// cladefs: the version of its branch it is a copy of, if it is one (TASK-476).
+    version: Option<u64>,
+    /// cladefs: the versions its commits cut that its branch's head may not name yet, by the
+    /// numbers of the commits cutting them: those of its write-ahead log, and those cut since it
+    /// opened, until it learns their commits uploaded ([`Store::local_versions`], TASK-476).
+    cuts: Mutex<BTreeMap<u64, VersionCut>>,
     /// cladefs: the URL of the bucket its branch is kept in, if its description names one.
     bucket: Option<String>,
     /// Its directory, taken for this process ([`Dir::take`]), and claimed for its opening
@@ -811,6 +825,12 @@ impl<D: Dir> Recovering<D> {
         self.file.vdisk.as_ref()
     }
 
+    /// cladefs: the version of its branch it is a copy of, if its description names one: its
+    /// branch's state at it, which nothing writes (doc-18, TASK-476).
+    pub fn version(&self) -> Option<u64> {
+        self.file.version
+    }
+
     /// The branch's commit its write-ahead log goes on from: the last the bucket acknowledged of
     /// its commits, if it acknowledged any.
     pub fn start(&self) -> Option<u64> {
@@ -888,7 +908,7 @@ impl<D: Dir> Recovering<D> {
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
         let Self { dir, taken, claim, file, wal: mut recovered } = self;
-        let StoreFile { block_size, branch, bucket, capacity, vdisk, .. } = file;
+        let StoreFile { block_size, branch, bucket, capacity, vdisk, version, .. } = file;
         let Opening { state, layer, taken: found, cache, keys, held } = opening;
         ensure!(state.branch == branch, "branch {branch} opened as {}", state.branch);
         // cladefs: the segments its recovery closed again framed, first, under its keys, as nothing
@@ -1014,6 +1034,15 @@ impl<D: Dir> Recovering<D> {
             let bytes = segments.len(SegmentId { branch: branch.id, number: *number }) + own;
             queued.push(Queued::new(*number, footer.clone(), restamped, bytes));
         }
+        // cladefs: the versions its log's segments cut, which its branch's head names once their
+        // segments are acknowledged (TASK-476).
+        let cuts: BTreeMap<u64, VersionCut> = (wal.segments())
+            .filter_map(|(footer, _)| {
+                let last = footer.contents.commits.last()?;
+                Some(footer.contents.versions.iter().map(move |cut| (epoch_of(*last), *cut)))
+            })
+            .flatten()
+            .collect();
         let mut uncommitted = Uncommitted::default();
         // cladefs: a branch saying no capacity has the store's, which its next commit sets in it
         // (TASK-165.3).
@@ -1039,6 +1068,8 @@ impl<D: Dir> Recovering<D> {
             lineage,
             bucket,
             vdisk,
+            version,
+            cuts: Mutex::new(cuts),
             opened: SharedLock::new("store opening", Mutex::new(Some((claim, taken)))),
             unpacked: Unpacked::default(),
             options,
@@ -1159,6 +1190,19 @@ impl<D: Dir> Store<D> {
         bucket: Option<&str>,
         vdisk: Option<Vdisk>,
     ) -> Result<(), Error> {
+        Self::make_copy(dir, description, bucket, vdisk, None)
+    }
+
+    /// cladefs: makes a new store's directory in `dir`, as [`Store::make`] does, a copy of the
+    /// version `version` of its branch, if given: its branch's state at the version, which nothing
+    /// writes, as a point's copy holds the point's (doc-18, TASK-476).
+    pub fn make_copy(
+        dir: &D,
+        description: Description,
+        bucket: Option<&str>,
+        vdisk: Option<Vdisk>,
+        version: Option<u64>,
+    ) -> Result<(), Error> {
         let Description { block_size, capacity, branch } = description;
         ensure!(
             block_size.is_power_of_two() && block_size as usize <= crate::framed::ALIGNMENT,
@@ -1174,7 +1218,8 @@ impl<D: Dir> Store<D> {
             dir.create(UNMADE, false)?.sync()?;
             let file = dir.create(DESCRIPTION, false)?;
             let bucket = bucket.map(str::to_owned);
-            let described = StoreFile { block_size, branch, bucket, capacity, token: None, vdisk };
+            let described =
+                StoreFile { block_size, branch, bucket, capacity, token: None, vdisk, version };
             let text = described.text();
             file.write_at(text.as_bytes(), 0)?;
             file.sync()?;
@@ -1321,6 +1366,47 @@ impl<D: Dir> Store<D> {
             Ok(epoch)
         };
         made().context(ForkCommitted { child: child.branch })
+    }
+
+    /// cladefs: commits, durably, a commit whose segment's footer names the version `cut` cut at its
+    /// end, a name for the branch's state as of the commit, which the acknowledgement naming the
+    /// segment names in the branch's head (doc-18, TASK-476). Its segment closes at the commit.
+    /// The store must be quiescent, no extent written since its last commit
+    /// ([`Store::has_open`]), so that the version holds what its guest committed and nothing more:
+    /// refused otherwise ([`NotQuiescent`]). Returns the commit's number: the version is
+    /// local until the bucket acknowledges it ([`Store::local_versions`]).
+    pub fn commit_version(&self, cut: VersionCut) -> Result<u64, Error> {
+        let committing = self.committing.with(Mutex::lock);
+        if self.has_open()? {
+            bail!(NotQuiescent);
+        }
+        self.writable()?.segments.close_for_version(cut);
+        self.commit_locked(&committing, None)?;
+        let epoch = self.lock().epoch;
+        self.cuts.lock().unwrap().insert(epoch, cut);
+        failpoint!("version::committed");
+        self.flush()?;
+        Ok(epoch)
+    }
+
+    /// cladefs: the versions its commits cut whose commits are later than `uploaded`, the number of
+    /// the last commit the bucket acknowledged, each by its commit's number: local, its branch's
+    /// head naming them not yet (TASK-476). Those uploaded it forgets.
+    pub fn local_versions(&self, uploaded: u64) -> Vec<(u64, VersionCut)> {
+        let mut cuts = self.cuts.lock().unwrap();
+        cuts.retain(|&commit, _| commit > uploaded);
+        cuts.iter().map(|(&commit, &cut)| (commit, cut)).collect()
+    }
+
+    /// cladefs: forgets the local versions `ids` names: their commits stay, and the bucket's head
+    /// names them as they are acknowledged, which their dropping then drops (TASK-476).
+    pub fn forget_versions(&self, ids: &BTreeSet<u64>) {
+        self.cuts.lock().unwrap().retain(|_, cut| !ids.contains(&cut.id));
+    }
+
+    /// cladefs: the version of its branch it is a copy of, if it is one (TASK-476).
+    pub fn version(&self) -> Option<u64> {
+        self.version
     }
 
     /// The store's directory.

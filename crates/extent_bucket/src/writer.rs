@@ -137,6 +137,9 @@ struct Inner {
     looked: Option<Branch>,
     /// Why it stopped, if it did.
     stopped: Option<Error>,
+    /// cladefs: the versions dropped, which no acknowledgement names, local ones among them, cut
+    /// by segments not yet acknowledged (TASK-476).
+    dropped: BTreeSet<u64>,
 }
 
 /// cladefs: how a writer takes its branch ([`Writer::open_keyed`],
@@ -308,6 +311,7 @@ impl<B: Bucket> Writer<B> {
                 refused: BTreeSet::new(),
                 looked: None,
                 stopped: None,
+                dropped: BTreeSet::new(),
             }),
             mover: std::sync::OnceLock::new(),
             keys,
@@ -502,9 +506,11 @@ impl<B: Bucket> Writer<B> {
     /// Returns the last segment acknowledged. cladefs: to the last that goes on with no commit, a
     /// commit spanning segments acknowledged with the segment it ends in, not part of it
     /// (`extent_frame::segment::Continued`, TASK-92.41): what a store lets go of, once
-    /// acknowledged, the bucket has whole, and a head names no commit begun.
+    /// acknowledged, the bucket has whole, and a head names no commit begun. cladefs: the swap names
+    /// the versions cut at the ends of the segments it names too ([`layout::Head::naming`], doc-18,
+    /// TASK-476): a version is uploaded once it does.
     pub async fn acknowledge(&self) -> Result<Option<u64>, Error> {
-        let through = {
+        let (through, cuts) = {
             let inner = self.inner();
             if let Some(error) = &inner.stopped {
                 return Err(error.clone());
@@ -518,13 +524,27 @@ impl<B: Bucket> Writer<B> {
             else {
                 return Ok(inner.state.through);
             };
-            *created[end].0
+            let through = *created[end].0;
+            // Without the rule, as a test shows it needed: every version taken, those of segments
+            // this swap doesn't name among them.
+            let cut = |(&seq, pending): (&u64, &Pending)| {
+                let cuts = pending.footer.contents.versions.iter();
+                cuts.map(move |cut| (seq, *cut)).collect::<Vec<_>>()
+            };
+            let cuts: Vec<_> = match rules().versions_acked {
+                true => inner.pending.range(..=through).flat_map(cut).collect(),
+                false => inner.pending.iter().flat_map(cut).collect(),
+            };
+            let cuts: Vec<_> =
+                cuts.into_iter().filter(|(_, cut)| !inner.dropped.contains(&cut.id)).collect();
+            (through, cuts)
         };
         failpoint!("writer::acknowledge");
         {
             let mut held = self.held.lock().await;
             if held.head.end <= through {
-                let next = held.head.clone().holding(self.epoch, through + 1);
+                let named = cuts.iter().map(|(seq, cut)| (*seq, cut));
+                let next = held.head.clone().holding(self.epoch, through + 1).naming(named);
                 match head::swap(&*self.bucket, self.branch, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
@@ -544,6 +564,54 @@ impl<B: Bucket> Writer<B> {
         failpoint!("writer::acknowledged");
         self.record_forks().await?;
         Ok(self.inner().state.through)
+    }
+
+    /// cladefs: the branch's versions, as its head names them, as this writer last swapped it
+    /// (doc-18, TASK-476): those its acknowledgements named, and those named before it took the
+    /// branch, but those dropped.
+    pub async fn versions(&self) -> Vec<layout::Version> {
+        self.held.lock().await.head.versions.clone()
+    }
+
+    /// cladefs: drops the versions `ids` names, those the branch's head names of them, and those of
+    /// segments it is yet to acknowledge, which its acknowledgements name not: the head
+    /// swapped to name them no more, with the condition every swap has (rule `head_swap`), a writer
+    /// taken over failing and stopping ([`Error::Fenced`]). The collector's next pass over the
+    /// branch's cell keeps their states no more (doc-18, TASK-476).
+    pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
+        self.inner().dropped.extend(ids);
+        self.change_versions(|head| head.without(ids)).await
+    }
+
+    /// cladefs: shares the version `id`, if `shared`, or no longer, if the branch's head names it:
+    /// forks of it may be of other tenants' cells while it is (doc-7, Shared points). Fails with
+    /// [`Error::NoBranch`] if the head names no such version.
+    pub async fn share_version(&self, id: u64, shared: bool) -> Result<(), Error> {
+        if self.held.lock().await.head.version(id).is_none() {
+            return Err(Error::NoBranch);
+        }
+        self.change_versions(|head| head.sharing(id, shared)).await
+    }
+
+    /// cladefs: the branch's head swapped to what `change` makes of it, its versions alone changed,
+    /// unless it makes it the same.
+    async fn change_versions(
+        &self,
+        change: impl FnOnce(layout::Head) -> layout::Head,
+    ) -> Result<(), Error> {
+        if let Some(error) = &self.inner().stopped {
+            return Err(error.clone());
+        }
+        let mut held = self.held.lock().await;
+        let next = change(held.head.clone());
+        if next == held.head {
+            return Ok(());
+        }
+        match head::swap(&*self.bucket, self.branch, &held, next).await {
+            Ok(swapped) => *held = swapped,
+            Err(error) => return Err(self.stop(error)),
+        }
+        Ok(())
     }
 
     /// Whether another branch has the ID of `child`, a fork's child, acknowledged: the fork made no
@@ -720,9 +788,10 @@ impl<B: Bucket> Writer<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Rules;
     use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_branch;
-    use crate::layout::{Contents, Segment, child};
+    use crate::layout::{Contents, Segment, VersionCut, child};
     use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
 
@@ -754,6 +823,122 @@ mod tests {
             assert_eq!(first.stopped(), Some(Error::Fenced));
             assert_eq!(add(&first, Commit { tag: 2, ..Commit::default() }), Err(Error::Fenced));
         });
+    }
+
+    /// Adds a segment of an empty commit tagged `tag` to `writer`, closed on its chain, the version
+    /// `cut` cut at its end: returns its number.
+    fn cut(writer: &Writer<ObjectBucket>, tag: u64, cut: VersionCut) -> Result<u64, Error> {
+        let commit = Commit { tag, ..Commit::default() };
+        writer.add_segment(
+            SegmentBuilder::from(commit)
+                .cut(cut, &mut writer.chain())
+                .frame(writer.keys().encrypting()),
+        )
+    }
+
+    fn version(id: u64, keep_last: Option<u32>) -> VersionCut {
+        VersionCut { id, cell_cut: None, keep_last }
+    }
+
+    /// The versions `head` names, by their IDs and the segments they are at.
+    fn named(head: Option<layout::Head>) -> Vec<(u64, u64)> {
+        let versions = head.map(|head| head.versions).unwrap_or_default();
+        versions.iter().map(|version| (version.id, version.at)).collect()
+    }
+
+    /// TASK-476: a branch's head names a version once the acknowledgement naming the segment
+    /// cutting it does, in the same swap; a window drops the oldest as a version asking for one is
+    /// named; its writer drops a version by a swap; a takeover names what the head named; a
+    /// deletion's final head names none.
+    #[test]
+    fn heads_name_versions_as_their_segments_are_acknowledged() {
+        futures::executor::block_on(async {
+            let bucket = memory();
+            let branch = test_branch(1);
+            branch::create(&*bucket, branch, 0).await.unwrap();
+            let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+            let a = cut(&writer, 1, version(0xa, None)).unwrap();
+            let b = cut(&writer, 2, version(0xb, None)).unwrap();
+            writer.upload(a).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xa, a)]);
+            writer.upload(b).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xa, a), (0xb, b)]);
+            let c = cut(&writer, 3, version(0xc, Some(2))).unwrap();
+            writer.upload(c).await.unwrap();
+            writer.acknowledge().await.unwrap();
+            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xb, b), (0xc, c)]);
+            writer.drop_versions(&BTreeSet::from([0xb, 0xd])).await.unwrap();
+            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xc, c)]);
+            let versions: Vec<_> = writer.versions().await.iter().map(|v| (v.id, v.at)).collect();
+            assert_eq!(versions, [(0xc, c)]);
+            writer.share_version(0xc, true).await.unwrap();
+            assert_eq!(writer.share_version(0xb, true).await, Err(Error::NoBranch));
+            let shared = head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert!(shared.version(0xc).unwrap().shared);
+
+            let next = Writer::open(bucket.clone(), branch, 11, 0).await.unwrap();
+            assert_eq!(named(head::get(&*bucket, branch).await.unwrap()), [(0xc, c)]);
+            assert_eq!(writer.drop_versions(&BTreeSet::from([0xc])).await, Err(Error::Fenced));
+            drop(next);
+            branch::delete(&*bucket, branch, 12, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
+            let ended = head::get(&*bucket, branch).await.unwrap().unwrap();
+            assert_eq!((ended.epoch, named(Some(ended))), (layout::Head::FINAL, vec![]));
+        });
+    }
+
+    /// TASK-476, rule `versions_acked`: an acknowledgement names the versions of the segments it
+    /// names alone. Without the rule, it names a version whose segment it does not, at a segment
+    /// past the head's end, which no reader of the branch holds.
+    #[test]
+    fn heads_name_versions_with_their_segments_alone() {
+        let (acked, unacked) = (Rules::ALL, Rules { versions_acked: false, ..Rules::ALL });
+        let names = |rules: Rules| {
+            crate::set_rules(rules);
+            let named = futures::executor::block_on(async {
+                let bucket = memory();
+                let branch = test_branch(1);
+                branch::create(&*bucket, branch, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+                let a = cut(&writer, 1, version(0xa, None)).unwrap();
+                cut(&writer, 2, version(0xb, None)).unwrap();
+                writer.upload(a).await.unwrap();
+                writer.acknowledge().await.unwrap();
+                let head = head::get(&*bucket, branch).await.unwrap().unwrap();
+                (head.end, named(Some(head)))
+            });
+            crate::set_rules(Rules::ALL);
+            named
+        };
+        assert_eq!(names(acked), (1, vec![(0xa, 0)]));
+        assert_eq!(names(unacked), (1, vec![(0xa, 0), (0xb, 1)]), "0xb past the head's end");
+    }
+
+    /// TASK-476, rule `versions_carried`: a takeover names the versions the head named. Without
+    /// the rule, the head it swaps names none, though no writer dropped them.
+    #[test]
+    fn takeovers_carry_versions() {
+        let carries = |rules: Rules| {
+            crate::set_rules(rules);
+            let named = futures::executor::block_on(async {
+                let bucket = memory();
+                let branch = test_branch(1);
+                branch::create(&*bucket, branch, 0).await.unwrap();
+                let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
+                let a = cut(&writer, 1, version(0xa, None)).unwrap();
+                writer.upload(a).await.unwrap();
+                writer.acknowledge().await.unwrap();
+                let _next = Writer::open(bucket.clone(), branch, 11, 0).await.unwrap();
+                named(head::get(&*bucket, branch).await.unwrap())
+            });
+            crate::set_rules(Rules::ALL);
+            named
+        };
+        assert_eq!(carries(Rules::ALL), [(0xa, 0)]);
+        assert_eq!(carries(Rules { versions_carried: false, ..Rules::ALL }), []);
     }
 
     /// An extent of its own a writer uploads again is its own; one that finds another's object
@@ -1181,6 +1366,7 @@ mod tests {
                     forks: vec![],
                     capacity: None,
                     continued: None,
+                    versions: vec![],
                 },
             };
             let encoded = |footer: &Footer| -> Vec<u8> {

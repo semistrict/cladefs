@@ -406,8 +406,8 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     let (did, slowest) = said.split_at(said.find("cladefs-gc: took").unwrap());
     assert_eq!(
         did,
-        "cladefs-gc: cell 1/1: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 references, \
-         in T s; requests: R\ncladefs-gc: deleted 2 (596 bytes), compacted 0 (0 bytes), retired 0 \
+        "cladefs-gc: cell 1/1: deleted 2 (612 bytes), compacted 0 (0 bytes), retired 0 references, \
+         in T s; requests: R\ncladefs-gc: deleted 2 (612 bytes), compacted 0 (0 bytes), retired 0 \
          references, over 3 cells (0 unchanged), 0 held by other passes, 0 swept by them since, 0 \
          failed; requests: R\n"
     );

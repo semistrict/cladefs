@@ -9,10 +9,12 @@
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use storage_device::ExtentId;
 
 pub use extent_frame::segment::{
-    Branch, Cell, Chain, Child, Contents, Continued, Footer, Location, epoch_of, tag, writer_of,
+    Branch, Cell, Chain, Child, Contents, Continued, Footer, Location, VersionCut, epoch_of, tag,
+    writer_of,
 };
 
 /// cladefs: the format of a branch's objects, which its record says first
@@ -44,8 +46,11 @@ pub use extent_frame::segment::{
 /// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
 /// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a point says whether
 /// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
-/// clone's reference is retired marked (TASK-455's review); nothing reads 12's.
-pub const FORMAT: u32 = 13;
+/// clone's reference is retired marked (TASK-455's review); nothing reads 12's. 14: a branch's head
+/// names its versions, and a footer those cut at its end ([`Head::versions`], [`VersionCut`];
+/// doc-18, TASK-476); a fork being made says whether it is of a point or a version; nothing reads
+/// 13's.
+pub const FORMAT: u32 = 14;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";
@@ -603,7 +608,29 @@ pub struct Head {
     pub runs: Vec<(u64, u64)>,
     /// The branch's newest checkpoint, by its number and its writer's epoch, if it has one.
     pub checkpoint: Option<(u64, u64)>,
+    /// cladefs: the branch's versions, oldest first (doc-18, TASK-476): each a name for its state
+    /// as of a segment it names, kept for as long as it names it. The acknowledgement naming a
+    /// segment names the versions cut at its end, in the same swap; a takeover names what the
+    /// head did; its writer drops one by a swap; a deletion's final head names none.
+    pub versions: Vec<Version>,
 }
+
+/// cladefs: a version a branch's head names ([`Head::versions`], doc-18): its ID, which the footer
+/// of the segment cutting it named ([`VersionCut`]); the segment it is at, its branch's state as of
+/// which it names; the cut of its cell's vdisks it is part of, if any; and whether forks of it
+/// may be of other tenants' cells (doc-7, Shared points).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Version {
+    pub id: u64,
+    pub at: u64,
+    pub cell_cut: Option<u64>,
+    pub shared: bool,
+}
+
+/// cladefs: the most versions a head names (doc-18): an acknowledgement writes them all, 25 bytes
+/// each, so that a head stays a few KB. A cut past it is refused, unless its window drops the
+/// oldest.
+pub const MAX_VERSIONS: usize = 256;
 
 impl Head {
     pub const FINAL: u64 = u64::MAX;
@@ -646,6 +673,45 @@ impl Head {
                 self.runs.push((self.end, epoch));
             }
             self.end = end;
+        }
+        self
+    }
+
+    /// cladefs: the head with the versions cut at the ends of the segments `cuts` names, each by its
+    /// number, named too, in order (doc-18, TASK-476): each after the versions named, and its
+    /// window, if it asks for one, keeping it and the newest before it alone.
+    pub fn naming<'a>(mut self, cuts: impl IntoIterator<Item = (u64, &'a VersionCut)>) -> Self {
+        for (at, cut) in cuts {
+            if self.version(cut.id).is_some() {
+                continue;
+            }
+            let VersionCut { id, cell_cut, keep_last } = *cut;
+            self.versions.push(Version { id, at, cell_cut, shared: false });
+            if let Some(keep) = keep_last {
+                let keep = usize::try_from(keep).unwrap_or(usize::MAX).max(1);
+                let dropped = self.versions.len().saturating_sub(keep);
+                self.versions.drain(..dropped);
+            }
+        }
+        self
+    }
+
+    /// cladefs: the version of ID `id` it names, if it does.
+    pub fn version(&self, id: u64) -> Option<&Version> {
+        self.versions.iter().find(|version| version.id == id)
+    }
+
+    /// cladefs: the head naming none of the versions `ids` names.
+    pub fn without(mut self, ids: &BTreeSet<u64>) -> Self {
+        self.versions.retain(|version| !ids.contains(&version.id));
+        self
+    }
+
+    /// cladefs: the head with its version of ID `id` shared, if `shared`, or no longer: other
+    /// tenants' cells may fork it while it is (doc-7, Shared points).
+    pub fn sharing(mut self, id: u64, shared: bool) -> Self {
+        for version in self.versions.iter_mut().filter(|version| version.id == id) {
+            version.shared = shared;
         }
         self
     }
@@ -1065,8 +1131,35 @@ mod tests {
             end: 5,
             runs: vec![(0, 1), (3, 4)],
             checkpoint: Some((2, 1)),
+            versions: vec![Version { id: 0xbe, at: 3, cell_cut: Some(0xce), shared: true }],
         };
         assert_eq!(Head::decode(&encode(&head)), Ok(head));
+    }
+
+    /// TASK-476: a head names the versions cut at the segments it names, in order, each once; a
+    /// window keeps the version cutting it and the newest before it alone; and a version is
+    /// dropped, or shared, by its ID.
+    #[test]
+    fn heads_name_their_versions() {
+        let cut = |id, keep_last| VersionCut { id, cell_cut: None, keep_last };
+        let named = |head: &Head| -> Vec<(u64, u64)> {
+            head.versions.iter().map(|version| (version.id, version.at)).collect()
+        };
+        let head = Head::default().naming([(2, &cut(10, None)), (3, &cut(11, None))]);
+        assert_eq!(named(&head), [(10, 2), (11, 3)]);
+        assert_eq!(named(&head.clone().naming([(2, &cut(10, None))])), named(&head), "once");
+        let windowed = head.clone().naming([(4, &cut(12, Some(2)))]);
+        assert_eq!(named(&windowed), [(11, 3), (12, 4)]);
+        let alone = head.clone().naming([(4, &cut(12, Some(0)))]);
+        assert_eq!(named(&alone), [(12, 4)], "a window keeps its own version, at least");
+        let dropped = windowed.clone().without(&BTreeSet::from([11]));
+        assert_eq!(named(&dropped), [(12, 4)]);
+        assert_eq!(
+            windowed.version(12),
+            Some(&Version { id: 12, at: 4, cell_cut: None, shared: false })
+        );
+        assert!(windowed.clone().sharing(12, true).version(12).unwrap().shared);
+        assert_eq!(windowed.version(10), None);
     }
 
     /// TASK-407: a head names each of its segments by its writer's epoch, from its runs, a run a
@@ -1105,6 +1198,7 @@ mod tests {
                 forks: vec![Child { branch: test_branch(7), owner: 8, point: false }],
                 capacity: Some(1 << 30),
                 continued: None,
+                versions: vec![VersionCut { id: 9, cell_cut: Some(10), keep_last: Some(11) }],
             },
         };
         let segment = Segment { data: b"abc".to_vec(), footer: footer.clone() };

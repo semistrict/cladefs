@@ -203,8 +203,8 @@ pub use state::AUDIT_FAILED;
 #[cfg(any(test, feature = "unkept"))]
 pub use store::UNKEPT_DEK;
 pub use store::{
-    BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, Opening, Options, Recovering,
-    SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
+    BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, NotQuiescent, Opening, Options,
+    Recovering, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use sync::Rules;
 #[cfg(feature = "shuttle")]

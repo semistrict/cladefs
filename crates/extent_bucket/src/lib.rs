@@ -428,6 +428,23 @@ pub struct Rules {
     /// stands for good, keeping its base's state at the fork point (TASK-455's review).
     /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
     pub resumes_marked: bool,
+    /// cladefs: a pass keeps, for each version a live branch's head names, the branch's whole state
+    /// at it and what recovering it reads, as for a fork point (doc-18, TASK-476). Without it, as a
+    /// test shows it needed, a checkpoint since covers the version's segments, which the pass
+    /// deletes, and the version recovers not.
+    /// TLA+: `specs/bucket/mutations/NoVersionsKept.cfg`.
+    pub versions_kept: bool,
+    /// cladefs: a takeover's swap of a branch's head names the versions it named
+    /// ([`head::take_from`]), as it names its segments. Without it, as a test shows it needed, they
+    /// are gone though no writer dropped them.
+    /// TLA+: `specs/bucket/mutations/NoVersionsCarried.cfg`.
+    pub versions_carried: bool,
+    /// cladefs: a writer's head names a version only with the segment cutting it, as its
+    /// acknowledgement names that segment ([`writer::Writer::acknowledge`]). Without it, as a test
+    /// shows it needed, an acknowledgement names every version taken, those of segments it doesn't
+    /// name among them, at a segment the head does not hold.
+    /// TLA+: `specs/bucket/mutations/NoVersionsAcked.cfg`.
+    pub versions_acked: bool,
 }
 
 impl Rules {
@@ -471,6 +488,9 @@ impl Rules {
         fences_kept: true,
         resumes_refer: true,
         resumes_marked: true,
+        versions_kept: true,
+        versions_carried: true,
+        versions_acked: true,
     };
 }
 

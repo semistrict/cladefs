@@ -211,6 +211,9 @@ fn one() {
             "fences_kept" => rules.fences_kept = false,
             "resumes_refer" => rules.resumes_refer = false,
             "resumes_marked" => rules.resumes_marked = false,
+            "versions_kept" => rules.versions_kept = false,
+            "versions_carried" => rules.versions_carried = false,
+            "versions_acked" => rules.versions_acked = false,
             other => panic!("no rule {other}"),
         }
     }
@@ -794,3 +797,38 @@ fn recovering() -> Profile {
 }
 
 test_holds!(recoveries_racing_collection, recovering());
+
+/// cladefs: versions (doc-18, TASK-476): cut by branches' writers, their stores quiescent,
+/// acknowledged with their segments, carried by takeovers, dropped, uploaded or local, restored on
+/// any host as points are, while their branches go on, free what they held, checkpoint past them,
+/// crash and are deleted, and collectors run.
+fn versions() -> Profile {
+    let mut profile = weights(|weights| {
+        weights.version = 6;
+        weights.drop_version = 2;
+        weights.restore_version = 4;
+        weights.open = 8;
+        weights.takeover = 2;
+        weights.crash = 2;
+        weights.checkpoint = 4;
+        weights.collect = 8;
+        weights.stop_collector = 1;
+        weights.delete = 1;
+        weights.unfork = 2;
+        weights.tick = 4;
+    });
+    profile.fail_after = 0.1;
+    profile.options.compact_below = 0.9;
+    profile.options.grace = 1;
+    profile
+}
+
+test_holds!(versions_cut_dropped_and_restored, versions());
+
+test_needs!(versions_need_their_states_kept, versions_kept, versions());
+
+test_needs!(versions_need_takeovers_to_carry_them, versions_carried, versions());
+
+test_needs!(versions_need_naming_with_their_segments, versions_acked, versions());
+
+test_needs!(restores_of_versions_need_their_heads_read, forks_check_points, versions());

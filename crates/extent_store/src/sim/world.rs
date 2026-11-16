@@ -15,7 +15,7 @@ use crate::{Description, MemDir, Place, Recovering, Store};
 use extent_bucket::collector::{self, Options};
 use extent_bucket::fetch::{Budget, Limits};
 use extent_bucket::layout::{self, Child, Origin, epoch_of, writer_of};
-use extent_bucket::record::Kind;
+use extent_bucket::record::{Forked, Kind};
 use extent_bucket::testing::{Direct, Fault, SimBucket};
 use extent_bucket::{Error, Recovered, Writer, branch, recovery, rules};
 use extent_frame::spent::Spent;
@@ -84,6 +84,13 @@ pub struct Weights {
     /// A writer whose session stopped, a later one taking its branch or its host cut off, which
     /// runs on unaware, checkpoints: late, past where the next writer recovered from (TASK-175).
     pub stale_checkpoint: u32,
+    /// cladefs: a branch's writer cuts a version, its store quiescent (doc-18, TASK-476).
+    pub version: u32,
+    /// cladefs: a branch's writer drops one of its versions, uploaded or local.
+    pub drop_version: u32,
+    /// cladefs: a host restores a version a branch's head names: a fork of it, its child's record
+    /// alone, as a point's restore.
+    pub restore_version: u32,
     /// The store's clock advances.
     pub tick: u32,
 }
@@ -148,6 +155,9 @@ impl Default for Profile {
                 write_point: 0,
                 usurp: 0,
                 stale_checkpoint: 0,
+                version: 0,
+                drop_version: 0,
+                restore_version: 0,
                 tick: 3,
             },
             options: Options { compact_below: 0.5, grace: 4 },
@@ -389,6 +399,11 @@ enum Event {
         created: Result<(), Error>,
         deleted: Option<Result<(), Error>>,
     },
+    /// cladefs: what a writer's dropping of a version gave.
+    VersionDropped {
+        id: u64,
+        result: Result<(), Error>,
+    },
     /// A writer took a point, which must not happen.
     PointTaken {
         point: u64,
@@ -411,8 +426,11 @@ struct Unfork {
 /// A fork of a point, until it is done: of which, naming what, on which host, and the task, unless
 /// a crash stopped it, for its host's next start to finish or delete.
 struct Restore {
-    point: u64,
+    /// cladefs: the point, or a version of the branch `origin` names (TASK-476).
+    of: Forked,
     origin: Origin,
+    /// The commit the fork's child starts from.
+    base: Option<u64>,
     host: usize,
     /// Its child's owner.
     owner: u64,
@@ -420,6 +438,15 @@ struct Restore {
     /// The fork whose child's ID it took, a guest having named it, that fork's segment not yet
     /// acknowledged: the child's, if that fork's record comes first (TASK-173).
     taken: Option<Branch>,
+}
+
+/// cladefs: a version a guest cut (TASK-476): of which branch, as of which of its commits, whether
+/// its writer drops it, asked, and whether it dropped it, told so.
+struct Cut {
+    branch: u64,
+    tag: u64,
+    dropping: bool,
+    dropped: bool,
 }
 
 /// What a segment's footer says of the branch's history: its commits' tags.
@@ -452,6 +479,8 @@ pub struct World {
     stale: Vec<Arc<Writer<SimBucket>>>,
     unforks: BTreeMap<u64, Unfork>,
     restores: BTreeMap<u64, Restore>,
+    /// cladefs: the versions the guests cut, by their IDs (TASK-476).
+    versions: BTreeMap<u64, Cut>,
     /// The forks whose children's IDs a root is taking ([`World::usurp`]), until it is done: the
     /// child's, if the fork's record comes first.
     usurped: BTreeMap<u64, Branch>,
@@ -507,6 +536,7 @@ impl World {
             stale: Vec::new(),
             unforks: BTreeMap::new(),
             restores: BTreeMap::new(),
+            versions: BTreeMap::new(),
             usurped: BTreeMap::new(),
             footers: RefCell::default(),
             next_id: 1,
@@ -566,6 +596,9 @@ impl World {
             w.usurp,
             w.write,
             w.stale_checkpoint,
+            w.version,
+            w.drop_version,
+            w.restore_version,
             w.tick,
         ];
         let mut roll = self.rng.random_range(0..choices.iter().sum::<u32>());
@@ -598,6 +631,9 @@ impl World {
             20 => self.usurp(),
             21 => self.write(),
             22 => self.stale_checkpoint(),
+            23 => self.cut_version(),
+            24 => self.drop_version(),
+            25 => self.restore_version(),
             _ => {
                 let ticks = self.rng.random_range(1..=self.profile.options.grace);
                 self.bucket.advance(ticks);
@@ -711,10 +747,22 @@ impl World {
             Event::Untwinned { child, result } => self.violation(format!(
                 "deleting a fork to branch {child:x}, which another fork took, gave {result:?}"
             )),
+            Event::VersionDropped { id, result } => {
+                let cut = self.versions.get_mut(&id).unwrap();
+                cut.dropping = false;
+                match result {
+                    Ok(()) => cut.dropped = true,
+                    Err(Error::Lost(_) | Error::Corrupt(_)) => {
+                        self.violation(format!("dropping version {id:x}: {result:?}"));
+                    }
+                    // Its writer taken over, or its branch deleted: dropped not.
+                    Err(_) => {}
+                }
+            }
             Event::Restored { child, result } => {
                 let Some(mut restore) = self.restores.remove(&child) else { return };
-                let (point, origin, owner) = (restore.point, Some(restore.origin), restore.owner);
-                let base = self.branches[&point].base;
+                let (point, origin, owner) = (restore.of, Some(restore.origin), restore.owner);
+                let base = restore.base;
                 match result {
                     // Told to its VM's manager: a branch from now on, whatever comes of the point.
                     Ok(()) => {
@@ -728,7 +776,7 @@ impl World {
                     }
                     // The point went, or the fork was given up on: its host deletes it.
                     Err(Error::Deleted) => self.fail_restore(child, restore, base),
-                    Err(error) => self.violation(format!("forking point {point:x}: {error}")),
+                    Err(error) => self.violation(format!("forking {point:?}: {error}")),
                 }
             }
             Event::Usurped { child, owner, created, deleted } => match (created, deleted) {
@@ -1466,11 +1514,11 @@ impl World {
     /// `child`, a fork of a point that failed, or a crash left, goes as its host's cleanup deletes
     /// it, or an operator does what no host held: which nothing relies on.
     fn fail_restore(&mut self, child: u64, restore: Restore, base: Option<u64>) {
-        let Restore { point, origin, owner, taken, .. } = restore;
+        let Restore { of, origin, owner, taken, .. } = restore;
         let mut found = Branch::forked(Some(origin), base, false, owner);
         found.deleting = true;
         self.branches.insert(child, found);
-        let forked = Kind::Forking { origin, point: sim_branch(point) };
+        let forked = Kind::Forking { origin, of };
         self.unforks.insert(child, Unfork { forked, owner, running: None, taken });
         self.spawn_unfork(child);
     }
@@ -1506,7 +1554,8 @@ impl World {
             _ => (child, None),
         };
         let host = self.rng.random_range(0..self.hosts.len());
-        let restore = Restore { point, origin, host, owner, running: None, taken };
+        let (of, base) = (Forked::Point(sim_branch(point)), self.branches[&point].base);
+        let restore = Restore { of, origin, base, host, owner, running: None, taken };
         self.restores.insert(child, restore);
         self.spawn_restore(child);
     }
@@ -1528,12 +1577,21 @@ impl World {
 
     /// Makes the fork `child`, or goes on with one a crash stopped, as opening its handle does.
     fn spawn_restore(&mut self, child: u64) {
-        let Restore { point, origin, owner, .. } = self.restores[&child];
+        let Restore { of, origin, owner, .. } = self.restores[&child];
         let (bucket, events) = (self.bucket.clone(), self.events.clone());
         let running = self.spawn(async move {
-            let result =
-                branch::fork_point(&*bucket, sim_branch(child), sim_branch(point), origin, owner)
-                    .await;
+            let child = sim_branch(child);
+            let result = match of {
+                Forked::Point(point) => {
+                    branch::fork_point(&*bucket, child, point, origin, owner).await
+                }
+                Forked::Version(id) => {
+                    let kms = extent_bucket::keys::testing::host_kms();
+                    let keys = extent_bucket::keys::Parents::Kms(&kms, None);
+                    branch::fork_version(&*bucket, child, id, origin, owner, keys).await
+                }
+            };
+            let child = child.id;
             events.borrow_mut().push(Event::Restored { child, result });
         });
         self.restores.get_mut(&child).unwrap().running = Some(running);
@@ -1552,6 +1610,103 @@ impl World {
             let result = Writer::open(bucket, sim_branch(point), holder, holder).await.map(drop);
             events.borrow_mut().push(Event::PointTaken { point, result });
         });
+    }
+
+    /// cladefs: a branch's writer cuts a version (doc-18, TASK-476), its store quiescent, its guest
+    /// having written nothing since its last commit: a commit of its store's whose segment's
+    /// footer names it, which its uploader is asked for, as a snapshot's caller may wait for it.
+    fn cut_version(&mut self) {
+        let Some((host, branch)) = self.ready() else { return };
+        let session = &self.hosts[host].sessions[&branch];
+        if !session.guest.written.is_empty() {
+            return;
+        }
+        let (store, uploader, parent) =
+            (session.store.clone().unwrap(), session.uploader.clone(), session.guest.head);
+        let (id, tag) = (self.id(), self.id());
+        let before = match store.last_commit() {
+            Ok(before) => before,
+            Err(err) => return self.store_failed(host, branch, store, err),
+        };
+        let cut = layout::VersionCut { id, cell_cut: None, keep_last: None };
+        if let Err(err) = store.commit_version(cut) {
+            return self.store_failed(host, branch, store, err);
+        }
+        let Some(epoch) = self.committed(branch, &store, before) else { return };
+        let made = Truth {
+            branch,
+            parent,
+            extents: Vec::new(),
+            frees: Vec::new(),
+            root: None,
+            capacity: None,
+        };
+        self.made(host, branch, tag, epoch, made);
+        self.versions.insert(id, Cut { branch, tag, dropping: false, dropped: false });
+        trace!("host {host}: {branch:x} cuts version {id:x} as commit {tag} at epoch {epoch}");
+        let _ = uploader.ask(epoch, false);
+    }
+
+    /// cladefs: a branch's writer drops one of its versions, uploaded or local, which its store
+    /// forgets: told dropped once its swap of the head is done.
+    fn drop_version(&mut self) {
+        let Some((host, branch)) = self.ready() else { return };
+        let ids: Vec<u64> = (self.versions.iter())
+            .filter(|(_, cut)| cut.branch == branch && !cut.dropped && !cut.dropping)
+            .map(|(&id, _)| id)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let id = ids[self.rng.random_range(0..ids.len())];
+        // Gone from the head as soon as its swap lands, which its writer may be told of later.
+        self.versions.get_mut(&id).unwrap().dropping = true;
+        let session = &self.hosts[host].sessions[&branch];
+        let ids = BTreeSet::from([id]);
+        session.store.as_ref().unwrap().forget_versions(&ids);
+        let (writer, events) = (session.uploader.writer().unwrap(), self.events.clone());
+        self.spawn(async move {
+            let result = writer.drop_versions(&ids).await;
+            events.borrow_mut().push(Event::VersionDropped { id, result });
+        });
+    }
+
+    /// cladefs: the versions the heads of the branches with versions name, each by its ID, of which
+    /// branch, the segment it is at and the commit it is of: as a host restoring one read it.
+    fn named_versions(&self) -> Vec<(u64, u64, u64, u64)> {
+        let direct = Direct(self.bucket.clone());
+        let branches: BTreeSet<u64> = self.versions.values().map(|cut| cut.branch).collect();
+        let mut named = Vec::new();
+        for branch in branches {
+            let Ok(Some(head)) = block_on(extent_bucket::head::get(&direct, sim_branch(branch)))
+            else {
+                continue;
+            };
+            for version in &head.versions {
+                if let Some(cut) = self.versions.get(&version.id) {
+                    named.push((version.id, branch, version.at, cut.tag));
+                }
+            }
+        }
+        named
+    }
+
+    /// cladefs: a host restores a version a branch's head names: its child's record, its reference,
+    /// the head read again, the fork made (`branch::fork_version`), as a point's restore.
+    fn restore_version(&mut self) {
+        let named = self.named_versions();
+        if named.is_empty() {
+            return;
+        }
+        let (id, branch, at, tag) = named[self.rng.random_range(0..named.len())];
+        let (child, owner) = (self.id(), self.id());
+        let host = self.rng.random_range(0..self.hosts.len());
+        let origin = Origin { parent: sim_branch(branch), at };
+        let of = Forked::Version(id);
+        let restore =
+            Restore { of, origin, base: Some(tag), host, owner, running: None, taken: None };
+        self.restores.insert(child, restore);
+        self.spawn_restore(child);
     }
 
     /// A placement cut off takes a branch back, on a host that has no writer of it, with an earlier
@@ -1629,7 +1784,7 @@ impl World {
     /// Deletes what a crash left of the fork of a point to `child`.
     fn give_up_restore(&mut self, child: u64) {
         let restore = self.restores.remove(&child).unwrap();
-        let base = self.branches[&restore.point].base;
+        let base = restore.base;
         self.fail_restore(child, restore, base);
     }
 
@@ -2352,6 +2507,73 @@ impl World {
                     Ok(bytes) if bytes == extents[extent] => {}
                     Ok(_) => violations.push(format!("branch {id:x}: {extent:?} reads wrong")),
                     Err(error) => violations.push(format!("branch {id:x}: {error}")),
+                }
+            }
+        }
+        // cladefs: every version a live branch's head names recovers, holding what its guest's
+        // commits held as of its cut, read back; and every version acknowledged, its branch live,
+        // not dropped, its head names (TASK-476).
+        for (&id, branch) in &self.branches {
+            if branch.deleting || self.unforks.contains_key(&id) {
+                continue;
+            }
+            let Ok(Some(head)) = block_on(extent_bucket::head::get(&*direct, sim_branch(id)))
+            else {
+                continue;
+            };
+            if head.epoch == layout::Head::FINAL {
+                continue;
+            }
+            for version in &head.versions {
+                let Some(cut) = self.versions.get(&version.id).filter(|cut| cut.branch == id)
+                else {
+                    violations
+                        .push(format!("branch {id:x} names version {:x}, cut by none", version.id));
+                    continue;
+                };
+                let ring = extent_bucket::keys::Ring::keyless();
+                let recovering =
+                    recovery::recover_version(&*direct, sim_branch(id), version.at, &ring);
+                let recovered = match block_on(recovering) {
+                    Ok(recovered) => recovered,
+                    Err(error) => {
+                        violations.push(format!("version {:x} of {id:x}: {error}", version.id));
+                        continue;
+                    }
+                };
+                for key in &recovered.touched {
+                    if !keys.contains(key) {
+                        violations
+                            .push(format!("version {:x} of {id:x} needs {key}, gone", version.id));
+                    }
+                }
+                let (extents, _) = self.expected(Some(cut.tag));
+                let held: Vec<_> = recovered.state.extents.keys().collect();
+                if held != extents.keys().collect::<Vec<_>>() {
+                    violations.push(format!("version {:x} of {id:x} holds {held:?}", version.id));
+                    continue;
+                }
+                for (extent, location) in &recovered.state.extents {
+                    match block_on(extent_bucket::testing::read(&direct, *extent, location)) {
+                        Ok(bytes) if bytes == extents[extent] => {}
+                        Ok(_) => violations
+                            .push(format!("version {:x}: {extent:?} reads wrong", version.id)),
+                        Err(error) => violations.push(format!("version {:x}: {error}", version.id)),
+                    }
+                }
+            }
+            for (&version, cut) in &self.versions {
+                if cut.branch == id
+                    && !cut.dropped
+                    && !cut.dropping
+                    && branch.acked.contains(&cut.tag)
+                    && head.version(version).is_none()
+                {
+                    violations.push(format!(
+                        "branch {id:x} names version {version:x} no more, its commit {} told \
+                         durable: its head {head:?}",
+                        cut.tag
+                    ));
                 }
             }
         }
