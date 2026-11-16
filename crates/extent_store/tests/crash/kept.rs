@@ -18,10 +18,10 @@
 //! leave nothing they should have collected (TASK-390).
 
 use super::rounds::{BLOCK, BRANCH, Model, OPTIONS, workload};
-use extent_remote::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
-use extent_remote::collector;
-use extent_remote::fetch::{Budget, Limits};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
+use extent_bucket::collector;
+use extent_bucket::fetch::{Budget, Limits};
+use extent_bucket::object_bucket::ObjectBucket;
 use extent_store::upload::{self, Runtime, Uploader};
 use extent_store::{BucketData, Description, MemDir, Recovering, Store};
 use object_store::memory::InMemory;
@@ -91,7 +91,7 @@ impl Host {
         let runtime = Runtime {
             handle: self.runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: extent_remote::keys::testing::host(),
+            keys: extent_bucket::keys::testing::host(),
         };
         // Checkpoints often, so that the collector's passes find segments recoveries no longer read,
         // which they compact.
@@ -109,7 +109,7 @@ impl Host {
                 let BucketData { location, .. } =
                     err.downcast_ref::<BucketData>().cloned().unwrap_or_else(|| panic!("{err:#}"));
                 let bucket = self.bucket();
-                let read = extent_remote::testing::read(&bucket, extent, &location);
+                let read = extent_bucket::testing::read(&bucket, extent, &location);
                 data = self.runtime.block_on(read).unwrap();
             }
             extents.insert(extent, data);
@@ -155,7 +155,7 @@ impl Cut {
     }
 }
 
-impl extent_remote::Bucket for Cut {
+impl extent_bucket::Bucket for Cut {
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
         self.request(self.bucket.get(key))
     }
@@ -179,15 +179,15 @@ impl extent_remote::Bucket for Cut {
     fn list_delimited(
         &self,
         prefix: &str,
-        page: extent_remote::bucket::Page<'_>,
-    ) -> impl Future<Output = Result<extent_remote::bucket::Listing, BucketError>> + Send {
+        page: extent_bucket::bucket::Page<'_>,
+    ) -> impl Future<Output = Result<extent_bucket::bucket::Listing, BucketError>> + Send {
         self.request(self.bucket.list_delimited(prefix, page))
     }
 
     fn put(
         &self,
         key: &str,
-        bytes: extent_remote::Bytes,
+        bytes: extent_bucket::Bytes,
         mode: PutMode,
     ) -> impl Future<Output = Result<Version, BucketError>> + Send {
         self.request(self.bucket.put(key, bytes, mode))
@@ -396,7 +396,7 @@ fn collected_alone(host: &Host, round: u64) {
         report == collector::Report::default()
     });
     assert!(quiet, "round {round}: {PASSES_ALONE} passes alone each did something");
-    let left = extent_remote::testing::uncollected(&*bucket, COLLECTING.compact_below);
+    let left = extent_bucket::testing::uncollected(&*bucket, COLLECTING.compact_below);
     assert_eq!(host.runtime.block_on(left), Vec::<String>::new(), "round {round}");
 }
 

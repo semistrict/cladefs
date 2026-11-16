@@ -24,9 +24,9 @@ use crate::store::{Options, Usage};
 use crate::timings::{self, Timing, durable, framing as framing_phase};
 use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use extent_bucket::keys::Ring;
 use extent_frame::PART;
 use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
-use extent_remote::keys::Ring;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
 use std::sync::Arc;
@@ -1536,7 +1536,7 @@ fn frame_segment<D: Dir>(
     path: &str,
     (raw_path, raw): (&str, &Arc<RawFile<D::File>>),
     (len, quiet, ahead): (u64, bool, Vec<Option<Looked>>),
-    (footer, encrypting): (&[u8], extent_remote::layout::EncryptionKey<'_>),
+    (footer, encrypting): (&[u8], extent_bucket::layout::EncryptionKey<'_>),
     timing: &mut Timing<4>,
 ) -> Result<(Arc<Framed<D::File>>, How), Error> {
     let started = Instant::now();
@@ -1949,7 +1949,7 @@ fn create_open<D: Dir>(
     segment: SegmentId,
     (spares, placed): (&mut Vec<SegmentId>, &mut Option<Placed<D::File>>),
     salt: u64,
-    encrypting: extent_remote::layout::EncryptionKey<'_>,
+    encrypting: extent_bucket::layout::EncryptionKey<'_>,
 ) -> Result<(Phase<D::File>, bool), Error> {
     if let Some(ready) = placed.take_if(|ready| ready.segment == segment && ready.salt == salt) {
         let raw = Arc::new(RawFile::new(ready.raw, ready.encryption.clone()));
@@ -1989,7 +1989,7 @@ fn create_open<D: Dir>(
 
 /// cladefs: the encryption of a new segment's raw file and log, under `encrypting`'s DEK, its branch's
 /// newest, from a salt of their own (TASK-411.5).
-fn new_encryption((dek, key): extent_remote::layout::EncryptionKey<'_>) -> Arc<RawEncryption> {
+fn new_encryption((dek, key): extent_bucket::layout::EncryptionKey<'_>) -> Arc<RawEncryption> {
     Arc::new(RawEncryption::new(dek, key))
 }
 
@@ -2062,7 +2062,7 @@ mod tests {
     use crate::{HeldParts, MemDir, MemFile};
 
     const BLOCK: u64 = SECTOR;
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
     fn segment(number: u64) -> SegmentId {
         SegmentId { branch: BRANCH.id, number }
@@ -2076,7 +2076,7 @@ mod tests {
             dir,
             (BRANCH.id, BTreeMap::new()),
             (0, 0, chain),
-            (open_files, extent_remote::testing::ring([BRANCH])),
+            (open_files, extent_bucket::testing::ring([BRANCH])),
         )
         .unwrap()
     }
@@ -2117,7 +2117,7 @@ mod tests {
             Source::Raw(file) => read_file(&*file).unwrap(),
             Source::Framed(framed) => extent_frame::data(
                 &read_whole(&*framed.file).unwrap(),
-                &extent_remote::testing::ring([BRANCH]).of(BRANCH.id),
+                &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
             )
             .unwrap(),
         }
@@ -2433,7 +2433,7 @@ mod tests {
             &dir,
             (BRANCH.id, BTreeMap::new()),
             (0, 2, chain),
-            (64, extent_remote::testing::ring([BRANCH])),
+            (64, extent_bucket::testing::ring([BRANCH])),
         );
         let mut segments = segments.unwrap();
         assert_eq!(segments.open_segment(), segment(2));

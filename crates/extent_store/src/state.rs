@@ -94,7 +94,7 @@ pub(crate) struct State<F> {
 /// write-ahead log's from its store's opening on, its extents by their lengths: which the state,
 /// as of each commit that closes a segment, must hold, the audit asserts (TASK-165.9's AC #5).
 #[cfg(any(test, feature = "audit"))]
-pub(crate) type Replay = extent_remote::State<Lengths>;
+pub(crate) type Replay = extent_bucket::State<Lengths>;
 
 /// cladefs: the lengths of a branch's extents, as a replay of its footers places them ([`Replay`]).
 #[cfg(any(test, feature = "audit"))]
@@ -102,9 +102,9 @@ pub(crate) type Replay = extent_remote::State<Lengths>;
 pub(crate) struct Lengths(pub BTreeMap<ExtentId, u64>);
 
 #[cfg(any(test, feature = "audit"))]
-impl extent_remote::recovery::Places for Lengths {
-    fn seal(&mut self, extent: ExtentId, seal: extent_remote::recovery::Seal) {
-        let (extent_remote::recovery::Seal::Run(at) | extent_remote::recovery::Seal::Own(at)) =
+impl extent_bucket::recovery::Places for Lengths {
+    fn seal(&mut self, extent: ExtentId, seal: extent_bucket::recovery::Seal) {
+        let (extent_bucket::recovery::Seal::Run(at) | extent_bucket::recovery::Seal::Own(at)) =
             seal;
         self.0.insert(extent, at.len);
     }
@@ -1138,7 +1138,7 @@ pub(crate) struct OwnFiles<F> {
     dir: String,
     written: bool,
     /// cladefs: the store's keys, which its files are read under (TASK-411.3).
-    keys: Arc<extent_remote::keys::Ring>,
+    keys: Arc<extent_bucket::keys::Ring>,
 }
 
 impl<F: File> OwnFiles<F> {
@@ -1146,7 +1146,7 @@ impl<F: File> OwnFiles<F> {
     pub fn new(
         branch: u64,
         sizes: HashMap<ExtentId, u64>,
-        (limit, keys): (usize, Arc<extent_remote::keys::Ring>),
+        (limit, keys): (usize, Arc<extent_bucket::keys::Ring>),
     ) -> Self {
         let (dir, open, unsynced) =
             (branch_dir(EXTENTS, branch), Files::new(limit), BTreeMap::new());

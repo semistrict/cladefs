@@ -5,7 +5,7 @@
 
 # Measure cladefs-gc's sweeps over a bucket of files of many cells (TASK-395.5): how long a sweep
 # takes, and the most memory it holds, by how many passes it runs at once. It builds cladefs-gc and
-# cladefs-gc-fill (release, extent_remote alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
+# cladefs-gc-fill (release, extent_bucket alone), fills WORK/bucket-SIDE once with CLADEFS_GC_TENANTS
 # tenants (100) of CLADEFS_GC_CELLS cells (100) of a branch of CLADEFS_GC_SEGMENTS segments (95), the
 # largest cell's CLADEFS_GC_LARGEST (950): about 1M objects in 10k cells by default, some 4 GB of
 # files at most; then, for each count of CLADEFS_GC_AT_ONCE ("1 4 16 64"), sweeps a copy of it
@@ -92,7 +92,7 @@ build() {
     [[ $phase != prepared ]] || return 0
     measurement_refuses "Building cladefs-gc"
     echo "== building cladefs-gc and cladefs-gc-fill of $1" >&2
-    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p extent_remote \
+    CARGO_TARGET_DIR=$2 cargo build --release -q --manifest-path "$1/Cargo.toml" -p extent_bucket \
         --bin cladefs-gc --bin cladefs-gc-fill
 }
 

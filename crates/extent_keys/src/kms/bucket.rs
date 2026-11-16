@@ -6,7 +6,7 @@
 //! tenant's KEK is a random key ([`TenantKek`]) kept in the bucket itself, in an object of its own
 //! ([`KekObject`]), wrapped by a master key ([`super::master`]); it wraps the keys asked of it
 //! ([`wrap`]) as [`super::LocalKms`] does. Where the objects are kept, and how hosts racing to make
-//! one agree, is `extent_remote::bucket_kms`'s; what they hold, and the keys, are here, with every
+//! one agree, is `extent_bucket::bucket_kms`'s; what they hold, and the keys, are here, with every
 //! other secret.
 //!
 //! **A KEK object** (`tenants/<tenant>/kek`): [`OBJECT_MAGIC`], [`FORMAT`], its kind, the tenant

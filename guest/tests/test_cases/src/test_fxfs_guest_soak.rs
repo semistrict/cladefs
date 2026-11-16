@@ -879,12 +879,12 @@ mod host {
 
         /// The bytes of the bucket's objects.
         fn bucket_bytes(&self) -> anyhow::Result<u64> {
-            use extent_remote::bucket::Bucket as _;
+            use extent_bucket::bucket::Bucket as _;
             if let Some(dir) = &self.paths.bucket_dir {
                 return du(dir);
             }
             let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let bucket = extent_remote::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
+            let bucket = extent_bucket::object_bucket::ObjectBucket::from_url(&self.paths.bucket)
                 .map_err(anyhow::Error::msg)?;
             let objects = runtime
                 .block_on(bucket.list(""))

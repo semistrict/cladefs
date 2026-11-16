@@ -22,8 +22,8 @@
 //! (`runner encrypted`).
 
 use anyhow::Context as _;
-use extent_remote::Bucket as _;
-use extent_remote::layout::{self, Cell};
+use extent_bucket::Bucket as _;
+use extent_bucket::layout::{self, Cell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -157,7 +157,7 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
             } else if kind.is_file() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                bucket |= name.starts_with(extent_remote::local::LOCK);
+                bucket |= name.starts_with(extent_bucket::local::LOCK);
                 if name == "store" {
                     store(&dir, report, scope)?;
                 }
@@ -217,7 +217,7 @@ async fn bucket(
     finder: &Finder,
     report: &mut Report,
 ) -> anyhow::Result<()> {
-    let store = extent_remote::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
+    let store = extent_bucket::object_bucket::ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?;
     let listed = store.list(prefix).await.with_context(|| format!("listing {url}{prefix}"))?;
     let mut written = BTreeSet::new();
     let mut records = Vec::new();
@@ -234,7 +234,7 @@ async fn bucket(
             layout::Kind::Moves { .. } => true,
             layout::Kind::Cell { cell } => {
                 report.cells += 1;
-                match extent_remote::cell::read(&store, cell).await.with_context(at)? {
+                match extent_bucket::cell::read(&store, cell).await.with_context(at)? {
                     Some(object) if object.keks.is_empty() && !object.shredded => {
                         report.clear.push(format!("{}: cell {cell}: no KEK, in the clear", at()));
                     }
@@ -248,7 +248,7 @@ async fn bucket(
             }
             _ => false,
         };
-        let Some(object) = extent_remote::bucket::get(&store, key).await else {
+        let Some(object) = extent_bucket::bucket::get(&store, key).await else {
             continue; // Deleted since it was listed.
         };
         report.objects += 1;
@@ -266,7 +266,7 @@ async fn bucket(
     }
     for branch in records {
         report.records += 1;
-        let Some(record) = extent_remote::branch::record(&store, branch).await? else { continue };
+        let Some(record) = extent_bucket::branch::record(&store, branch).await? else { continue };
         if record.deks.is_empty()
             && !record.is_point()
             && !record.deleted

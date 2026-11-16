@@ -11,7 +11,7 @@
 //! TASK-411.17) and Google Cloud KMS (`gcp-kms`, TASK-411.18), the real ones (the user's choice of
 //! 2026-11-14), each naming a tenant's KEK as [`KeyNames`] says. The bucket KMS (TASK-411.27), its
 //! tenants' KEKs kept in the bucket wrapped by a master key, has its keys and formats here
-//! ([`bucket`], [`master`]) and its objects in `extent_remote::bucket_kms`, where buckets are
+//! ([`bucket`], [`master`]) and its objects in `extent_bucket::bucket_kms`, where buckets are
 //! known: it is named by no URL, but chosen where `CLADEFS_KMS` names none and a master key is given.
 
 use crate::{Secret, Unauthentic, Wrapped};

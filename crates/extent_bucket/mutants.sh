@@ -3,7 +3,7 @@
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 #
-# Puts each of mutants/*.patch into the tree, a bug of a kind the simulation of extent_remote's
+# Puts each of mutants/*.patch into the tree, a bug of a kind the simulation of extent_bucket's
 # protocol exists to find (TASK-149.32: an object an acknowledged segment names gone, an upload never
 # woken), runs the simulation's test its header names (`# Killer: TEST`, extent_store's, TASK-88,
 # built with the profile sim, as scripts/test.sh's sim part builds it) against it, and takes it out: killed if the test fails, MISSED if it passes,
@@ -26,7 +26,7 @@ if [[ ${1:-} == --check ]]; then
     shift
 fi
 
-mutants=crates/extent_remote/mutants
+mutants=crates/extent_bucket/mutants
 names=("$@")
 if [[ ${#names[@]} == 0 ]]; then
     for patch in "$mutants"/*.patch; do

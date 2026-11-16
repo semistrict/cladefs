@@ -343,7 +343,7 @@ mod tests {
 
     const BLOCK: u32 = crate::host_store::BLOCK_SIZE;
     const MIB: usize = 1 << 20;
-    const BRANCH: crate::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: crate::Branch = extent_bucket::layout::test_branch(7);
 
     /// A new directory, a device on a new image in it holding `capacity` bytes, and the image: in
     /// that order, so that a test's bindings of them drop the device before the directory, as a

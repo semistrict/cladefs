@@ -188,7 +188,7 @@ pub use dax::uffd::{
 pub use dax::{Access, DaxWindow, SecondStage};
 pub use error::{Errno, Error, Result};
 /// cladefs: where a branch is: its tenant's cell, and its ID there (TASK-364).
-pub use extent_remote::layout::{Branch, Cell};
+pub use extent_bucket::layout::{Branch, Cell};
 #[cfg(target_os = "linux")]
 pub use extentd::{DaemonConnection, DaemonDevice, DaemonExtentStore};
 pub use extents::{

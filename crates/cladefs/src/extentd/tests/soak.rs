@@ -4,7 +4,7 @@
 
 //! TASK-330.3: the daemon against a degraded bucket, for a long while, with VM processes writing
 //! all the while: the bucket slow, then full, then out of service, then answering again as slowly
-//! as before ([`extent_remote::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
+//! as before ([`extent_bucket::faults`], its file `CLADEFS_BUCKET_FAULTS`), as LangSmith's RustFS
 //! beside their hosts' daemons on a shared disk was (TASK-310, TASK-314, TASK-317). The simulation of the
 //! bucket's protocol checks that nothing a failing bucket does is wrong; this checks what it costs
 //! the daemon over time, and what it says of it:
@@ -24,7 +24,7 @@
 //!   up, as slowly as the bucket lets it;
 //! - **a failing bucket is sent no more than probes** (TASK-382): through a failing phase, the
 //!   writes that failed, each its object sent whole, are a wave of the host's uploads at once and
-//!   then a probe of each kind every [`extent_remote::object_bucket`]'s backoff at most, not every
+//!   then a probe of each kind every [`extent_bucket::object_bucket`]'s backoff at most, not every
 //!   upload tried again and again, most of the daemon's CPU in the qualification's soak.
 //!
 //! `CLADEFS_SOAK_SECS` says how long it runs (default 300 s, CI's; 1,800 or more each night, Hunt's
@@ -38,8 +38,8 @@ use super::super::{process, stores};
 use super::{connect, read};
 use crate::test_data::noise;
 use crate::{ExtentId, VolatileSlice};
-use extent_remote::faults::{Failing, Fault};
-use extent_remote::object_bucket::Request;
+use extent_bucket::faults::{Failing, Fault};
+use extent_bucket::object_bucket::Request;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};

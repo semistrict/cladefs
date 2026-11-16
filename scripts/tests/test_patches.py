@@ -231,7 +231,7 @@ class PatchRun(Stoppable, unittest.TestCase):
 RUNNERS = {
     "scripts/loom-mutants.sh": "crates/c/loom-mutants",
     "crates/cladefs/mutants.sh": "crates/cladefs/mutants",
-    "crates/extent_remote/mutants.sh": "crates/extent_remote/mutants",
+    "crates/extent_bucket/mutants.sh": "crates/extent_bucket/mutants",
     "crates/fxfs-posix/mutants.sh": "crates/fxfs-posix/mutants",
 }
 

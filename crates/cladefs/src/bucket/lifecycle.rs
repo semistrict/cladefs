@@ -10,7 +10,7 @@
 //! The bucket is one in memory behind [`Recording`], which notes every request that reaches the
 //! object store, the ones `ObjectBucket::stats` leaves out too (the collector's marks), with its
 //! key, its bytes and when it began and ended, and behind a fixed latency
-//! (`extent_remote::faults::Faulty`). So each phase says, beside its requests by kind and its
+//! (`extent_bucket::faults::Faulty`). So each phase says, beside its requests by kind and its
 //! bytes up and down: how many requests were in flight at once at most; how long at least one was
 //! in flight, which over the latency is how many round trips it made one after another; and the
 //! keys it read more than once.
@@ -23,8 +23,8 @@ use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::extents::Opening;
 use crate::host_store::{self, DEFAULT_TENANT, new_cell};
 use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
-use extent_remote::faults::{Fault, Faults, Faulty};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::faults::{Fault, Faults, Faulty};
+use extent_bucket::object_bucket::ObjectBucket;
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
 use object_store::path::Path as Key;

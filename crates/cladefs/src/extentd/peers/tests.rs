@@ -8,9 +8,9 @@
 
 use super::*;
 use crate::bucket::peers::tests::{gets, holding, noise};
-use extent_remote::cache::Cache;
-use extent_remote::layout::{self, Location};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::cache::Cache;
+use extent_bucket::layout::{self, Location};
+use extent_bucket::object_bucket::ObjectBucket;
 use std::time::Instant;
 
 const URL: &str = "memory:///peers";
@@ -37,7 +37,7 @@ fn ask(address: &str, url: &str, asked: Asked) -> Result<Option<Vec<u8>>, String
 /// its stored bytes.
 fn asked(bucket: &ObjectBucket, location: &Location, part: u64) -> (Asked, Vec<u8>) {
     let object = crate::bucket::runtime().handle.block_on(async {
-        use extent_remote::bucket::Bucket as _;
+        use extent_bucket::bucket::Bucket as _;
         bucket.get(&location.key).await.unwrap().bytes
     });
     let parts = extent_frame::Parts::of(&object, &extent_frame::NoKeys).unwrap();

@@ -44,7 +44,7 @@ const _: () = assert!(
 );
 #[cfg(all(feature = "testing", not(debug_assertions)))]
 compile_error!(
-    "extent_remote's `testing` in a release build, which measures with it: build the package alone \
+    "extent_bucket's `testing` in a release build, which measures with it: build the package alone \
      (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn it on (TASK-320)"
 );
 
@@ -445,7 +445,7 @@ pub fn rules() -> Rules {
     RULES.with(|rules| rules.get())
 }
 
-/// Has this thread's protocol keep `rules` alone, as tests that see a rule needed do: extent_remote's
+/// Has this thread's protocol keep `rules` alone, as tests that see a rule needed do: extent_bucket's
 /// own, and extent_store's simulation of the protocol (the `testing` feature).
 #[cfg(any(test, feature = "testing"))]
 pub fn set_rules(rules: Rules) {

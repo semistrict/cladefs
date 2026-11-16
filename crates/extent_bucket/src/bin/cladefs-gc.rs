@@ -20,7 +20,7 @@
 //! reached with credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables. It
 //! collects once, or every SECONDS, a cell at a time (TASK-395.4): every cell of the bucket, found
 //! by delimiter listings a page at a time, listing none of their objects, PASSES of them at once
-//! (16 by default, TASK-395.5; `extent_remote::sweep`), or the one `--cell` names, its IDs in
+//! (16 by default, TASK-395.5; `extent_bucket::sweep`), or the one `--cell` names, its IDs in
 //! hexadecimal. Each cell's pass takes the cell's own lease, lists the cell alone, and deletes there
 //! alone, but for the references it retires of its deleted children's under their parents' cells.
 //! It holds the lease for `--lease` SECONDS (600 by default), renewing it between its steps and
@@ -33,7 +33,7 @@
 //! s by default); objects whose live extents take less than FRACTION of them (0.5) are compacted.
 //! Every cell's objects are encrypted (TASK-411.28), and compacted under its keys (TASK-411.6): its
 //! KEK unwrapped once a pass, by the host's KMS, as every cladefs process chooses it
-//! (`extent_remote::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
+//! (`extent_bucket::bucket_kms::from_env`: the one `CLADEFS_KMS` names; else, given
 //! `CLADEFS_MASTER_KEY` or `CLADEFS_MASTER_KEY_FILE`, the bucket KMS over URL's bucket, TASK-411.27),
 //! and only by a pass compacting something. With neither variable giving a KMS, or one that can't
 //! be had, cladefs-gc refuses to start collecting or deleting a branch, saying so; a dry run,
@@ -109,15 +109,15 @@
 //! them, finishes. Once it ran refusing none, hosts need the newest key alone. Done again, it
 //! rewraps nothing.
 
-use extent_remote::bucket::Meta;
-use extent_remote::collector::{Collector, DryRun, Marking, Options, Report};
-use extent_remote::layout;
-use extent_remote::layout::Cell;
-use extent_remote::object_bucket::{ObjectBucket, Request, probe};
-use extent_remote::passed::{self, Sum, Usage};
-use extent_remote::record::Record;
-use extent_remote::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
-use extent_remote::{branch, cell};
+use extent_bucket::bucket::Meta;
+use extent_bucket::collector::{Collector, DryRun, Marking, Options, Report};
+use extent_bucket::layout;
+use extent_bucket::layout::Cell;
+use extent_bucket::object_bucket::{ObjectBucket, Request, probe};
+use extent_bucket::passed::{self, Sum, Usage};
+use extent_bucket::record::Record;
+use extent_bucket::sweep::{self, Outcome, Ran, Requests, Sweep, Swept};
+use extent_bucket::{branch, cell};
 use futures::{Stream, StreamExt as _};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
@@ -458,18 +458,18 @@ async fn collect(
 }
 
 /// The host's KMS, as every cladefs process chooses it (TASK-411.3,
-/// `extent_remote::bucket_kms::from_env`): the one `CLADEFS_KMS` names; else, given a master key,
+/// `extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names; else, given a master key,
 /// the bucket KMS over `bucket`, the one collected (TASK-411.27). What passes unwrap their cells'
 /// KEKs through, to compact (TASK-411.6); and what a deletion authenticates its checkpoints at
 /// fork points under (TASK-411.14). None chosen, or one that can't be had, stops cladefs-gc before it
 /// collects or deletes anything (TASK-411.28).
 fn kms(bucket: &Arc<ObjectBucket>) -> Result<extent_keys::kms::Shared, String> {
-    let chosen = extent_remote::bucket_kms::from_env(|| Ok(bucket.clone()))?;
+    let chosen = extent_bucket::bucket_kms::from_env(|| Ok(bucket.clone()))?;
     Ok(chosen.shared())
 }
 
 /// Rewraps every tenant's KEK object in `bucket` under the newest of the master keys the
-/// environment gives (TASK-411.27, `extent_remote::bucket_kms::rotate`), saying what it did on
+/// environment gives (TASK-411.27, `extent_bucket::bucket_kms::rotate`), saying what it did on
 /// standard error; failing, once it went over every tenant, if it left any under none of them.
 async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
     use extent_keys::kms::master::{MASTER_KEY_FILE_VAR, MASTER_KEY_VAR, MasterKeys};
@@ -479,8 +479,8 @@ async fn rotate_master_key(bucket: &ObjectBucket) -> Result<(), String> {
              master key: the newest first, then those to rotate from"
         )
     })?;
-    let rotated = extent_remote::bucket_kms::rotate(bucket, &keys).await;
-    let extent_remote::bucket_kms::Rotated { rewrapped, newest, destroyed, refused } = rotated;
+    let rotated = extent_bucket::bucket_kms::rotate(bucket, &keys).await;
+    let extent_bucket::bucket_kms::Rotated { rewrapped, newest, destroyed, refused } = rotated;
     eprintln!(
         "cladefs-gc: master key {}: rewrapped {rewrapped} tenants' KEKs, {newest} under it already, \
          {destroyed} tenants shredded, {} refused",
@@ -511,7 +511,7 @@ async fn delete_branch(
     branch: layout::Branch,
     kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
-    let keys = extent_remote::keys::CachingKms::new(kms);
+    let keys = extent_bucket::keys::CachingKms::new(kms);
     // Whichever placement took it last: u64::MAX is no lower than any's token.
     let deleted = branch::delete(bucket, branch, rand::random(), u64::MAX, &keys);
     deleted.await.map_err(|err| format!("deleting branch {branch}: {err}"))
@@ -673,7 +673,7 @@ impl Histogram {
 ///   `cladefs_gc_sweep_locked_cells`, the cells those were of, and
 ///   `cladefs_gc_sweep_resurrected_objects`.
 /// - `cladefs_gc_sweep_requests{request}`: the requests it made of each kind
-///   (`extent_remote::object_bucket::Request::name`), listing the cells among them.
+///   (`extent_bucket::object_bucket::Request::name`), listing the cells among them.
 /// - `cladefs_gc_pass_seconds`: a histogram of how long its passes took, those it ran;
 ///   `cladefs_gc_slowest_pass_seconds{cell}`: its slowest passes, by their cells, TENANT/CELL.
 /// - `cladefs_gc_peak_resident_bytes`: the most memory the process held so far.
@@ -959,9 +959,9 @@ fn main() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extent_remote::bucket::Version;
-    use extent_remote::layout::Origin;
-    use extent_remote::record::Kind;
+    use extent_bucket::bucket::Version;
+    use extent_bucket::layout::Origin;
+    use extent_bucket::record::Kind;
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| arg.to_string()))
@@ -1080,7 +1080,7 @@ mod tests {
     /// that it marked nothing, fenced.
     #[test]
     fn mark_only_passes_say_what_they_marked() {
-        use extent_remote::layout::{Marked, Marks};
+        use extent_bucket::layout::{Marked, Marks};
         let marked = |key: &str, size| Marked {
             key: key.into(),
             size,
@@ -1159,8 +1159,8 @@ mod tests {
     /// others; each cell's line once, in order, then its tenant's.
     #[test]
     fn usage_lists_a_page_of_cells_at_a_time() {
-        use extent_remote::Bucket as _;
-        use extent_remote::bucket::{LIST_PAGE, PutMode};
+        use extent_bucket::Bucket as _;
+        use extent_bucket::bucket::{LIST_PAGE, PutMode};
         let bucket = ObjectBucket::from_url("memory:///").unwrap();
         let many = LIST_PAGE as u64 * 2 + 5;
         let mut cells: Vec<Cell> = (0..many).map(|id| Cell { tenant: 2, id }).collect();
@@ -1378,7 +1378,7 @@ mod tests {
                  references, in 0.012 s; requests: list 2"
             )
         );
-        let failed = Outcome::Failed(extent_remote::Error::Corrupt("x".into()));
+        let failed = Outcome::Failed(extent_bucket::Error::Corrupt("x".into()));
         assert_eq!(
             passed_line(&passed(failed)).as_deref(),
             Some("cladefs-gc: collecting cell 1/2: corrupt: x, in 0.012 s; requests: list 2")
@@ -1408,7 +1408,7 @@ mod tests {
         // TASK-411.13: one skipping a cell left locked, leaving it so, says nothing either.
         let still = Report { skipped: 1, locked: 1, uncompacted: 3, ..Report::default() };
         assert_eq!(passed_line(&passed(Outcome::Collected(still))), None);
-        assert_eq!(passed_line(&passed(Outcome::Left(extent_remote::Left::Held))), None);
+        assert_eq!(passed_line(&passed(Outcome::Left(extent_bucket::Left::Held))), None);
     }
 
     /// TASK-395.5: `--metrics` writes the last sweep's counts in Prometheus' text format: its cells
@@ -1438,8 +1438,8 @@ mod tests {
         for (millis, outcome) in [
             (250, Outcome::Collected(Report::default())),
             (5, Outcome::Collected(Report::default())),
-            (20_000, Outcome::Failed(extent_remote::Error::Corrupt("x".into()))),
-            (1, Outcome::Left(extent_remote::Left::Held)),
+            (20_000, Outcome::Failed(extent_bucket::Error::Corrupt("x".into()))),
+            (1, Outcome::Left(extent_bucket::Left::Held)),
         ] {
             let cell = Cell { tenant: 1, id: 2 };
             let took = Duration::from_millis(millis);

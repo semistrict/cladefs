@@ -854,9 +854,10 @@ dependencies = [
  "async-trait",
  "bitflags",
  "event-listener",
+ "extent_bucket",
+ "extent_files",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "fail",
  "flate2",
@@ -1148,6 +1149,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "extent_bucket"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bincode",
+ "bytes",
+ "extent_frame",
+ "extent_keys",
+ "fail",
+ "futures",
+ "humantime",
+ "hyper",
+ "imbl",
+ "libc",
+ "log",
+ "object_store",
+ "opentelemetry",
+ "rand 0.10.3",
+ "reqwest",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sha2",
+ "storage_device",
+ "thiserror",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "extent_files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "storage_device",
+ "thiserror",
+]
+
+[[package]]
 name = "extent_frame"
 version = "0.1.0"
 dependencies = [
@@ -1186,45 +1228,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "extent_remote"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "bincode",
- "bytes",
- "extent_frame",
- "extent_keys",
- "fail",
- "futures",
- "humantime",
- "hyper",
- "imbl",
- "libc",
- "log",
- "object_store",
- "opentelemetry",
- "rand 0.10.3",
- "reqwest",
- "rustc-hash",
- "serde",
- "serde_json",
- "sha2",
- "storage_device",
- "thiserror",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "extent_store"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "event-listener",
+ "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "fail",
  "futures",
  "libc",
@@ -3765,9 +3777,9 @@ dependencies = [
  "anyhow",
  "bytes",
  "cladefs",
+ "extent_bucket",
  "extent_frame",
  "extent_keys",
- "extent_remote",
  "extent_store",
  "follower_history",
  "futures",

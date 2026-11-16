@@ -205,7 +205,7 @@ fn a_fork_of_a_store_and_the_store_go_their_own_ways() {
 /// its disk alone, is not in the bucket, its wait for it failing; its commits after it fail.
 #[test]
 fn a_database_is_fenced_with_its_cell() {
-    use extent_remote::cell;
+    use extent_bucket::cell;
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let bucket = dir.path().join("bucket");
     std::fs::create_dir(&bucket).unwrap();
@@ -228,7 +228,7 @@ fn a_database_is_fenced_with_its_cell() {
     connection.execute("INSERT INTO t VALUES (1, 'ours')", []).unwrap();
     control.sync_store(&store).unwrap();
     let ours = control.branch(&store).unwrap();
-    let objects = extent_remote::object_bucket::ObjectBucket::from_url(&url).unwrap();
+    let objects = extent_bucket::object_bucket::ObjectBucket::from_url(&url).unwrap();
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let held = runtime.block_on(cell::read(&objects, ours.cell)).unwrap().unwrap();
     let named = cell::Volume { branch: ours.id, kind: cell::Kind::Sqlite };
@@ -243,7 +243,7 @@ fn a_database_is_fenced_with_its_cell() {
         // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
         let kms = cladefs::bucket::kms();
         let writer =
-            extent_remote::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
+            extent_bucket::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
         drop(writer.await.unwrap());
     });
     connection.execute("INSERT INTO t VALUES (2, 'cut off')", []).unwrap();

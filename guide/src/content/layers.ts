@@ -98,7 +98,7 @@ export const layers: Layer[] = [
       "with checkpoints of its index. One writer holds a branch's head, which names its segments " +
       "and newest checkpoint, every key written once; forks record where they were made and " +
       "inherit without copying; the collector alone deletes.",
-    dirs: ["crates/extent_remote"],
+    dirs: ["crates/extent_bucket"],
     anchors: ["upload", "acknowledge", "head_swap", "bucket", "fork_point", "fetcher", "es_fork"],
     docs: ["doc-7", "doc-14"],
     provenance: "cladefs's own.",

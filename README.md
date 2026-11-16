@@ -222,7 +222,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 disk, of segments, large extents' own files, and an index of checkpoints and
 per-commit deltas, which recovers to a prefix of its commits after a crash. A
 store's directory holds one branch; forks, points and deletion are the
-bucket's (`crates/extent_remote`, TASK-165.7). Nothing collects in a store:
+bucket's (`crates/extent_bucket`, TASK-165.7). Nothing collects in a store:
 once a segment is acknowledged in the bucket, it and the extents' files it
 names leave the directory, for the host's cache of the bucket's objects, and
 the bucket's collector, the only thing that deletes, takes back what no extent

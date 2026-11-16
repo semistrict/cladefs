@@ -493,7 +493,7 @@ mod tests {
         let bytes = extent_frame::framed(
             &[7; 4096],
             &[],
-            extent_remote::testing::encrypting(extent_remote::layout::test_branch(1)),
+            extent_bucket::testing::encrypting(extent_bucket::layout::test_branch(1)),
         );
         file.write_at(&bytes, 0).unwrap();
         let framed = Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap());
@@ -522,7 +522,7 @@ mod tests {
             let bytes = extent_frame::framed(
                 &[key as u8; 4096],
                 &[],
-                extent_remote::testing::encrypting(extent_remote::layout::test_branch(1)),
+                extent_bucket::testing::encrypting(extent_bucket::layout::test_branch(1)),
             );
             file.write_at(&bytes, 0).unwrap();
             Arc::new(Framed::new(Arc::new(file), Parts::of(&bytes, &extent_frame::NoKeys).unwrap()))

@@ -10,8 +10,8 @@
 //! own, at most one every [`EVERY`]. A process has one collector of a bucket, however many of its images it has open, an
 //! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
-use extent_remote::collector::{Collector, Options, Report};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::collector::{Collector, Options, Report};
+use extent_bucket::object_bucket::ObjectBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -176,7 +176,7 @@ impl Collecting {
 
     /// Runs passes as [`Collecting::pass_now`] does until two in a row delete and compact nothing,
     /// every image of the bucket closed, and says what they left that they should have collected
-    /// ([`extent_remote::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
+    /// ([`extent_bucket::testing::uncollected`]): the space freed comes back (TASK-390). Two, as a
     /// pass over a dead cell retires the references that kept what its parents' cells reclaim at
     /// their next (TASK-395.4); and a pass retiring them again deletes nothing.
     #[cfg(test)]
@@ -192,7 +192,7 @@ impl Collecting {
         }
         assert_eq!(quiet, 2, "{PASSES} passes alone, which kept doing something");
         let left =
-            extent_remote::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
+            extent_bucket::testing::uncollected(&*self.bucket, self.pace.options.compact_below);
         extent_store::upload::block_on(left).unwrap()
     }
 }

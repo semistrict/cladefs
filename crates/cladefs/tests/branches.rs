@@ -9,7 +9,7 @@
 //! refused (`ESTALE`): nothing ran them.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::object_bucket::ObjectBucket;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -90,7 +90,7 @@ fn forks_and_takes_branches_in(url: &str) {
         branch(&url, &["fork", path("parent").to_str().unwrap(), path("child").to_str().unwrap()]);
     let child_branch: cladefs::Branch = child.trim().parse().unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let record = runtime.block_on(extent_remote::branch::record(&*bucket, child_branch));
+    let record = runtime.block_on(extent_bucket::branch::record(&*bucket, child_branch));
     assert_eq!(record.unwrap().unwrap().origin().map(|origin| origin.parent), Some(parent_branch));
     let forked = attached(&path("child"));
     assert_eq!(forked.branch(), child_branch);
@@ -159,7 +159,7 @@ fn places_and_syncs_stores_in(url: &str) {
     branch(&url, &["place", &path("first"), "5"]);
     branch(&url, &["sync", &path("first")]);
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let state = runtime.block_on(extent_remote::recover(&*bucket, branch_id, None)).unwrap().state;
+    let state = runtime.block_on(extent_bucket::recover(&*bucket, branch_id, None)).unwrap().state;
     assert_eq!(state.root, Some(b"synced".to_vec()));
 
     let capacity = (1u64 << 30).to_string();

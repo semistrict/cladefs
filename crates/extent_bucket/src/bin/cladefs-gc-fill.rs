@@ -40,17 +40,17 @@
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
 //! a thread; a sandbox's memory starting from its base's and its point's objects, which it reads.
 //! Encrypted, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
-//! it (`extent_remote::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
+//! it (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
 //! `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to start.
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
-use extent_remote::batch::{Commit, SegmentBuilder};
-use extent_remote::bucket::Bucket as _;
-use extent_remote::keys::{self, CachingKms};
-use extent_remote::layout::{Branch, Cell, Child, Origin};
-use extent_remote::object_bucket::ObjectBucket;
-use extent_remote::{Bytes, Writer, branch, cell};
+use extent_bucket::batch::{Commit, SegmentBuilder};
+use extent_bucket::bucket::Bucket as _;
+use extent_bucket::keys::{self, CachingKms};
+use extent_bucket::layout::{Branch, Cell, Child, Origin};
+use extent_bucket::object_bucket::ObjectBucket;
+use extent_bucket::{Bytes, Writer, branch, cell};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
 use object_store::memory::InMemory;
@@ -203,13 +203,13 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// The host's KMS, as every cladefs process chooses it ([`extent_remote::bucket_kms::from_env`]):
+/// The host's KMS, as every cladefs process chooses it ([`extent_bucket::bucket_kms::from_env`]):
 /// the bucket KMS's over `dir`, made if missing, given master keys.
 fn host_kms(dir: &std::path::Path) -> Result<Arc<CachingKms>, String> {
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let dir = dir.canonicalize().map_err(|err| format!("{}: {err}", dir.display()))?;
     let url = format!("file://{}/", dir.display());
-    let kms = extent_remote::bucket_kms::from_env(|| Ok(Arc::new(ObjectBucket::from_url(&url)?)))?;
+    let kms = extent_bucket::bucket_kms::from_env(|| Ok(Arc::new(ObjectBucket::from_url(&url)?)))?;
     Ok(CachingKms::new(kms.shared()))
 }
 
@@ -350,7 +350,7 @@ async fn write(
             .map_err(|err| err.to_string())?;
     }
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
-    let failed = |err: extent_remote::Error| err.to_string();
+    let failed = |err: extent_bucket::Error| err.to_string();
     make_cell(&bucket, kms, cell).await.map_err(failed)?;
     let id = Branch { cell, id: 1 };
     match of {
@@ -423,7 +423,7 @@ async fn make_cell(
     bucket: &ObjectBucket,
     kms: &Arc<CachingKms>,
     cell: Cell,
-) -> Result<(), extent_remote::Error> {
+) -> Result<(), extent_bucket::Error> {
     let (_, kek) = keys::new_cell_kek(kms, cell.tenant).await?;
     cell::create(bucket, cell, WRITER, kek).await.map(drop)
 }
@@ -469,10 +469,10 @@ fn point_at(shape: Shape, tenant: u64, n: u64) -> Option<Branch> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extent_remote::collector::Options;
-    use extent_remote::layout::{self, Kind as Key};
-    use extent_remote::object_bucket::Request;
-    use extent_remote::sweep::{Mode, Sweep, Swept};
+    use extent_bucket::collector::Options;
+    use extent_bucket::layout::{self, Kind as Key};
+    use extent_bucket::object_bucket::Request;
+    use extent_bucket::sweep::{Mode, Sweep, Swept};
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
         parse(args.iter().map(|arg| (*arg).to_owned()))

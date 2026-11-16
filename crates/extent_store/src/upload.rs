@@ -10,16 +10,16 @@
 //! **Opening a store** ([`open`]) is the same whether its branch was here, elsewhere or never
 //! anywhere (doc-14, Opening a store): the branch's writer takes its head, with the epoch of
 //! its cell's taking by the store's placement, or the host's, recovers it and fences its end
-//! (`extent_remote::Writer`); the store opens as the bucket holds the branch, its write-ahead log
+//! (`extent_bucket::Writer`); the store opens as the bucket holds the branch, its write-ahead log
 //! put after the branch's end by its commits, what of it landed acknowledged and the rest stamped
 //! anew on the writer's chain ([`Recovering::open`]). A log another writer's commits moved past
-//! refuses to open (`extent_remote::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
+//! refuses to open (`extent_bucket::Error::Diverged`, `ESTALE`) until `cladefsctl take` drops it;
 //! one that plainly diverged before the head is taken refuses before, fencing no writer. A branch
-//! with no record is made, a root (`extent_remote::branch::create`).
+//! with no record is made, a root (`extent_bucket::branch::create`).
 //!
 //! **A point** takes no head (doc-7, Points): its store holds its state, recovered, which nothing
 //! writes, and no log; nothing it does goes to the bucket but its forks' records
-//! ([`Uploader::forked`], `extent_remote::branch::fork_point`). Any number of hosts hold one at
+//! ([`Uploader::forked`], `extent_bucket::branch::fork_point`). Any number of hosts hold one at
 //! once.
 //!
 //! **The uploader** hands the store's write-ahead log's segments, framed, whose commits are durable
@@ -46,14 +46,14 @@
 
 use crate::{Dir, DirHold, File, HeldParts, Opening, Recovering, Store, read_object};
 use event_listener::{Event, Listener as _};
-use extent_remote::cache::Cache;
-use extent_remote::fetch::Budget;
-use extent_remote::keys::{self, CellKeys, Ring, RingHold};
-use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
-use extent_remote::object_bucket::ObjectBucket;
-use extent_remote::record::{Kind, Record};
-use extent_remote::wal::TakenBranch;
-use extent_remote::{Body, Objects, Recovered, Writer, branch, cell};
+use extent_bucket::cache::Cache;
+use extent_bucket::fetch::Budget;
+use extent_bucket::keys::{self, CellKeys, Ring, RingHold};
+use extent_bucket::layout::{Branch, Chain, Child, Origin, epoch_of};
+use extent_bucket::object_bucket::ObjectBucket;
+use extent_bucket::record::{Kind, Record};
+use extent_bucket::wal::TakenBranch;
+use extent_bucket::{Body, Objects, Recovered, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
 use futures::stream::FuturesOrdered;
@@ -123,15 +123,15 @@ pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure>
     Ok(runtime.block_on(future))
 }
 
-/// Deletes `branch` in `bucket` (`extent_remote::branch::delete`), as the placement whose fencing
+/// Deletes `branch` in `bucket` (`extent_bucket::branch::delete`), as the placement whose fencing
 /// token is `token`: its writer stops at its next acknowledgement, no writer takes it again, and
 /// the collector reclaims what no other branch inherited from it, as its forks' branches live on
 /// (TASK-39.4). Deleting it again does nothing. A later placement's branch, whose token is higher,
-/// is not deleted (`extent_remote::Error::Stale`, TASK-45.1).
+/// is not deleted (`extent_bucket::Error::Stale`, TASK-45.1).
 ///
 /// cladefs: its lease ended at its cell's epoch, a placement a later one took the cell from deleting
 /// nothing (`Stale`), and the cell's other volumes' writers going on; then the volume naming it is
-/// taken out of the cell (`extent_remote::cell::forget`, TASK-364). An encrypted branch's forks to
+/// taken out of the cell (`extent_bucket::cell::forget`, TASK-364). An encrypted branch's forks to
 /// other cells it records get its checkpoint at their fork points under its keys, its cell's KEK
 /// unwrapped by `kms`, the host's (`branch::delete`, TASK-411.4).
 pub fn delete_branch(
@@ -150,13 +150,13 @@ pub fn delete_branch(
 /// typed, which cladefs's `bucket` maps to its errno, in the one place.
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum Failure {
-    /// What object storage's protocol found of the branch, as `extent_remote` says it: another
+    /// What object storage's protocol found of the branch, as `extent_bucket` says it: another
     /// writer took it (`Fenced`), it was deleted, a later placement holds it
     /// (`Stale`, TASK-39.7), another writer's commits moved it on from the store's write-ahead log
     /// (`Diverged`), another branch has a fork's child's ID (`IdTaken`, TASK-79.82), or what it
     /// needs is gone or corrupt.
     #[error(transparent)]
-    Bucket(#[from] extent_remote::Error),
+    Bucket(#[from] extent_bucket::Error),
     /// The point a store is of was deleted: it forks no more, and its forks live on.
     #[error("the point was deleted")]
     PointDeleted,
@@ -200,7 +200,7 @@ impl Eq for Failure {}
 /// a write-ahead log diverged from it.
 impl From<anyhow::Error> for Failure {
     fn from(error: anyhow::Error) -> Self {
-        match error.downcast::<extent_remote::Error>() {
+        match error.downcast::<extent_bucket::Error>() {
             Ok(error) => Self::Bucket(error),
             Err(error) => Self::Local(Arc::new(error)),
         }
@@ -313,7 +313,7 @@ pub struct Uploader<D: Dir> {
     _dir: DirHold<D>,
 }
 
-pub(crate) struct Shared<D: Dir, B: extent_remote::Bucket = ObjectBucket> {
+pub(crate) struct Shared<D: Dir, B: extent_bucket::Bucket = ObjectBucket> {
     /// The store, once opened.
     store: std::sync::OnceLock<Arc<Store<D>>>,
     /// The branch's writer, once it took the branch, and as it takes it again (TASK-204).
@@ -426,7 +426,7 @@ struct Progress {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Taking {
     /// The fencing token it was taken with: the epoch of its cell's taking by this placement
-    /// (`extent_remote::cell::Held::epoch`, TASK-364).
+    /// (`extent_bucket::cell::Held::epoch`, TASK-364).
     pub token: u64,
     /// Its epoch: one more than the taking's before.
     pub epoch: u64,
@@ -541,7 +541,7 @@ impl<D: Dir> Uploader<D> {
     /// fork are uploaded: the segment the fork's commit ends names `child`, whose record the
     /// acknowledgement makes, naming the branch and the segment as its origin, and a checkpoint at
     /// the fork is where its recovery starts. `child`'s ID may be another branch's by then, which
-    /// took it after [`Uploader::child_free`] found it free (`extent_remote::Error::IdTaken`): the
+    /// took it after [`Uploader::child_free`] found it free (`extent_bucket::Error::IdTaken`): the
     /// fork failed, and the uploader goes on.
     ///
     /// A fork of a point commits nothing: the child's record is the fork, and fails if the point
@@ -574,7 +574,7 @@ impl<D: Dir> Uploader<D> {
             let (of, origin) = (point.branch, point.origin);
             let forking = branch::fork_point(&*self.bucket, child.branch, of, origin, child.owner);
             return match block_on(forking)? {
-                Err(extent_remote::Error::Deleted) => Err(Failure::PointDeleted),
+                Err(extent_bucket::Error::Deleted) => Err(Failure::PointDeleted),
                 forked => Ok(forked?),
             };
         }
@@ -587,7 +587,7 @@ impl<D: Dir> Uploader<D> {
         })?;
         match shared.writer() {
             Some(writer) if writer.refused(child) => {
-                Err(extent_remote::Error::IdTaken(child).into())
+                Err(extent_bucket::Error::IdTaken(child).into())
             }
             _ => Ok(()),
         }
@@ -716,7 +716,7 @@ impl<D: Dir> Drop for Uploader<D> {
     }
 }
 
-impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
+impl<D: Dir, B: extent_bucket::Bucket> Shared<D, B> {
     /// An uploader that uploads as `options` say, within `uploads`, its interval running out on
     /// `clock`: started by [`Shared::run`]. cladefs: encrypting and reading under `keys`, the host's
     /// (TASK-411.3).
@@ -755,7 +755,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     async fn cell_keys(
         &self,
         bucket: &B,
-        cell: extent_remote::layout::Cell,
+        cell: extent_bucket::layout::Cell,
         placement: Option<u64>,
     ) -> Result<CellKeys, Failure> {
         let kms = self.keys.kms.clone();
@@ -1023,12 +1023,12 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         // The record, and the head the writer takes after recovering the branch, at once: the
         // taking goes on from this read of it, a round trip less (TASK-165.11).
         let (found, read) =
-            futures::join!(record(&**bucket, branch), extent_remote::head::read(&**bucket, branch));
+            futures::join!(record(&**bucket, branch), extent_bucket::head::read(&**bucket, branch));
         let found = match found? {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
             None if recovering.start().is_some() => {
-                return Err(extent_remote::Error::NoBranch.into());
+                return Err(extent_bucket::Error::NoBranch.into());
             }
             // cladefs: made once its cell is held, which gives it its DEK (TASK-411.3).
             None => None,
@@ -1056,7 +1056,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                         keys::ring(&**bucket, &keys, branch, &record, true).await?
                     }
                 };
-                let recovered = extent_remote::recovery::recover_under(
+                let recovered = extent_bucket::recovery::recover_under(
                     &**bucket,
                     branch,
                     record.origin(),
@@ -1068,7 +1068,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 let head = recovered.head.clone().unwrap_or_default();
                 let found = TakenBranch::of(head, &recovered.state, chain);
                 if !recovering.follows(&found) {
-                    return Err(extent_remote::Error::Diverged.into());
+                    return Err(extent_bucket::Error::Diverged.into());
                 }
                 Some((record, recovered, before))
             }
@@ -1077,7 +1077,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         if let Some((record, ..)) = &found
             && record.deleted
         {
-            return Err(extent_remote::Error::Deleted.into());
+            return Err(extent_bucket::Error::Deleted.into());
         }
         // cladefs: its cell, held by this placement, whose epoch is the token the branch's head is
         // taken with: a later taking of the cell, elsewhere, fences its writer (TASK-364). A
@@ -1157,13 +1157,13 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         &self,
         bucket: &Arc<B>,
         cell_keys: &CellKeys,
-        branch: extent_remote::layout::Branch,
+        branch: extent_bucket::layout::Branch,
         record: Option<Record>,
     ) -> Result<Arc<Ring>, Failure> {
         let record = match record {
             Some(record) => record,
             None => {
-                branch::record(&**bucket, branch).await?.ok_or(extent_remote::Error::NoBranch)?
+                branch::record(&**bucket, branch).await?.ok_or(extent_bucket::Error::NoBranch)?
             }
         };
         let record = keys::with_dek(&**bucket, cell_keys, branch, record).await?;
@@ -1214,7 +1214,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
         let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
         let recovering =
-            extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
+            extent_bucket::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
         let recovered = recovering.await?;
         // cladefs: its store's open segment, which nothing writes, encrypted as every store's is
         // (TASK-411.28).
@@ -1327,7 +1327,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
 /// The record of `branch`, if it has one: a fork of a point its host crashed in the middle of, its
 /// record saying so, finished first, which fails if the point was deleted. So the store takes no
 /// state of a fork not made.
-async fn record<B: extent_remote::Bucket>(
+async fn record<B: extent_bucket::Bucket>(
     bucket: &B,
     branch: Branch,
 ) -> Result<Option<Record>, Failure> {
@@ -1381,12 +1381,12 @@ impl Uploading {
 #[derive(Default)]
 struct InFlight {
     segments: VecDeque<Uploading>,
-    uploads: FuturesOrdered<BoxFuture<'static, Result<(), extent_remote::Error>>>,
+    uploads: FuturesOrdered<BoxFuture<'static, Result<(), extent_bucket::Error>>>,
 }
 
 impl InFlight {
     /// Uploads `segments`, which `writer` took, after those uploading.
-    fn upload<B: extent_remote::Bucket>(
+    fn upload<B: extent_bucket::Bucket>(
         &mut self,
         writer: &Arc<Writer<B>>,
         segments: Vec<Uploading>,
@@ -1401,7 +1401,7 @@ impl InFlight {
     /// The next upload done, in order.
     fn next(
         &mut self,
-    ) -> impl Future<Output = Option<Result<(), extent_remote::Error>>> + Unpin + '_ {
+    ) -> impl Future<Output = Option<Result<(), extent_bucket::Error>>> + Unpin + '_ {
         self.uploads.next()
     }
 
@@ -1430,10 +1430,10 @@ mod encrypted;
 mod tests {
     use super::*;
     use crate::{Description, MemDir};
-    use extent_remote::fetch::Limits;
+    use extent_bucket::fetch::Limits;
     use storage_device::ExtentId;
 
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
     /// TASK-92.52: a stall says what it waits for: the bytes past the lag bound, which a stall over
     /// it waits on, and the commits not uploaded and the oldest's age, which a slow upload shows.
@@ -1464,7 +1464,7 @@ mod tests {
         let host = Runtime {
             handle: runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: extent_remote::keys::testing::host(),
+            keys: extent_bucket::keys::testing::host(),
         };
         let bucket =
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
@@ -1482,7 +1482,7 @@ mod tests {
         assert_eq!((object.epoch, object.holder, object.token), (1, 5, 5));
         let root = cell::Volume { branch: BRANCH.id, kind: cell::Kind::Fxfs };
         assert_eq!(object.volumes, std::collections::BTreeMap::from([("root".to_owned(), root)]));
-        let head = runtime.block_on(extent_remote::head::get(&*bucket, BRANCH)).unwrap().unwrap();
+        let head = runtime.block_on(extent_bucket::head::get(&*bucket, BRANCH)).unwrap().unwrap();
         assert_eq!((head.epoch, head.token), (1, 1));
 
         store.write(ExtentId::new(BRANCH.id, 1), 0, &[1; 4096]).unwrap();
@@ -1493,7 +1493,7 @@ mod tests {
         let taken = runtime.block_on(async {
             let (held, _) = cell::hold(&*bucket, BRANCH.cell, (6, 6), None, None).await.unwrap();
             drop(
-                extent_remote::Writer::open(bucket.clone(), BRANCH, 0x66, held.epoch)
+                extent_bucket::Writer::open(bucket.clone(), BRANCH, 0x66, held.epoch)
                     .await
                     .unwrap(),
             );
@@ -1503,9 +1503,9 @@ mod tests {
         store.write(ExtentId::new(BRANCH.id, 2), 0, &[2; 4096]).unwrap();
         store.commit(None).unwrap();
         let fenced = uploader.wait_uploaded(store.epoch().unwrap());
-        assert!(matches!(fenced, Err(Failure::Bucket(extent_remote::Error::Fenced))), "{fenced:?}");
+        assert!(matches!(fenced, Err(Failure::Bucket(extent_bucket::Error::Fenced))), "{fenced:?}");
         let back = runtime.block_on(cell::hold(&*bucket, BRANCH.cell, (5, 5), None, None));
-        assert_eq!(back.map(|(held, _)| held), Err(extent_remote::Error::Stale));
+        assert_eq!(back.map(|(held, _)| held), Err(extent_bucket::Error::Stale));
     }
 
     /// TASK-79.19: a gather takes no more of the segments the store closed than may upload at once,
@@ -1516,7 +1516,7 @@ mod tests {
         let host = Runtime {
             handle: runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
-            keys: extent_remote::keys::testing::host(),
+            keys: extent_bucket::keys::testing::host(),
         };
         let bucket =
             Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), ""));
@@ -1553,7 +1553,7 @@ mod tests {
         assert_eq!(taken, [IN_FLIGHT, IN_FLIGHT, 1]);
         assert_eq!(uploader.last_uploaded(), store.epoch().unwrap());
         drop(uploader);
-        let state = runtime.block_on(extent_remote::recover(&*bucket, BRANCH, None)).unwrap().state;
+        let state = runtime.block_on(extent_bucket::recover(&*bucket, BRANCH, None)).unwrap().state;
         let sequences: Vec<u64> = state.extents.keys().map(|extent| extent.sequence).collect();
         assert_eq!(sequences, (1..=closed as u64).collect::<Vec<_>>());
     }
@@ -1568,10 +1568,10 @@ mod tests {
 mod shuttle_tests {
     use super::*;
     use crate::{Description, MemDir};
-    use extent_remote::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
-    use extent_remote::collector;
-    use extent_remote::fetch::Limits;
-    use extent_remote::testing::{Direct, SimBucket};
+    use extent_bucket::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
+    use extent_bucket::collector;
+    use extent_bucket::fetch::Limits;
+    use extent_bucket::testing::{Direct, SimBucket};
     use shuttle::scheduler::{PctScheduler, RandomScheduler, Scheduler};
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -1579,9 +1579,9 @@ mod shuttle_tests {
     use storage_device::ExtentId;
 
     const BLOCK: usize = 4096;
-    const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+    const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
     /// The branch the writer forks.
-    const CHILD: extent_remote::layout::Branch = extent_remote::layout::test_branch(BRANCH.id + 1);
+    const CHILD: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(BRANCH.id + 1);
 
     /// Small segments, so that commits close several, and extents of two blocks or more in
     /// objects of their own, which upload before the segments naming them (TASK-79.3); flushes of
@@ -1646,7 +1646,7 @@ mod shuttle_tests {
 
         /// A listing of `prefix` goes through the gate.
         fn pass(&self, prefix: &str) {
-            let whole = extent_remote::layout::cell_of_prefix(prefix).is_some();
+            let whole = extent_bucket::layout::cell_of_prefix(prefix).is_some();
             if whole && self.armed.swap(false, SeqCst) {
                 self.reached.store(true, SeqCst);
                 until(|| self.open.load(SeqCst));
@@ -1654,7 +1654,7 @@ mod shuttle_tests {
         }
     }
 
-    impl extent_remote::Bucket for Turns {
+    impl extent_bucket::Bucket for Turns {
         fn get(&self, key: &str) -> impl Future<Output = Result<Object, BucketError>> + Send {
             shuttle::thread::yield_now();
             self.direct.get(key)
@@ -1686,8 +1686,8 @@ mod shuttle_tests {
         fn list_delimited(
             &self,
             prefix: &str,
-            page: extent_remote::bucket::Page<'_>,
-        ) -> impl Future<Output = Result<extent_remote::bucket::Listing, BucketError>> + Send
+            page: extent_bucket::bucket::Page<'_>,
+        ) -> impl Future<Output = Result<extent_bucket::bucket::Listing, BucketError>> + Send
         {
             self.direct.list_delimited(prefix, page)
         }
@@ -1695,7 +1695,7 @@ mod shuttle_tests {
         fn put(
             &self,
             key: &str,
-            bytes: extent_remote::Bytes,
+            bytes: extent_bucket::Bytes,
             mode: PutMode,
         ) -> impl Future<Output = Result<Version, BucketError>> + Send {
             shuttle::thread::yield_now();
@@ -1735,10 +1735,10 @@ mod shuttle_tests {
         branch: Branch,
         holds: &BTreeMap<ExtentId, Vec<u8>>,
     ) -> Result<(), String> {
-        let failed = |err: extent_remote::Error| format!("branch {branch}: {err}");
+        let failed = |err: extent_bucket::Error| format!("branch {branch}: {err}");
         let record = shuttle::future::block_on(branch::record(&**bucket, branch));
         let record = record.map_err(failed)?.ok_or(format!("branch {branch}: no record"))?;
-        let recovering = extent_remote::recover(&**bucket, branch, record.origin());
+        let recovering = extent_bucket::recover(&**bucket, branch, record.origin());
         let state = shuttle::future::block_on(recovering).map_err(failed)?.state;
         let held: Vec<&ExtentId> = state.extents.keys().collect();
         if held != holds.keys().collect::<Vec<_>>() {
@@ -1746,7 +1746,7 @@ mod shuttle_tests {
         }
         for (extent, location) in &state.extents {
             let read =
-                shuttle::future::block_on(extent_remote::testing::read(bucket, *extent, location));
+                shuttle::future::block_on(extent_bucket::testing::read(bucket, *extent, location));
             if read.as_ref() != Ok(&holds[extent]) {
                 return Err(format!("branch {branch}: {extent:?} reads {read:?}"));
             }
@@ -1787,7 +1787,7 @@ mod shuttle_tests {
                 options,
                 Budget::new(Limits::UNBOUNDED),
                 never,
-                extent_remote::keys::testing::host(),
+                extent_bucket::keys::testing::host(),
             );
             let (started, start) = std::sync::mpsc::channel();
             let running = {
@@ -1992,14 +1992,14 @@ mod shuttle_tests {
     /// the pass recovered names, and deleted.
     #[test]
     fn a_pass_keeping_what_a_child_made_as_it_lists_uploads_needs_candidates_first() {
-        let all = extent_remote::Rules::ALL;
-        let off = extent_remote::Rules { candidates_first: false, ..all };
+        let all = extent_bucket::Rules::ALL;
+        let off = extent_bucket::Rules { candidates_first: false, ..all };
         explore(RandomScheduler::new(runs() / 10), move || {
-            extent_remote::set_rules(off);
+            extent_bucket::set_rules(off);
             let listed = listed_while_forking();
-            extent_remote::set_rules(all);
+            extent_bucket::set_rules(all);
             let extent = "ExtentId { branch: 8, sequence: 1099511627776 }";
-            let segment = extent_remote::layout::segment(CHILD, 0, 1);
+            let segment = extent_bucket::layout::segment(CHILD, 0, 1);
             let lost =
                 format!("branch {CHILD}: {extent} reads Err(Lost(\"{extent} in {segment}\"))");
             assert_eq!(listed, Err(lost));

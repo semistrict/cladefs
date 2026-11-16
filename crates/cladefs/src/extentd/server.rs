@@ -17,7 +17,7 @@ use crate::store_requests::{self, Guest, Resizes, Shrinking};
 use crate::store_table::Writer;
 use crate::{Commit, MappingContents, VolatileSlice, VolatileSliceMut, WindowMapping};
 use crate::{DaxWindow, Errno, ExtentStore, SecondStage};
-use extent_remote::trace;
+use extent_bucket::trace;
 use extent_store::shared::SharedLock;
 use std::os::fd::AsFd;
 use std::os::unix::net::{UnixListener, UnixStream};

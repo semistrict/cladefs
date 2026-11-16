@@ -8,7 +8,7 @@ host = [
     "cladefs",
     "extent_frame",
     "extent_keys",
-    "extent_remote",
+    "extent_bucket",
     "extent_store",
     "follower_history",
     "futures",
@@ -44,7 +44,7 @@ extent_frame = { path = "../../../crates/extent_frame", optional = true }
 # cladefs's KMS, the local one a run's stores are encrypted under (TASK-411.15).
 extent_keys = { path = "../../../crates/extent_keys", optional = true }
 # cladefs's buckets, which fxfs-guest-soak measures (TASK-67), and the runtime it lists them on.
-extent_remote = { path = "../../../crates/extent_remote", optional = true }
+extent_bucket = { path = "../../../crates/extent_bucket", optional = true }
 tokio = { version = "1", optional = true, features = ["rt", "time", "net", "sync", "macros"] }
 # cladefs's history checker of followers (TASK-42.1), which the followers' torture test's host runs.
 follower_history = { path = "../../../crates/follower_history", optional = true }

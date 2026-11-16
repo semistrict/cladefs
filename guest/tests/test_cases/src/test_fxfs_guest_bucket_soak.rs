@@ -55,7 +55,7 @@ mod host {
     use crate::vm::{Firecracker, Vm};
     use crate::{ShouldRun, Test, TestOutcome, TestSetup};
     use anyhow::{Context, ensure};
-    use extent_remote::faults::Fault;
+    use extent_bucket::faults::Fault;
     use std::ffi::CString;
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -75,7 +75,7 @@ mod host {
     const MIN_SECS: u64 = 1200;
 
     /// The phases, each a fraction of the run, and what the bucket does through it, as
-    /// `extent_remote::faults::Fault`'s words say it, answering again as slowly as before it
+    /// `extent_bucket::faults::Fault`'s words say it, answering again as slowly as before it
     /// failed, each PUT of what waited holding its object as long; and whether it fails.
     const PHASES: [(&str, f64, &str, bool); 5] = [
         ("answering", 0.1, "latency-ms=0 failing=not", false),

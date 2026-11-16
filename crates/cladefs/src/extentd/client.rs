@@ -19,7 +19,7 @@ use crate::{
     Access, Commit, ExtentId, ExtentInfo, MappingContents, Prefault, SecondStage, VolatileSlice,
     VolatileSliceMut, WindowMapping, WriteBarriers,
 };
-use extent_remote::cell::Kind;
+use extent_bucket::cell::Kind;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use std::borrow::Cow;

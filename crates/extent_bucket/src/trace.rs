@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: spans of the expensive operations of extent stores, their uploads and their daemon, for
-//! OpenTelemetry (TASK-258), shared by the crates that make them: extent_remote's bucket requests,
+//! OpenTelemetry (TASK-258), shared by the crates that make them: extent_bucket's bucket requests,
 //! uploads and checkpoints, extent_store's commits and flushes, and cladefs's daemon
 //! (`cladefs::extentd`), which enables them from the environment (`cladefs::extentd::otel`;
 //! `docs/tracing.md`).

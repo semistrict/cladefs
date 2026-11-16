@@ -12,7 +12,7 @@ use std::time::Duration;
 use storage_device::{ExtentId, NoExtent};
 
 const BLOCK: usize = 4096;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
 /// Small segments and large extents, so that tests make several of each.
 const OPTIONS: Options = Options {
@@ -96,7 +96,7 @@ fn views_read_frees_acknowledged_in_the_bucket() {
     let closed = store.closed(usize::MAX).unwrap();
     let keys: Vec<String> = (closed.iter())
         .map(|closed| {
-            extent_remote::layout::segment(
+            extent_bucket::layout::segment(
                 closed.footer.branch,
                 closed.footer.segment,
                 closed.footer.epoch,

@@ -36,12 +36,12 @@ use crate::wal::{
 };
 use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use extent_bucket::cache::Cache;
+use extent_bucket::keys::Ring;
+use extent_bucket::recovery::{Places, Seal};
+use extent_bucket::trace;
+use extent_bucket::wal::{Rebased, Wal};
 use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
-use extent_remote::cache::Cache;
-use extent_remote::keys::Ring;
-use extent_remote::recovery::{Places, Seal};
-use extent_remote::trace;
-use extent_remote::wal::{Rebased, Wal};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -733,30 +733,30 @@ pub struct Unmade;
 
 /// cladefs: what the bucket holds of the branch a store opens (doc-14, Opening a store;
 /// TASK-165.9): its state, as recovery found it once its writer took its head, what the writer
-/// found taking it ([`extent_remote::TakenBranch`]), the head, which the store's write-ahead log is put after,
+/// found taking it ([`extent_bucket::TakenBranch`]), the head, which the store's write-ahead log is put after,
 /// and its writer's chain there, which stamps the store's footers from then on; or, for a point,
 /// its state alone, which nothing writes. And the host's cache of the bucket's objects, if it has
 /// one, which what the bucket acknowledged of the store's goes into. cladefs: and the store's keys,
 /// its branch's and its ancestors' DEKs, which its segments and extents stored on their own are
-/// encrypted and read under (`extent_remote::keys`, TASK-411.3): a writer's, which encrypts, but a
+/// encrypted and read under (`extent_bucket::keys`, TASK-411.3): a writer's, which encrypts, but a
 /// point's. And what holds
 /// the parts of its segments packed as they fill, which the process's stores share, so that what
 /// governs the process's memory lets them go as it runs short (`crate::held`, TASK-400); without,
 /// one of the store's own, which nothing makes let go. An encrypted store holds none (TASK-411.5).
 pub struct Opening {
-    pub state: extent_remote::State,
+    pub state: extent_bucket::State,
     /// cladefs: the decoded state `state` started from, if it did, whose map of the extents it
-    /// shares ([`extent_remote::Recovered::layer`]): held by the store while it is open, so that
+    /// shares ([`extent_bucket::Recovered::layer`]): held by the store while it is open, so that
     /// the stores of its lineage opened after it find it decoded and share it too (TASK-453).
-    pub layer: Option<Arc<extent_remote::State>>,
-    pub taken: Option<extent_remote::TakenBranch>,
+    pub layer: Option<Arc<extent_bucket::State>>,
+    pub taken: Option<extent_bucket::TakenBranch>,
     pub cache: Option<Arc<Cache>>,
     pub keys: Arc<Ring>,
     pub held: Option<Arc<HeldParts>>,
 }
 
 /// cladefs: the DEK stores kept in no bucket are encrypted under ([`Opening::new`], TASK-411.28): the
-/// tests' (`extent_remote::testing::dek`, of which a test's reader holds the ring), known to all,
+/// tests' (`extent_bucket::testing::dek`, of which a test's reader holds the ring), known to all,
 /// so that tests, benches and simulations make and reopen them in any process. A host's stores are
 /// all kept in a bucket, under DEKs their records keep; none is so.
 #[cfg(any(test, feature = "unkept"))]
@@ -765,15 +765,15 @@ pub const UNKEPT_DEK: [u8; 32] = [0x7e; 32];
 impl Opening {
     /// The opening of `branch`, which the bucket holds nothing of: no commit of it there, and a
     /// writer's chain from its first segment, of epoch 0. Its store's write-ahead log
-    /// follows only if it never had anything acknowledged ([`extent_remote::Error::Diverged`]):
+    /// follows only if it never had anything acknowledged ([`extent_bucket::Error::Diverged`]):
     /// a store of the store's own tests, of a bucket it never reaches. cladefs: encrypted under
     /// [`UNKEPT_DEK`]: every store is encrypted (TASK-411.28), and one kept nowhere has no record to
     /// keep a DEK of its own; tests', benches' and simulations'.
     #[cfg(any(test, feature = "unkept"))]
     pub fn new(branch: Branch) -> Self {
         let chain = Chain::new(branch, 0, 0, 0);
-        let state = extent_remote::State::new(branch);
-        let taken = extent_remote::TakenBranch::of(Default::default(), &state, chain);
+        let state = extent_bucket::State::new(branch);
+        let taken = extent_bucket::TakenBranch::of(Default::default(), &state, chain);
         let keys = Ring::writing_under(branch, extent_frame::Secret::from_bytes(&UNKEPT_DEK));
         Self { state, layer: None, taken: Some(taken), cache: None, keys, held: None }
     }
@@ -819,7 +819,7 @@ impl<D: Dir> Recovering<D> {
 
     /// cladefs: whether `commit`, a branch's last, is its write-ahead log's start or one of its
     /// commits: a branch whose last commit is never moved on from the log, which then diverged
-    /// not ([`extent_remote::Error::Diverged`], TASK-345).
+    /// not ([`extent_bucket::Error::Diverged`], TASK-345).
     pub fn holds_commit(&self, commit: Option<u64>) -> bool {
         let wal = self.wal();
         let mut commits = wal.segments().flat_map(|(footer, _)| &footer.contents.commits);
@@ -837,10 +837,10 @@ impl<D: Dir> Recovering<D> {
     }
 
     /// Whether its write-ahead log follows the branch whose end a writer found as `taken` says:
-    /// unless the branch moved on from it ([`extent_remote::Error::Diverged`]). What a store asks
+    /// unless the branch moved on from it ([`extent_bucket::Error::Diverged`]). What a store asks
     /// of the branch as recovery found it before taking its head, so that a store plainly stale
     /// fences no writer.
-    pub fn follows(&self, taken: &extent_remote::TakenBranch) -> bool {
+    pub fn follows(&self, taken: &extent_bucket::TakenBranch) -> bool {
         self.wal().rebase(taken).is_ok()
     }
 
@@ -883,7 +883,7 @@ impl<D: Dir> Recovering<D> {
     /// its write-ahead log put after the branch's end, by its commits, those of its segments that
     /// landed acknowledged, their files into the host's cache, and the rest stamped anew on the
     /// writer's chain ([`Wal::rebase`]), its start written first; or refused, if the branch moved
-    /// on from it ([`extent_remote::Error::Diverged`]). The branch's state is the bucket's, its
+    /// on from it ([`extent_bucket::Error::Diverged`]). The branch's state is the bucket's, its
     /// extents there, with the log's segments' footers applied over it, their extents here; and
     /// another segment opens, past them. A point's store holds its state alone, and no log.
     pub fn open(self, options: Options, opening: Opening) -> Result<Store<D>, Error> {
@@ -938,7 +938,7 @@ impl<D: Dir> Recovering<D> {
         let mut leaving = Vec::new();
         for (footer, number) in landed {
             let segment = SegmentId { branch: branch.id, number };
-            let key = extent_remote::layout::segment(branch, footer.segment, footer.epoch);
+            let key = extent_bucket::layout::segment(branch, footer.segment, footer.epoch);
             leaving.push((segment_path(segment), Some(key)));
             leaving.extend(footer.own().map(|(extent, at)| (extent_path(extent), Some(at.key))));
         }
@@ -952,7 +952,7 @@ impl<D: Dir> Recovering<D> {
         });
         let mut named_own = BTreeSet::new();
         for (footer, number) in wal.segments() {
-            let key = extent_remote::layout::segment(branch, footer.segment, footer.epoch);
+            let key = extent_bucket::layout::segment(branch, footer.segment, footer.epoch);
             replay.extents.segments.insert(key, SegmentId { branch: branch.id, number: *number });
             replay.apply_contents(footer.segment, footer.epoch, &footer.contents);
             named_own.extend(footer.own().map(|(extent, _)| extent));
@@ -963,7 +963,7 @@ impl<D: Dir> Recovering<D> {
         let epoch = head.map_or(0, epoch_of);
         let restate = replay.capacity.is_none() && found.is_some();
         let capacity = replay.capacity.unwrap_or(capacity);
-        let extent_remote::State { extents: Local { extents, .. }, root, spent, .. } = replay;
+        let extent_bucket::State { extents: Local { extents, .. }, root, spent, .. } = replay;
         // Past every extent of its own the branch holds: fxfs looks for what a crash left below
         // it (`Allocator::open`). Not the footers' next sequence, which their writers stamped
         // past their own floors (`Chain::close`), the next floor being the uploader's to say.
@@ -1116,10 +1116,10 @@ impl Places for Local {
 }
 
 /// cladefs: the footer of `extent`'s own file, the object it is in the bucket: it names the extent,
-/// so that one copied to another's key is refused (`extent_remote::layout::own_extent`,
+/// so that one copied to another's key is refused (`extent_bucket::layout::own_extent`,
 /// TASK-411.3).
 fn own_footer(extent: ExtentId) -> Vec<u8> {
-    extent_remote::layout::encode(&extent)
+    extent_bucket::layout::encode(&extent)
 }
 
 /// cladefs: the files at the paths of `leaving` leave a store's directory `dir`, the objects in the
@@ -1991,7 +1991,7 @@ impl<D: Dir> Store<D> {
     /// The steps of the next commit, which sets `root`, if any, in their order: each takes what
     /// those before it leave.
     /// cladefs: its seal, and what it writes of it, each in a span of its own, `commit.seal` and
-    /// `commit.write` (`extent_remote::trace`, TASK-258).
+    /// `commit.write` (`extent_bucket::trace`, TASK-258).
     fn commit_in(&self, state: &mut State<D::File>, root: Option<&[u8]>) -> Result<(), Error> {
         let epoch = state.epoch + 1;
         let seal = trace::Span::start("commit.seal");
@@ -2746,7 +2746,7 @@ impl<D: Dir> Store<D> {
             let mut leaving = Vec::new();
             for queued in whole {
                 let footer = &queued.footer;
-                let key = extent_remote::layout::segment(self.branch, footer.segment, footer.epoch);
+                let key = extent_bucket::layout::segment(self.branch, footer.segment, footer.epoch);
                 let own: Vec<_> = footer.own().collect();
                 let segment = SegmentId { branch: self.branch.id, number: queued.number };
                 leaving.extend(state.acknowledge(segment, (&key, !queued.restamped), &own));
@@ -2769,7 +2769,7 @@ impl<D: Dir> Store<D> {
     /// then the files they made unreferenced go; and the raw files and logs of the segments framed
     /// whose commits are durable. It waits for no framing (TASK-165.9).
     ///
-    /// cladefs: in a span of its own, `store.flush` (`extent_remote::trace`, TASK-258): a durable
+    /// cladefs: in a span of its own, `store.flush` (`extent_bucket::trace`, TASK-258): a durable
     /// commit's, or of the commits ordered before, which a daemon's turn makes durable.
     pub fn flush(&self) -> Result<(), Error> {
         let span = trace::Span::start("store.flush");
@@ -3262,7 +3262,7 @@ impl<D: Dir> Store<D> {
 
     /// cladefs: the decoded state its bucket's layer shares, if it shares one (TASK-453).
     #[cfg(feature = "testing")]
-    pub fn extents_layer(&self) -> Result<Option<Arc<extent_remote::State>>, Error> {
+    pub fn extents_layer(&self) -> Result<Option<Arc<extent_bucket::State>>, Error> {
         Ok(self.state()?.extents.layer().cloned())
     }
 
@@ -3400,7 +3400,7 @@ mod tests {
                 let description = Description {
                     block_size: 4096,
                     capacity: 1 << 20,
-                    branch: extent_remote::layout::test_branch(1),
+                    branch: extent_bucket::layout::test_branch(1),
                 };
                 let store =
                     Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
@@ -3432,7 +3432,7 @@ mod tests {
                 let description = Description {
                     block_size: 4096,
                     capacity: 1 << 20,
-                    branch: extent_remote::layout::test_branch(1),
+                    branch: extent_bucket::layout::test_branch(1),
                 };
                 let store = Store::create(dir.clone(), description, Options::default()).unwrap();
                 let extent = |sequence| ExtentId::new(1, sequence);
@@ -3465,7 +3465,7 @@ mod tests {
         let description = Description {
             block_size: 4096,
             capacity: 1 << 20,
-            branch: extent_remote::layout::test_branch(1),
+            branch: extent_bucket::layout::test_branch(1),
         };
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         // Whether extent `sequence` is recorded as sealed after commit `epoch`.
@@ -3496,7 +3496,7 @@ mod tests {
         let description = Description {
             block_size: 4096,
             capacity: 1 << 20,
-            branch: extent_remote::layout::test_branch(1),
+            branch: extent_bucket::layout::test_branch(1),
         };
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();
@@ -3511,7 +3511,7 @@ mod tests {
         let description = Description {
             block_size: 4096,
             capacity: 1 << 20,
-            branch: extent_remote::layout::test_branch(1),
+            branch: extent_bucket::layout::test_branch(1),
         };
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();

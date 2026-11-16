@@ -59,7 +59,7 @@ const REVOKED: &str = "revoked";
 /// for it.
 const DESTROYED: &str = "destroyed";
 
-/// A KMS on the host's filesystem: a fake, for tests and development, as `extent_remote`'s local
+/// A KMS on the host's filesystem: a fake, for tests and development, as `extent_bucket`'s local
 /// bucket is one of S3. Under its directory, each tenant has one of its own, named by its ID in
 /// decimal, holding each version of its KEK, a file of [`KEY_LEN`] bytes named `<version>.kek`,
 /// and the files [`REVOKED`] and [`DESTROYED`] when it is so. Its files are only its owner's to

@@ -26,7 +26,7 @@ use crate::extents::PublicReach;
 use crate::pages::{ArenaId, page_size};
 use crate::profile::Recorder;
 use crate::stats::{self, Counter};
-use extent_remote::trace;
+use extent_bucket::trace;
 use extent_store::shared::SharedLock;
 use extent_store::{HostDir, Store};
 use futures::future::BoxFuture;
@@ -186,7 +186,7 @@ fn extent_cache() -> &'static ExtentCache {
 /// or the arenas past the total's, give back (TASK-50.3). Returns the bytes it evicted. Evicted
 /// pages are read in again as they are touched.
 ///
-/// cladefs: in a span of its own, `cache.relief` (`extent_remote::trace`, TASK-258).
+/// cladefs: in a span of its own, `cache.relief` (`extent_bucket::trace`, TASK-258).
 pub(crate) fn evict_least_used(arena: Option<ArenaId>, enough: impl FnMut(u64) -> bool) -> u64 {
     let span = trace::Span::start("cache.relief");
     if let Some(arena) = arena {
@@ -854,7 +854,7 @@ impl CachedExtent {
         bytes
     }
 
-    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`extent_remote::trace`,
+    /// cladefs: the span of a page-in of its part `pages`, `cache.page_in` (`extent_bucket::trace`,
     /// TASK-258): its reads, from the store or the bucket, its children.
     fn page_in_span(&self, pages: &Range<u64>) -> trace::Span {
         let span = trace::Span::start("cache.page_in");

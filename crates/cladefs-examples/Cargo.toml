@@ -16,7 +16,7 @@ anyhow.workspace = true
 extent_frame.workspace = true
 extent_keys.workspace = true
 # store-bench's stores opened as a host with a KMS opens them (TASK-411.5).
-extent_remote.workspace = true
+extent_bucket.workspace = true
 # store-bench's stores kept in no bucket, encrypted under the tests' DEK (TASK-411.28).
 extent_store = { workspace = true, features = ["unkept"] }
 # fxfs-metabench's attributes, as Fxfs's API takes them.

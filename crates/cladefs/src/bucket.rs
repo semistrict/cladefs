@@ -9,19 +9,19 @@
 //!
 //! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
 //! chooses alike, the extent daemon, the cladefs CLI's mounts and `cladefsctl`
-//! (`extent_remote::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
+//! (`extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
 //! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
 //! (`CLADEFS_EXTENTD_REMOTE`), made on each tenant's first use (TASK-411.27); else none, which every
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
-use extent_remote::bucket_kms::BucketKms;
-use extent_remote::cache::Cache;
-use extent_remote::fetch::{self, Budget, Limits, Priority};
-use extent_remote::keys;
-use extent_remote::layout::Location;
-use extent_remote::object_bucket::ObjectBucket;
+use extent_bucket::bucket_kms::BucketKms;
+use extent_bucket::cache::Cache;
+use extent_bucket::fetch::{self, Budget, Limits, Priority};
+use extent_bucket::keys;
+use extent_bucket::layout::Location;
+use extent_bucket::object_bucket::ObjectBucket;
 use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
@@ -85,7 +85,7 @@ impl Host {
 /// logged.
 pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
     use crate::Errno;
-    use extent_remote::Error;
+    use extent_bucket::Error;
     match failure {
         Failure::Bucket(Error::Fenced | Error::Deleted | Error::Point) => Some(Errno::EROFS),
         Failure::Bucket(Error::Stale | Error::Diverged) => Some(Errno::ESTALE),
@@ -124,7 +124,7 @@ pub fn runtime() -> Runtime {
 }
 
 /// cladefs: the host's KMS, as its environment chooses it the first time it is asked for
-/// (`extent_remote::bucket_kms::from_env`: `CLADEFS_KMS`'s, else the bucket KMS over the host's
+/// (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, else the bucket KMS over the host's
 /// bucket given a master key, TASK-411.27), or [`set_kms`] set it before (TASK-411.3). None chosen,
 /// or one that can't be had (a bad `CLADEFS_KMS`, a master key unreadable, or given with no host's
 /// bucket to keep tenants' KEKs in), it is a KMS refusing every call, naming why: the host then
@@ -153,22 +153,22 @@ pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
 
 /// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
 fn host_keys() -> &'static Result<HostKeys, String> {
-    KMS.get_or_init(|| match extent_remote::bucket_kms::from_env(host_bucket) {
+    KMS.get_or_init(|| match extent_bucket::bucket_kms::from_env(host_bucket) {
         Ok(chosen) => {
             Ok(HostKeys { kms: host_kms(chosen.shared()), bucket: chosen.bucket().cloned() })
         }
         // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
         // tenant's KEK made on its first use, which the tests' readers share
-        // (`extent_remote::keys::testing`, TASK-411.28).
+        // (`extent_bucket::keys::testing`, TASK-411.28).
         #[cfg(test)]
-        Err(why) if why == extent_remote::bucket_kms::no_kms() => {
-            let kms = extent_remote::keys::testing::kms();
+        Err(why) if why == extent_bucket::bucket_kms::no_kms() => {
+            let kms = extent_bucket::keys::testing::kms();
             Ok(HostKeys { kms: host_kms(kms), bucket: None })
         }
         // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
         // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
         #[cfg(all(feature = "tests-kms", not(test)))]
-        Err(why) if why == extent_remote::bucket_kms::no_kms() => Ok(testing::host_keys()),
+        Err(why) if why == extent_bucket::bucket_kms::no_kms() => Ok(testing::host_keys()),
         Err(why) => {
             log::error!("cladefs: the host's KMS: {why}");
             Err(why)
@@ -278,7 +278,7 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
     forgotten
 }
 
-/// cladefs: shreds `cell` in `bucket` ([`extent_remote::cell::shred`]): its wrapped KEKs taken out of
+/// cladefs: shreds `cell` in `bucket` ([`extent_bucket::cell::shred`]): its wrapped KEKs taken out of
 /// its object, by a conditional update; then has this host forget its keys ([`forget`]). Shredded
 /// already, its object stays as it is, and the host forgets them all the same: what each host told
 /// of the shredding does. Returns how many generations of its KEK it took out, and what the host
@@ -286,22 +286,22 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
 pub async fn shred_cell(
     bucket: &ObjectBucket,
     cell: crate::Cell,
-) -> Result<(usize, Forgotten), extent_remote::Error> {
-    let removed = extent_remote::cell::shred(bucket, cell).await?;
-    let why = extent_remote::cell::shredded(cell).to_string();
+) -> Result<(usize, Forgotten), extent_bucket::Error> {
+    let removed = extent_bucket::cell::shred(bucket, cell).await?;
+    let why = extent_bucket::cell::shredded(cell).to_string();
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
 /// cladefs: shreds `tenant` under the host's bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
 /// KEK object in the host's bucket replaced by a tombstone, so that no key its KEK wrapped unwraps
-/// anywhere and none is made it again ([`extent_remote::bucket_kms::destroy`]); then has this host
+/// anywhere and none is made it again ([`extent_bucket::bucket_kms::destroy`]); then has this host
 /// forget its keys ([`forget`]). Shredded already, it finds it so, and the host forgets them all
 /// the same: what each host told does. Refused, changing nothing, if the host's KMS is not the
 /// bucket KMS: another KMS's tenant is shredded by destroying its KEK there, then
 /// `ForgetTenantKeys`. Only as strong as the bucket keeps no older version of the KEK object.
 pub async fn shred_tenant(
     tenant: u64,
-) -> Result<(extent_remote::bucket_kms::Destroyed, Forgotten), String> {
+) -> Result<(extent_bucket::bucket_kms::Destroyed, Forgotten), String> {
     let Some(kms) = bucket_kms() else {
         return Err(format!(
             "tenant {tenant}: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no \
@@ -428,7 +428,7 @@ static RUNTIME: std::sync::LazyLock<tokio::runtime::Runtime> = std::sync::LazyLo
 });
 
 /// Reads the extents a store holds whose data is in object storage (`extent_store::Store::adopt`),
-/// at their locations there, as the store names them: a fetcher (`extent_remote::fetch::Fetcher`)
+/// at their locations there, as the store names them: a fetcher (`extent_bucket::fetch::Fetcher`)
 /// that is the host's, its reads on the bucket runtime, which their uploads use too, under the
 /// host's budget of GETs and memory, asking the host's peers first if it has any.
 pub struct HostFetcher {
@@ -540,10 +540,10 @@ mod tests {
     use crate::test_checkpoints::checkpointed;
     use crate::test_data::noise;
     use crate::{ExtentId, ExtentStore, VolatileSlice};
-    use extent_remote::cache::Cache;
-    use extent_remote::object_bucket::ObjectBucket;
-    use extent_remote::testing::read;
-    use extent_remote::{branch, recover};
+    use extent_bucket::cache::Cache;
+    use extent_bucket::object_bucket::ObjectBucket;
+    use extent_bucket::testing::read;
+    use extent_bucket::{branch, recover};
     use object_store::memory::InMemory;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -662,12 +662,12 @@ mod tests {
             (vec![(2, pattern(2, 2 * BLOCK)), (3, large.clone())], Some(b"second".to_vec()))
         );
         // Extent 4, written and freed between two uploads, never was.
-        let keys = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, "")).unwrap();
+        let keys = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, "")).unwrap();
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
-                    extent_remote::layout::kind(&meta.key),
-                    extent_remote::layout::Kind::Extent { .. }
+                    extent_bucket::layout::kind(&meta.key),
+                    extent_bucket::layout::Kind::Extent { .. }
                 ))
                 .count(),
             1
@@ -676,8 +676,8 @@ mod tests {
             .iter()
             .filter(|meta| {
                 matches!(
-                    extent_remote::layout::kind(&meta.key),
-                    extent_remote::layout::Kind::Segment { .. }
+                    extent_bucket::layout::kind(&meta.key),
+                    extent_bucket::layout::Kind::Segment { .. }
                 )
             })
             .count();
@@ -687,16 +687,16 @@ mod tests {
         let store = reopened(dir.path().join("store"), idle()).unwrap();
         // Its guest mints from the second writer's range.
         let info = store.info().unwrap();
-        assert_eq!(info.sequence_floor, 2 << extent_remote::EPOCH_SHIFT);
+        assert_eq!(info.sequence_floor, 2 << extent_bucket::EPOCH_SHIFT);
         // What the store holds ends far below: the guest looks for what a crash left there only.
-        assert!(info.next_sequence < 1 << extent_remote::EPOCH_SHIFT, "{info:?}");
-        let keys = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, "")).unwrap();
+        assert!(info.next_sequence < 1 << extent_bucket::EPOCH_SHIFT, "{info:?}");
+        let keys = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, "")).unwrap();
         // No segment more: the store takes the branch by its head alone.
         assert_eq!(
             keys.iter()
                 .filter(|meta| matches!(
-                    extent_remote::layout::kind(&meta.key),
-                    extent_remote::layout::Kind::Segment { .. }
+                    extent_bucket::layout::kind(&meta.key),
+                    extent_bucket::layout::Kind::Segment { .. }
                 ))
                 .count(),
             segments
@@ -715,7 +715,7 @@ mod tests {
     /// went, and the store took the branch again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
-        use extent_remote::{Commit, SegmentBuilder, Writer};
+        use extent_bucket::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let (branch, token) = (crate::host_store::new_alone(), crate::host_store::token().unwrap());
@@ -740,7 +740,7 @@ mod tests {
         futures::executor::block_on(async {
             before.upload(segments[1]).await.unwrap();
             before.upload(segments[0]).await.unwrap();
-            assert_eq!(before.acknowledge().await, Err(extent_remote::Error::Fenced));
+            assert_eq!(before.acknowledge().await, Err(extent_bucket::Error::Fenced));
         });
         // The store's commit is the branch's, its head as it was.
         write(&store, 1, &pattern(1, BLOCK));
@@ -784,9 +784,9 @@ mod tests {
         let gated = Arc::new(Gated::over(objects.clone()));
         let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
         let bucket = Arc::new(ObjectBucket::new(objects, ""));
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         let cache = Some(Arc::new(Cache::open(&dir.path().join("cache"), 1 << 30, 0).unwrap()));
@@ -808,14 +808,14 @@ mod tests {
         checkpointed(&store, &bucket);
         collect(2);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_remote::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .collect();
         let moves =
-            extent_remote::layout::moves_under(&extent_remote::layout::segments(branch)).unwrap();
-        let first = extent_remote::layout::segment(branch, 0, 1);
+            extent_bucket::layout::moves_under(&extent_bucket::layout::segments(branch)).unwrap();
+        let first = extent_bucket::layout::segment(branch, 0, 1);
         assert!(keys.iter().any(|key| key.starts_with(&moves)), "{keys:?}");
         assert!(!keys.contains(&first), "{keys:?}");
         // The host dies: its disk copied as it is, its cache not, its store cut off.
@@ -864,9 +864,9 @@ mod tests {
         const EXTENT: usize = 64 * BLOCK;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         // The parent's segment, of extents 1 to 16, which don't compress, freed but 1 to 3; its
@@ -900,24 +900,24 @@ mod tests {
         collect(3);
         collect(4);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_remote::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .filter(|key| {
                     matches!(
-                        extent_remote::layout::kind(key),
-                        extent_remote::layout::Kind::Moves { .. }
-                            | extent_remote::layout::Kind::Segment { .. }
+                        extent_bucket::layout::kind(key),
+                        extent_bucket::layout::Kind::Moves { .. }
+                            | extent_bucket::layout::Kind::Segment { .. }
                     ) && key.starts_with(&branch.cell.prefix())
                 })
                 .collect();
-        let sealed = extent_remote::layout::segments(branch);
-        let once = extent_remote::layout::moves_under(&sealed).unwrap();
-        let twice = extent_remote::layout::moves_under(&once).unwrap();
+        let sealed = extent_bucket::layout::segments(branch);
+        let once = extent_bucket::layout::moves_under(&sealed).unwrap();
+        let twice = extent_bucket::layout::moves_under(&once).unwrap();
         let compacted: Vec<String> = (keys.iter())
             .filter(|key| key.starts_with(&once))
-            .filter_map(|key| extent_remote::layout::moved_from(key))
+            .filter_map(|key| extent_bucket::layout::moved_from(key))
             .collect();
         assert_eq!(compacted.len(), 1, "{keys:?}");
         assert!(!keys.contains(&compacted[0]), "{keys:?}");
@@ -935,9 +935,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
         let collect = |holder| {
-            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap()
         };
         let cache =
@@ -969,21 +969,21 @@ mod tests {
         collect(3);
         collect(4);
         let keys: Vec<String> =
-            futures::executor::block_on(extent_remote::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| meta.key)
                 .filter(|key| {
                     matches!(
-                        extent_remote::layout::kind(key),
-                        extent_remote::layout::Kind::Moves { .. }
-                            | extent_remote::layout::Kind::Segment { .. }
+                        extent_bucket::layout::kind(key),
+                        extent_bucket::layout::Kind::Moves { .. }
+                            | extent_bucket::layout::Kind::Segment { .. }
                     )
                 })
                 .collect();
         let once =
-            extent_remote::layout::moves_under(&extent_remote::layout::segments(branch)).unwrap();
-        let twice = extent_remote::layout::moves_under(&once).unwrap();
+            extent_bucket::layout::moves_under(&extent_bucket::layout::segments(branch)).unwrap();
+        let twice = extent_bucket::layout::moves_under(&once).unwrap();
         assert!(keys.iter().any(|key| key.starts_with(&twice)), "{keys:?}");
         assert!(!keys.iter().any(|key| key.starts_with(&once)), "{keys:?}");
         // The store, open all along, reads it there, and so does its follower.
@@ -997,13 +997,13 @@ mod tests {
     }
 
     /// The footers of `branch`'s segments in `bucket`, in order.
-    fn footers(bucket: &ObjectBucket, branch: crate::Branch) -> Vec<extent_remote::layout::Footer> {
-        use extent_remote::layout;
+    fn footers(bucket: &ObjectBucket, branch: crate::Branch) -> Vec<extent_bucket::layout::Footer> {
+        use extent_bucket::layout;
         futures::executor::block_on(async {
-            let listed = extent_remote::Bucket::list(bucket, &layout::segments(branch)).await;
+            let listed = extent_bucket::Bucket::list(bucket, &layout::segments(branch)).await;
             let mut footers = Vec::new();
             for meta in listed.unwrap() {
-                let object = extent_remote::Bucket::get(bucket, &meta.key).await.unwrap();
+                let object = extent_bucket::Bucket::get(bucket, &meta.key).await.unwrap();
                 footers.push(layout::footer(&object.bytes).unwrap());
             }
             footers
@@ -1053,8 +1053,8 @@ mod tests {
         let opened = crate::host_store::create_unmade(
             &path,
             1 << 30,
-            crate::host_store::BranchOf::Named(extent_remote::layout::test_branch(7)),
-            extent_remote::cell::Kind::Fxfs,
+            crate::host_store::BranchOf::Named(extent_bucket::layout::test_branch(7)),
+            extent_bucket::cell::Kind::Fxfs,
             Some(&url_of(&bucket)),
             options,
         );
@@ -1116,7 +1116,7 @@ mod tests {
             &path,
             1 << 30,
             crate::host_store::BranchOf::Named(branch),
-            extent_remote::cell::Kind::Fxfs,
+            extent_bucket::cell::Kind::Fxfs,
             idle(),
         )
         .unwrap();
@@ -1223,7 +1223,7 @@ mod tests {
     /// What the stores' maps of their extents hold now, as the extent daemon counts it
     /// (`extentd::process::extents_held`, Linux's): what the stores hold of their own, and the
     /// decoded states they share, each once.
-    fn extents_counted() -> (extent_store::Own, extent_remote::recovery::Held) {
+    fn extents_counted() -> (extent_store::Own, extent_bucket::recovery::Held) {
         (extent_store::own_held(), crate::host_store::decoded_held())
     }
 
@@ -1232,7 +1232,7 @@ mod tests {
     /// 1, 10, 20, 50 and 100 of them open, in all, for each, for each opened since the count before
     /// (marginal), and that for each extent of the base; and how long each of those took to open.
     /// TASK-453: each past the first holds [`IDLE_FORK_BYTES`] at most, the decoded state they
-    /// share one, of the base's extents, counted at [`extent_remote::recovery::ENTRY_BYTES`] an
+    /// share one, of the base's extents, counted at [`extent_bucket::recovery::ENTRY_BYTES`] an
     /// entry, which covers what the first held more than the others, and a map of them built
     /// sharing nothing, as the writer's of a base written live is. Then what closing them all
     /// leaves held over the heap before them; opened and closed again, the heap is to the byte
@@ -1241,7 +1241,7 @@ mod tests {
     /// 4,096: what it holds more, what closing it lets go of more than closing an idle one does,
     /// what it holds of its own, counted ([`extent_store::Own::bytes`]), covers. And one more frees
     /// every 32nd extent it inherited, each its writer's map's change apart, a path of its nodes
-    /// copied ([`extent_remote::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
+    /// copied ([`extent_bucket::recovery::RUN_BYTES`]), and checkpoints: what closing it lets go of
     /// more than an idle one does, counted too; and opened again, from its checkpoint, its map made
     /// of the base's, what the heap holds more than an idle fork the bucket's decoded states count
     /// more.
@@ -1294,7 +1294,7 @@ mod tests {
         let settled = || {
             extent_store::pages::shared().write_back_all().unwrap();
             extent_store::pages::shared().evict_to(0);
-            extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+            extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
             held()
         };
 
@@ -1314,7 +1314,7 @@ mod tests {
         let (layers, entries) =
             (decoded.states - decoded_before.states, decoded.entries - decoded_before.entries);
         // What this base's bucket holds decoded, whenever it decoded it.
-        let shared = extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+        let shared = extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
         let (mut last, mut last_held, mut last_took) = (0, 0, Duration::ZERO);
         let first = samples[0].1;
         for &(open, held, took) in &samples {
@@ -1354,13 +1354,13 @@ mod tests {
         });
         let keys: usize = state.extents.iter().map(|(_, at)| at.key.len()).sum();
         let weighed = held();
-        let mut rebuilt = extent_remote::State::new(branch).extents;
+        let mut rebuilt = extent_bucket::State::new(branch).extents;
         for (extent, at) in &state.extents {
             rebuilt.insert(*extent, at.clone());
         }
         let unshared = held() - weighed;
         drop(rebuilt);
-        let bound = state.extents.len() as u64 * extent_remote::recovery::ENTRY_BYTES;
+        let bound = state.extents.len() as u64 * extent_bucket::recovery::ENTRY_BYTES;
         assert!(unshared <= bound, "a map of the extents unshared: {unshared} bytes, of {bound}");
 
         // Closed, opened and closed again.
@@ -1439,7 +1439,7 @@ mod tests {
         // Opened again, from its checkpoint, beside an idle fork holding the base's map: what
         // the heap holds more than an idle fork, its map made of the base's, counted.
         let idle = open(&paths[0]);
-        let decoded = || extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+        let decoded = || extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
         let (heap_before, decoded_before) = (settled(), decoded());
         let reopened = open(&freeing);
         let (heap_after, decoded_after) = (settled(), decoded());
@@ -1500,8 +1500,8 @@ mod tests {
                 assert!(forks[0].shares_extents_with(other), "forks {name}: their maps");
             }
             let one =
-                extent_remote::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
-            let decoded = || extent_remote::Bucket::decoded(&*bucket).unwrap().held();
+                extent_bucket::recovery::Held { states: 1, entries: EXTENTS as usize, runs: 0 };
+            let decoded = || extent_bucket::Bucket::decoded(&*bucket).unwrap().held();
             assert_eq!(decoded(), one, "forks {name}: the states they share, decoded");
             let read = |store: &ExtentStore, extent: ExtentId| {
                 let mut data = vec![0; BLOCK];
@@ -1671,7 +1671,7 @@ mod tests {
     /// as those objects, which the store's reads read there with the bucket's gone (TASK-165.8).
     #[test]
     fn uploaded_segments_are_the_stores_files() {
-        use extent_remote::layout::{self, Footer};
+        use extent_bucket::layout::{self, Footer};
         let dir = tempfile::tempdir().unwrap();
         let memory = Arc::new(InMemory::new());
         let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
@@ -1699,10 +1699,10 @@ mod tests {
         // The bucket's objects under `prefix`.
         let objects = |prefix: String| -> Vec<Vec<u8>> {
             futures::executor::block_on(async {
-                let listed = extent_remote::Bucket::list(&*bucket, &prefix).await.unwrap();
+                let listed = extent_bucket::Bucket::list(&*bucket, &prefix).await.unwrap();
                 let mut objects = Vec::new();
                 for meta in listed {
-                    let object = extent_remote::Bucket::get(&*bucket, &meta.key).await.unwrap();
+                    let object = extent_bucket::Bucket::get(&*bucket, &meta.key).await.unwrap();
                     objects.push(object.bytes);
                 }
                 objects
@@ -1751,7 +1751,7 @@ mod tests {
     /// storage under the CRC it fails (TASK-153.11).
     #[test]
     fn files_with_flipped_bytes_are_not_uploaded() {
-        use extent_remote::layout;
+        use extent_bucket::layout;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
@@ -1774,7 +1774,7 @@ mod tests {
         extent_store::pages::shared().evict_to(0);
         assert_eq!(store.commit(None), Err(crate::error::Errno::EIO));
         let listed = |prefix: String| -> Vec<String> {
-            let listed = extent_remote::Bucket::list(&*bucket, &prefix);
+            let listed = extent_bucket::Bucket::list(&*bucket, &prefix);
             futures::executor::block_on(listed).unwrap().into_iter().map(|meta| meta.key).collect()
         };
         assert_eq!(listed(layout::extents(branch)), Vec::<String>::new());
@@ -1790,7 +1790,7 @@ mod tests {
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), idle()).unwrap();
         write(&store, 1, &pattern(1, BLOCK));
         store.commit(None).unwrap();
-        let other = extent_remote::Writer::open(
+        let other = extent_bucket::Writer::open(
             bucket.clone(),
             store.branch(),
             2,
@@ -1827,7 +1827,7 @@ mod tests {
         // The first, restarted, takes it back no more: its token is the earlier.
         let refused = reopened(&first_path, idle()).err().and_then(|err| err.errno());
         assert_eq!(refused, Some(crate::Errno::ESTALE));
-        let head = futures::executor::block_on(extent_remote::head::get(&*bucket, branch));
+        let head = futures::executor::block_on(extent_bucket::head::get(&*bucket, branch));
         assert_eq!(head.unwrap().unwrap().token, 2);
 
         // Placed later still, it does.
@@ -1860,13 +1860,13 @@ mod tests {
         write(&second, 2, &pattern(2, BLOCK));
         second.commit(Some(b"second")).unwrap();
         drop(second);
-        let state = futures::executor::block_on(extent_remote::recover(&*bucket, branch, None))
+        let state = futures::executor::block_on(extent_bucket::recover(&*bucket, branch, None))
             .unwrap()
             .state;
         assert_eq!(state.root, Some(b"second".to_vec()));
 
         ExtentStore::delete(&second_path, Some(&bucket)).unwrap();
-        let deleted = futures::executor::block_on(extent_remote::branch::record(&*bucket, branch));
+        let deleted = futures::executor::block_on(extent_bucket::branch::record(&*bucket, branch));
         assert!(deleted.unwrap().unwrap().deleted, "the branch lives");
     }
 
@@ -1879,11 +1879,11 @@ mod tests {
         let options = extent_store::upload::Options { token: 9, ..idle() };
         let store =
             kept_in(dir.path().join("store"), (1 << 30, None), &bucket.clone(), options).unwrap();
-        let head = futures::executor::block_on(extent_remote::head::get(&*bucket, store.branch()));
+        let head = futures::executor::block_on(extent_bucket::head::get(&*bucket, store.branch()));
         let head = head.unwrap().unwrap();
         // cladefs: its cell taken with the host's token, its branch's head with the cell's epoch
         // (TASK-364).
-        let cell = extent_remote::cell::read(&*bucket, store.branch().cell);
+        let cell = extent_bucket::cell::read(&*bucket, store.branch().cell);
         let cell = futures::executor::block_on(cell).unwrap().unwrap();
         assert_eq!((cell.token, cell.holder, cell.epoch, head.token), (9, 9, 1, 1));
     }
@@ -1966,13 +1966,13 @@ mod tests {
 
     impl Hold {
         fn holds(&self, key: &str) -> bool {
-            use extent_remote::layout::{Kind, kind};
+            use extent_bucket::layout::{Kind, kind};
             match self {
                 Hold::Nothing => false,
                 Hold::Segments => {
                     matches!(
-                        extent_remote::layout::kind(key),
-                        extent_remote::layout::Kind::Segment { .. }
+                        extent_bucket::layout::kind(key),
+                        extent_bucket::layout::Kind::Segment { .. }
                     )
                 }
                 Hold::SegmentsFrom(from) => {
@@ -2283,7 +2283,7 @@ mod tests {
         options: extent_store::upload::Options,
         failing: fn(&Gated) -> &std::sync::atomic::AtomicBool,
     ) {
-        use extent_remote::object_bucket::Request;
+        use extent_bucket::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::new());
         let bucket = Arc::new(ObjectBucket::new(gated.clone(), ""));
@@ -2449,8 +2449,8 @@ mod tests {
             assert_eq!(commit.join().unwrap(), Ok(()));
         }
         // The store's segments closed, in the bucket: those of the commits waiting.
-        let prefix = extent_remote::layout::segments(branch);
-        let closed = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, &prefix));
+        let prefix = extent_bucket::layout::segments(branch);
+        let closed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix));
         let closed = closed.unwrap();
         assert_eq!(closed.len(), extent_store::upload::IN_FLIGHT);
         store.wait_uploaded().unwrap();
@@ -2465,7 +2465,7 @@ mod tests {
     /// their uploads, are all in the branch, which another host's empty store takes, losing the
     /// lag's commits at most; and writes on. In the objects of `store` under `prefix`.
     fn survives_its_hosts_loss(store: Arc<dyn object_store::ObjectStore>, prefix: &str) {
-        use extent_remote::layout;
+        use extent_bucket::layout;
         use std::sync::atomic::Ordering::Relaxed;
         let dir = tempfile::tempdir().unwrap();
         let gated = Arc::new(Gated::over(store.clone()));
@@ -2517,7 +2517,7 @@ mod tests {
             let footers = bytes.filter_map(|bytes| layout::footer::<layout::Footer>(&bytes).ok());
             footers.flat_map(|footer| footer.contents.commits).collect()
         };
-        while !framed().iter().any(|&tag| extent_remote::layout::epoch_of(tag) == last) {
+        while !framed().iter().any(|&tag| extent_bucket::layout::epoch_of(tag) == last) {
             // Returned, the commit waiting says the uploader failed, which never framed it.
             assert!(!waiting.is_finished(), "the commit waiting returned, its segment not framed");
             std::thread::yield_now();
@@ -2600,7 +2600,7 @@ mod tests {
     #[test]
     #[ignore = "a measurement against CLADEFS_PHASES_BUCKET's bucket"]
     fn bucket_round_trips_by_phase() {
-        use extent_remote::object_bucket::Request;
+        use extent_bucket::object_bucket::Request;
         let url =
             std::env::var("CLADEFS_PHASES_BUCKET").expect("CLADEFS_PHASES_BUCKET names a bucket");
         let url = format!("{}/phases-{:016x}/", url.trim_end_matches('/'), rand::random::<u64>());
@@ -2671,7 +2671,7 @@ mod tests {
     /// checkpoint is due and no fork made. On GCS each request is a round trip.
     #[test]
     fn durable_commits_cost_a_create_and_a_head_swap() {
-        use extent_remote::object_bucket::Request;
+        use extent_bucket::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let store =
@@ -2704,8 +2704,8 @@ mod tests {
 
     #[test]
     fn takes_recover_their_branches_once_by_their_segments_tails() {
-        use extent_remote::layout;
-        use extent_remote::object_bucket::Request;
+        use extent_bucket::layout;
+        use extent_bucket::object_bucket::Request;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let lost =
@@ -2728,14 +2728,14 @@ mod tests {
             .map(|&request| (request.name(), after.requests(request) - before.requests(request)))
             .collect();
         let sizes: std::collections::BTreeMap<_, _> =
-            futures::executor::block_on(extent_remote::Bucket::list(&*bucket, ""))
+            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""))
                 .unwrap()
                 .into_iter()
                 .map(|meta| (meta.key, meta.size))
                 .collect();
         let tails: u64 = (0..4)
             .map(|segment| {
-                sizes[&layout::segment(branch, segment, 1)].min(extent_remote::object::TAIL)
+                sizes[&layout::segment(branch, segment, 1)].min(extent_bucket::object::TAIL)
             })
             .sum();
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
@@ -2775,7 +2775,7 @@ mod tests {
     #[ignore = "needs an S3 bucket: scripts/test-rustfs.sh, CI's object-stores job"]
     fn rustfs_branches_survive_their_hosts_loss() {
         let url = std::env::var("CLADEFS_S3_URL").expect("CLADEFS_S3_URL names the bucket to use");
-        let (store, prefix) = extent_remote::object_bucket::object_store_at(&url).unwrap();
+        let (store, prefix) = extent_bucket::object_bucket::object_store_at(&url).unwrap();
         // A prefix of the run's own, in a bucket runs share.
         let prefix = format!("{prefix}/{:016x}", rand::random::<u64>());
         survives_its_hosts_loss(store, prefix.trim_start_matches('/'));
@@ -2892,7 +2892,7 @@ mod tests {
         // Each request of the bucket the read made: its kind, and the request it names.
         let mut made: Vec<(String, String)> = (lines.lock().unwrap().iter())
             .filter_map(|line| {
-                line.strip_prefix("DEBUG extent_remote::object_bucket: object storage: ")
+                line.strip_prefix("DEBUG extent_bucket::object_bucket: object storage: ")
             })
             .map(|line| {
                 let kind = line.split(' ').next().unwrap().to_owned();
@@ -2912,7 +2912,7 @@ mod tests {
         branch: crate::Branch,
         meanwhile: impl FnOnce(),
     ) -> Result<ExtentStore, crate::Error> {
-        gated.hold.send_replace(Hold::First(extent_remote::layout::head(branch)));
+        gated.hold.send_replace(Hold::First(extent_bucket::layout::head(branch)));
         let opening = std::thread::spawn(move || reopened(path, idle()));
         gated.wait_held(1);
         meanwhile();
@@ -2927,7 +2927,7 @@ mod tests {
         let description =
             extent_store::Description { block_size: BLOCK as u32, capacity: 1 << 30, branch };
         let volume =
-            extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs };
+            extent_store::Volume { name: "root".into(), kind: extent_bucket::cell::Kind::Fxfs };
         extent_store::create_host(path, description, &url_of(bucket), volume).unwrap();
         extent_store::made_host(path).unwrap();
     }
@@ -3118,9 +3118,9 @@ mod tests {
         drop(point);
         delete(&dir.path().join("ours"));
         delete(&path);
-        let options = extent_remote::collector::Options { compact_below: 0.5, grace: 0 };
+        let options = extent_bucket::collector::Options { compact_below: 0.5, grace: 0 };
         for holder in 1..=2 {
-            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap();
         }
         // What this process cached of the extents goes: the fork reads them from the bucket.
@@ -3183,9 +3183,9 @@ mod tests {
         drop(point);
         delete(&dir.path().join("ours"));
         delete(&path);
-        let options = extent_remote::collector::Options { compact_below: 0.0, grace: 0 };
+        let options = extent_bucket::collector::Options { compact_below: 0.0, grace: 0 };
         for holder in 1..=2 {
-            let pass = extent_remote::collector::collect(&*bucket, holder, &options);
+            let pass = extent_bucket::collector::collect(&*bucket, holder, &options);
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
@@ -3222,7 +3222,7 @@ mod tests {
             let refused = refused.map(drop).map_err(|err| err.errno());
             assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
             let cell =
-                futures::executor::block_on(extent_remote::cell::read(&*bucket, branch.cell));
+                futures::executor::block_on(extent_bucket::cell::read(&*bucket, branch.cell));
             assert_eq!(cell, Ok(None), "{name}");
         }
     }
@@ -3295,7 +3295,7 @@ mod tests {
 
         kms.destroy(1).unwrap();
         let why = "tenant 1: its KEK is destroyed";
-        let forgotten = crate::bucket::forget(extent_remote::keys::Scope::Tenant(1), why);
+        let forgotten = crate::bucket::forget(extent_bucket::keys::Scope::Tenant(1), why);
         assert_eq!(
             (forgotten.stores, forgotten.rings, forgotten.extents),
             (1, 1, 1),
@@ -3327,8 +3327,8 @@ mod tests {
     /// tenant's reads on. Shredding it again finds it so.
     #[test]
     fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
-        use extent_remote::bucket_kms::Destroyed;
-        use extent_remote::layout;
+        use extent_bucket::bucket_kms::Destroyed;
+        use extent_bucket::layout;
         let url = "memory:///bucket-kms";
         let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
         // SAFETY: this test's process is its own (nextest), no store open yet.
@@ -3361,7 +3361,7 @@ mod tests {
         for (store, _, _) in &stores {
             let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
             assert_eq!(record.unwrap().unwrap().deks.len(), 1);
-            let cell = futures::executor::block_on(extent_remote::cell::read(
+            let cell = futures::executor::block_on(extent_bucket::cell::read(
                 &*bucket,
                 store.branch().cell,
             ));
@@ -3369,7 +3369,7 @@ mod tests {
         }
         let kek = |tenant| {
             let key = layout::kek(tenant);
-            let got = futures::executor::block_on(extent_remote::bucket::get(&*bucket, &key));
+            let got = futures::executor::block_on(extent_bucket::bucket::get(&*bucket, &key));
             got.map(|object| object.bytes)
         };
         assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
@@ -3394,7 +3394,7 @@ mod tests {
         let new = of(1);
         let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
         assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
-        let cell = futures::executor::block_on(extent_remote::cell::read(&*bucket, new.cell));
+        let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, new.cell));
         assert_eq!(cell, Ok(None));
         let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
         assert_eq!(again.0, Destroyed::Already);
@@ -3431,7 +3431,7 @@ mod tests {
         };
         let cell = |tenant| crate::host_store::new_cell(tenant);
         let listed = || {
-            let listed = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, ""));
+            let listed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, ""));
             listed.unwrap()
         };
         let store = |name: &str, tenant| {
@@ -3492,8 +3492,8 @@ mod tests {
         parent.commit_ordered(Some(b"root")).unwrap();
         let child = crate::host_store::fork_child(parent.branch());
         let checkpoints = || {
-            let prefix = extent_remote::layout::checkpoints(parent.branch());
-            futures::executor::block_on(extent_remote::Bucket::list(&*bucket, &prefix)).unwrap()
+            let prefix = extent_bucket::layout::checkpoints(parent.branch());
+            futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix)).unwrap()
         };
         assert_eq!(checkpoints().len(), 0);
         parent.fork_to(dir.path().join("child"), child).unwrap();
@@ -3506,10 +3506,10 @@ mod tests {
         let origin = record.origin().unwrap();
 
         assert_eq!(origin.parent, parent.branch());
-        let inherited = |state: &extent_remote::State| {
+        let inherited = |state: &extent_bucket::State| {
             let parents = [
-                extent_remote::layout::segments(parent.branch()),
-                extent_remote::layout::extents(parent.branch()),
+                extent_bucket::layout::segments(parent.branch()),
+                extent_bucket::layout::extents(parent.branch()),
             ];
             state
                 .extents
@@ -3542,8 +3542,8 @@ mod tests {
         // And one when the parent's uploader stops, the store closing.
         let parent_branch = parent.branch();
         drop(parent);
-        let prefix = extent_remote::layout::checkpoints(parent_branch);
-        let listed = futures::executor::block_on(extent_remote::Bucket::list(&*bucket, &prefix));
+        let prefix = extent_bucket::layout::checkpoints(parent_branch);
+        let listed = futures::executor::block_on(extent_bucket::Bucket::list(&*bucket, &prefix));
         assert_eq!(listed.unwrap().len(), 2);
     }
 
@@ -3562,7 +3562,7 @@ mod tests {
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         // The fork's segment, after the commit's, lands after the next.
-        let segment = |number| extent_remote::layout::segment(branch, number, 1);
+        let segment = |number| extent_bucket::layout::segment(branch, number, 1);
         let (forking, next) = (segment(1), segment(2));
         gated.hold.send_replace(Hold::Key(forking));
         let child = crate::host_store::fork_child(branch);
@@ -3580,7 +3580,7 @@ mod tests {
             })
         };
         let landed =
-            || futures::executor::block_on(extent_remote::Bucket::head(&*bucket, &next)).is_ok();
+            || futures::executor::block_on(extent_bucket::Bucket::head(&*bucket, &next)).is_ok();
         while !landed() && std::time::Instant::now() < deadline {
             std::thread::yield_now();
         }
@@ -3702,8 +3702,8 @@ mod tests {
     /// head is as it was, and no segment of it is written.
     #[test]
     fn branches_of_newer_formats_are_refused() {
-        use extent_remote::Bucket as _;
-        use extent_remote::bucket::PutMode;
+        use extent_bucket::Bucket as _;
+        use extent_bucket::bucket::PutMode;
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
         let first =
@@ -3714,9 +3714,9 @@ mod tests {
         drop(first);
         // A later release's record, whose format says first what follows, which this one can't
         // read.
-        let mut newer = (extent_remote::layout::FORMAT + 1).to_le_bytes().to_vec();
+        let mut newer = (extent_bucket::layout::FORMAT + 1).to_le_bytes().to_vec();
         newer.extend_from_slice(b"what a later format holds");
-        let (key, overwrite) = (extent_remote::layout::record(branch), PutMode::Overwrite);
+        let (key, overwrite) = (extent_bucket::layout::record(branch), PutMode::Overwrite);
         futures::executor::block_on(bucket.put(&key, newer.into(), overwrite)).unwrap();
         let listed = || {
             let listed = futures::executor::block_on(bucket.list("")).unwrap();
@@ -3726,7 +3726,7 @@ mod tests {
 
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(branch)), &bucket, idle());
         let refused = taken.err().unwrap();
-        let format = extent_remote::layout::FORMAT;
+        let format = extent_bucket::layout::FORMAT;
         let named = format!(
             "branch {branch} is of format {}, which this reader, of format {format}, doesn't \
              read",
@@ -3744,7 +3744,7 @@ mod tests {
         bucket: &Arc<ObjectBucket>,
         path: &std::path::Path,
         child: crate::Branch,
-    ) -> extent_remote::record::Record {
+    ) -> extent_bucket::record::Record {
         write(parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         parent.fork_to(path, child).unwrap();
@@ -3806,7 +3806,7 @@ mod tests {
         // Its fork goes on unseen, in a copy of the bucket only it reaches, as a dead host's.
         gated.sever();
         gated.shut.store(false, std::sync::atomic::Ordering::Relaxed);
-        let next = extent_remote::Writer::open(
+        let next = extent_bucket::Writer::open(
             bucket.clone(),
             branch,
             3,
@@ -3814,7 +3814,7 @@ mod tests {
         );
         futures::executor::block_on(next).unwrap();
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
-        let origin = extent_remote::layout::Origin { parent: branch, at: 1 };
+        let origin = extent_bucket::layout::Origin { parent: branch, at: 1 };
         assert_eq!(record.map(|record| record.origin()), Some(Some(origin)));
         let taken = kept_in(dir.path().join("taken"), (1 << 30, Some(child)), &bucket, idle());
         let taken = taken.unwrap();
@@ -3911,7 +3911,7 @@ mod tests {
             write(&parent, 1, &pattern(1, BLOCK));
             write(&parent, Self::OWN, &pattern(2, (4 << 20) as usize));
             parent.commit(Some(b"root")).unwrap();
-            let forking = extent_remote::layout::segment(branch, 1, 1);
+            let forking = extent_bucket::layout::segment(branch, 1, 1);
             gated.hold.send_replace(Hold::Key(forking));
             let child = crate::host_store::fork_child(branch);
             let fork = {
@@ -3921,7 +3921,7 @@ mod tests {
             gated.wait_held(1);
             let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
             let token = crate::host_store::token().unwrap();
-            futures::executor::block_on(extent_remote::Writer::open(bucket, branch, 3, token))
+            futures::executor::block_on(extent_bucket::Writer::open(bucket, branch, 3, token))
                 .unwrap();
             (Self { memory, gated, branch, child }, fork)
         }
@@ -3939,7 +3939,7 @@ mod tests {
         }
 
         /// The child's record.
-        fn record(&self) -> Option<extent_remote::record::Record> {
+        fn record(&self) -> Option<extent_bucket::record::Record> {
             futures::executor::block_on(branch::record(&*self.bucket(), self.child)).unwrap()
         }
     }
@@ -3959,12 +3959,12 @@ mod tests {
 
         // TASK-79.82: its deletion gave it the record its fork would first, naming the fork:
         // deleted, as its parent's branch holds no fork.
-        let origin = extent_remote::layout::Origin { parent: failed.branch, at: 1 };
+        let origin = extent_bucket::layout::Origin { parent: failed.branch, at: 1 };
         // Of the fork's owner, which its footer names.
         let owner = failed.record().unwrap().owner;
-        let deleted = extent_remote::record::Record {
+        let deleted = extent_bucket::record::Record {
             deleted: true,
-            ..extent_remote::record::Kind::Fork(origin).of(owner)
+            ..extent_bucket::record::Kind::Fork(origin).of(owner)
         };
         assert_eq!(failed.record(), Some(deleted));
         let parents = futures::executor::block_on(recover(&*failed.bucket(), failed.branch, None));
@@ -3987,33 +3987,33 @@ mod tests {
         let path = dir.path().join("child");
         let (branch, child, fork) = forking_held(dir.path(), &gated, &path);
         crate::ExtentStore::delete(&path, None).unwrap();
-        gated.hold.send_replace(Hold::Key(extent_remote::layout::head(child)));
+        gated.hold.send_replace(Hold::Key(extent_bucket::layout::head(child)));
         gated.wait_went(1);
         gated.wait_held(1);
-        let later = futures::executor::block_on(extent_remote::head::take(&*bucket, child, 5, 5));
+        let later = futures::executor::block_on(extent_bucket::head::take(&*bucket, child, 5, 5));
         assert_eq!(later.map(|held| held.head.epoch), Ok(1));
         gated.hold.send_replace(Hold::Nothing);
         let forked = fork.join().unwrap().map_err(|err| err.to_string());
         let unmade = format!("forking to branch {child}: making its store");
         assert_eq!((forked, path.exists()), (Err(unmade), false));
 
-        let origin = extent_remote::layout::Origin { parent: branch, at: 1 };
-        let live = extent_remote::record::Kind::Fork(origin).of(0);
+        let origin = extent_bucket::layout::Origin { parent: branch, at: 1 };
+        let live = extent_bucket::record::Kind::Fork(origin).of(0);
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(live));
     }
 
     /// The record of a branch no fork made, its store's own, of no parent, but for its owner
     /// ([`unowned`]).
-    fn own_record() -> extent_remote::record::Record {
-        extent_remote::record::Kind::Root.of(0)
+    fn own_record() -> extent_bucket::record::Record {
+        extent_bucket::record::Kind::Root.of(0)
     }
 
     /// `record`, but for its owner, which its maker chose at random, and its keys, wrapped under
     /// keys made at random (TASK-411.28): as the tests that are not of owners or keys compare
     /// records.
-    fn unowned(record: extent_remote::record::Record) -> extent_remote::record::Record {
-        extent_remote::record::Record {
+    fn unowned(record: extent_bucket::record::Record) -> extent_bucket::record::Record {
+        extent_bucket::record::Record {
             owner: 0,
             deks: Vec::new(),
             inherited: Vec::new(),
@@ -4099,7 +4099,7 @@ mod tests {
         let branch = parent.branch();
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
-        gated.hold.send_replace(Hold::Key(extent_remote::layout::head(branch)));
+        gated.hold.send_replace(Hold::Key(extent_bucket::layout::head(branch)));
         let child = crate::host_store::fork_child(branch);
         let fork = {
             let path = path.to_owned();
@@ -4166,9 +4166,9 @@ mod tests {
 
         parent.commit(Some(b"later")).unwrap();
         assert_eq!(parent.wait_uploaded(), Ok(()));
-        let deleted = extent_remote::record::Record {
+        let deleted = extent_bucket::record::Record {
             deleted: true,
-            ..extent_remote::record::Kind::Own.of(0)
+            ..extent_bucket::record::Kind::Own.of(0)
         };
         let record = futures::executor::block_on(branch::record(&*bucket, child)).unwrap();
         assert_eq!(record.map(unowned), Some(deleted));

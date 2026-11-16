@@ -15,7 +15,7 @@ use super::grants::Grants;
 use super::memory;
 use super::stores;
 use crate::Errno;
-use extent_remote::cell::Kind;
+use extent_bucket::cell::Kind;
 use proto::extentd_client::ExtentdClient;
 use proto::extentd_server::{Extentd, ExtentdServer};
 use proto::*;
@@ -515,7 +515,7 @@ impl Extentd for Control {
             vm_private_requests: _,
             vm_private_request_ns: _,
         } = crate::stats::stats();
-        use extent_remote::object_bucket::{Request, Upload};
+        use extent_bucket::object_bucket::{Request, Upload};
         let bucket = stores::daemon_bucket().map_err(status)?.stats();
         let object_storage = Some(ObjectStorageStats {
             requests: (Request::ALL.into_iter())
@@ -678,7 +678,7 @@ impl Extentd for Control {
             }
             false => why,
         };
-        let scope = extent_remote::keys::Scope::Tenant(tenant);
+        let scope = extent_bucket::keys::Scope::Tenant(tenant);
         let forgotten = stores::blocking(move || Ok(crate::bucket::forget(scope, &why))).await;
         reply(
             forgotten.map(|forgotten| ForgetTenantKeysResponse {
@@ -696,7 +696,7 @@ impl Extentd for Control {
             log::error!("extentd: shredding tenant {tenant}: {why}");
             saying(Errno::ENOTSUP, why)
         })?;
-        let shredded_now = destroyed == extent_remote::bucket_kms::Destroyed::Now;
+        let shredded_now = destroyed == extent_bucket::bucket_kms::Destroyed::Now;
         Ok(Response::new(ShredTenantResponse {
             shredded_now,
             forgotten: Some(forgotten_of(forgotten)),

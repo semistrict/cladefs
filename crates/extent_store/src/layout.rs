@@ -6,11 +6,11 @@
 
 use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use extent_bucket::cell::Kind;
 use extent_frame::segment::Branch;
 #[cfg(test)]
 use extent_frame::segment::Contents;
 use extent_frame::segment::Location;
-use extent_remote::cell::Kind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;
@@ -64,7 +64,7 @@ pub(crate) struct StoreFile {
 }
 
 /// cladefs: what a store kept in a bucket is of its branch's cell: a volume, of a name and a kind
-/// (`extent_remote::cell`, TASK-364).
+/// (`extent_bucket::cell`, TASK-364).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Volume {
     pub name: String,
@@ -99,7 +99,7 @@ impl StoreFile {
         let volume = match (fields.get("volume"), fields.get("kind")) {
             (None, None) => None,
             (Some(name), Some(kind)) => {
-                ensure!(extent_remote::cell::valid_name(name), "bad volume {name:?}");
+                ensure!(extent_bucket::cell::valid_name(name), "bad volume {name:?}");
                 let kind = Kind::named(kind).ok_or_else(|| anyhow!("bad kind {kind:?}"))?;
                 Some(Volume { name: name.clone(), kind })
             }
@@ -287,10 +287,10 @@ pub(crate) enum Data {
 
 impl Data {
     /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on its
-    /// way there (`extent_remote::layout::further`, TASK-195).
+    /// way there (`extent_bucket::layout::further`, TASK-195).
     pub fn follow(&mut self, to: &Location) {
         if let Data::Bucket(at) = self
-            && extent_remote::layout::further(&at.key, &to.key)
+            && extent_bucket::layout::further(&at.key, &to.key)
         {
             *at = to.clone();
         }

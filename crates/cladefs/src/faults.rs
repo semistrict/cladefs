@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! cladefs: the failpoints of a fork's protocol (TASK-44.10), here and in `extent_store` and
-//! `extent_remote`: a step failing, as what its function returns, partway through a fork or the
+//! `extent_bucket`: a step failing, as what its function returns, partway through a fork or the
 //! cleanup of one that failed. The `fail` crate's: nothing without the `failpoints` feature, which
 //! this crate's tests have. Tests set them one by one, or as a seed says ([`plan`]); a daemon built
 //! with them, as FAILPOINTS or CLADEFS_FAULT_SEED say ([`from_seed`]).

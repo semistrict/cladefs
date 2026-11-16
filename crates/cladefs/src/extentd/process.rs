@@ -70,9 +70,9 @@ pub struct AnonBudget {
     /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
     /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
     /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
-    /// (`extent_remote::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
+    /// (`extent_bucket::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
     /// changes to a shared map, a path of its nodes copied, at its
-    /// (`extent_remote::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
+    /// (`extent_bucket::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
     /// holds them to. Not bounded otherwise: a host's
     /// stores' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
@@ -111,7 +111,7 @@ pub const FRAMING: u64 = {
 };
 
 /// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_remote::fetch`'s `TAILS`,
+/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_bucket::fetch`'s `TAILS`,
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its stores read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);

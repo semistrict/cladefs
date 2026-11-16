@@ -175,7 +175,7 @@ const TAKE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 /// cladefs: every file of it bypasses the host's page cache (`O_DIRECT` on Linux, `F_NOCACHE` on
 /// macOS), or is not opened: a file system that can't fails its openings (TASK-433.6). Its reads
 /// and writes go by the blocks around them, from memory aligned to them
-/// (`extent_remote::direct`), so that no byte of a store's is held in
+/// (`extent_bucket::direct`), so that no byte of a store's is held in
 /// the host's page cache, a memory no budget of the process's counts (TASK-433). Extents' files
 /// go through the process's page cache instead ([`crate::pages`]): a write lands there and
 /// returns, the disk taking it later, coalesced, as the host's page cache had it, a `WRITE`
@@ -237,9 +237,9 @@ impl DiskDir {
     }
 
     /// `file`, opened at `path`, bypassing the host's page cache, or refused, naming it, if its
-    /// file system refuses that (`InvalidInput`, [`extent_remote::direct::bypass`]).
+    /// file system refuses that (`InvalidInput`, [`extent_bucket::direct::bypass`]).
     fn file(&self, path: &str, file: std::fs::File) -> io::Result<DiskFile> {
-        extent_remote::direct::bypass(&file, &self.path.join(path))?;
+        extent_bucket::direct::bypass(&file, &self.path.join(path))?;
         Ok(DiskFile { file, tail: Mutex::default() })
     }
 }
@@ -423,10 +423,10 @@ fn take_from_others(lock: &std::fs::File) -> io::Result<()> {
 
 /// cladefs: a file of the host's disk, bypassing its page cache ([`DiskDir`]): read and written by
 /// the blocks around what is asked, from memory aligned to them, the block ending the last write
-/// held, so that an append, a log's, reads nothing back (`extent_remote::direct`, TASK-433).
+/// held, so that an append, a log's, reads nothing back (`extent_bucket::direct`, TASK-433).
 pub struct DiskFile {
     file: std::fs::File,
-    tail: Mutex<extent_remote::direct::Tail>,
+    tail: Mutex<extent_bucket::direct::Tail>,
 }
 
 impl AsRawFd for DiskFile {
@@ -437,12 +437,12 @@ impl AsRawFd for DiskFile {
 
 impl File for DiskFile {
     fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
-        extent_remote::direct::read_at(&self.file, buf, offset)
+        extent_bucket::direct::read_at(&self.file, buf, offset)
     }
 
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut tail = self.tail.lock().unwrap();
-        extent_remote::direct::write_at(&self.file, &mut tail, buf, offset)
+        extent_bucket::direct::write_at(&self.file, &mut tail, buf, offset)
     }
 
     /// Taken as no write is in flight: a write of part of a block writes it whole, the file cut

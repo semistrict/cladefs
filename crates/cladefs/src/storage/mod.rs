@@ -115,7 +115,7 @@ impl Storage {
             let keeping = Self::keeping()?;
             let keeping =
                 extent_store::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
-            let kept = (extent_remote::cell::Kind::Fxfs, Some(bucket), keeping);
+            let kept = (extent_bucket::cell::Kind::Fxfs, Some(bucket), keeping);
             let opened = host_store::create_unmade(path, capacity, of, kept.0, kept.1, kept.2)?;
             opened.made().map_err(Error::new)?;
             // Closed before it is placed, as `CreateStore` places a store, and opened again.

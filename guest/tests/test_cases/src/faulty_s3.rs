@@ -9,7 +9,7 @@
 //! does. A daemon whose bucket is through it (its `AWS_ENDPOINT`) meets what its own S3 client
 //! makes of those, retries and all.
 //!
-//! Between the daemon and its bucket, not in the daemon (`extent_remote::faults`,
+//! Between the daemon and its bucket, not in the daemon (`extent_bucket::faults`,
 //! `CLADEFS_BUCKET_FAULTS`, which cladefs's in-process soak still uses): so that a pin's daemon
 //! from before that, LangSmith's, meets the same faults as the candidate's, and a qualification's
 //! A/B compares what each did with them. The requests keep their `Host`, which their signatures
@@ -17,7 +17,7 @@
 
 use anyhow::Context;
 use bytes::Bytes;
-use extent_remote::faults::{Failing, Fault};
+use extent_bucket::faults::{Failing, Fault};
 use http_body_util::{BodyExt as _, Either, Full};
 use hyper::body::Incoming;
 use hyper::{Method, Request, Response, StatusCode};

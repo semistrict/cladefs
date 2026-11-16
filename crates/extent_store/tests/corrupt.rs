@@ -19,7 +19,7 @@ use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
 const MIB: usize = 1 << 20;
-const BRANCH: extent_remote::layout::Branch = extent_remote::layout::test_branch(7);
+const BRANCH: extent_bucket::layout::Branch = extent_bucket::layout::test_branch(7);
 
 /// Segments of a few parts, and extents on their own from 8 MiB.
 const OPTIONS: Options = Options {
@@ -191,7 +191,7 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
         assert_eq!(
-            extent_frame::data(&bytes, &extent_remote::testing::ring([BRANCH]).of(BRANCH.id))
+            extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
                 .unwrap(),
             data
         );

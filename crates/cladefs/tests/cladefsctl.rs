@@ -182,7 +182,7 @@ fn points_are_shared_and_unshared_locally() {
     let branch: cladefs::Branch = printed.trim().parse().unwrap();
     let bucket = ExtentStore::bucket_at(&point).unwrap().unwrap();
     let shared = || {
-        let record = extent_remote::branch::record(&*bucket, branch);
+        let record = extent_bucket::branch::record(&*bucket, branch);
         futures::executor::block_on(record).unwrap().unwrap().shared
     };
     assert!(shared(), "made a point not shared");

@@ -7,12 +7,12 @@
 //! gRPC links are `extentd::peers`'.
 
 use super::*;
-use extent_remote::bucket::{Bucket as _, PutMode};
-use extent_remote::cache::Cache;
-use extent_remote::fetch::{Budget, Fetcher, Limits, Memory, Priority};
-use extent_remote::layout::{self, Contents, Location, test_branch};
-use extent_remote::object_bucket::{ObjectBucket, Request};
-use extent_remote::peer::Peers as _;
+use extent_bucket::bucket::{Bucket as _, PutMode};
+use extent_bucket::cache::Cache;
+use extent_bucket::fetch::{Budget, Fetcher, Limits, Memory, Priority};
+use extent_bucket::layout::{self, Contents, Location, test_branch};
+use extent_bucket::object_bucket::{ObjectBucket, Request};
+use extent_bucket::peer::Peers as _;
 use std::sync::atomic::AtomicBool;
 use storage_device::ExtentId;
 
@@ -42,7 +42,7 @@ pub(crate) fn holding(data: &[u8]) -> (Arc<ObjectBucket>, Location) {
     let footer = layout::Chain::new(test_branch(1), 1, 0, 0).close(contents);
     // cladefs: encrypted under the tests' DEK, which the hosts' fetchers hold (TASK-411.28).
     let object = layout::Segment { data: data.to_vec(), footer }
-        .encode(extent_remote::testing::encrypting(test_branch(1)));
+        .encode(extent_bucket::testing::encrypting(test_branch(1)));
     futures::executor::block_on(bucket.put(&key, object.into(), PutMode::Create)).unwrap();
     (bucket, Location { key, offset: 0, len: data.len() as u64 })
 }
@@ -97,7 +97,7 @@ fn hosts(
             let kept = Arc::new(Cache::open(cache.path(), u64::MAX, 0).unwrap());
             let (budget, memory) = (Budget::new(Limits::UNBOUNDED), Memory::new());
             // cladefs: holding the tests' keys, which the objects are encrypted under, for good.
-            std::mem::forget(memory.keys().hold(extent_remote::testing::ring([test_branch(1)])));
+            std::mem::forget(memory.keys().hold(extent_bucket::testing::ring([test_branch(1)])));
             let fetcher =
                 || Fetcher::new(bucket.clone(), budget.clone(), memory.clone(), Some(kept.clone()));
             (fetcher(), Arc::new(fetcher()), cache)
@@ -271,7 +271,7 @@ fn hosts_ask_peers_only_for_framed_objects_they_dont_own() {
     assert!(peers.owner(&segment, 0).is_none(), "asked itself");
     assert_eq!(peers.addresses(), [me]);
     for key in [layout::record(test_branch(1)), layout::head(test_branch(1))] {
-        assert!(!extent_remote::peer::served(&key), "{key} served");
+        assert!(!extent_bucket::peer::served(&key), "{key} served");
     }
-    assert!(extent_remote::peer::served(&segment));
+    assert!(extent_bucket::peer::served(&segment));
 }

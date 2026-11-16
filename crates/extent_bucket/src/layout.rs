@@ -138,7 +138,7 @@ pub fn tenant_of_prefix(prefix: &str) -> Option<u64> {
 /// cladefs: `tenant`'s KEK object, under the bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
 /// KEK wrapped by a master key, created (create-only) on the tenant's first wrap, rewrapped by a
 /// rotation of the master keys (conditional), and replaced by a tombstone when the tenant is
-/// shredded (`extent_remote::bucket_kms`). Under the tenant's prefix, beside its cells', no cell's:
+/// shredded (`extent_bucket::bucket_kms`). Under the tenant's prefix, beside its cells', no cell's:
 /// no collector pass lists it, and none deletes it.
 pub fn kek(tenant: u64) -> String {
     format!("{TENANTS}{tenant:016x}/{KEK}")

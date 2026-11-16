@@ -462,7 +462,7 @@ pub fn render() -> String {
     }
 
     if let Some(stats) = super::stores::bucket_stats() {
-        use extent_remote::object_bucket::{Request, Upload};
+        use extent_bucket::object_bucket::{Request, Upload};
         let name = "cladefs_extentd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
         let _ = writeln!(out, "# TYPE {name} counter");

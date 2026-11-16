@@ -5,14 +5,14 @@
 //! A deterministic simulation of branches in object storage (TASK-28.1): doc-7's protocol run by
 //! hosts' stores, this crate's, and their uploaders (`upload`), writing, committing, forking,
 //! taken over and crashing, and by deletions and collectors, over a bucket that delays, reorders
-//! and fails requests (TASK-88: extent_remote's until then, whose writers made their segments
+//! and fails requests (TASK-88: extent_bucket's until then, whose writers made their segments
 //! with `SegmentBuilder`, so that the store's choice of what a segment seals, frees and forks never
 //! met a takeover or a collector), checked after every step against what each branch's guests did
 //! and were told, every object a branch's acknowledged segments name there, and what its live
 //! writer and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
 //! stops, for garbage left behind, for tasks still waiting, a checkpoint, a deletion or anything
 //! else nothing will wake, and for uploaders that upload no more what they are asked to. A host's
-//! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/extent_remote/mutants.sh` puts
+//! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/extent_bucket/mutants.sh` puts
 //! back a bug of each kind, and sees a test fail.
 //!
 //! Each case doc-7 lists is a profile that makes it likely, run over many seeds; each rule of the
@@ -20,7 +20,7 @@
 
 mod world;
 
-use extent_remote::{Rules, set_rules};
+use extent_bucket::{Rules, set_rules};
 use std::ops::Range;
 use world::{Profile, Weights, World};
 
@@ -479,7 +479,7 @@ fn late_checkpoints() -> Profile {
 test_holds!(late_checkpoints_landing_past_takeovers, late_checkpoints());
 
 // The rule `ways_from_seals` (TASK-175), a writer taken over checkpointing late past where the
-// next recovered from, has no search here: extent_remote's simulation reached its case at one seed
+// next recovered from, has no search here: extent_bucket's simulation reached its case at one seed
 // of 20,000 of `recreated` (677, where it was found), and this one, its writers the stores', at
 // none of 40,000 of `recreated` or of `late_checkpoints` (TASK-88). The collector's
 // `writers_reading_past_checkpoints_landing_after_they_took_over_need_ways_from_seals` shows it
@@ -654,13 +654,13 @@ test_leaks!(forgotten_restores_need_clones_record_first, clones_record_first, fo
 
 // A reference whose child's ID another branch took stays for ever, no record naming it, when no
 // recorder takes it back (TASK-395.10); `uncollected` excused one until retirements were marked
-// (TASK-395.13). Its direct test is extent_remote's
+// (TASK-395.13). Its direct test is extent_bucket's
 // `forks_whose_childrens_ids_are_taken_need_references_taken_back`.
 test_leaks!(restores_need_references_taken_back, references_taken_back, restores());
 
 // A stale recorder's reference, written after its take-back or its retirement, stays for ever
 // unmarked: no recorder, nor pass of its child's cell, skipping it, looks at it again
-// (TASK-395.13, TASK-395.14). Its direct test is extent_remote's
+// (TASK-395.13, TASK-395.14). Its direct test is extent_bucket's
 // `stale_recorders_references_need_retirements_marked`.
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 
