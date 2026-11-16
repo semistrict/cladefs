@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 01:06'
+updated_date: '2026-11-16 02:11'
 labels:
   - perf
   - review-2026-11-15
@@ -27,7 +27,7 @@ Measured by TASK-443.2 (docs/measurements/macos-fork-extent-memory-2026-11-15/no
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 bench_fork_extent_memory: an idle fork of a base of 32,768 and of 300,000 extents holds heap that does not grow with the base's extents (per fork, of a point and of a live store), the numbers recorded beside TASK-443.2's
+- [x] #1 bench_fork_extent_memory: an idle fork of a base of 32,768 and of 300,000 extents holds heap that does not grow with the base's extents (per fork, of a point and of a live store), the numbers recorded beside TASK-443.2's
 - [ ] #2 What the daemon still holds per extent, once per base, is counted by something the governor or the anon budget sees, or bounded
 - [ ] #3 extentd's serves_hundreds_of_forks_of_a_base runs at 32,768 extents on Linux and bounds resident memory per fork
 <!-- AC:END -->
@@ -35,8 +35,8 @@ Measured by TASK-443.2 (docs/measurements/macos-fork-extent-memory-2026-11-15/no
 ## Definition of Done
 <!-- DOD:BEGIN -->
 - [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -59,4 +59,8 @@ Accounting: Decoded::held() (each map once by ptr_eq; a state made of another st
 TASK-450 left: FIFO KEEP=16 eviction order untouched; only the Weak lookup was added. Unbounded counting of states nobody holds stays theirs.
 Tests: extent_store extents::tests::stores_layer_their_own_over_the_buckets; cladefs remote::tests::forks_open_at_once_share_what_they_inherited (4 forks live and of a point: one shared map by ptr_eq, Decoded::held == 1 state of 64 entries, reads the base's data; a fork's free of an inherited extent and its own write stay its own, others and a fork opened after read the base's and still share). Hand mutants (restored): rebased() always None -> red (forks of the live store: their maps); Extents::over copying the map -> red. bench_fork_extent_memory now asserts each fork past the first <= 64 KiB (IDLE_FORK_BYTES), Decoded of the bucket == 1 state of E entries, own entries unchanged by idle forks, a full unshared map <= E x ENTRY_BYTES, a fork's writes <= own entries x OWN_ENTRY_BYTES; CLADEFS_BENCH_PARENTS=live,point picks halves (TASK-471's flaky close check otherwise kills the point half).
 Filed: TASK-471 (bench close/reopen check off by 256-2048 B on main), TASK-472 (intern Location keys).
+
+2026-11-15, verified on macOS (commit b712efcad, branch t453). AC #1 checked: bench_fork_extent_memory, every (E in 1,024 / 32,768 / 300,000) x (10, 100 forks) x (live, point) run alone: marginal heap a fork 31.5-36.1 KB at every E (before: 0.27-0.51 MB at 1,024, 7.8-15.3 MB at 32,768, 66-135 MB at 300,000); totals at 300,000 x 100: 3.41 MB live / 3.19 MB point (before 12.42 / 6.62 GB); docs/measurements/macos-fork-extent-memory-shared-2026-11-15/note.md beside TASK-443.2's. Its new assertions passed in all 12 runs. Its close/reopen check (TASK-471) failed in the 6 point-alone runs (+213 to +2,048 B) and 1 of 6 live; with both halves in one process 3 of 3 passed: cold-process first allocations; noted on TASK-471.
+AC #2 NOT checked: Decoded::held and extent_store::own_entries are exercised and their bounds asserted on macOS (bench, unit test), but extentd/process.rs, which adds them to AnonBudget, is Linux-only and was neither compiled nor run here. AC #3 (Linux, serves_hundreds_of_forks_of_a_base) not run: no ubu1 in this task.
+Suites (macOS): cargo nextest run -p extent_store -p extent_remote -p cladefs -E 'not (package(extent_store) & test(/^sim::/))': 923 run, 909 passed and 14 failed in one run; the 14 (cladefs branches/cladefsctl/import and extent_remote gc tests) ran cladefsctl and cladefs-gc binaries another agent had built at bucket format 12 into the shared target dir ('of format 11, which this reader, of format 12, doesn't read'); rerun with this tree's binaries, those test binaries: 37 run, 37 passed. An earlier run, before the final bench-only edits, passed 923 of 923. sim part (test.sh): 52 passed; shuttle part: all passed (37, 10, 6, 33, 10, 18, 2, 1, 1); clippy part: clean. scripts/upstream-changes.py --check: pass. DoD #1 open: only these three packages on macOS, not the workspace, and nothing on Linux.
 <!-- SECTION:NOTES:END -->
