@@ -37,8 +37,13 @@ choices (the extentd names and Firecracker's API; cladefsd everywhere):
   (upstream ignores unknown keys, so a VM would boot without its disk); `extentd_socket` and
   `extent_overrides` were refused already as unknown fields. Old gRPC calls get `UNIMPLEMENTED`.
 - **A/B tooling reads a side from before the rename** (its `extentd-stats.txt`, `extentd-*`
-  metrics) as the new names, as LangSmith's pin and the nightly's night before are such sides for a
-  while. *Undo:* drop the shim once the pin is past TASK-501.
+  metrics) as the new names (ab-rounds.py, ab-guest-summary.py, bench-report.py), and test-e2e.sh
+  names a base tree's run-wide stats and log as that tree's helpers read them, as the nightly's
+  night before is such a side for a night. *Undo:* drop the shims once no base is from before.
+- **Qualification against a pin from before stays broken**, as TASK-437 and TASK-475.1 already
+  broke it (this tree's test-e2e.sh builds `-p cladefs --bin cladefsd`, which such a tree lacks);
+  TASK-501 adds the gRPC package and Firecracker's keys, which the one harness both sides share
+  speaks. It mends when LangSmith's pin moves past them. *Instead:* a harness speaking both.
 - **Trace span names (`cladefsd.map`, ...), the daemon's log file and the stats file renamed too**,
   which tools reading them (dashboards, log queries) must follow.
 

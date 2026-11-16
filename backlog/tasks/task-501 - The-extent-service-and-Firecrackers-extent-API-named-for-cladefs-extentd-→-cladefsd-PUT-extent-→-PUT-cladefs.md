@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 22:23'
-updated_date: '2026-11-16 22:23'
+updated_date: '2026-11-16 22:57'
 labels:
   - naming
   - host
@@ -49,3 +49,14 @@ TASK-475.1 renamed the binary cladefsd and its variables CLADEFSD_*, but kept ex
 5. Hand edits: CONTEXT.md, integrator guide, upgrading-a-host, OPEN_QUESTIONS.md (decided: config layer cladefs, device layer extent).
 6. Verify: macOS scripts/test.sh, go test, guide tests, generate.sh --check, upstream-changes --check; ubu1 under fxjob: workspace nextest, firecracker-series-check, a guest e2e case.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Round 1: scripts/rename-to-cladefs-api.sh (named so it never says the old word itself) renamed 195 live files and 33 paths; idempotent (a second run leaves the tree as it is). The fork series rewritten by filter-branch --tree/--msg-filter: the 14 commits before the extent device unchanged (same trees and messages), the 9 after renamed; stable rustfmt of the pinned toolchain run on renamed Rust files that were formatted before (insert_cladefs_device ran past 100 columns; modules reorder). Then one commit on top: a configuration file's `extent` refused (ResourcesError::CladefsRenamed). Branch cladefs-v1.16.1-r9 pushed (8506cccc1), submodule pinned, rewrites line e10356028 -> 26add4ca1.
+Found on the way: thread names "extentd request/control/metrics/signals" became 16 bytes, past Linux's comm (perf, bpftrace saw them cut): now "cladefsd reqs/ctl/metric/signal". bpftrace strncmp lengths of "extentd.bucket"/"extentd-cache" fixed to the new names' lengths. go/cladefsd/v1/client.go needed gofmt (the script runs it). --backlog first turned stale CLADEFS_EXTENTD_* in docs into CLADEFS_CLADEFSD_*: the script applies TASK-475.1's renames first; redone.
+Decided without the user (OPEN_QUESTIONS.md): Firecracker's configuration layer says cladefs, the device layer keeps extent; A/B readers take an old side's extentd-* metrics and stats file as the new names (ab-rounds.py named_now, ab-guest-summary.py, ab-guest-cases.sh prune). Qualification's harness driving a pre-rename pin's build breaks on the gRPC and Firecracker names, as TASK-474's proto changes already broke it (no migrations, AGENTS.md).
+macOS: clippy, scripts 523 tests, guide 42/42, upstream-changes --check pass.
+
+Correction to the note above: what already breaks the qualification A/B against a pin from before is TASK-437 and TASK-475.1, not TASK-474 (proto field renames keep their numbers): this tree's test-e2e.sh builds a side with `cargo build -p cladefs --bin cladefsd`, which a tree from before them has neither of. TASK-501 adds the gRPC package and Firecracker's keys to that; the pin moving past them is what mends it.
+<!-- SECTION:NOTES:END -->

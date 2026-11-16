@@ -405,6 +405,12 @@ echo "encryption: $(cat "$results/encryption.txt")" >&2
 # otherwise, empty for none; not this process's, which the cases' own daemons would share
 # (TASK-164.12). In the results' directory, where the cases make their stores: a store goes into
 # the cache by renames, which a store on another filesystem than the cache's refuses (TASK-359).
+# What the run's daemon's stats file and log are called, NAME-stats.txt and NAME.log: as the
+# tree's own helpers read them (scripts/guest_results.py), cladefsd, or the daemon's name before
+# TASK-501 in a tree from before it (CLADEFS_E2E_ROOT, an A/B's base).
+daemon_file=$(grep -om1 '[a-z]*d-stats\.txt' "$root/scripts/guest_results.py" || true)
+daemon_file=${daemon_file:-cladefsd-stats.txt}
+daemon_file=${daemon_file%-stats.txt}
 bucket_dir=
 if [[ -z ${CLADEFSD_BUCKET:-} ]]; then
     bucket_dir=$(mktemp -d /dev/shm/cladefs-e2e-bucket.XXXXXX)
@@ -440,14 +446,14 @@ ${cladefsd_run[@]+"${cladefsd_run[@]}"} \
 env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
     CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
-    CLADEFSD_STATS="$results/cladefsd-stats.txt" CLADEFSD_GRPC="$control" \
+    CLADEFSD_STATS="$results/$daemon_file-stats.txt" CLADEFSD_GRPC="$control" \
     FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${cladefsd_wrap[@]+"${cladefsd_wrap[@]}"} "$cladefsd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \
-    > "$results/cladefsd.log" 2>&1 &
+    > "$results/$daemon_file.log" 2>&1 &
 daemon=$!
 trap 'cladefsd_peak; kill "$daemon" 2> /dev/null; cladefsd_stop; rm -r "$sockets"; [[ -z $bucket_dir ]] || rm -r "$bucket_dir"; [[ -z $cache_dir ]] || rm -r "$cache_dir"' EXIT
 while [[ ! -S $socket || ! -S $control ]]; do
     if ! kill -0 "$daemon" 2> /dev/null; then
-        echo "the extent daemon exited: see $results/cladefsd.log" >&2
+        echo "the extent daemon exited: see $results/$daemon_file.log" >&2
         exit 1
     fi
     sleep 0.1
@@ -517,7 +523,7 @@ fi
 # cladefs: the guest stores the DAX windows refused: the guest and the window disagreeing, which fails
 # the run (TASK-44.12). Not a kernel worker's, the VM processes' logs saying whose (TASK-150.16).
 mapfile -t firecracker_logs < <(find "$results" -name firecracker.log)
-if ! "$root/scripts/dax-refusals.py" "$results/cladefsd.log" "${firecracker_logs[@]}" \
+if ! "$root/scripts/dax-refusals.py" "$results/$daemon_file.log" "${firecracker_logs[@]}" \
     > "$results/unexplained-refusals.txt"; then
     echo "the DAX window refused a guest's stores: see $results/unexplained-refusals.txt" >&2
     status=1
@@ -526,7 +532,7 @@ fi
 # retried until it is answered, holding its guests' commits at the lag bound meanwhile. The run's
 # own file bucket, on tmpfs, fails only once that is full, its cases then hanging until the runner
 # times them out: the run fails, saying so.
-grep -E "object storage: [a-z-]+ requests (failing|still failing)" "$results/cladefsd.log" \
+grep -E "object storage: [a-z-]+ requests (failing|still failing)" "$results/$daemon_file.log" \
     > "$results/bucket-failures.txt" || true
 if [[ -s $results/bucket-failures.txt ]]; then
     echo "the bucket failed requests, each retried: see $results/bucket-failures.txt; the first:" >&2
@@ -543,7 +549,7 @@ fi
 # for each guest byte, by kind. The run's own daemon's bucket, a file bucket on tmpfs, writes no
 # disk.
 budgets=()
-[[ -z $bucket_dir ]] || budgets=(--bucket-in-memory "$results/cladefsd-stats.txt")
+[[ -z $bucket_dir ]] || budgets=(--bucket-in-memory "$results/$daemon_file-stats.txt")
 if ! "$root/scripts/budgets.py" ${budgets[@]+"${budgets[@]}"} "$results"; then
     echo "an extent daemon past its budget: see $results/budgets.json" >&2
     status=1

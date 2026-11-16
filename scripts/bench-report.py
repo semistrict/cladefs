@@ -64,8 +64,11 @@ def daemon_stats(directory, kind):
     for each kind: object-store (what it did with object storage, if it kept stores there),
     followers (what the stores' followers were), daemon (what serving the stores cost it) and
     requests (the VM processes' requests it served, by kind)."""
-    path = Path(directory) / "logs" / "cladefsd-stats.txt"
-    if not path.exists():
+    logs = Path(directory) / "logs"
+    # A run of a tree from before TASK-501 names it for the daemon's old name, extent[d].
+    path = next(logs.glob("cladefsd-stats.txt"), None) or next(logs.glob("extent[d]-stats.txt"),
+                                                                None)
+    if path is None:
         return None
     for line in path.read_text().splitlines():
         if line.startswith(f"{kind}:"):
