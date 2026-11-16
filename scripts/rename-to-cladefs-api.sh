@@ -118,6 +118,7 @@ s/fxfs-linux/cladefs-linux/g; s/fxfs_linux/cladefs_linux/g;
 s/fxfs([-_])tls/cladefs$1tls/g;
 s/\b0004-fxfs\.patch\b/0004-cladefs.patch/g;
 s/\bfxfs_trace\.h\b/cladefs_trace.h/g; s/\bfxfs\.h\b/cladefs.h/g;
+s{("fs" / )"fxfs"}{$1"cladefs"}g;
 s/\bfxfs-latency\.bt\b/cladefs-latency.bt/g;
 s{/sys/module/fxfs/}{/sys/module/cladefs/}g;
 s/\btracepoint:fxfs:/tracepoint:cladefs:/g; s{\bevents/fxfs\b}{events/cladefs}g;
