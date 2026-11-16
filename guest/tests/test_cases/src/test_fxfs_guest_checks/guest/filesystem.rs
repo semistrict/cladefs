@@ -186,8 +186,8 @@ pub(super) fn test_show_options(dax: bool) {
     assert!(options.contains(&"rw") && !options.contains(&"follow"), "{line}");
 }
 
-/// TASK-26.19: what programs see of what Fxfs does not do (README, "Guest Fxfs: what it does
-/// not do"): FIDEDUPERANGE's status is EOPNOTSUPP, and a MAP_SYNC mapping fails with it.
+/// TASK-26.19: what programs see of what Fxfs does not do (docs/code.md, "Guest Fxfs: what it
+/// does not do"): FIDEDUPERANGE's status is EOPNOTSUPP, and a MAP_SYNC mapping fails with it.
 pub(super) fn test_unsupported() {
     /// `_IOWR(0x94, 54, struct file_dedupe_range)`.
     const FIDEDUPERANGE: libc::c_ulong = 0xc018_9436;

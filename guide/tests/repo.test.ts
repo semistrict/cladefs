@@ -11,7 +11,7 @@ import { firstSentence, indexRepo, isTestPath } from "../tools/lib/symbols.ts";
 describe("where code comes from", () => {
   const crates = crateOrigins();
 
-  test("the stand-ins are README's table's, and zx-sys", () => {
+  test("the stand-ins are docs/code.md's table's, and zx-sys", () => {
     expect([...standIns()].sort()).toEqual([
       "bssl-crypto",
       "diagnostics-log",

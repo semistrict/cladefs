@@ -39,7 +39,7 @@
 # starts, as CLADEFSD tells the tests; its control API is beside it, at
 # extentd.control, in a directory of their own under /tmp. CLADEFSD_MEMORY
 # caps its memory, in bytes. LIBCLANG_PATH names libclang's directory where
-# llvm-config cannot, and DAX needs access to /dev/userfaultfd (see the README).
+# llvm-config cannot, and DAX needs access to /dev/userfaultfd (docs/operating-a-host.md).
 set -euo pipefail
 root=$(cd "${CLADEFS_E2E_ROOT:-$(dirname "$0")/..}" && pwd)
 harness="$root/guest/tests"
