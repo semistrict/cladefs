@@ -3984,9 +3984,9 @@ mod tests {
     }
 
     /// What this process logs, kept: for tests of what a failure says.
-    struct Kept(Mutex<Vec<String>>);
+    struct KeptLog(Mutex<Vec<String>>);
 
-    impl log::Log for Kept {
+    impl log::Log for KeptLog {
         fn enabled(&self, _: &log::Metadata) -> bool {
             true
         }
@@ -4003,7 +4003,7 @@ mod tests {
     /// index placed in the bucket and that could not be read (TASK-217, GCE r757 round 40).
     #[test]
     fn failed_page_ins_say_why() {
-        static KEPT: Kept = Kept(Mutex::new(Vec::new()));
+        static KEPT: KeptLog = KeptLog(Mutex::new(Vec::new()));
         log::set_logger(&KEPT).unwrap();
         log::set_max_level(log::LevelFilter::Error);
         let extent = Arc::new(CachedExtent::new(

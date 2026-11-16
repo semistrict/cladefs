@@ -23,7 +23,7 @@ use fxfs::fsck::{FsckOptions, fsck_volume_with_options, fsck_with_options};
 use fxfs::object_store::volume::{list_volumes, root_volume};
 use gate::WriteGate;
 use image::ImageDevice;
-use kept::Kept;
+use kept::KeptImage;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -47,7 +47,7 @@ pub(crate) enum Kind {
     Image {
         dir: PathBuf,
         writes: Arc<WriteGate>,
-        image: Arc<Kept>,
+        image: Arc<KeptImage>,
     },
     Memory,
 }
@@ -310,11 +310,11 @@ impl fmt::Debug for Storage {
 }
 
 /// Clones `image` to a new image at `path`, a fork of its store, and of its branch in its bucket,
-/// with a branch of its own ([`Kept::fork`]), on a thread of its own, as forking commits the store
+/// with a branch of its own ([`KeptImage::fork`]), on a thread of its own, as forking commits the store
 /// durably and waits for the fork's upload. The clone pauses `writes`, the device's writes and
 /// frees, until the fork's commit is made, so that it is the image as it was at one time.
 pub(crate) async fn clone_image(
-    image: Arc<Kept>,
+    image: Arc<KeptImage>,
     writes: Arc<WriteGate>,
     path: &Path,
 ) -> Result<Storage, Error> {

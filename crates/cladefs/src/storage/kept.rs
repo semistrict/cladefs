@@ -24,7 +24,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 /// An image's store, its branch kept in its bucket. See the module docs.
-pub(crate) struct Kept {
+pub(crate) struct KeptImage {
     store: Arc<Store<HostDir>>,
     /// The branch's uploader, which opened the store: dropped, it closes the store's open segment,
     /// uploads what the store made durable, then stops (TASK-192).
@@ -36,7 +36,7 @@ pub(crate) struct Kept {
     collecting: Option<Arc<Collecting>>,
 }
 
-impl Kept {
+impl KeptImage {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of the
     /// branch `of` says ([`host_store::create`]): whole if `whole`, or else unmade until its maker says it
     /// is ([`host_store::create_unmade`], TASK-196), as an import's, once filled. Its uploader
@@ -151,7 +151,7 @@ mod tests {
     const MIB: usize = 1 << 20;
 
     /// The image `storage` is of.
-    fn image(storage: &Storage) -> &Arc<Kept> {
+    fn image(storage: &Storage) -> &Arc<KeptImage> {
         let Kind::Image { image, .. } = &storage.kind else { panic!("memory") };
         image
     }
@@ -182,7 +182,7 @@ mod tests {
     }
 
     /// The extents `image`'s store holds, by their lengths, and its root.
-    fn held(image: &Kept) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
+    fn held(image: &KeptImage) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let store = image.store();
         (store.extents().unwrap().into_iter().collect(), store.root().unwrap())
     }
@@ -317,7 +317,7 @@ mod tests {
             keeping,
         );
         made.unwrap().made().unwrap();
-        let image = Kept::open(&path).unwrap();
+        let image = KeptImage::open(&path).unwrap();
         assert!(image.collecting().is_none());
         image.store().write(ExtentId::new(7, 1), 0, &[1; 4096]).unwrap();
         image.store().commit(None).unwrap();
@@ -335,7 +335,7 @@ mod tests {
     fn the_collector_reclaims_what_images_freed() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
-        let image = Kept::create(
+        let image = KeptImage::create(
             &path,
             (SIZE, BranchOf::Named(extent_remote::layout::test_branch(7)), true),
             host_store::keeping().unwrap(),
@@ -363,7 +363,7 @@ mod tests {
         let own = dir.path().join("image.bucket");
         let before = bucket_bytes(&own);
         assert!(before >= 20 * MIB as u64, "{before} bytes");
-        let image = Kept::open(&path).unwrap();
+        let image = KeptImage::open(&path).unwrap();
         let report = image.collecting().unwrap().pass_now();
         assert!(report.deleted >= 3, "{report:?}");
         let after = bucket_bytes(&own);

@@ -18,7 +18,7 @@
 
 use super::gate::WriteGate;
 use super::io::{Done, Io, IoFile, Op};
-use super::kept::Kept;
+use super::kept::KeptImage;
 use anyhow::{Context, Error, bail};
 use async_trait::async_trait;
 use extent_store::{Aligned, Description, HostDir, HostFile, Part, SECTOR, Store};
@@ -43,7 +43,7 @@ async fn unblock<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> R
 
 /// An Fxfs device on an image. See the module docs.
 pub(crate) struct ImageDevice {
-    image: Arc<Kept>,
+    image: Arc<KeptImage>,
     /// The image's store, the one `image` keeps.
     store: Arc<Store<HostDir>>,
     description: Description,
@@ -55,30 +55,30 @@ pub(crate) struct ImageDevice {
 
 impl ImageDevice {
     /// Makes a new image at `dir`, which must not exist, holding at most `capacity` bytes, of
-    /// `branch`, whole if `whole`, its branch kept as `keeping` says ([`Kept::create`]), and its
-    /// device, whose writes, frees and commits go through `writes`.
+    /// `branch`, whole if `whole`, its branch kept as `keeping` says ([`KeptImage::create`]), and
+    /// its device, whose writes, frees and commits go through `writes`.
     pub fn create(
         dir: &Path,
         made: (u64, crate::host_store::BranchOf, bool),
         keeping: extent_store::upload::Options,
         writes: Arc<WriteGate>,
     ) -> Result<Self, Error> {
-        Self::new(Kept::create(dir, made, keeping)?, writes)
+        Self::new(KeptImage::create(dir, made, keeping)?, writes)
     }
 
     /// The device of the image at `dir`, an image's or a clone's, whose writes, frees and commits
     /// go through `writes`.
     pub fn open(dir: &Path, writes: Arc<WriteGate>) -> Result<Self, Error> {
-        let image = Kept::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+        let image = KeptImage::open(dir).with_context(|| format!("opening {}", dir.display()))?;
         Self::new(image, writes)
     }
 
     /// The image's store, kept in its bucket.
-    pub fn image(&self) -> Arc<Kept> {
+    pub fn image(&self) -> Arc<KeptImage> {
         self.image.clone()
     }
 
-    fn new(image: Kept, writes: Arc<WriteGate>) -> Result<Self, Error> {
+    fn new(image: KeptImage, writes: Arc<WriteGate>) -> Result<Self, Error> {
         let store = image.store().clone();
         let description = store.description();
         Ok(Self {
@@ -167,7 +167,7 @@ impl ImageDevice {
     }
 
     /// Commits the store, setting its root to `root` if given, and does what follows a commit
-    /// ([`Kept::committed`]): collects its bucket if that is due; off the executor's threads.
+    /// ([`KeptImage::committed`]): collects its bucket if that is due; off the executor's threads.
     async fn commit(&self, root: Option<Vec<u8>>) -> Result<(), Error> {
         let _writing = self.writes.write().await;
         let image = self.image.clone();

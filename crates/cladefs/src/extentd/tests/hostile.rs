@@ -789,7 +789,7 @@ fn store(addr: usize, byte: u8) -> Result<(), i32> {
 }
 
 /// An extent alice wrote and hasn't freed.
-struct Kept {
+struct LiveExtent {
     bytes: Vec<u8>,
     sealed: bool,
 }
@@ -815,7 +815,7 @@ struct Alice {
     branch: u64,
     /// The sequence of her next extent.
     next: u64,
-    extents: BTreeMap<u64, Kept>,
+    extents: BTreeMap<u64, LiveExtent>,
     freed: BTreeSet<u64>,
     pages: Vec<Page>,
     root: Vec<u8>,
@@ -920,7 +920,7 @@ impl Alice {
                 self.next += 1;
                 let bytes = marked(ALICE_MARK, sequence, blocks as usize * BLOCK);
                 expect(op, write(&self.store, self.id(sequence), 0, &bytes), Ok(()))?;
-                self.extents.insert(sequence, Kept { bytes, sealed: false });
+                self.extents.insert(sequence, LiveExtent { bytes, sealed: false });
             }
             AliceOp::Commit { durable, root } => {
                 let root = root.then(|| marked(ALICE_MARK, u64::MAX >> 24 ^ self.next, 64));
