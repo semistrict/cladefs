@@ -9,7 +9,7 @@
 
 #![cfg(target_os = "linux")]
 
-use cladefs::{ExtentId, ExtentStore, RemoteExtentStore, VolatileSlice};
+use cladefs::{DaemonExtentStore, ExtentId, ExtentStore, VolatileSlice};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -102,7 +102,7 @@ fn serve_and_drain(dir: &Path, traces: Option<&str>) -> Vec<(String, Vec<u8>)> {
     let (endpoint, exports) = collector();
     let socket = dir.join("extentd.sock");
     let mut daemon = daemon(&socket, traces, &endpoint);
-    let store = RemoteExtentStore::connect(&socket, dir.join("store"), 1 << 28).unwrap();
+    let store = DaemonExtentStore::connect(&socket, dir.join("store"), 1 << 28).unwrap();
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(&[7; BLOCK][..])]).unwrap();
     store.commit(Some(b"traced")).unwrap();

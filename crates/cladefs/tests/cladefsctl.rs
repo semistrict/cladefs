@@ -399,7 +399,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
     let path = dir.path().join("store");
-    let store = cladefs::RemoteExtentStore::connect(dir.path().join("vms.sock"), &path, 1 << 24);
+    let store = cladefs::DaemonExtentStore::connect(dir.path().join("vms.sock"), &path, 1 << 24);
     let store = std::sync::Arc::new(store.unwrap());
     // Its guest answers each ask, off the thread the ask comes on.
     let answering = std::sync::Arc::downgrade(&store);
@@ -544,7 +544,7 @@ fn cladefsctl_writes_its_stacks_on_sigquit() {
 #[cfg(target_os = "linux")]
 #[test]
 fn tenants_are_granted_and_revoked() {
-    use cladefs::{Errno, RemoteExtentStore};
+    use cladefs::{DaemonExtentStore, Errno};
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
     let (acme, other) = (dir.path().join("acme"), dir.path().join("other"));
@@ -557,14 +557,14 @@ fn tenants_are_granted_and_revoked() {
     let socket = dir.path().join("tenants/a.sock");
     assert_eq!(cladefsctl.run(&grant).unwrap(), format!("{}\n", socket.display()));
     assert_eq!(cladefsctl.run(&grant[..3]).unwrap(), format!("{}\n", socket.display()));
-    let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), 1 << 24).unwrap();
-    let refused = RemoteExtentStore::connect(&socket, other.join("vm"), 1 << 24);
+    let vm = DaemonExtentStore::connect(&socket, acme.join("vm"), 1 << 24).unwrap();
+    let refused = DaemonExtentStore::connect(&socket, other.join("vm"), 1 << 24);
     assert_eq!(refused.err().and_then(|err| err.errno()), Some(Errno::EACCES));
 
     let revoke = [Path::new("revoke"), Path::new("a")];
     assert_eq!(cladefsctl.run(&revoke).unwrap(), "");
     assert!(!socket.exists(), "the revoked tenant's socket stayed");
-    assert!(RemoteExtentStore::connect(&socket, acme.join("new"), 1 << 24).is_err());
+    assert!(DaemonExtentStore::connect(&socket, acme.join("new"), 1 << 24).is_err());
     assert_eq!(vm.info().unwrap().capacity, 1 << 24);
     drop(vm);
     let error = cladefsctl.run(&revoke).expect_err("revoked a tenant not granted");

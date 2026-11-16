@@ -11,7 +11,7 @@
 #![cfg(target_os = "linux")]
 
 use cladefs::extentd::control::Client;
-use cladefs::{ExtentId, RemoteExtentStore, VolatileSlice, VolatileSliceMut};
+use cladefs::{DaemonExtentStore, ExtentId, VolatileSlice, VolatileSliceMut};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
@@ -130,7 +130,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let second = daemon(&hosts[1], &bucket, peered.then_some(&second_peers[..]));
 
     let base = hosts[0].join("base");
-    let store = RemoteExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&first.vms, &base, CAPACITY).unwrap();
     let branch = store.branch();
     for sequence in 1..=EXTENTS {
         let extent = ExtentId { branch, sequence };
@@ -144,7 +144,7 @@ fn run(peered: bool) -> (u64, u64, u64, u64) {
     let (copy, fork) = (hosts[1].join("point"), hosts[1].join("fork"));
     second.control.create_store(&copy, CAPACITY, point, None).unwrap();
     second.control.fork_store(&copy, &fork).unwrap();
-    let store = RemoteExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
+    let store = DaemonExtentStore::connect(&second.vms, &fork, CAPACITY).unwrap();
     for sequence in 1..=EXTENTS {
         let mut read = vec![0; EXTENT];
         let extent = ExtentId { branch, sequence };

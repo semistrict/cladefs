@@ -121,7 +121,7 @@ mod host {
     use super::*;
 
     use crate::common::{
-        Measured, ProcessCosts, cgroup_memory, control, cladefs_guest_should_run, resident,
+        Measured, ProcessCosts, cgroup_memory, cladefs_guest_should_run, control, resident,
         setup_rootfs,
     };
     use crate::test_fxfs_guest_docker::host::{DockerFiles, buildx};
@@ -179,7 +179,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 ("CLADEFS_PGBENCH_RUNS", 1),
                 ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 1000), ("CLADEFS_SANDBOX_GIT_COMMITS", 30)],
+            Role::Git => {
+                &[("CLADEFS_SANDBOX_GIT_FILES", 1000), ("CLADEFS_SANDBOX_GIT_COMMITS", 30)]
+            }
             Role::Writer => {
                 &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
@@ -224,7 +226,9 @@ RUN apk add --no-cache postgresql postgresql-contrib git
                 ("CLADEFS_PGBENCH_RUNS", 3),
                 ("CLADEFS_PGBENCH_RUN_SECS", 60),
             ],
-            Role::Git => &[("CLADEFS_SANDBOX_GIT_FILES", 3000), ("CLADEFS_SANDBOX_GIT_COMMITS", 100)],
+            Role::Git => {
+                &[("CLADEFS_SANDBOX_GIT_FILES", 3000), ("CLADEFS_SANDBOX_GIT_COMMITS", 100)]
+            }
             Role::Writer => {
                 &[("CLADEFS_SHARED_DISK_LARGE_MIB", 768), ("CLADEFS_SHARED_DISK_FILES", 3000)]
             }
@@ -542,10 +546,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let dir = &test_setup.tmp_dir;
             let mut tally = Tally::default();
             // The topology: the bucket an S3 server's, its data on the case's disk.
-            let remote = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFS_EXTENTD_REMOTE").unwrap_or_default();
             ensure!(
-                remote.starts_with("s3://"),
-                "CLADEFS_EXTENTD_REMOTE is {remote:?}, not an S3 server's bucket: scripts/sandboxes.sh \
+                bucket_url.starts_with("s3://"),
+                "CLADEFS_EXTENTD_REMOTE is {bucket_url:?}, not an S3 server's bucket: scripts/sandboxes.sh \
                  starts one"
             );
             let bucket_dir = std::env::var_os("CLADEFS_SANDBOX_BUCKET_DIR")

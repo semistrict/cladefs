@@ -767,7 +767,7 @@ mod tests {
     fn ranges_are_refused_as_object_stores_refuse_them() {
         let sim = Direct(SimBucket::new());
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
-        let memory = crate::store::Store::new(memory, "");
+        let memory = crate::object_bucket::ObjectBucket::new(memory, "");
         for bucket in [&sim as &dyn Ranged, &memory] {
             bucket.put_bytes("key", (0..100).collect());
             bucket.put_bytes("empty", Vec::new());

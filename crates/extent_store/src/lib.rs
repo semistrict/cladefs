@@ -83,7 +83,7 @@
 //!
 //! **The bucket.** cladefs: once its writer acknowledges a segment in the bucket
 //! ([`Store::acknowledged`], TASK-165.8), the extents sealed in it, and those stored on their own
-//! its footer names, held or kept, are the bucket's: read there ([`RemoteData`]), and their files
+//! its footer names, held or kept, are the bucket's: read there ([`BucketData`]), and their files
 //! leave the store, into the host's cache of the bucket's objects if the uploader gave one, the
 //! segment's once no write is in progress in it. Durably: the write-ahead log's start records it,
 //! after the commits durable so far. So the branch's files are what is not acknowledged yet, and
@@ -197,7 +197,7 @@ pub use segments::{
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
 pub use store::{
-    DirHold, ForkCommitted, Info, InheritedId, NoSpace, Opening, Options, Recovering, RemoteData,
+    BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, Opening, Options, Recovering,
     SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,
 };
 pub use sync::Rules;

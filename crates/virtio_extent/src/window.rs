@@ -212,7 +212,7 @@ impl WindowMemory {
     /// memory: the store is dropped first.
     pub(crate) unsafe fn create(
         &self,
-        store: &cladefs::RemoteExtentStore,
+        store: &cladefs::DaemonExtentStore,
         prefault: Option<Arc<dyn PrefaultGuestMemory>>,
         private_max: u64,
     ) -> Result<(), cladefs::Error> {

@@ -1726,7 +1726,7 @@ fn commit_contents(
                 ensure!(extent.branch == segment.branch, "{extent:?} is another branch's");
                 contents.own.push((extent.sequence, entry.len));
             }
-            Data::Remote(_) => {}
+            Data::Bucket(_) => {}
         }
     }
     Ok((contents, continued))

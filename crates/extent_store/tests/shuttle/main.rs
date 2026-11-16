@@ -42,7 +42,7 @@
 
 use extent_frame::segment::{Chain, Child, Footer};
 use extent_store::{
-    Description, Dir, MemDir, Opening, Options, RemoteData, Rules, Store, set_rules,
+    BucketData, Description, Dir, MemDir, Opening, Options, Rules, Store, set_rules,
 };
 use shuttle::scheduler::{PctScheduler, RandomScheduler, ReplayScheduler};
 use shuttle::sync::Mutex;
@@ -245,7 +245,7 @@ fn run_with(Run { steps, follow }: Run) {
             loop {
                 // Whether the writer was done before this round: then it takes everything.
                 let done = written.load(Ordering::SeqCst);
-                // As cladefs's uploader does (remote.rs): closes the open segment between commits,
+                // As cladefs's uploader does (upload.rs): closes the open segment between commits,
                 // and takes the segments closed whose commits are durable, reading them and their
                 // extents' own files.
                 store.close_now().unwrap();
@@ -492,10 +492,10 @@ impl Bucket {
         read: impl FnOnce(&mut [u8]) -> anyhow::Result<()>,
     ) -> anyhow::Result<()> {
         let error = match read(buf) {
-            Err(error) if error.downcast_ref::<RemoteData>().is_some() => error,
+            Err(error) if error.downcast_ref::<BucketData>().is_some() => error,
             read => return read,
         };
-        let location = &error.downcast_ref::<RemoteData>().unwrap().location;
+        let location = &error.downcast_ref::<BucketData>().unwrap().location;
         let objects = self.0.lock().unwrap();
         let Some(object) = objects.get(&location.key) else {
             anyhow::bail!("{error:#}, which the uploader uploaded not");

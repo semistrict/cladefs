@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
-use cladefs::{Errno, ExtentStore, RemoteExtentStore};
+use cladefs::{DaemonExtentStore, Errno, ExtentStore};
 use virtio_extent::protocol::*;
 use virtio_extent::{
     BoxError, Buffers, CacheType, Config, ConfigInterrupt, Device, Notices, WindowVm, handle,
@@ -78,13 +78,13 @@ fn daemon() -> TestDir {
 }
 
 /// A store of `capacity` bytes, which a daemon of the test's serves.
-fn store_of(capacity: u64) -> (RemoteExtentStore, TestDir) {
+fn store_of(capacity: u64) -> (DaemonExtentStore, TestDir) {
     let dir = daemon();
-    let store = RemoteExtentStore::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
+    let store = DaemonExtentStore::connect(dir.socket(), dir.0.join("store"), capacity).unwrap();
     (store, dir)
 }
 
-fn store() -> (RemoteExtentStore, TestDir) {
+fn store() -> (DaemonExtentStore, TestDir) {
     store_of(1 << 20)
 }
 
@@ -132,7 +132,7 @@ fn buffers(readable: &mut [u8], written: &mut [u8], split: usize) -> Buffers {
 /// response included, split into descriptors of at most `split` bytes; returns how much the device
 /// says it wrote, and the `writable` bytes it was given.
 fn serve(
-    store: &RemoteExtentStore,
+    store: &DaemonExtentStore,
     readable: &[u8],
     writable: usize,
     split: usize,
@@ -148,7 +148,7 @@ fn serve(
 /// Serves a request as [`serve`] does, and returns what the device wrote, the response apart, and
 /// the response's status.
 fn request_split(
-    store: &RemoteExtentStore,
+    store: &DaemonExtentStore,
     readable: &[u8],
     writable: usize,
     split: usize,
@@ -160,7 +160,7 @@ fn request_split(
     (written, u32::from_le(response.status))
 }
 
-fn request(store: &RemoteExtentStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
+fn request(store: &DaemonExtentStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
     request_split(store, readable, writable, usize::MAX)
 }
 
@@ -168,7 +168,7 @@ fn read<T: FromBytes>(bytes: &[u8]) -> T {
     T::read_from_prefix(bytes).unwrap().0
 }
 
-fn io(store: &RemoteExtentStore, sequence: u64, offset: u64, len: usize) -> IoArgs {
+fn io(store: &DaemonExtentStore, sequence: u64, offset: u64, len: usize) -> IoArgs {
     IoArgs {
         id: ExtentIdLe { branch: store.branch().to_le(), sequence: sequence.to_le() },
         offset: offset.to_le(),
@@ -367,7 +367,7 @@ fn roots_and_info() {
 #[test]
 fn follows_a_writer() {
     let (store, dir) = store();
-    let follower = RemoteExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
+    let follower = DaemonExtentStore::connect_read_only(dir.socket(), dir.0.join("store")).unwrap();
     let (heard, commits) = mpsc::channel();
     follower.on_committed(move |committed| {
         // Unheard once the test stops listening.

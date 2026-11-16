@@ -88,7 +88,7 @@ pub struct SpentExtent(pub ExtentId);
 /// `location` ([`Store::adopt`]): what the store's user reads it from.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{extent:?}'s data is in the bucket, at {location:?}")]
-pub struct RemoteData {
+pub struct BucketData {
     pub extent: ExtentId,
     pub location: Location,
 }
@@ -414,7 +414,7 @@ fn place_of(entry: &Extent) -> Place {
             _ => Place::Pieces,
         },
         Data::Own => Place::Own,
-        Data::Remote(location) => Place::Remote(location.clone()),
+        Data::Bucket(location) => Place::Bucket(location.clone()),
     }
 }
 
@@ -927,7 +927,7 @@ impl<D: Dir> Recovering<D> {
         // The branch: the bucket's state, the log's footers applied over it.
         let mut replay = state.placed(|extents| Local {
             extents: (extents.into_iter())
-                .map(|(extent, at)| (extent, Extent { len: at.len, data: Data::Remote(at) }))
+                .map(|(extent, at)| (extent, Extent { len: at.len, data: Data::Bucket(at) }))
                 .collect(),
             segments: HashMap::new(),
         });
@@ -976,7 +976,7 @@ impl<D: Dir> Recovering<D> {
                     let file = file.with_context(|| format!("extent {extent:?}'s file"))?;
                     own_sizes.insert(*extent, file.size()?);
                 }
-                Data::Remote(_) => {}
+                Data::Bucket(_) => {}
             }
         }
         let opened = (epoch, recovered.next, chain);
@@ -1826,7 +1826,7 @@ impl<D: Dir> Store<D> {
                     source.locate(offset, held_end - offset, unpacked, &mut parts)?;
                 }
             }
-            Data::Remote(location) => bail!(RemoteData { extent, location: location.clone() }),
+            Data::Bucket(location) => bail!(BucketData { extent, location: location.clone() }),
             Data::Pieces(pieces) => {
                 for (start, end, source) in paint(pieces, offset, held_end) {
                     match source {
@@ -1924,7 +1924,7 @@ impl<D: Dir> Store<D> {
                 }
             }
             Data::Own => state.uncommitted.let_go(entry.len),
-            Data::Remote(_) => unreachable!("an open extent's data is in segments or a raw file"),
+            Data::Bucket(_) => unreachable!("an open extent's data is in segments or a raw file"),
         }
         Ok(())
     }
@@ -2171,7 +2171,7 @@ impl<D: Dir> Store<D> {
         };
         let large = entry.len >= self.options.large_extent;
         match (&entry.data, state.uncommitted.packing(extent)) {
-            (Data::Remote(_), _) => return Ok(0),
+            (Data::Bucket(_), _) => return Ok(0),
             // Written to a raw file of its own, which it is framed from, or in.
             (Data::Own, Some(Packing::Own(raw))) => {
                 let raw = raw.clone();
@@ -2662,7 +2662,7 @@ impl<D: Dir> Store<D> {
 
     /// cladefs: segment `number`, which [`Store::closed`] gave, the first of the write-ahead log, is
     /// acknowledged in the bucket: the extents sealed in it, and those stored on their own its
-    /// footer names, are read there from now on ([`RemoteData`]), and their files leave the store
+    /// footer names, are read there from now on ([`BucketData`]), and their files leave the store
     /// for the host's cache, or go: the extents' own files, and the segment's, once no extent's
     /// data is in it here (TASK-165.8). The frees of its commits are the bucket's to keep. The
     /// log's start, its last commit from now on, is durable first, so that the store opened again

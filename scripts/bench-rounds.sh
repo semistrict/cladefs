@@ -33,7 +33,7 @@
 # daemon's part cache are on ext4, as a host's local disk: in the job's temporary directory,
 # fxjob's, on the host's scratch disk, which goes with the job (scripts/test-e2e-job.sh, which
 # refuses another filesystem). Its bucket is test-e2e.sh's own, a file bucket in memory, on
-# tmpfs, whose remoteness CLADEFS_REMOTE_LATENCY_MS stands for, unless CLADEFS_EXTENTD_REMOTE names
+# tmpfs, whose distance CLADEFS_BUCKET_LATENCY_MS stands for, unless CLADEFS_EXTENTD_REMOTE names
 # one: it counts against the run's memory, and a case whose working set of gigabytes overruns
 # that (TASK-350) takes more of it (CLADEFS_ROUNDS_MEM), or a bucket named on a disk.
 #

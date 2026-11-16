@@ -154,7 +154,7 @@ pub const MAX_MANY_DATA: usize = 64 << 10;
 pub const MAX_STATS: usize = 64 << 10;
 
 #[cfg(target_os = "linux")]
-const _: () = assert!(MAX_STATS == cladefs::RemoteExtentStore::MAX_STATS);
+const _: () = assert!(MAX_STATS == cladefs::DaemonExtentStore::MAX_STATS);
 
 /// cladefs: a request's `flags`, of type `type_`, as a device whose cache is `Unsafe` serves them
 /// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not uploaded.

@@ -900,7 +900,7 @@ fn an_encrypted_store_served_reads_back_and_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();
-    cladefs::remote::set_kms(std::sync::Arc::new(kms)).unwrap();
+    cladefs::bucket::set_kms(std::sync::Arc::new(kms)).unwrap();
     // Under the build's temporary directory, where direct I/O works.
     let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
     let path = dir.path().join("store");

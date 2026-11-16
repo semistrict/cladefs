@@ -224,7 +224,7 @@ mod tests {
 
     fn freed(freed: u64, uploader: bool, len: u64) -> Kept {
         let location = extent_frame::segment::Location { key: "k".to_owned(), offset: 0, len };
-        Kept { entry: Extent { len, data: Data::Remote(location) }, freed, uploader }
+        Kept { entry: Extent { len, data: Data::Bucket(location) }, freed, uploader }
     }
 
     fn extent(sequence: u64) -> ExtentId {

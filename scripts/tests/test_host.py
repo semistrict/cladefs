@@ -117,7 +117,7 @@ class HostCommand(unittest.TestCase):
                     "CLADEFS_BENCH_WATCHDOG_SECS": "900",
                     "CLADEFS_ZSTD_LEVEL": "3",
                     "CLADEFS_BENCH_PGBENCH_SCALE": "50",
-                    "CLADEFS_REMOTE_LATENCY_MS": "25",
+                    "CLADEFS_BUCKET_LATENCY_MS": "25",
                     "PJDFSTEST_COMMIT": "85a8aea9",
                     # A driver's own, which does nothing there.
                     "CLADEFS_HOST_RUN": "r1040",
@@ -135,7 +135,7 @@ class HostCommand(unittest.TestCase):
                     "CLADEFS_FOLLOW_SECONDS=600",
                     "CLADEFS_HOST_RUN=r1040",
                     "CLADEFS_PJDFSTEST_TESTS=chmod chown",
-                    "CLADEFS_REMOTE_LATENCY_MS=25",
+                    "CLADEFS_BUCKET_LATENCY_MS=25",
                     "CLADEFS_ZSTD_LEVEL=3",
                     "PJDFSTEST_COMMIT=85a8aea9",
                 ]),

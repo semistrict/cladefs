@@ -1414,7 +1414,7 @@ impl Connection {
             // No larger than the daemon makes room for, the codec has it (TASK-150.3).
             Request::Window { size, private_max, budget } => {
                 let (sender, acks) = (self.peer.sender.clone(), self.peer.acks.clone());
-                let stage = Arc::new(RemoteStage {
+                let stage = Arc::new(VmProcessStage {
                     sender,
                     acks,
                     change: SharedLock::new("stage change", Mutex::default()),
@@ -1914,7 +1914,7 @@ struct Watched {
 
 impl Acks {
     /// The ID of `op`, the next stage operation sent, which the caller queues to send before it
-    /// gives another ([`RemoteStage::send_now`]).
+    /// gives another ([`VmProcessStage::send_now`]).
     fn sent(&self, op: &StageOp) -> u64 {
         self.state.lock().unwrap().next(op.taking())
     }
@@ -2458,7 +2458,7 @@ async fn watch() {
 /// good (TASK-79.9): one that takes access to pages away is acknowledged, and the guest has no
 /// access to a page the kernel frees, reuses or shares next, as what was freed waits for it
 /// ([`quarantine`]).
-struct RemoteStage {
+struct VmProcessStage {
     sender: Arc<AsyncSender>,
     acks: Arc<Acks>,
     /// cladefs: the operations of the change the window is making, if it is, held back to be sent
@@ -2469,7 +2469,7 @@ struct RemoteStage {
     change: SharedLock<Mutex<Option<Vec<StageOp>>>>,
 }
 
-impl RemoteStage {
+impl VmProcessStage {
     /// Sends the stage operation `op`, or holds it back with the change being made.
     fn send(&self, op: StageOp) {
         let mut change = self.change.with(Mutex::lock);
@@ -2489,7 +2489,7 @@ impl RemoteStage {
     }
 }
 
-impl SecondStage for RemoteStage {
+impl SecondStage for VmProcessStage {
     fn map(&self, offset: u64, phys: crate::pages::PhysLocation, len: u64) {
         self.send(StageOp::Map { offset, phys, len });
         crate::stats::add(crate::stats::Counter::StageMaps, 1);

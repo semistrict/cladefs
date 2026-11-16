@@ -28,7 +28,7 @@ use crate::store_table::{self, StoreTable, Writer as _};
 use crate::{Branch, BranchOf, Cell, Errno, ExtentInfo, ExtentStore};
 use extent_remote::cache::Cache;
 use extent_remote::cell::Kind;
-use extent_remote::store::Stats;
+use extent_remote::object_bucket::Stats;
 use std::borrow::Borrow;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -575,7 +575,7 @@ fn attached<T>(
     open: impl FnOnce(extent_store::upload::Options) -> Result<T, crate::Error>,
 ) -> Result<T, Errno> {
     // The daemon's own first, which the stores naming it share (`host_store::bucket`).
-    remote_bucket()?;
+    daemon_bucket()?;
     let keeping = keeping()?;
     open(keeping).map_err(|err| errno_of(format_args!("opening {}", path.display()), err))
 }
@@ -586,11 +586,11 @@ fn attached<T>(
 /// they fill, which the daemon's memory governor lets go of first (`memory::held_parts`,
 /// TASK-400).
 fn keeping() -> Result<extent_store::upload::Options, Errno> {
-    let token = crate::remote::host_token().map_err(|err| {
+    let token = crate::bucket::host_token().map_err(|err| {
         log::error!("extentd: {err}");
         Errno::EINVAL
     })?;
-    let (cache, interval) = (remote_cache()?, upload_interval());
+    let (cache, interval) = (part_cache()?, upload_interval());
     let held = Some(super::memory::held_parts().clone());
     Ok(extent_store::upload::Options { cache, held, token, interval, ..Default::default() })
 }
@@ -988,10 +988,10 @@ pub(super) async fn delete(path: PathBuf) -> Result<(), Errno> {
 /// The bucket the store at `path`, or the fork whose handle it is, keeps its branch in, as its
 /// description names it (TASK-165.6): or, if its description is not there, as for what a
 /// deletion that stopped partway left, which deletes nothing in a bucket, the daemon's.
-fn bucket_of(path: &Path) -> Result<Arc<extent_remote::store::Store>, Errno> {
+fn bucket_of(path: &Path) -> Result<Arc<extent_remote::object_bucket::ObjectBucket>, Errno> {
     match crate::host_store::bucket_at(path) {
         Ok(Some(bucket)) => Ok(bucket),
-        Ok(None) => remote_bucket(),
+        Ok(None) => daemon_bucket(),
         Err(err) => {
             log::warn!("extentd: the bucket of {}: {err:#}", path.display());
             Err(Errno::EIO)
@@ -1012,7 +1012,7 @@ pub(super) async fn drop_copy(path: PathBuf) -> Result<(), Errno> {
 /// has it open.
 async fn delete_alone(
     path: PathBuf,
-    bucket: Option<Arc<extent_remote::store::Store>>,
+    bucket: Option<Arc<extent_remote::object_bucket::ObjectBucket>>,
 ) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
@@ -1134,11 +1134,11 @@ pub(super) async fn stat(path: PathBuf) -> Result<StoreState, Errno> {
     .await
 }
 
-/// The bucket [`remote_bucket`] made, once a store needs it.
-static BUCKET: OnceLock<Arc<extent_remote::store::Store>> = OnceLock::new();
+/// The bucket [`daemon_bucket`] made, once a store needs it.
+static BUCKET: OnceLock<Arc<extent_remote::object_bucket::ObjectBucket>> = OnceLock::new();
 
 /// What the daemon did with its bucket so far, if it made it (`metrics`).
-pub(super) fn bucket_stats() -> Option<extent_remote::store::Stats> {
+pub(super) fn bucket_stats() -> Option<extent_remote::object_bucket::Stats> {
     BUCKET.get().map(|bucket| bucket.stats())
 }
 
@@ -1167,12 +1167,12 @@ pub(super) fn follower_views() -> usize {
 }
 
 /// cladefs: the bucket `CLADEFS_EXTENTD_REMOTE` names, which the stores opened keep their branches in:
-/// `EIO` if it names none, as the daemon's host must (`crate::remote::Host`, TASK-45).
-pub(crate) fn remote_bucket() -> Result<Arc<extent_remote::store::Store>, Errno> {
+/// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
+pub(crate) fn daemon_bucket() -> Result<Arc<extent_remote::object_bucket::ObjectBucket>, Errno> {
     if let Some(bucket) = BUCKET.get() {
         return Ok(bucket.clone());
     }
-    let host = crate::remote::Host::from_env().map_err(|err| {
+    let host = crate::bucket::Host::from_env().map_err(|err| {
         log::error!("extentd: {err}");
         Errno::EIO
     })?;
@@ -1195,7 +1195,7 @@ static UPLOADS_WHEN_ASKED: std::sync::atomic::AtomicBool =
 
 /// Has the stores opened from now on upload only when something waits for an upload (a fork, a
 /// sync, a commit stalled at the lag's bound, the store closing), never as their interval runs
-/// out, as `remote::fork_faults`' stores do. For tests that set a failpoint to fail once for one
+/// out, as `bucket::fork_faults`' stores do. For tests that set a failpoint to fail once for one
 /// store's work: failpoints are the process's, and another store's uploader, woken by its
 /// interval, would pass it first (TASK-157).
 #[cfg(test)]
@@ -1207,9 +1207,9 @@ pub(super) fn uploads_when_asked() {
 /// daemon's stores and their objects. The stores naming `CLADEFS_EXTENTD_REMOTE`'s bucket open it
 /// (`host_store::use_bucket`).
 #[cfg(test)]
-pub(super) fn use_bucket(bucket: extent_remote::store::Store) {
+pub(super) fn use_bucket(bucket: extent_remote::object_bucket::ObjectBucket) {
     let bucket = Arc::new(bucket);
-    let host = crate::remote::Host::from_env().expect("the daemon's host");
+    let host = crate::bucket::Host::from_env().expect("the daemon's host");
     crate::host_store::use_bucket(&host.bucket, bucket.clone());
     assert!(BUCKET.set(bucket.clone()).is_ok(), "the daemon has its bucket already");
     watch_stats(Arc::downgrade(&bucket));
@@ -1265,15 +1265,15 @@ impl FollowerStats {
 }
 
 /// cladefs: keeps what `bucket` did, its requests by kind and its bytes up and down
-/// (`extent_remote::store::Stats::line`), what the stores' followers are ([`FollowerStats`]),
-/// what serving the stores cost ([`daemon_line`]), the requests served
+/// (`extent_remote::object_bucket::Stats::line`), what the stores' followers are
+/// ([`FollowerStats`]), what serving the stores cost ([`daemon_line`]), the requests served
 /// (`super::metrics::requests_line`), what its uploads hold ([`uploads_line`]) and what its process
 /// holds and spent (`super::process::line`, sampled every poll, as the metrics report it, file or
 /// not), while it lives: in the file `CLADEFS_EXTENTD_STATS` names, if it names one, a line each, rewritten whole within [`STATS_POLL`] of each change, which the
 /// bench reports (`scripts/bench-report.py`); and the bucket's in the log every [`STATS_EVERY`]
 /// that it changed. cladefs: what it keeps but the bucket's, it looks at only to keep it in the file
 /// (TASK-92.17).
-fn watch_stats(bucket: std::sync::Weak<extent_remote::store::Store>) {
+fn watch_stats(bucket: std::sync::Weak<extent_remote::object_bucket::ObjectBucket>) {
     let file = std::env::var_os("CLADEFS_EXTENTD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let watching = std::thread::Builder::new().name("extentd stats".into()).spawn(move || {
@@ -1325,13 +1325,13 @@ fn watch_stats(bucket: std::sync::Weak<extent_remote::store::Store>) {
 }
 
 /// cladefs: what the daemon's uploads hold of the objects they upload, in bytes, now and at most,
-/// and the most they may (`crate::remote::upload_memory`, TASK-317).
+/// and the most they may (`crate::bucket::upload_memory`, TASK-317).
 fn uploads_line() -> String {
-    let memory = crate::remote::upload_memory();
+    let memory = crate::bucket::upload_memory();
     format!("uploads: held={} max-held={} budget={}", memory.held, memory.max_held, memory.budget)
 }
 
-/// cladefs: the daemon's part cache, if it opened one ([`remote_cache`]): opening none.
+/// cladefs: the daemon's part cache, if it opened one ([`part_cache`]): opening none.
 pub(super) fn opened_cache() -> Option<Arc<Cache>> {
     CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().flatten()
 }
@@ -1510,7 +1510,7 @@ pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
 }
 
 /// cladefs: the daemon's part cache, once its first store opened it, if it keeps one
-/// ([`remote_cache`]).
+/// ([`part_cache`]).
 static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::new(None);
 
 /// cladefs: the cache the environment configures ([`cache_config`]), if it does, where what the
@@ -1518,7 +1518,7 @@ static CACHE: std::sync::Mutex<Option<Option<Arc<Cache>>>> = std::sync::Mutex::n
 /// opening meanwhile waiting for it: a cache holds its directory locked, and two opened at once, as
 /// a daemon's VMs booting at once open their stores, failed the second (TASK-67). A failure is the
 /// caller's, and the next tries again.
-pub(super) fn remote_cache() -> Result<Option<Arc<Cache>>, Errno> {
+pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
     let mut opened = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(cache) = &*opened {
         return Ok(cache.clone());
@@ -1560,7 +1560,7 @@ mod tests {
                 .map(|_| {
                     scope.spawn(|| {
                         at_once.wait();
-                        remote_cache()
+                        part_cache()
                     })
                 })
                 .collect();
@@ -1585,7 +1585,7 @@ mod tests {
             std::env::set_var("CLADEFS_EXTENTD_CACHE", dir.path());
             std::env::set_var("CLADEFS_EXTENTD_CACHE_BYTES", "268435456");
         }
-        let cache = remote_cache().expect("a cache").expect("CLADEFS_EXTENTD_CACHE's");
+        let cache = part_cache().expect("a cache").expect("CLADEFS_EXTENTD_CACHE's");
         assert_eq!(cache.capacity(), 256 << 20);
     }
 

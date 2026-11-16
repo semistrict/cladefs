@@ -53,7 +53,7 @@
 //! - cladefs: `cladefs_extentd_upload_held_bytes`, `cladefs_extentd_upload_held_max_bytes` and
 //!   `cladefs_extentd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
 //!   every store's together, now and at most, and their budget, `CLADEFS_EXTENTD_UPLOAD_MEMORY`
-//!   (`crate::remote::upload_memory`, TASK-317).
+//!   (`crate::bucket::upload_memory`, TASK-317).
 //! - cladefs: `cladefs_extentd_part_cache_bytes` and `cladefs_extentd_part_cache_capacity_bytes`: what
 //!   the host's part cache keeps, once a store opened it, and its budget,
 //!   `CLADEFS_EXTENTD_CACHE_BYTES` (TASK-406.1).
@@ -321,7 +321,7 @@ pub fn render() -> String {
     }
 
     // cladefs: what the uploads hold of the objects they upload (TASK-317).
-    let memory = crate::remote::upload_memory();
+    let memory = crate::bucket::upload_memory();
     for (name, help, value) in [
         (
             "cladefs_extentd_upload_held_bytes",
@@ -462,7 +462,7 @@ pub fn render() -> String {
     }
 
     if let Some(stats) = super::stores::bucket_stats() {
-        use extent_remote::store::{Request, Upload};
+        use extent_remote::object_bucket::{Request, Upload};
         let name = "cladefs_extentd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
         let _ = writeln!(out, "# TYPE {name} counter");

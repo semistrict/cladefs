@@ -12,7 +12,7 @@
 
 use crate::{Options, Volume};
 use anyhow::{Context as _, Error, ensure};
-use cladefs::{MappingContents, RemoteDevice, RemoteExtentStore, WindowMapping};
+use cladefs::{DaemonDevice, DaemonExtentStore, MappingContents, WindowMapping};
 use extent_files::{Contents, Run, VolumeWindow};
 use std::path::Path;
 use std::ptr::NonNull;
@@ -38,14 +38,14 @@ pub fn open(
     })?;
     let store = Arc::new(store);
     let window = DaemonWindow::new(store.clone(), window)?;
-    let device = DeviceHolder::new(RemoteDevice::new(store)?);
+    let device = DeviceHolder::new(DaemonDevice::new(store)?);
     Volume::open_mapped(device, Box::new(window), options)
 }
 
 /// A store's DAX window in this process's memory. See the module docs.
 pub struct DaemonWindow {
     /// The store, which goes before the memory does.
-    store: Option<Arc<RemoteExtentStore>>,
+    store: Option<Arc<DaemonExtentStore>>,
     memory: NonNull<u8>,
     size: u64,
 }
@@ -57,7 +57,7 @@ unsafe impl Sync for DaemonWindow {}
 
 impl DaemonWindow {
     /// `store`'s window, in `size` bytes of new address space.
-    pub fn new(store: Arc<RemoteExtentStore>, size: u64) -> Result<Self, Error> {
+    pub fn new(store: Arc<DaemonExtentStore>, size: u64) -> Result<Self, Error> {
         // SAFETY: new anonymous memory, which the window takes over.
         let memory = unsafe {
             libc::mmap(
@@ -85,7 +85,7 @@ impl DaemonWindow {
         Ok(window)
     }
 
-    fn store(&self) -> &RemoteExtentStore {
+    fn store(&self) -> &DaemonExtentStore {
         self.store.as_ref().expect("a store until dropped")
     }
 }

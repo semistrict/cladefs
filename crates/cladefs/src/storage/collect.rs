@@ -11,7 +11,7 @@
 //! image and its forks, which reads again only the branches' records that changed (`Collector`).
 
 use extent_remote::collector::{Collector, Options, Report};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
@@ -57,7 +57,7 @@ fn pace() -> Pace {
 static COLLECTING: Mutex<BTreeMap<String, Weak<Collecting>>> = Mutex::new(BTreeMap::new());
 
 /// The collector of `bucket`, at `url`, an image's own, which this process's images of it share.
-pub(crate) fn of(url: &str, bucket: &Arc<Bucket>) -> Arc<Collecting> {
+pub(crate) fn of(url: &str, bucket: &Arc<ObjectBucket>) -> Arc<Collecting> {
     let mut collecting = COLLECTING.lock().unwrap();
     collecting.retain(|_, collector| collector.strong_count() > 0);
     if let Some(collector) = collecting.get(url).and_then(Weak::upgrade) {
@@ -75,7 +75,7 @@ pub(crate) fn of(url: &str, bucket: &Arc<Bucket>) -> Arc<Collecting> {
 
 /// An image's own bucket's collector in this process. Dropped, it waits for the pass it runs, if any.
 pub(crate) struct Collecting {
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     pace: Pace,
     state: Mutex<State>,
 }
@@ -203,7 +203,7 @@ impl Drop for Collecting {
 /// A pass of `collector` over `bucket`, as a holder no other pass is: what it did, logged and
 /// returned, or why it failed, logged. Nothing it could not read it deleted: the next pass tries
 /// again.
-fn pass(collector: &mut Collector, bucket: &Bucket) -> Report {
+fn pass(collector: &mut Collector, bucket: &ObjectBucket) -> Report {
     // Where a test holds a pass up, to drop the images it collects for meanwhile (TASK-291.3).
     fail::fail_point!("collect::pass", |_| Report::default());
     let failed = match extent_store::upload::block_on(collector.collect(bucket, rand::random())) {

@@ -377,7 +377,7 @@ fn nice(nice: i32) {
 struct Host {
     encrypted: bool,
     runtime: tokio::runtime::Runtime,
-    bucket: Arc<extent_remote::store::Store>,
+    bucket: Arc<extent_remote::object_bucket::ObjectBucket>,
     upload: extent_store::upload::Runtime,
     _kms: tempfile::TempDir,
 }
@@ -393,7 +393,7 @@ impl Host {
         let encrypted = std::env::var("CLADEFS_BENCH_ENCRYPTED").ok()?;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
-        let bucket = Arc::new(extent_remote::store::Store::new(objects, ""));
+        let bucket = Arc::new(extent_remote::object_bucket::ObjectBucket::new(objects, ""));
         let kms = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::ENCRYPTED).unwrap();
@@ -416,7 +416,7 @@ impl Host {
         id: u64,
         options: Options,
         held: Arc<HeldParts>,
-    ) -> (Arc<Store<HostDir>>, extent_store::upload::Remote<HostDir>) {
+    ) -> (Arc<Store<HostDir>>, extent_store::upload::Uploader<HostDir>) {
         let tenant = if self.encrypted { Self::ENCRYPTED } else { Self::CLEAR };
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
@@ -430,11 +430,11 @@ impl Host {
         let holding = (id, uploading);
         let bucket = self.bucket.clone();
         let _entered = self.runtime.enter();
-        let (store, remote) =
+        let (store, uploader) =
             extent_store::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
         store.made().unwrap();
         assert_eq!(store.keys().encrypting().is_some(), self.encrypted);
-        (store, remote)
+        (store, uploader)
     }
 }
 
@@ -457,10 +457,10 @@ fn writes(mib: u64) {
     let dir = HostDir::new(temp.path()).unwrap();
     // Segments close at commits alone.
     let options = Options { segment_size: 1 << 30, ..Options::default() };
-    let (store, _remote) = match &host {
+    let (store, _uploader) = match &host {
         Some(host) => {
-            let (store, remote) = host.open(dir, 1, options, HeldParts::new());
-            (store, Some(remote))
+            let (store, uploader) = host.open(dir, 1, options, HeldParts::new());
+            (store, Some(uploader))
         }
         None => (Arc::new(create(dir, options)), None),
     };
@@ -539,10 +539,10 @@ fn framing(segments: u64) {
                 // Segments close between commits alone, a commit after each 32 MiB.
                 let options = Options { segment_size: 1 << 30, ..Options::default() };
                 let dir = HostDir::new(&temp).unwrap();
-                let (store, _remote) = match host {
+                let (store, _uploader) = match host {
                     Some(host) => {
-                        let (store, remote) = host.open(dir, store + 1, options, held.clone());
-                        (store, Some(remote))
+                        let (store, uploader) = host.open(dir, store + 1, options, held.clone());
+                        (store, Some(uploader))
                     }
                     None => {
                         let description = Description {

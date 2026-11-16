@@ -1,5 +1,5 @@
 # TASK-444.2.2 put back: listening reads the latest with a load, as virtio_extent's hear_commits read
-# RemoteExtentStore::committed after on_committed: store buffering against the rise, which may find
+# DaemonExtentStore::committed after on_committed: store buffering against the rise, which may find
 # no listener as the load misses it, the rise unheard.
 # Killer: cladefs hearing::loom::listeners_hear_of_every_rise
 --- a/crates/cladefs/src/hearing.rs

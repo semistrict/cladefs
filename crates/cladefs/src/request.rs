@@ -14,7 +14,7 @@
 //! object store's requests made for it among them, name it, as anything that traces it can.
 //!
 //! A request is current while what serves it is polled, or run, on a thread ([`InRequest`],
-//! [`within_now`]), and carried by hand to another ([`within`]): the remotes' runtime's reads of
+//! [`within_now`]), and carried by hand to another ([`within`]): the bucket runtime's reads of
 //! object storage, and the pager's.
 
 use std::cell::Cell;

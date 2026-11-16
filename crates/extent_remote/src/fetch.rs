@@ -2275,7 +2275,7 @@ mod tests {
     }
 
     /// TASK-92.21: a benchmark of reads of parts the cache keeps, on a runtime of four threads, as
-    /// the remotes' runtime may be, each a task of its own, all at once: how long 1,024 reads of a
+    /// the bucket runtime may be, each a task of its own, all at once: how long 1,024 reads of a
     /// part take, each by a fetcher whose memory holds nothing, so that it reads the part, and its
     /// object's tail, from the cache. `cargo nextest run -p extent_remote --run-ignored only
     /// bench_reads_of_the_cache_on_a_runtime --no-capture`.
@@ -2317,7 +2317,7 @@ mod tests {
 
     /// TASK-92.43's review: a benchmark of reads of parts the host's memory holds, as the page-ins
     /// of a base's forks are of what they share, by eight fetchers of a host at once, each a task
-    /// of a runtime of eight threads, as the remotes' runtime may be: how long 32 Ki reads of 4 KiB
+    /// of a runtime of eight threads, as the bucket runtime may be: how long 32 Ki reads of 4 KiB
     /// each take each fetcher, none asking the bucket for anything, so that what the locks the
     /// host's fetchers share cost their reads shows. `cargo nextest run -p extent_remote --release
     /// --run-ignored only bench_reads_of_parts_in_memory_by_a_hosts_fetchers --no-capture`.

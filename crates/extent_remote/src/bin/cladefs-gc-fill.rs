@@ -45,7 +45,7 @@
 use extent_remote::batch::{Commit, SegmentBuilder};
 use extent_remote::bucket::Bucket as _;
 use extent_remote::layout::{Branch, Cell, Child, Origin};
-use extent_remote::store::Store;
+use extent_remote::object_bucket::ObjectBucket;
 use extent_remote::{Bytes, Writer, branch, cell};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
@@ -286,7 +286,7 @@ fn run(args: &Args) -> Result<Filled, String> {
 /// A cell written into memory ([`write`]): its bucket, and the last point its branch was forked
 /// to, if any, with the fork.
 struct Written {
-    bucket: Arc<Store>,
+    bucket: Arc<ObjectBucket>,
     point: Option<(Branch, Origin)>,
 }
 
@@ -326,7 +326,7 @@ async fn write(cell: Cell, shape: Shape, of: Option<&Point>) -> Result<Written, 
             .await
             .map_err(|err| err.to_string())?;
     }
-    let bucket = Arc::new(Store::new(memory, ""));
+    let bucket = Arc::new(ObjectBucket::new(memory, ""));
     let failed = |err: extent_remote::Error| err.to_string();
     cell::create(&*bucket, cell, WRITER, None).await.map_err(failed)?;
     let id = Branch { cell, id: 1 };
@@ -396,7 +396,7 @@ async fn write(cell: Cell, shape: Shape, of: Option<&Point>) -> Result<Written, 
 /// Copies every object of `bucket`, one in memory, into `files`, but those of `but`, which the
 /// bucket started from: what the copied take, and each with its bytes, in the order of their keys.
 async fn copy(
-    bucket: &Store,
+    bucket: &ObjectBucket,
     files: &LocalFileSystem,
     but: Option<&Point>,
 ) -> Result<(Sum, Vec<(String, Bytes)>), String> {
@@ -436,7 +436,7 @@ mod tests {
     use super::*;
     use extent_remote::collector::Options;
     use extent_remote::layout::{self, Kind as Key};
-    use extent_remote::store::Request;
+    use extent_remote::object_bucket::Request;
     use extent_remote::sweep::{Mode, Sweep, Swept};
 
     fn parsed(args: &[&str]) -> Result<Args, String> {
@@ -485,7 +485,7 @@ mod tests {
     }
 
     /// A sweep of every cell of `bucket`, a pass at a time, deleting what is free at once.
-    fn sweep(bucket: &Arc<Store>) -> Swept {
+    fn sweep(bucket: &Arc<ObjectBucket>) -> Swept {
         let sweep = Sweep {
             options: Options { compact_below: 0.5, grace: 0 },
             mode: Mode::Delete,
@@ -507,7 +507,7 @@ mod tests {
     }
 
     /// The keys of the objects of `bucket` under `prefix`, in order.
-    fn keys(bucket: &Store, prefix: &str) -> Vec<String> {
+    fn keys(bucket: &ObjectBucket, prefix: &str) -> Vec<String> {
         let listed = futures::executor::block_on(bucket.list(prefix)).unwrap();
         listed.into_iter().map(|meta| meta.key).collect()
     }
@@ -537,7 +537,7 @@ mod tests {
         let deleted =
             Args { dir: directory.path().join("deleted"), ..args([1, 3, 2, 2], Kind::Deleted) };
         assert_eq!(run(&deleted).unwrap().cells, 3);
-        let bucket = Arc::new(Store::from_url(&url(&deleted.dir)).unwrap());
+        let bucket = Arc::new(ObjectBucket::from_url(&url(&deleted.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 0, 3]);
         assert_eq!(requests(&swept[2]), [6, 6, 3, 2, 17]);
@@ -553,7 +553,7 @@ mod tests {
         };
         let filled = run(&clones).unwrap();
         assert_eq!(filled.cells, 5);
-        let bucket = Arc::new(Store::from_url(&url(&clones.dir)).unwrap());
+        let bucket = Arc::new(ObjectBucket::from_url(&url(&clones.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 1, 5]);
         // Each sandbox's second pass, in full for its own deletes, retires its reference again,
@@ -565,7 +565,7 @@ mod tests {
             assert_eq!(keys(&bucket, &cell.prefix()), left(cell));
         }
         let base = Cell { tenant: 1, id: 1 };
-        let of_base = |bucket: &Store| {
+        let of_base = |bucket: &ObjectBucket| {
             let keys = keys(bucket, &base.prefix());
             let count = |kind: fn(&Key<'_>) -> bool| {
                 keys.iter().filter(|key| kind(&layout::kind(key))).count()

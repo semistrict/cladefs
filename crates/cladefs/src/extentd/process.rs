@@ -45,7 +45,7 @@ pub struct Sample {
 /// (`physmem`'s memfd), bounded by `MEMORY_BYTES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnonBudget {
-    /// Its uploads': its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (`crate::remote::UPLOADS`),
+    /// Its uploads': its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
     /// every store's PUTs holding their objects within it, once each however often each is tried.
     pub uploads: u64,
     /// Its framings': [`FRAMING`] for each store written at once, the most so far.
@@ -96,7 +96,7 @@ pub const FRAMING: u64 = {
 };
 
 /// What the host's fetches hold at once, at most: the GETs of extents' data in flight
-/// (`crate::remote::BUDGET`, 64 MiB), the objects' tails kept (`extent_remote::fetch`'s `TAILS`,
+/// (`crate::bucket::BUDGET`, 64 MiB), the objects' tails kept (`extent_remote::fetch`'s `TAILS`,
 /// 64 MiB) and the parts fetched last (its `RECENT`, 64 MiB), each bounded for the host, however
 /// many of its stores read (TASK-92.21, TASK-92.22).
 pub const FETCHES: u64 = 3 * (64 << 20);
@@ -145,7 +145,7 @@ fn budget(state: &mut State) -> AnonBudget {
     state.writers = state.writers.max(super::stores::open_count() as u64);
     state.in_flight = state.in_flight.max(super::memory::in_flight_held());
     AnonBudget {
-        uploads: crate::remote::upload_memory().budget,
+        uploads: crate::bucket::upload_memory().budget,
         framings: state.writers * FRAMING,
         fetches: FETCHES,
         in_flight: state.in_flight,

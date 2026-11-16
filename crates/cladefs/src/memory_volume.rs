@@ -9,11 +9,11 @@
 //! restored VM's next snapshot goes into a fork of its parent's memory ([`MemoryVolume::fork`]),
 //! which reads the parent's pages and stores only its own.
 //!
-//! Its device is the daemon's store ([`RemoteDevice`]): its reads of sealed extents are the
+//! Its device is the daemon's store ([`DaemonDevice`]): its reads of sealed extents are the
 //! daemon's cache's, which every store and VM it serves shares.
 
 use crate::error::Error;
-use crate::{DaemonConnection, RemoteDevice, RemoteExtentStore};
+use crate::{DaemonConnection, DaemonDevice, DaemonExtentStore};
 use extent_files::{Options, Volume};
 use std::path::Path;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ pub fn capacity(size: u64) -> u64 {
 
 /// A VM's memory, a volume of its cell. See the module docs.
 pub struct MemoryVolume {
-    store: Arc<RemoteExtentStore>,
+    store: Arc<DaemonExtentStore>,
     volume: Arc<Volume>,
     size: u64,
 }
@@ -43,7 +43,7 @@ impl MemoryVolume {
         let daemon = DaemonConnection::connect(socket)?;
         let opened = daemon.open_memory(store, capacity(size))?;
         let store = Arc::new(opened);
-        let device = DeviceHolder::new(RemoteDevice::new(store.clone()).map_err(Error::new)?);
+        let device = DeviceHolder::new(DaemonDevice::new(store.clone()).map_err(Error::new)?);
         let volume = Volume::open(device, Options::default()).map_err(Error::new)?;
         volume.open_file(IMAGE, true).map_err(Error::new)?;
         match volume.size(IMAGE).map_err(Error::new)? {

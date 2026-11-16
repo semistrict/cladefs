@@ -20,13 +20,13 @@
 //!
 //! The extents are a guest's: minted from its store's next sequence number or its writer's floor,
 //! which jumps at each writer, on from 1 << 40, its branches random; never counted from nothing, as
-//! the extents of `remote`'s other tests are, which no store's are.
+//! the extents of `bucket`'s other tests are, which no store's are.
 
 use super::tests::{Gated, Mishap, idle, kept_in, naming, pattern, reopened, restart, uploaded};
 use crate::faults::{CLEANUP_STEPS, FORK_STEPS, plan};
 use crate::{Errno, ExtentId, ExtentStore, VolatileSlice, VolatileSliceMut};
 use extent_remote::layout::{self, Kind};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use extent_remote::{EPOCH_SHIFT, branch};
 use fail::FailGuard;
 use futures::executor::block_on;
@@ -79,7 +79,7 @@ struct World {
     temp: tempfile::TempDir,
     /// Where the parent's host's disk is: once it died, its copy, restarted.
     host: PathBuf,
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     gated: Arc<Gated>,
     parent: Option<ExtentStore>,
     branch: crate::Branch,
@@ -155,9 +155,9 @@ impl World {
         let host = temp.path().join("host");
         std::fs::create_dir(&host).unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let gated = Arc::new(Gated::over(memory));
-        let reached = Arc::new(Bucket::new(gated.clone(), ""));
+        let reached = Arc::new(ObjectBucket::new(gated.clone(), ""));
 
         let other =
             kept_in(temp.path().join("other"), (1 << 30, None), &bucket, options()).unwrap();
@@ -565,10 +565,10 @@ fn branches_taking_the_childs_id_at_each_step() {
 #[test]
 fn branches_taking_the_id_of_a_fork_whose_host_dies() {
     host();
-    let after_free = FORK_STEPS.iter().position(|step| *step == "remote::child_free").unwrap();
+    let after_free = FORK_STEPS.iter().position(|step| *step == "upload::child_free").unwrap();
     all(FORK_STEPS[after_free + 1..].iter().flat_map(|&step| {
         [Leftover::Deleted, Leftover::Opened]
-            .map(|leftover| (vec![Fault::Taken("remote::child_free"), Fault::Dies(step)], leftover))
+            .map(|leftover| (vec![Fault::Taken("upload::child_free"), Fault::Dies(step)], leftover))
     }));
 }
 

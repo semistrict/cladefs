@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! What serving the device's requests asks of its store: on Linux, cladefs's `RemoteExtentStore`,
-//! the device's connection to the extent daemon; a fake one in tests.
+//! What serving the device's requests asks of its backend, its store: on Linux, cladefs's
+//! `DaemonExtentStore`, the device's connection to the extent daemon; a fake one in tests.
 
 use std::future::Future;
 
@@ -11,10 +11,10 @@ use cladefs::{
     Commit, Errno, ExtentId, ExtentInfo, VolatileSlice, VolatileSliceMut, WriteBarriers,
 };
 
-/// The store a device's requests are served with ([`handle`](crate::handle)): each method one of
-/// the device's requests, as cladefs's `RemoteExtentStore` serves it, which its documentation
-/// describes. Errors are the request's status.
-pub trait Store: Send + Sync {
+/// The store a device's requests are served with ([`handle`](crate::handle)), its backend: each
+/// method one of the device's requests, as cladefs's `DaemonExtentStore` serves it, which its
+/// documentation describes. Errors are the request's status.
+pub trait Backend: Send + Sync {
     /// The branch the guest mints extents of.
     fn branch(&self) -> u64;
     /// Whether the store's window copies on write: a writer's (backlog doc-13).
@@ -92,13 +92,13 @@ pub trait Store: Send + Sync {
 }
 
 #[cfg(target_os = "linux")]
-impl Store for cladefs::RemoteExtentStore {
+impl Backend for cladefs::DaemonExtentStore {
     fn branch(&self) -> u64 {
-        cladefs::RemoteExtentStore::branch(self)
+        cladefs::DaemonExtentStore::branch(self)
     }
 
     fn copies_on_write(&self) -> bool {
-        cladefs::RemoteExtentStore::copies_on_write(self)
+        cladefs::DaemonExtentStore::copies_on_write(self)
     }
 
     fn read(
@@ -143,7 +143,7 @@ impl Store for cladefs::RemoteExtentStore {
     }
 
     fn prefault(&self, window_offset: u64, len: u64) {
-        cladefs::RemoteExtentStore::prefault(self, window_offset, len);
+        cladefs::DaemonExtentStore::prefault(self, window_offset, len);
     }
 
     fn unmap(

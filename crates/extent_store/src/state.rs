@@ -280,7 +280,7 @@ impl<F: File> State<F> {
                 self.own_files.forget(extent);
                 self.unreferenced.doomed.extend(FileKey::Own(extent).paths());
             }
-            Data::Remote(_) => {}
+            Data::Bucket(_) => {}
         }
     }
 
@@ -327,7 +327,7 @@ impl<F: File> State<F> {
         named: impl Fn(&ExtentId) -> bool,
     ) -> Vec<(String, Option<String>)> {
         let in_bucket = |len, piece: &Piece| {
-            Data::Remote(Location { key: key.to_owned(), offset: piece.offset, len })
+            Data::Bucket(Location { key: key.to_owned(), offset: piece.offset, len })
         };
         let cached_key = |key: &str| cached.then(|| key.to_owned());
         for extent in sealed {
@@ -346,7 +346,7 @@ impl<F: File> State<F> {
             if let Some(entry) = self.extents.get_mut(extent)
                 && entry.data == Data::Own
             {
-                entry.data = Data::Remote(location.clone());
+                entry.data = Data::Bucket(location.clone());
                 self.own_files.forget(*extent);
                 leaving.push((extent_path(*extent), cached_key(&location.key)));
             } else if self.kept.get(extent).is_none_or(|kept| kept.entry.data != Data::Own) {
@@ -364,8 +364,8 @@ impl<F: File> State<F> {
                     [piece] if piece.segment == segment => Some(in_bucket(held.entry.len, &piece)),
                     _ => None,
                 },
-                Data::Own => own.get(extent).map(|location| Data::Remote((*location).clone())),
-                Data::Remote(_) => None,
+                Data::Own => own.get(extent).map(|location| Data::Bucket((*location).clone())),
+                Data::Bucket(_) => None,
             };
             if let Some(placed) = placed {
                 kept.push((*extent, std::mem::replace(&mut held.entry.data, placed)));
@@ -378,7 +378,7 @@ impl<F: File> State<F> {
                     self.own_files.forget(extent);
                     leaving.push((extent_path(extent), cached_key(&own[&extent].key)));
                 }
-                Data::Remote(_) => unreachable!("kept, placed in the bucket again"),
+                Data::Bucket(_) => unreachable!("kept, placed in the bucket again"),
             }
         }
         leaving

@@ -172,7 +172,7 @@ struct Host {
     /// CLADEFS_NO_UNSHARE: set, the cases run as they are.
     no_unshare: bool,
     /// CLADEFS_EXTENTD_REMOTE, the bucket cases' own extent daemons keep their stores in.
-    remote: Option<String>,
+    bucket: Option<String>,
     has: fn(&str) -> bool,
 }
 
@@ -182,7 +182,7 @@ impl Host {
             linux: cfg!(target_os = "linux"),
             root: nix::unistd::geteuid().is_root(),
             no_unshare: std::env::var_os("CLADEFS_NO_UNSHARE").is_some(),
-            remote: std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty()),
+            bucket: std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty()),
             has: on_path,
         }
     }
@@ -196,7 +196,8 @@ fn on_path(command: &str) -> bool {
     let Some(path) = std::env::var_os("PATH") else { return false };
     std::env::split_paths(&path).any(|dir| {
         let metadata = std::fs::metadata(dir.join(command));
-        metadata.is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+        metadata
+            .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
     })
 }
 
@@ -212,7 +213,7 @@ fn isolation(host: &Host) -> Isolation {
         Isolation::None("network namespaces are Linux's")
     } else if host.no_unshare {
         Isolation::None("CLADEFS_NO_UNSHARE is set")
-    } else if host.remote.as_deref().is_some_and(networked) {
+    } else if host.bucket.as_deref().is_some_and(networked) {
         Isolation::None("CLADEFS_EXTENTD_REMOTE names a bucket over the network")
     } else if !(host.has)("unshare") || !(host.has)("ip") {
         Isolation::None("unshare or ip is missing")
@@ -648,10 +649,11 @@ fn outcome_json(result: &TestResult, run: &serde_json::Value, round: u32) -> ser
 /// cladefs: the command that runs `case` again on a host as it ran (scripts/test-host.sh), its knobs
 /// `knobs`.
 fn replay(case: &str, knobs: &BTreeMap<String, String>) -> String {
-    let mut words = vec!["CLADEFS_WORKSPACE_TESTS=0".to_owned(), format!("CLADEFS_E2E_TEST={case}")];
-    let others = knobs
-        .iter()
-        .filter(|(name, _)| !["CLADEFS_WORKSPACE_TESTS", "CLADEFS_E2E_TEST"].contains(&name.as_str()));
+    let mut words =
+        vec!["CLADEFS_WORKSPACE_TESTS=0".to_owned(), format!("CLADEFS_E2E_TEST={case}")];
+    let others = knobs.iter().filter(|(name, _)| {
+        !["CLADEFS_WORKSPACE_TESTS", "CLADEFS_E2E_TEST"].contains(&name.as_str())
+    });
     words.extend(others.map(|(name, value)| format!("{name}={}", shell_word(value))));
     words.push("scripts/test-host.sh".to_owned());
     words.join(" ")
@@ -910,10 +912,10 @@ mod tests {
         );
     }
 
-    /// A Linux host as root with every command, CLADEFS_EXTENTD_REMOTE `remote`.
-    fn host(remote: Option<&str>) -> Host {
-        let remote = remote.map(str::to_owned);
-        Host { linux: true, root: true, no_unshare: false, remote, has: |_| true }
+    /// A Linux host as root with every command, CLADEFS_EXTENTD_REMOTE `bucket`.
+    fn host(bucket: Option<&str>) -> Host {
+        let bucket = bucket.map(str::to_owned);
+        Host { linux: true, root: true, no_unshare: false, bucket, has: |_| true }
     }
 
     /// A command is found on PATH, executable, whatever it says to `--version`.
