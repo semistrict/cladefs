@@ -58,7 +58,7 @@ pub fn bypass(file: &File, path: &Path) -> io::Result<()> {
     }
 }
 
-/// Memory aligned to [`BLOCK`], zeroed, a whole number of blocks long.
+/// Memory aligned to [`BLOCK`], zeroed as it is allocated, a whole number of blocks long.
 struct Aligned {
     ptr: *mut u8,
     len: usize,
@@ -79,16 +79,6 @@ impl Aligned {
         }
         Self { ptr, len }
     }
-
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: It owns `len` bytes at `ptr`, initialized.
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-
-    fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: It owns `len` bytes at `ptr`, initialized, and is borrowed mutably.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len) }
-    }
 }
 
 impl Drop for Aligned {
@@ -97,6 +87,81 @@ impl Drop for Aligned {
         // SAFETY: Allocated with this layout by `zeroed`.
         unsafe { dealloc(self.ptr, layout) };
     }
+}
+
+/// The most a thread keeps of a [`Buffer`] it let go, for its next: a write-back's run, the page
+/// cache's `CHUNK`. More is allocated for one that needs it, and freed with it, so that what a
+/// thread keeps, outside every budget, stays this small.
+const SPARE_MOST: usize = 1 << 20;
+
+thread_local! {
+    /// The memory of the last [`Buffer`] the thread let go, if no more than [`SPARE_MOST`].
+    static SPARE: std::cell::Cell<Option<Aligned>> = const { std::cell::Cell::new(None) };
+}
+
+/// cladefs: `len` bytes aligned to [`BLOCK`], what direct I/O reads into and writes from as they
+/// are: the thread's spare memory if it is large enough, which held what the last held, or memory
+/// allocated zeroed. Each write-back, read and write here used to allocate a zeroed buffer of its
+/// own: on Linux a MiB of fresh pages each, faulted in, zeroed and freed again, a quarter of the
+/// time of a store's writes (TASK-433.8).
+pub struct Buffer {
+    aligned: Option<Aligned>,
+    len: usize,
+}
+
+impl Buffer {
+    /// `len` bytes, aligned to [`BLOCK`]: what they hold is unspecified, zeros or what the
+    /// thread's last buffer held.
+    pub fn new(len: usize) -> Self {
+        let blocks = (len as u64).div_ceil(BLOCK).max(1);
+        let aligned = match SPARE.take() {
+            Some(spare) if spare.len as u64 >= blocks * BLOCK => spare,
+            spare => {
+                SPARE.set(spare);
+                Aligned::zeroed(blocks)
+            }
+        };
+        Self { aligned: Some(aligned), len }
+    }
+
+    /// Its bytes.
+    pub fn bytes(&self) -> &[u8] {
+        let aligned = self.aligned.as_ref().expect("held until dropped");
+        // SAFETY: It owns `aligned.len` bytes at `ptr`, initialized, `len` or more.
+        unsafe { std::slice::from_raw_parts(aligned.ptr, self.len) }
+    }
+
+    /// Its bytes, to fill.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        let aligned = self.aligned.as_ref().expect("held until dropped");
+        // SAFETY: It owns `aligned.len` bytes at `ptr`, initialized, `len` or more, and is
+        // borrowed mutably.
+        unsafe { std::slice::from_raw_parts_mut(aligned.ptr, self.len) }
+    }
+}
+
+/// Its memory is the thread's spare, if it is no more than [`SPARE_MOST`] and larger than the
+/// spare there.
+impl Drop for Buffer {
+    fn drop(&mut self) {
+        let Some(aligned) = self.aligned.take() else { return };
+        if aligned.len > SPARE_MOST {
+            return;
+        }
+        let kept = match SPARE.take() {
+            Some(kept) if kept.len >= aligned.len => kept,
+            _ => aligned,
+        };
+        SPARE.set(Some(kept));
+    }
+}
+
+/// Whether `bytes` at `offset` are whole blocks, from memory aligned to them: what direct I/O
+/// moves as it is.
+fn aligned(bytes: &[u8], offset: u64) -> bool {
+    offset.is_multiple_of(BLOCK)
+        && (bytes.len() as u64).is_multiple_of(BLOCK)
+        && (bytes.as_ptr() as usize).is_multiple_of(BLOCK as usize)
 }
 
 /// The blocks around `range`: from the block it starts in to the end of the block it ends in.
@@ -128,14 +193,11 @@ fn read_fully(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()
 /// the blocks around them, into memory aligned to them. Bytes past the file's end read as zeros.
 pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let range = offset..offset + buf.len() as u64;
-    let aligned_already = offset % BLOCK == 0
-        && buf.len() as u64 % BLOCK == 0
-        && (buf.as_ptr() as usize) % BLOCK as usize == 0;
-    if buf.is_empty() || aligned_already {
+    if buf.is_empty() || aligned(buf, offset) {
         return read_fully(file, buf, offset);
     }
     let around = blocks(&range);
-    let mut bounce = Aligned::zeroed((around.end - around.start) / BLOCK);
+    let mut bounce = Buffer::new((around.end - around.start) as usize);
     read_fully(file, bounce.bytes_mut(), around.start)?;
     let from = (offset - around.start) as usize;
     buf.copy_from_slice(&bounce.bytes()[from..from + buf.len()]);
@@ -161,15 +223,21 @@ impl Tail {
 /// from memory aligned to them, what `bytes` doesn't cover of the first and last block merged in,
 /// read from the file unless `tail` holds the last it wrote. The file's size is as a plain write's
 /// would leave it: the blocks written past the end of what was written are cut off. `tail` holds,
-/// after, the block that ends what this wrote, if it ends partway through one.
+/// after, the block that ends what this wrote, if it ends partway through one. Whole blocks from
+/// memory aligned to them ([`Buffer`]) are written as they are: no copy, nothing merged.
 pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::Result<()> {
     if bytes.is_empty() {
+        return Ok(());
+    }
+    if aligned(bytes, offset) {
+        file.write_all_at(bytes, offset)?;
+        tail.held = None;
         return Ok(());
     }
     let range = offset..offset + bytes.len() as u64;
     let around = blocks(&range);
     let len = file.metadata()?.len();
-    let mut buf = Aligned::zeroed((around.end - around.start) / BLOCK);
+    let mut buf = Buffer::new((around.end - around.start) as usize);
     // The edges' blocks, what this doesn't write of them: as held, or as on the disk; none past
     // the file's end, zeros there. One block alone is read once.
     let (first, last) = (around.start, around.end - BLOCK);
@@ -196,19 +264,21 @@ pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::
 }
 
 /// Fills the block at `at` of `buf`, which holds the blocks from `start` on, with what the file of
-/// `len` bytes holds there: as `tail` holds it, or read; zeros past the file's end.
+/// `len` bytes holds there: as `tail` holds it, or read; zeros past the file's end, as `buf` holds
+/// what it held before ([`Buffer::new`]).
 fn merge_from(
     file: &File,
     tail: &Tail,
     len: u64,
-    buf: &mut Aligned,
+    buf: &mut Buffer,
     start: u64,
     at: u64,
 ) -> io::Result<()> {
+    let place = (at - start) as usize..(at - start + BLOCK) as usize;
     if at >= len {
+        buf.bytes_mut()[place].fill(0);
         return Ok(());
     }
-    let place = (at - start) as usize..(at - start + BLOCK) as usize;
     match tail.block(at) {
         Some(held) => buf.bytes_mut()[place].copy_from_slice(held),
         None => read_fully(file, &mut buf.bytes_mut()[place], at)?,
@@ -269,6 +339,32 @@ mod tests {
             want[..end - offset].copy_from_slice(&model[offset..end]);
             assert_eq!(read, want, "{len} bytes at {offset}");
         }
+    }
+
+    /// TASK-433.8: a write past the file's end from a buffer the thread reused, which holds what
+    /// the last held, leaves zeros in the gap, not those bytes; whole blocks from a buffer are
+    /// written as they are, and read back so.
+    #[test]
+    fn reused_buffers_leave_none_of_what_they_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = opened(dir.path());
+        let mut tail = Tail::default();
+        let mut stale = Buffer::new(4 * BLOCK as usize);
+        stale.bytes_mut().fill(0xaa);
+        drop(stale);
+        write_at(&file, &mut tail, &[1; 10], BLOCK + 5).unwrap();
+        let mut want = vec![0; BLOCK as usize + 15];
+        want[BLOCK as usize + 5..].fill(1);
+        let mut read = vec![0xbb; want.len()];
+        read_at(&file, &mut read, 0).unwrap();
+        assert_eq!(read, want);
+        let mut whole = Buffer::new(2 * BLOCK as usize);
+        whole.bytes_mut().fill(7);
+        write_at(&file, &mut tail, whole.bytes(), 2 * BLOCK).unwrap();
+        assert_eq!(file.metadata().unwrap().len(), 4 * BLOCK);
+        let mut read = vec![0; 2 * BLOCK as usize];
+        read_at(&file, &mut read, 2 * BLOCK).unwrap();
+        assert_eq!(read, vec![7; 2 * BLOCK as usize]);
     }
 
     /// A file system that refuses to bypass the page cache, as the failpoint makes every one, fails

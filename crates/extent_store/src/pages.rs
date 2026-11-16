@@ -646,20 +646,23 @@ impl<F: File> Shared<F> {
             }
             let start = run[0] * PAGE;
             let end = ((run[run.len() - 1] + 1) * PAGE).min(pages.size.max(start));
-            let mut bytes = Vec::with_capacity((end - start) as usize);
+            // Assembled in memory aligned to blocks, which direct I/O writes as it is: whole
+            // pages, but at the file's end (TASK-433.8).
+            let mut buffer = extent_remote::direct::Buffer::new(run.len() * PAGE as usize);
             let mut written = Vec::with_capacity(run.len());
-            for &index in &run {
+            for (&index, into) in run.iter().zip(buffer.bytes_mut().chunks_exact_mut(PAGE as usize))
+            {
                 let page = pages.pages.get_mut(&index).unwrap();
                 page.writing = true;
                 written.push((index, page.last));
-                bytes.extend_from_slice(&page.bytes);
+                into.copy_from_slice(&page.bytes);
             }
-            bytes.truncate((end - start) as usize);
+            let bytes = &buffer.bytes()[..(end - start) as usize];
             let len = run.len() as u64 * PAGE;
             self.cache.writing.fetch_add(len, Ordering::Relaxed);
             drop(pages);
             let in_flight = InFlight { shared: self, run: &written, len, ended: false };
-            let wrote = self.file.write_at(&bytes, start);
+            let wrote = self.file.write_at(bytes, start);
             pages = in_flight.end();
             for &(index, last) in &written {
                 let Some(page) = pages.pages.get_mut(&index) else { continue };
