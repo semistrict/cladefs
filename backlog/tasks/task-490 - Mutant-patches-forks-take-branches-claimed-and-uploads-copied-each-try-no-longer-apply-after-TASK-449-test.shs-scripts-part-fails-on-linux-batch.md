@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 08:52'
-updated_date: '2026-11-16 11:07'
+updated_date: '2026-11-16 11:47'
 labels:
   - bug
   - testing
@@ -25,7 +25,7 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Both patches re-anchored on the code TASK-449 left, the same mutation each
-- [ ] #2 forks-take-branches-claimed is killed by its Killer remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist (macOS) and uploads-copied-each-try by extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound (ubu1, fxjob)
+- [x] #2 forks-take-branches-claimed is killed by its Killer remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist (macOS) and uploads-copied-each-try by extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound (ubu1, fxjob)
 - [x] #3 crates/cladefs/mutants.sh --check reports 0 broken; CLADEFS_TEST_PARTS=scripts scripts/test.sh passes
 <!-- AC:END -->
 
@@ -50,4 +50,6 @@ uploads-copied-each-try: same mutation (Bytes::copy_from_slice per try in bucket
 mutants.sh --check: 22 checked, 0 broken. CLADEFS_TEST_PARTS=scripts scripts/test.sh passes on macOS (501 python tests OK, every mutants check 0 broken).
 
 2026-11-16: Linux, ubu1 under fxjob, the batch rebased on main ffd513512 (TASK-475's cladefsd) at eb13f8ca7: scripts/test.sh clippy and workspace, 2854 passed, 88 skipped. Pushed to main. mutants.sh --check 22 applying. The soak killer's run on ubu1 (317 s) failed on TASK-493's flusher panic, not on its own budget check: AC #2 open until TASK-493 lands and the mutant is rerun.
+
+2026-11-16 ubu1 (t493-int, main 4a3283a59 + TASK-493): clippy and workspace 2856 of 2857 passed, the one failure fuse_differential's directory ctime (TASK-495, unrelated: TASK-493 touches the page cache and the soak only); the soak on this tree passed in 311 s with no flusher panic; mutants.sh uploads-copied-each-try killed in 249 s by the soak's own check: 'assertion left == right failed: 334 MiB of anonymous memory, past its budget of 3201 MiB' (soak.rs:262).
 <!-- SECTION:NOTES:END -->

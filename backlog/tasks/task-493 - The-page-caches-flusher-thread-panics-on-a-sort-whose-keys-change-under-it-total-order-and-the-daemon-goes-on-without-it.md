@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 10:31'
-updated_date: '2026-11-16 11:15'
+updated_date: '2026-11-16 11:47'
 labels:
   - bug
 dependencies: []
@@ -24,8 +24,8 @@ Found 2026-11-16 on ubu1 running extentd::tests::soak::a_degraded_bucket_costs_t
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 The sorts take each file's key once (a snapshot before sorting) so no concurrent change can break the order, with a test that changes keys during a sort and fails before the fix
-- [ ] #2 A panic on the flusher thread (or any page-cache background thread) is not silent: the daemon fails or logs and restarts it as the project's rule for background threads says, and the soak test fails if the flusher died
-- [ ] #3 TASK-490's uploads-copied-each-try is shown killed by the soak's own check, not by this panic, on ubu1
+- [x] #2 A panic on the flusher thread (or any page-cache background thread) is not silent: the daemon fails or logs and restarts it as the project's rule for background threads says, and the soak test fails if the flusher died
+- [x] #3 TASK-490's uploads-copied-each-try is shown killed by the soak's own check, not by this panic, on ubu1
 <!-- AC:END -->
 
 ## Definition of Done
@@ -58,4 +58,6 @@ Soak: abort_on_panics as cladefsd does, flusher_lives() each second and at the e
 Look-around (sort, sort_by*, sort_unstable*, sort_by_cached_key, max_by*, min_by*, BinaryHeap, select_nth, binary_search_by over extent_store, extent_remote, cladefs src): only pages.rs read live keys. Others sort owned values or snapshot tuples: cladefs cache.rs evict_in_order and let_go_least_used (keys collected into tuples first), dax/uffd.rs runs (tuples), extent_store views.rs min_by_key (under the views lock; min/max_by_key compute each key once anyway), extent_remote recovery.rs max_by_key (under the kept lock), extent_remote cache.rs found.modified (metadata snapshot), store/collector/passed/sweep/keys/memory/disk/control (fields of owned items). No BinaryHeap or select_nth. A syntactic rust-rules.py rule was tried and dropped (dead-ends/sort-keys-syntactic-rule.md: it flagged a pure accessor in fxfs-posix).
 
 macOS (6c1914594): clippy part as CI (fmt, workspace -D disallowed_methods -D warnings, shuttle and loom builds) clean; workspace nextest 2538/2538; shuttle part 37+10+6+33+10+18+loom 2+1+1 all passed. sim part not run. Open: AC #2's soak run and AC #3 need ubu1; DoD Linux run too.
+
+2026-11-16 ubu1 (t493-int, main 4a3283a59 + TASK-493): clippy and workspace 2856 of 2857 passed, the one failure fuse_differential's directory ctime (TASK-495, unrelated: TASK-493 touches the page cache and the soak only); the soak on this tree passed in 311 s with no flusher panic; mutants.sh uploads-copied-each-try killed in 249 s by the soak's own check: 'assertion left == right failed: 334 MiB of anonymous memory, past its budget of 3201 MiB' (soak.rs:262).
 <!-- SECTION:NOTES:END -->
