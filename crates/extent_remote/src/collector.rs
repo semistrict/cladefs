@@ -1964,11 +1964,16 @@ impl Pass {
                 // branch's, final, fences its writers, which no swap of theirs passes. cladefs: but
                 // with a dead cell that goes whole ([`Pass::removal`], TASK-455).
                 Kind::Record { .. } => Fate::Stays,
-                // cladefs: but in a cell of no record, where one is a writer's that took a branch by a
-                // read of its record from before its deletion, its cell removed since (TASK-455),
-                // or a deletion's of a branch of no record, which needs none: no writer takes a
-                // branch of none.
-                Kind::Head { .. } => goes(self.records.is_empty()),
+                // cladefs: but one of a branch of no record listed that is no fence ([`fence`]): a
+                // writer's that took a branch by a read of its record from before its deletion, its
+                // cell removed since (TASK-455). Without the rule, as a test shows it needed, any in
+                // a cell of no record, a deletion's fence among them.
+                Kind::Head { branch } => match rules().fences_kept {
+                    true => {
+                        goes(!self.records.contains_key(&branch) && !fence(bucket, branch).await?)
+                    }
+                    false => goes(self.records.is_empty()),
+                },
                 // The collector's own: its lease, and its marks, which a mark-only pass never
                 // deletes, and an operator removes (TASK-264); and references, which the passes of
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
@@ -2032,7 +2037,8 @@ impl Pass {
     /// nothing will need again: its records, each [`Record::removable`] (a root's or a clone's
     /// made, deleted, of an ID an allocator gave), its branches' heads, its object, and its
     /// lease. A mark under it (of a reference retired, which a writer may write again; or a
-    /// mark-only pass's, an operator's to remove), what it defers, and anything else keep it.
+    /// mark-only pass's, an operator's to remove), what it defers, a fence ([`fence`]), and
+    /// anything else keep it.
     /// A cell of no record loses its lease alone, once nothing but its lease is left: one whose
     /// removal stopped before its end; its object, if it has one, may be of a cell being made,
     /// its record yet to come, and keeps it.
@@ -2052,9 +2058,15 @@ impl Pass {
                     self.records.get(&branch).filter(|record| record.removable(given))?;
                     removal.records.push(meta);
                 }
-                Kind::Head { .. } | Kind::Cell { .. } if !self.records.is_empty() => {
+                // A head of a branch of no record listed that `doomed` leaves is a fence
+                // ([`fence`]), which keeps it; without the rule, it goes with the rest.
+                Kind::Head { branch }
+                    if !self.records.is_empty()
+                        && (self.records.contains_key(&branch) || !rules().fences_kept) =>
+                {
                     removal.rest.push(meta);
                 }
+                Kind::Cell { .. } if !self.records.is_empty() => removal.rest.push(meta),
                 Kind::GcLease { .. } => removal.lease = Some(meta),
                 _ => return None,
             }
@@ -2090,6 +2102,19 @@ impl Pass {
         });
         Some(if kept { passed::digest(self.cell, left) } else { digest })
     }
+}
+
+/// cladefs: whether `branch`'s head, its record not listed by the pass, is to stay (rule
+/// `fences_kept`, TASK-455's review): final, a deletion's fence, of a fork's child whose record is
+/// yet to come, the deletion's own or its parent's slow writer's (TASK-79.78), which a writer
+/// taking the branch once it is recorded must find; or the branch has a record after all, listed
+/// after the cell, a listing of many pages having missed it. Any other is a stale taker's, of a
+/// branch removed with its cell, whose record never comes again (rule `ids_given`): garbage. Two
+/// GETs at most, of a head no record was listed with, which only those leave. Gone since, it is
+/// not to stay.
+async fn fence(bucket: &impl Bucket, branch: Branch) -> Result<bool, Error> {
+    let Some(head) = crate::head::get(bucket, branch).await? else { return Ok(false) };
+    Ok(head.epoch == layout::Head::FINAL || branch::record(bucket, branch).await?.is_some())
 }
 
 /// cladefs: what a pass removing its cell whole deletes ([`Pass::removal`], TASK-455).
@@ -3121,6 +3146,183 @@ mod tests {
         assert_eq!((&mut acknowledging).now_or_never(), Some(Ok(Some(at))));
         let record = branch::record(&*direct, test_branch(CHILD)).await.unwrap();
         (record, collect(&*direct, 2, &now).await)
+    }
+
+    /// TASK-455's review: a fork's child whose deletion, asked before its parent's writer recorded
+    /// it, ended its head and stopped before its record, its cell holding nothing else: a pass
+    /// keeps the head, final, a fence, and once the parent's writer records the child, no writer
+    /// takes it.
+    #[test]
+    fn deletions_fences_stand_until_their_records() {
+        let fenced = block_on(take_a_child_whose_deletion_stopped_before_its_record());
+        assert_eq!(fenced, (layout::Head::FINAL, Err(Error::Deleted)));
+    }
+
+    /// Without the rule, the pass deletes the head, and a writer takes the child once it is
+    /// recorded, which the deletion, going on, marks deleted under it: specs/bucket's
+    /// NoFencesKept.
+    #[test]
+    fn deletions_fences_need_fences_kept() {
+        crate::set_rules(crate::Rules { fences_kept: false, ..crate::Rules::ALL });
+        let fenced = block_on(take_a_child_whose_deletion_stopped_before_its_record());
+        crate::set_rules(crate::Rules::ALL);
+        assert_eq!(fenced, (0, Ok(())));
+    }
+
+    /// The epoch of the head of child 2, in a cell of its own, after a pass, and what a writer's
+    /// taking of it gives once recorded: branch 1's writer forked to it, and stalls recording it,
+    /// as its deletion ends its head and stops before its record (the TASK-79.78 race).
+    async fn take_a_child_whose_deletion_stopped_before_its_record() -> (u64, Result<(), Error>) {
+        use crate::layout::{Contents, Segment};
+        use crate::writer::Objects;
+        let direct = Arc::new(Direct(SimBucket::new()));
+        let (parent, child) = (celled(1, 1), celled(2, 2));
+        let (slow, open) = Gated::new(direct.clone(), Gate::Put(layout::record(child)));
+        branch::create(&*direct, parent, 0).await.unwrap();
+        let writer = Writer::open(Arc::new(slow), parent, 10, 0).await.unwrap();
+        let forked = Child { branch: child, owner: 0x22, point: false };
+        let footer = writer.chain().close(Contents { forks: vec![forked], ..Contents::default() });
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
+        writer.upload(at).await.unwrap();
+        // The fork acknowledged, the child's record waits.
+        let mut acknowledging = Box::pin(writer.acknowledge());
+        assert!((&mut acknowledging).now_or_never().is_none());
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("branch::lease_ended", "return").unwrap();
+        let deleting = branch::delete(&*direct, child, 20, 0).await;
+        scenario.teardown();
+        assert_eq!(deleting, Err(Error::Read("failpoint branch::lease_ended".to_string())));
+        let now = Options { compact_below: 0.0, grace: 0 };
+        collect(&*direct, 1, &now).await.unwrap();
+        let head = crate::head::epoch(&*direct, child).await.unwrap();
+        open.send(()).unwrap();
+        assert_eq!((&mut acknowledging).now_or_never(), Some(Ok(Some(at))));
+        let recorded = branch::record(&*direct, child).await.unwrap();
+        assert_eq!(recorded, Some(crate::record::Kind::Fork(Origin { parent, at }).of(0x22)));
+        (head, Writer::open(direct.clone(), child, 30, 0).await.map(drop))
+    }
+
+    /// TASK-455's review: a clone a store resumed, its host stalling before its reference, made,
+    /// deleted and its cell removed, the host's reference landing after: its retirement marked, the
+    /// base's next pass deletes it, and nothing is left; the host's fork fails, its record gone.
+    #[test]
+    fn late_references_of_resumed_clones_go() {
+        let (left, late, marks, _) = block_on(left_by_a_late_host_of_a_resumed_clone());
+        assert_eq!((left, late, marks), (Vec::new(), Err(Error::NoBranch), 1));
+    }
+
+    /// Without the rule, the clone resumed retires its reference unmarked, as one its host made
+    /// alone, and the host's reference, written after, stays for good: specs/bucket's
+    /// NoResumesMarked.
+    #[test]
+    fn late_references_of_resumed_clones_need_resumes_marked() {
+        crate::set_rules(crate::Rules { resumes_marked: false, ..crate::Rules::ALL });
+        let (left, late, marks, reference) = block_on(left_by_a_late_host_of_a_resumed_clone());
+        crate::set_rules(crate::Rules::ALL);
+        assert_eq!(
+            (left, late, marks),
+            (vec![format!("garbage left: {reference}")], Err(Error::NoBranch), 0)
+        );
+    }
+
+    /// A point of branch 1's state at its segment `at` (its writer's), branch 2, both in cells of
+    /// their own: the writer, which sealed `extent` before the fork, and the point's origin.
+    async fn pointed<B: Bucket>(bucket: Arc<B>) -> (Writer<B>, ExtentId, Origin) {
+        let (origin_branch, point) = (celled(1, 1), celled(2, 2));
+        branch::create(&*bucket, origin_branch, 0).await.unwrap();
+        let writer = Writer::open(bucket, origin_branch, 10, 0).await.unwrap();
+        let extent = ExtentId::new(1, writer.chain().next_sequence());
+        let made = Child { branch: point, owner: 0x22, point: true };
+        let at = commit_and_fork(&writer, vec![(extent, b"held".to_vec())], made).await;
+        (writer, extent, Origin { parent: origin_branch, at })
+    }
+
+    /// What [`crate::testing::uncollected`] finds, what the host's fork gave and how many marks
+    /// the base's cell holds, once a clone of a point of the base, of an ID an allocator gave, was
+    /// begun by its host, which stalled before its reference; a store resumed it; it was deleted,
+    /// and passes ran until quiet, which removed its cell; and the host's reference landed, and
+    /// passes ran again. And the reference's key.
+    async fn left_by_a_late_host_of_a_resumed_clone()
+    -> (Vec<String>, Result<(), Error>, usize, String) {
+        let direct = Arc::new(Direct(SimBucket::new()));
+        let (_writer, _, origin) = pointed(direct.clone()).await;
+        let id = crate::objectid::Allocator::new().next(&*direct).await;
+        let clone = Branch { cell: layout::Cell { tenant: 1, id: 3 }, id };
+        let reference = layout::reference(origin.parent, origin.at, clone);
+        let (slow, open) = Gated::new(direct.clone(), Gate::Put(reference.clone()));
+        let mut forking = Box::pin(branch::fork_point(&slow, clone, celled(2, 2), origin, 0x33));
+        assert!((&mut forking).now_or_never().is_none());
+        branch::resume_point_fork(&*direct, clone).await.unwrap();
+        branch::delete(&*direct, clone, 20, u64::MAX).await.unwrap();
+        let options = Options { compact_below: 0.0, grace: 0 };
+        crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
+        assert_eq!(bucket::list(&*direct, &clone.cell.prefix()).await, Vec::new());
+        open.send(()).unwrap();
+        let late = forking.await;
+        crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
+        let listed = bucket::list(&*direct, &origin.parent.cell.prefix()).await;
+        let marks = listed.iter().filter(|meta| layout::kind(&meta.key).name() == "retired");
+        let marks = marks.count();
+        (crate::testing::uncollected(&*direct, 0.0).await, late, marks, reference)
+    }
+
+    /// TASK-455's review: a clone whose host died after its record, before its reference, which a
+    /// store resumed: the resume writes its reference, which keeps the base's state at the fork
+    /// point once the base freed it and the point was deleted, and the clone holds what it did.
+    #[test]
+    fn clones_resumed_keep_their_references() {
+        let (referred, held) = block_on(clone_resumed_after_its_host_died());
+        assert_eq!((referred, held), (true, Ok(1)));
+    }
+
+    /// Without the rule, the resume makes the clone with no reference, and the base's passes,
+    /// the point gone, reclaim what the clone recovers from: specs/bucket's NoResumesRefer.
+    #[test]
+    fn clones_resumed_need_resumes_refer() {
+        crate::set_rules(crate::Rules { resumes_refer: false, ..crate::Rules::ALL });
+        let (referred, held) = block_on(clone_resumed_after_its_host_died());
+        crate::set_rules(crate::Rules::ALL);
+        // The base's checkpoint at the fork point, which the clone recovers from.
+        let lost = layout::checkpoint(celled(1, 1), 1, 1);
+        assert_eq!((referred, held), (false, Err(Error::Lost(lost))));
+    }
+
+    /// Whether a clone of a point of the base has its reference once its host died after its
+    /// record and a store resumed it; and how many of the extents it names, recovered, are where
+    /// it says, once the point was deleted, the base freed what it held and checkpointed, and
+    /// passes ran until quiet.
+    async fn clone_resumed_after_its_host_died() -> (bool, Result<usize, Error>) {
+        let direct = Arc::new(Direct(SimBucket::new()));
+        let (writer, extent, origin) = pointed(direct.clone()).await;
+        let clone = celled(3, 3);
+        let reference = layout::reference(origin.parent, origin.at, clone);
+        let (slow, never) = Gated::new(direct.clone(), Gate::Put(reference.clone()));
+        let mut forking = Box::pin(branch::fork_point(&slow, clone, celled(2, 2), origin, 0x33));
+        assert!((&mut forking).now_or_never().is_none());
+        // The host dies there.
+        drop(forking);
+        drop(never);
+        branch::resume_point_fork(&*direct, clone).await.unwrap();
+        let referred = bucket::get(&*direct, &reference).await.is_some();
+        // The point deleted, the base's checkpoint after drops its fork to it.
+        branch::delete(&*direct, celled(2, 2), 20, 0).await.unwrap();
+        commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
+        writer.checkpoint().await.unwrap();
+        let options = Options { compact_below: 0.0, grace: 0 };
+        crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
+        let recovered = crate::recovery::recover(&*direct, clone, Some(origin)).await;
+        let held = match recovered {
+            Ok(recovered) => {
+                let mut held = 0;
+                for location in recovered.state.extents.values() {
+                    held += usize::from(bucket::get(&*direct, &location.key).await.is_some());
+                }
+                Ok(held)
+            }
+            Err(error) => Err(error),
+        };
+        (referred, held)
     }
 
     /// TASK-183: two deletions of a branch at once, a fork's segment of its writer's in flight,

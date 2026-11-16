@@ -556,7 +556,8 @@ pub const SWEEPS: u64 = 32;
 /// marks stay, and references' marks. cladefs: but a dead cell's, none marked under it, whose records
 /// are each a root's or a clone's made, deleted, of an ID an allocator gave, which goes whole,
 /// records, heads, object and lease (TASK-455); and a cell's of no record, its heads, and its lease
-/// once nothing else is left.
+/// once nothing else is left. A final head of a branch of no record, a deletion's fence, stays,
+/// and keeps its cell (TASK-455's review).
 pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String> {
     use crate::layout::{Location, Origin};
     use crate::record::{Kind as Made, Record};
@@ -589,8 +590,27 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
             given.insert(branch);
         }
     }
-    // Whether a cell goes whole: dead, no mark under it, each of its records, one at least, one it
-    // may go with.
+    // cladefs: the heads of branches of no record, final: deletions' fences, whose records may yet
+    // come, which stay and keep their cells (TASK-455's review). Any other head of no record, a
+    // stale taker's, is garbage.
+    let mut fences = BTreeSet::new();
+    for key in &keys {
+        if let Kind::Head { branch } = layout::kind(key)
+            && !records.contains_key(&branch)
+            && crate::head::epoch(bucket, branch)
+                .await
+                .is_ok_and(|epoch| epoch == layout::Head::FINAL)
+        {
+            fences.insert(key.clone());
+        }
+    }
+    let fenced = |cell: layout::Cell| {
+        fences
+            .iter()
+            .any(|key| matches!(layout::kind(key), Kind::Head { branch } if branch.cell == cell))
+    };
+    // Whether a cell goes whole: dead, no mark under it, no fence, each of its records, one at
+    // least, one it may go with.
     let marked_under = |cell: layout::Cell| {
         keys.iter().any(|key| match layout::kind(key) {
             Kind::Retired { parent, .. } => parent.cell == cell,
@@ -603,6 +623,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         held.peek().is_some()
             && dead(cell)
             && !marked_under(cell)
+            && !fenced(cell)
             && held.all(|(branch, record)| record.removable(given.contains(branch)))
     };
     let recorded = |cell: layout::Cell| records.keys().any(|branch| branch.cell == cell);
@@ -614,7 +635,7 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         listed.cloned().collect()
     };
     let mut maps = MovesMaps::default();
-    let mut needed = BTreeSet::new();
+    let mut needed = fences.clone();
     let mut touched = BTreeSet::new();
     let mut named: BTreeMap<String, BTreeMap<ExtentId, u64>> = BTreeMap::new();
     let mut points: BTreeSet<Origin> = BTreeSet::new();

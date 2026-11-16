@@ -1334,18 +1334,18 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
 }
 
 /// The record of `branch`, if it has one: a fork of a point its host crashed in the middle of, its
-/// record saying so, finished first, which fails if the point was deleted. So the store takes no
-/// state of a fork not made.
+/// record saying so, resumed first ([`branch::resume_point_fork`]: its reference written, the
+/// fork made), which fails if the point was deleted. So the store takes no state of a fork not
+/// made.
 async fn record<B: extent_remote::Bucket>(
     bucket: &B,
     branch: Branch,
 ) -> Result<Option<Record>, Failure> {
     let found = branch::record(bucket, branch).await?;
-    let Some(point) = found.as_ref().filter(|record| !record.deleted).and_then(Record::forking)
-    else {
+    if !found.as_ref().is_some_and(|record| !record.deleted && record.forking().is_some()) {
         return Ok(found);
-    };
-    branch::finish_point_fork(bucket, branch, point).await?;
+    }
+    branch::resume_point_fork(bucket, branch).await?;
     Ok(branch::record(bucket, branch).await?)
 }
 

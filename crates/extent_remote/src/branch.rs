@@ -393,6 +393,10 @@ pub async fn record_fork_under(
 /// no child. A fork refused by a record there writes none. Written first, a host dying before the
 /// record left a reference no record names, which nothing retired: specs/bucket's
 /// NoClonesRecordFirst. Forked again, the record its own, it writes it again, which stands.
+///
+/// cladefs: forked again, its record being made, it resumes the fork as another would
+/// ([`resume_point_fork`]): the record said resumed first, with a condition, as the making that
+/// began it may still write the reference after the clone was made (TASK-455's review).
 pub async fn fork_point(
     bucket: &impl Bucket,
     child: Branch,
@@ -426,6 +430,10 @@ pub async fn fork_point(
             refused = Some(found);
             Err(Error::IdTaken(child))
         }
+        // Ours, being made by another making of it, which it resumes.
+        Some(found) if found.forking().is_some() && !found.resumed => {
+            Ok(Step::Write(found.resumed(), true))
+        }
         Some(found) => Ok(Step::Stop(found.forking().is_some())),
     })
     .await;
@@ -446,6 +454,35 @@ pub async fn fork_point(
         refer(bucket, origin, child, owner).await;
     }
     Ok(())
+}
+
+/// cladefs: resumes the fork of a point to `child` that another began ([`fork_point`]), its record
+/// saying it is being made: a store opening `child`, its host dead or slow, makes it, so that it
+/// takes no state of a fork not made (TASK-455's review). The record is said resumed first
+/// ([`Record::resumed`]), with a condition, so that the clone made says so, whose reference's
+/// retirement is then marked: the host that began it, slow, may write the reference after the
+/// clone was made, deleted and its cell removed (rule `resumes_marked`). Then the reference, as
+/// that host writes it, before the fork is made (rule `resumes_refer`): it may have died first.
+/// Then the fork made ([`finish_point_fork`]). A fork made already, it writes nothing: its host,
+/// or a resume, wrote the reference before. Fails as [`finish_point_fork`] does, and with
+/// [`Error::Deleted`] for a fork given up on, [`Error::NoBranch`] for no record.
+pub async fn resume_point_fork(bucket: &impl Bucket, child: Branch) -> Result<(), Error> {
+    let forking = change(bucket, child, Start::Read, |found| match found {
+        None => Err(Error::NoBranch),
+        Some(found) if found.deleted => Err(Error::Deleted),
+        Some(found) if found.forking().is_none() => Ok(Step::Stop(None)),
+        Some(found) if found.resumed => Ok(Step::Stop(Some(found))),
+        Some(found) => Ok(Step::Write(found.clone().resumed(), Some(found))),
+    })
+    .await?;
+    let Some(Record { kind: Kind::Forking { origin, point }, owner, .. }) = forking else {
+        return Ok(());
+    };
+    // Without the rule, as a test shows it needed: none written.
+    if rules().references && rules().clones_refer_first && rules().resumes_refer {
+        refer(bucket, origin, child, owner).await;
+    }
+    finish_point_fork(bucket, child, point).await
 }
 
 /// Makes the fork being made of `point` to `child` ([`fork_point`]), whose record is created, a

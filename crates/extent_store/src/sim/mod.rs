@@ -208,6 +208,9 @@ fn one() {
             "fork_points_kept" => rules.fork_points_kept = false,
             "ids_given" => rules.ids_given = false,
             "clones_made_unmarked" => rules.clones_made_unmarked = false,
+            "fences_kept" => rules.fences_kept = false,
+            "resumes_refer" => rules.resumes_refer = false,
+            "resumes_marked" => rules.resumes_marked = false,
             other => panic!("no rule {other}"),
         }
     }
@@ -670,6 +673,12 @@ test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 // stays for ever: no record names it, and no mark has its parent's cell's pass delete it
 // (TASK-455). Its model is specs/bucket's NoClonesMadeUnmarked.
 test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores());
+
+// cladefs: a clone a store resumed, its host having died after its record, made with no reference:
+// once its point goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
+// direct test is extent_remote's `clones_resumed_need_resumes_refer`; its model specs/bucket's
+// NoResumesRefer.
+test_needs!(restores_need_resumes_refer, resumes_refer, restores());
 
 /// Restores as [`restores`] makes them, fewer and among more forks, so that more take the IDs of
 /// forks' children whose segments are not yet acknowledged, as guests may name any: whichever's
