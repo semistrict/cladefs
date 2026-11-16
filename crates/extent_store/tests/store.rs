@@ -3389,6 +3389,46 @@ fn extents_written_in_runs_seal_where_they_are() {
     }
 }
 
+/// cladefs: once `Store::close` returns, the store reads its directory no more: a look ahead
+/// reading a part written whole when the store closed (on the framer's thread, holding no lock,
+/// TASK-400) ends before close returns. It read on after, and a store opened on the directory
+/// meanwhile counted up to a part of the closed store's reads as its opening's (TASK-426).
+#[test]
+fn close_waits_for_a_look_ahead_reading() {
+    use std::sync::mpsc::{RecvTimeoutError, channel};
+    use std::sync::{Mutex, atomic::AtomicBool, atomic::Ordering};
+    const MIB: usize = 1 << 20;
+    let options = Options { segment_size: 32 << 20, large_extent: 4 << 20, ..OPTIONS };
+    let description = Description { block_size: BLOCK as u32, capacity: 64 << 20, branch: BRANCH };
+    let store = Arc::new(Store::create(MemDir::new(), description, options).unwrap());
+    let (reading, looking) = channel();
+    let (go, gone) = channel::<()>();
+    let (reading, gone) = (Mutex::new(reading), Mutex::new(gone));
+    let released = Arc::new(AtomicBool::new(false));
+    let held = fail::FailGuard::with_callback("store::looking_ahead", move || {
+        let _ = reading.lock().unwrap().send(());
+        let _ = gone.lock().unwrap().recv();
+    })
+    .unwrap();
+    // Its first parts, written whole: looks ahead at them queued, the first reading, held.
+    store.write(extent(1), 0, &pattern(1, 0, 2 * MIB)).unwrap();
+    looking.recv().unwrap();
+    let (closed, closing) = channel();
+    let thread = std::thread::spawn({
+        let (store, released) = (store.clone(), released.clone());
+        move || {
+            store.close().unwrap();
+            closed.send(released.load(Ordering::SeqCst)).unwrap();
+        }
+    });
+    let timeout = std::time::Duration::from_millis(500);
+    assert_eq!(closing.recv_timeout(timeout), Err(RecvTimeoutError::Timeout), "closed, reading");
+    released.store(true, Ordering::SeqCst);
+    drop((go, held));
+    assert_eq!(closing.recv(), Ok(true), "close returned once the look ahead read");
+    thread.join().unwrap();
+}
+
 /// An extent larger than the part sealing frames at once (16 MiB) is framed whole.
 #[test]
 fn extents_larger_than_a_framing_chunk_seal_whole() {

@@ -507,6 +507,7 @@ impl<D: Dir> Framer<D> {
         let Some((raw, look)) = Self::to_see(&state, number) else { return state };
         state.framing.looking = true;
         drop(state);
+        fail::fail_point!("store::looking_ahead");
         let seen = self.look(&*raw, part, look);
         let mut state = self.lock();
         Self::saw(&mut state, (number, part), seen);
@@ -1369,6 +1370,13 @@ impl<D: Dir> Store<D> {
                 state = state.wait(&self.idle);
             }
             state.standing.close();
+            // cladefs: and for a look ahead reading its part, holding no lock (TASK-400), which
+            // read on after close returned, maybe once the raw files below were gone, while a store
+            // opened on the directory meanwhile counted its I/O as that store's own (TASK-426).
+            // Closed, the store begins none of those queued ([`Framer::to_see`]).
+            while state.framing.looking {
+                state = state.wait(&self.idle);
+            }
             // Their raw files, of commits durable, go as a flush's would.
             let raw = match state.standing.failed() {
                 false => state.segments.raw(self.durability.with(Mutex::lock).durable()),
