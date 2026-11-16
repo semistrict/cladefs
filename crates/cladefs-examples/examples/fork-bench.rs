@@ -17,7 +17,7 @@
 //! forks a store of tenant 5, sealed, whose forks keep the DEKs they inherit rewrapped under their
 //! own cells' KEKs, taken from the host's pool, and one of tenant 6, in the clear. With
 //! `--no-kms`, a host with none: tenant 6's alone, as hosts forked before TASK-411.3. Each request
-//! of the bucket's waits `CLADEFS_REMOTE_LATENCY_MS` more, if set, as a bucket elsewhere's round
+//! of the bucket's waits `CLADEFS_BUCKET_LATENCY_MS` more, if set, as a bucket elsewhere's round
 //! trips do.
 
 use cladefs::{ExtentId, ExtentStore, VolatileSlice};
@@ -71,7 +71,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
     store.commit(Some(b"root")).unwrap();
-    if let Some(kms) = cladefs::remote::kms() {
+    if let Some(kms) = cladefs::bucket::kms() {
         // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
         futures::executor::block_on(kms.filled(tenant));
     }

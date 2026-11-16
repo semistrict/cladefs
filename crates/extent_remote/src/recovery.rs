@@ -1017,7 +1017,7 @@ mod tests {
     use crate::branch;
     use crate::layout::test_branch;
     use crate::layout::{Child, Continued, Segment, child};
-    use crate::store::Store;
+    use crate::object_bucket::ObjectBucket;
     use crate::testing::SimBucket;
     use crate::writer::{Objects, Writer};
     use object_store::memory::InMemory;
@@ -1117,12 +1117,12 @@ mod tests {
     #[test]
     fn commits_spanning_segments_seal_once_ended() {
         futures::executor::block_on(async {
-            let bucket = Arc::new(Store::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let extent = |sequence| ExtentId::new(1, sequence);
             let tag = |epoch| layout::tag(writer.epoch(), epoch);
-            let landed = async |writer: &Writer<Store>, contents: Contents| {
+            let landed = async |writer: &Writer<ObjectBucket>, contents: Contents| {
                 let footer = writer.chain().close(contents);
                 let data = vec![7; 8192];
                 let segment = Segment { data, footer: footer.clone() }.encode().into();
@@ -1186,14 +1186,14 @@ mod tests {
     #[test]
     fn capacities_are_set_by_commits() {
         futures::executor::block_on(async {
-            let bucket = Arc::new(Store::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             assert_eq!(parent.state().capacity, None);
             let resize = |tag, capacity: u64| {
                 Batch::from(Commit { tag, capacity: Some(capacity), ..Commit::default() })
             };
-            let landed = async |writer: &Writer<Store>, objects| {
+            let landed = async |writer: &Writer<ObjectBucket>, objects| {
                 let seq = writer.add_segment(objects).unwrap();
                 writer.upload(seq).await.unwrap();
                 writer.acknowledge().await.unwrap();
@@ -1233,7 +1233,7 @@ mod tests {
     fn forks_checkpoint_their_own_states() {
         futures::executor::block_on(async {
             let memory = Arc::new(InMemory::new());
-            let bucket = Arc::new(Store::new(memory.clone(), ""));
+            let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let extent = ExtentId::new(1, parent.chain().next_sequence());
@@ -1277,7 +1277,7 @@ mod tests {
             // Read by another host, which decoded nothing of it before: a key names one object,
             // which a host's bucket keeps decoded (TASK-407).
             let corrupt = format!("{key} holds a checkpoint of 1/1/1");
-            let other = Store::new(memory, "");
+            let other = ObjectBucket::new(memory, "");
             assert_eq!(
                 recover(&other, test_branch(2), origin).await.unwrap_err(),
                 Error::Corrupt(corrupt)

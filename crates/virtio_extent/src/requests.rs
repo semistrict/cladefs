@@ -3,7 +3,7 @@
 // found in the LICENSE file.
 
 //! Serving the device's requests: each request's buffers ([`Buffers`]) read, the store asked
-//! ([`Store`]), and what it returns and the response written back. The device applies requests in
+//! ([`Backend`]), and what it returns and the response written back. The device applies requests in
 //! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
 //! durable commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cladefs::{Commit, Errno};
 use log::{error, info};
 
+use crate::backend::Backend;
 use crate::buffers::{Buffers, Reader, Writer};
 use crate::config::CacheType;
 use crate::notices::Notices;
 use crate::protocol::*;
-use crate::store::Store;
 
 /// The requests served, and the time serving them took, by type, logged as a VMM's worker stops:
 /// against what the guest waits for a request (its driver's request_ns), what the transport
@@ -69,7 +69,7 @@ impl Served {
 /// Serves the request whose buffers are `buffers` with `store`, its guest's notices `notices`, and
 /// returns the length of what the device writes to it: its writable buffers, whose last bytes hold
 /// the response. The VMM returns the request to the driver with that length.
-pub async fn handle<S: Store>(
+pub async fn handle<S: Backend>(
     store: &S,
     notices: &Notices,
     cache: CacheType,
@@ -95,7 +95,7 @@ pub async fn handle<S: Store>(
 
 /// Serves the request `reader` holds, writing what it returns with `writer`, which has `room`
 /// bytes for it, and returns how many it wrote.
-async fn serve<S: Store>(
+async fn serve<S: Backend>(
     store: &S,
     notices: &Notices,
     cache: CacheType,
@@ -346,7 +346,7 @@ mod linux {
     use std::sync::{Arc, Condvar, Mutex};
     use std::time::Instant;
 
-    use cladefs::RemoteExtentStore;
+    use cladefs::DaemonExtentStore;
     use log::error;
 
     use super::{Served, handle, type_of};
@@ -359,7 +359,7 @@ mod linux {
     /// receiving the daemon's replies, which complete them. Counts those in flight, which the
     /// worker waits for as it stops ([`Requests::wait_idle`]), and what it served of each type.
     pub struct Requests {
-        store: Arc<RemoteExtentStore>,
+        store: Arc<DaemonExtentStore>,
         notices: Arc<Notices>,
         /// cladefs: what it does with the guest's asks for durability (TASK-363).
         cache: CacheType,
@@ -383,7 +383,7 @@ mod linux {
     impl Requests {
         /// Requests served with `store`, as `notices` and `cache` say: those of a device
         /// ([`Device::requests`](crate::Device::requests)).
-        pub fn new(store: Arc<RemoteExtentStore>, notices: Arc<Notices>, cache: CacheType) -> Self {
+        pub fn new(store: Arc<DaemonExtentStore>, notices: Arc<Notices>, cache: CacheType) -> Self {
             Self {
                 store,
                 notices,
@@ -464,7 +464,7 @@ mod tests {
     /// A store in memory, which records what it is asked: extents, sealed by a commit; a root; a
     /// window's maps; and the guest's stats and answers.
     #[derive(Default)]
-    struct FakeStore {
+    struct FakeBackend {
         copies_on_write: bool,
         state: Mutex<FakeState>,
     }
@@ -486,7 +486,7 @@ mod tests {
         resized: Vec<(u64, bool)>,
     }
 
-    impl FakeStore {
+    impl FakeBackend {
         fn state(&self) -> std::sync::MutexGuard<'_, FakeState> {
             self.state.lock().unwrap()
         }
@@ -494,7 +494,7 @@ mod tests {
 
     const BRANCH: u64 = 7;
 
-    impl Store for FakeStore {
+    impl Backend for FakeBackend {
         fn branch(&self) -> u64 {
             BRANCH
         }
@@ -660,7 +660,7 @@ mod tests {
     /// as `cache` says; returns what the device wrote, the response apart, and the response's
     /// status.
     fn request_as(
-        store: &FakeStore,
+        store: &FakeBackend,
         notices: &Notices,
         cache: CacheType,
         readable: &[u8],
@@ -685,7 +685,7 @@ mod tests {
         (written, u32::from_le(response.status))
     }
 
-    fn request(store: &FakeStore, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
+    fn request(store: &FakeBackend, readable: &[u8], writable: usize) -> (Vec<u8>, u32) {
         request_as(store, &Notices::default(), CacheType::Writeback, readable, writable, usize::MAX)
     }
 
@@ -710,7 +710,7 @@ mod tests {
     /// seals what was written; a FREE frees.
     #[test]
     fn writes_and_reads_go_through_the_store() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let data: Vec<u8> = (0..3000).map(|i| i as u8).collect();
         let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(1, 0, data.len())), &data);
         let notices = Notices::default();
@@ -737,7 +737,7 @@ mod tests {
     /// root after the data; none but a WRITE's.
     #[test]
     fn writes_carry_their_barriers() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let rooted = IoArgs { root_len: 6u32.to_le(), ..io(1, 0, 4) };
         let flags = VIRTIO_EXTENT_WRITE_BARRIER
             | VIRTIO_EXTENT_WRITE_COMMIT
@@ -769,7 +769,7 @@ mod tests {
     /// driver asked.
     #[test]
     fn unsafe_devices_commit_ordered() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let notices = Notices::default();
         let durable = bytes(
             VIRTIO_EXTENT_T_COMMIT,
@@ -793,7 +793,7 @@ mod tests {
     /// INFO writes the store's whole, the branch too, refusing room for less (TASK-141.3).
     #[test]
     fn roots_and_info_are_written_whole() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let commit = bytes(
             VIRTIO_EXTENT_T_COMMIT,
             VIRTIO_EXTENT_COMMIT_ROOT,
@@ -830,7 +830,7 @@ mod tests {
     /// that copies on write, and those MAP_AHEAD says mapped ahead; flags of neither, refused.
     #[test]
     fn maps_carry_their_pieces() {
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let map = |sequence: u64, offset: u64, len: u64, window_offset: u64| MapArgs {
             id: ExtentIdLe { branch: BRANCH.to_le(), sequence: sequence.to_le() },
             offset: offset.to_le(),
@@ -864,7 +864,7 @@ mod tests {
 
         // Without a window that copies on write, zeros are refused; and a flag unknown, writable
         // DAX's MAP_WRITE among them (backlog doc-13).
-        let follower = FakeStore::default();
+        let follower = FakeBackend::default();
         let zeros = bytes(VIRTIO_EXTENT_T_MAP, VIRTIO_EXTENT_MAP_ZEROS, Some(map(0, 0, 1, 0)), &[]);
         assert_eq!(request(&follower, &zeros, RESPONSE).1, errno(Errno::EINVAL));
         for unknown in [1 << 0, 1 << 4] {
@@ -886,7 +886,7 @@ mod tests {
     /// again and again names as much as it likes. Up to it, the request is served.
     #[test]
     fn many_past_their_most_are_refused() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let write = bytes(VIRTIO_EXTENT_T_WRITE, 0, Some(io(1, 0, 1)), b"x");
         assert_eq!(request(&store, &write, RESPONSE), (vec![], 0));
         let extent = io(1, 0, 0).id;
@@ -919,7 +919,7 @@ mod tests {
     /// copies on write alone.
     #[test]
     fn notices_and_window_requests_reach_their_ends() {
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let notices = Notices::default();
         let serve = |request: &[u8]| {
             request_as(&store, &notices, CacheType::Writeback, request, RESPONSE, usize::MAX)
@@ -955,7 +955,7 @@ mod tests {
         );
         assert_eq!(store.state().unmapped, vec![(4096, 8192)]);
         assert_eq!(store.state().private, vec![(4096, 8192)]);
-        let follower = FakeStore::default();
+        let follower = FakeBackend::default();
         let private = bytes(VIRTIO_EXTENT_T_PRIVATE, 0, Some(range), &[]);
         assert_eq!(request(&follower, &private, RESPONSE).1, errno(Errno::EINVAL));
     }
@@ -964,7 +964,7 @@ mod tests {
     /// unknown type, or whose header is short, is refused.
     #[test]
     fn bad_requests_are_refused() {
-        let store = FakeStore::default();
+        let store = FakeBackend::default();
         let mut header = bytes::<Info>(VIRTIO_EXTENT_T_INFO, 0, None, &[]);
         let mut buffers = Buffers::new();
         // SAFETY: The test's memory, which outlives the request.
@@ -989,7 +989,7 @@ mod tests {
         use proptest::prelude::*;
         use proptest::test_runner::{Config, TestRunner};
 
-        let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
+        let store = FakeBackend { copies_on_write: true, ..FakeBackend::default() };
         let near_or_far = || {
             prop_oneof![
                 0u64..(1 << 22),

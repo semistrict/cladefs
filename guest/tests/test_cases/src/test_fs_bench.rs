@@ -456,10 +456,10 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
 
         /// The store at `store`, which the daemon at `extentd` serves: once the daemon has seen the
         /// VM that had it open go.
-        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::RemoteExtentStore> {
+        fn opened(extentd: &Path, store: &Path) -> anyhow::Result<cladefs::DaemonExtentStore> {
             let deadline = Instant::now() + Duration::from_secs(30);
             loop {
-                match cladefs::RemoteExtentStore::connect(extentd, store, IMAGE_SIZE) {
+                match cladefs::DaemonExtentStore::connect(extentd, store, IMAGE_SIZE) {
                     Ok(store) => return Ok(store),
                     Err(err)
                         if Instant::now() < deadline
@@ -713,7 +713,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                 Backend::FxfsGuestDaxForkCold | Backend::FxfsGuestDaxForkProfiled
             ) && std::env::var_os("CLADEFS_EXTENTD_BIN").is_none()
             {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon's binary");
+                return ShouldRun::No(
+                    "CLADEFS_EXTENTD_BIN does not name the extent daemon's binary",
+                );
             }
             match self.backend {
                 Backend::FxfsGuest

@@ -62,7 +62,7 @@ measurable.
 | Site | What orders it instead |
 |---|---|
 | `cladefs::extentd::client::Client::closing` (Release store in `close`, Acquire load as the receiving loop ends) | `close` stores, then shuts the socket down. The loop ends on the receive that the shutdown ends, a kernel ordering. A daemon going at the same instant is a race no ordering decides. |
-| `RemoteExtentStore::copying` (Release in `create_dax_window_in_host_memory`, Acquire in `copies_on_write`) | only the bool |
+| `DaemonExtentStore::copying` (Release in `create_dax_window_in_host_memory`, Acquire in `copies_on_write`) | only the bool |
 | `cladefs::extentd::server::Connection::closing` (Release once the connection ends, Acquire in `going`) | only the bool. `going` is a hint the writer path polls. |
 | `server::Peer::let_go` (swap AcqRel, loads Acquire) | swapped once, to shut the socket down once; read by `gone` after the connection ended. Only the bool. |
 | `server::Counted` connections (fetch_add/sub AcqRel) | a limit counter: only itself |
@@ -86,7 +86,7 @@ measurable.
 | `cladefs::dax::uffd::Busy::{doing, since, serving}` | a watchdog's diagnostic. The two loads may disagree with each other. |
 | `cladefs::profile::Profile::written` | a once-flag (swap). The profile's file is the real guard (`path.exists()`). |
 | `extent_remote::marks::Watch::{any, marked, marking, marking_due}`, `Held::read` | `any` and `marking` are hints in front of the `cells` lock, which guards the marks. A stale hint only delays a warning. `marking_due` is a CAS so that one caller per refresh rereads. |
-| `extent_remote::store::{Store::honoured, Failing::on}` | `honoured` caches a probe that is idempotent. `on` is a hint in front of the `run` lock. |
+| `extent_remote::object_bucket::{ObjectBucket::honoured, Failing::on}` | `honoured` caches a probe that is idempotent. `on` is a hint in front of the `run` lock. |
 | `extent_store::dir::Dir::bypassing` | the last open's answer, a diagnostic |
 | `extent_store::sync::REFUSING` (Shuttle builds only) | a test's switch, set before the threads it affects |
 | `vendor/firecracker` extent `window::KvmPrefault::failed` | a log-once flag (swap) |
@@ -97,7 +97,7 @@ measurable.
 These publish nothing. Each is an RMW or a load of a value that is read as a number.
 
 - cladefs: `stats::COUNTS`; `heap::{HELD, PEAK, LIMIT}` (tests' global allocator); `extents::OPEN_MAPS_REFUSED`;
-  `remote::peers::Counters`; `dax::Gauges` (window state's gauges); `dax::uffd::{Taken, REFUSED, CHANGED}`;
+  `bucket::peers::Counters`; `dax::Gauges` (window state's gauges); `dax::uffd::{Taken, REFUSED, CHANGED}`;
   `extentd::client`'s `Client::next`, `StageCosts` and `Transfer::used`; `extentd::metrics::Requests`;
   `extentd::snapshot`'s `ASKS`, `IDS` and each VM's `costs`, `private` and `installed`; `extentd::peers::{SERVED,
   SERVED_MISSING}`; `extentd::server::REFUSED`; `extentd::stores::{STATS_WRITTEN,
@@ -113,7 +113,7 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
 
 The atomics in test modules (`#[cfg(test)]`), in Shuttle builds (whose atomics are `SeqCst`
 whatever they ask) and in `tests/` are switches a test sets before the threads it affects start,
-or counters a test reads after joining them. Examples: `cladefs::remote`'s `Gated` store (`shut`,
+or counters a test reads after joining them. Examples: `cladefs::bucket`'s `Gated` store (`shut`,
 `full`, `held`, `went`, `writes`), `extentd::tests`, `store_table`'s and `store_requests`' Shuttle
 tests, `follower`'s test listener, and `extent_remote::{branch, collector, fetch}` tests. The join
 or channel that ends the test orders the read after the writes.
@@ -126,5 +126,5 @@ or channel that ends the test orders the read after the writes.
   meant two concurrent `process::exit` calls in Firecracker's listener. Fixed by `Occurrence`.
 - TASK-444.2.2: a follower's device read the latest commit with a load after setting its
   listener, the same pattern against the rise. loom showed a commit heard by neither. Fixed by
-  `Latest::listen`, which returns the value through an RMW (`RemoteExtentStore::on_committed`
+  `Latest::listen`, which returns the value through an RMW (`DaemonExtentStore::on_committed`
   now returns it).

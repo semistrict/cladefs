@@ -204,9 +204,9 @@ impl Device for ImageDevice {
         let parts = match self.store.locate(extent, offset, buffer.len() as u64) {
             // cladefs: in the image's bucket, as a clone holds what it inherited (TASK-165.7).
             Err(ref error)
-                if let Some(remote) = error.downcast_ref::<extent_store::RemoteData>() =>
+                if let Some(in_bucket) = error.downcast_ref::<extent_store::BucketData>() =>
             {
-                let location = remote.location.clone();
+                let location = in_bucket.location.clone();
                 let fetcher = self.image.fetcher();
                 let fetched = fetcher.read(extent, location, offset, buffer.len() as u64).await?;
                 let (len, end) = (fetched.len(), buffer.len());
@@ -591,7 +591,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
-        crate::remote::set_kms(Arc::new(kms)).unwrap();
+        crate::bucket::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let image = dir.path().join("image");
         let cell = crate::host_store::new_cell(5);

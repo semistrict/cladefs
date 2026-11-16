@@ -16,7 +16,7 @@ use crate::faults::RESTORE_STEPS;
 use crate::{Errno, ExtentId, ExtentStore, StoreRole};
 use extent_remote::branch;
 use extent_remote::layout::{self, Kind};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use fail::FailGuard;
 use futures::executor::block_on;
 use object_store::memory::InMemory;
@@ -49,7 +49,7 @@ enum Fault {
 /// A bucket, and the hosts of one point in it: the branch it was taken of has freed what it held.
 struct Hosts {
     temp: tempfile::TempDir,
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     gated: Vec<Arc<Gated>>,
     /// Each host's disk: a dead host's, its copy, restarted.
     disks: Vec<PathBuf>,
@@ -77,14 +77,14 @@ fn copy_at(host: usize, disk: &Path) -> PathBuf {
 /// keys its record keeps, its cell's KEK unwrapped by the host's KMS, if it has one
 /// (TASK-411.4).
 fn in_bucket(
-    bucket: &Arc<Bucket>,
+    bucket: &Arc<ObjectBucket>,
     child: crate::Branch,
 ) -> Result<Vec<(ExtentId, Vec<u8>)>, String> {
     block_on(async {
         let record = branch::record(&**bucket, child).await.map_err(|err| err.to_string())?;
         let record = record.ok_or("no record")?;
         let origin = record.origin();
-        let kms = crate::remote::kms();
+        let kms = crate::bucket::kms();
         let keys = extent_remote::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
         let recovering = extent_remote::recovery::recover_under(&**bucket, child, origin, &keys);
@@ -108,11 +108,11 @@ fn in_bucket(
 /// has one: what the deletion records of a sealed branch's forks to other cells is sealed
 /// (TASK-411.4).
 async fn operator_delete(
-    bucket: &Arc<Bucket>,
+    bucket: &Arc<ObjectBucket>,
     branch: crate::Branch,
     holder: u64,
 ) -> Result<(), extent_remote::Error> {
-    let kms = crate::remote::kms();
+    let kms = crate::bucket::kms();
     branch::delete_under(&**bucket, branch, holder, u64::MAX, kms.as_ref()).await
 }
 
@@ -120,9 +120,9 @@ impl Hosts {
     fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let gated: Vec<_> = (0..HOSTS).map(|_| Arc::new(Gated::over(memory.clone()))).collect();
-        let reached = |host: usize| Arc::new(Bucket::new(gated[host].clone(), ""));
+        let reached = |host: usize| Arc::new(ObjectBucket::new(gated[host].clone(), ""));
         let disks: Vec<_> =
             (0..HOSTS).map(|host| temp.path().join(format!("host{host}"))).collect();
         for disk in &disks {
@@ -172,7 +172,7 @@ impl Hosts {
     /// Sweeps of the collector over every cell, deleting what is free at once, until two in a row
     /// delete nothing: a dead cell's pass retires the references the point's origin's cell keeps
     /// the fork point for, which that cell's next pass reclaims (TASK-395.4).
-    fn collect(bucket: &Arc<Bucket>, case: &str) {
+    fn collect(bucket: &Arc<ObjectBucket>, case: &str) {
         let options = extent_remote::collector::Options { compact_below: 0.0, grace: 0 };
         let collected = extent_remote::testing::collect_until_quiet(&**bucket, &options);
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
@@ -588,7 +588,7 @@ fn sealed() -> tempfile::TempDir {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(crate::host_store::NO_TENANT).unwrap();
-    crate::remote::set_kms(Arc::new(kms)).unwrap();
+    crate::bucket::set_kms(Arc::new(kms)).unwrap();
     keys
 }
 

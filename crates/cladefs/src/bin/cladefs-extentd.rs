@@ -24,7 +24,7 @@
 //! It runs as a host of cladefs's multi-node system: `CLADEFS_EXTENTD_REMOTE` names the bucket its
 //! stores' branches are kept in, and `CLADEFS_EXTENTD_TOKEN` its placement's fencing token, which
 //! the system's control plane gives it, and which fences earlier placements' writes and deletes;
-//! without them, it refuses to start (`cladefs::remote::Host`, TASK-45). Tests and development use
+//! without them, it refuses to start (`cladefs::bucket::Host`, TASK-45). Tests and development use
 //! an in-memory bucket (`memory:///NAME`).
 //!
 //! One daemon serves every VM on a host. Connections to SOCKET are of the default tenant: with
@@ -78,9 +78,10 @@
 //! holds in memory is what it uploads at once, `CLADEFS_EXTENTD_UPLOAD_MEMORY` bytes at most (512 MiB
 //! by default, 64 MiB at least: an extent, which goes alone), every store's together (TASK-317).
 //! With `CLADEFS_EXTENTD_STATS` naming a file too, the daemon keeps there what it did with the
-//! bucket, its requests by kind and its bytes up and down (`extent_remote::store::Stats::line`),
-//! what the stores' followers are, what serving the stores cost it (`cladefs::stats::Stats`), and
-//! the VM processes' requests it served, by kind, rewritten as they change.
+//! bucket, its requests by kind and its bytes up and down
+//! (`extent_remote::object_bucket::Stats::line`), what the stores' followers are, what serving the
+//! stores cost it (`cladefs::stats::Stats`), and the VM processes' requests it served, by kind,
+//! rewritten as they change.
 //!
 //! With `CLADEFS_EXTENTD_TRACES` set to `otlp`, the daemon exports spans of what it does, over OTLP,
 //! to the collector `OTEL_EXPORTER_OTLP_ENDPOINT` names, OpenTelemetry's variables configuring
@@ -89,9 +90,9 @@
 //! It logs to standard error, a line a record (`cladefs::extentd::logging`): text by default, or,
 //! with `CLADEFS_LOG_FORMAT=json`, a JSON object a line, of the record's `timestamp`, `level`,
 //! `target`, `message` and key-values (TASK-259). `CLADEFS_LOG_LEVEL` says how much, `info` by
-//! default, by target too: `info,extent_remote::store=debug` logs each request of object storage.
-//! A record about a VM's request names it, `request_id`, the guest's number of it, with its
-//! `store` (TASK-260).
+//! default, by target too: `info,extent_remote::object_bucket=debug` logs each request of object
+//! storage. A record about a VM's request names it, `request_id`, the guest's number of it, with
+//! its `store` (TASK-260).
 
 #[cfg(target_os = "linux")]
 fn main() -> anyhow::Result<()> {
@@ -116,7 +117,7 @@ fn main() -> anyhow::Result<()> {
     }
     cladefs::extentd::raise_open_files_limit().context("raising the limit of open files")?;
     // A host of the multi-node system: the bucket and this host's placement token named.
-    cladefs::remote::Host::from_env().map_err(anyhow::Error::msg)?;
+    cladefs::bucket::Host::from_env().map_err(anyhow::Error::msg)?;
     // cladefs: its part cache's directory and budget, if it keeps one (TASK-406.1).
     cladefs::extentd::cache_config().map_err(anyhow::Error::msg)?;
     // cladefs: the hosts sharing its bucket, which it serves parts and asks for theirs (TASK-406.2).
@@ -137,7 +138,7 @@ fn main() -> anyhow::Result<()> {
     {
         let bytes = bytes.to_str().and_then(|bytes| bytes.parse().ok());
         let bytes = bytes.context("CLADEFS_EXTENTD_UPLOAD_MEMORY must be a number of bytes")?;
-        cladefs::remote::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
+        cladefs::bucket::set_upload_memory(bytes).map_err(anyhow::Error::msg)?;
     }
     let mut args = std::env::args().skip(1);
     let socket = args.next().context("usage: cladefs-extentd SOCKET [MEMORY_BYTES]")?;

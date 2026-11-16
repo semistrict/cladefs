@@ -5,7 +5,7 @@
 //! cladefs: the heap of this crate's test processes, counted as it is allocated ([`Bounded`]), so
 //! that a test bounds what the code it runs holds: what the daemon holds of a hostile VM process's
 //! (`extentd::tests::hostile`, TASK-150.3), or what a store's uploads hold while the bucket takes
-//! none of them (`remote`'s tests, TASK-317). nextest runs each test in a process of its own, so
+//! none of them (`bucket`'s tests, TASK-317). nextest runs each test in a process of its own, so
 //! that what one counts is its own.
 
 use std::alloc::{GlobalAlloc, Layout, System};

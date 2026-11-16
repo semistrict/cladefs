@@ -11,7 +11,7 @@
 mod common;
 
 use cladefs::extentd::control::proto::{AttachBaseRequest, MakePublicRequest};
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSliceMut};
+use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSliceMut};
 use common::daemon::{CAPACITY, Daemon, failure, name, write};
 use common::{copies, pattern};
 use std::path::{Path, PathBuf};
@@ -27,7 +27,7 @@ fn make_generation_public(daemon: &mut Daemon, path: &Path) -> Result<(), tonic:
     daemon.runtime.block_on(daemon.client.make_public(request)).map(drop)
 }
 
-fn read(store: &RemoteExtentStore, extent: ExtentId) -> Result<Vec<u8>, Errno> {
+fn read(store: &DaemonExtentStore, extent: ExtentId) -> Result<Vec<u8>, Errno> {
     let mut data = pattern(0);
     data.fill(0);
     store.read(extent, 0, &mut [VolatileSliceMut::from(&mut data[..])])?;
@@ -92,7 +92,7 @@ fn stores_keep_what_is_attached() {
     drop(vm);
     daemon.sync(&sandbox).unwrap();
     let vm_restored =
-        RemoteExtentStore::connect_forked(&daemon.vms, &restored, &sandbox, branch, CAPACITY)
+        DaemonExtentStore::connect_forked(&daemon.vms, &restored, &sandbox, branch, CAPACITY)
             .unwrap();
     assert!(read(&vm_restored, extent).unwrap() == pattern(3), "the restored VM reads other bytes");
 }
@@ -109,7 +109,7 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     let acme_socket = daemon.grant("acme", 1, &acme, None).unwrap();
     let globex_socket = daemon.grant("globex", 2, &globex, None).unwrap();
     let open =
-        |socket: &Path, path: PathBuf| RemoteExtentStore::connect(socket, path, CAPACITY).unwrap();
+        |socket: &Path, path: PathBuf| DaemonExtentStore::connect(socket, path, CAPACITY).unwrap();
 
     // A private generation of acme's.
     let vm = open(&acme_socket, acme.join("publisher"));

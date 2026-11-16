@@ -74,27 +74,27 @@ impl Default for Holders {
 /// store holds them without their data.
 struct Holder {
     store: Weak<Store<HostDir>>,
-    remote: Option<Weak<crate::remote::Fetcher>>,
+    fetcher: Option<Weak<crate::bucket::HostFetcher>>,
 }
 
 /// A [`Holder`] open still.
-type OpenHolder = (Arc<Store<HostDir>>, Option<Arc<crate::remote::Fetcher>>);
+type OpenHolder = (Arc<Store<HostDir>>, Option<Arc<crate::bucket::HostFetcher>>);
 
 impl Holders {
-    /// Adds `store`, reading through `remote`, unless it is there, letting go of those closed.
-    fn add(&self, store: &Arc<Store<HostDir>>, remote: Option<&Arc<crate::remote::Fetcher>>) {
+    /// Adds `store`, reading through `fetcher`, unless it is there, letting go of those closed.
+    fn add(&self, store: &Arc<Store<HostDir>>, fetcher: Option<&Arc<crate::bucket::HostFetcher>>) {
         let mut holders = self.0.with(Mutex::lock);
         holders.retain(|holder| holder.store.strong_count() > 0);
         if !holders.iter().any(|holder| std::ptr::eq(holder.store.as_ptr(), Arc::as_ptr(store))) {
-            let (store, remote) = (Arc::downgrade(store), remote.map(Arc::downgrade));
-            holders.push(Holder { store, remote });
+            let (store, fetcher) = (Arc::downgrade(store), fetcher.map(Arc::downgrade));
+            holders.push(Holder { store, fetcher });
         }
     }
 
     /// Adds those of `other` open still, as [`Holders::add`] does.
     fn adopt(&self, other: &Holders) {
-        for (store, remote) in other.open() {
-            self.add(&store, remote.as_ref());
+        for (store, fetcher) in other.open() {
+            self.add(&store, fetcher.as_ref());
         }
     }
 
@@ -103,7 +103,7 @@ impl Holders {
         let holders = self.0.with(Mutex::lock);
         (holders.iter())
             .filter_map(|holder| {
-                Some((holder.store.upgrade()?, holder.remote.as_ref().and_then(Weak::upgrade)))
+                Some((holder.store.upgrade()?, holder.fetcher.as_ref().and_then(Weak::upgrade)))
             })
             .collect()
     }
@@ -299,12 +299,12 @@ impl Placement {
 }
 
 /// The sealed `extent`, of `len` bytes, in the cache, of `placement`'s arena, cached from `store` if it isn't:
-/// read from it, or from `remote`, with its page-ins recorded by `recorder`, if any; and from any
+/// read from it, or from `fetcher`, with its page-ins recorded by `recorder`, if any; and from any
 /// other store that asked for it, which `store` is one of from now on (TASK-79.7).
 pub(crate) fn cached(
     store: &Arc<Store<HostDir>>,
     placement: Placement,
-    remote: Option<Arc<crate::remote::Fetcher>>,
+    fetcher: Option<Arc<crate::bucket::HostFetcher>>,
     recorder: Option<Arc<Recorder>>,
     extent: ExtentId,
     len: u64,
@@ -336,7 +336,7 @@ pub(crate) fn cached(
     }
     let cached = extents.get_mut(&key).expect("cached");
     cached.extent.used();
-    cached.holders.add(store, remote.as_ref());
+    cached.holders.add(store, fetcher.as_ref());
     let found = cached.extent.clone();
     let most = MOST_CACHED.load(Ordering::Relaxed);
     let gone = (extents.len() > most.max(TRIM_AT.load(Ordering::Relaxed))).then(|| {
@@ -528,7 +528,7 @@ impl StoredExtent {
         // object storage holds it in.
         let offset = match store.place(id) {
             Ok(Some(extent_store::Place::Run { offset, .. })) => offset,
-            Ok(Some(extent_store::Place::Remote(location))) => location.offset,
+            Ok(Some(extent_store::Place::Bucket(location))) => location.offset,
             _ => 0,
         };
         let phase = offset % extent_frame::PART / page_size() * page_size();
@@ -551,7 +551,7 @@ impl Contents for StoredExtent {
         let id: storage_device::ExtentId = self.extent.into();
         // Through the first of the stores that asked for it that holds it still (TASK-79.7).
         let mut failed = anyhow::Error::new(NoExtent(id));
-        for (store, remote) in self.holders.open() {
+        for (store, fetcher) in self.holders.open() {
             // An extent freed since it was mapped, which a follower's view keeps, reads as kept
             // (doc-8).
             let read = match store.read(id, offset, buf) {
@@ -566,10 +566,10 @@ impl Contents for StoredExtent {
                     return Box::pin(std::future::ready(Ok(())));
                 }
                 Err(ref error)
-                    if let Some(data) = error.downcast_ref::<extent_store::RemoteData>()
-                        && let Some(remote) = remote =>
+                    if let Some(data) = error.downcast_ref::<extent_store::BucketData>()
+                        && let Some(fetcher) = fetcher =>
                 {
-                    let fetched = remote.read(id, data.location.clone(), offset, buf.len() as u64);
+                    let fetched = fetcher.read(id, data.location.clone(), offset, buf.len() as u64);
                     return Box::pin(async move {
                         let data = fetched.await?;
                         stats::add(Counter::FetchedBytes, data.len() as u64);

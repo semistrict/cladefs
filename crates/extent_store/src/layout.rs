@@ -282,14 +282,14 @@ pub(crate) fn add_piece(pieces: &mut Vec<Piece>, mut piece: Piece) {
 pub(crate) enum Data {
     Pieces(Vec<Piece>),
     Own,
-    Remote(Location),
+    Bucket(Location),
 }
 
 impl Data {
     /// cladefs: if in the bucket, named at `to`, where the collector moved it, if it is named on its
     /// way there (`extent_remote::layout::further`, TASK-195).
     pub fn follow(&mut self, to: &Location) {
-        if let Data::Remote(at) = self
+        if let Data::Bucket(at) = self
             && extent_remote::layout::further(&at.key, &to.key)
         {
             *at = to.clone();
@@ -337,7 +337,7 @@ pub(crate) fn files_of<'a>(
             Data::Own => {
                 files.insert(FileKey::Own(*extent));
             }
-            Data::Remote(_) => {}
+            Data::Bucket(_) => {}
         }
     }
     files
@@ -388,7 +388,7 @@ pub enum Place {
     /// Its own file.
     Own,
     /// cladefs: in the bucket, at its location there.
-    Remote(Location),
+    Bucket(Location),
     /// Pieces, as it was written: the extent is open.
     Pieces,
 }

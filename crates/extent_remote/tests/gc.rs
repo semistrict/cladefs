@@ -95,7 +95,7 @@ fn lists_and_deletes_branches() {
 #[test]
 fn collects_a_file_bucket() {
     use extent_remote::batch::{Batch, Commit};
-    use extent_remote::store::Store;
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::{Writer, branch};
     use std::sync::Arc;
     use storage_device::ExtentId;
@@ -103,7 +103,7 @@ fn collects_a_file_bucket() {
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
     futures::executor::block_on(async {
-        let bucket = Arc::new(Store::from_url(&url).unwrap());
+        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
         branch::create(&*bucket, test_branch(1), 0).await.unwrap();
         let writer = Writer::open(bucket, test_branch(1), 10, 1).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
@@ -124,7 +124,7 @@ fn collects_a_file_bucket() {
         [0, 1].map(|seq| format!("{at}/segments/0000000000000001/0000000000000001.{seq:016x}"));
     let bytes: u64 = futures::executor::block_on(async {
         use extent_remote::Bucket as _;
-        let listed = Store::from_url(&url).unwrap().list("").await.unwrap();
+        let listed = ObjectBucket::from_url(&url).unwrap().list("").await.unwrap();
         listed.iter().filter(|meta| doomed.contains(&meta.key)).map(|meta| meta.size).sum()
     });
     // TASK-395.4: a pass over another cell, named, leaves this one be.
@@ -143,7 +143,7 @@ fn collects_a_file_bucket() {
     assert!(out.status.success());
     let left = futures::executor::block_on(async {
         use extent_remote::Bucket as _;
-        let bucket = Store::from_url(&url).unwrap();
+        let bucket = ObjectBucket::from_url(&url).unwrap();
         let listed = bucket.list("").await.unwrap();
         listed
             .into_iter()
@@ -175,7 +175,7 @@ fn collects_a_file_bucket() {
 #[test]
 fn dry_runs_and_mark_only_passes_delete_nothing() {
     use extent_remote::batch::{Batch, Commit};
-    use extent_remote::store::Store;
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::{Writer, branch};
     use std::sync::Arc;
     use storage_device::ExtentId;
@@ -183,7 +183,7 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
     futures::executor::block_on(async {
-        let bucket = Arc::new(Store::from_url(&url).unwrap());
+        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
         branch::create(&*bucket, test_branch(1), 0).await.unwrap();
         let writer = Writer::open(bucket, test_branch(1), 10, 1).await.unwrap();
         let extent = ExtentId::new(1, writer.chain().next_sequence());
@@ -306,7 +306,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use extent_remote::Bucket as _;
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::layout::{self, Branch, Cell};
-    use extent_remote::store::Store;
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::{Writer, branch};
     use serde_json::{Value, json};
     use std::collections::BTreeMap;
@@ -315,7 +315,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 
     let dir = tempfile::tempdir().unwrap();
     let url = url::Url::from_directory_path(dir.path()).unwrap().to_string();
-    let bucket = Arc::new(Store::from_url(&url).unwrap());
+    let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
     let cells =
         [Cell { tenant: 1, id: 1 }, Cell { tenant: 1, id: 0x2f }, Cell { tenant: 0xb, id: 1 }];
     let unpassed = Cell { tenant: 1, id: 0x30 };
@@ -464,7 +464,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     use extent_keys::kms::LocalKms;
     use extent_remote::batch::{Batch, Commit};
     use extent_remote::layout::{self, Branch, Cell, Child, Origin};
-    use extent_remote::store::Store;
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::{Bucket as _, Writer, branch, cell, keys};
     use futures::executor::block_on;
     use std::sync::Arc;
@@ -480,7 +480,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     let parent = test_branch(1);
     let child = Branch { cell: Cell { tenant: 1, id: 2 }, id: 9 };
     let at = block_on(async {
-        let bucket = Arc::new(Store::from_url(&url).unwrap());
+        let bucket = Arc::new(ObjectBucket::from_url(&url).unwrap());
         let shared: extent_keys::kms::Shared = local.clone();
         let host = keys::Kms::new(shared);
         let kek = keys::new_cell_kek(Some(&host), 1).await.unwrap();
@@ -513,7 +513,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         bucket.put(&layout::head(parent), named.into(), overwrite).await.unwrap();
         at
     });
-    let bucket = Store::from_url(&url).unwrap();
+    let bucket = ObjectBucket::from_url(&url).unwrap();
     let record = |branch| block_on(branch::record(&bucket, branch)).unwrap();
     let checkpoints = || {
         let listed = block_on(bucket.list(&format!("{}checkpoints/", parent.cell.prefix())));

@@ -37,7 +37,7 @@
 //! make new stores, work so anywhere, as when building base images where no daemon runs. The others change
 //! existing stores' branches, which are in the bucket each store's description names: they need
 //! this host's (`CLADEFS_EXTENTD_REMOTE`) and its placement's fencing token (`CLADEFS_EXTENTD_TOKEN`),
-//! and refuse otherwise (`cladefs::remote::Host`, TASK-45).
+//! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one volume of a
 //! new cell of no tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
@@ -407,7 +407,7 @@ impl Command {
                 | Self::Stat { .. }
                 | Self::Drop { .. }
         );
-        if let Some(Err(why)) = existing.then(cladefs::remote::Host::from_env) {
+        if let Some(Err(why)) = existing.then(cladefs::bucket::Host::from_env) {
             bail!(
                 "without the extent daemon (CLADEFS_EXTENTD_GRPC), cladefsctl changes no existing \
                  store's branch here: {why}"

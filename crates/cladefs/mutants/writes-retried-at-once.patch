@@ -4,8 +4,8 @@
 # bucket soak (1,200 of its 1,580 s on ubu1), where a probe at a time would do.
 # Kind: failures
 # Killer: extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound
---- a/crates/extent_remote/src/store.rs
-+++ b/crates/extent_remote/src/store.rs
+--- a/crates/extent_remote/src/object_bucket.rs
++++ b/crates/extent_remote/src/object_bucket.rs
 @@ -820,8 +820,6 @@
          };
          let upload = Upload::of(key);

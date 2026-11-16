@@ -578,11 +578,11 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         fn run_stores(&self, test_setup: &TestSetup, root: &Path) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             // A daemon of its own, whose bucket answers 25 ms late, as the sandbox team's RustFS
-            // did, or as CLADEFS_REMOTE_LATENCY_MS says; its socket's path short, as Unix sockets'
+            // did, or as CLADEFS_BUCKET_LATENCY_MS says; its socket's path short, as Unix sockets'
             // must be.
             let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
             let socket = sockets.path().join("extentd.sock");
-            let given = std::env::var_os("CLADEFS_REMOTE_LATENCY_MS");
+            let given = std::env::var_os("CLADEFS_BUCKET_LATENCY_MS");
             let bucket = std::env::var_os("CLADEFS_EXTENTD_REMOTE");
             let latency = added_latency(given.as_deref(), bucket.as_deref());
             let stats = dir.join("extentd-stats.txt");
@@ -590,7 +590,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
             let env = [
-                ("CLADEFS_REMOTE_LATENCY_MS", latency),
+                ("CLADEFS_BUCKET_LATENCY_MS", latency),
                 ("CLADEFS_EXTENTD_STATS", stats.as_os_str()),
                 ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
             ];
@@ -772,8 +772,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
     }
 
     /// cladefs: the milliseconds the case's daemon adds to each of its bucket's requests:
-    /// CLADEFS_REMOTE_LATENCY_MS's, `given`, if set; otherwise 25, the sandbox team's RustFS's, to a
-    /// bucket here, `bucket` naming one in files or none (the daemon's is then in its memory,
+    /// CLADEFS_BUCKET_LATENCY_MS's, `given`, if set; otherwise 25, the sandbox team's RustFS's, to
+    /// a bucket here, `bucket` naming one in files or none (the daemon's is then in its memory,
     /// `crate::common::spawn_daemon`), and none to a real one, which is as far as it is. Added to
     /// GCS's, the forked case's restart after its crash, its reads of what the fork inherited
     /// ranged GETs one after another, took more than pg_ctl's 900 s (GCE r740, TASK-209).

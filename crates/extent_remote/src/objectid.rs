@@ -102,12 +102,12 @@ async fn take(bucket: &impl Bucket) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::Store;
+    use crate::object_bucket::ObjectBucket;
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    fn memory() -> Store {
-        Store::new(Arc::new(object_store::memory::InMemory::new()), "")
+    fn memory() -> ObjectBucket {
+        ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "")
     }
 
     /// An allocator gives its block's IDs in order, each once, then takes another block; another

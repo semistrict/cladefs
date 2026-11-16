@@ -21,9 +21,9 @@ use super::rounds::{BLOCK, BRANCH, Model, OPTIONS, workload};
 use extent_remote::bucket::{ByteRange, Error as BucketError, Meta, Object, PutMode, Version};
 use extent_remote::collector;
 use extent_remote::fetch::{Budget, Limits};
-use extent_remote::store::Store as Bucket;
-use extent_store::upload::{self, Remote, Runtime};
-use extent_store::{Description, MemDir, Recovering, RemoteData, Store};
+use extent_remote::object_bucket::ObjectBucket;
+use extent_store::upload::{self, Runtime, Uploader};
+use extent_store::{BucketData, Description, MemDir, Recovering, Store};
 use object_store::memory::InMemory;
 use rand::rngs::StdRng;
 use rand::{RngExt as _, SeedableRng as _};
@@ -47,7 +47,7 @@ const URL: &str = "memory:///kept";
 /// reaches it: since its last crash, a copy of what the bucket held then ([`Host::crash`]).
 struct Host {
     runtime: tokio::runtime::Runtime,
-    bucket: RefCell<Arc<Bucket>>,
+    bucket: RefCell<Arc<ObjectBucket>>,
     memory: RefCell<Arc<InMemory>>,
 }
 
@@ -59,12 +59,12 @@ impl Host {
             .build()
             .unwrap();
         let memory = Arc::new(InMemory::new());
-        let bucket = Arc::new(Bucket::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         Self { runtime, bucket: RefCell::new(bucket), memory: RefCell::new(memory) }
     }
 
     /// The bucket, as the host reaches it now.
-    fn bucket(&self) -> Arc<Bucket> {
+    fn bucket(&self) -> Arc<ObjectBucket> {
         self.bucket.borrow().clone()
     }
 
@@ -76,7 +76,7 @@ impl Host {
     /// copy whose head named a segment it lacked (TASK-432).
     fn crash(&self) {
         let copy = Arc::new(self.memory.borrow().fork());
-        *self.bucket.borrow_mut() = Arc::new(Bucket::new(copy.clone(), ""));
+        *self.bucket.borrow_mut() = Arc::new(ObjectBucket::new(copy.clone(), ""));
         *self.memory.borrow_mut() = copy;
     }
 
@@ -87,7 +87,7 @@ impl Host {
         recovering: Recovering<MemDir>,
         holder: u64,
         interval: Duration,
-    ) -> Result<(Arc<Store<MemDir>>, Remote<MemDir>), upload::Failure> {
+    ) -> Result<(Arc<Store<MemDir>>, Uploader<MemDir>), upload::Failure> {
         let runtime = Runtime {
             handle: self.runtime.handle().clone(),
             uploads: Budget::new(Limits::UNBOUNDED),
@@ -106,8 +106,8 @@ impl Host {
         for (extent, len) in store.extents().unwrap() {
             let mut data = vec![0; len as usize];
             if let Err(err) = store.read(extent, 0, &mut data) {
-                let RemoteData { location, .. } =
-                    err.downcast_ref::<RemoteData>().cloned().unwrap_or_else(|| panic!("{err:#}"));
+                let BucketData { location, .. } =
+                    err.downcast_ref::<BucketData>().cloned().unwrap_or_else(|| panic!("{err:#}"));
                 let bucket = self.bucket();
                 let read = extent_remote::fetch::read(&bucket, extent, &location);
                 data = self.runtime.block_on(read).unwrap();
@@ -125,7 +125,7 @@ const COLLECTING: collector::Options = collector::Options { compact_below: 0.9, 
 /// which never complete, as a dead host's do not. A failing request would be no cut: a pass
 /// retries what fails for ever.
 struct Cut {
-    bucket: Arc<Bucket>,
+    bucket: Arc<ObjectBucket>,
     left: AtomicU64,
 }
 
@@ -272,7 +272,7 @@ const DESCRIPTION: Description =
 fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Crashed {
     let dir = MemDir::new();
     Store::make(&dir, DESCRIPTION, Some(URL), None).unwrap();
-    let (store, remote) =
+    let (store, uploader) =
         host.open(Store::recover_unmade(dir.clone()).unwrap(), 1, interval).unwrap();
     store.made().unwrap();
     // The commits opening it made, the branch's capacity set, hold nothing.
@@ -282,13 +282,13 @@ fn crashed(host: &Host, round: u64, rng: &mut StdRng, interval: Duration) -> Cra
     let passes = Passes::start(cut.clone(), interval);
     dir.fail_after(Some(rng.random_range(0..600)));
     let (durable, _) = workload(rng, &store, &mut epochs, Model::default(), first);
-    let acknowledged = remote.last_uploaded() as usize;
+    let acknowledged = uploader.last_uploaded() as usize;
     let dir = dir.crash(round);
     let collected = passes.abort().unwrap_or_else(|err| panic!("round {round}: {err}"));
     host.crash();
     // The host is gone: its uploader, which stops at the store's failure, or uploads what it
     // has left where none sees it, and its store.
-    drop(remote);
+    drop(uploader);
     drop(store);
     Crashed { dir, epochs, durable, acknowledged, first, cut: cut.cut(), collected }
 }
@@ -305,7 +305,7 @@ fn reopened(
 ) -> usize {
     let recovering = Store::recover(dir)
         .unwrap_or_else(|err| panic!("round {round}: the store doesn't recover: {err:#}"));
-    let (store, remote) = host
+    let (store, uploader) = host
         .open(recovering, holder, HOUR)
         .unwrap_or_else(|err| panic!("round {round}: the store doesn't open: {err}"));
     let epochs = &crashed.epochs;
@@ -318,7 +318,7 @@ fn reopened(
         epochs.len()
     );
     assert_eq!(host.contents(&store), epochs[epoch], "round {round}: at epoch {epoch}");
-    drop(remote);
+    drop(uploader);
     drop(store);
     epoch
 }
@@ -355,7 +355,7 @@ pub fn kept(round: u64) -> Kept {
     let elsewhere = MemDir::new();
     Store::make(&elsewhere, DESCRIPTION, Some(URL), None).unwrap();
     let recovering = Store::recover_unmade(elsewhere).unwrap();
-    let (taken, remote) = host.open(recovering, 2, interval).unwrap();
+    let (taken, uploader) = host.open(recovering, 2, interval).unwrap();
     taken.made().unwrap();
     let epoch = taken.epoch().unwrap() as usize;
     assert!(
@@ -364,7 +364,7 @@ pub fn kept(round: u64) -> Kept {
         epochs.len()
     );
     assert_eq!(host.contents(&taken), epochs[epoch], "round {round}: taken at epoch {epoch}");
-    drop(remote);
+    drop(uploader);
     drop(taken);
 
     // Its disk kept, the store opens again: its log follows the branch, which the taking fenced

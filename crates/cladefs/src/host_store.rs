@@ -24,9 +24,9 @@ use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
 use extent_remote::layout::{Branch, Cell, Child};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use extent_remote::{branch, cell};
-use extent_store::upload::{self, Failure, Remote};
+use extent_store::upload::{self, Failure, Uploader};
 use extent_store::{Description, HostDir, Options, Recovering, Store, Volume};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -52,7 +52,7 @@ pub(crate) fn fork_cell(parent: Branch) -> Cell {
     new_cell(parent.cell.tenant)
 }
 
-/// cladefs: whether a fork of `parent`, whose uploader is `remote`, may make a branch of `cell`
+/// cladefs: whether a fork of `parent` by `uploader`, its uploader, may make a branch of `cell`
 /// (TASK-395.9): `EACCES` if `parent` has a writer and `cell` is another tenant's than its own,
 /// unless its own is the common tenant's ([`NO_TENANT`]), as the daemon's own stores and public
 /// bases are. Inheritance across tenants is the common tenant's and shared points' alone: a fork of
@@ -60,11 +60,11 @@ pub(crate) fn fork_cell(parent: Branch) -> Cell {
 /// (`branch::finish_point_fork`, TASK-395.7).
 pub(crate) fn may_fork_into(
     parent: Branch,
-    remote: &Remote<HostDir>,
+    uploader: &Uploader<HostDir>,
     cell: Cell,
 ) -> Result<(), Error> {
     let tenant = parent.cell.tenant;
-    if remote.is_point() || tenant == NO_TENANT || tenant == cell.tenant {
+    if uploader.is_point() || tenant == NO_TENANT || tenant == cell.tenant {
         return Ok(());
     }
     let refused = format!(
@@ -78,7 +78,7 @@ pub(crate) fn may_fork_into(
 /// A new branch of `cell`, of `bucket`: its ID one no other branch of the bucket has, nor will
 /// (`extent_remote::objectid`), so that stores made apart, and the forks of one, mint extent IDs
 /// of their own (backlog doc-4), which a host's cache of extents keys them by (TASK-364).
-pub(crate) fn new_branch(bucket: &Bucket, cell: Cell) -> Result<Branch, Failure> {
+pub(crate) fn new_branch(bucket: &ObjectBucket, cell: Cell) -> Result<Branch, Failure> {
     let id = upload::block_on(bucket.new_objectid())?;
     Ok(Branch { cell, id })
 }
@@ -135,15 +135,15 @@ const FIRST_PLACEMENT: u64 = 1;
 /// The buckets this process keeps stores' branches in, by their URLs: one each, which every store
 /// naming it shares, so that a memory bucket (`memory:///NAME`) is one for the process, as a
 /// bucket elsewhere is one for every process.
-static BUCKETS: Mutex<BTreeMap<String, Arc<Bucket>>> = Mutex::new(BTreeMap::new());
+static BUCKETS: Mutex<BTreeMap<String, Arc<ObjectBucket>>> = Mutex::new(BTreeMap::new());
 
-/// The bucket at `url` ([`Bucket::from_url`]): this process's, made if it has none yet.
-pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<Bucket>> {
+/// The bucket at `url` ([`ObjectBucket::from_url`]): this process's, made if it has none yet.
+pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<ObjectBucket>> {
     let mut buckets = BUCKETS.lock().unwrap();
     if let Some(bucket) = buckets.get(url) {
         return Ok(bucket.clone());
     }
-    let bucket = Arc::new(Bucket::from_url(url).map_err(anyhow::Error::msg)?);
+    let bucket = Arc::new(ObjectBucket::from_url(url).map_err(anyhow::Error::msg)?);
     buckets.insert(url.to_owned(), bucket.clone());
     Ok(bucket)
 }
@@ -151,15 +151,15 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<Bucket>> {
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the
 /// buckets they put themselves in front of; unless it is already, the same.
 #[cfg(test)]
-pub(crate) fn use_bucket(url: &str, bucket: Arc<Bucket>) {
+pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
     let mut buckets = BUCKETS.lock().unwrap();
     let had = buckets.entry(url.to_owned()).or_insert_with(|| bucket.clone());
     assert!(Arc::ptr_eq(had, &bucket), "this process has another bucket at {url}");
 }
 
 /// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
-/// if it is a host of cladefs's system (`CLADEFS_EXTENTD_REMOTE`, as [`crate::remote::Host`] has it);
-/// else a file bucket of the store's own ([`bucket_named`]).
+/// if it is a host of cladefs's system (`CLADEFS_EXTENTD_REMOTE`, as [`crate::bucket::Host`] has
+/// it); else a file bucket of the store's own ([`bucket_named`]).
 fn bucket_for(path: &Path) -> anyhow::Result<String> {
     let host = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
     bucket_named(host, path)
@@ -190,11 +190,11 @@ pub(crate) fn keeps_own_bucket(store: &Store<HostDir>) -> bool {
 
 /// The fencing token copies of stores never placed take their branches with where this process
 /// opens them as no host's daemon does, as [`crate::Storage`] does: this host's placement's, if it
-/// is a host of cladefs's system (`CLADEFS_EXTENTD_TOKEN`, [`crate::remote::host_token`]); else the
+/// is a host of cladefs's system (`CLADEFS_EXTENTD_TOKEN`, [`crate::bucket::host_token`]); else the
 /// first placement's. So the daemon and the cladefs CLI on one host take each other's branches.
 pub(crate) fn token() -> Result<u64, Failure> {
     match std::env::var_os("CLADEFS_EXTENTD_TOKEN").filter(|token| !token.is_empty()) {
-        Some(_) => crate::remote::host_token(),
+        Some(_) => crate::bucket::host_token(),
         None => Ok(FIRST_PLACEMENT),
     }
 }
@@ -209,8 +209,8 @@ pub(crate) fn keeping() -> Result<upload::Options, Failure> {
 /// and its uploader, which took the branch's lease, or holds its point (TASK-165.9).
 pub(crate) struct Opened {
     pub store: Arc<Store<HostDir>>,
-    pub bucket: Arc<Bucket>,
-    pub remote: Remote<HostDir>,
+    pub bucket: Arc<ObjectBucket>,
+    pub uploader: Uploader<HostDir>,
 }
 
 impl Opened {
@@ -223,7 +223,7 @@ impl Opened {
 /// The bucket the store at `path` names, if its description is there: as deleting it, or what of
 /// it a deletion that stopped left, goes by. A store of another format is refused
 /// (`extent_store::Format`).
-pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<Bucket>>> {
+pub(crate) fn bucket_at(path: &Path) -> anyhow::Result<Option<Arc<ObjectBucket>>> {
     match extent_store::host_bucket(path) {
         Ok(Some(url)) => Ok(Some(bucket(&url)?)),
         Err(err) if err.is::<extent_store::Format>() => Err(err),
@@ -243,7 +243,7 @@ pub(crate) fn share(path: &Path, shared: bool) -> Result<(), Error> {
     let sharing = upload::block_on(branch::share(&*bucket, point, shared))?;
     Ok(sharing.map_err(|err| match err {
         extent_remote::Error::Deleted => Failure::PointDeleted,
-        err => Failure::Remote(err),
+        err => Failure::Bucket(err),
     })?)
 }
 
@@ -333,7 +333,7 @@ fn host_dir(path: &Path) -> Result<HostDir, Failure> {
 /// Opening a store; doc-7, Recovery on the same host).
 pub(crate) fn take(path: &Path, keeping: upload::Options) -> Result<Opened, Failure> {
     match open(path, keeping.clone()) {
-        Err(Failure::Remote(extent_remote::Error::Diverged)) => {
+        Err(Failure::Bucket(extent_remote::Error::Diverged)) => {
             let mut recovering = Store::recover(host_dir(path)?)?;
             log::warn!(
                 "cladefs: dropping {}'s write-ahead log: another writer moved branch {} past it",
@@ -353,10 +353,10 @@ fn opened(recovering: Recovering<HostDir>, keeping: upload::Options) -> Result<O
     let path = || recovering_path(&recovering);
     let url = url.ok_or_else(|| Failure::msg(format!("{} names no bucket", path())))?;
     let bucket = bucket(&url).with_context(|| format!("opening the bucket {url}"))?;
-    let runtime = crate::remote::runtime();
+    let runtime = crate::bucket::runtime();
     let holding = (rand::random(), keeping);
-    let (store, remote) = upload::open(recovering, options(), bucket.clone(), holding, &runtime)?;
-    Ok(Opened { store, bucket, remote })
+    let (store, uploader) = upload::open(recovering, options(), bucket.clone(), holding, &runtime)?;
+    Ok(Opened { store, bucket, uploader })
 }
 
 /// The path of the directory `recovering` is of, for what fails of it.
@@ -373,7 +373,7 @@ pub(crate) fn unmade(path: &Path) -> bool {
 
 /// Forks `store`, as of its last commit, made durable first, to `child`, a new branch holding what
 /// it holds, whose store is a new directory at `path`, which [`open`] opens: `EEXIST` if anything is
-/// at `path`. The fork is made in the bucket alone (doc-7, Forks; TASK-165.7): `remote`, the
+/// at `path`. The fork is made in the bucket alone (doc-7, Forks; TASK-165.7): `uploader`, the
 /// store's uploader, uploads the store's commit naming the child ([`Store::commit_fork`]), whose
 /// acknowledgement gives the child its record, inheriting the store's extents rather than copies;
 /// `held`, given, is let go of once that commit is made, before its upload goes. Only then is the
@@ -389,37 +389,37 @@ pub(crate) fn unmade(path: &Path) -> bool {
 /// with `EEXIST`, making nothing; and so does one whose child's ID another branch took as it was
 /// made, its commit standing, which names a child its parent's writers leave be (TASK-79.82). A
 /// fork that fails once its commit was made, its upload failing, or the store's, is deleted in the
-/// bucket as the fork's alone (`Remote::unfork`), so that its segment, landing late, makes nothing
-/// (TASK-79.78); its host crashing, it stands, or never was, as the bucket has it.
+/// bucket as the fork's alone (`Uploader::unfork`), so that its segment, landing late, makes
+/// nothing (TASK-79.78); its host crashing, it stands, or never was, as the bucket has it.
 ///
 /// A fork of a point commits nothing: its child's record is the fork, which fails with `ENOENT`
-/// once the point is deleted (`Remote::forked`), and with `EACCES` if the child is of another
+/// once the point is deleted (`Uploader::forked`), and with `EACCES` if the child is of another
 /// tenant's cell than the point, which isn't shared (`branch::finish_point_fork`, TASK-395.7). A
 /// fork of a store with a writer to another tenant's cell fails with `EACCES` before anything is
 /// made, unless the store is the common tenant's ([`may_fork_into`], TASK-395.9).
 ///
 /// cladefs: a fork of a sealed store into another cell, as every fork here is, gives its child the
 /// keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
-/// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
+/// (`Uploader::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
 /// `ENOTSUP` if the child's tenant has no KEK, its cell in the clear, `EACCES` if the host heard a
 /// tenant whose keys it inherits, or the child's, revoked or destroyed.
 pub(crate) fn fork<H>(
     store: &Store<HostDir>,
-    remote: &Remote<HostDir>,
+    uploader: &Uploader<HostDir>,
     path: &Path,
     child: Child,
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
     held: H,
 ) -> Result<(), Error> {
-    may_fork_into(store.description().branch, remote, child.branch.cell)?;
-    let inheriting = remote.inheriting(child)?;
+    may_fork_into(store.description().branch, uploader, child.branch.cell)?;
+    let inheriting = uploader.inheriting(child)?;
     std::fs::create_dir(path).map_err(|err| match err.kind() {
         std::io::ErrorKind::AlreadyExists => {
             Error::new(anyhow::Error::new(err).context(Errno::EEXIST))
         }
         _ => Error::new(anyhow::Error::new(err).context(format!("creating {}", path.display()))),
     })?;
-    let forked = fork_in(store, remote, path, (child, inheriting), prepare, held);
+    let forked = fork_in(store, uploader, path, (child, inheriting), prepare, held);
     if forked.is_err() {
         // Leave nothing half made behind.
         let _ = std::fs::remove_dir_all(path);
@@ -430,7 +430,7 @@ pub(crate) fn fork<H>(
 /// Forks `store` to `child` as [`fork`] does, into the directory at `path`, made empty.
 fn fork_in<H>(
     store: &Store<HostDir>,
-    remote: &Remote<HostDir>,
+    uploader: &Uploader<HostDir>,
     path: &Path,
     (child, inheriting): (Child, Option<extent_remote::keys::Inheriting>),
     prepare: impl FnOnce(&Path) -> anyhow::Result<()>,
@@ -438,29 +438,29 @@ fn fork_in<H>(
 ) -> Result<(), Error> {
     let branch = child.branch;
     let failed = |err: Failure| match err {
-        Failure::Remote(extent_remote::Error::IdTaken(_)) => taken(branch),
+        Failure::Bucket(extent_remote::Error::IdTaken(_)) => taken(branch),
         Failure::PointDeleted => anyhow::Error::new(Errno::ENOENT)
             .context(format!("forking to branch {branch}: the point was deleted")),
         // cladefs: another tenant's point, not shared (TASK-395.7).
-        Failure::Remote(refused @ extent_remote::Error::NotShared(_)) => {
+        Failure::Bucket(refused @ extent_remote::Error::NotShared(_)) => {
             anyhow::Error::new(Errno::EACCES)
                 .context(format!("forking to branch {branch}: {refused}"))
         }
         err => anyhow::anyhow!("forking to branch {branch}: {err}"),
     };
-    if !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+    if !uploader.child_free(branch).map_err(|err| Error::new(failed(err)))? {
         return Err(Error::new(taken(branch)));
     }
-    let made = match remote.is_point() {
+    let made = match uploader.is_point() {
         true => {
             drop(held);
-            remote.forked(0, child, inheriting).map_err(failed)
+            uploader.forked(0, child, inheriting).map_err(failed)
         }
         false => {
             let committed = store.commit_fork(child);
             drop(held);
             match committed {
-                Ok(epoch) => remote.forked(epoch, child, inheriting).map_err(failed),
+                Ok(epoch) => uploader.forked(epoch, child, inheriting).map_err(failed),
                 Err(err) if err.downcast_ref::<extent_store::ForkCommitted>().is_some() => {
                     Err(err.context(format!("forking to branch {branch}")))
                 }
@@ -478,7 +478,7 @@ fn fork_in<H>(
     });
     let Err(err) = made else { return Ok(()) };
     // Leave no fork whose store went behind, as the fork's alone: its segment may land yet.
-    if let Err(why) = remote.unfork(child) {
+    if let Err(why) = uploader.unfork(child) {
         log::warn!("cladefs: leaving branch {branch}, whose fork failed: {why}");
     }
     Err(Error::new(err))
@@ -525,7 +525,7 @@ fn make_child(
 /// store holds its branch in `bucket`.
 pub(crate) fn delete(
     path: &Path,
-    bucket: Option<&Bucket>,
+    bucket: Option<&ObjectBucket>,
     token: impl Fn() -> Result<u64, Failure>,
 ) -> Result<(), Error> {
     // As this copy's placement, or this host's, deletes it: not from under a later one (`ESTALE`).
@@ -533,7 +533,7 @@ pub(crate) fn delete(
         Some(bucket) => {
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
-            let kms = crate::remote::kms();
+            let kms = crate::bucket::kms();
             extent_store::upload::delete_branch(bucket, branch, token, kms.as_ref())
         }
         None => Ok(()),
@@ -561,7 +561,7 @@ pub(crate) fn delete_with(
         // Its errno, if deleting the branch elsewhere failed with one: `ESTALE` for a branch a
         // later placement holds.
         let failure = err.chain().find_map(|cause| cause.downcast_ref::<Failure>());
-        match failure.and_then(crate::remote::errno) {
+        match failure.and_then(crate::bucket::errno) {
             Some(errno) => Error::new(err.context(errno)),
             None => Error::new(err),
         }
@@ -630,7 +630,7 @@ mod tests {
             Some(&url),
             keeping().unwrap(),
         );
-        let Err(Failure::Remote(refused)) = refused.map(drop) else { panic!("made") };
+        let Err(Failure::Bucket(refused)) = refused.map(drop) else { panic!("made") };
         assert_eq!(refused, extent_remote::Error::NoBranch);
         assert!(!path.exists(), "a store of no branch was left");
     }
@@ -652,11 +652,11 @@ mod tests {
 
         // Where no host's bucket is, as in this test's process.
         let (made, fork) = (dir.path().join("made"), dir.path().join("fork"));
-        let Opened { store, bucket, remote } =
+        let Opened { store, bucket, uploader } =
             create(&made, MIB, new(), cell::Kind::Fxfs, keeping().unwrap()).unwrap();
         let forked = new_branch(&bucket, fork_cell(store.description().branch)).unwrap();
         let child = Child { branch: forked, owner: 1, point: false };
-        super::fork(&store, &remote, &fork, child, |_| Ok(()), ()).unwrap();
+        super::fork(&store, &uploader, &fork, child, |_| Ok(()), ()).unwrap();
         let own = dir.path().canonicalize().unwrap().join("made.bucket");
         let url = format!("file://{}/", own.display());
         for named in [&made, &fork] {
@@ -669,7 +669,7 @@ mod tests {
         let cell = own.join(store.description().branch.cell.prefix());
         assert!(cell.join("branches").exists(), "{:?}", std::fs::read_dir(&own).unwrap());
         // The store deleted, its fork's branch lives on in it.
-        drop(remote);
+        drop(uploader);
         drop(store);
         delete(&made, Some(&bucket), || Ok(1)).unwrap();
         assert!(!made.exists() && own.exists());

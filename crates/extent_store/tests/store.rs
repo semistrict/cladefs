@@ -9,8 +9,8 @@ mod common;
 use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_store::{
-    Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening, Options, Part,
-    Place, RemoteData, Spent, Store, TooLong, TooSmall, Unsectored,
+    BucketData, Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening,
+    Options, Part, Place, Spent, Store, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -405,9 +405,9 @@ fn extents_the_bucket_holds_are_held_without_their_data() {
     state.next_sequence = 6;
     let check = |store: &Store<MemDir>| {
         assert_eq!(store.extent(extent(5)).unwrap(), Some((3 * BLOCK as u64, false)));
-        let remote = RemoteData { extent: extent(5), location: location.clone() };
-        error_is(store.read(extent(5), 0, &mut [0; BLOCK]), remote);
-        assert_eq!(store.place(extent(5)).unwrap(), Some(Place::Remote(location.clone())));
+        let in_bucket = BucketData { extent: extent(5), location: location.clone() };
+        error_is(store.read(extent(5), 0, &mut [0; BLOCK]), in_bucket);
+        assert_eq!(store.place(extent(5)).unwrap(), Some(Place::Bucket(location.clone())));
         assert_eq!(store.info().unwrap().used, 4 * BLOCK as u64);
         assert_eq!(store.info().unwrap().next_sequence, 6);
         // Sealed.
@@ -2039,7 +2039,7 @@ fn segments_upload_before_their_framed_files_are_durable() {
         let reopened = opened_on(dir.crash(seed), bucket.clone(), chain);
         for sequence in 1..=2 {
             match reopened.place(extent(sequence)).unwrap() {
-                Some(Place::Remote(_)) => assert!(bucket.last_commit.is_some(), "seed {seed}"),
+                Some(Place::Bucket(_)) => assert!(bucket.last_commit.is_some(), "seed {seed}"),
                 Some(_) => assert_eq!(
                     read(&reopened, extent(sequence), 0, BLOCK),
                     pattern(sequence as u8, 0, BLOCK),
@@ -2712,7 +2712,7 @@ fn dead_space_the_uploader_lets_go_takes_none_of_the_room() {
     assert_eq!(store.info().unwrap().available, 0);
     for sequence in (0..160).step_by(16) {
         let place = store.place(extent(sequence)).unwrap();
-        assert!(matches!(place, Some(Place::Remote(_))), "{sequence} at {place:?}");
+        assert!(matches!(place, Some(Place::Bucket(_))), "{sequence} at {place:?}");
     }
     assert_eq!(read(&store, extent(200), 0, 54 * BLOCK), pattern(200, 0, 54 * BLOCK));
 }
@@ -2779,7 +2779,7 @@ fn acknowledged_segments_leave_a_churning_guests_files() {
     }
     for sequence in live {
         let place = store.place(extent(sequence)).unwrap();
-        assert!(matches!(place, Some(Place::Remote(_))), "{sequence} at {place:?}");
+        assert!(matches!(place, Some(Place::Bucket(_))), "{sequence} at {place:?}");
     }
 }
 

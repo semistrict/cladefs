@@ -226,7 +226,7 @@ fn a_sealed_store_mounted_holds_nothing_in_the_clear() {
     let keys = tempfile::tempdir().unwrap();
     let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
     kms.create(0).unwrap();
-    cladefs::remote::set_kms(std::sync::Arc::new(kms)).unwrap();
+    cladefs::bucket::set_kms(std::sync::Arc::new(kms)).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let (store, m) = paths(dir.path());
     // Data that compresses not: from a xorshift generator.

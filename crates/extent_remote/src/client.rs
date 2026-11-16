@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the HTTP client of buckets in the cloud (TASK-205), which [`crate::store`] gives
-//! `object_store`'s S3, GCS and Azure stores. It is `object_store`'s own, reqwest, built from the
-//! same options as `object_store` builds it, but for how a request times out.
+//! cladefs: the HTTP client of buckets in the cloud (TASK-205), which [`crate::object_bucket`]
+//! gives `object_store`'s S3, GCS and Azure stores. It is `object_store`'s own, reqwest, built from
+//! the same options as `object_store` builds it, but for how a request times out.
 //!
 //! `object_store`'s gives a request 30 s, its body included. A host's uploads, up to 512 MiB of
 //! single PUTs at once, share its upstream: below 18 MB/s they all ran out of time together, part
@@ -19,7 +19,7 @@
 //! round trips' and the link's queue's worth: seconds at worst, well within the stall time. A
 //! peer that reads slowly lets it grow to the kernel's bound, 4 MiB on Linux, which over
 //! loopback, whose segments are 64 KiB, it does at once: a request's share of the bandwidth must
-//! carry that within the stall time (the tests' S3 server's reads, `store::tests`).
+//! carry that within the stall time (the tests' S3 server's reads, `object_bucket::tests`).
 
 use bytes::Bytes;
 use futures::future::Either;

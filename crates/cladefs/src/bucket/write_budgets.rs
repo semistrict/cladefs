@@ -17,7 +17,7 @@
 use super::tests::{idle, kept_in};
 use crate::test_data::noise;
 use crate::{ExtentId, ExtentStore, VolatileSlice};
-use extent_remote::store::Store as Bucket;
+use extent_remote::object_bucket::ObjectBucket;
 use extent_store::Written;
 use std::sync::Arc;
 
@@ -92,7 +92,8 @@ fn a_hosts_store_writes_what_its_design_says() {
     // cladefs: at the shell's limit of open files, not the daemon's: a burst's extents spilled to
     // raw files of their own held two each till its commit, past 1,024 (TASK-332).
     let dir = tempfile::tempdir().unwrap();
-    let bucket = Arc::new(Bucket::new(Arc::new(object_store::memory::InMemory::new()), "branches"));
+    let bucket =
+        Arc::new(ObjectBucket::new(Arc::new(object_store::memory::InMemory::new()), "branches"));
     let store = kept_in(dir.path().join("store"), (4 << 30, None), &bucket, idle()).unwrap();
     let options = crate::host_store::options();
     let branch = store.branch();

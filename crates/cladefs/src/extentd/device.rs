@@ -10,7 +10,7 @@
 //! durable on the host's disk (`COMMIT_LOCAL`), as a database's on a local filesystem are, not
 //! waiting for object storage (the user, 2026-11-09, TASK-301); closing it waits for that.
 
-use super::RemoteExtentStore;
+use super::DaemonExtentStore;
 use crate::{Commit, VolatileSlice, VolatileSliceMut, WriteBarriers};
 use anyhow::{Context as _, Error, ensure};
 use async_trait::async_trait;
@@ -23,15 +23,15 @@ use storage_device::{Device, ExtentId, ReadOptions, WriteFlags, WriteOptions};
 const TRANSFER_HEAP_SIZE: usize = 32 << 20;
 
 /// A store the daemon serves, as a device. See the module docs.
-pub struct RemoteDevice {
-    store: Arc<RemoteExtentStore>,
+pub struct DaemonDevice {
+    store: Arc<DaemonExtentStore>,
     allocator: BufferAllocator,
     block_count: u64,
 }
 
-impl RemoteDevice {
+impl DaemonDevice {
     /// `store` as a device.
-    pub fn new(store: Arc<RemoteExtentStore>) -> Result<Self, Error> {
+    pub fn new(store: Arc<DaemonExtentStore>) -> Result<Self, Error> {
         let block_size = crate::host_store::BLOCK_SIZE;
         let capacity = store.info().map_err(Error::new).context("the store's capacity")?.capacity;
         let allocator =
@@ -40,7 +40,7 @@ impl RemoteDevice {
     }
 
     /// The store.
-    pub fn store(&self) -> &Arc<RemoteExtentStore> {
+    pub fn store(&self) -> &Arc<DaemonExtentStore> {
         &self.store
     }
 }
@@ -50,7 +50,7 @@ fn id(extent: ExtentId) -> crate::ExtentId {
 }
 
 #[async_trait]
-impl Device for RemoteDevice {
+impl Device for DaemonDevice {
     fn allocate_buffer(&self, size: usize) -> BufferFuture<'_> {
         self.allocator.allocate_buffer(size)
     }

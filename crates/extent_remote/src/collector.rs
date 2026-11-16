@@ -1911,7 +1911,7 @@ mod tests {
     use crate::bucket::{ByteRange, Created, Error as BucketError, Object, PutMode, Version};
     use crate::layout::test_branch;
     use crate::layout::{Child, child};
-    use crate::store::{Request, Store};
+    use crate::object_bucket::{ObjectBucket, Request};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;
     use extent_frame::KeyId;
@@ -1927,8 +1927,8 @@ mod tests {
     /// No compaction, and compacted objects kept long.
     const KEEP: Options = Options { compact_below: 0.0, grace: 3_600_000 };
 
-    fn store() -> Arc<Store> {
-        Arc::new(Store::new(Arc::new(InMemory::new()), ""))
+    fn store() -> Arc<ObjectBucket> {
+        Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
     }
 
     /// `commit` in a segment of its own, uploaded and acknowledged.
@@ -3437,16 +3437,16 @@ mod tests {
     /// pass before compacted.
     #[test]
     fn passes_delete_in_batches_over_s3() {
+        use crate::object_bucket::Request;
         use crate::s3_server::{BUCKET, S3Server};
-        use crate::store::Request;
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         runtime.block_on(async {
             let server = S3Server::start(None);
             let url = format!("s3://{BUCKET}/collector");
             let client = &crate::client::Client::DEFAULT;
             let (objects, prefix) =
-                crate::store::object_store_with(&url, server.options(), client).unwrap();
-            let bucket = Arc::new(Store::new(objects, &prefix));
+                crate::object_bucket::object_store_with(&url, server.options(), client).unwrap();
+            let bucket = Arc::new(ObjectBucket::new(objects, &prefix));
             let segments = mostly_freed(bucket.clone()).await;
             let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 });
             let report = collector.collect(&*bucket, 1).await.unwrap();
@@ -3589,7 +3589,7 @@ mod tests {
         const PARENT: u64 = 2;
         const CHILD: u64 = 3;
         /// Forks `writer`'s branch to `CHILD`, of `owner`: at the segment it returns.
-        async fn fork(writer: &Writer<Store>, owner: u64) -> u64 {
+        async fn fork(writer: &Writer<ObjectBucket>, owner: u64) -> u64 {
             let forked = Child { branch: test_branch(CHILD), owner, point: false };
             let forks = Contents { forks: vec![forked], ..Contents::default() };
             let footer = writer.chain().close(forks);
@@ -3992,7 +3992,7 @@ mod tests {
     /// garbage: its fence, a segment of a small extent and a large, a segment freeing the large,
     /// all covered by a checkpoint, and an extent stored on its own, freed. The segment of the
     /// small extent is mostly freed: a pass compacting below half compacts it.
-    async fn garbage(bucket: &Arc<Store>) {
+    async fn garbage(bucket: &Arc<ObjectBucket>) {
         branch::create(&**bucket, test_branch(1), 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
         collect(&**bucket, 1, &KEEP).await.unwrap();
@@ -4158,7 +4158,7 @@ mod tests {
     fn readers_and_mark_only_passes_warn_of_what_a_wrong_pass_marked() {
         let log = crate::marks::captured();
         let memory: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let bucket = Arc::new(Store::new(memory.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let (late, key) = block_on(async {
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
@@ -4194,7 +4194,7 @@ mod tests {
         };
         assert_eq!(warnings(), Vec::<String>::new());
 
-        let reader = Arc::new(Store::new(memory.clone(), ""));
+        let reader = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let read = block_on(async {
             let recovered = recovery::recover(&*reader, test_branch(1), None).await.unwrap();
             crate::read(&reader, late, &recovered.state.extents[&late]).await
@@ -4421,7 +4421,7 @@ mod tests {
     /// reader of another host's, whose bucket kept none of what it read decoded (TASK-407).
     async fn read_forked_from_a_deleted_parent() -> Result<Vec<u8>, Error> {
         let objects: Arc<InMemory> = Arc::new(InMemory::new());
-        let bucket = Arc::new(Store::new(objects.clone(), ""));
+        let bucket = Arc::new(ObjectBucket::new(objects.clone(), ""));
         let (parent, child) = (celled(1, 1), celled(2, 2));
         branch::create(&*bucket, parent, 0).await.unwrap();
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
@@ -4432,7 +4432,7 @@ mod tests {
         drop(writer);
         branch::delete(&*bucket, parent, 20, 0).await.unwrap();
         sweep(&*bucket).await?;
-        read_inherited(&Arc::new(Store::new(objects, "")), child, extent).await
+        read_inherited(&Arc::new(ObjectBucket::new(objects, "")), child, extent).await
     }
 
     /// TASK-395.3, TASK-395.4: a chain of forks across cells, a root's, its child's, its
@@ -4487,7 +4487,7 @@ mod tests {
     /// What a grandchild, forked to cell 3 from a child forked to cell 2 from a root in cell 1,
     /// reads of what it inherited from the root: the child deleted, the root having freed it and
     /// checkpointed, sweeps having run until they did nothing more. With the bucket.
-    async fn read_through_a_deleted_child() -> (Result<Vec<u8>, Error>, Arc<Store>) {
+    async fn read_through_a_deleted_child() -> (Result<Vec<u8>, Error>, Arc<ObjectBucket>) {
         let bucket = store();
         let (root, child, grandchild) = (celled(1, 1), celled(2, 2), celled(3, 3));
         branch::create(&*bucket, root, 0).await.unwrap();
@@ -5745,10 +5745,10 @@ mod tests {
     /// of [`layout::TEST_CELL`]'s tenant, counting its calls; and a writer of branch 1 of the cell,
     /// sealed, its record's DEK wrapped under the cell's KEK, holding the ring its store holds.
     struct Sealed {
-        bucket: Arc<Store>,
+        bucket: Arc<ObjectBucket>,
         counted: Arc<Counted<LocalKms>>,
         kms: kms::Shared,
-        writer: Writer<Store>,
+        writer: Writer<ObjectBucket>,
         ring: Arc<Ring>,
         /// The cell's keys, as its maker holds them.
         cell: CellKeys,
@@ -5853,7 +5853,7 @@ mod tests {
     /// `extent`'s data at `location`, read by a host's fetcher holding `ring`, as a host serving
     /// the branch's store holds its keys; none, if `ring` is clear.
     async fn read_holding(
-        bucket: &Arc<Store>,
+        bucket: &Arc<ObjectBucket>,
         ring: &Arc<Ring>,
         extent: ExtentId,
         location: &Location,

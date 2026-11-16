@@ -5,20 +5,20 @@
 //! An image's store kept in its bucket (backlog doc-14, TASK-165.6): as every store's branch is,
 //! in the bucket its description names, an image's own file bucket where it was made on no host
 //! of cladefs's system (`host_store::create`). An uploader takes the branch's lease and uploads the
-//! image's commits behind them, as the extent daemon's stores' are (`crate::remote`); the image's
+//! image's commits behind them, as the extent daemon's stores' are (`crate::bucket`); the image's
 //! commits are durable once in its store, as before, and closing it waits for them to be uploaded.
 //! A clone is a fork of the branch in the bucket, as the daemon's forks are (`host_store::fork`).
 //! An image's own bucket's collector runs in the process, after commits ([`super::collect`]); a
 //! host's bucket's is the host's.
 
 use super::collect::{self, Collecting};
+use crate::bucket;
 use crate::error::{Error, anyhow_of};
 use crate::host_store::{self, BranchOf, Opened};
-use crate::remote;
 use extent_remote::cache::Cache;
 use extent_remote::cell::Kind;
 use extent_remote::layout::Child;
-use extent_store::upload::{self, Remote};
+use extent_store::upload::{self, Uploader};
 use extent_store::{HostDir, Store};
 use std::path::Path;
 use std::sync::Arc;
@@ -28,9 +28,9 @@ pub(crate) struct Kept {
     store: Arc<Store<HostDir>>,
     /// The branch's uploader, which opened the store: dropped, it closes the store's open segment,
     /// uploads what the store made durable, then stops (TASK-192).
-    remote: Remote<HostDir>,
+    uploader: Uploader<HostDir>,
     /// What reads the store's extents whose data is in the bucket.
-    fetcher: Arc<remote::Fetcher>,
+    fetcher: Arc<bucket::HostFetcher>,
     /// The bucket's collector in this process, if it is the image's own, which no host's collector
     /// collects.
     collecting: Option<Arc<Collecting>>,
@@ -67,12 +67,12 @@ impl Kept {
 
     /// `opened`, its branch taken in its bucket, its extents there read through `cache`, if given.
     fn opened(opened: Opened, cache: Option<Arc<Cache>>) -> anyhow::Result<Self> {
-        let Opened { store, bucket, remote } = opened;
+        let Opened { store, bucket, uploader } = opened;
         let url = store.bucket().unwrap_or_default().to_owned();
-        let fetcher = remote::Fetcher::new(bucket.clone(), cache);
+        let fetcher = bucket::HostFetcher::new(bucket.clone(), cache);
         let own = host_store::keeps_own_bucket(&store);
         let collecting = own.then(|| collect::of(&url, &bucket));
-        Ok(Self { store, remote, fetcher, collecting })
+        Ok(Self { store, uploader, fetcher, collecting })
     }
 
     pub fn store(&self) -> &Arc<Store<HostDir>> {
@@ -81,7 +81,7 @@ impl Kept {
 
     /// What reads the store's extents whose data is in the bucket, as a clone's inherited extents
     /// are (TASK-165.7).
-    pub fn fetcher(&self) -> Arc<remote::Fetcher> {
+    pub fn fetcher(&self) -> Arc<bucket::HostFetcher> {
         self.fetcher.clone()
     }
 
@@ -90,10 +90,10 @@ impl Kept {
     /// a branch no bucket has; it waits while more of its commits wait to be uploaded than the
     /// lag's bound; and the bucket's collector runs, if it is due.
     pub fn committed(&self) -> anyhow::Result<()> {
-        if let Some(failed) = self.remote.failed() {
+        if let Some(failed) = self.uploader.failed() {
             return Err(anyhow::Error::new(failed).context("the image's branch is not uploaded"));
         }
-        self.remote.wait_lag(self.store.epoch()?)?;
+        self.uploader.wait_lag(self.store.epoch()?)?;
         if let Some(collecting) = &self.collecting {
             collecting.after_commit();
         }
@@ -103,7 +103,7 @@ impl Kept {
     /// Waits until the store's commits are uploaded: so a closed image's branch is whole in its
     /// bucket.
     pub fn wait_uploaded(&self) -> anyhow::Result<()> {
-        Ok(self.remote.wait_uploaded(self.store.epoch()?)?)
+        Ok(self.uploader.wait_uploaded(self.store.epoch()?)?)
     }
 
     /// Forks the store's branch, as of its last commit, to a new branch, the one volume of a new
@@ -111,9 +111,9 @@ impl Kept {
     /// too ([`host_store::fork`]): `held` is let go of once the fork's commit is made.
     pub fn fork<H>(&self, path: &Path, held: H) -> Result<(), Error> {
         let cell = host_store::fork_cell(self.store.description().branch);
-        let branch = host_store::new_branch(self.remote.bucket(), cell).map_err(Error::from)?;
+        let branch = host_store::new_branch(self.uploader.bucket(), cell).map_err(Error::from)?;
         let child = Child { branch, owner: rand::random(), point: false };
-        host_store::fork(&self.store, &self.remote, path, child, |_| Ok(()), held)
+        host_store::fork(&self.store, &self.uploader, path, child, |_| Ok(()), held)
     }
 
     /// The bucket's collector in this process, if it is the image's own.
@@ -138,8 +138,8 @@ mod tests {
     use super::super::{Kind, Storage};
     use super::*;
     use crate::{Filesystem, Owner};
+    use extent_remote::object_bucket::ObjectBucket;
     use extent_remote::record::Kind as Record;
-    use extent_remote::store::Store as Bucket;
     use futures::executor::block_on;
     use rand::rngs::StdRng;
     use rand::{RngExt as _, SeedableRng as _};
@@ -165,13 +165,13 @@ mod tests {
     }
 
     /// The bucket the store at `path` names.
-    fn bucket_of(path: &Path) -> Arc<Bucket> {
+    fn bucket_of(path: &Path) -> Arc<ObjectBucket> {
         host_store::bucket_at(path).unwrap().expect("a bucket")
     }
 
     /// The extents `branch`'s state in `bucket` holds, by their lengths, those it inherited too,
     /// and its root.
-    fn kept(bucket: &Bucket, branch: crate::Branch) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
+    fn kept(bucket: &ObjectBucket, branch: crate::Branch) -> (BTreeMap<ExtentId, u64>, Vec<u8>) {
         let recovered = extent_store::upload::block_on(async {
             let record = extent_remote::branch::record(bucket, branch).await?;
             extent_remote::recover(bucket, branch, record.and_then(|record| record.origin())).await
@@ -292,7 +292,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("image");
         let scenario = fail::FailScenario::setup();
-        fail::cfg("remote::stopped", "sleep(500)").unwrap();
+        fail::cfg("upload::stopped", "sleep(500)").unwrap();
         drop(Storage::create(&path, SIZE).unwrap());
         let reopened = host_store::open(&path, host_store::keeping().unwrap())
             .map(|opened| opened.store.description().branch);

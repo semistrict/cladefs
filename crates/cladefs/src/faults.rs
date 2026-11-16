@@ -32,11 +32,11 @@ pub(crate) use failpoint;
 /// the child's store made, taking its state from the bucket (TASK-165.7).
 pub const FORK_STEPS: [&str; 20] = [
     "fork::durable",
-    "remote::child_free",
+    "upload::child_free",
     "fork::committed",
     "fork::flushed",
-    "remote::forked",
-    "remote::gather",
+    "upload::forked",
+    "upload::gather",
     "writer::upload",
     "writer::uploaded",
     "writer::acknowledge",
@@ -44,11 +44,11 @@ pub const FORK_STEPS: [&str; 20] = [
     "branch::record_fork",
     "branch::referred",
     "branch::recorded_fork",
-    "remote::acknowledged",
-    "remote::released",
+    "upload::acknowledged",
+    "upload::released",
     "writer::checkpoint",
     "writer::checkpointed",
-    "remote::checkpointed",
+    "upload::checkpointed",
     "fork::recorded",
     "fork::made",
 ];
@@ -59,8 +59,8 @@ pub const FORK_STEPS: [&str; 20] = [
 /// point's, and the record made; then the child's store. No upload, as it commits nothing.
 pub const RESTORE_STEPS: [&str; 10] = [
     "fork::durable",
-    "remote::child_free",
-    "remote::forked",
+    "upload::child_free",
+    "upload::forked",
     "point::record",
     "point::recorded",
     "point::referred",

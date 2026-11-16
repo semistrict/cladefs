@@ -664,15 +664,15 @@ mod tests {
     use crate::batch::{Batch, Commit};
     use crate::layout::test_branch;
     use crate::layout::{Contents, Segment, child};
-    use crate::store::{Request, Store};
+    use crate::object_bucket::{ObjectBucket, Request};
     use object_store::memory::InMemory;
 
-    fn memory() -> Arc<Store> {
-        Arc::new(Store::new(Arc::new(InMemory::new()), ""))
+    fn memory() -> Arc<ObjectBucket> {
+        Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""))
     }
 
     /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
-    fn add(writer: &Writer<Store>, commit: Commit) -> Result<u64, Error> {
+    fn add(writer: &Writer<ObjectBucket>, commit: Commit) -> Result<u64, Error> {
         writer.add_segment(Batch::from(commit).close(&mut writer.chain()).frame())
     }
 
@@ -861,7 +861,7 @@ mod tests {
             )
             .await
             .unwrap();
-            let forks = |writer: &Writer<Store>| writer.inner().state.forks.len() as u64;
+            let forks = |writer: &Writer<ObjectBucket>| writer.inner().state.forks.len() as u64;
             for n in 0..FORKS / RECORDS_AT_ONCE as u64 {
                 let seq = add(&writer, Commit { tag: FORKS + n + 1, ..Commit::default() }).unwrap();
                 writer.upload(seq).await.unwrap();
@@ -1058,7 +1058,7 @@ mod tests {
     #[test]
     fn writers_upload_segments_stores_closed() {
         futures::executor::block_on(async {
-            let bucket = Arc::new(Store::new(Arc::new(InMemory::new()), ""));
+            let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let chain = writer.chain();

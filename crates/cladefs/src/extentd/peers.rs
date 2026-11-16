@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: the daemon's part in the hosts sharing its bucket (TASK-406.2, `crate::remote::peers`):
+//! cladefs: the daemon's part in the hosts sharing its bucket (TASK-406.2, `crate::bucket::peers`):
 //! it serves them parts of the bucket's objects over gRPC, at `CLADEFS_EXTENTD_PEER_ADDRESS`
 //! (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask them for the parts they own,
 //! `CLADEFS_EXTENTD_PEERS` naming them at its start and the control API's `SetPeers` at any time.
 //! What it serves comes from the host's memory and part cache, which it needs, or from the bucket
-//! once, however many hosts ask at once ([`crate::remote::serving_peers`]).
+//! once, however many hosts ask at once ([`crate::bucket::serving_peers`]).
 
-use crate::remote::peers::{Asked, Link, Peers};
+use crate::bucket::peers::{Asked, Link, Peers};
 use futures::FutureExt as _;
 use futures::future::BoxFuture;
 use proto::peer_client::PeerClient;
@@ -33,7 +33,7 @@ const CONNECT: Duration = Duration::from_secs(1);
 /// behind others in its budget, takes the bucket's latency and more.
 const DEADLINE: Duration = Duration::from_secs(5);
 
-/// How many threads serve the peers' requests, whose fetches run on the remotes' runtime.
+/// How many threads serve the peers' requests, whose fetches run on the bucket runtime.
 const THREADS: usize = 2;
 
 /// The parts the daemon served its peers, and those it had not as they asked.
@@ -53,10 +53,10 @@ pub fn start(
     for peer in std::iter::once(address).chain(peers.iter().map(String::as_str)) {
         check_address(peer)?;
     }
-    let url = crate::remote::Host::from_env()?.bucket;
+    let url = crate::bucket::Host::from_env()?.bucket;
     let failed = |what: &str| format!("serving peers: {what}");
-    let bucket = super::stores::remote_bucket().map_err(|err| failed(&format!("{err:?}")))?;
-    let cache = super::stores::remote_cache().map_err(|err| failed(&format!("{err:?}")))?;
+    let bucket = super::stores::daemon_bucket().map_err(|err| failed(&format!("{err:?}")))?;
+    let cache = super::stores::part_cache().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = cache.ok_or_else(|| {
         "CLADEFS_EXTENTD_PEER_ADDRESS is set, but CLADEFS_EXTENTD_CACHE names no directory for the \
          part cache, which keeps what the daemon serves its peers"
@@ -65,8 +65,8 @@ pub fn start(
     let linked = url.clone();
     let asking = Peers::new(address, move |peer| link(peer, &linked));
     asking.set(peers);
-    crate::remote::ask_peers(bucket.clone(), asking)?;
-    let server = Server { bucket: url, serving: crate::remote::serving_peers(bucket, cache) };
+    crate::bucket::ask_peers(bucket.clone(), asking)?;
+    let server = Server { bucket: url, serving: crate::bucket::serving_peers(bucket, cache) };
     listener.set_nonblocking(true).map_err(|err| failed(&err.to_string()))?;
     let serving = std::thread::Builder::new().name("extentd peers".into()).spawn(move || {
         if let Err(err) = serve(listener, server) {
@@ -80,7 +80,7 @@ pub fn start(
 /// Has the hosts sharing the bucket be those at `addresses` (`SetPeers`): `EINVAL` if one is no
 /// `HOST:PORT`, `ENOTSUP` if the daemon serves no peers.
 pub(super) fn set(addresses: Vec<String>) -> Result<(), crate::Errno> {
-    let peers = crate::remote::peers().ok_or(crate::Errno::ENOTSUP)?;
+    let peers = crate::bucket::peers().ok_or(crate::Errno::ENOTSUP)?;
     for address in &addresses {
         check_address(address).map_err(|err| {
             log::warn!("extentd: SetPeers: {err}");
@@ -108,15 +108,15 @@ fn check_address(address: &str) -> Result<(), String> {
 
 /// What the daemon's stores' fetchers asked its peers, and the parts it served them and had not as
 /// they asked, if it serves peers.
-pub(super) fn counts() -> Option<(crate::remote::peers::Counts, u64, u64)> {
-    let counts = crate::remote::peers()?.counts();
+pub(super) fn counts() -> Option<(crate::bucket::peers::Counts, u64, u64)> {
+    let counts = crate::bucket::peers()?.counts();
     Some((counts, SERVED.load(Ordering::Relaxed), SERVED_MISSING.load(Ordering::Relaxed)))
 }
 
 /// The daemon's line in its stats file (`CLADEFS_EXTENTD_STATS`): its [`counts`].
 pub(super) fn line() -> Option<String> {
     let (counts, served, served_missing) = counts()?;
-    let crate::remote::peers::Counts { asked, given, missing, failed } = counts;
+    let crate::bucket::peers::Counts { asked, given, missing, failed } = counts;
     Some(format!(
         "peers: asked={asked} given={given} missing={missing} failed={failed} served={served} \
          served-missing={served_missing}"
@@ -145,7 +145,7 @@ fn serve(listener: std::net::TcpListener, server: Server) -> std::io::Result<()>
 /// What serves the daemon's peers: the parts of `bucket`, by URL, which `serving` reads.
 struct Server {
     bucket: String,
-    serving: crate::remote::Serving,
+    serving: crate::bucket::Serving,
 }
 
 #[tonic::async_trait]
@@ -181,9 +181,9 @@ impl proto::peer_server::Peer for Server {
 }
 
 /// The link to the peer at `address`, a daemon serving the parts of the bucket at `bucket`, by URL,
-/// connected when first asked, on the remotes' runtime.
+/// connected when first asked, on the bucket runtime.
 fn link(address: &str, bucket: &str) -> Arc<dyn Link> {
-    let runtime = crate::remote::runtime().handle;
+    let runtime = crate::bucket::runtime().handle;
     let _entered = runtime.enter();
     let endpoint = tonic::transport::Endpoint::from_shared(format!("http://{address}"))
         .expect("a peer's address checked")

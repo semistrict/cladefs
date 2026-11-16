@@ -39,7 +39,7 @@
 //!   at most, the rest waiting their turn; a fault waiting for the pager holds neither a thread
 //!   nor one of the 8 (TASK-92.20), nor does an opening waiting for a store, or for a restore's
 //!   point, which the daemon keeps open for the restores of its snapshot (TASK-92.5). Every
-//!   store's uploader and fetches run on one runtime more (`crate::remote`), its disk work in
+//!   store's uploader and fetches run on one runtime more (`crate::bucket`), its disk work in
 //!   `block_in_place`.
 //! - **Files.** A store keeps its own segments' and extents' files open, the most
 //!   `extent_store::Options::open_files` of each (64) but for those reads use: a fork, which writes
@@ -113,9 +113,9 @@ pub(crate) mod wire;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 
-pub use client::{DaemonConnection, RemoteExtentStore, spawn_on_replies};
+pub use client::{DaemonConnection, DaemonExtentStore, spawn_on_replies};
 pub use control::serve_control;
-pub use device::RemoteDevice;
+pub use device::DaemonDevice;
 pub use metrics::serve_metrics;
 pub use server::{Tenant, serve, serve_tenant};
 pub use stores::cache_config;

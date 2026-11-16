@@ -8,7 +8,7 @@ use cladefs::extentd::control::proto::extentd_client::ExtentdClient;
 use cladefs::extentd::control::proto::*;
 use cladefs::extentd::control::{connect, errno};
 use cladefs::extentd::{serve, serve_control};
-use cladefs::{Errno, ExtentId, RemoteExtentStore, VolatileSlice};
+use cladefs::{DaemonExtentStore, Errno, ExtentId, VolatileSlice};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use tonic::Code;
@@ -38,8 +38,8 @@ impl Daemon {
     }
 
     /// A VM process's store at `path`, created with `capacity` bytes if it doesn't exist.
-    pub fn open(&self, path: &Path, capacity: u64) -> RemoteExtentStore {
-        RemoteExtentStore::connect(&self.vms, path, capacity).unwrap()
+    pub fn open(&self, path: &Path, capacity: u64) -> DaemonExtentStore {
+        DaemonExtentStore::connect(&self.vms, path, capacity).unwrap()
     }
 
     /// Makes a store at `path` of `branch`, an Fxfs volume of its cell: a new cell if its cell's
@@ -244,7 +244,7 @@ pub fn failure<T: std::fmt::Debug>(result: Result<T, tonic::Status>) -> (Code, E
 }
 
 /// Writes `bytes` as the first extent of `store` and commits, setting its root to `root`.
-pub fn write(store: &RemoteExtentStore, bytes: &[u8], root: &[u8]) {
+pub fn write(store: &DaemonExtentStore, bytes: &[u8], root: &[u8]) {
     let extent = ExtentId { branch: store.branch(), sequence: 1 };
     store.write(extent, 0, &[VolatileSlice::from(bytes)]).unwrap();
     store.commit(Some(root)).unwrap();

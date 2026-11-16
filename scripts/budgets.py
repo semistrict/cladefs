@@ -28,7 +28,7 @@ NAME-stats.txt), its last lines:
 
 And says, of each, what it wrote by kind for each byte its guests wrote (`written_raw_bytes`, every
 guest byte once), and its CPU time a request, which a workload's own case holds to its design
-(`cladefs::remote::write_budgets`, of a host's store; the guest cases' own).
+(`cladefs::bucket::write_budgets`, of a host's store; the guest cases' own).
 
     budgets.py [--bucket-in-memory STATS]... RESULTS    each daemon's under RESULTS; exits 1 past one
 
