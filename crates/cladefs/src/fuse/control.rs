@@ -244,8 +244,8 @@ impl proto::mount_server::Mount for Control {
                     };
                     // cladefs: a cell made gets a KEK its tenant's wrapped, if the host has a KMS
                     // and the tenant a KEK there (TASK-411.3).
+                    let kms = crate::remote::kms()?;
                     let holding = async {
-                        let kms = crate::remote::kms();
                         let kek = match make {
                             true => keys::new_cell_kek(kms.as_ref(), cell.tenant).await?,
                             false => None,
