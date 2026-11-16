@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 12:33'
-updated_date: '2026-11-15 20:35'
+updated_date: '2026-11-16 03:04'
 labels: []
 dependencies: []
 references:
@@ -59,4 +59,6 @@ Coccinelle gotchas (Homebrew spatch 1.3.3): =~ regexes match nothing, use {a, b}
 Tests: scripts/tests/test_cocci_guest.py (the guest's C passes, every rule finds its mutants, the safe and unruled lists' semantics).
 
 Left: the Rust half (AC#1 for the host crates' 74 mutants and loom's 10; clippy.toml's disallowed-methods is how cladefs already turns bugs into rules, TASK-98; dylint where that can't express one); CI wiring is via the clippy scripts part, which runs scripts/tests with Coccinelle installed (AC#4).
+
+C half landed on main (244b04ef3). CI on land-444-6 green (43760916383, guest-sim full). DAX gate on fb95ffd75: guest/sim's mutants all killed; the dax-gate suites 5 rounds each passed; pgbench-dax-forked passed (window MAP 20 us, write(2) 49 us); the 11 real-kernel mutants all killed (task-79.49 equivalent). The driver stopped at the agent's 2 h limit in the mutants step; the second mutant's run was resumed and the rest run by guest-mutants-host.py on that commit. On the way: TASK-149.47 (patch 0010's mutant no longer killed on main, a scenario written), and the guide's anchor and task-164.2's mutant moved with fxfs_dax_range_swap. Left: the Rust half.
 <!-- SECTION:NOTES:END -->
