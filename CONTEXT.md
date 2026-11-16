@@ -523,6 +523,9 @@ code does not have yet are said so.
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
+- **Fxfs** / **cladefs** in the guest: Fxfs is Fuchsia's filesystem, its crates and its format; the guest
+  kernel's module that runs it is `cladefs` (`fs/cladefs`, `mount -t cladefs`, `cladefs.*` parameters,
+  the `cladefs` tracepoints); cases keep `fxfs-guest-*`, named for what they test.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
 - **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).

@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 22:23'
-updated_date: '2026-11-16 22:57'
+updated_date: '2026-11-16 23:33'
 labels:
   - naming
   - host
@@ -30,6 +30,7 @@ TASK-475.1 renamed the binary cladefsd and its variables CLADEFSD_*, but kept ex
 - [ ] #4 A/B tooling compares a side from before the rename: its extentd-stats.txt and extentd-* metrics read as the new names
 - [ ] #5 A script renames a branch begun before (repo, --tree, --filter, --backlog modes), tested as rename-to-cladefsd.sh is
 - [ ] #6 CONTEXT.md, the integrator guide and upgrading-a-host say the new names
+- [ ] #7 The guest kernel's filesystem module is cladefs: fs/cladefs, mount -t cladefs, CONFIG_CLADEFS_FS, cladefs.* parameters, cladefs tracepoints, /proc/fs/cladefs, guest/rust/cladefs-linux, guest/sim; Fxfs (Fuchsia's crates and format) and the fxfs-guest-* cases keep their names; guest cases pass on a guest kernel built so
 <!-- AC:END -->
 
 ## Definition of Done
@@ -59,4 +60,6 @@ Decided without the user (OPEN_QUESTIONS.md): Firecracker's configuration layer 
 macOS: clippy, scripts 523 tests, guide 42/42, upstream-changes --check pass.
 
 Correction to the note above: what already breaks the qualification A/B against a pin from before is TASK-437 and TASK-475.1, not TASK-474 (proto field renames keep their numbers): this tree's test-e2e.sh builds a side with `cargo build -p cladefs --bin cladefsd`, which a tree from before them has neither of. TASK-501 adds the gRPC package and Firecracker's keys to that; the pin moving past them is what mends it.
+
+Scope added by the user (2026-11-16): fxfs renamed cladefs inside Linux, the kernel module only (Fuchsia's crates and format, and the fxfs-guest-* cases, keep Fxfs), folded into this task. The script collects the C symbols guest/linux and guest/sim define (GUEST_SYMBOLS) and the module's parameters (GUEST_PARAMS) before renaming, renames the kernel C scope (guest/linux, guest/sim, guest/mutants, crates/fxfs-sim-diff/shim, cocci, bpftrace) whole, and elsewhere only the module's interface. First run missed guest/sim's own fxfs_sim_* symbols and the sim-diff shim's `struct fxfs`, which crates/fxfs-sim-diff failed to build on; fixed in the script and the tree. macOS cargo check of fxfs-sim-diff passes.
 <!-- SECTION:NOTES:END -->

@@ -44,6 +44,11 @@ choices (the extentd names and Firecracker's API; cladefsd everywhere):
   broke it (this tree's test-e2e.sh builds `-p cladefs --bin cladefsd`, which such a tree lacks);
   TASK-501 adds the gRPC package and Firecracker's keys, which the one harness both sides share
   speaks. It mends when LangSmith's pin moves past them. *Instead:* a harness speaking both.
+- **The guest kernel's module is cladefs, Fxfs keeps its name** (your choice: the module only): `fs/cladefs`,
+  `mount -t cladefs`, `CONFIG_CLADEFS_FS`, `cladefs.*` parameters, the `cladefs` tracepoints, `/proc/fs/cladefs`,
+  its C symbols, `guest/rust/cladefs-linux`, guest/sim's build and model. Kept: Fuchsia's crates and format,
+  the `fxfs-guest-*` cases (the A/B history's keys), fxfs-posix, fxfs-sim-diff, fxfs-automount and its
+  `git-remote-fxfs` helper. *Undo:* revert TASK-501's guest commits; nothing else depends on them.
 - **Trace span names (`cladefsd.map`, ...), the daemon's log file and the stats file renamed too**,
   which tools reading them (dashboards, log queries) must follow.
 

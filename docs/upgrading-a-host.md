@@ -34,7 +34,10 @@ calls a new daemon answers `UNIMPLEMENTED`; and Firecracker's API says `cladefs`
 /cladefs/{id}`, a configuration file's `cladefs` list, `cladefs_overrides` and `cladefsd_socket`.
 A configuration file still saying `extent` is refused, naming `cladefs`; `PUT /extent/{id}` is an
 unknown path; `extentd_socket` and `extent_overrides` are unknown fields. A VM manager is upgraded
-with the host's build. The VM snapshots and stores are unchanged.
+with the host's build. The guest kernel's filesystem module is `cladefs` too: a guest mounts
+with `mount -t cladefs` (`fxfs` is an unknown type), sets `cladefs.*` parameters and reads the
+`cladefs` tracepoints and `/proc/fs/cladefs`, so guest images and agents move with the guest
+kernel. The VM snapshots and stores are unchanged.
 
 A wire or device protocol change alone leaves stores and branches readable: VMs move by snapshot
 to a host of the new build only if the device protocol is the same, and stop and boot again there
