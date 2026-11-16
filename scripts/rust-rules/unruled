@@ -1,0 +1,71 @@
+# Each mutant of the crates (crates/*/mutants, crates/*/loom-mutants) that no rule of
+# scripts/rust-rules.py finds, and why no rule finds its kind: NAME: WHY (TASK-444.6). Most are a
+# value, a condition or a choice of the algorithm's own, which no other place shares: its killer
+# holds it. "Taken out whole" leaves nothing for a syntactic rule to see. A new mutant goes under a
+# rule, or here.
+a-panic-under-a-shared-lock-unwinds: a condition forced false (whether a panic holds the shared lock)
+a-second-open-holds-its-path: a connection's second open handled instead of asserted: one protocol's rule, which its assertion states
+a-tenant-shares-no-room: one call for another (add for take().await): which is right is the budget's
+arenas-shrink: a seal of a memfd not made (F_SEAL_SHRINK): one call's effect, a value left in its place
+bucket-failures-dropped: the counting of a failure taken out whole
+copies-of-whole-requests: a constant's value (PIECE)
+forks-take-branches-claimed: a check's result discarded and two conditions narrowed: which branches a fork may take is the protocol's
+framed-in-copies: a condition forced false and a fast path taken out: a performance choice of the segments'
+large-extents-framed-in-copies: a fast path taken out whole
+no-room-checked: a condition narrowed (the peer's room)
+roots-of-any-size: a bound replaced by a looser one (MAX_ROOT by MAX_PAYLOAD): which bound is the codec's
+tenants-disks-unlimited: a limit replaced by none: a value
+tenants-given-the-default-memory: the tenant's budget replaced by the default's: which budget is the server's
+tenants-name-any-store: a check replaced by true
+tenants-name-branches: a policy's flag replaced by false
+walks-forget-writes-in-flight: arithmetic (a term left out)
+windows-of-any-size: a bound's check and an assertion taken out whole
+writes-admitted-as-nothing: a value (the bytes admitted)
+writes-retried-at-once: a wait for its turn taken out whole
+written-back-twice: a second write added: a cost, as the algorithm's
+own-extents-in-flight-collected: a condition narrowed (the collector's ahead)
+uploads-wake-no-waiter: a wake taken out whole: a wait's condition and its wake are in different modules, which a syntactic rule can't pair (the guest's are, unwoken.cocci)
+a-batch-loses-its-last-run: a batch's last flush taken out whole (Fxfs's graveyard)
+a-create-leaves-its-directorys-times: a flag negated
+a-create-times-its-directory-on-the-guest: a flag forced true
+a-directory-folds-case-once-reopened: a commit's callback dropped: what one commit must do is the directory's
+a-directory-moved-stays-counted: a count left at 0
+a-directory-replaced-may-have-names: a check taken out whole (NotEmpty)
+a-held-back-free-frees-what-is-frozen: a check taken out whole (frozen ranges)
+a-long-symlinks-chunks-are-listed: a prefix replaced by another
+a-queued-evict-leaves-the-object: a tombstone's queueing taken out whole
+a-queued-unlink-times-its-directory: one call for another: which removal keeps the directory's times is the batch's
+a-snapshot-holds-no-commits-back: a lock taken out whole: Fxfs's locks are a lock manager's keys, no field a rule can follow
+a-special-files-entry-says-file: a value (the descriptor)
+a-sync-holding-commits-records-reaches: a condition narrowed
+a-tombstone-leaves-a-trims-entry: a graveyard's removal taken out whole
+a-transaction-never-fills: a bound replaced by a huge value
+a-trim-goes-past-the-room: a bound replaced by a count
+a-volume-frees-what-its-snapshot-shares: a condition narrowed (frozen owners)
+allocate-ignores-the-room: a condition widened
+allocate-preallocates: one implementation for another: what fallocate does is the protocol's
+allocate-shrinks-to-its-end: a comparison changed
+an-xattr-made-replaces-one-there: a condition forced false
+clone-counts-holes: a bound added to arithmetic
+evict-leaves-the-object: a tombstone's queueing taken out whole
+exchange-counts-a-directory-twice: a count's value
+fsync-goes-ahead-of-unlinks: an entry of the ops' ordering table changed
+last-unlink-leaves-no-graveyard-entry: a graveyard's addition taken out whole
+link-stays-in-graveyard: a graveyard's removal taken out whole
+names-are-made-lossy: a name decoded lossily: a rule against from_utf8_lossy would flag the crates' logging and messages, there by design; the model test holds names exact
+punch-by-range: one bound for another (a fixed size for the room)
+readdir-lists-special-files-as-files: a value (the entry's kind)
+readdir-lists-the-name-it-resumes-after: a condition narrowed
+reap-leaves-objects: a tombstone's queueing taken out whole
+rename-goes-ahead-of-unlinks: an entry of the ops' ordering table changed
+setattr-loses-the-atime: a value (None)
+setattr-zeroes-what-it-isnt-given: a condition forced false
+special-files-lose-their-device: a value (rdev 0)
+statfs-counts-nothing-used: arithmetic (a term left out)
+truncate-gives-up-on-its-tail: a retry taken out whole
+writeback-pays-for-nothing-with-its-room: one call for another (without its reservation)
+xattrs-refuse-the-largest-value: a comparison off by one
+latest-listening-loads: a read-modify-write replaced by a load, no ordering weaker: loom's (hearing::loom), which no syntactic rule can judge
+occurrence-told-by-a-store-and-a-load: a read-modify-write replaced by a store and a load, no ordering weaker: loom's (hearing::loom), which no syntactic rule can judge
+answers-clear-asks-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives
+asks-read-relaxed: equivalent (its Fate): mixed-orderings would ask its Relaxed for a reason, which docs/memory-ordering.md gives
