@@ -173,7 +173,7 @@ fn walk(dir: &Path, finder: &Finder, report: &mut Report, scope: &mut Scope) -> 
 
 /// Checks the store in `dir`, if it holds one (its description, `store`, says so).
 fn store(dir: &Path, report: &mut Report, scope: &mut Scope) -> anyhow::Result<()> {
-    let host = extent_store::HostDir::new(dir, false).with_context(|| dir.display().to_string())?;
+    let host = extent_store::HostDir::new(dir).with_context(|| dir.display().to_string())?;
     let Some(on_disk) = extent_store::on_disk(&host).with_context(|| dir.display().to_string())?
     else {
         return Ok(());
