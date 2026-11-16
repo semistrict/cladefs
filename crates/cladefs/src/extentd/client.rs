@@ -114,7 +114,7 @@ impl RemoteExtentStore {
             ))),
             errno => Error::new(anyhow::Error::new(errno).context("the daemon named no arena")),
         })?;
-        let Opened { branch, arena, epoch, max_map_count } = opened;
+        let Opened { branch, arena, commit, max_map_count } = opened;
         let mut fds = reply.fds.into_iter();
         let (Some(own), Some(public)) = (fds.next(), fds.next()) else {
             return Err(Error::msg("the daemon sent no physical memory"));
@@ -122,7 +122,7 @@ impl RemoteExtentStore {
         // Its tenant's arena, and the default one, read-only.
         let memories = vec![(arena, own), (crate::pages::ArenaId::DEFAULT, public)];
         // A follower's view's commit, which it has heard of.
-        client.committed.rise(epoch);
+        client.committed.rise(commit);
         // cladefs: its build, which the daemon's metrics show (TASK-111.7).
         client.request_blocking(&Request::Build(crate::BUILD_COMMIT)).map_err(|errno| {
             Error::new(anyhow::Error::new(errno).context("saying this VM process's build"))
@@ -139,13 +139,13 @@ impl RemoteExtentStore {
         self.read_only
     }
 
-    /// cladefs: the epoch of the latest commit of a follower's writer it has heard of: its view's,
+    /// cladefs: the number of the latest commit of a follower's writer it has heard of: its view's,
     /// or one after ([`RemoteExtentStore::on_committed`]).
     pub fn committed(&self) -> u64 {
         self.client.committed.latest()
     }
 
-    /// cladefs: calls `committed` with the epoch of each commit of a follower's writer it hears
+    /// cladefs: calls `committed` with the number of each commit of a follower's writer it hears
     /// of from now on: the latest of each run of them, which the follower may advance to. Returns
     /// the latest heard of as it began: each commit is heard of from one or the other, or a later
     /// one, one as it begins perhaps from both; a second read, of
@@ -157,7 +157,7 @@ impl RemoteExtentStore {
 
     /// cladefs: moves a follower's view to its writer's latest commit, holding what the commits
     /// since the one it was as of held until it lets go of them ([`RemoteExtentStore::let_go`]),
-    /// and returns the commit's epoch (`ADVANCE`). `ESTALE` once it was cut off.
+    /// and returns the commit's number (`ADVANCE`). `ESTALE` once it was cut off.
     pub fn advance(&self) -> Result<u64> {
         blocking(self.advance_async())
     }
@@ -165,18 +165,18 @@ impl RemoteExtentStore {
     /// [`RemoteExtentStore::advance`], waiting for the daemon holding no thread.
     pub async fn advance_async(&self) -> Result<u64> {
         let reply = self.client.request(&Request::Advance).await?;
-        Ok(Advanced::from_args(reply.header.args).epoch)
+        Ok(Advanced::from_args(reply.header.args).commit)
     }
 
-    /// cladefs: lets go of what a follower's view held of the commits before the commit of
-    /// `epoch`, which an advance returned (`LET_GO`).
-    pub fn let_go(&self, epoch: u64) -> Result<()> {
-        blocking(self.let_go_async(epoch))
+    /// cladefs: lets go of what a follower's view held of the commits before the one
+    /// numbered `commit`, which an advance returned (`LET_GO`).
+    pub fn let_go(&self, commit: u64) -> Result<()> {
+        blocking(self.let_go_async(commit))
     }
 
     /// [`RemoteExtentStore::let_go`], waiting for the daemon holding no thread.
-    pub async fn let_go_async(&self, epoch: u64) -> Result<()> {
-        self.client.request(&Request::LetGo { epoch }).await.map(drop)
+    pub async fn let_go_async(&self, commit: u64) -> Result<()> {
+        self.client.request(&Request::LetGo { commit }).await.map(drop)
     }
 
     /// cladefs: keeps `extent`, which a follower's view holds, whatever commit it advances to, until
@@ -406,13 +406,13 @@ impl RemoteExtentStore {
         Ok(())
     }
 
-    /// Commits, and sets the root to `root` if given, durably (`COMMIT` with `COMMIT_DURABLE`).
+    /// Commits, and sets the root to `root` if given, uploaded (`COMMIT` with `COMMIT_UPLOADED`).
     pub fn commit(&self, root: Option<&[u8]>) -> Result<()> {
-        blocking(self.commit_async(root, Commit::Durable))
+        blocking(self.commit_async(root, Commit::Uploaded))
     }
 
-    /// Commits, and sets the root to `root` if given, once ordered, not durable: the daemon makes
-    /// it durable soon after (`COMMIT`).
+    /// Commits, and sets the root to `root` if given, once ordered, not local: the daemon makes
+    /// it local soon after (`COMMIT`).
     pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()> {
         blocking(self.commit_async(root, Commit::Ordered))
     }
@@ -434,7 +434,7 @@ impl RemoteExtentStore {
         Ok(self.client.request(&Request::Root).await?.payload)
     }
 
-    /// Forks the store, as of its last commit made durable, to a new branch, whose handle is a new
+    /// Forks the store, as of its last commit made uploaded, to a new branch, whose handle is a new
     /// directory at `path`, which the daemon serves sharing the store's pages (`FORK`), and returns
     /// the branch's ID, the bucket's to give (TASK-364).
     pub fn fork(&self, path: &Path) -> Result<u64> {
@@ -525,14 +525,14 @@ impl RemoteExtentStore {
         self.copying.load(Ordering::Acquire)
     }
 
-    /// cladefs: maps the pages of the window's `len` bytes at `window_offset` for the guest ahead of
-    /// its accesses: the pages a guest maps read-only to read next (doc-4's `MAP_AHEAD`), installed
-    /// in the VM process's memory, then mapped for the guest through the window's `Prefault`, which
-    /// the window leaves to the guest's first touches otherwise (TASK-112.1, TASK-276.6). Without
-    /// a window, nothing.
+    /// cladefs: maps the pages of the window's `len` bytes at `window_offset` for the guest ahead
+    /// of its accesses: the pages a guest maps read-only to read next (doc-4's `MAP_PREFAULT`),
+    /// installed in the VM process's memory, then mapped for the guest through the window's
+    /// `Prefault`, which the window leaves to the guest's first touches otherwise (TASK-112.1,
+    /// TASK-276.6). Without a window, nothing.
     pub fn prefault(&self, window_offset: u64, len: u64) {
         if let Some(stage) = self.client.stage.get() {
-            stage.map_ahead(window_offset, len);
+            stage.prefault(window_offset, len);
         }
     }
 
@@ -992,8 +992,8 @@ impl Client {
                     }
                     continue;
                 }
-                Ok(Told::Committed { epoch }) => {
-                    self.committed.rise(epoch);
+                Ok(Told::Committed { commit }) => {
+                    self.committed.rise(commit);
                     continue;
                 }
                 // cladefs: no guest asked, it answers with none (TASK-111.4).

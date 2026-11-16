@@ -237,22 +237,23 @@ struct dax_device *fxfs_device_dax(struct fxfs_device *dev, u64 *window_len)
 }
 
 /*
- * cladefs: diagnostic (TASK-121): whether maps carry MAP_AHEAD, which has the VM process map the
+ * cladefs: diagnostic (TASK-121): whether maps carry MAP_PREFAULT, which has the VM process map the
  * pages for the guest ahead of its accesses, after the MAP, not waited for.
  */
-static bool fxfs_device_maps_ahead = true;
-module_param_named(map_ahead, fxfs_device_maps_ahead, bool, 0644);
-MODULE_PARM_DESC(map_ahead, "Ask the device to map pages ahead of the guest's accesses (diagnostic)");
+static bool fxfs_device_prefaults = true;
+module_param_named(prefault, fxfs_device_prefaults, bool, 0644);
+MODULE_PARM_DESC(prefault, "Ask the device to prefault pages the guest reads (diagnostic)");
 
-/* cladefs: the flags of `map`, accessed next if `ahead`, or zeros, that the device takes. */
+/* cladefs: the flags of `map`, accessed next if `prefault`, or zeros, that the device takes. */
 static u32 fxfs_device_map_flags(struct fxfs_device *dev, const struct fxfs_device_map *map)
 {
 	u32 flags = 0;
 
 	if (map->zeros)
 		flags |= VIRTIO_EXTENT_MAP_ZEROS;
-	if (map->ahead && READ_ONCE(fxfs_device_maps_ahead) && virtio_extent_map_ahead(dev->vext))
-		flags |= VIRTIO_EXTENT_MAP_AHEAD;
+	if (map->prefault && READ_ONCE(fxfs_device_prefaults) &&
+	    virtio_extent_map_prefault(dev->vext))
+		flags |= VIRTIO_EXTENT_MAP_PREFAULT;
 	return flags;
 }
 
@@ -288,11 +289,11 @@ static int fxfs_device_map_one(struct fxfs_device *dev, const struct fxfs_device
 }
 
 int fxfs_device_map(struct fxfs_device *dev, u64 branch, u64 sequence, u64 offset, u64 len,
-		    u64 window_offset, bool ahead)
+		    u64 window_offset, bool prefault)
 {
 	const struct fxfs_device_map map = {
 		.branch = branch, .sequence = sequence, .offset = offset, .len = len,
-		.window_offset = window_offset, .ahead = ahead,
+		.window_offset = window_offset, .prefault = prefault,
 	};
 
 	return fxfs_device_map_one(dev, &map);

@@ -56,9 +56,9 @@ fn follow(path: &Path) -> Result<(RemoteExtentStore, JoinHandle<()>), Option<Err
 /// cladefs: the commits a follower hears of ([`RemoteExtentStore::on_committed`]).
 fn commits_heard(follower: &RemoteExtentStore) -> std::sync::mpsc::Receiver<u64> {
     let (heard, commits) = std::sync::mpsc::channel();
-    follower.on_committed(move |epoch| {
+    follower.on_committed(move |commit| {
         // Unheard once the test stops listening.
-        let _ = heard.send(epoch);
+        let _ = heard.send(commit);
     });
     commits
 }
@@ -697,7 +697,7 @@ fn writes_with_barriers() {
         ExtentId { branch: store.branch(), sequence: 2 },
     );
     let data = pattern(1, BLOCK);
-    let committed = WriteBarriers { after: Some(Commit::Durable), ..Default::default() };
+    let committed = WriteBarriers { after: Some(Commit::Uploaded), ..Default::default() };
     store.write_with_barriers(first, 0, &[VolatileSlice::from(&data[..])], committed).unwrap();
     assert_eq!(write(&store, first, BLOCK as u64, &data), Err(Errno::EPERM), "first is open");
     write(&store, second, 0, &data).unwrap();
@@ -2848,15 +2848,15 @@ fn followers_follow_their_writer_side_by_side() {
     write(&store, extent(2), 0, &pattern(2, BLOCK)).unwrap();
     store.free(extent(1)).unwrap();
     store.commit(Some(b"two")).unwrap();
-    let epoch = commits.recv().unwrap();
-    assert_eq!(follower.committed(), epoch);
+    let commit = commits.recv().unwrap();
+    assert_eq!(follower.committed(), commit);
     assert_eq!(read(&follower, extent(2), 0, BLOCK), Err(Errno::ENOENT));
     assert_eq!(read(&other, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
-    assert_eq!(follower.advance(), Ok(epoch));
+    assert_eq!(follower.advance(), Ok(commit));
     assert_eq!(follower.root(), Ok(b"two".to_vec()));
     assert_eq!(read(&follower, extent(2), 0, BLOCK), Ok(pattern(2, BLOCK)));
     assert_eq!(read(&follower, extent(1), 0, BLOCK), Ok(pattern(1, BLOCK)));
-    follower.let_go(epoch).unwrap();
+    follower.let_go(commit).unwrap();
     assert_eq!(read(&follower, extent(1), 0, BLOCK), Err(Errno::EIO));
     follower.pin(extent(2)).unwrap();
 
@@ -4534,7 +4534,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 /// its own, as of no tenant, and its wire version this one.
 fn opened_args(branch: u64) -> [u64; 5] {
     let arena = crate::pages::ArenaId(1);
-    super::codec::Opened { branch, arena, epoch: 0, max_map_count: None }.args()
+    super::codec::Opened { branch, arena, commit: 0, max_map_count: None }.args()
 }
 
 /// TASK-79.95: a fork's child opened while the fork is being made, its segment not yet in the
@@ -5007,7 +5007,7 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
     sender.send(open, std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str()), &[]).unwrap();
     let opened = receiver.receive(|| 0).unwrap().unwrap();
     assert_eq!(opened.header.status, 0);
-    let mut epoch = opened.header.args[2];
+    let mut commit = opened.header.args[2];
 
     // Commits, many times what its socket holds, each told of as the writer makes it, each of an
     // extent of its own.
@@ -5027,13 +5027,13 @@ fn followers_that_stop_reading_are_told_of_the_latest_commit() {
     let latest = holder.store().unwrap().committed().unwrap();
     // Each commit it is told of after the last, the latest last.
     let told = within(std::time::Duration::from_secs(10), move || {
-        while epoch < latest {
+        while commit < latest {
             let told = receiver.receive(|| 0).unwrap().unwrap();
             assert_eq!(told.header.kind, COMMITTED);
-            assert!(told.header.args[0] > epoch, "told of {} after {epoch}", told.header.args[0]);
-            epoch = told.header.args[0];
+            assert!(told.header.args[0] > commit, "told of {} after {commit}", told.header.args[0]);
+            commit = told.header.args[0];
         }
-        epoch
+        commit
     });
     assert_eq!(told, Ok(latest), "the follower wasn't told of its writer's latest commit");
     drop((sender, writer));
@@ -5112,7 +5112,7 @@ fn shrinks_return_once_the_pages_they_evict_are_free() {
         let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
         served(written, &pattern(sequence as u8, CHUNK as usize));
     }
-    served(Header::new(COMMIT, 3).with_flags(COMMIT_DURABLE), &[]);
+    served(Header::new(COMMIT, 3).with_flags(COMMIT_UPLOADED), &[]);
     for sequence in 1..=2 {
         let read = Header::new(READ, 3 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
         assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
@@ -5163,7 +5163,7 @@ fn the_governor_shares_memory_by_weight() {
             let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
             served(written, &pattern(sequence as u8, CHUNK as usize));
         }
-        served(Header::new(COMMIT, 5).with_flags(COMMIT_DURABLE), &[]);
+        served(Header::new(COMMIT, 5).with_flags(COMMIT_UPLOADED), &[]);
         for sequence in 1..=4 {
             let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
             assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
@@ -5213,7 +5213,7 @@ fn the_governor_lets_parts_held_go_before_tenants_pages() {
         let written = Header::new(WRITE, sequence).with_args(&[branch, sequence, 0]);
         served(written, &noise(sequence));
     }
-    served(Header::new(COMMIT, 5).with_flags(COMMIT_DURABLE), &[]);
+    served(Header::new(COMMIT, 5).with_flags(COMMIT_UPLOADED), &[]);
     for sequence in 1..=4 {
         let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
         assert!(served(read, &[]).payload == noise(sequence), "extent {sequence}");

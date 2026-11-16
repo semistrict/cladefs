@@ -55,7 +55,7 @@ pub struct ConfigState {
     /// cladefs: the window's private pages at most, as configured (doc-13).
     pub dax_private_max: Option<u64>,
     pub extentd_socket: String,
-    /// cladefs: what it does with the guest's asks for durability (TASK-363).
+    /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
     pub cache_type: CacheType,
 }
 

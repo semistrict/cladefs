@@ -87,7 +87,7 @@ export const invariants: Invariant[] = [
     id: "exclusive-swap-rebind",
     layer: "guest",
     claim:
-      "Writeback's swap of the dirty set, and a rebind (a private page mapped back to its sealed " +
+      "Writeback's swap of the dirty set, and a rebind (a private page mapped anew to its sealed " +
       "extent), each hold the file's semaphore exclusively.",
     why:
       "No write(2) may straddle them: one that dirtied its page before the swap and copies its " +
@@ -139,7 +139,7 @@ export const invariants: Invariant[] = [
     why:
       "doc-2's rule: a crash may lose a suffix of recent history, never a middle. fsync keeps its " +
       "ordering without a round trip to the disk.",
-    enforcedBy: ["dev_commit_root", "es_commit_ordered", "flush_behind", "es_durable"],
+    enforcedBy: ["dev_commit_root", "es_commit_ordered", "flush_behind", "es_uploaded"],
     evidence: [{ kind: "doc", id: "doc-12" }, { kind: "doc", id: "doc-2" }],
     standing: "stated",
   },

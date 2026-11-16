@@ -1946,7 +1946,7 @@ impl<D: Dir> Store<D> {
     /// cladefs: commits as [`Store::commit`] does, but without waiting for durability: a barrier,
     /// which orders what came before it before what comes after, and seals the extents written
     /// before it. A crash keeps a prefix of the commits, which [`Store::flush`] makes durable in
-    /// order: doc-4's `COMMIT` without `COMMIT_DURABLE`.
+    /// order: doc-4's `COMMIT` without `COMMIT_UPLOADED`.
     pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<(), Error> {
         let committing = self.committing.with(Mutex::lock);
         self.commit_locked(&committing, root)

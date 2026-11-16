@@ -9,20 +9,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::protocol::{
     DAX_WINDOW_ALIGNMENT, MAX_TAG_LEN, VIRTIO_EXTENT_F_DAX, VIRTIO_EXTENT_F_FREE_MANY,
-    VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_MAP_AHEAD, VIRTIO_EXTENT_F_MAP_MANY,
+    VIRTIO_EXTENT_F_FREEZE, VIRTIO_EXTENT_F_MAP_MANY, VIRTIO_EXTENT_F_MAP_PREFAULT,
     VIRTIO_EXTENT_F_READ_ONLY, VIRTIO_EXTENT_F_RESIZE, VIRTIO_EXTENT_F_STATS,
     VIRTIO_EXTENT_F_WRITE_COMMIT,
 };
 
-/// cladefs: what the device does with the guest's asks for durability, as a block device's
+/// cladefs: what the device does with the guest's asks for uploaded commits, as a block device's
 /// `cache_type` does with its flushes (TASK-363). Firecracker's API names them as its block
 /// devices' `CacheType` does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CacheType {
     /// Each is answered once ordered, as a block device's dropped flushes are: the daemon makes
-    /// it durable soon after, without the guest waiting.
+    /// it local soon after, and uploaded, without the guest waiting.
     Unsafe,
-    /// Each is answered once durable, as the extent daemon makes it, uploaded.
+    /// Each is answered once uploaded, as the extent daemon makes it.
     Writeback,
 }
 
@@ -69,13 +69,13 @@ pub struct Config {
     /// backlog doc-8): the store must exist, and the guest mounts it read-only.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
-    /// cladefs: what the device does with the guest's asks for durability, as a block device's
-    /// `cache_type` does with its flushes (TASK-363): `Writeback`, the default, waits for each, the
-    /// store's commits durable as the extent daemon makes them, uploaded; `Unsafe` answers them once
-    /// ordered, as a block device's dropped flushes are, the daemon making them durable soon after,
-    /// without the guest waiting: sync, syncfs, a freeze and an unmount wait for nothing past the
-    /// host, and what a host's crash takes since its last upload is lost, as it is of a disk image
-    /// whose flushes the host drops.
+    /// cladefs: what the device does with the guest's asks for uploaded commits, as a block
+    /// device's `cache_type` does with its flushes (TASK-363): `Writeback`, the default, waits for
+    /// each, the store's commits uploaded as the extent daemon makes them; `Unsafe` answers them
+    /// once ordered, as a block device's dropped flushes are, the daemon making them local soon
+    /// after, without the guest waiting: sync, syncfs, a freeze and an unmount wait for nothing
+    /// past the host, and what a host's crash takes since its last upload is lost, as it is of a
+    /// disk image whose flushes the host drops.
     #[serde(default = "writeback", skip_serializing_if = "is_writeback")]
     pub cache_type: CacheType,
 }
@@ -114,7 +114,7 @@ impl Config {
     /// `VIRTIO_RING_F_EVENT_IDX`) are the VMM's to add. A follower's device writes nothing
     /// (doc-4's `F_READ_ONLY`); the daemon asks the guest for its stats, a follower's as a
     /// writer's (TASK-111.4); a window's MAP may carry a chunk's pieces (`MAP_MANY`, TASK-91.4) and
-    /// say the guest reads them next (`MAP_AHEAD`, TASK-112.1).
+    /// say the guest reads them next (`MAP_PREFAULT`, TASK-112.1).
     pub fn features(&self) -> u64 {
         let mut features = if self.read_only {
             (1 << VIRTIO_EXTENT_F_FREEZE)
@@ -130,7 +130,7 @@ impl Config {
         if self.dax_window_size.is_some() {
             features |= (1 << VIRTIO_EXTENT_F_DAX)
                 | (1 << VIRTIO_EXTENT_F_MAP_MANY)
-                | (1 << VIRTIO_EXTENT_F_MAP_AHEAD);
+                | (1 << VIRTIO_EXTENT_F_MAP_PREFAULT);
         }
         features
     }

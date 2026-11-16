@@ -438,14 +438,14 @@ impl Close for Forked {
     }
 }
 
-/// Returns once every commit of `store` ordered so far is durable and uploaded: its flush on a
+/// Returns once every commit of `store` ordered so far is uploaded: its flush on a
 /// blocking thread, which holds it meanwhile, the wait for its uploads holding none.
 pub(super) async fn uploaded<S>(store: &Arc<S>) -> Result<(), Errno>
 where
     S: Borrow<ExtentStore> + Send + Sync + 'static,
 {
     let flushed = store.clone();
-    let epoch = blocking(move || (*flushed).borrow().durable_epoch()).await?;
+    let epoch = blocking(move || (*flushed).borrow().make_local()).await?;
     (**store).borrow().uploaded(epoch).await
 }
 

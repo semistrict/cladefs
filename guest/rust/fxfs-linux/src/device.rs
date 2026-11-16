@@ -118,9 +118,9 @@ const RESIZED_TOOK: u32 = 1 << 0;
 const FREEZE_FROZEN: u32 = 1 << 0;
 const WRITE_BARRIER: u32 = 1 << 0;
 const WRITE_COMMIT: u32 = 1 << 1;
-const WRITE_DURABLE: u32 = 1 << 2;
+const WRITE_UPLOADED: u32 = 1 << 2;
 const WRITE_ROOT: u32 = 1 << 3;
-const COMMIT_DURABLE: u32 = 1 << 0;
+const COMMIT_UPLOADED: u32 = 1 << 0;
 const COMMIT_ROOT: u32 = 1 << 1;
 const FREE_MANY: u32 = 1 << 0;
 // `struct fxfs_device_info`'s flags (device.h).
@@ -156,11 +156,11 @@ struct InfoReply {
     branch: u64,
 }
 
-/// `struct virtio_extent_epoch`: little-endian.
+/// `struct virtio_extent_commit_number`: little-endian.
 #[repr(C)]
 #[derive(Default)]
-struct EpochReply {
-    epoch: u64,
+struct CommitNumberReply {
+    commit: u64,
     reserved: u64,
 }
 
@@ -226,13 +226,13 @@ pub struct ExtentDevice {
     open: Arc<OpenExtents>,
     /// What seals the extents open.
     sealer: Sealer,
-    /// cladefs: the syncs wanting durability in progress (`Durability`).
-    durable: Arc<AtomicUsize>,
+    /// cladefs: the syncs wanting uploaded commits in progress (`Uploading`).
+    uploading: Arc<AtomicUsize>,
     /// cladefs: what writes, frees and commits pass, unless the device is frozen.
     gate: Arc<Gate>,
     /// cladefs: the guest's branch, which thawing may change (`Freezer`).
     branch: Arc<AtomicU64>,
-    /// cladefs: the epoch of the commit a follower's device last advanced to (`Device::advance`).
+    /// cladefs: the number of the commit a follower's device last advanced to (`Device::advance`).
     advanced: Arc<AtomicU64>,
     /// cladefs: whether its filesystem writes nothing, mounted read-only (-o ro, or a follower's):
     /// then it commits nothing either, as it flushes or closes (`writing_nothing`).
@@ -311,25 +311,25 @@ impl Drop for Passage {
     }
 }
 
-/// cladefs: what makes the device's commits durable (`COMMIT_DURABLE`). doc-2 asks durability of
-/// sync, syncfs and unmount only: fsync keeps its ordering, but need not wait for the host's
-/// disk, and the device's other commits are barriers only, which the host makes durable soon
-/// after. Commits setting the root and closing are always durable.
+/// cladefs: what makes the device's commits uploaded (`COMMIT_UPLOADED`). doc-2 asks that of sync,
+/// syncfs and unmount only: fsync keeps its ordering, but need not wait for the host's disk, and
+/// the device's other commits are barriers only, which the host makes local soon after. Commits
+/// closing are always uploaded.
 #[derive(Clone)]
-pub struct Durability(Arc<AtomicUsize>);
+pub struct Uploading(Arc<AtomicUsize>);
 
-impl Durability {
-    /// Makes the device's commits durable until the guest returned drops.
-    pub fn begin(&self) -> DurableGuard {
+impl Uploading {
+    /// Makes the device's commits uploaded until the guard returned drops.
+    pub fn begin(&self) -> UploadingGuard {
         self.0.fetch_add(1, Ordering::SeqCst);
-        DurableGuard(self.0.clone())
+        UploadingGuard(self.0.clone())
     }
 }
 
-/// While it lives, the device's commits are durable (`Durability::begin`).
-pub struct DurableGuard(Arc<AtomicUsize>);
+/// While it lives, the device's commits are uploaded (`Uploading::begin`).
+pub struct UploadingGuard(Arc<AtomicUsize>);
 
-impl Drop for DurableGuard {
+impl Drop for UploadingGuard {
     fn drop(&mut self) {
         self.0.fetch_sub(1, Ordering::SeqCst);
     }
@@ -376,7 +376,7 @@ pub struct DeviceStats {
     pub writes: Timed,
     pub write_bytes: AtomicU64,
     pub commits: Timed,
-    pub durable_commits: AtomicU64,
+    pub uploaded_commits: AtomicU64,
     /// Seals begun, from asking to begin, waiting for another seal, the writes in flight and the
     /// window's stores, to beginning.
     pub seal_waits: Timed,
@@ -512,7 +512,7 @@ impl ExtentDevice {
                 writes: Arc::default(),
                 stats: Arc::default(),
             },
-            durable: Arc::default(),
+            uploading: Arc::default(),
             gate: Arc::default(),
             branch: Arc::new(AtomicU64::new(info.branch)),
             advanced: Arc::default(),
@@ -568,9 +568,9 @@ impl ExtentDevice {
         self.sealer.stats.clone()
     }
 
-    /// What makes the device's commits durable.
-    pub fn durability(&self) -> Durability {
-        Durability(self.durable.clone())
+    /// What makes the device's commits uploaded.
+    pub fn uploading(&self) -> Uploading {
+        Uploading(self.uploading.clone())
     }
 
     /// cladefs: whether it is a follower's device, which reads a store another VM writes
@@ -584,7 +584,7 @@ impl ExtentDevice {
         Commits { device: self.device }
     }
 
-    /// cladefs: the epoch of the commit a follower's device last advanced to, as it advances.
+    /// cladefs: the number of the commit a follower's device last advanced to, as it advances.
     pub fn advanced(&self) -> Arc<AtomicU64> {
         self.advanced.clone()
     }
@@ -613,19 +613,19 @@ impl ExtentDevice {
         info(self.device).await
     }
 
-    /// Commits, setting the root to `root` if given: durably if `durable`, or if a sync wanting
-    /// durability is in progress (`Durability`).
-    async fn commit(&self, root: Option<&[u8]>, durable: bool) -> Result<(), Error> {
+    /// Commits, setting the root to `root` if given: uploaded if `uploaded`, or if a sync wanting
+    /// that is in progress (`Uploading`).
+    async fn commit(&self, root: Option<&[u8]>, uploaded: bool) -> Result<(), Error> {
         let root = root.map(|root| self.root_to_send(root)).transpose()?;
         let _seal = Seal::begin(self).await;
-        self.commit_sealed(root, durable).await
+        self.commit_sealed(root, uploaded).await
     }
 
-    /// Commits, in a seal, setting the root to `root` if given (`root_to_send`), durably if
-    /// `durable` or if a sync wanting durability is in progress.
-    async fn commit_sealed(&self, root: Option<Vec<u8>>, durable: bool) -> Result<(), Error> {
-        let durable = self.durable(durable);
-        let mut flags = if durable { COMMIT_DURABLE } else { 0 };
+    /// Commits, in a seal, setting the root to `root` if given (`root_to_send`), uploaded if
+    /// `uploaded` or if a sync wanting that is in progress.
+    async fn commit_sealed(&self, root: Option<Vec<u8>>, uploaded: bool) -> Result<(), Error> {
+        let uploaded = self.uploaded(uploaded);
+        let mut flags = if uploaded { COMMIT_UPLOADED } else { 0 };
         let (data, len) = match &root {
             Some(root) => {
                 flags |= COMMIT_ROOT;
@@ -635,7 +635,7 @@ impl ExtentDevice {
         };
         let began = Instant::now();
         let committed = self.call(op(T_COMMIT, flags, None, 0, data, len), None).await;
-        self.count_commit(began, durable);
+        self.count_commit(began, uploaded);
         committed
     }
 
@@ -655,18 +655,18 @@ impl ExtentDevice {
         }
     }
 
-    /// cladefs: counts a commit, which began at `began`, durable if `durable` (`DeviceStats`).
-    fn count_commit(&self, began: Instant, durable: bool) {
+    /// cladefs: counts a commit, which began at `began`, uploaded if `uploaded` (`DeviceStats`).
+    fn count_commit(&self, began: Instant, uploaded: bool) {
         self.sealer.stats.commits.add(began);
-        if durable {
-            self.sealer.stats.durable_commits.fetch_add(1, Ordering::Relaxed);
+        if uploaded {
+            self.sealer.stats.uploaded_commits.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    /// Whether a commit is durable: if `durable`, or a sync wanting durability is in progress
-    /// (`Durability`).
-    fn durable(&self, durable: bool) -> bool {
-        durable || self.durable.load(Ordering::SeqCst) > 0
+    /// Whether a commit is uploaded: if `uploaded`, or a sync wanting that is in progress
+    /// (`Uploading`).
+    fn uploaded(&self, uploaded: bool) -> bool {
+        uploaded || self.uploading.load(Ordering::SeqCst) > 0
     }
 
     /// The device's requests for `len` bytes at `offset` in `extent`, from memory at `addr`: as
@@ -801,7 +801,7 @@ unsafe impl Send for Commits {}
 unsafe impl Sync for Commits {}
 
 impl Commits {
-    /// The epoch of the writer's latest commit.
+    /// The number of the writer's latest commit.
     pub fn latest(&self) -> u64 {
         // SAFETY: The device is bound while the filesystem is mounted.
         unsafe { ffi::fxfs_device_committed(self.device.as_ptr()) }
@@ -809,11 +809,11 @@ impl Commits {
 }
 
 /// cladefs: lets go of what a follower's device's view held of the commits before the one it
-/// advanced to, `epoch`, when dropped: a request not waited for, which names its epoch, as the
+/// advanced to, `commit`, when dropped: a request not waited for, which names its commit, as the
 /// device may serve it after the next advance (doc-4's LET_GO).
 struct LetGo {
     device: NonNull<ffi::Device>,
-    epoch: u64,
+    commit: u64,
 }
 
 // SAFETY: The device's requests work from any thread.
@@ -830,13 +830,13 @@ extern "C" fn let_go_done(_arg: *mut c_void, status: c_int) {
 
 impl Drop for LetGo {
     fn drop(&mut self) {
-        let op = op(T_LET_GO, 0, None, self.epoch, std::ptr::null_mut(), 0);
+        let op = op(T_LET_GO, 0, None, self.commit, std::ptr::null_mut(), 0);
         // SAFETY: The device is bound while the filesystem is mounted, and `op` has no data.
         let ret = unsafe {
             ffi::fxfs_device_submit(self.device.as_ptr(), &op, let_go_done, std::ptr::null_mut())
         };
         if ret != 0 {
-            log::error!("letting go of commits before epoch {}: errno {}", self.epoch, -ret);
+            log::error!("letting go of commits before commit {}: errno {}", self.commit, -ret);
         }
     }
 }
@@ -892,7 +892,7 @@ impl Freezer {
             let device = self.sealer.device;
             if !self.writes_nothing {
                 let _seal = Seal::begin_with(&self.sealer).await;
-                let commit = op(T_COMMIT, COMMIT_DURABLE, None, 0, std::ptr::null_mut(), 0);
+                let commit = op(T_COMMIT, COMMIT_UPLOADED, None, 0, std::ptr::null_mut(), 0);
                 call(device, commit, None).await?;
             }
             if self.freeze {
@@ -1048,7 +1048,7 @@ impl Device for ExtentDevice {
             && self.info.flags & DEVICE_WRITE_COMMIT != 0
             && len <= self.info.max_io as usize;
         if in_one {
-            flags |= WRITE_COMMIT | if self.durable(false) { WRITE_DURABLE } else { 0 };
+            flags |= WRITE_COMMIT | if self.uploaded(false) { WRITE_UPLOADED } else { 0 };
         }
         let began = Instant::now();
         let requests = match root.as_ref().filter(|_| in_one) {
@@ -1079,7 +1079,7 @@ impl Device for ExtentDevice {
         written?;
         // The commit in its one request, counted with the others.
         if in_one {
-            self.count_commit(began, flags & WRITE_DURABLE != 0);
+            self.count_commit(began, flags & WRITE_UPLOADED != 0);
         }
         if commit && !in_one {
             self.commit_sealed(root, false).await?;
@@ -1167,10 +1167,10 @@ impl Device for ExtentDevice {
         Ok(buf)
     }
 
-    /// cladefs: ordered, as the device's other commits, durable only while a sync wants it: each
-    /// journal compaction ends in one, and durable, its seal held the guest's fsyncs and stores
+    /// cladefs: ordered, as the device's other commits, uploaded only while a sync wants it: each
+    /// journal compaction ends in one, and uploaded, its seal held the guest's fsyncs and stores
     /// for as long as the object store's uploads took (TASK-91.2). A crash keeps a prefix of the
-    /// epochs (doc-4), the root with what came before it, or neither.
+    /// commits (doc-4), the root with what came before it, or neither.
     async fn commit_root(&self, root: &[u8]) -> Result<(), Error> {
         let _passage = self.gate.pass().await;
         self.commit(Some(root), false).await
@@ -1198,13 +1198,13 @@ impl Device for ExtentDevice {
     }
 
     async fn advance(&self) -> Result<Previous, Error> {
-        let mut reply = Box::new(EpochReply::default());
-        let data = &mut *reply as *mut EpochReply as *mut c_void;
-        let len = size_of::<EpochReply>() as u32;
+        let mut reply = Box::new(CommitNumberReply::default());
+        let data = &mut *reply as *mut CommitNumberReply as *mut c_void;
+        let len = size_of::<CommitNumberReply>() as u32;
         self.call(op(T_ADVANCE, 0, None, 0, data, len), None).await?;
-        let epoch = u64::from_le(reply.epoch);
-        self.advanced.store(epoch, Ordering::Release);
-        Ok(Previous::new(LetGo { device: self.device, epoch }))
+        let commit = u64::from_le(reply.commit);
+        self.advanced.store(commit, Ordering::Release);
+        Ok(Previous::new(LetGo { device: self.device, commit }))
     }
 
     async fn pin(&self, extent: ExtentId) -> Result<(), Error> {
