@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 03:34'
+updated_date: '2026-11-16 03:35'
 labels:
   - perf
   - review-2026-11-15
@@ -71,4 +71,6 @@ TASK-471's close/reopen check (asserted last, after all the above) failed by +25
 Suites (macOS): -p extent_store -p extent_remote -p cladefs (not extent_store sim): 926 run, 926 passed (bins rebuilt from this tree first); sim part 50/50 (the earlier note's 52: sim sources unchanged since, not explained); shuttle part 37, 10, 6, 33, 10, 18 all passed; clippy part clean; cargo fmt clean for these crates. extentd/process.rs (Linux-only) not compiled: x86_64-unknown-linux-gnu check fails on aws-lc-sys's C build (no cross toolchain).
 AC #2 left unchecked: the counts are now honest bounds (asserted on macOS), but the AnonBudget plumbing that adds them is Linux-only and still uncompiled and unrun.
 doc-7 budget paragraph and docs/measurements/macos-fork-extent-memory-shared-2026-11-15/note.md updated.
+
+2026-11-15: Linux, ubu1 under fxjob, TASK-453 before its review fixes (t453-int on main 21f042594-era): scripts/test.sh clippy and workspace, 2819 passed, 83 skipped; process.rs's AnonBudget code compiled and ran there. The review fixes (164f4eed2) need their own Linux run.
 <!-- SECTION:NOTES:END -->
