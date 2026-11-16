@@ -26,7 +26,7 @@ class Filter(unittest.TestCase):
             filtered("CLADEFS_EXTENTD_REMOTE=s3://b target/debug/cladefs-extentd SOCKET\n"
                      "CARGO_BIN_EXE_cladefs-extentd cladefs_extentd_requests_total\n"
                      'std::env::var_os("CLADEFS_EXTENTD")\n'),
-            "CLADEFSD_BUCKET=s3://b target/debug/cladefsd SOCKET\n"
+            "CLADEFSD_REMOTE=s3://b target/debug/cladefsd SOCKET\n"
             "CARGO_BIN_EXE_cladefsd cladefsd_requests_total\n"
             'std::env::var_os("CLADEFSD")\n',
         )
