@@ -10,7 +10,7 @@
 //! ```
 //!
 //! DIR, a directory, made if missing and empty, becomes a bucket of files (`file:///DIR/`) of
-//! TENANTS tenants of CELLS cells each, each cell's object and one branch, its record, its lease,
+//! TENANTS tenants of CELLS cells each, each cell's object and one branch, its record, its head,
 //! SEGMENTS segments and a checkpoint covering them all: SEGMENTS + 5 objects a cell, but the first
 //! cell of tenant 1, the largest, whose branch has LARGEST segments (SEGMENTS by default). Each
 //! segment holds four extents of 1 KiB, and the next frees three of them, every other one all
@@ -26,7 +26,7 @@
 //!
 //! With `--deleted`, every cell's branch is deleted once written, as its host deletes it
 //! (TASK-443.4): cells nothing lives in, of which a pass keeps the cell's object, its branch's
-//! record and head, and its own lease, for good.
+//! record and head, and its collector lease, for good.
 //!
 //! With `--clones`, the cells are sandboxes made and deleted (TASK-443.4). Each tenant's first cell
 //! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, forked at its last
@@ -45,9 +45,9 @@
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
-use extent_remote::batch::{Batch, Commit};
+use extent_remote::batch::{Commit, SegmentBuilder};
 use extent_remote::bucket::Bucket as _;
-use extent_remote::keys::{self, Kms};
+use extent_remote::keys::{self, CachingKms};
 use extent_remote::layout::{Branch, Cell, Child, Origin};
 use extent_remote::store::Store;
 use extent_remote::{Bytes, Writer, branch, cell};
@@ -205,17 +205,17 @@ fn main() -> Result<(), String> {
 
 /// The host's KMS, as every cladefs process chooses it ([`extent_remote::bucket_kms::from_env`]):
 /// the bucket KMS's over `dir`, made if missing, given master keys.
-fn host_kms(dir: &std::path::Path) -> Result<Arc<Kms>, String> {
+fn host_kms(dir: &std::path::Path) -> Result<Arc<CachingKms>, String> {
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
     let dir = dir.canonicalize().map_err(|err| format!("{}: {err}", dir.display()))?;
     let url = format!("file://{}/", dir.display());
     let kms = extent_remote::bucket_kms::from_env(|| Ok(Arc::new(Store::from_url(&url)?)))?;
-    Ok(Kms::new(kms.shared()))
+    Ok(CachingKms::new(kms.shared()))
 }
 
 /// Fills `args`' directory, made if missing and empty, as `args` say, encrypting its cells under
 /// `kms`.
-fn run(args: &Args, kms: &Arc<Kms>) -> Result<Filled, String> {
+fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     let &Args { tenants, cells, segments, largest, kind, .. } = args;
     let dir = &args.dir;
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
@@ -310,7 +310,7 @@ struct Written {
 /// into memory, then into `files`: what it took, `of`'s own objects apart.
 async fn fill(
     files: &LocalFileSystem,
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
@@ -323,7 +323,7 @@ async fn fill(
 /// `files`: what it took, and its point, for its clones.
 async fn fill_base(
     files: &LocalFileSystem,
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
 ) -> Result<(Sum, Point), String> {
@@ -336,7 +336,7 @@ async fn fill_base(
 /// Writes `cell`, its branch as `shape` says, and a VM's points' cells, into a bucket in memory:
 /// one starting from `of`'s objects, the branch a clone of that point, if given.
 async fn write(
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
@@ -385,23 +385,26 @@ async fn write(
                 let kept = usize::from(n % 2 == 0 && n > 0);
                 let frees = held.split_off(kept.min(held.len()));
                 held = extents.iter().map(|(extent, _)| *extent).collect();
-                Batch::from(Commit { tag: n + 1, extents, frees, ..Commit::default() })
+                SegmentBuilder::from(Commit { tag: n + 1, extents, frees, ..Commit::default() })
             }
-            Shape::Vm { .. } => Batch::from(Commit { tag: n + 1, extents, ..Commit::default() }),
+            Shape::Vm { .. } => {
+                SegmentBuilder::from(Commit { tag: n + 1, extents, ..Commit::default() })
+            }
         };
         let point = point_at(shape, cell.tenant, n);
-        let segment = match point {
+        let closed = match point {
             Some(point) => {
                 make_cell(&bucket, kms, point.cell).await.map_err(failed)?;
                 batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
             }
             None => batch.close(&mut writer.chain()),
         };
-        let seq = writer.add_segment(segment.frame(writer.keys().encrypting())).map_err(failed)?;
-        writer.upload(seq).await.map_err(failed)?;
+        let segment =
+            writer.add_segment(closed.frame(writer.keys().encrypting())).map_err(failed)?;
+        writer.upload(segment).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
         if let Some(point) = point {
-            forked = Some((point, Origin { parent: id, at: seq }));
+            forked = Some((point, Origin { parent: id, at: segment }));
         }
     }
     writer.checkpoint().await.map_err(failed)?;
@@ -416,7 +419,11 @@ async fn write(
 
 /// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its branch's record is given its DEK
 /// by its writer.
-async fn make_cell(bucket: &Store, kms: &Arc<Kms>, cell: Cell) -> Result<(), extent_remote::Error> {
+async fn make_cell(
+    bucket: &Store,
+    kms: &Arc<CachingKms>,
+    cell: Cell,
+) -> Result<(), extent_remote::Error> {
     let (_, kek) = keys::new_cell_kek(kms, cell.tenant).await?;
     cell::create(bucket, cell, WRITER, kek).await.map(drop)
 }
@@ -518,8 +525,8 @@ mod tests {
     }
 
     /// A host's KMS over the tests' ([`known`]).
-    fn kms() -> Arc<Kms> {
-        Kms::new(known())
+    fn kms() -> Arc<CachingKms> {
+        CachingKms::new(known())
     }
 
     /// A sweep of every cell of `bucket`, a pass at a time, deleting what is free at once.
@@ -563,7 +570,7 @@ mod tests {
             let branch = Branch { cell, id: 1 };
             let mut keys = [
                 layout::cell(cell),
-                layout::gc_lease(cell),
+                layout::collector_lease(cell),
                 layout::head(branch),
                 layout::record(branch),
             ];

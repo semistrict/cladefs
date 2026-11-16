@@ -263,7 +263,7 @@ impl<F: File> Source<F> {
         at: u64,
         len: u64,
         unpacked: &Unpacked,
-        parts: &mut Vec<Part<F>>,
+        parts: &mut Vec<Located<F>>,
     ) -> Result<(), Corrupt> {
         let framed = match self {
             Self::Raw(file) => {
@@ -284,8 +284,8 @@ impl<F: File> Source<F> {
             let (skip, len) = (from - place.start, to - from);
             let key = (framed.id, part);
             parts.push(match unpacked.get(key) {
-                Some(bytes) => Part::Unpacked { bytes, skip, len },
-                None => Part::Packed {
+                Some(bytes) => Located::Unpacked { bytes, skip, len },
+                None => Located::Packed {
                     part: Packed { file: framed.file.clone(), part: opened, key },
                     skip,
                     len,
@@ -298,21 +298,21 @@ impl<F: File> Source<F> {
 
 /// Adds `len` bytes at `offset` in `file`, a raw file, to `parts`, extending the last if they
 /// follow it.
-fn push_data<F>(parts: &mut Vec<Part<F>>, file: &Arc<RawFile<F>>, offset: u64, len: u64) {
-    if let Some(Part::Data { file: last, offset: last_offset, len: last_len }) = parts.last_mut()
+fn push_data<F>(parts: &mut Vec<Located<F>>, file: &Arc<RawFile<F>>, offset: u64, len: u64) {
+    if let Some(Located::Data { file: last, offset: last_offset, len: last_len }) = parts.last_mut()
         && Arc::ptr_eq(last, file)
         && *last_offset + *last_len == offset
     {
         *last_len += len;
         return;
     }
-    parts.push(Part::Data { file: file.clone(), offset, len });
+    parts.push(Located::Data { file: file.clone(), offset, len });
 }
 
-/// A part of a range of an extent: bytes of a raw file; bytes of a part of a framed file, which
-/// [`crate::Store::unpack`] checks and unpacks from its stored bytes; bytes of a part unpacked
-/// lately; or zeros, where nothing was written.
-pub enum Part<F> {
+/// A piece of a range of an extent, located ([`crate::Store::locate`]): bytes of a raw file; bytes
+/// of a part of a framed file, which [`crate::Store::unpack`] checks and unpacks from its stored
+/// bytes; bytes of a part unpacked lately; or zeros, where nothing was written.
+pub enum Located<F> {
     /// cladefs: bytes of a raw file, which the store wrote lately and has not framed: an open
     /// segment's, or an open extent's own. No CRC covers them (TASK-153.11). Reads of them go
     /// through the host's page cache ([`File::read_cached`](crate::File::read_cached)). cladefs: an
@@ -338,7 +338,7 @@ pub enum Part<F> {
     Zeros(u64),
 }
 
-impl<F> Part<F> {
+impl<F> Located<F> {
     /// The bytes of the extent it is.
     pub fn len(&self) -> u64 {
         match self {
@@ -433,14 +433,15 @@ pub fn unpacks() -> u64 {
 /// reads of extents are of neighbouring blocks, which a part holds.
 #[derive(Default)]
 pub(crate) struct Unpacked {
-    kept: Mutex<Kept>,
+    kept: Mutex<Recent>,
 }
 
 /// A part unpacked: its file's opening, and its number.
 type Key = (u64, u64);
 
+/// The parts [`Unpacked`] keeps, by when they were last read.
 #[derive(Default)]
-struct Kept {
+struct Recent {
     /// Each part, and when it was last read.
     parts: HashMap<Key, (Arc<Aligned>, u64)>,
     by_use: BTreeMap<u64, Key>,

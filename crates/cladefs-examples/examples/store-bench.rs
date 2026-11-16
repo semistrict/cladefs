@@ -403,7 +403,7 @@ impl Host {
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::ENCRYPTED).unwrap();
         let keys = extent_remote::keys::Host::new(
-            extent_remote::keys::Kms::new(Arc::new(local)),
+            extent_remote::keys::CachingKms::new(Arc::new(local)),
             extent_remote::fetch::Memory::new().keys().clone(),
         );
         let uploads = extent_remote::fetch::Budget::new(extent_remote::fetch::Limits::UNBOUNDED);

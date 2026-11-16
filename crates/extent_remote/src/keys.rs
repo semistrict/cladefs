@@ -9,14 +9,14 @@
 //! a KEK, but a shredded cell's, and every branch that writes has a DEK: nothing is in the clear
 //! (TASK-411.28), and every host has a KMS ([`Host::kms`]).
 //!
-//! **Taking a cell** unwraps its KEK with one call of the KMS, which a host's [`Kms`] keeps for
+//! **Taking a cell** unwraps its KEK with one call of the KMS, which a host's [`CachingKms`] keeps for
 //! that taking, whatever number of the cell's volumes it opens: its branches' DEKs are unwrapped
 //! with it locally ([`CellKeys`]). A cell made by a host gets a KEK the host wrapped before, which
 //! it keeps in a pool for the cells it makes: none is unwrapped then. Every cell is made encrypted
 //! ([`new_cell_kek`]): any refusal of the KMS fails the making, naming the tenant, a KMS saying it
 //! has no KEK for the tenant among them, as destroyed (a real KMS forgets a deleted key, answering
 //! as for one never made: AWS KMS, OpenBao, TASK-411.19). (Before TASK-411.28, a tenant with no
-//! KEK had its cells made in the clear, that answer believed for a minute, TASK-411.10, and a
+//! KEK had its cells made in the clear, that answer believed for a minute, TASK-411.10, and an
 //! encrypted marker in the bucket told a forgotten KEK from none, TASK-411.19: both went with the
 //! clear cells.)
 //!
@@ -28,7 +28,7 @@
 //!
 //! **Forks into other cells** (doc-16, Forks and shared points; TASK-411.4). A branch's record
 //! keeps, beside its own DEKs, the DEKs of every ancestor of another cell whose objects it reads,
-//! each generation, rewrapped under its own cell's KEK ([`Inherited`],
+//! each generation, rewrapped under its own cell's KEK ([`InheritedDek`],
 //! [`crate::record::Record::inherited`]), given with its first DEK, in one conditional update: a
 //! record with DEKs holds all it inherits from other cells, so that its readers need no other
 //! cell's KEK, nor another tenant's KMS, and shredding a parent leaves it what it inherited. A
@@ -40,8 +40,8 @@
 //!
 //! **Pools.** A host wraps new cell KEKs ahead, a pool a tenant, refilled in batches on its
 //! runtime as a take leaves one low, off the fork's path ([`Pooling`]). A tenant whose KEK the KMS
-//! says is revoked or destroyed, or the control API does ([`Kms::revoked`]), has its pool dropped,
-//! and no fork inherits its keys, until the KMS answers for it again.
+//! says is revoked or destroyed, or the control API does ([`CachingKms::revoked`]), has its pool
+//! dropped, and no fork inherits its keys, until the KMS answers for it again.
 //!
 //! **Generations.** A record's DEKs are a list of generations, each wrapped by a generation of its
 //! cell's KEK, which it names. New objects are encrypted under the newest ([`Ring::encrypting`]);
@@ -135,7 +135,7 @@ pub fn unwrap_dek(kek: &Secret, branch: Branch, dek: &Dek) -> Result<Secret, Err
 /// that inherits from it keeps it: wrapped by that record's own cell's KEK of generation
 /// `dek.kek` (TASK-411.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Inherited {
+pub struct InheritedDek {
     pub branch: Branch,
     pub dek: Dek,
 }
@@ -163,9 +163,9 @@ pub fn wrap_inherited(
     of: Branch,
     generation: u32,
     dek: &Secret,
-) -> Inherited {
+) -> InheritedDek {
     let wrapped = inherited_key(kek, holder, of, generation).wrap(dek);
-    Inherited { branch: of, dek: Dek { generation, kek: kek_generation, wrapped } }
+    InheritedDek { branch: of, dek: Dek { generation, kek: kek_generation, wrapped } }
 }
 
 /// The DEK `inherited`, of `holder`'s record, unwrapped under `kek`, the generation of `holder`'s
@@ -173,9 +173,9 @@ pub fn wrap_inherited(
 pub fn unwrap_inherited(
     kek: &Secret,
     holder: Branch,
-    inherited: &Inherited,
+    inherited: &InheritedDek,
 ) -> Result<Secret, Error> {
-    let Inherited { branch, dek } = inherited;
+    let InheritedDek { branch, dek } = inherited;
     let key = inherited_key(kek, holder, *branch, dek.generation);
     key.unwrap(&dek.wrapped).map_err(|err| {
         Error::Corrupt(format!(
@@ -219,8 +219,8 @@ impl Ring {
 
     /// Its keys as a reader of the objects of `branch` holds them: that branch's DEKs alone, so
     /// that an object at a key of one branch encrypted under another's DEK is not opened.
-    pub fn of(&self, branch: u64) -> View<'_> {
-        View { ring: self, branch }
+    pub fn of(&self, branch: u64) -> RingView<'_> {
+        RingView { ring: self, branch }
     }
 
     /// The DEK a writer encrypts new objects under, and which it is: its branch's newest. Every
@@ -317,7 +317,7 @@ impl Ring {
 
     /// Adds the keys `record`, `branch`'s, keeps, unwrapped under `keys`, its cell's: its own DEKs,
     /// the branch encrypted if it has any, and those it keeps of ancestors of other cells
-    /// ([`Inherited`]).
+    /// ([`InheritedDek`]).
     async fn take(
         &mut self,
         keys: &CellKeys,
@@ -347,10 +347,10 @@ impl Ring {
 }
 
 /// Every DEK `source` holds of a branch of another cell than `child`'s, rewrapped under `kek`, a
-/// generation of `child`'s cell's KEK, as `child`'s record keeps them ([`Inherited`]), in the
+/// generation of `child`'s cell's KEK, as `child`'s record keeps them ([`InheritedDek`]), in the
 /// order of their branches and generations (TASK-411.4).
-pub fn inherit(source: &Ring, child: Branch, kek: (&Secret, u32)) -> Vec<Inherited> {
-    let mut inherited: Vec<Inherited> = (source.deks.iter())
+pub fn inherit(source: &Ring, child: Branch, kek: (&Secret, u32)) -> Vec<InheritedDek> {
+    let mut inherited: Vec<InheritedDek> = (source.deks.iter())
         .filter_map(|(id, dek)| {
             let of = *source.places.get(&id.branch).expect("a ring knows its DEKs' branches");
             (of.cell != child.cell).then(|| wrap_inherited(kek, child, of, id.generation, dek))
@@ -362,12 +362,12 @@ pub fn inherit(source: &Ring, child: Branch, kek: (&Secret, u32)) -> Vec<Inherit
 
 /// A ring's keys as a reader of one branch's objects holds them ([`Ring::of`]).
 #[derive(Clone, Copy, Debug)]
-pub struct View<'a> {
+pub struct RingView<'a> {
     ring: &'a Ring,
     branch: u64,
 }
 
-impl Keys for View<'_> {
+impl Keys for RingView<'_> {
     fn dek(&self, id: KeyId) -> Option<&Secret> {
         (id.branch == self.branch).then(|| self.ring.deks.get(&id).map(|dek| &**dek)).flatten()
     }
@@ -397,7 +397,7 @@ pub fn branch_of(key: &str) -> Option<u64> {
 
 /// The keys of the reader of the object at `key`, holding `ring`: those of the object's branch,
 /// as its key says ([`Ring::of`]); none for an object of no branch's.
-pub fn of_key<'a>(ring: &'a Ring, key: &str) -> View<'a> {
+pub fn of_key<'a>(ring: &'a Ring, key: &str) -> RingView<'a> {
     // A branch no ID names, whose keys no ring holds.
     ring.of(branch_of(key).unwrap_or(u64::MAX))
 }
@@ -516,7 +516,7 @@ impl Pooling {
     }
 }
 
-/// A refill of a tenant's pool, going, which whoever waits for it shares ([`Kms::filled`]).
+/// A refill of a tenant's pool, going, which whoever waits for it shares ([`CachingKms::filled`]).
 type Refill = Shared<BoxFuture<'static, ()>>;
 
 /// A tenant's new cell KEKs, each wrapped by its KEK, and the refill of them going, if one is.
@@ -538,7 +538,7 @@ struct Pools {
 /// its object names, unwrapped once for all of it ([`CellKeys`]); a pool of new cell KEKs a tenant,
 /// wrapped by their tenants' KEKs ahead of the cells made with them; and the tenants whose KEKs it
 /// last heard are revoked or destroyed, or none.
-pub struct Kms {
+pub struct CachingKms {
     kms: kms::Shared,
     /// Each cell's KEKs unwrapped, by generation, and the taking they were unwrapped for: a
     /// taking since unwraps anew, so that a tenant whose KEK was revoked takes none of its cells
@@ -570,7 +570,7 @@ fn revokes(error: &kms::Error) -> bool {
     )
 }
 
-impl Kms {
+impl CachingKms {
     /// The host's over `kms`, its pools refilled a KEK at a time, as one is wanted: tests', which
     /// count the calls a path makes.
     pub fn new(kms: kms::Shared) -> Arc<Self> {
@@ -636,7 +636,7 @@ impl Kms {
     }
 
     /// Forgets what it holds of `scope`, as a host told so does (TASK-411.7): a tenant's, its KEK
-    /// revoked or destroyed, as `why` says ([`Kms::revoked`]); a cell's, shredded, its KEKs
+    /// revoked or destroyed, as `why` says ([`CachingKms::revoked`]); a cell's, shredded, its KEKs
     /// unwrapped dropped and refused from then on, whatever object of the cell its asker read
     /// before ([`crate::cell::shredded`]).
     pub fn forget(&self, scope: Scope, why: impl Into<String>) {
@@ -838,7 +838,7 @@ pub struct CellKeys {
     keks: Vec<Kek>,
     /// The taking they are unwrapped for: its epoch and holder.
     taking: (u64, u64),
-    kms: Arc<Kms>,
+    kms: Arc<CachingKms>,
     /// Whether its object says it is shredded ([`crate::cell::shred`], TASK-411.7).
     shredded: bool,
 }
@@ -846,7 +846,7 @@ pub struct CellKeys {
 impl CellKeys {
     /// The keys of `cell`, whose object, as taken, or read, is `object`, unwrapped by `kms`, the
     /// host's, for the object's taking.
-    pub fn of(cell: Cell, object: &Object, kms: Arc<Kms>) -> Self {
+    pub fn of(cell: Cell, object: &Object, kms: Arc<CachingKms>) -> Self {
         Self::taken(cell, object, (object.epoch, object.holder), kms)
     }
 
@@ -854,7 +854,7 @@ impl CellKeys {
     /// the holder `placement` makes of it next ([`crate::cell::hold`]): the object's, if it is
     /// that placement's already, the next epoch's otherwise. Read before the cell is held, as a
     /// writer's recovery is, they are those it is held with then, unwrapped once.
-    pub fn to_hold(cell: Cell, object: &Object, kms: Arc<Kms>, placement: u64) -> Self {
+    pub fn to_hold(cell: Cell, object: &Object, kms: Arc<CachingKms>, placement: u64) -> Self {
         let taking = match object.holder == placement {
             true => (object.epoch, object.holder),
             false => (object.epoch + 1, placement),
@@ -865,11 +865,11 @@ impl CellKeys {
     /// The keys of `cell`, which has no object: none, as a point's cell, which no host makes,
     /// nothing writing it, its ancestors' read under the cells they are of. Not a cell in the
     /// clear: none is (TASK-411.28).
-    pub fn objectless(cell: Cell, kms: Arc<Kms>) -> Self {
+    pub fn objectless(cell: Cell, kms: Arc<CachingKms>) -> Self {
         Self { cell, keks: Vec::new(), taking: (0, 0), kms, shredded: false }
     }
 
-    fn taken(cell: Cell, object: &Object, taking: (u64, u64), kms: Arc<Kms>) -> Self {
+    fn taken(cell: Cell, object: &Object, taking: (u64, u64), kms: Arc<CachingKms>) -> Self {
         Self { cell, keks: object.keks.clone(), taking, kms, shredded: object.shredded }
     }
 
@@ -934,12 +934,12 @@ impl CellKeys {
     }
 }
 
-/// The KEK a cell made by a host gets: one the host wrapped ahead, by its KMS ([`Kms::new_kek`]),
+/// The KEK a cell made by a host gets: one the host wrapped ahead, by its KMS ([`CachingKms::new_kek`]),
 /// refused as the KMS refuses it, naming the tenant: a tenant the KMS says has no KEK among them,
 /// as destroyed (TASK-411.28: no cell is made in the clear). What every maker of a cell asks
 /// before making it: a store's opening, a fork into a new cell ([`inheriting`]), the control API's
 /// attaching.
-pub async fn new_cell_kek(kms: &Arc<Kms>, tenant: u64) -> Result<(Arc<Secret>, Kek), Error> {
+pub async fn new_cell_kek(kms: &Arc<CachingKms>, tenant: u64) -> Result<(Arc<Secret>, Kek), Error> {
     let (secret, wrapped) = kms.new_kek(tenant).await?;
     Ok((secret, Kek { generation: FIRST, wrapped }))
 }
@@ -948,7 +948,7 @@ pub async fn new_cell_kek(kms: &Arc<Kms>, tenant: u64) -> Result<(Arc<Secret>, K
 /// it would have made it with: kept for the taking if the cell was made with it, and given back to
 /// the pool otherwise. Returns the cell's keys.
 pub fn held(
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     object: Object,
     kek: Option<(Arc<Secret>, Kek)>,
@@ -991,7 +991,7 @@ pub async fn with_dek(
 async fn give_keys(
     bucket: &impl Bucket,
     branch: Branch,
-    keys: (Vec<Dek>, Vec<Inherited>),
+    keys: (Vec<Dek>, Vec<InheritedDek>),
 ) -> Result<Record, Error> {
     branch::give_deks(bucket, branch, |found| found.deks.is_empty().then(|| keys.clone())).await
 }
@@ -1039,7 +1039,7 @@ fn next_generation(deks: &[Dek]) -> u32 {
 /// docs). Returns the new generation and the records rewrapped.
 pub async fn rotate(
     bucket: &impl Bucket,
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     held: crate::cell::Held,
     object: Object,
 ) -> Result<(u32, usize), Error> {
@@ -1086,7 +1086,7 @@ pub async fn rotate(
                 let secret = unwrap_dek(kek(dek)?, branch, dek)?;
                 Ok(wrap_dek((&new, generation), branch, dek.generation, &secret))
             };
-            let rewrap_inherited = |had: &Inherited| {
+            let rewrap_inherited = |had: &InheritedDek| {
                 let secret = unwrap_inherited(kek(&had.dek)?, branch, had)?;
                 let of = had.branch;
                 Ok(wrap_inherited((&new, generation), branch, of, had.dek.generation, &secret))
@@ -1205,7 +1205,7 @@ pub async fn compacting<'a>(
 /// its forks to other cells ([`crate::branch::delete`], TASK-411.4).
 pub async fn writing(
     bucket: &impl Bucket,
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     branch: Branch,
     record: &Record,
 ) -> Result<Arc<Ring>, Error> {
@@ -1224,7 +1224,7 @@ pub async fn writing(
 /// holds its cell (`extent_store::upload`).
 pub async fn taking(
     bucket: &impl Bucket,
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     branch: Branch,
     holder: u64,
 ) -> Result<Arc<Ring>, Error> {
@@ -1253,7 +1253,7 @@ pub async fn taking(
 #[derive(Clone, Copy)]
 pub enum Parents<'a> {
     Held(&'a Arc<Ring>),
-    Kms(&'a Arc<Kms>, Option<&'a Record>),
+    Kms(&'a Arc<CachingKms>, Option<&'a Record>),
 }
 
 impl Parents<'_> {
@@ -1277,7 +1277,7 @@ impl Parents<'_> {
 /// its child inherits, and a KEK for its child's cell from the host's pool, given back if no cell
 /// is made with it.
 pub struct Inheriting {
-    kms: Arc<Kms>,
+    kms: Arc<CachingKms>,
     child: Branch,
     source: Arc<Ring>,
     kek: Option<(Arc<Secret>, Kek)>,
@@ -1300,7 +1300,7 @@ impl Drop for Inheriting {
 /// those branches' KEK is revoked or destroyed ([`Kms::revoked`]); or as the KMS refuses a KEK
 /// for the child's cell, which comes from the host's pool, no call made then ([`new_cell_kek`]).
 pub async fn inheriting(
-    kms: &Arc<Kms>,
+    kms: &Arc<CachingKms>,
     source: &Arc<Ring>,
     parent: Branch,
     child: layout::Child,
@@ -1324,7 +1324,7 @@ pub async fn inheriting(
 /// TASK-411.4): makes its cell with the KEK from the pool, held by no placement, so that any takes
 /// it, as `holder` made it, the host keeping the KEK for its first taking here, which unwraps
 /// nothing then; then gives its record its first DEK and the keys it inherits rewrapped under that
-/// KEK, in one conditional update ([`Inherited`]). A cell made there already, by another, is
+/// KEK, in one conditional update ([`InheritedDek`]). A cell made there already, by another, is
 /// left as it is, its own KEK used, and the pool's given back. A record given its keys already is
 /// left so. Its record is read as the cell is made: two round trips, a create and an update.
 /// Returns the record as it left it.
@@ -1361,19 +1361,20 @@ pub async fn give_inherited(
 /// serves ([`HostRing`], the host's fetchers' `fetch::Memory::keys`).
 #[derive(Clone)]
 pub struct Host {
-    pub kms: Arc<Kms>,
+    pub kms: Arc<CachingKms>,
     pub ring: Arc<HostRing>,
 }
 
 impl Host {
     /// A host over `kms`, its fetchers' keys `ring`.
-    pub fn new(kms: Arc<Kms>, ring: Arc<HostRing>) -> Self {
+    pub fn new(kms: Arc<CachingKms>, ring: Arc<HostRing>) -> Self {
         Self { kms, ring }
     }
 
     /// Forgets what the host holds of `scope`'s keys, as it is told a tenant's KEK is revoked or
-    /// destroyed, or a cell shredded, `why` saying which (TASK-411.7): its KMS's ([`Kms::forget`])
-    /// and its fetchers' ([`HostRing::forget`]). Returns how many stores' rings its fetchers forgot.
+    /// destroyed, or a cell shredded, `why` saying which (TASK-411.7): its KMS's
+    /// ([`CachingKms::forget`]) and its fetchers' ([`HostRing::forget`]). Returns how many stores'
+    /// rings its fetchers forgot.
     pub fn forget(&self, scope: Scope, why: impl Into<String>) -> usize {
         self.kms.forget(scope, why);
         self.ring.forget(scope)
@@ -1395,8 +1396,8 @@ pub mod testing {
     }
 
     /// A host's KMS over the tests' ([`kms`]): a host's own, keeping what it unwrapped apart.
-    pub fn host_kms() -> Arc<Kms> {
-        Kms::new(kms())
+    pub fn host_kms() -> Arc<CachingKms> {
+        CachingKms::new(kms())
     }
 
     /// A host of the tests: its KMS over the tests' ([`kms`]), its fetchers' keys its own.
@@ -1444,13 +1445,13 @@ mod tests {
     use futures::executor::block_on;
 
     /// A KMS holding tenant 1's KEK, counting its calls, and the host's over it.
-    fn kms() -> (tempfile::TempDir, Arc<Counted<LocalKms>>, Arc<Kms>) {
+    fn kms() -> (tempfile::TempDir, Arc<Counted<LocalKms>>, Arc<CachingKms>) {
         let dir = tempfile::tempdir().unwrap();
         let local = LocalKms::open(dir.path().join("kms")).unwrap();
         local.create(TEST_CELL.tenant).unwrap();
         let counted = Arc::new(Counted::new(local));
         let shared: kms::Shared = counted.clone();
-        (dir, counted, Kms::new(shared))
+        (dir, counted, CachingKms::new(shared))
     }
 
     /// A DEK wrapped under a cell's KEK unwraps for its place alone: another branch's, of the
@@ -1629,7 +1630,7 @@ mod tests {
             (test_branch(7), 2, 3)
         );
         assert_eq!(unwrap_inherited(&kek, holder, &wrapped).unwrap().expose(), dek.expose());
-        let refused = |holder: Branch, wrapped: &Inherited| {
+        let refused = |holder: Branch, wrapped: &InheritedDek| {
             unwrap_inherited(&kek, holder, wrapped).map(|_| ()).unwrap_err().to_string()
         };
         assert_eq!(
@@ -1637,9 +1638,10 @@ mod tests {
             "corrupt: branch 2/5/9's DEK of branch 1/1/7, generation 2: not authentic: a wrapped \
              key, by its integrity check"
         );
-        let other = Inherited { branch: test_branch(6), ..wrapped.clone() };
+        let other = InheritedDek { branch: test_branch(6), ..wrapped.clone() };
         assert!(unwrap_inherited(&kek, holder, &other).is_err());
-        let relabelled = Inherited { dek: Dek { generation: 3, ..wrapped.dek.clone() }, ..wrapped };
+        let relabelled =
+            InheritedDek { dek: Dek { generation: 3, ..wrapped.dek.clone() }, ..wrapped };
         assert!(unwrap_inherited(&kek, holder, &relabelled).is_err());
         // Nor is it a DEK of the branch's own.
         assert!(unwrap_dek(&kek, test_branch(7), &relabelled.dek).is_err());
@@ -1725,7 +1727,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let shared: kms::Shared = counted.clone();
         let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
-        let kms = Kms::pooled(shared, pooling);
+        let kms = CachingKms::pooled(shared, pooling);
         let tenant = TEST_CELL.tenant;
         runtime.block_on(kms.new_kek(tenant)).unwrap();
         runtime.block_on(kms.filled(tenant));
@@ -1788,7 +1790,7 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let shared: kms::Shared = counted.clone();
         let pooling = Pooling { low: 2, batch: 3, handle: runtime.handle().clone() };
-        let kms = Kms::pooled(shared, pooling);
+        let kms = CachingKms::pooled(shared, pooling);
         let new = |tenant| runtime.block_on(new_cell_kek(&kms, tenant)).map(|(_, kek)| kek);
         // Tenant 2, never given a KEK.
         let none = Error::Kms("tenant 2: no KEK in the KMS".into());
@@ -1909,7 +1911,7 @@ mod tests {
         assert_eq!((counted.wraps(), counted.unwraps()), (0, 3));
     }
 
-    fn made_cell(bucket: &impl Bucket, kms: &Arc<Kms>, cell: Cell, holder: u64) -> CellKeys {
+    fn made_cell(bucket: &impl Bucket, kms: &Arc<CachingKms>, cell: Cell, holder: u64) -> CellKeys {
         let kek = block_on(new_cell_kek(kms, cell.tenant)).unwrap();
         let making = Some(&kek.1);
         let (_, object) =
@@ -1923,9 +1925,9 @@ mod tests {
     }
 
     /// A host's KMS over `counted`, unwrapping anew.
-    fn kms_over(counted: &Arc<Counted<LocalKms>>) -> ((), Arc<Kms>) {
+    fn kms_over(counted: &Arc<Counted<LocalKms>>) -> ((), Arc<CachingKms>) {
         let shared: kms::Shared = counted.clone();
-        ((), Kms::new(shared))
+        ((), CachingKms::new(shared))
     }
 
     /// Whether `bytes` hold `piece` anywhere.

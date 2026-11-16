@@ -9,8 +9,8 @@ mod common;
 use common::noise;
 use extent_frame::segment::{Chain, Child, Contents, Location};
 use extent_store::{
-    Closed, Description, Dir, File as _, HostDir, MemDir, MemFile, NoSpace, Opening, Options, Part,
-    Place, RemoteData, Spent, Store, TooLong, TooSmall, Unsectored,
+    Closed, Description, Dir, File as _, HostDir, Located, MemDir, MemFile, NoSpace, Opening,
+    Options, Place, RemoteData, SpentExtent, Store, TooLong, TooSmall, Unsectored,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -59,8 +59,8 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 /// cladefs: the store in `dir`, opened where the bucket holds `state` of its branch, its writer's
 /// chain `chain` (TASK-165.9), its head naming the segments before the chain's, of its epoch.
 fn opened_on(dir: MemDir, state: extent_remote::State, chain: Chain) -> Store<MemDir> {
-    let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
-    let taken = extent_remote::Taken::of(head, &state, chain);
+    let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_segment());
+    let taken = extent_remote::TakenBranch::of(head, &state, chain);
     let keys = extent_remote::testing::ring([BRANCH]);
     let opening = Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
@@ -189,9 +189,9 @@ fn freed_extents_are_written_no_more() {
     store.write(extent(2), 0, &[2; BLOCK]).unwrap();
     store.commit(None).unwrap();
     store.free(extent(1)).unwrap();
-    error_is(store.write(extent(1), 0, &[3; BLOCK]), Spent(extent(1)));
+    error_is(store.write(extent(1), 0, &[3; BLOCK]), SpentExtent(extent(1)));
     store.commit(None).unwrap();
-    error_is(store.write(extent(1), 0, &[3; BLOCK]), Spent(extent(1)));
+    error_is(store.write(extent(1), 0, &[3; BLOCK]), SpentExtent(extent(1)));
     error_is(store.write(extent(2), 0, &[3; BLOCK]), SealedExtent(extent(2)));
 
     store.write(extent(4), 0, &[4; BLOCK]).unwrap();
@@ -202,12 +202,12 @@ fn freed_extents_are_written_no_more() {
 
     // From its deltas; then from the checkpoint that opening wrote.
     let store = reopened(store, &dir);
-    error_is(store.write(extent(1), 0, &[6; BLOCK]), Spent(extent(1)));
+    error_is(store.write(extent(1), 0, &[6; BLOCK]), SpentExtent(extent(1)));
     store.free(extent(2)).unwrap();
     store.commit(None).unwrap();
     let store = reopened(store, &dir);
     for sequence in [1, 2] {
-        error_is(store.write(extent(sequence), 0, &[6; BLOCK]), Spent(extent(sequence)));
+        error_is(store.write(extent(sequence), 0, &[6; BLOCK]), SpentExtent(extent(sequence)));
     }
     store.write(extent(3), 0, &[7; BLOCK]).unwrap();
     store.commit(None).unwrap();
@@ -350,7 +350,7 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     let blocks: Vec<_> = (1..=16).map(|sequence| (extent(sequence), BLOCK as u64)).collect();
     assert_eq!(written, blocks);
     let own = Location {
-        key: extent_key(BRANCH.cell, WRITER.epoch(), writing.footer.seq, extent(17)),
+        key: extent_key(BRANCH.cell, WRITER.epoch(), writing.footer.segment, extent(17)),
         offset: 0,
         len: 32 << 10,
     };
@@ -920,16 +920,17 @@ fn locating_parts_stored_compressed() {
     let kinds = |extent| -> Vec<&'static str> {
         (store.locate(extent, 4 * BLOCK as u64, 2 * BLOCK as u64).unwrap().iter())
             .map(|part| match part {
-                Part::Data { .. } => "data",
-                Part::Packed { .. } => "packed",
-                Part::Unpacked { .. } => "unpacked",
-                Part::Zeros(_) => "zeros",
+                Located::Data { .. } => "data",
+                Located::Packed { .. } => "packed",
+                Located::Unpacked { .. } => "unpacked",
+                Located::Zeros(_) => "zeros",
             })
             .collect()
     };
     // Both in the segment's first part, which compresses.
     assert_eq!(kinds(extent(1)), ["packed"]);
-    let [Part::Packed { part, skip, len }] = &store.locate(extent(1), 0, BLOCK as u64).unwrap()[..]
+    let [Located::Packed { part, skip, len }] =
+        &store.locate(extent(1), 0, BLOCK as u64).unwrap()[..]
     else {
         panic!("not packed");
     };
@@ -1010,7 +1011,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         first.footer,
         Footer {
             branch: BRANCH,
-            seq: 5,
+            segment: 5,
             epoch: 3,
             contents: Contents {
                 commits: vec![tag(3, 1)],
@@ -1058,7 +1059,7 @@ fn segments_close_for_the_writer_of_their_chain() {
         .unwrap();
     let closed = store.closed(usize::MAX).unwrap();
     let [second] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    assert_eq!((second.footer.seq, second.footer.epoch), (6, 3));
+    assert_eq!((second.footer.segment, second.footer.epoch), (6, 3));
     assert_eq!(
         (second.footer.contents.commits.clone(), second.footer.contents.forks.clone()),
         (
@@ -3347,7 +3348,7 @@ fn forks_take_no_id_of_their_lineage() {
     let child = extent_remote::layout::Branch { cell: elsewhere, id: BRANCH.id };
     let forked = Child { branch: child, owner: 0, point: false };
     let refused = store.commit_fork(forked).unwrap_err();
-    assert_eq!(refused.downcast_ref(), Some(&extent_store::Inherited(child)));
+    assert_eq!(refused.downcast_ref(), Some(&extent_store::InheritedId(child)));
     assert_eq!(store.epoch().unwrap(), 1);
     let other =
         Child { branch: extent_remote::layout::Branch { id: BRANCH.id + 1, ..child }, ..forked };

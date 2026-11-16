@@ -25,9 +25,9 @@
 //!   commits that stored extents on their own, which no record checks, syncs their data first,
 //!   as before. Its raw data and log go once it is
 //!   framed and the commits it names are durable, its framed file their record then.
-//! - **Its base**, `wal`: the branch's commit its first segment goes on from, which the store
-//!   writes, durably, before the segments it acknowledged leave it ([`BaseFile`]): a segment a
-//!   crash brings back, its removal not durable, whose last commit is the base's or before, is
+//! - **Its start**, `wal`: the branch's commit its first segment goes on from, which the store
+//!   writes, durably, before the segments it acknowledged leave it ([`StartFile`]): a segment a
+//!   crash brings back, its removal not durable, whose last commit is the start's or before, is
 //!   acknowledged, and goes again.
 //!
 //! Recovering it ([`recover`]) keeps each segment whose framed file is whole, and closes again
@@ -68,63 +68,63 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-/// The file of the WAL's base.
-pub(crate) const BASE: &str = "wal";
+/// The file of the WAL's start.
+pub(crate) const START: &str = "wal";
 
-/// The bytes of each of the base file's two slots: a record each, written whole or torn alone.
+/// The bytes of each of the start file's two slots: a record each, written whole or torn alone.
 const SLOT: u64 = 4096;
 
-/// A slot of the base file: the base, and the serial number of its writing, which the later
+/// A slot of the start file: the start, and the serial number of its writing, which the later
 /// writing's exceeds.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct Slot {
     serial: u64,
-    base: Option<u64>,
+    start: Option<u64>,
 }
 
-/// The WAL's base, kept durably in two slots of [`BASE`]: each writing writes the slot the latest
+/// The WAL's start, kept durably in two slots of [`START`]: each writing writes the slot the latest
 /// is not in, and syncs it, so that a writing a crash tears leaves the one before. Read, it is the
 /// whole slot of the higher serial number; none, before the first writing. Opened for each
 /// writing, which comes with an acknowledgement, rather than held open: a host serves hundreds
 /// of stores, forks most of them, which acknowledge little.
-pub(crate) struct BaseFile {
+pub(crate) struct StartFile {
     made: bool,
     serial: u64,
 }
 
-impl BaseFile {
-    /// The base file of the store in `dir`, and the base it holds.
+impl StartFile {
+    /// The start file of the store in `dir`, and the start it holds.
     pub fn read<D: Dir>(dir: &D) -> Result<(Self, Option<u64>), Error> {
-        let file = match dir.open(BASE, false) {
+        let file = match dir.open(START, false) {
             Ok(file) => file,
             Err(err) if not_found(&err) => return Ok((Self { made: false, serial: 0 }, None)),
-            Err(err) => return Err(Error::new(err).context("opening the WAL's base")),
+            Err(err) => return Err(Error::new(err).context("opening the WAL's start")),
         };
-        let bytes = read_file(&file).context("reading the WAL's base")?;
+        let bytes = read_file(&file).context("reading the WAL's start")?;
         let slots = bytes.chunks(SLOT as usize).filter_map(|slot| decode::<Slot>(slot).0.pop());
         let latest = slots.max_by_key(|slot| slot.serial);
-        let (serial, base) = latest.map_or((0, None), |slot| (slot.serial, slot.base));
-        Ok((Self { made: true, serial }, base))
+        let (serial, start) = latest.map_or((0, None), |slot| (slot.serial, slot.start));
+        Ok((Self { made: true, serial }, start))
     }
 
-    /// Writes `base`, durably, in `dir`: the file made, and its entry made durable, first if it
+    /// Writes `start`, durably, in `dir`: the file made, and its entry made durable, first if it
     /// isn't there.
-    pub fn write<D: Dir>(&mut self, dir: &D, base: Option<u64>) -> Result<(), Error> {
+    pub fn write<D: Dir>(&mut self, dir: &D, start: Option<u64>) -> Result<(), Error> {
         let file = match self.made {
-            true => dir.open(BASE, false).context("opening the WAL's base")?,
+            true => dir.open(START, false).context("opening the WAL's start")?,
             false => {
-                let file = dir.create(BASE, false).context("making the WAL's base")?;
+                let file = dir.create(START, false).context("making the WAL's start")?;
                 dir.sync_dir("")?;
                 self.made = true;
                 file
             }
         };
         let serial = self.serial + 1;
-        let record = encode(&Slot { serial, base });
-        assert!(record.len() as u64 <= SLOT, "a base's record fits its slot");
-        file.write_at(&record, (serial % 2) * SLOT).context("writing the WAL's base")?;
+        let record = encode(&Slot { serial, start });
+        assert!(record.len() as u64 <= SLOT, "a start's record fits its slot");
+        file.write_at(&record, (serial % 2) * SLOT).context("writing the WAL's start")?;
         crate::written::wrote(crate::written::Kind::Log, record.len());
-        file.sync().context("syncing the WAL's base")?;
+        file.sync().context("syncing the WAL's start")?;
         self.serial = serial;
         Ok(())
     }
@@ -433,14 +433,14 @@ impl<F: File> SegmentLog<F> {
     }
 }
 
-/// A store's WAL as its directory holds it, recovered ([`recover`]): its base; its segments,
+/// A store's WAL as its directory holds it, recovered ([`recover`]): its start; its segments,
 /// footers by their numbers, in order; and the number of the next segment, past every one the
 /// directory held. cladefs: of those, the ones closed again, not yet framed, by their numbers, with
 /// the records of their logs their footers fold, their raw files and logs still there: framed once
 /// the store's keys are known ([`Recovered::close`], TASK-411.9).
 pub(crate) struct Recovered {
-    pub base: Option<u64>,
-    pub base_file: BaseFile,
+    pub start: Option<u64>,
+    pub start_file: StartFile,
     pub segments: Vec<(Footer, u64)>,
     pub next: u64,
     pub closing: BTreeMap<u64, Vec<Contents>>,
@@ -530,7 +530,7 @@ impl Recovered {
 /// commits, to the last durable commit; and nothing else of segments: raw data, logs and framed
 /// files torn, closed again or holding nothing durable, go.
 pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Error> {
-    let (base_file, base) = BaseFile::read(dir)?;
+    let (start_file, start) = StartFile::read(dir)?;
     let listed = |kind| -> Result<BTreeSet<u64>, Error> {
         Ok(list_numbers(dir, &branch_dir(kind, branch.id))?.into_iter().collect())
     };
@@ -547,8 +547,8 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     // cladefs: the logs that are their segments' own, their headers naming them: one renamed a spare
     // and taken as another segment's log, which a crash brought back under its old name, holds none
     // of its segment's records, and says nothing of whether its segment was made durable: a
-    // segment the base acknowledged, its files' removal undone, its log a spare taken since, read as
-    // one past the base whose raw file and log are both there, broke the run of segments framed
+    // segment the start acknowledged, its files' removal undone, its log a spare taken since, read
+    // as one past the start whose raw file and log are both there, broke the run of segments framed
     // whole, those after it closed again from their raw files and logs, which they hold no more,
     // their commits lost (TASK-369, the Shuttle rounds, with the next segment's log prepared from a
     // spare as soon as it opens).
@@ -570,12 +570,12 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         }
         Ok(())
     };
-    // A log's commits the base acknowledged are the bucket's: its framed file left, its raw data
+    // A log's commits the start acknowledged are the bucket's: its framed file left, its raw data
     // and log a crash brought back, it holds nothing of the log's. cladefs: a commit's record going
     // on with it past the segment, the commit's (TASK-92.41).
-    let after_base = |records: &[Contents]| {
+    let after_start = |records: &[Contents]| {
         let last = records.iter().rev().find_map(last_commit);
-        last.is_some_and(|last| base.is_none_or(|base| epoch_of(last) > epoch_of(base)))
+        last.is_some_and(|last| start.is_none_or(|start| epoch_of(last) > epoch_of(start)))
     };
     // A segment holding nothing goes, its framed file's removal durable before its raw data's and
     // log's, as its framing was before they went: a framed file a crash kept without them, which
@@ -591,7 +591,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         remove(dir, &log_path(segment))
     };
     // What each segment holds, in order. cladefs: its framed file, whole, only while every segment
-    // before it is framed whole, or holds only commits the base acknowledged; after the first that
+    // before it is framed whole, or holds only commits the start acknowledged; after the first that
     // isn't, each whose raw file and log are both still there is closed again from them, as a
     // torn one is (TASK-310). Segments are made durable several at once, a later one's framed file
     // whole while an earlier one's is not, its commits not durable then, which its log lacks: the
@@ -606,13 +606,13 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
     // cladefs: the segments whose logs hold a record whose runs their raw data doesn't hold: its
     // commit's data not durable, the commit isn't, nor those after it (`log_records`); and those
     // which end what is durable so, holding nothing durable, their framed file not whole, nor any
-    // record: one whose raw file or log is there, past the segments the base acknowledged, made
+    // record: one whose raw file or log is there, past the segments the start acknowledged, made
     // as the next commits' flushes would have synced its entries, which no durable commit's did
-    // (TASK-334). A segment the base acknowledged, its files' removal undone, comes before those
+    // (TASK-334). A segment the start acknowledged, its files' removal undone, comes before those
     // past it.
     let mut refusing = BTreeSet::new();
     let mut ending = BTreeSet::new();
-    let mut past_base = base.is_none();
+    let mut past_start = start.is_none();
     for number in numbers {
         let segment = SegmentId { branch: branch.id, number };
         let again = broken && raw.contains(&number) && own.contains(&number);
@@ -630,27 +630,27 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             }
             _ => Vec::new(),
         };
-        // Not whole, and not one the base acknowledged, whose removal a crash undid: one whose
+        // Not whole, and not one the start acknowledged, whose removal a crash undid: one whose
         // raw file or log is gone was durable, as they go only then.
         let lost = raw.contains(&number) && own.contains(&number);
-        broken |= footer.is_none() && lost && (records.is_empty() || after_base(&records));
-        let holds_nothing = past_base && records.is_empty();
+        broken |= footer.is_none() && lost && (records.is_empty() || after_start(&records));
+        let holds_nothing = past_start && records.is_empty();
         if footer.is_none() && left(number) && (refusing.contains(&number) || holds_nothing) {
             ending.insert(number);
         }
-        past_base |= after_base(&records)
-            || footer
-                .as_ref()
-                .is_some_and(|footer| base.is_none_or(|base| footer_last(footer) > epoch_of(base)));
+        past_start |= after_start(&records)
+            || footer.as_ref().is_some_and(|footer| {
+                start.is_none_or(|start| footer_last(footer) > epoch_of(start))
+            });
         found.push(match footer {
             Some(footer) => (number, Found::Whole(footer)),
-            None if after_base(&records) => (number, Found::Torn(records)),
+            None if after_start(&records) => (number, Found::Torn(records)),
             None => (number, Found::Nothing),
         });
     }
-    // cladefs: whether the base acknowledged a segment's commits, its whole.
+    // cladefs: whether the start acknowledged a segment's commits, its whole.
     let acknowledged =
-        |footer: &Footer| base.is_some_and(|base| footer_last(footer) <= epoch_of(base));
+        |footer: &Footer| start.is_some_and(|start| footer_last(footer) <= epoch_of(start));
     // cladefs: whether the commit the segment found at `at` goes on with past it, `commit`, ends:
     // the segments after it, one after another, each going on with it, to one ending it
     // (TASK-92.41). A flush appends a commit's records to its segments' logs in their order, the
@@ -702,7 +702,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             synced()
         };
         let (mut records, unended) = match found_here {
-            // One the base acknowledged, whose files' removal a crash undid, goes below: its
+            // One the start acknowledged, whose files' removal a crash undid, goes below: its
             // commit is the bucket's, whole, whatever is left of the segments after it.
             Found::Whole(footer) => match &footer.contents.continued {
                 Some(continued) if !acknowledged(footer) && !ended(at, continued.commit) => {
@@ -727,13 +727,14 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
                 continue;
             }
             Found::Torn(records) => {
-                // cladefs: its log goes on from the last commit kept, the base's or a segment's, or
-                // it and those after go, durably: a flush appends its commits' records to the logs
-                // of their segments at once, and a crash may keep a later commit's record, in this
-                // one's log, and lose an earlier one's, in the log of a segment before, which went,
-                // holding nothing durable (TASK-334, found by TASK-310's Shuttle crash rounds).
+                // cladefs: its log goes on from the last commit kept, the start's or a segment's,
+                // or it and those after go, durably: a flush appends its commits' records to the
+                // logs of their segments at once, and a crash may keep a later commit's record, in
+                // this one's log, and lose an earlier one's, in the log of a segment before, which
+                // went, holding nothing durable (TASK-334, found by TASK-310's Shuttle crash
+                // rounds).
                 let kept = segments.last().map(|(footer, _)| footer_last(footer));
-                let kept = kept.max(base.map(epoch_of));
+                let kept = kept.max(start.map(epoch_of));
                 if let (Some(first), Some(kept)) = (first_epoch(records), kept)
                     && first > kept + 1
                 {
@@ -757,7 +758,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         if !whole && at + 1 < found.len() {
             cut(at + 1)?;
         }
-        if !after_base(&records) {
+        if !after_start(&records) {
             gone(number)?;
             break;
         }
@@ -773,7 +774,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
             break;
         }
     }
-    // Those acknowledged by the base, whose files' removal a crash undid, are the bucket's: they
+    // Those acknowledged by the start, whose files' removal a crash undid, are the bucket's: they
     // go again.
     let (gone, segments): (Vec<_>, Vec<_>) =
         segments.into_iter().partition(|(footer, _)| acknowledged(footer));
@@ -784,7 +785,7 @@ pub(crate) fn recover<D: Dir>(dir: &D, branch: Branch) -> Result<Recovered, Erro
         }
     }
     let next = (framed.iter().chain(&raw).chain(&logs)).max().map_or(0, |last| last + 1);
-    Ok(Recovered { base, base_file, segments, next, closing })
+    Ok(Recovered { start, start_file, segments, next, closing })
 }
 
 /// The footer of `segment`'s framed file, if it is whole: checked whole, data and all, if `left`,
@@ -837,7 +838,7 @@ fn first_epoch(records: &[Contents]) -> Option<u64> {
 }
 
 /// What recovery finds of a segment: its framed file whole; or not, and the records of its log,
-/// holding commits after the WAL's base, to close it again from, with its raw data; or nothing
+/// holding commits after the WAL's start, to close it again from, with its raw data; or nothing
 /// durable.
 enum Found {
     Whole(Footer),
@@ -933,7 +934,7 @@ fn closed_again(
     let first = records.first().and_then(last_commit);
     let first = first.context("a log closed again holds a commit")?;
     let mut chain = match last {
-        Some(last) => Chain::new(branch, last.epoch, last.seq + 1, last.contents.next_sequence),
+        Some(last) => Chain::new(branch, last.epoch, last.segment + 1, last.contents.next_sequence),
         None => Chain::new(branch, writer_of(first), 0, 0),
     };
     Ok(chain.close(fold(branch.id, records)))
@@ -967,20 +968,20 @@ pub(crate) struct Queued {
 }
 
 /// The WAL's segments not yet acknowledged, in order, which the uploader takes once their
-/// commits are durable and they are framed, and acknowledges in order; and its base, the branch's
+/// commits are durable and they are framed, and acknowledges in order; and its start, the branch's
 /// commit before the first, which acknowledging moves on.
 pub(crate) struct Queue {
     segments: VecDeque<Queued>,
-    base: Option<u64>,
+    start: Option<u64>,
     /// cladefs: those acknowledged that go on with a commit the next end, held until the one ending
     /// it is acknowledged too ([`Queue::acknowledge`], TASK-338).
     held: Vec<Queued>,
 }
 
 impl Queue {
-    /// A queue of `segments`, after `base`.
-    pub fn new(base: Option<u64>, segments: impl IntoIterator<Item = Queued>) -> Self {
-        Self { segments: segments.into_iter().collect(), base, held: Vec::new() }
+    /// A queue of `segments`, after `start`.
+    pub fn new(start: Option<u64>, segments: impl IntoIterator<Item = Queued>) -> Self {
+        Self { segments: segments.into_iter().collect(), start, held: Vec::new() }
     }
 
     /// Segment `number`, closed, whose footer is `footer`, holding `bytes` of data with the
@@ -989,9 +990,9 @@ impl Queue {
         self.segments.push_back(Queued::new(number, footer, false, bytes));
     }
 
-    /// The WAL's base: the branch's commit before its first segment.
-    pub fn base(&self) -> Option<u64> {
-        self.base
+    /// The WAL's start: the branch's commit before its first segment.
+    pub fn start(&self) -> Option<u64> {
+        self.start
     }
 
     /// The bytes of the segments not yet acknowledged: what the uploader's lag counts.
@@ -1029,7 +1030,7 @@ impl Queue {
     /// last commit. Returns the segments whose acknowledgements are whole now, which their store
     /// may let go of: it, and those held before it; none if it goes on with a commit, which it is
     /// held for, until the segment ending that commit is acknowledged (TASK-338). Let go of before,
-    /// its files leaving for the host's cache, the base not yet past the commit, a crash left the
+    /// its files leaving for the host's cache, the start not yet past the commit, a crash left the
     /// segments before and after it, the commit's runs in it missing, and an opening closed the
     /// commit's first segment again without it, losing it and those after, durable. None if it is
     /// not the first.
@@ -1038,7 +1039,7 @@ impl Queue {
             return None;
         }
         let queued = self.segments.pop_front().unwrap();
-        self.base = queued.footer.contents.commits.last().copied().or(self.base);
+        self.start = queued.footer.contents.commits.last().copied().or(self.start);
         let continues = queued.footer.contents.continued.is_some();
         self.held.push(queued);
         Some(if continues { Vec::new() } else { std::mem::take(&mut self.held) })
@@ -1135,21 +1136,21 @@ mod tests {
         list_numbers(dir, &branch_dir(kind, BRANCH.id)).unwrap()
     }
 
-    /// The base is the last written, whole: a writing torn leaves the one before; none before the
+    /// The start is the last written, whole: a writing torn leaves the one before; none before the
     /// first.
     #[test]
-    fn bases_are_the_last_written_whole() {
+    fn starts_are_the_last_written_whole() {
         let dir = MemDir::new();
-        let (mut file, base) = BaseFile::read(&dir).unwrap();
-        assert_eq!(base, None);
+        let (mut file, start) = StartFile::read(&dir).unwrap();
+        assert_eq!(start, None);
         for written in [Some(3), None, Some(9)] {
             file.write(&dir, written).unwrap();
-            assert_eq!(BaseFile::read(&dir).unwrap().1, written);
+            assert_eq!(StartFile::read(&dir).unwrap().1, written);
         }
         // The next writing, to the slot of `None`'s, torn.
-        let raw = dir.open(BASE, false).unwrap();
+        let raw = dir.open(START, false).unwrap();
         raw.write_at(&[0xff; 8], 0).unwrap();
-        assert_eq!(BaseFile::read(&dir).unwrap().1, Some(9));
+        assert_eq!(StartFile::read(&dir).unwrap().1, Some(9));
     }
 
     /// A segment left open closes again from its raw data and its log's whole records, their
@@ -1204,7 +1205,7 @@ mod tests {
         assert_eq!(numbers, [0, 1]);
         assert_eq!(recovered.segments[0].0, footer);
         let second = &recovered.segments[1].0;
-        assert_eq!((second.seq, second.epoch), (footer.seq + 1, footer.epoch));
+        assert_eq!((second.segment, second.epoch), (footer.segment + 1, footer.epoch));
         assert_eq!(recovered.segments[1].0.contents.commits, [tag(2, 2)]);
     }
 
@@ -1251,7 +1252,7 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// A segment the base acknowledged, its framed file gone, as acknowledging it removed it, but
+    /// A segment the start acknowledged, its framed file gone, as acknowledging it removed it, but
     /// its raw data and log a crash brought back, holds nothing of the log's: the whole segment
     /// after it is kept, not taken to follow one closed again, and dropped with the durable
     /// commits it holds (found by the kept crash rounds, TASK-165.9).
@@ -1264,9 +1265,9 @@ mod tests {
         left_open(&dir, 1, 1, &[commit(2, 2, 0)]);
         let framed = recover_closing(&dir).unwrap().segments;
         assert_eq!(framed.iter().map(|(_, number)| *number).collect::<Vec<_>>(), [0, 1]);
-        // Segment 0 acknowledged: the base names its commit, and its framed file went; a crash
+        // Segment 0 acknowledged: the start names its commit, and its framed file went; a crash
         // brought back its raw data and log, whose removals were not durable.
-        BaseFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 1))).unwrap();
+        StartFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 1))).unwrap();
         dir.remove(&segment_path(segment(0))).unwrap();
         left_open(&dir, 0, 1, &[commit(1, 1, 0)]);
         let recovered = recover_closing(&dir).unwrap();
@@ -1364,11 +1365,11 @@ mod tests {
         assert_eq!(recovered.iter().map(place).collect::<Vec<_>>(), [(0, vec![tag(2, 1)], None)]);
     }
 
-    /// cladefs: a segment going on with a commit the base acknowledged, its raw data gone, its framed
-    /// file's removal, as it left for the host's cache, and its log's undone by a crash, the segment
-    /// ending the commit gone: it goes, its commit the bucket's, whole, not taken for one going on
-    /// with a commit no segment ends, whose raw data it would close it again from (found by the
-    /// cut openings of the kept crash rounds, TASK-92.41).
+    /// cladefs: a segment going on with a commit the start acknowledged, its raw data gone, its
+    /// framed file's removal, as it left for the host's cache, and its log's undone by a crash, the
+    /// segment ending the commit gone: it goes, its commit the bucket's, whole, not taken for one
+    /// going on with a commit no segment ends, whose raw data it would close it again from (found
+    /// by the cut openings of the kept crash rounds, TASK-92.41).
     #[test]
     fn segments_going_on_with_acknowledged_commits_go() {
         let dir = MemDir::new();
@@ -1376,7 +1377,7 @@ mod tests {
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
         left_open(&dir, 1, 1, &[commit(2, 3, 0)]);
         assert_eq!(recover_closing(&dir).unwrap().segments.len(), 2);
-        BaseFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 2))).unwrap();
+        StartFile::read(&dir).unwrap().0.write(&dir, Some(tag(2, 2))).unwrap();
         dir.remove(&segment_path(segment(1))).unwrap();
         // Its log's removal undone too, not its raw data's.
         left_open(&dir, 0, 2, &[commit(1, 1, 0), continuing(2, 2, 4096)]);
@@ -1528,15 +1529,15 @@ mod tests {
         }
     }
 
-    /// cladefs: a segment the base acknowledged, its raw file brought back by a crash without its log
-    /// or framed file, breaks no run of whole framed files: the segments after it are read from
+    /// cladefs: a segment the start acknowledged, its raw file brought back by a crash without its
+    /// log or framed file, breaks no run of whole framed files: the segments after it are read from
     /// theirs, though their raw files and logs are still there, their commits durable (TASK-310).
     #[test]
     fn segments_acknowledged_brought_back_break_no_whole_run() {
         let dir = MemDir::new();
         let framed = framed_three(&dir);
-        let (mut base, _) = BaseFile::read(&dir).unwrap();
-        base.write(&dir, Some(tag(2, 2))).unwrap();
+        let (mut start, _) = StartFile::read(&dir).unwrap();
+        start.write(&dir, Some(tag(2, 2))).unwrap();
         dir.remove(&segment_path(segment(0))).unwrap();
         dir.create(&open_segment_path(segment(0)), true).unwrap();
         // Segment 2's commit after its framing, its raw file and log not gone yet.
@@ -1565,19 +1566,19 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// cladefs: a segment the base acknowledged, its framed file gone, its raw file and log back, a
-    /// crash undoing their removal, its log a spare taken since as another segment's, breaks no run
-    /// of segments framed whole: those after it are read framed, though their raw files and logs are
-    /// back too, their logs spares taken since. Its log taken for its own, holding no record, it
-    /// broke the run, and the segments after it were closed again from logs holding none of their
-    /// records, commits the uploader had lost (TASK-369, the Shuttle rounds, round
+    /// cladefs: a segment the start acknowledged, its framed file gone, its raw file and log back,
+    /// a crash undoing their removal, its log a spare taken since as another segment's, breaks no
+    /// run of segments framed whole: those after it are read framed, though their raw files and
+    /// logs are back too, their logs spares taken since. Its log taken for its own, holding no
+    /// record, it broke the run, and the segments after it were closed again from logs holding none
+    /// of their records, commits the uploader had lost (TASK-369, the Shuttle rounds, round
     /// writer_closer_and_uploader_randomly's: "uploaded commit 3 before durable").
     #[test]
     fn logs_taken_since_break_no_run_of_whole_segments() {
         let dir = MemDir::new();
         framed_three(&dir);
-        let (mut base, _) = BaseFile::read(&dir).unwrap();
-        base.write(&dir, Some(tag(2, 2))).unwrap();
+        let (mut start, _) = StartFile::read(&dir).unwrap();
+        start.write(&dir, Some(tag(2, 2))).unwrap();
         dir.remove(&segment_path(segment(0))).unwrap();
         for (number, of) in [(0, 9), (1, 8)] {
             let raw = dir.create(&open_segment_path(segment(number)), true).unwrap();
@@ -1592,16 +1593,16 @@ mod tests {
         assert_eq!((files(&dir, OPEN_SEGMENTS), files(&dir, LOGS)), (vec![], vec![]));
     }
 
-    /// cladefs: a segment left open whose log goes on from the base's commit is kept, though the
-    /// segments the base acknowledged that a crash brought back end before it: the segment of the
-    /// base's commit left for the host's cache, those before it its files' removal undone
+    /// cladefs: a segment left open whose log goes on from the start's commit is kept, though the
+    /// segments the start acknowledged that a crash brought back end before it: the segment of the
+    /// start's commit left for the host's cache, those before it its files' removal undone
     /// (TASK-334).
     #[test]
-    fn logs_following_the_base_are_kept() {
+    fn logs_following_the_start_are_kept() {
         let dir = MemDir::new();
         framed_three(&dir);
-        let (mut base, _) = BaseFile::read(&dir).unwrap();
-        base.write(&dir, Some(tag(2, 4))).unwrap();
+        let (mut start, _) = StartFile::read(&dir).unwrap();
+        start.write(&dir, Some(tag(2, 4))).unwrap();
         dir.remove(&segment_path(segment(2))).unwrap();
         left_open(&dir, 3, 1, &[commit(5, 5, 0)]);
         let recovered = recover_closing(&dir).unwrap();
@@ -1645,12 +1646,12 @@ mod tests {
     }
 
     /// The queue gives the uploader the segments that are framed, whose commits are durable, in
-    /// order, each once, and is acknowledged in order, its base moving on.
+    /// order, each once, and is acknowledged in order, its start moving on.
     #[test]
     fn queues_give_what_may_upload_in_order() {
-        let footer = |seq, epoch| Footer {
+        let footer = |segment, epoch| Footer {
             branch: BRANCH,
-            seq,
+            segment,
             epoch: 2,
             contents: Contents { commits: vec![tag(2, epoch)], ..Contents::default() },
         };
@@ -1666,20 +1667,21 @@ mod tests {
         assert_eq!(numbers(queue.take(7, |_| false, 9)), [3]);
         assert_eq!(numbers(queue.take(7, |_| false, 9)), Vec::<u64>::new());
         assert!(queue.acknowledge(2).is_none());
-        let seqs = |group: Vec<Queued>| group.iter().map(|q| q.footer.seq).collect::<Vec<_>>();
-        assert_eq!(queue.acknowledge(1).map(seqs), Some(vec![1]));
-        assert_eq!((queue.base(), queue.bytes()), (Some(tag(2, 5)), 200));
+        let segments =
+            |group: Vec<Queued>| group.iter().map(|q| q.footer.segment).collect::<Vec<_>>();
+        assert_eq!(queue.acknowledge(1).map(segments), Some(vec![1]));
+        assert_eq!((queue.start(), queue.bytes()), (Some(tag(2, 5)), 200));
     }
 
     /// cladefs: acknowledged, the segments going on with a commit are held until the one ending it
-    /// is acknowledged too, then given together, the base past the commit: let go one at a time, a
+    /// is acknowledged too, then given together, the start past the commit: let go one at a time, a
     /// crash between left a hole in the commit's segments here, which recovery read as the commit
     /// unended (TASK-338, TASK-310's crash rounds, round 65).
     #[test]
     fn queues_hold_acknowledged_segments_going_on_with_a_commit() {
-        let footer = |seq, commits: Vec<u64>, continued: Option<u64>| Footer {
+        let footer = |segment, commits: Vec<u64>, continued: Option<u64>| Footer {
             branch: BRANCH,
-            seq,
+            segment,
             epoch: 2,
             contents: Contents {
                 commits: commits.into_iter().map(|epoch| tag(2, epoch)).collect(),
@@ -1698,9 +1700,9 @@ mod tests {
         let numbers = |group: Vec<Queued>| group.iter().map(|q| q.number).collect::<Vec<_>>();
         assert_eq!(queue.acknowledge(1).map(numbers), Some(vec![1]));
         assert_eq!(queue.acknowledge(2).map(numbers), Some(vec![]));
-        assert_eq!(queue.base(), Some(tag(2, 6)));
+        assert_eq!(queue.start(), Some(tag(2, 6)));
         assert_eq!(queue.acknowledge(3).map(numbers), Some(vec![]));
         assert_eq!(queue.acknowledge(4).map(numbers), Some(vec![2, 3, 4]));
-        assert_eq!(queue.base(), Some(tag(2, 7)));
+        assert_eq!(queue.start(), Some(tag(2, 7)));
     }
 }

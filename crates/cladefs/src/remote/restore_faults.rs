@@ -176,7 +176,7 @@ impl Hosts {
         block_on(collected).unwrap_or_else(|err| panic!("{case}: the collector: {err}"));
     }
 
-    /// Asserts nothing wrote the point: no lease, but its deletion's, no segment, no checkpoint.
+    /// Asserts nothing wrote the point: no head, but its deletion's, no segment, no checkpoint.
     fn check_unwritten(&self, case: &str) {
         let keys = block_on(extent_remote::Bucket::list(&*self.bucket, "")).unwrap();
         let written = keys.iter().filter(|meta| match layout::kind(&meta.key) {
@@ -428,7 +428,7 @@ impl Hosts {
                     .unwrap()
                     .is_some_and(|record| record.deleted),
                 // cladefs: a cell's object stays, as its branches' records do, its epoch fencing
-                // its volumes' leases (TASK-364): left over only if it names a live branch.
+                // its volumes' heads (TASK-364): left over only if it names a live branch.
                 Kind::Cell { cell } => {
                     let object = block_on(extent_remote::cell::read(&*self.bucket, cell));
                     let object = object.unwrap().expect("a cell listed");
@@ -442,7 +442,7 @@ impl Hosts {
                 // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a
                 // tenant's KEK object (TASK-411.27).
                 Kind::Head { .. }
-                | Kind::GcLease { .. }
+                | Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
                 | Kind::Kek { .. }

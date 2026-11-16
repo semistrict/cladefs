@@ -487,8 +487,9 @@ impl Bucket {
             state.apply(footer);
             chain = chain.admit(footer).expect("the footers acknowledged follow each other");
         }
-        let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
-        let taken = extent_remote::Taken::of(head, &state, chain);
+        let head =
+            extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_segment());
+        let taken = extent_remote::TakenBranch::of(head, &state, chain);
         let keys = extent_remote::testing::ring([BRANCH]);
         let opening =
             Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
@@ -521,7 +522,7 @@ impl Bucket {
 
 /// cladefs: the key in the bucket of the object `closed`, a segment closed, is: its writer's.
 fn bucket_key<F>(closed: &extent_store::Closed<F>) -> String {
-    extent_remote::layout::segment(closed.footer.branch, closed.footer.seq, closed.footer.epoch)
+    extent_remote::layout::segment(closed.footer.branch, closed.footer.segment, closed.footer.epoch)
 }
 
 /// One run of writes racing commits, as a VM's requests may: a writer writes extents, in segments

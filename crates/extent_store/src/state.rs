@@ -668,7 +668,7 @@ impl<F: File> State<F> {
     /// panics unless the state is what the replay says: its extents and their lengths, its root,
     /// what it spent and its capacity (TASK-165.9's AC #5).
     pub fn closed(&mut self, footer: &extent_frame::segment::Footer) {
-        self.replay.apply_contents(footer.seq, footer.epoch, &footer.contents);
+        self.replay.apply_contents(footer.segment, footer.epoch, &footer.contents);
         // cladefs: nor a commit begun in the footers, which the open segment's ends (TASK-92.41).
         if !self.uncommitted.is_empty() || self.replay.begun.is_some() {
             return;
@@ -901,12 +901,12 @@ impl Space {
 }
 
 /// Where an open extent's data goes: segments, or a raw file of its own.
-pub(crate) enum Placement<F> {
+pub(crate) enum Packing<F> {
     Segment,
     Own(Arc<RawFile<F>>),
 }
 
-impl<F> Clone for Placement<F> {
+impl<F> Clone for Packing<F> {
     fn clone(&self) -> Self {
         match self {
             Self::Segment => Self::Segment,
@@ -938,7 +938,7 @@ pub(crate) struct Uncommitted<F> {
 /// cladefs: and the bytes its writes wrote over, in segments, which its pieces hold until it is
 /// sealed, or freed.
 struct Open<F> {
-    placement: Placement<F>,
+    packing: Packing<F>,
     opening: u64,
     overwritten: u64,
 }
@@ -952,13 +952,13 @@ impl<F> Default for Uncommitted<F> {
 
 impl<F> Uncommitted<F> {
     /// Where `extent`'s data goes, if it is open.
-    pub fn placement(&self, extent: ExtentId) -> Option<&Placement<F>> {
-        self.open.get(&extent).map(|open| &open.placement)
+    pub fn packing(&self, extent: ExtentId) -> Option<&Packing<F>> {
+        self.open.get(&extent).map(|open| &open.packing)
     }
 
     /// Where `extent`'s data goes, and its opening's number, if it is open.
-    pub fn opening(&self, extent: ExtentId) -> Option<(Placement<F>, u64)> {
-        self.open.get(&extent).map(|open| (open.placement.clone(), open.opening))
+    pub fn opening(&self, extent: ExtentId) -> Option<(Packing<F>, u64)> {
+        self.open.get(&extent).map(|open| (open.packing.clone(), open.opening))
     }
 
     /// Whether `extent` is open.
@@ -982,11 +982,11 @@ impl<F> Uncommitted<F> {
         self.open.is_empty() && self.changes.is_empty() && self.capacity.is_none()
     }
 
-    /// Opens `extent`, whose data goes as `placement` says: returns the opening's number.
-    pub fn open(&mut self, extent: ExtentId, placement: Placement<F>) -> u64 {
+    /// Opens `extent`, whose data goes as `packing` says: returns the opening's number.
+    pub fn open(&mut self, extent: ExtentId, packing: Packing<F>) -> u64 {
         self.openings += 1;
         let opening = self.openings;
-        self.open.insert(extent, Open { placement, opening, overwritten: 0 });
+        self.open.insert(extent, Open { packing, opening, overwritten: 0 });
         opening
     }
 
@@ -1016,10 +1016,10 @@ impl<F> Uncommitted<F> {
     /// `extent`, freed, is open no more: where its data went, if it was. cladefs: what its writes
     /// wrote over is let go of with the rest of what they wrote, which its free lets go of; and its
     /// raw file, if it has one, which the next commit's flush removes.
-    pub fn remove(&mut self, extent: ExtentId) -> Option<Placement<F>> {
+    pub fn remove(&mut self, extent: ExtentId) -> Option<Packing<F>> {
         let open = self.open.remove(&extent)?;
         self.overwritten -= open.overwritten;
-        Some(open.placement)
+        Some(open.packing)
     }
 
     /// The extents open, which the next commit seals, in the order they were opened. cladefs: an
@@ -1066,14 +1066,14 @@ impl<F> Uncommitted<F> {
             assert!(open.opening <= self.openings, "{extent:?} opened past the openings");
             let entry = extents.get(extent).map(Entry::into_cow);
             let data = entry.as_deref().map(|entry| (entry.len, &entry.data));
-            match (&open.placement, data) {
-                (Placement::Segment, Some((len, Data::Pieces(pieces)))) => {
+            match (&open.packing, data) {
+                (Packing::Segment, Some((len, Data::Pieces(pieces)))) => {
                     let written: u64 = pieces.iter().map(|piece| piece.len).sum();
                     let held = covered(pieces, 0, len);
                     assert_eq!(open.overwritten + held, written, "{extent:?}'s writes, open");
                 }
-                (Placement::Own(_), Some((_, Data::Own)))
-                | (Placement::Segment | Placement::Own(_), None) => {
+                (Packing::Own(_), Some((_, Data::Own)))
+                | (Packing::Segment | Packing::Own(_), None) => {
                     assert_eq!(open.overwritten, 0, "{extent:?}, in a raw file, wrote over");
                 }
                 (_, data) => panic!("{extent:?}, open, holds {data:?} where it is not placed"),

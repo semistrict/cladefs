@@ -453,7 +453,7 @@ impl World {
                 // final, fencing its writers (TASK-407), and a tenant's KEK object, for good
                 // (TASK-411.27).
                 Kind::Head { .. }
-                | Kind::GcLease { .. }
+                | Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
                 | Kind::Retired { .. }
@@ -539,7 +539,7 @@ fn forks_take_their_steps_in_order() {
     assert_eq!(traced(&[]), FORK_STEPS);
     let cleanup = traced(&[Fault::Fails("writer::acknowledge")]);
     let cleaned: Vec<_> = cleanup.into_iter().filter(|step| !FORK_STEPS.contains(step)).collect();
-    assert_eq!(cleaned, ["branch::claimed", "branch::claim_lease_ended"]);
+    assert_eq!(cleaned, ["branch::claimed", "branch::claim_head_ended"]);
 }
 
 /// A step of a fork that fails fails the fork, and what must hold holds.

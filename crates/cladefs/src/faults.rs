@@ -78,8 +78,8 @@ pub const DAEMON_STEPS: [&str; 3] = ["extentd::fork", "extentd::fork_uploaded", 
 /// order: the first two, or the next two, by whether the child has a record.
 pub const CLEANUP_STEPS: [&str; 4] = [
     "branch::claimed",
-    "branch::claim_lease_ended",
-    "branch::lease_ended",
+    "branch::claim_head_ended",
+    "branch::head_ended",
     "branch::children_recorded",
 ];
 

@@ -15,8 +15,9 @@
 //!
 //! Its segments' footers are stamped by its chain ([`Writer::chain`]): those a local store closed,
 //! framed, which it uploads as they are (a store's closed segment is the object, doc-7, decision
-//! 1), and those of batches of commits it is given ([`Batch`](crate::Batch)) alike. It takes each
-//! one way ([`Writer::add_segment`]), admitting it only if its chain would have stamped it so.
+//! 1), and those of batches of commits it is given ([`SegmentBuilder`](crate::SegmentBuilder))
+//! alike. It takes each one way ([`Writer::add_segment`]), admitting it only if its chain would
+//! have stamped it so.
 //!
 //! The bytes of the objects it uploads are read only as their uploads go ([`Body`]), within a
 //! budget it may share with other writers, a host's ([`Writer::uploading_within`]), and held only
@@ -34,7 +35,7 @@ use crate::layout::{self, Branch, Chain, Child, Footer, Location, Origin};
 use crate::moves::MovesMaps;
 use crate::record::Record;
 use crate::recovery::{self, Recovered, State};
-use crate::wal::Taken;
+use crate::wal::TakenBranch;
 use crate::{EPOCH_SHIFT, Error, branch, rules, trace};
 use futures::{StreamExt as _, TryStreamExt as _};
 use std::collections::{BTreeMap, BTreeSet};
@@ -104,7 +105,7 @@ pub struct Writer<B: Bucket> {
     /// What its uploads may hold at once, with those of the writers it shares it with.
     budget: Arc<Budget>,
     /// What it found taking the branch over: the head as it took it.
-    taken: Taken,
+    taken: TakenBranch,
     /// The head as it last swapped it, which its next swap is conditional on: one at a time.
     held: futures::lock::Mutex<Held>,
     inner: Mutex<Inner>,
@@ -155,7 +156,7 @@ impl<B: Bucket> Writer<B> {
         bucket: Arc<B>,
         branch: Branch,
         (holder, token): (u64, u64),
-        kms: &Arc<crate::keys::Kms>,
+        kms: &Arc<crate::keys::CachingKms>,
     ) -> Result<Self, Error> {
         let keys = crate::keys::taking(&*bucket, kms, branch, holder).await?;
         Self::open_keyed(bucket, branch, (holder, token), keys).await
@@ -258,8 +259,8 @@ impl<B: Bucket> Writer<B> {
         // recovered is what the head it took names, no later writer's segment among it.
         let floor = if rules().epoch_sequences { epoch << EPOCH_SHIFT } else { 0 };
         let chain = Chain::new(branch, epoch, held.head.end, state.next_sequence.max(floor));
-        let taken = Taken::of(held.head.clone(), &state, chain);
-        let checkpoint = held.head.checkpoint.map(|(seq, _)| seq);
+        let taken = TakenBranch::of(held.head.clone(), &state, chain);
+        let checkpoint = held.head.checkpoint.map(|(segment, _)| segment);
         let writer = Self {
             bucket,
             branch,
@@ -323,7 +324,7 @@ impl<B: Bucket> Writer<B> {
 
     /// What it found taking the branch over, the head as it took it: what a host's write-ahead
     /// log is put after ([`Wal::rebase`](crate::Wal::rebase)), before the writer takes a segment.
-    pub fn taken(&self) -> &Taken {
+    pub fn taken(&self) -> &TakenBranch {
         &self.taken
     }
 
@@ -365,11 +366,12 @@ impl<B: Bucket> Writer<B> {
     }
 
     /// Takes a segment, `objects`, as the next to upload ([`Writer::upload`]): one a store closed,
-    /// or a batch's ([`Batch`](crate::Batch)), closed on the writer's chain. Its footer must be the
-    /// next the chain would have stamped ([`Chain::admit`]), and the objects of the extents it says
-    /// are stored on their own must come with it, by their keys. Returns its number.
+    /// or a segment builder's ([`SegmentBuilder`](crate::SegmentBuilder)), closed on the writer's
+    /// chain. Its footer must be the next the chain would have stamped ([`Chain::admit`]), and the
+    /// objects of the extents it says are stored on their own must come with it, by their keys.
+    /// Returns its number.
     pub fn add_segment(&self, objects: Objects) -> Result<u64, Error> {
-        let Objects { footer, segment, own } = objects;
+        let Objects { footer, segment: framed, own } = objects;
         let mut inner = self.inner();
         if let Some(error) = &inner.stopped {
             return Err(error.clone());
@@ -382,34 +384,35 @@ impl<B: Bucket> Writer<B> {
             }
         }
         inner.chain = chain;
-        let seq = footer.seq;
-        inner.pending.insert(seq, Pending { footer, objects: Some((segment, own)) });
-        Ok(seq)
+        let segment = footer.segment;
+        inner.pending.insert(segment, Pending { footer, objects: Some((framed, own)) });
+        Ok(segment)
     }
 
-    /// Uploads segment `seq`: its extents stored on their own, a few at once, then it, its bytes
-    /// ending with the footer it was taken with, each at a key naming the writer's epoch, which no
-    /// other writer writes. cladefs: in a span of its own, `upload.segment`, its bucket's requests
-    /// children of it (`crate::trace`, TASK-258).
-    pub async fn upload(&self, seq: u64) -> Result<(), Error> {
+    /// Uploads segment `segment`: its extents stored on their own, a few at once, then it, its
+    /// bytes ending with the footer it was taken with, each at a key naming the writer's epoch,
+    /// which no other writer writes. cladefs: in a span of its own, `upload.segment`, its bucket's
+    /// requests children of it (`crate::trace`, TASK-258).
+    pub async fn upload(&self, segment: u64) -> Result<(), Error> {
         let span = trace::Span::start("upload.segment");
         span.set_branch(self.branch);
-        span.set_count(trace::SEGMENT, seq);
-        let uploaded = span.around(self.upload_segment(seq, &span)).await;
+        span.set_count(trace::SEGMENT, segment);
+        let uploaded = span.around(self.upload_segment(segment, &span)).await;
         span.result(&uploaded);
         uploaded
     }
 
-    /// Uploads segment `seq`, as [`Writer::upload`] says, saying its extents and bytes on `span`.
-    async fn upload_segment(&self, seq: u64, span: &trace::Span) -> Result<(), Error> {
-        let Some((footer, segment, own)) = self.inner().pending.get(&seq).and_then(|pending| {
-            let (segment, own) = pending.objects.clone()?;
-            Some((pending.footer.clone(), segment, own))
+    /// Uploads segment `segment`, as [`Writer::upload`] says, saying its extents and bytes on
+    /// `span`.
+    async fn upload_segment(&self, segment: u64, span: &trace::Span) -> Result<(), Error> {
+        let Some((footer, framed, own)) = self.inner().pending.get(&segment).and_then(|pending| {
+            let (framed, own) = pending.objects.clone()?;
+            Some((pending.footer.clone(), framed, own))
         }) else {
             return Ok(());
         };
         span.set_count(trace::EXTENTS, own.len() as u64);
-        let bytes = segment.len + own.iter().map(|(_, body)| body.len).sum::<u64>();
+        let bytes = framed.len + own.iter().map(|(_, body)| body.len).sum::<u64>();
         span.set_count(trace::BYTES, bytes);
         // Its extents of their own, a few at once, then it.
         let creates = futures::stream::iter(own).map(|(key, body)| async move {
@@ -422,7 +425,7 @@ impl<B: Bucket> Writer<B> {
         if let Err(error) = creates.buffer_unordered(OWN_AT_ONCE).try_collect::<()>().await {
             return Err(self.stop(error));
         }
-        let key = layout::segment(self.branch, seq, self.epoch);
+        let key = layout::segment(self.branch, segment, self.epoch);
         let keys = self.keys.of(self.branch.id);
         let read = |bytes: &[u8]| layout::footer_under::<Footer>(bytes, &keys);
         let taken = |bytes: &[u8]| match read(bytes)? == footer {
@@ -430,12 +433,12 @@ impl<B: Bucket> Writer<B> {
             false => Err(Error::Corrupt(format!("{key} ends with another footer than taken"))),
         };
         failpoint!("writer::upload");
-        match self.create(&key, &segment, taken).await {
+        match self.create(&key, &framed, taken).await {
             Err(error) => Err(self.stop(error)),
             Ok(Created::Created) => {
                 failpoint!("writer::uploaded");
                 // Its objects, uploaded, go.
-                if let Some(pending) = self.inner().pending.get_mut(&seq) {
+                if let Some(pending) = self.inner().pending.get_mut(&segment) {
                     pending.objects = None;
                 }
                 Ok(())
@@ -581,8 +584,8 @@ impl<B: Bucket> Writer<B> {
             debug_assert!(inner.state.begun.is_none(), "a checkpoint of a commit begun");
             inner.state.clone()
         };
-        let seq = state.through.unwrap();
-        span.set_count(trace::SEGMENT, seq);
+        let segment = state.through.unwrap();
+        span.set_count(trace::SEGMENT, segment);
         span.set_count(trace::EXTENTS, state.extents.len() as u64);
         // Forks whose children were deleted. Their records stay; their forks need not. Of a few
         // forks' children each checkpoint, in turn, after those the last looked at: every child's,
@@ -634,16 +637,16 @@ impl<B: Bucket> Writer<B> {
         }
         state.forks.retain(|fork| !gone.contains(&fork.child));
         failpoint!("writer::checkpoint");
-        let key = layout::checkpoint(self.branch, seq, self.epoch);
+        let key = layout::checkpoint(self.branch, segment, self.epoch);
         // One this writer wrote before, of the same segment, holds the same extents, perhaps
         // elsewhere: it stands, at its key, written once.
         let checkpoint = crate::checkpoint::encode(&state, self.keys.encrypting());
         bucket::create(&*self.bucket, &key, checkpoint).await;
         {
             let mut held = self.held.lock().await;
-            if held.head.checkpoint.is_none_or(|(at, _)| at < seq) {
+            if held.head.checkpoint.is_none_or(|(at, _)| at < segment) {
                 let next =
-                    layout::Head { checkpoint: Some((seq, self.epoch)), ..held.head.clone() };
+                    layout::Head { checkpoint: Some((segment, self.epoch)), ..held.head.clone() };
                 match head::swap(&*self.bucket, self.branch, &held, next).await {
                     Ok(swapped) => *held = swapped,
                     Err(error) => return Err(self.stop(error)),
@@ -657,7 +660,7 @@ impl<B: Bucket> Writer<B> {
         let mut inner = self.inner();
         inner.state.forks.retain(|fork| !gone.contains(&fork.child));
         inner.looked = looked.or(inner.looked);
-        inner.checkpoint = inner.checkpoint.max(Some(seq));
+        inner.checkpoint = inner.checkpoint.max(Some(segment));
         Ok(inner.checkpoint)
     }
 
@@ -686,7 +689,7 @@ impl<B: Bucket> Writer<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch::{Batch, Commit};
+    use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::test_branch;
     use crate::layout::{Contents, Segment, child};
     use crate::store::{Request, Store};
@@ -699,7 +702,9 @@ mod tests {
     /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
     fn add(writer: &Writer<Store>, commit: Commit) -> Result<u64, Error> {
         writer.add_segment(
-            Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting()),
+            SegmentBuilder::from(commit)
+                .close(&mut writer.chain())
+                .frame(writer.keys().encrypting()),
         )
     }
 
@@ -712,8 +717,8 @@ mod tests {
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let first = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let _second = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
-            let seq = add(&first, Commit { tag: 1, ..Commit::default() }).unwrap();
-            assert_eq!(first.upload(seq).await, Ok(()));
+            let segment = add(&first, Commit { tag: 1, ..Commit::default() }).unwrap();
+            assert_eq!(first.upload(segment).await, Ok(()));
             assert_eq!(first.acknowledge().await, Err(Error::Fenced));
             assert_eq!(first.stopped(), Some(Error::Fenced));
             assert_eq!(add(&first, Commit { tag: 2, ..Commit::default() }), Err(Error::Fenced));
@@ -730,10 +735,14 @@ mod tests {
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let first = writer.chain().next_sequence();
             let (again, other) = (ExtentId::new(1, first), ExtentId::new(1, first + 1));
-            let again_key =
-                layout::extent(layout::TEST_CELL, writer.epoch(), writer.chain().next_seq(), again);
+            let again_key = layout::extent(
+                layout::TEST_CELL,
+                writer.epoch(),
+                writer.chain().next_segment(),
+                again,
+            );
             let own = vec![(again.sequence, b"again".to_vec())];
-            let objects = Batch::from(Commit { tag: 1, own, ..Commit::default() })
+            let objects = SegmentBuilder::from(Commit { tag: 1, own, ..Commit::default() })
                 .close(&mut writer.chain())
                 .frame(writer.keys().encrypting());
             // Its bytes, as this writer uploads them, there before: its own, landed though its
@@ -741,12 +750,16 @@ mod tests {
             let [(key, again_bytes)] = &objects.own[..] else { panic!("one of its own") };
             assert_eq!(key, &again_key);
             bucket::create(&*bucket, &again_key, again_bytes.read().unwrap()).await;
-            let seq = writer.add_segment(objects).unwrap();
-            assert_eq!(writer.upload(seq).await, Ok(()));
-            assert_eq!(writer.acknowledge().await, Ok(Some(seq)));
+            let segment = writer.add_segment(objects).unwrap();
+            assert_eq!(writer.upload(segment).await, Ok(()));
+            assert_eq!(writer.acknowledge().await, Ok(Some(segment)));
 
-            let other_key =
-                layout::extent(layout::TEST_CELL, writer.epoch(), writer.chain().next_seq(), other);
+            let other_key = layout::extent(
+                layout::TEST_CELL,
+                writer.epoch(),
+                writer.chain().next_segment(),
+                other,
+            );
             bucket::create(
                 &*bucket,
                 &other_key,
@@ -758,9 +771,9 @@ mod tests {
             )
             .await;
             let own = vec![(other.sequence, b"other".to_vec())];
-            let seq = add(&writer, Commit { tag: 2, own, ..Commit::default() }).unwrap();
+            let segment = add(&writer, Commit { tag: 2, own, ..Commit::default() }).unwrap();
             let corrupt = Error::Corrupt(format!("{other_key} holds another extent"));
-            assert_eq!(writer.upload(seq).await, Err(corrupt.clone()));
+            assert_eq!(writer.upload(segment).await, Err(corrupt.clone()));
             assert_eq!(writer.stopped(), Some(corrupt));
         });
     }
@@ -777,9 +790,9 @@ mod tests {
             let first = writer.chain().next_sequence();
             for n in 0..64 {
                 let extents = vec![(ExtentId::new(1, first + n), b"segment".to_vec())];
-                let seq =
+                let segment =
                     add(&writer, Commit { tag: n + 1, extents, ..Commit::default() }).unwrap();
-                writer.upload(seq).await.unwrap();
+                writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
             }
             let before = bucket.stats();
@@ -808,10 +821,12 @@ mod tests {
         let first = writer.chain().next_sequence();
         let own = (0..2 * OWN_AT_ONCE as u64 + 1).map(|n| (first + n, vec![n as u8; 10])).collect();
         let commit = Commit { tag: 1, own, ..Commit::default() };
-        let seq = writer.add_segment(
-            Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting()),
+        let segment = writer.add_segment(
+            SegmentBuilder::from(commit)
+                .close(&mut writer.chain())
+                .frame(writer.keys().encrypting()),
         );
-        let mut upload = std::pin::pin!(writer.upload(seq.unwrap()));
+        let mut upload = std::pin::pin!(writer.upload(segment.unwrap()));
         let mut context = Context::from_waker(futures::task::noop_waker_ref());
         // The most creates waiting at once.
         let mut most = 0;
@@ -839,12 +854,12 @@ mod tests {
             (2..2 + 2 * RECORDS_AT_ONCE as u64 + 1).map(|id| child(test_branch(id))).collect();
         let footer = writer.chain().close(Contents { forks: children, ..Contents::default() });
         let segment = Segment { data: Vec::new(), footer: footer.clone() };
-        let seq = writer.add_segment(Objects {
+        let segment = writer.add_segment(Objects {
             footer,
             segment: segment.encode(writer.keys().encrypting()).into(),
             own: Vec::new(),
         });
-        bucket.served(writer.upload(seq.unwrap())).0.unwrap();
+        bucket.served(writer.upload(segment.unwrap())).0.unwrap();
         let mut context = Context::from_waker(futures::task::noop_waker_ref());
         // The most requests waiting at once, until `future` is done.
         let mut most_waiting = |future: std::pin::Pin<&mut dyn Future<Output = _>>| {
@@ -881,13 +896,13 @@ mod tests {
             let mut most = 0;
             let mut first = None;
             for n in 0..FORKS {
-                let batch = Batch::from(Commit { tag: n + 1, ..Commit::default() });
+                let batch = SegmentBuilder::from(Commit { tag: n + 1, ..Commit::default() });
                 let forked = batch
                     .fork(child(test_branch(2 + n)), &mut writer.chain())
                     .frame(writer.keys().encrypting());
-                let seq = writer.add_segment(forked).unwrap();
-                first.get_or_insert(seq);
-                writer.upload(seq).await.unwrap();
+                let segment = writer.add_segment(forked).unwrap();
+                first.get_or_insert(segment);
+                writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
                 let before = bucket.stats().requests(Request::Get);
                 writer.checkpoint().await.unwrap();
@@ -909,8 +924,9 @@ mod tests {
             .unwrap();
             let forks = |writer: &Writer<Store>| writer.inner().state.forks.len() as u64;
             for n in 0..FORKS / RECORDS_AT_ONCE as u64 {
-                let seq = add(&writer, Commit { tag: FORKS + n + 1, ..Commit::default() }).unwrap();
-                writer.upload(seq).await.unwrap();
+                let segment =
+                    add(&writer, Commit { tag: FORKS + n + 1, ..Commit::default() }).unwrap();
+                writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
                 writer.checkpoint().await.unwrap();
             }
@@ -933,19 +949,21 @@ mod tests {
         let writer = writer.uploading_within(Budget::new(Limits { requests: 1, bytes: u64::MAX }));
         // Two segments, a commit's each, whose reads are noted.
         let reads = Arc::new(Mutex::new(Vec::new()));
-        let mut seqs = Vec::new();
+        let mut segments = Vec::new();
         for tag in 1..=2 {
             let commit = Commit { tag, ..Commit::default() };
-            let Objects { footer, segment, own } =
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting());
+            let Objects { footer, segment, own } = SegmentBuilder::from(commit)
+                .close(&mut writer.chain())
+                .frame(writer.keys().encrypting());
             let reads = reads.clone();
             let segment = Body::new(10, move || {
                 reads.lock().unwrap().push(tag);
                 segment.read()
             });
-            seqs.push(writer.add_segment(Objects { footer, segment, own }).unwrap());
+            segments.push(writer.add_segment(Objects { footer, segment, own }).unwrap());
         }
-        let uploads = futures::future::join_all(seqs.iter().map(|&seq| writer.upload(seq)));
+        let uploads =
+            futures::future::join_all(segments.iter().map(|&segment| writer.upload(segment)));
         let mut uploads = std::pin::pin!(uploads);
         let mut context = Context::from_waker(futures::task::noop_waker_ref());
         let mut uploading = || match uploads.as_mut().poll(&mut context) {
@@ -971,14 +989,16 @@ mod tests {
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let close = |tag| {
                 let commit = Commit { tag, ..Commit::default() };
-                Batch::from(commit).close(&mut writer.chain()).frame(writer.keys().encrypting())
+                SegmentBuilder::from(commit)
+                    .close(&mut writer.chain())
+                    .frame(writer.keys().encrypting())
             };
             let Objects { footer, own, .. } = close(1);
             let objects = Objects { footer, segment: close(2).segment, own };
-            let seq = writer.add_segment(objects).unwrap();
-            let key = layout::segment(test_branch(1), seq, 1);
+            let segment = writer.add_segment(objects).unwrap();
+            let key = layout::segment(test_branch(1), segment, 1);
             let corrupt = Error::Corrupt(format!("{key} ends with another footer than taken"));
-            assert_eq!(writer.upload(seq).await, Err(corrupt.clone()));
+            assert_eq!(writer.upload(segment).await, Err(corrupt.clone()));
             assert_eq!(writer.stopped(), Some(corrupt));
             assert_eq!(bucket.head(&key).await.map(|_| ()), Err(bucket::Error::NotFound));
         });
@@ -997,11 +1017,11 @@ mod tests {
             Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
         });
         let commit = |tag| {
-            let objects = Batch::from(Commit { tag, ..Commit::default() })
+            let objects = SegmentBuilder::from(Commit { tag, ..Commit::default() })
                 .close(&mut first.chain())
                 .frame(first.keys().encrypting());
-            let seq = first.add_segment(objects).unwrap();
-            bucket.served(first.upload(seq)).0.unwrap();
+            let segment = first.add_segment(objects).unwrap();
+            bucket.served(first.upload(segment)).0.unwrap();
             bucket.served(first.acknowledge()).0.unwrap();
         };
         commit(1);
@@ -1015,8 +1035,12 @@ mod tests {
         let (second, rounds) = bucket.served_in_rounds(opening);
         let second = second.unwrap();
         assert_eq!(second.last_commit(), Some(2));
-        let tail = |seq| {
-            format!("get {} last {}", layout::segment(test_branch(1), seq, 1), crate::object::TAIL)
+        let tail = |segment| {
+            format!(
+                "get {} last {}",
+                layout::segment(test_branch(1), segment, 1),
+                crate::object::TAIL
+            )
         };
         let head = layout::head(test_branch(1));
         let record_key = layout::record(test_branch(1));
@@ -1066,7 +1090,7 @@ mod tests {
         let second = second.unwrap();
         assert_eq!(second.epoch(), 2);
         assert_eq!(rounds[0], [format!("put {head}")]);
-        // A read of the lease, then another writer's taking of it, then the opening.
+        // A read of the head, then another writer's taking of it, then the opening.
         let (record, before, read) = found();
         let (third, _) = bucket.served(Writer::open(bucket.clone(), test_branch(1), 12, 0));
         assert_eq!(third.unwrap().epoch(), 3);
@@ -1092,9 +1116,9 @@ mod tests {
             let bucket = memory();
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
-            let seq = writer.checkpoint().await.unwrap();
+            let segment = writer.checkpoint().await.unwrap();
             let requests = bucket.stats().requests;
-            assert_eq!(writer.checkpoint().await, Ok(seq));
+            assert_eq!(writer.checkpoint().await, Ok(segment));
             assert_eq!(bucket.stats().requests, requests);
         });
     }
@@ -1109,12 +1133,12 @@ mod tests {
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let chain = writer.chain();
-            let seq = chain.next_seq();
+            let segment = chain.next_segment();
             let (small, large) = (ExtentId::new(1, 2), ExtentId::new(1, 3));
-            let own_key = layout::extent(layout::TEST_CELL, writer.epoch(), seq, large);
+            let own_key = layout::extent(layout::TEST_CELL, writer.epoch(), segment, large);
             let footer = Footer {
                 branch: test_branch(1),
-                seq,
+                segment,
                 epoch: writer.epoch(),
                 contents: Contents {
                     commits: vec![7],
@@ -1128,7 +1152,7 @@ mod tests {
                     continued: None,
                 },
             };
-            let segment = |footer: &Footer| -> Vec<u8> {
+            let encoded = |footer: &Footer| -> Vec<u8> {
                 Segment { data: b"abc".to_vec(), footer: footer.clone() }
                     .encode(writer.keys().encrypting())
             };
@@ -1136,18 +1160,18 @@ mod tests {
             let owns = || vec![(own_key.clone(), own.clone().into())];
             let objects = |footer: &Footer, own| Objects {
                 footer: footer.clone(),
-                segment: segment(footer).into(),
+                segment: encoded(footer).into(),
                 own,
             };
-            let elsewhere = layout::extent(layout::TEST_CELL, writer.epoch() + 1, seq, large);
+            let elsewhere = layout::extent(layout::TEST_CELL, writer.epoch() + 1, segment, large);
             // Its chain's next place: segment 0 of epoch 1, the head's end.
-            assert_eq!((writer.epoch(), seq), (1, 0));
+            assert_eq!((writer.epoch(), segment), (1, 0));
             let wanted = format!("{:?}", (test_branch(1), 0, 1));
             let misplaced = |place: &str| {
                 Error::Corrupt(format!("a segment of branch 1/1/1, {place}, not {wanted}"))
             };
             for (wrong, refused) in [
-                (Footer { seq: seq + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),
+                (Footer { segment: segment + 1, ..footer.clone() }, misplaced("number 1, epoch 1")),
                 (
                     Footer { epoch: writer.epoch() + 1, ..footer.clone() },
                     misplaced("number 0, epoch 2"),
@@ -1162,16 +1186,16 @@ mod tests {
             assert_eq!(writer.add_segment(objects(&footer, vec![])), Err(missing));
             assert_eq!(writer.chain(), chain);
             // Its bytes, encrypted once, under a salt of their own (TASK-411.28).
-            let ours = segment(&footer);
+            let ours = encoded(&footer);
             let taken =
                 Objects { footer: footer.clone(), segment: ours.clone().into(), own: owns() };
-            assert_eq!(writer.add_segment(taken), Ok(seq));
+            assert_eq!(writer.add_segment(taken), Ok(segment));
             let chain = writer.chain();
-            assert_eq!(chain.next_seq(), seq + 1);
-            writer.upload(seq).await.unwrap();
-            assert_eq!(writer.acknowledge().await, Ok(Some(seq)));
+            assert_eq!(chain.next_segment(), segment + 1);
+            writer.upload(segment).await.unwrap();
+            assert_eq!(writer.acknowledge().await, Ok(Some(segment)));
             let object =
-                bucket::get(&*bucket, &layout::segment(test_branch(1), seq, 1)).await.unwrap();
+                bucket::get(&*bucket, &layout::segment(test_branch(1), segment, 1)).await.unwrap();
             assert_eq!(object.bytes, ours);
             let object = bucket::get(&*bucket, &own_key).await.unwrap();
             assert_eq!(object.bytes, own);

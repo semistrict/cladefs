@@ -23,7 +23,7 @@ pub(crate) enum Kind {
     Framed,
     /// Extents stored in files of their own, framed as they are sealed: large ones.
     Own,
-    /// The segments' logs of the commits in them, and the write-ahead log's base.
+    /// The segments' logs of the commits in them, and the write-ahead log's start.
     Log,
 }
 

@@ -30,7 +30,7 @@ pub use extent_frame::segment::{
 /// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
-/// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`gc_lease`],
+/// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
 /// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
 /// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
 /// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
@@ -67,13 +67,13 @@ pub fn segments(branch: Branch) -> String {
     format!("{}segments/{:016x}/", branch.cell.prefix(), branch.id)
 }
 
-/// Segment `seq` of `branch` by the writer of lease epoch `epoch`: `seq` counts from 0 without
+/// Segment `segment` of `branch` by the writer of epoch `epoch`: `segment` counts from 0 without
 /// gaps, and a writer writes each of its numbers once, so that no key is written twice; the segment
 /// is the branch's once its head names it ([`Head`], TASK-407). The epoch first, as an extent's
 /// key has it: a writer's keys share all but their numbers, which a checkpoint's table, keeping
 /// keys front-coded, stores once.
-pub fn segment(branch: Branch, seq: u64, epoch: u64) -> String {
-    format!("{}{:016x}.{seq:016x}", segments(branch), keyed(epoch))
+pub fn segment(branch: Branch, segment: u64, epoch: u64) -> String {
+    format!("{}{:016x}.{segment:016x}", segments(branch), keyed(epoch))
 }
 
 /// The epoch a key names: its writer's (rule `epoch_keys`); without the rule, none, every writer's
@@ -87,19 +87,19 @@ pub fn extents(branch: Branch) -> String {
 }
 
 /// The object of an extent of `cell`'s stored on its own, uploaded by the writer of epoch `epoch`
-/// before its segment `seq`, which names it.
-pub fn extent(cell: Cell, epoch: u64, seq: u64, extent: ExtentId) -> String {
-    extent_frame::segment::extent_key(cell, epoch, seq, extent)
+/// before its segment `segment`, which names it.
+pub fn extent(cell: Cell, epoch: u64, segment: u64, extent: ExtentId) -> String {
+    extent_frame::segment::extent_key(cell, epoch, segment, extent)
 }
 
 pub fn checkpoints(branch: Branch) -> String {
     format!("{}checkpoints/{:016x}/", branch.cell.prefix(), branch.id)
 }
 
-/// The checkpoint of `branch` as of its segment `seq`, by the writer of lease epoch `epoch`: the
+/// The checkpoint of `branch` as of its segment `segment`, by the writer of epoch `epoch`: the
 /// branch's newest once its head names it ([`Head::checkpoint`], TASK-407).
-pub fn checkpoint(branch: Branch, seq: u64, epoch: u64) -> String {
-    format!("{}{:016x}.{seq:016x}", checkpoints(branch), keyed(epoch))
+pub fn checkpoint(branch: Branch, segment: u64, epoch: u64) -> String {
+    format!("{}{:016x}.{segment:016x}", checkpoints(branch), keyed(epoch))
 }
 
 /// cladefs: the prefix of the records of `cell`'s branches.
@@ -111,7 +111,7 @@ pub fn record(branch: Branch) -> String {
     format!("{}{:016x}", records(branch.cell), branch.id)
 }
 
-/// The head of `branch` ([`Head`]): its writer's lease, the segments it holds and its newest
+/// The head of `branch` ([`Head`]): its writer's taking, the segments it holds and its newest
 /// checkpoint, swapped with a condition (TASK-407).
 pub fn head(branch: Branch) -> String {
     format!("{}heads/{:016x}", branch.cell.prefix(), branch.id)
@@ -213,9 +213,9 @@ pub fn moved_from(key: &str) -> Option<String> {
 }
 
 /// cladefs: the collector's lease over `cell`, which its passes over the cell take (doc-7, Garbage
-/// collection; TASK-395.2), a [`crate::passed::GcLease`]: passes over other cells run beside them,
-/// unfenced.
-pub fn gc_lease(cell: Cell) -> String {
+/// collection; TASK-395.2), a [`crate::passed::CollectorLease`]: passes over other
+/// cells run beside them, unfenced.
+pub fn collector_lease(cell: Cell) -> String {
     format!("{}{GC_LEASE}", cell.prefix())
 }
 
@@ -318,24 +318,24 @@ pub fn further(key: &str, later: &str) -> bool {
 }
 
 /// What kind of object a key names, and what its key says. cladefs: an extent's says the segment
-/// that names it, `seq`, of the writer of `epoch`, which uploaded it before: what it may yet be
+/// that names it, `segment`, of the writer of `epoch`, which uploaded it before: what it may yet be
 /// named by, as its writer declares it (TASK-79.3, TASK-153.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind<'a> {
     Segment {
         branch: Branch,
-        seq: u64,
+        segment: u64,
         epoch: u64,
     },
     Extent {
         branch: Branch,
         epoch: u64,
-        seq: u64,
+        segment: u64,
         sequence: u64,
     },
     Checkpoint {
         branch: Branch,
-        seq: u64,
+        segment: u64,
         epoch: u64,
     },
     Record {
@@ -358,7 +358,7 @@ pub enum Kind<'a> {
         tenant: u64,
     },
     /// cladefs: the collector's lease over a cell ([`gc_lease`]).
-    GcLease {
+    CollectorLease {
         cell: Cell,
     },
     /// cladefs: a mark-only pass's word that it marks the bucket ([`MARKING`]).
@@ -404,7 +404,7 @@ impl Kind<'_> {
             Self::Cell { .. } => "cell",
             Self::ObjectIds { .. } => "objectid",
             Self::Kek { .. } => "kek",
-            Self::GcLease { .. } => "gc-lease",
+            Self::CollectorLease { .. } => "gc-lease",
             Self::Marks { .. } => "marks",
             Self::Marking => "marking",
             Self::Moves { .. } => "moves",
@@ -427,7 +427,9 @@ pub fn owner(key: &str) -> Option<Cell> {
         | Kind::Head { branch }
         | Kind::Reference { parent: branch, .. }
         | Kind::Retired { parent: branch, .. } => Some(branch.cell),
-        Kind::Cell { cell } | Kind::GcLease { cell } | Kind::Marks { cell, .. } => Some(cell),
+        Kind::Cell { cell } | Kind::CollectorLease { cell } | Kind::Marks { cell, .. } => {
+            Some(cell)
+        }
         Kind::Moves { cell, .. } => Some(cell),
         Kind::ObjectIds { .. } | Kind::Kek { .. } | Kind::Marking | Kind::Unknown => None,
     }
@@ -461,7 +463,7 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         if let Some(rest) = rest.strip_prefix(GC) {
             if rest == GC_LEASE.strip_prefix(GC)? {
-                return Some(Kind::GcLease { cell });
+                return Some(Kind::CollectorLease { cell });
             }
             let epoch = rest.strip_prefix(GC_MARKS.strip_prefix(GC)?)?;
             return Some(Kind::Marks { cell, epoch: hex(epoch)? });
@@ -496,26 +498,26 @@ pub fn kind(key: &str) -> Kind<'_> {
         }
         // A segment's or a checkpoint's key: its writer's epoch, then its number.
         let numbered = |rest: &str| -> Option<(u64, u64)> {
-            let (epoch, seq) = rest.split_once('.')?;
-            Some((hex(seq)?, hex(epoch)?))
+            let (epoch, segment) = rest.split_once('.')?;
+            Some((hex(segment)?, hex(epoch)?))
         };
         if let Some(rest) = rest.strip_prefix("segments/") {
             let (id, rest) = rest.split_once('/')?;
-            let (seq, epoch) = numbered(rest)?;
-            return Some(Kind::Segment { branch: branch(id)?, seq, epoch });
+            let (segment, epoch) = numbered(rest)?;
+            return Some(Kind::Segment { branch: branch(id)?, segment, epoch });
         }
         if let Some(rest) = rest.strip_prefix("checkpoints/") {
             let (id, rest) = rest.split_once('/')?;
-            let (seq, epoch) = numbered(rest)?;
-            return Some(Kind::Checkpoint { branch: branch(id)?, seq, epoch });
+            let (segment, epoch) = numbered(rest)?;
+            return Some(Kind::Checkpoint { branch: branch(id)?, segment, epoch });
         }
         if let Some(rest) = rest.strip_prefix("extents/") {
             let (id, rest) = rest.split_once('/')?;
-            let [epoch, seq, sequence] = rest.split('.').collect::<Vec<_>>()[..] else {
+            let [epoch, segment, sequence] = rest.split('.').collect::<Vec<_>>()[..] else {
                 return None;
             };
-            let (epoch, seq, sequence) = (hex(epoch)?, hex(seq)?, hex(sequence)?);
-            return Some(Kind::Extent { branch: branch(id)?, epoch, seq, sequence });
+            let (epoch, segment, sequence) = (hex(epoch)?, hex(segment)?, hex(sequence)?);
+            return Some(Kind::Extent { branch: branch(id)?, epoch, segment, sequence });
         }
         None
     };
@@ -573,21 +575,22 @@ pub struct Origin {
     pub at: u64,
 }
 
-/// A branch's head (TASK-407): its writer's lease, the taking of the epoch after its last, by
-/// `holder`, of the placement whose fencing token is `token`; and what the branch holds, its
-/// segments to `end` and its newest checkpoint. Swapped with a condition (S3 If-Match, GCS
-/// generation), by its writer alone while it holds it: a segment or a checkpoint is the branch's
-/// only once the head names it, so that one its writer uploaded, taken over before it swapped the
-/// head, never is, nor ever will be, and the collector deletes it. A takeover swaps it to the next
-/// epoch, which fences the writer before: its next swap fails. A head of [`Head::FINAL`] is a
-/// deleted branch's: no writer takes it again. Heads are never deleted.
+/// A branch's head (TASK-407): its writer's taking, of the epoch after the taking before, by
+/// `holder`, with the fencing token `token`; and what the branch holds, its segments to `end` and
+/// its newest checkpoint. Swapped with a condition (S3 If-Match, GCS generation), by its writer
+/// alone while it holds it: a segment or a checkpoint is the branch's only once the head names it,
+/// so that one its writer uploaded, taken over before it swapped the head, never is, nor ever will
+/// be, and the collector deletes it. A takeover swaps it to the next epoch, which fences the writer
+/// before: its next swap fails. A head of [`Head::FINAL`] is a deleted branch's: no writer takes it
+/// again. Heads are never deleted.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Head {
     pub epoch: u64,
     /// Who took it: unique to each taking, so that a write of it is recognised.
     pub holder: u64,
-    /// The fencing token of the placement that took it: a branch's writer's placement's boot ID,
-    /// which a later placement's exceeds, and which no lower one takes the head from (TASK-39.7).
+    /// The fencing token it was taken with, which no lower one takes the head from (TASK-39.7): the
+    /// epoch of the taking of the branch's cell by its writer's placement ([`crate::cell::Held`],
+    /// TASK-364), which a later taking of the cell exceeds; `u64::MAX` once deleted.
     pub token: u64,
     /// The number of segments the branch holds: 0 to `end`, without gaps.
     pub end: u64,
@@ -606,28 +609,29 @@ impl Head {
         decode(bytes)
     }
 
-    /// The epoch of the writer of segment `seq`, if the head names it.
-    pub fn epoch_of(&self, seq: u64) -> Option<u64> {
-        if seq >= self.end {
+    /// The epoch of the writer of segment `segment`, if the head names it.
+    pub fn epoch_of(&self, segment: u64) -> Option<u64> {
+        if segment >= self.end {
             return None;
         }
-        let run = self.runs.partition_point(|&(from, _)| from <= seq);
+        let run = self.runs.partition_point(|&(from, _)| from <= segment);
         run.checked_sub(1).map(|run| self.runs[run].1)
     }
 
-    /// The segments the head names from `seq` on, each by its number and its writer's epoch.
-    pub fn segments(&self, seq: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        (seq..self.end).map(|seq| (seq, self.epoch_of(seq).expect("runs name every segment")))
+    /// The segments the head names from `segment` on, each by its number and its writer's epoch.
+    pub fn segments(&self, segment: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
+        (segment..self.end)
+            .map(|segment| (segment, self.epoch_of(segment).expect("runs name every segment")))
     }
 
-    /// The key of segment `seq` of `branch`, if the head names it.
-    pub fn segment(&self, branch: Branch, seq: u64) -> Option<String> {
-        self.epoch_of(seq).map(|epoch| segment(branch, seq, epoch))
+    /// The key of segment `segment` of `branch`, if the head names it.
+    pub fn segment(&self, branch: Branch, segment: u64) -> Option<String> {
+        self.epoch_of(segment).map(|epoch| self::segment(branch, segment, epoch))
     }
 
     /// The key of `branch`'s newest checkpoint, if it has one.
     pub fn checkpoint(&self, branch: Branch) -> Option<String> {
-        self.checkpoint.map(|(seq, epoch)| checkpoint(branch, seq, epoch))
+        self.checkpoint.map(|(segment, epoch)| checkpoint(branch, segment, epoch))
     }
 
     /// The head with the segments of the writer of `epoch` to `end` named too: the next ones its
@@ -837,7 +841,7 @@ mod tests {
             self::cell(cell),
             moves(&segment(branch, 7, 2)),
             moves(&moves(&segment(branch, 7, 2))),
-            gc_lease(cell),
+            collector_lease(cell),
             marks(cell, 2),
             reference(branch, 7, elsewhere),
         ] {
@@ -859,7 +863,7 @@ mod tests {
                  0000000000000001/0000000000000001"
             )
         );
-        assert_eq!(gc_lease(cell), format!("{prefix}gc/lease"));
+        assert_eq!(collector_lease(cell), format!("{prefix}gc/lease"));
         assert_eq!(marks(cell, 0x2a), format!("{prefix}gc/marks/000000000000002a"));
         assert_eq!(
             reference(branch, 7, elsewhere),
@@ -941,14 +945,17 @@ mod tests {
         let cell = Cell { tenant: 0xa, id: 0xc };
         let branch = Branch { cell, id: 3 };
         let id = ExtentId::new(3, 9);
-        assert_eq!(kind(&segment(branch, 7, 2)), Kind::Segment { branch, seq: 7, epoch: 2 });
-        let own = Kind::Extent { branch, epoch: 2, seq: 4, sequence: 9 };
+        assert_eq!(kind(&segment(branch, 7, 2)), Kind::Segment { branch, segment: 7, epoch: 2 });
+        let own = Kind::Extent { branch, epoch: 2, segment: 4, sequence: 9 };
         assert_eq!(kind(&extent(cell, 2, 4, id)), own);
         // A key naming no segment declares nothing: no extent's.
         let earlier =
             format!("{}extents/0000000000000003/0000000000000002.0000000000000009", cell.prefix());
         assert_eq!(kind(&earlier), Kind::Unknown);
-        assert_eq!(kind(&checkpoint(branch, 7, 2)), Kind::Checkpoint { branch, seq: 7, epoch: 2 });
+        assert_eq!(
+            kind(&checkpoint(branch, 7, 2)),
+            Kind::Checkpoint { branch, segment: 7, epoch: 2 }
+        );
         assert_eq!(kind(&record(branch)), Kind::Record { branch });
         assert_eq!(kind(&head(branch)), Kind::Head { branch });
         assert_eq!(kind(&self::cell(cell)), Kind::Cell { cell });
@@ -962,7 +969,7 @@ mod tests {
         assert_eq!(kind("tenants/2a/kek"), Kind::Unknown);
         assert_eq!(kind(&format!("{}kek", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}encrypted", cell.prefix())), Kind::Unknown);
-        assert_eq!(kind(&gc_lease(cell)), Kind::GcLease { cell });
+        assert_eq!(kind(&collector_lease(cell)), Kind::CollectorLease { cell });
         assert_eq!(kind(&marks(cell, 0x2a)), Kind::Marks { cell, epoch: 0x2a });
         assert_eq!(kind(&format!("{}gc/marks/2a", cell.prefix())), Kind::Unknown);
         assert_eq!(kind(&format!("{}gc/other", cell.prefix())), Kind::Unknown);
@@ -1024,7 +1031,7 @@ mod tests {
             self::cell(cell),
             moves(&segment(branch, 7, 2)),
             moves(&moves(&extent(cell, 2, 4, ExtentId::new(3, 9)))),
-            gc_lease(cell),
+            collector_lease(cell),
             marks(cell, 1),
             reference(branch, 7, child),
             retired(branch, 7, child),
@@ -1082,7 +1089,7 @@ mod tests {
     fn segments_hold_their_footers() {
         let footer = Footer {
             branch: test_branch(1),
-            seq: 2,
+            segment: 2,
             epoch: 3,
             contents: Contents {
                 commits: vec![4],

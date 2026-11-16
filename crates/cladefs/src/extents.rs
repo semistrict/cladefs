@@ -40,7 +40,7 @@ use extent_remote::cell::Kind;
 use extent_remote::layout::{Branch, Cell};
 use extent_remote::trace;
 use extent_store::{
-    HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned, Unsectored,
+    HostDir, NoSpace, NotHeld, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unsectored,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -192,7 +192,7 @@ pub struct ExtentStore {
     /// cladefs: the stores it was forked from, nearest first, as of the forks ([`store_dir::ancestry`]).
     forked_from: Arc<Vec<(u64, std::path::PathBuf)>>,
     /// cladefs: the uploader of the store's branch to object storage, which opened it, taking its
-    /// lease, or holds its point: what doc-4's `COMMIT_UPLOADED` commits wait for.
+    /// head, or holds its point: what doc-4's `COMMIT_UPLOADED` commits wait for.
     /// None for a follower, whose writer's it is (TASK-165.9).
     remote: Option<extent_store::upload::Remote<HostDir>>,
     /// cladefs: what records the store's page-ins for its base's boot profile, if it is a fork of a
@@ -228,7 +228,7 @@ pub struct Opening {
     /// Whether its base's boot profile is read into the extent cache, or recorded
     /// ([`ExtentStore::profile`]).
     pub profiled: bool,
-    /// How its uploader keeps its branch in its bucket, taking its lease.
+    /// How its uploader keeps its branch in its bucket, taking its head.
     pub keeping: extent_store::upload::Options,
 }
 
@@ -449,7 +449,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         // A follower's too, of one written after its view's commit: as Fxfs's journal replay
         // finds the end of the commit.
         Errno::ENOENT
-    } else if error.is::<SealedExtent>() || error.is::<Spent>() || error.is::<OtherBranch>() {
+    } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherBranch>() {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
@@ -605,7 +605,7 @@ impl ExtentStore {
     }
 
     /// cladefs: the store at `path`, as of its last commit, opened as `opening` says: its uploader
-    /// takes its branch's lease, with the token its placement names or `opening`'s, and recovers
+    /// takes its branch's head, with the token its placement names or `opening`'s, and recovers
     /// it, the store's write-ahead log put after its end (TASK-165.9); a log another writer's
     /// commits moved past refuses (`ESTALE`) until `cladefsctl take` drops it. A tenant's (TASK-43):
     /// the pages of its own extents, and of those it inherited from other branches but public ones
@@ -1052,9 +1052,10 @@ impl ExtentStore {
     /// cladefs: makes a new store at `path`, which must not exist, of `capacity` bytes and the branch
     /// `of` says, a volume of `kind` of its branch's cell (TASK-364), its uploader as `keeping`
     /// says, placed at `token`'s placement if given, closes it, and returns its branch: what
-    /// [`ExtentStore::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its lease is taken as it is made with the
-    /// token of the placement it is given, not `keeping`'s, this host's: a new copy placed later
-    /// took no branch from an earlier placement (`ESTALE`), the lease taken before the placement
+    /// [`ExtentStore::take_with`] takes a branch into, and the daemon's `CreateStore` makes. Its
+    /// cell, and so its head, is taken as it is made with the token of the placement it is given,
+    /// not `keeping`'s, this host's: a new copy placed later
+    /// took no branch from an earlier placement (`ESTALE`), the head taken before the placement
     /// was recorded (TASK-149.20, TASK-266).
     pub fn create_placed(
         path: impl AsRef<Path>,
@@ -1079,10 +1080,10 @@ impl ExtentStore {
     }
 
     /// cladefs: places the store at `path` at the placement
-    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its writer takes its branch's
-    /// lease in object storage with that token from then on, which a later placement's exceeds, so
-    /// a placement cut off takes no branch back from the one after it (`ESTALE`), and its commits
-    /// fail once a later one takes it (`EROFS`).
+    /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its branch's
+    /// cell with that token from then on, and its writer the branch's head with that taking's
+    /// epoch; a later placement's token exceeds it, so a placement cut off takes no branch back
+    /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
         extent_store::place_host(path.as_ref(), token).map_err(Error::new)
     }
@@ -2245,7 +2246,7 @@ mod tests {
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
             (SealedExtent(extent).into(), Errno::EPERM),
-            (Spent(extent).into(), Errno::EPERM),
+            (SpentExtent(extent).into(), Errno::EPERM),
             (OtherBranch(extent).into(), Errno::EPERM),
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),

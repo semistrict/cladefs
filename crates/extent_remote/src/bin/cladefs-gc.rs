@@ -511,7 +511,7 @@ async fn delete_branch(
     branch: layout::Branch,
     kms: extent_keys::kms::Shared,
 ) -> Result<(), String> {
-    let keys = extent_remote::keys::Kms::new(kms);
+    let keys = extent_remote::keys::CachingKms::new(kms);
     // Whichever placement took it last: u64::MAX is no lower than any's token.
     let deleted = branch::delete(bucket, branch, rand::random(), u64::MAX, &keys);
     deleted.await.map_err(|err| format!("deleting branch {branch}: {err}"))

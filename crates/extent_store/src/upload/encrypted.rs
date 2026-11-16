@@ -73,7 +73,7 @@ impl<K: Kms> World<K> {
     fn host(&self, token: u64) -> Host {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
-        let keys = keys::Host::new(keys::Kms::new(kms), memory.keys().clone());
+        let keys = keys::Host::new(keys::CachingKms::new(kms), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
@@ -88,7 +88,7 @@ impl<K: Kms> World<K> {
         let memory = Memory::new();
         let kms: extent_keys::kms::Shared = self.kms.clone();
         let pooling = keys::Pooling { low: 2, batch: 4, handle: self.runtime.handle().clone() };
-        let keys = keys::Host::new(keys::Kms::pooled(kms, pooling), memory.keys().clone());
+        let keys = keys::Host::new(keys::CachingKms::pooled(kms, pooling), memory.keys().clone());
         let uploads = Budget::new(Limits::UNBOUNDED);
         Host {
             runtime: Runtime { handle: self.runtime.handle().clone(), uploads, keys },
@@ -1613,7 +1613,7 @@ fn host_of_kms(world: &World, url: &str, token: u64) -> Host {
 /// A host of placement `token` as [`World::host`] makes one, but its KMS `kms`, its own.
 fn host_over(world: &World, kms: extent_keys::kms::Shared, token: u64) -> Host {
     let memory = Memory::new();
-    let keys = keys::Host::new(keys::Kms::new(kms), memory.keys().clone());
+    let keys = keys::Host::new(keys::CachingKms::new(kms), memory.keys().clone());
     let uploads = Budget::new(Limits::UNBOUNDED);
     Host {
         runtime: Runtime { handle: world.runtime.handle().clone(), uploads, keys },

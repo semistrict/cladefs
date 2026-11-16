@@ -170,11 +170,11 @@ impl<P> State<P> {
 impl<P: Places> State<P> {
     /// Applies `footer`'s segment, the next its head names.
     pub fn apply(&mut self, footer: &Footer) {
-        self.through = Some(footer.seq);
-        self.apply_contents(footer.seq, footer.epoch, &footer.contents);
+        self.through = Some(footer.segment);
+        self.apply_contents(footer.segment, footer.epoch, &footer.contents);
     }
 
-    /// Applies `contents`, those of the branch's segment `seq`, of the writer of lease epoch
+    /// Applies `contents`, those of the branch's segment `segment`, of the writer of epoch
     /// `epoch`: what its commits sealed, where they sealed it, then what they freed; the root they
     /// set, their last commit, the branch's next sequence number, the largest named, the forks at
     /// its end, and the capacity they set. Every free of the branch's own extents spends it, as
@@ -183,8 +183,8 @@ impl<P: Places> State<P> {
     /// seal (TASK-165.3). cladefs: first, the runs of a commit the segments before began ([`Begun`]),
     /// if this one ends it, or holding them on if it goes on with it; then, after its own, holding
     /// those of the commit it goes on with, if any (TASK-92.41).
-    pub fn apply_contents(&mut self, seq: u64, epoch: u64, contents: &Contents) {
-        let key = layout::segment(self.branch, seq, epoch);
+    pub fn apply_contents(&mut self, segment: u64, epoch: u64, contents: &Contents) {
+        let key = layout::segment(self.branch, segment, epoch);
         match self.begun.take() {
             Some(begun) if contents.ends(begun.commit) => {
                 for (extent, location) in begun.runs {
@@ -199,7 +199,7 @@ impl<P: Places> State<P> {
         for &(extent, offset, len) in &contents.extents {
             self.extents.seal(extent, Seal::Run(Location { key: key.clone(), offset, len }));
         }
-        for (extent, location) in contents.own_at(self.branch, epoch, seq) {
+        for (extent, location) in contents.own_at(self.branch, epoch, segment) {
             self.extents.seal(extent, Seal::Own(location));
         }
         for &extent in &contents.frees {
@@ -215,7 +215,7 @@ impl<P: Places> State<P> {
             self.last_commit = Some(commit);
         }
         self.next_sequence = self.next_sequence.max(contents.next_sequence);
-        self.forks.extend(contents.forks.iter().map(|child| Fork::at(seq, child)));
+        self.forks.extend(contents.forks.iter().map(|child| Fork::at(segment, child)));
         if contents.capacity.is_some() {
             self.capacity = contents.capacity;
         }
@@ -603,13 +603,13 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
 /// extent daemon counts.
 #[derive(Default)]
 pub struct Decoded {
-    kept: Mutex<Kept>,
+    kept: Mutex<States>,
 }
 
 /// The states [`Decoded`] keeps, by their checkpoints' keys, and those, oldest first; and every one
 /// it decoded others may hold still.
 #[derive(Default)]
-struct Kept {
+struct States {
     states: HashMap<String, Arc<State>>,
     order: VecDeque<String>,
     live: HashMap<String, Live>,
@@ -860,7 +860,7 @@ pub async fn recover_on(
     let from = was.as_ref().map_or(0, |was| was.end);
     // A checkpoint since, covering what it would follow on from: the collector, going by it, may
     // have deleted those segments, and it recovers anew.
-    if head.as_ref().and_then(|head| head.checkpoint).is_some_and(|(seq, _)| seq >= from) {
+    if head.as_ref().and_then(|head| head.checkpoint).is_some_and(|(segment, _)| segment >= from) {
         return recover_from(bucket, branch, origin, head, ring).await;
     }
     let mut recovered = Recovered { state: Layered::of(state), head: head.clone(), touched, layer };
@@ -926,7 +926,7 @@ async fn attempt<B: Bucket>(
             }
         },
     };
-    let from = state.through.map_or(0, |seq| seq + 1);
+    let from = state.through.map_or(0, |segment| segment + 1);
     let mut recovered = Recovered { state, head, touched, layer };
     follow((bucket, checkpoints.keys), &mut recovered, from).await?;
     Ok(recovered)
@@ -944,9 +944,9 @@ async fn follow<B: Bucket>(
     let Some(named) = head.as_ref() else { return Ok(()) };
     let branch = state.branch;
     let mut footers = futures::stream::iter(named.segments(from))
-        .map(|(seq, epoch)| async move {
-            let key = layout::segment(branch, seq, epoch);
-            let footer = segment_footer((bucket, keys), branch, seq, epoch).await?;
+        .map(|(segment, epoch)| async move {
+            let key = layout::segment(branch, segment, epoch);
+            let footer = segment_footer((bucket, keys), branch, segment, epoch).await?;
             Ok::<_, Error>((key, footer))
         })
         .buffered(AT_ONCE);
@@ -978,30 +978,30 @@ async fn moved(bucket: &impl Bucket, branch: Branch, head: Option<&Head>) -> Att
 async fn segment_footer(
     (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
-    seq: u64,
+    segment: u64,
     epoch: u64,
 ) -> Result<Option<Footer>, Error> {
-    let key = layout::segment(branch, seq, epoch);
+    let key = layout::segment(branch, segment, epoch);
     let Some(tail) = object::tail(bucket, &key).await? else { return Ok(None) };
     if !keys.is_empty() {
         tail.open(&keys.of(branch.id))?;
     }
-    Ok(Some(placed(&key, layout::decode(tail.footer())?, branch, seq, epoch)?))
+    Ok(Some(placed(&key, layout::decode(tail.footer())?, branch, segment, epoch)?))
 }
 
-/// `footer`, that of the object at `key`, which holds segment `seq` of `branch` by the writer of
-/// `epoch`, if it says so.
+/// `footer`, that of the object at `key`, which holds segment `segment` of `branch` by the writer
+/// of `epoch`, if it says so.
 fn placed(
     key: &str,
     footer: Footer,
     branch: Branch,
-    seq: u64,
+    segment: u64,
     epoch: u64,
 ) -> Result<Footer, Error> {
-    if footer.branch != branch || footer.seq != seq || footer.epoch != epoch {
+    if footer.branch != branch || footer.segment != segment || footer.epoch != epoch {
         return Err(Error::Corrupt(format!(
             "{key} holds segment {:x} of {} by epoch {:x}",
-            footer.seq, footer.branch, footer.epoch
+            footer.segment, footer.branch, footer.epoch
         )));
     }
     Ok(footer)
@@ -1023,7 +1023,9 @@ fn newest_to(listed: &[Meta], at: u64) -> Option<&Meta> {
     listed
         .iter()
         .filter_map(|meta| match layout::kind(&meta.key) {
-            layout::Kind::Checkpoint { seq, epoch, .. } if seq <= at => Some(((seq, epoch), meta)),
+            layout::Kind::Checkpoint { segment, epoch, .. } if segment <= at => {
+                Some(((segment, epoch), meta))
+            }
             _ => None,
         })
         .max_by_key(|(place, _)| *place)
@@ -1122,15 +1124,15 @@ fn state_at<'a, B: Bucket>(
                 }
             }
         };
-        let from = state.through.map_or(0, |seq| seq + 1);
+        let from = state.through.map_or(0, |segment| segment + 1);
         let named = head.as_ref().expect("a head naming the segment at");
         let mut footers =
-            futures::stream::iter(named.segments(from).take_while(|&(seq, _)| seq <= at))
-                .map(|(seq, epoch)| async move {
-                    let key = layout::segment(branch, seq, epoch);
+            futures::stream::iter(named.segments(from).take_while(|&(segment, _)| segment <= at))
+                .map(|(segment, epoch)| async move {
+                    let key = layout::segment(branch, segment, epoch);
                     Ok::<_, Error>((
                         key,
-                        segment_footer((bucket, checkpoints.keys), branch, seq, epoch).await?,
+                        segment_footer((bucket, checkpoints.keys), branch, segment, epoch).await?,
                     ))
                 })
                 .buffered(AT_ONCE);
@@ -1242,7 +1244,7 @@ pub(crate) async fn holds_fork(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch::{Batch, Commit};
+    use crate::batch::{Commit, SegmentBuilder};
     use crate::branch;
     use crate::layout::test_branch;
     use crate::layout::{Child, Continued, Segment, child};
@@ -1318,11 +1320,11 @@ mod tests {
     #[test]
     fn segments_are_where_their_keys_say() {
         let footer =
-            Footer { branch: test_branch(1), seq: 2, epoch: 1, contents: Contents::default() };
+            Footer { branch: test_branch(1), segment: 2, epoch: 1, contents: Contents::default() };
         assert_eq!(placed("here", footer.clone(), test_branch(1), 2, 1), Ok(footer.clone()));
-        for (branch, seq, epoch) in [(1, 3, 1), (4, 2, 1), (1, 2, 2)] {
+        for (branch, segment, epoch) in [(1, 3, 1), (4, 2, 1), (1, 2, 2)] {
             let corrupt = Error::Corrupt("here holds segment 2 of 1/1/1 by epoch 1".into());
-            let found = placed("here", footer.clone(), test_branch(branch), seq, epoch);
+            let found = placed("here", footer.clone(), test_branch(branch), segment, epoch);
             assert_eq!(found, Err(corrupt));
         }
     }
@@ -1331,11 +1333,11 @@ mod tests {
     /// acknowledged, its requests served by `bucket`.
     fn committed(bucket: &SimBucket, writer: &Writer<SimBucket>, tag: u64, count: u64) {
         for tag in tag..tag + count {
-            let objects = Batch::from(Commit { tag, ..Commit::default() })
+            let objects = SegmentBuilder::from(Commit { tag, ..Commit::default() })
                 .close(&mut writer.chain())
                 .frame(writer.keys().encrypting());
-            let seq = writer.add_segment(objects).unwrap();
-            bucket.served(writer.upload(seq)).0.unwrap();
+            let segment = writer.add_segment(objects).unwrap();
+            bucket.served(writer.upload(segment)).0.unwrap();
             bucket.served(writer.acknowledge()).0.unwrap();
         }
     }
@@ -1351,18 +1353,24 @@ mod tests {
             Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
         });
         committed(&bucket, &writer, 1, 5);
-        let tails = |seqs: std::ops::Range<u64>| -> Vec<String> {
-            seqs.map(|seq| {
-                format!("get {} last {}", layout::segment(test_branch(1), seq, 1), object::TAIL)
-            })
-            .collect()
+        let tails = |segments: std::ops::Range<u64>| -> Vec<String> {
+            segments
+                .map(|segment| {
+                    format!(
+                        "get {} last {}",
+                        layout::segment(test_branch(1), segment, 1),
+                        object::TAIL
+                    )
+                })
+                .collect()
         };
         let head = vec![format!("get {}", layout::head(test_branch(1)))];
         let (recovered, rounds) = bucket.served_in_rounds(recover(&*bucket, test_branch(1), None));
         let recovered = recovered.unwrap();
         assert_eq!((recovered.end(), recovered.state.last_commit), (5, Some(5)));
         assert_eq!(rounds, [head.clone(), tails(0..5)]);
-        let keys: Vec<_> = (0..5).map(|seq| layout::segment(test_branch(1), seq, 1)).collect();
+        let keys: Vec<_> =
+            (0..5).map(|segment| layout::segment(test_branch(1), segment, 1)).collect();
         assert_eq!(recovered.touched.iter().cloned().collect::<Vec<_>>(), keys);
 
         committed(&bucket, &writer, 6, 2);
@@ -1387,16 +1395,20 @@ mod tests {
         committed(&bucket, &writer, 1, 2);
         let recovered = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
         committed(&bucket, &writer, 3, 1);
-        let seq = bucket.served(writer.checkpoint()).0.unwrap().unwrap();
+        let segment = bucket.served(writer.checkpoint()).0.unwrap().unwrap();
         committed(&bucket, &writer, 4, 1);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
         let (on, rounds) =
             bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::keyless()));
         let on = on.unwrap();
-        assert_eq!((on.checkpoint(), on.end(), on.state.last_commit), (Some((seq, 1)), 4, Some(4)));
-        let checkpoint = vec![format!("get {}", layout::checkpoint(test_branch(1), seq, 1))];
-        let tail =
-            |seq| format!("get {} last {}", layout::segment(test_branch(1), seq, 1), object::TAIL);
+        assert_eq!(
+            (on.checkpoint(), on.end(), on.state.last_commit),
+            (Some((segment, 1)), 4, Some(4))
+        );
+        let checkpoint = vec![format!("get {}", layout::checkpoint(test_branch(1), segment, 1))];
+        let tail = |segment| {
+            format!("get {} last {}", layout::segment(test_branch(1), segment, 1), object::TAIL)
+        };
         assert_eq!(rounds, [checkpoint, vec![tail(3)]]);
     }
 
@@ -1416,12 +1428,14 @@ mod tests {
             let landed = async |writer: &Writer<Store>, contents: Contents| {
                 let footer = writer.chain().close(contents);
                 let data = vec![7; 8192];
-                let segment = Segment { data, footer: footer.clone() }
+                let framed = Segment { data, footer: footer.clone() }
                     .encode(writer.keys().encrypting())
                     .into();
-                let seq = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
-                writer.upload(seq).await.unwrap();
-                (seq, writer.acknowledge().await.unwrap())
+                let segment = writer
+                    .add_segment(Objects { footer, segment: framed, own: Vec::new() })
+                    .unwrap();
+                writer.upload(segment).await.unwrap();
+                (segment, writer.acknowledge().await.unwrap())
             };
             let continuing = |commit, sequence| Contents {
                 continued: Some(Continued {
@@ -1444,8 +1458,8 @@ mod tests {
             };
             let (ends, acked) = landed(&writer, ending).await;
             assert_eq!(acked, Some(ends));
-            let at = |seq, offset| Location {
-                key: layout::segment(test_branch(1), seq, 1),
+            let at = |segment, offset| Location {
+                key: layout::segment(test_branch(1), segment, 1),
                 offset,
                 len: 4096,
             };
@@ -1465,7 +1479,7 @@ mod tests {
             let (begun, _) = landed(&writer, continuing(tag(2), 4)).await;
             let next = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
             assert_eq!(next.state().through, Some(ends), "the head's end, before it");
-            assert_eq!(next.taken().chain.next_seq(), begun, "where its own go");
+            assert_eq!(next.taken().chain.next_segment(), begun, "where its own go");
             assert_eq!(next.state().extents.into_iter().collect::<Vec<_>>(), expected);
             assert_eq!((next.state().begun, next.state().last_commit), (None, Some(tag(1))));
             let recovered = recover(&*bucket, test_branch(1), None).await.unwrap().state;
@@ -1484,21 +1498,22 @@ mod tests {
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             assert_eq!(parent.state().capacity, None);
             let resize = |tag, capacity: u64| {
-                Batch::from(Commit { tag, capacity: Some(capacity), ..Commit::default() })
+                SegmentBuilder::from(Commit { tag, capacity: Some(capacity), ..Commit::default() })
             };
             let landed = async |writer: &Writer<Store>, objects| {
-                let seq = writer.add_segment(objects).unwrap();
-                writer.upload(seq).await.unwrap();
+                let segment = writer.add_segment(objects).unwrap();
+                writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
-                seq
+                segment
             };
             let forked = resize(1, 1 << 20)
                 .fork(child(test_branch(2)), &mut parent.chain())
                 .frame(parent.keys().encrypting());
             let forked = Origin { parent: test_branch(1), at: landed(&parent, forked).await };
             let point = Child { branch: test_branch(3), owner: 0, point: true };
-            let pointed =
-                Batch::default().fork(point, &mut parent.chain()).frame(parent.keys().encrypting());
+            let pointed = SegmentBuilder::default()
+                .fork(point, &mut parent.chain())
+                .frame(parent.keys().encrypting());
             let pointed = Origin { parent: test_branch(1), at: landed(&parent, pointed).await };
             landed(
                 &parent,
@@ -1541,7 +1556,7 @@ mod tests {
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let extent = ExtentId::new(1, parent.chain().next_sequence());
             let extents = vec![(extent, b"one".to_vec())];
-            let batch = Batch::from(Commit { tag: 1, extents, ..Commit::default() });
+            let batch = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
             let at = parent
                 .add_segment(
                     batch
@@ -1561,15 +1576,15 @@ mod tests {
             // segment of its own.
             let child = Writer::open(bucket.clone(), test_branch(2), 11, 0).await.unwrap();
             assert_eq!(child.checkpoint().await, Ok(None));
-            let commit = Batch::from(Commit { tag: 2, ..Commit::default() });
-            let seq = child
+            let commit = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
+            let segment = child
                 .add_segment(commit.close(&mut child.chain()).frame(child.keys().encrypting()))
                 .unwrap();
-            child.upload(seq).await.unwrap();
+            child.upload(segment).await.unwrap();
             child.acknowledge().await.unwrap();
-            assert_eq!(child.checkpoint().await, Ok(Some(seq)));
+            assert_eq!(child.checkpoint().await, Ok(Some(segment)));
             let recovered = recover(&*bucket, test_branch(2), origin).await.unwrap();
-            assert_eq!(recovered.checkpoint(), Some((seq, child.epoch())));
+            assert_eq!(recovered.checkpoint(), Some((segment, child.epoch())));
             assert_eq!(recovered.state.branch, test_branch(2));
             assert_eq!(recovered.state.extents.keys().collect::<Vec<_>>(), [&extent]);
 
@@ -1578,7 +1593,7 @@ mod tests {
             let object = bucket::get(&*bucket, &layout::checkpoint(test_branch(1), parents, 1))
                 .await
                 .unwrap();
-            let key = layout::checkpoint(test_branch(2), seq, child.epoch());
+            let key = layout::checkpoint(test_branch(2), segment, child.epoch());
             let overwrite = crate::bucket::PutMode::Overwrite;
             crate::bucket::Bucket::put(&*bucket, &key, object.bytes.into(), overwrite)
                 .await

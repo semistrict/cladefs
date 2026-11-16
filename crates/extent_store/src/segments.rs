@@ -230,7 +230,7 @@ pub(crate) struct Segments<F> {
     /// What the commits since it opened changed, which its footer records.
     window: Window,
     /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
-    /// store opened, which stamps each footer with its place: its number, its writer's lease epoch
+    /// store opened, which stamps each footer with its place: its number, its writer's epoch
     /// and its floor of the branch's next sequence number. Without one, the footers are of epoch 0,
     /// numbered on from the segment open as the branch was opened, one for each segment closed.
     chain: Chain,
@@ -966,15 +966,15 @@ impl<F: File> Segments<F> {
         self.unsynced_entries.retain(|number| !synced.contains(number));
     }
 
-    /// cladefs: where segment `number` is in its life, for why a commit's sealing copies the extents
-    /// in it ([`crate::seals`], TASK-92.41).
-    pub fn stage(&self, number: SegmentId) -> crate::seals::Stage {
-        use crate::seals::Stage;
+    /// cladefs: where segment `number` stands for a commit sealing the extents in it, for why it
+    /// copies them ([`crate::seals`], TASK-92.41).
+    pub fn standing(&self, number: SegmentId) -> crate::seals::Standing {
+        use crate::seals::Standing;
         match self.tracked.get(&number).map(|segment| &segment.phase) {
-            _ if number == self.open => Stage::Open,
-            Some(Phase::Full { .. }) => Stage::Full,
-            Some(Phase::Framing { .. } | Phase::Failed { .. }) => Stage::Framing,
-            Some(Phase::Open { .. }) | Some(Phase::Closed) | None => Stage::Closed,
+            _ if number == self.open => Standing::Open,
+            Some(Phase::Full { .. }) => Standing::Full,
+            Some(Phase::Framing { .. } | Phase::Failed { .. }) => Standing::Framing,
+            Some(Phase::Open { .. }) | Some(Phase::Closed) | None => Standing::Closed,
         }
     }
 
@@ -2439,7 +2439,7 @@ mod tests {
         assert_eq!(segments.open_segment(), segment(2));
         let close = |segments: &mut Segments<MemFile>, epoch| {
             let footer = segments.close(&dir, epoch, 7).unwrap().footer;
-            (footer.seq, footer.epoch, footer.contents.commits, footer.contents.next_sequence)
+            (footer.segment, footer.epoch, footer.contents.commits, footer.contents.next_sequence)
         };
         assert_eq!(close(&mut segments, 3), (5, 3, vec![tag(3, 3)], 100));
         assert_eq!(close(&mut segments, 4), (6, 3, vec![tag(3, 4)], 100));

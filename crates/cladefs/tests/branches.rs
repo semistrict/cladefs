@@ -164,9 +164,9 @@ fn places_and_syncs_stores_in(url: &str) {
 
     let capacity = (1u64 << 30).to_string();
     let hex = branch_id.to_string();
-    // Refused as it takes the branch's lease, which a later placement holds, leaving nothing
+    // Refused as it takes the branch's head, which a later placement holds, leaving nothing
     // (TASK-165.9: before, it took the branch and its sync was refused); taken placed later, its
-    // lease taken with that placement's token as it is made (TASK-149.20).
+    // head taken with that placement's token as it is made (TASK-149.20).
     let stale = branch_fails(&url, &["take", &path("earlier"), &capacity, &hex, "3"]);
     assert!(stale.contains("a later placement holds the branch"), "{stale}");
     assert!(!Path::new(&path("earlier")).exists());

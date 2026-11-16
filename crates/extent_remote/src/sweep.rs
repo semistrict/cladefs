@@ -388,7 +388,7 @@ impl<B: Bucket> Bucket for Counted<B> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::batch::{Batch, Commit};
+    use crate::batch::{Commit, SegmentBuilder};
     use crate::layout::{self, Branch};
     use crate::passed::Passed;
     use crate::store::Store;
@@ -437,11 +437,11 @@ mod tests {
                 commits.push(Commit { tag: 4, frees: vec![large], ..Commit::default() });
             }
             for commit in commits {
-                let segment = Batch::from(commit)
+                let framed = SegmentBuilder::from(commit)
                     .close(&mut writer.chain())
                     .frame(writer.keys().encrypting());
-                let seq = writer.add_segment(segment).unwrap();
-                writer.upload(seq).await.unwrap();
+                let segment = writer.add_segment(framed).unwrap();
+                writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
             }
             writer.checkpoint().await.unwrap();
@@ -770,9 +770,10 @@ mod tests {
         assert_eq!((after.visited, after.held, after.swept, after.failed), (12, 0, 0, 0));
         assert_eq!(after.report.deleted, 6);
         let left = block_on(sizes(&*bucket));
-        let leases = cells.iter().map(|&cell| layout::gc_lease(cell));
-        let deleted =
-            |key: &&String| matches!(layout::kind(key), layout::Kind::Segment { seq: 0..=1, .. });
+        let leases = cells.iter().map(|&cell| layout::collector_lease(cell));
+        let deleted = |key: &&String| {
+            matches!(layout::kind(key), layout::Kind::Segment { segment: 0..=1, .. })
+        };
         let kept: BTreeSet<String> =
             (before.keys().filter(|key| !deleted(key)).cloned()).chain(leases).collect();
         assert_eq!(left.keys().cloned().collect::<BTreeSet<_>>(), kept);

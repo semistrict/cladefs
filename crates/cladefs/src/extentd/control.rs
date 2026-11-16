@@ -237,7 +237,7 @@ pub(crate) fn saying(errno: Errno, message: String) -> Status {
 /// What StatStore says of a store that is and holds `state`.
 fn stat_response(state: stores::StoreState) -> StatStoreResponse {
     let upload = state.upload.unwrap_or(extent_store::upload::UploadStatus {
-        lease: None,
+        taking: None,
         uploaded: 0,
         pending_bytes: 0,
         oldest_pending: None,
@@ -264,9 +264,9 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
         inherited_extents: state.holding.extents.inherited,
         committed: state.committed,
         uploading: state.upload.is_some(),
-        lease_token: upload.lease.map_or(0, |lease| lease.token),
-        lease_epoch: upload.lease.map_or(0, |lease| lease.epoch),
-        lease_taken_unix_ms: upload.lease.map_or(0, |lease| millis(lease.taken)),
+        lease_token: upload.taking.map_or(0, |taking| taking.token),
+        lease_epoch: upload.taking.map_or(0, |taking| taking.epoch),
+        lease_taken_unix_ms: upload.taking.map_or(0, |taking| millis(taking.taken)),
         uploaded: upload.uploaded,
         pending_upload_bytes: upload.pending_bytes,
         oldest_pending_ms: upload.oldest_pending.map_or(0, waited),

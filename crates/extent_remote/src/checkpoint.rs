@@ -11,24 +11,23 @@
 use crate::Error;
 use crate::layout::{self, Location};
 use crate::recovery::State;
-use extent_frame::table::{self, Block, Entry, Footer};
+use extent_frame::table::{self, Block, Entry, TableFooter};
 use storage_device::ExtentId;
 
-pub use extent_frame::table::BLOCK;
+pub use extent_frame::table::TABLE_BLOCK;
 
 /// The checkpoint of `state`. cladefs: authenticated, not encrypted, under the DEK `encrypting` gives:
 /// metadata, which the collector reads holding no key (doc-16, TASK-411.3).
 pub fn encode(state: &State, encrypting: layout::EncryptionKey<'_>) -> Vec<u8> {
     let rest = State { extents: Default::default(), ..state.clone() };
-    let entries = (state.extents.iter()).map(|(extent, location)| {
-        ((extent.branch, extent.sequence), location.key.as_str(), location.offset, location.len)
-    });
+    let entries = (state.extents.iter())
+        .map(|(extent, location)| (*extent, location.key.as_str(), location.offset, location.len));
     table::encode(entries, layout::encode(&rest), encrypting)
 }
 
 fn located(entry: Entry) -> (ExtentId, Location) {
-    let Entry { id: (branch, sequence), key, offset, len } = entry;
-    (ExtentId::new(branch, sequence), Location { key, offset, len })
+    let Entry { id, key, offset, len } = entry;
+    (id, Location { key, offset, len })
 }
 
 /// The state a checkpoint holds: read by a reader holding no key, which reads an authenticated
@@ -53,14 +52,14 @@ pub fn decode_under(bytes: &[u8], keys: &dyn extent_frame::Keys) -> Result<State
 /// ([`Fetcher::lookup`](crate::fetch::Fetcher::lookup)).
 #[derive(Debug)]
 pub struct Table {
-    footer: Footer,
+    footer: TableFooter,
     state: State,
 }
 
 impl Table {
     /// The table a checkpoint's footer, `footer`, says.
     pub(crate) fn decode(footer: &[u8]) -> Result<Self, Error> {
-        let footer = Footer::decode(footer)?;
+        let footer = TableFooter::decode(footer)?;
         let state = layout::decode(&footer.rest)?;
         Ok(Self { footer, state })
     }
@@ -72,7 +71,7 @@ impl Table {
 
     /// The block that would hold `extent`'s entry, if the checkpoint has one: where in its data.
     pub(crate) fn block(&self, extent: ExtentId) -> Option<&Block> {
-        self.footer.block((extent.branch, extent.sequence))
+        self.footer.block(extent)
     }
 
     /// Where `extent` is, if `bytes`, those of `block`, hold its entry.

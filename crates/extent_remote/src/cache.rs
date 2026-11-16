@@ -45,13 +45,14 @@ pub struct Cache {
     files: Files,
     capacity: u64,
     floor: u64,
-    kept: Mutex<Kept>,
+    kept: Mutex<Index>,
     /// The directory, locked, so that no other cache opens it while this one has it.
     _lock: File,
 }
 
+/// The cache's index: the objects it keeps parts of, and those parts by when they were last read.
 #[derive(Debug, Default)]
-struct Kept {
+struct Index {
     objects: HashMap<String, Object>,
     /// The parts kept, by when they were last read.
     by_use: BTreeMap<u64, (String, u64)>,
@@ -121,7 +122,7 @@ enum Evicted {
     Remove(String),
 }
 
-impl Kept {
+impl Index {
     /// Counts part `part` of the object at `key` read now, and its tail after it.
     fn touch(&mut self, key: &str, part: u64) {
         let parts: &[u64] = if part == TAIL { &[TAIL] } else { &[part, TAIL] };
@@ -272,7 +273,7 @@ impl Cache {
         files.walk(Path::new(""), &mut found)?;
         // By when each was written last: it was read then, if not since.
         found.sort_by_key(|(_, found)| found.modified);
-        let mut kept = Kept::default();
+        let mut kept = Index::default();
         for (key, found) in found {
             kept.bytes += found.bytes();
             kept.insert(&key, found);
@@ -553,7 +554,7 @@ impl Cache {
         self.kept.lock().unwrap().bytes
     }
 
-    /// Does with the files what evicting left to do ([`Kept::evict`]), holding no lock: punches
+    /// Does with the files what evicting left to do ([`Index::evict`]), holding no lock: punches
     /// parts' holes, or removes objects' files; then they are no longer busy, which may leave an
     /// object forgotten meanwhile nothing, its file removed then too.
     fn evict(&self, mut evicted: Vec<Evicted>) -> io::Result<()> {
@@ -1083,7 +1084,7 @@ mod tests {
         }
     }
 
-    impl Kept {
+    impl Index {
         /// Checks what the index says of itself: each object it holds keeps or writes something,
         /// keeps parts only with its tail, read after them; what it counts by use it keeps; and,
         /// with none busy, the bytes it counts are those it keeps.

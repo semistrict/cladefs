@@ -28,7 +28,7 @@
 //! - **What a host keeps:** each tenant's KEK unwrapped, zeroed when dropped, read from the bucket
 //!   again once [`FRESH_FOR`] old, so that a tenant shredded on another host is refused here within
 //!   that time even if this host is not told; dropped at once by `Kms::forget`, which a host told
-//!   the tenant's keys are revoked or destroyed calls (`keys::Kms::revoked`).
+//!   the tenant's keys are revoked or destroyed calls (`keys::CachingKms::revoked`).
 //! - **Which KMS a host uses** ([`from_env`]): `CLADEFS_KMS`'s if it names one; else, given a master
 //!   key, this one, over the host's bucket; else none, which every process opening stores refuses
 //!   to start with, naming both (TASK-411.28: every store is encrypted).

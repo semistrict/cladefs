@@ -55,11 +55,11 @@ use std::sync::{Condvar, Mutex};
 const KEPT: usize = 2 * 32;
 
 /// cladefs: what [`KEPT`] keeps, taken by framings and given back.
-struct Kept<T> {
+struct Pool<T> {
     kept: Mutex<Vec<T>>,
 }
 
-impl<T> Kept<T> {
+impl<T> Pool<T> {
     const fn new() -> Self {
         Self { kept: Mutex::new(Vec::new()) }
     }
@@ -79,8 +79,8 @@ impl<T> Kept<T> {
     }
 }
 
-static BUFFERS: Kept<Vec<u8>> = Kept::new();
-static PACKERS: Kept<PartPacker> = Kept::new();
+static BUFFERS: Pool<Vec<u8>> = Pool::new();
+static PACKERS: Pool<PartPacker> = Pool::new();
 
 /// cladefs: the bytes of a part of a segment's data, read, in a buffer of a part's bytes kept for
 /// the framings after it once it goes, if there is room ([`KEPT`]).

@@ -2,10 +2,10 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! A batch: commits a writer makes into one segment of its own (doc-7, Layout), rather than take a
-//! segment a store closed. Closed on the writer's chain, it is the writer's next segment, framed as
-//! the store frames its own ([`Unframed::frame`]), which the writer takes as it takes a store's
-//! ([`Writer::add_segment`](crate::Writer::add_segment)).
+//! A segment builder ([`SegmentBuilder`]): commits a writer makes into one segment of its own
+//! (doc-7, Layout), rather than take a segment a store closed. Closed on the writer's chain, it is
+//! the writer's next segment, framed as the store frames its own ([`Unframed::frame`]), which the
+//! writer takes as it takes a store's ([`Writer::add_segment`](crate::Writer::add_segment)).
 //!
 //! What is too much to hold at once, what a store holds that its branch doesn't, goes in segments
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
@@ -207,15 +207,15 @@ pub fn objects(
 /// Commits for one segment, in order: what they make ([`Plan`]), its data, and that of the
 /// extents they seal on their own.
 #[derive(Default)]
-pub struct Batch {
+pub struct SegmentBuilder {
     plan: Plan,
     data: Vec<u8>,
     /// Those sealed on their own, by their sequence numbers.
     own: BTreeMap<u64, Vec<u8>>,
 }
 
-impl From<Commit> for Batch {
-    /// A batch of `commit` alone.
+impl From<Commit> for SegmentBuilder {
+    /// A segment of `commit` alone.
     fn from(commit: Commit) -> Self {
         let mut batch = Self::default();
         batch.commit(commit);
@@ -223,7 +223,7 @@ impl From<Commit> for Batch {
     }
 }
 
-impl Batch {
+impl SegmentBuilder {
     /// Adds `commit`, after those before it.
     pub fn commit(&mut self, commit: Commit) {
         for (extent, bytes) in commit.extents {
@@ -248,9 +248,9 @@ impl Batch {
         self.close_forking(chain, Vec::new())
     }
 
-    /// Closes it on `chain`, as [`Batch::close`] does, with a fork of the branch to `child` at its
-    /// end, of its owner, a point if it says so: a fork ends its segment, which its child inherits
-    /// the whole of (doc-7, Forks, Points).
+    /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the branch to
+    /// `child` at its end, of its owner, a point if it says so: a fork ends its segment, which its
+    /// child inherits the whole of (doc-7, Forks, Points).
     pub fn fork(self, child: Child, chain: &mut Chain) -> Unframed {
         self.close_forking(chain, vec![child])
     }
@@ -261,7 +261,7 @@ impl Batch {
     }
 }
 
-/// A batch closed, its segment's footer stamped, its data yet to be framed.
+/// A segment builder closed, its segment's footer stamped, its data yet to be framed.
 pub struct Unframed {
     pub footer: Footer,
     pub data: Data,
@@ -310,8 +310,9 @@ mod tests {
 
     /// The next sequence number the footer of `commit`'s segment, closed on `chain`, names.
     fn next_sequence(commit: Commit, chain: &mut Chain) -> u64 {
-        let objects =
-            Batch::from(commit).close(chain).frame(crate::testing::encrypting(test_branch(1)));
+        let objects = SegmentBuilder::from(commit)
+            .close(chain)
+            .frame(crate::testing::encrypting(test_branch(1)));
         layout::footer::<Footer>(&objects.segment.read().unwrap()).unwrap().contents.next_sequence
     }
 
@@ -348,7 +349,7 @@ mod tests {
     fn batches_frame_their_commits() {
         let mut chain = Chain::new(test_branch(1), 2, 0, 0);
         let (small, large, freed) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 1));
-        let mut batch = Batch::default();
+        let mut batch = SegmentBuilder::default();
         assert!(batch.is_empty());
         let extents = vec![(small, b"small".to_vec())];
         let (root, capacity) = (Some(b"one".to_vec()), Some(1 << 20));
@@ -365,10 +366,10 @@ mod tests {
         let segment = objects.segment.read().unwrap();
         let footer: Footer = layout::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
-        assert_eq!((footer.seq, footer.epoch), (0, 2));
+        assert_eq!((footer.segment, footer.epoch), (0, 2));
         assert_eq!(footer.contents.commits, [7, 8, 9]);
         assert_eq!(footer.contents.extents, [(small, 0, 5)]);
-        let key = layout::extent(layout::TEST_CELL, 2, footer.seq, large);
+        let key = layout::extent(layout::TEST_CELL, 2, footer.segment, large);
         assert_eq!(
             footer.own().collect::<Vec<_>>(),
             [(large, layout::Location { key: key.clone(), offset: 0, len: 5 })]
@@ -386,7 +387,7 @@ mod tests {
         };
         let own = own.read().unwrap();
         assert_eq!((own_key, data(&own)), (&key, b"large".to_vec()));
-        assert_eq!(chain.next_seq(), 1);
+        assert_eq!(chain.next_segment(), 1);
     }
 
     /// TASK-165.3: as a store's segment's footer does, a batch's seals what its commits sealed that
@@ -400,7 +401,7 @@ mod tests {
         let (small, large, other) = (ExtentId::new(1, 3), ExtentId::new(1, 4), ExtentId::new(1, 5));
         let (written, inherited, kept) =
             (ExtentId::new(1, 6), ExtentId::new(9, 4), ExtentId::new(1, 7));
-        let mut batch = Batch::default();
+        let mut batch = SegmentBuilder::default();
         let extents = vec![(small, b"small".to_vec()), (kept, b"kept".to_vec())];
         let own = vec![(large.sequence, b"large".to_vec()), (other.sequence, b"other".to_vec())];
         batch.commit(Commit { tag: 7, extents, own, ..Commit::default() });
@@ -441,7 +442,7 @@ mod tests {
             capacity: Some(1 << 20),
         };
         let chain = Chain::new(test_branch(1), 2, 0, 0);
-        let batch = Batch::from(commit)
+        let batch = SegmentBuilder::from(commit)
             .close(&mut chain.clone())
             .frame(crate::testing::encrypting(test_branch(1)));
         let mut plan = Plan::default();

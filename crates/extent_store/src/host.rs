@@ -51,9 +51,10 @@ pub fn unmade_host(path: &Path) -> bool {
 }
 
 /// cladefs: places the store at `path` (TASK-39.7): records, durably, in its description, the
-/// fencing token its writer takes its branch's lease with from then on, the boot ID of the
-/// placement it is, which a later placement's exceeds. A writer takes the lease only with a token
-/// as high as the last writer's: a placement cut off takes no branch back from the one after it.
+/// fencing token its host takes its cell with from then on, the boot ID of the placement it
+/// is, which a later placement's exceeds; its writer takes its branch's head with the epoch of
+/// that taking of the cell. A placement takes the cell only with a token as high as the last
+/// one's: a placement cut off takes no branch back from the one after it.
 /// A store never placed takes it with its host's (TASK-165.9: the token is the description's).
 pub fn place_host(path: &Path, token: u64) -> Result<(), Error> {
     let mut file = store_file(path)?;
