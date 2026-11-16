@@ -241,8 +241,8 @@ mod tests {
 
     /// cladefs TASK-227: a writer's window holds 1 GiB of private pages at most unless configured
     /// otherwise, whatever its size: the window is address space, as large as the data, and its
-    /// private pages are memory, which the daemon reserves against the tenant's. Half a 64 GiB
-    /// window's pages, as TASK-164.11's default had it, would have reserved 32 GiB a VM. A window
+    /// private pages are memory, the VM process's. Half a 64 GiB window's pages, as TASK-164.11's
+    /// default had it, would have let a VM hold 32 GiB of them. A window
     /// smaller than the default holds as many as it has pages; one of a page, one.
     #[test]
     fn a_windows_private_pages_are_not_its_size() {

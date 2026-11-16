@@ -183,10 +183,11 @@ commit on that store's branch, so its host needs to be the branch's writer. Fork
 at a time, or make a point first (above).
 
 **Memory.** The pages a guest writes through its DAX window are its own, private copies, in its VM
-process's memory (backlog doc-13): at most the device's `dax_private_max` (a quarter of the window's
-pages by default), reserved against the store's tenant as the guest activates the device, so that a
-store never waits for memory. The guest writes them back and lets them go below that bound; a store
-past it stops that VM (exit 159). Everything else the window maps is sealed extents' pages, shared
+process's memory (backlog doc-13): at most the device's `dax_private_max` (1 GiB by default, or the
+window's size if smaller), charged to the VM process, as its guest memory is, not to the daemon or
+the store's tenant: the daemon reserves none of it, so its memory sizes its cache alone (TASK-501).
+Bound the VM process's memory, its cgroup, for guest memory and private pages together. The guest
+writes them back and lets them go below that bound; a store past it stops that VM (exit 159). Everything else the window maps is sealed extents' pages, shared
 and evictable.
 
 **Extents.** The daemon holds a few hundred bytes of memory for each extent of every store open, its

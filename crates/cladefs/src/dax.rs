@@ -25,11 +25,11 @@
 //! a sealed extent's or zeros, gives the page a private copy holding what the page held, mapped
 //! writable at the same offset; the mapping stays the source's. Only the guest's `MAP` or `UNMAP`
 //! over a private page ends it: a source evicting its pages and a free mapping zeros leave it. A
-//! window holds a bound of them, reserved against the tenant's memory as it is made, past which a
-//! store is refused, as every store is to a window that doesn't copy, a follower's. The private
-//! pages are the second stage's memory ([`SecondStage::make_private`]): the VM process's own, laid
-//! out as the window is, so that they cost it no mapping each (`dax::uffd`); the window keeps where
-//! they are and how many.
+//! window holds a bound of them, past which a store is refused, as every store is to a window that
+//! doesn't copy, a follower's. The private pages are the second stage's memory
+//! ([`SecondStage::make_private`]): the VM process's own, laid out as the window is, so that they
+//! cost it no mapping each (`dax::uffd`), and charged to it, not to the daemon (TASK-501); the
+//! window keeps where they are and how many.
 
 pub(crate) mod failures;
 #[cfg(all(test, feature = "shuttle"))]
@@ -406,34 +406,21 @@ enum Private {
     Keep,
 }
 
-/// cladefs: how a window copies on write (backlog doc-13): against which arena its private pages are
-/// counted, its tenant's, and how many it holds at most, which it reserved against the arena as it
-/// was made (`physmem::pin`), and lets go of as it goes. The pages are its second stage's memory
-/// ([`SecondStage::make_private`]), its VM process's, not the arena's: the reservation still counts
-/// them against the tenant as they are reserved, and no store waits for the arena's memory.
+/// cladefs: how a window copies on write (backlog doc-13): how many private pages it holds at most.
+/// The pages are its second stage's memory ([`SecondStage::make_private`]), its VM process's, not
+/// the daemon's: nothing is reserved for them against an arena (TASK-501), as the daemon never holds
+/// them; the bound and the VM process's own limits are what bound them, as its guest memory is.
 pub(crate) struct CopyOnWrite {
-    arena: crate::pages::ArenaId,
     most: u64,
 }
 
 impl CopyOnWrite {
-    /// Reserves `most` pages of `arena`'s memory for a window's private pages: `EINVAL` for none,
-    /// `ENOMEM` past what the arena may hold that nothing can evict.
-    pub(crate) fn reserve(arena: crate::pages::ArenaId, most: u64) -> Result<Self> {
-        let count = usize::try_from(most).map_err(|_| Errno::EINVAL)?;
-        if count == 0 {
+    /// A window's private pages, `most` of them at most: `EINVAL` for none.
+    pub(crate) fn new(most: u64) -> Result<Self> {
+        if most == 0 {
             return Err(Errno::EINVAL);
         }
-        if !physmem::pin(arena, count) {
-            return Err(Errno::ENOMEM);
-        }
-        Ok(Self { arena, most })
-    }
-}
-
-impl Drop for CopyOnWrite {
-    fn drop(&mut self) {
-        physmem::unpin(self.arena, self.most as usize);
+        Ok(Self { most })
     }
 }
 
@@ -2062,13 +2049,13 @@ pub(crate) mod tests {
     }
 
     /// cladefs: a window of `pages` pages that copies on write, holding `most` private pages at
-    /// most, of the default arena, through `stage`, or in this process's memory without one.
+    /// most, through `stage`, or in this process's memory without one.
     pub(crate) fn copying(
         pages: u64,
         most: u64,
         stage: Option<Arc<dyn SecondStage>>,
     ) -> (Dax, DaxWindow) {
-        let copying = CopyOnWrite::reserve(crate::pages::ArenaId::DEFAULT, most).unwrap();
+        let copying = CopyOnWrite::new(most).unwrap();
         Dax::copying(pages * page_size(), stage, Some(copying)).unwrap()
     }
 
@@ -2234,21 +2221,18 @@ pub(crate) mod tests {
         assert_eq!(refused, Err(Errno::EINVAL));
     }
 
-    /// cladefs TASK-164.1: a window's private pages are reserved against its arena as it is made,
-    /// all of them, and let go of as it goes, so that a store never waits for memory; a bound of
-    /// none, or of more pages than the window has, is refused.
+    /// cladefs TASK-501: a window's private pages are its VM process's memory, reserved against no
+    /// arena as it is made: windows whose bounds together are more than the daemon's memory are
+    /// made all the same; a bound of none, or of more pages than the window has, is refused.
     #[test]
-    fn private_pages_are_reserved_as_windows_are_made() {
-        let (ps, arena) = (page_size(), crate::pages::ArenaId::DEFAULT);
-        let before = physmem::pinned_bytes(arena);
-        let (dax, window) = copying(8, 4, None);
-        assert_eq!(physmem::pinned_bytes(arena) - before, 4 * ps);
-        drop((dax, window));
-        assert_eq!(physmem::pinned_bytes(arena), before);
+    fn windows_reserve_no_memory_for_their_private_pages() {
+        let ps = page_size();
+        let pages = physmem::memory_bytes() / ps;
+        let windows: Vec<_> = (0..3).map(|_| copying(pages, pages, None)).collect();
+        assert_eq!(windows.len(), 3);
 
-        let too_many = CopyOnWrite::reserve(arena, 9).unwrap();
+        let too_many = CopyOnWrite::new(9).unwrap();
         assert_eq!(Dax::copying(8 * ps, None, Some(too_many)).err(), Some(Errno::EINVAL));
-        assert_eq!(physmem::pinned_bytes(arena), before);
-        assert_eq!(CopyOnWrite::reserve(arena, 0).err(), Some(Errno::EINVAL));
+        assert_eq!(CopyOnWrite::new(0).err(), Some(Errno::EINVAL));
     }
 }

@@ -5,8 +5,8 @@ title: >-
   window), and an idle guest keeps up to 7/8 of them
 status: To Do
 assignee: []
-created_date: '2026-11-15 12:24'
-updated_date: '2026-11-15 13:31'
+created_date: 2026-11-15 12:24
+updated_date: '2026-11-16T21:40:00Z'
 labels:
   - perf
   - review-2026-11-15
@@ -36,3 +36,9 @@ PRIVATE_MAX_DEFAULT is 1 GiB (crates/virtio_extent/src/config.rs); CopyOnWrite::
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+TASK-501 removes the cap half: copying windows reserve nothing against the daemon memory, so WINDOW no longer fails ENOMEM past 7/8 of it. The idle half stays: with no reservation, private pages an idle guest keeps (fxfs_dax_work relieves only near the bound) are what bounds VMs a host, now in real host memory.
+<!-- SECTION:NOTES:END -->

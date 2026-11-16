@@ -40,9 +40,9 @@ extent store             crates/extent_store: segments, large extents' files,
   reaches alone: the guest's struct pages, the VM process's state, its
   mappings and KVM's page tables are the same through 8 GiB and 64 GiB windows
   (GCE r881, r882). A window is 64 GiB at most (`MAX_WINDOW`, which bounds what
-  the daemon keeps for it). `private_max` is memory, reserved against the
-  tenant's: 1 GiB unless configured (`dax_private_max`), whatever the window's
-  size. The daemon's memory (`MEMORY_BYTES`) is what keeps a VM's rereads
+  the daemon keeps for it). `private_max` bounds memory, the VM process's: 1 GiB
+  unless configured (`dax_private_max`), whatever the window's size. The daemon
+  reserves none of it (TASK-501). The daemon's memory (`MEMORY_BYTES`) is what keeps a VM's rereads
   fast, as a host's page cache keeps a pmem image's: a Linux tree's warm
   reread through an 8 GiB window took 13.15 s with a daemon of 1 GiB,
   600 ms with 8 GiB, against ext4's 586 ms from its guest's page cache. The
@@ -119,8 +119,8 @@ A tenant's VM process holds its tenant's arena and the default one, read-only
 (mapped private, so the window can track stores to it), and nothing of another
 tenant's. An extent's pages are of the arena it is cached in alone. A VM's
 private DAX pages, those its guest wrote, are its VM process's own memory,
-laid out as its window is, at most `private_max` of them, which the daemon
-reserves against the tenant's memory as the window is made.
+laid out as its window is, at most `private_max` of them, charged to the VM
+process (its cgroup), not to the daemon's memory or the tenant's (TASK-501).
 The host's VM manager drives the daemon
 through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
 `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,

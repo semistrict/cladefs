@@ -5,7 +5,8 @@ title: >-
   pages shared between VMs
 status: To Do
 assignee: []
-created_date: '2026-11-15 13:33'
+created_date: 2026-11-15 13:33
+updated_date: '2026-11-16T21:40:00Z'
 labels:
   - memory
   - firecracker
@@ -26,7 +27,7 @@ Firecracker's restore today fills guest memory from a file (MAP_PRIVATE) or thro
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Two VMs restored from one snapshot on one host share the pages neither wrote: the host holds one copy of each, shown by a guest test reading the pages in both and counting extentd's pages and the VMs' private pages
-- [ ] #2 A guest may write all its memory: private pages bounded by the guest's memory, reserved against the tenant, not by dax_private_max, shown by a guest test writing every page
+- [ ] #2 A guest may write all its memory: private pages bounded by the guest's memory, charged to the VM process as its guest memory is (nothing reserved against the daemon or the tenant, TASK-501), not by dax_private_max, shown by a guest test writing every page
 - [ ] #3 A 64 GiB guest restores and runs within vm.max_map_count, shown by a test
 - [ ] #4 Pages the guest gives back through the balloon's free page reporting drop their private copies, shown by a test
 <!-- AC:END -->

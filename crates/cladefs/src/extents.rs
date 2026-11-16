@@ -1586,11 +1586,10 @@ impl ExtentStore {
     }
 
     /// cladefs: creates the DAX window as [`create_dax_window`](Self::create_dax_window) does, one
-    /// that copies on write (backlog doc-13): a store to a page gives the page a private copy,
-    /// counted against the store's arena's memory, of which it holds `private_max` pages at most,
-    /// reserved against the arena now (`ENOMEM` past what it may hold that nothing can evict). A
-    /// store whose extents can't change, a follower's, a point or a public base, takes none (as
-    /// [`StoreAccess::may_write`]).
+    /// that copies on write (backlog doc-13): a store to a page gives the page a private copy, of
+    /// which it holds `private_max` pages at most, its second stage's memory, not the daemon's: none
+    /// is reserved for them (TASK-501). A store whose extents can't change, a follower's, a point
+    /// or a public base, takes none (as [`StoreAccess::may_write`]).
     pub fn create_copying_dax_window(
         &self,
         size: u64,
@@ -1598,7 +1597,7 @@ impl ExtentStore {
         private_max: u64,
     ) -> Result<DaxWindow, Error> {
         self.access().may_write()?;
-        let copying = crate::dax::CopyOnWrite::reserve(self.arenas.own(), private_max)?;
+        let copying = crate::dax::CopyOnWrite::new(private_max)?;
         self.install_dax(|| Ok(Dax::copying(size, second_stage, Some(copying))?))
     }
 

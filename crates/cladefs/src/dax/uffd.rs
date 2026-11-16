@@ -2855,7 +2855,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::reserve(crate::pages::ArenaId::DEFAULT, 1).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(1).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         // Not in memory as it is mapped, and zeros as it is brought in: not here until a fault.
         let file = TestSource::anonymous(1);
@@ -2931,7 +2931,7 @@ mod tests {
         let base = memory as usize;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, ps as u64, None) }.unwrap();
-        let copying = crate::dax::CopyOnWrite::reserve(crate::pages::ArenaId::DEFAULT, 1).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(1).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         // In memory as it is mapped, installed here as a load first touches it.
         let file = TestSource::filled(1, 9);
@@ -3001,8 +3001,7 @@ mod tests {
         let base = window_memory(3);
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, (3 * ps) as u64, None) }.unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, 3).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(3).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let file = TestSource::filled(3, 9).source();
         dax.map(0, &file, 0, (3 * ps) as u64);
@@ -3151,8 +3150,7 @@ mod tests {
         let size = (PAGES * ps) as u64;
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, size, None) }.unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, PAGES as u64).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(PAGES as u64).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
@@ -3201,8 +3199,7 @@ mod tests {
         let stage =
             unsafe { UffdSecondStage::with_budget(base, size, Memories::InProcess, None, BUDGET) }
                 .unwrap();
-        let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, PAGES as u64).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(PAGES as u64).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let tag = |page: usize| (page % 251) as u8 + 1;
         let file = TestSource::scattered(PAGES as u64, |page| tag(page as usize)).source();
@@ -3261,7 +3258,7 @@ mod tests {
         // SAFETY: Only the test uses the memory, which outlives the window.
         let stage = unsafe { UffdSecondStage::in_process(base, (2 * ps) as u64, None) }.unwrap();
         let arena = crate::pages::ArenaId::DEFAULT;
-        let copying = crate::dax::CopyOnWrite::reserve(arena, 2).unwrap();
+        let copying = crate::dax::CopyOnWrite::new(2).unwrap();
         let (mut dax, window) = Dax::in_host_memory_copying(stage.clone(), Some(copying)).unwrap();
         let file = TestSource::filled(2, 7).source();
         dax.map(0, &file, 0, (2 * ps) as u64);

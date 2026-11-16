@@ -2,8 +2,8 @@
 id: doc-13
 title: Copy-on-write DAX
 type: specification
-created_date: '2026-11-04 07:55'
-updated_date: '2026-11-16 04:07'
+created_date: 2026-11-04 07:55
+updated_date: '2026-11-16T21:40:00Z'
 ---
 # Copy-on-write DAX: the window maps sealed extents only; a store gets a private copy
 
@@ -126,8 +126,9 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   the device a private page holding what the page held, mapped writable at the same address, until
   a `MAP` or `UNMAP` replaces it. Not with `READ_ONLY`: a follower's stores stay refused.
 - **`private_max`** (configuration, with `DAX`): the most private pages the device holds at
-  once. A store past it is refused, and the VM stops (159). The host sets it as it opens the device,
-  and counts it against the tenant's memory then, not as pages come: a store never waits for memory.
+  once. A store past it is refused, and the VM stops (159). The host sets it as it opens the device.
+  *TASK-501:* nothing is reserved for it: the pages are the VM process's memory, which the bound and
+  the VM process's cgroup limit, not the daemon's or the tenant's.
   *TASK-227:* 1 GiB unless configured (`dax_private_max`), or the window's pages if fewer, whatever
   the window's size: the window is address space, as large as the data, its private pages memory
   (half a window's, TASK-164.11's default, would have reserved 32 GiB of a 64 GiB window's).
@@ -162,10 +163,10 @@ window's changes take; 3 and 4 are the guest's, unchanged.
   the source's. KVM's worker's writes are resolved as reads, as now, and the vCPU's own access
   decides. On arm64, the write-protect fault reports the address, as now. *Done differently
   (TASK-164.1):* a private page is the VM process's own memory, a memfd laid out as the window
-  (`dax::uffd::PrivateMemory`), not a page of the tenant's arena; `private_max`
-  is reserved against the tenant's arena as the window is made (OPEN_QUESTIONS.md).
+  (`dax::uffd::PrivateMemory`), not a page of the tenant's arena; nothing is reserved for
+  `private_max` (TASK-501, OPEN_QUESTIONS.md).
 - **Private pages** are the device's: a source evicting its page skips them; a `MAP` or `UNMAP`
-  over one frees it; the device's count and the tenant's are kept with them.
+  over one frees it; the device's count is kept with them.
 - **A `MAP` names pages; their first touch installs them** (TASK-276.6, `dax::uffd`). A page the
   window maps is left out of the VM process's memory, as one past the budget of runs is, until the
   guest touches it: a load's fault installs it, with the pages around it of memory following on, as
@@ -190,7 +191,7 @@ window's changes take; 3 and 4 are the guest's, unchanged.
 - **What went** (stage 4): open extents' sources in windows (`Source::is_open`, the open extent's
   memory in `crate::cache`), the commit's sealing of windows' mappings (`commit_seal_ns`, `make_read_only`),
   the open-page pin budget and its `ENOMEM` (`extentd/memory.rs`, `physmem::pin` for open extents;
-  both stay, the tenants' limits and the reservation of `private_max`),
+  the tenants' limits stay; the reservation of `private_max`, the last pin, went with TASK-501),
   asking guests to seal (`extentd/seals.rs`), writable `MAP`s, and `ExtentStore::open`'s mapped
   half (an extent open in memory, a VMO the window maps).
 - **What stays:** the window, its second stage (the VM process's, userfaultfd), `MAP_MANY`,

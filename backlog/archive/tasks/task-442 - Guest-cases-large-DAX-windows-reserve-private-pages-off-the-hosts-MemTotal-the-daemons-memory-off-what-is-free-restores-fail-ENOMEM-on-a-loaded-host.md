@@ -5,7 +5,8 @@ title: >-
   the daemon's memory off what is free: restores fail ENOMEM on a loaded host
 status: To Do
 assignee: []
-created_date: '2026-11-15 11:57'
+created_date: 2026-11-15 11:57
+updated_date: '2026-11-16T21:40:00Z'
 labels:
   - tests
   - dax
@@ -31,3 +32,9 @@ Window::Large sizes a case's DAX window at the host's MemTotal (guest/tests/test
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Superseded by TASK-501: copying windows reserve nothing against the daemon memory, so a loaded host no longer refuses a restore window ENOMEM for its private pages.
+<!-- SECTION:NOTES:END -->
