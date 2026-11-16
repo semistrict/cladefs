@@ -485,6 +485,33 @@ pub(crate) async fn recover_at<B: Bucket>(
     )))
 }
 
+/// cladefs: the state of `branch` as of its segment `at`, a version's (doc-18, TASK-476), as a copy
+/// of the version holds it: its newest checkpoint up to there, then the segments its head names to
+/// there, read holding `ring`; the decoded state it is, shared, its layer. No head: nothing writes
+/// a version.
+pub async fn recover_version(
+    bucket: &impl Bucket,
+    branch: Branch,
+    at: u64,
+    ring: &Ring,
+) -> Result<Recovered, Error> {
+    let checkpoints = Checkpoints::new(bucket, 0).holding(ring);
+    for _ in 0..RESTARTS {
+        let mut touched = BTreeSet::new();
+        match state_at(&checkpoints, branch, at, &mut touched, branch.cell, false).await {
+            Ok(state) => {
+                let recovered = State::clone(&state);
+                return Ok(Recovered { state: recovered, head: None, touched, layer: Some(state) });
+            }
+            Err(Attempt::Restart) => {}
+            Err(Attempt::Failed(error)) => return Err(error),
+        }
+    }
+    Err(Error::Lost(format!(
+        "branch {branch} at {at:x}: what its recovery starts from keeps going"
+    )))
+}
+
 /// Checkpoints read whole, for recoveries, each read once for those that start from it at once,
 /// and for those after while it is among the last few read: a base's recovery and its forks',
 /// those without checkpoints of their own starting from the base's, share one, as a pass of the

@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-16 11:25'
+updated_date: '2026-11-16 14:44'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -172,7 +172,7 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>extents/<branch>/<epoch>.<segment>.<sequence>` | an extent of 4 MiB or more, raw, uploaded by the writer of `epoch` before its segment `segment`, which names it: the key is the writer's declaration of what may yet name it, which the collector goes by (Garbage collection) | create-only, before the segment naming it |
 | `<C>checkpoints/<branch>/<epoch>.<segment>` | the branch's state as of segment `segment`, by the writer of `epoch`; at a fork point to another cell, by whoever records the fork, of the epoch of the segment there (Forks) | create-only |
 | `<C>branches/<branch>` | the format of the branch's objects, first; its owner; where it was forked from, whether it is a fork's, whether deleted, whether a point, whether its fork of a point is being made, or made, and whether another than its host resumed it, whether a failed fork's claim | create; updated with a condition |
-| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
+| `<C>heads/<branch>` | the branch's head: its writer's epoch, who took it, and the token it was taken with (its cell's epoch, Cells); the end of its segments, the runs of epochs they were written in, and its newest checkpoint (The head, TASK-407); its versions, each its ID, the segment it is at and its cell's cut (Versions, TASK-476) | created, then swapped with a condition; deleted only with its cell, dead (Dead cells removed whole); or, of a branch of no record listed, if no deletion's (Fences kept) |
 | `<C>gc/lease` | the collector's epoch over the cell, which its passes take, and what the last pass over the cell to end recorded: its listing's digest, what it deferred, what the cell takes (Garbage collection, Passes that skip; TASK-395.2, TASK-395.6, TASK-395.8) | likewise |
 | `<C>gc/marks/<epoch>` | what the cell's mark-only pass of that epoch would have deleted, each object's key, size, version and time as listed (Garbage collection) | create-only, by the collector; removed by an operator |
 | `<C>moves/<rest>/<pass>` | the live extents of the object at `<C><rest>`, compacted by the cell's pass of epoch `pass`, and where in it each is; `<C>moves/moves/<rest>/<pass>/<pass>` those moves' (Garbage collection, TASK-407.1) | create-only, by the collector |
@@ -833,6 +833,54 @@ serving them, wherever they are; TASK-486 for the runtime's size.
 `bucket::lifecycle::restores_ask_the_bucket_what_the_protocol_needs` pins each phase's requests and
 round trips one after another (the longest chain of requests each begun once the one before it was
 answered); `bucket_lifecycle_by_phase` measures them at any base size and latency.
+
+## Versions
+
+*Designed 2026-11-16 (TASK-476, doc-18; the user's decisions of 2026-11-15 and 2026-11-16),
+model-checked in specs/bucket; in extent_bucket and extent_store since, the simulation's
+`sim::versions_*` tests and a hand mutant checking it; cladefs's interfaces next.* A version is a named state of a vdisk kept in
+its own cell, the name of the branch's state as of a segment its head names. It has no record, no
+head and no cell of its own: **the branch's head names it** (`Head::versions`: its ID, the segment
+it is at, the cell's cut it is part of, whether it is shared), for as long as the version is kept.
+
+- **Its cut** is a commit of the branch, its store quiescent, that closes its segment, as a fork's
+  does (Forks). The segment's footer names the version (`Contents::versions`), its ID random,
+  unique to its making, as owners are. The snapshot returns once that commit is local, synced on the
+  host's disk: the version is **local**, local-first. The acknowledgement whose swap names the segment
+  names the version too (rule `versions_acked`): the version is then **uploaded**, and costs the
+  bucket the segment's create and the head's swap, as any commit does. A WAL put after the
+  branch's end (`Wal::rebase`) renumbers the segment, never the version's ID.
+- **Takeovers carry versions** (rule `versions_carried`), as they carry what the head names. A
+  deletion's final head names none: a branch's versions go with it, and deleting a vdisk that
+  has versions is refused unless the deletion is asked to delete them too.
+- **Dropping one** is its writer's swap of the head without it, one request, as a window's oldest
+  is dropped in the swap of the acknowledgement that names a new version. A host holding no
+  writer of the branch takes the head first (The head) and recovers nothing.
+- **A restore of a version** into C, a new branch, is a point's fork's steps (Points), with the
+  branch's head in place of the point's record: C's record being made, naming the branch and the
+  version; its reference under the branch's cell (References); the head read, which must name the
+  version (`forks_check_points`), shared if C is of another tenant; for C of another cell, the
+  checkpoint at the version's segment, created if none is there, by the first restore into
+  another cell alone (`recovery::checkpoint_at`: C's recovery reads its parent across cells by that
+  key); then C's record made. The collector gives up on a restore being made of a version its
+  branch's head names no more (`collector_abandons`), and passes over one into another cell whose
+  checkpoint is not there yet, which holds nothing (doc-18, For the code).
+- **The collector keeps each version's state** (rule `versions_kept`): a pass recovering a live
+  branch from its head keeps, for each version the head names, the branch's whole state at it
+  and what recovering it reads, as it keeps a fork point's (A pass over a cell). A version dropped
+  is kept by no pass after the swap: its data goes at the next pass, unless a fork of it holds it by its
+  reference.
+- **A cell's cut** is versions of each of its vdisks cut at one moment by the one process
+  holding them all (cladefsd), which then names the cut in the cell's object (Cells). The bucket's
+  protocol holds it as versions alone. specs/bucket does not model cells' objects.
+
+specs/bucket: the head's `vers`, the commit `"version"`, `DropVersion`, `StartRestoreVersion`; the
+invariant `VersionsStay` (a version acknowledged stays named until its writer drops it or a deletion
+ends the head), and `NothingNeededGone` and `HistoriesOwn` applied to every version a live branch's
+head names. Models `BucketVersions`, `BucketVersionsTakeovers` and `BucketCellsVersions`. Mutations
+`NoVersionsKept`, `NoVersionsCarried` and `NoVersionsAcked`, and three of the restore's rules
+removed for versions: `NoForksCheckVersions`, `NoForksReferFirstVersions` and
+`NoCollectorAbandonsVersions`.
 
 ## Reading
 

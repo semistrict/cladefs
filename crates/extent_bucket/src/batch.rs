@@ -11,7 +11,7 @@
 //! planned by the lengths of the extents they seal ([`Plan`]), whose objects read their data only
 //! as they upload ([`objects`]).
 
-use crate::layout::{self, Branch, Chain, Child, Contents, Footer, Segment};
+use crate::layout::{self, Branch, Chain, Child, Contents, Footer, Segment, VersionCut};
 use crate::writer::{Body, Objects};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -157,13 +157,18 @@ impl Plan {
     /// Closes it on `chain`, as the writer's next segment, which the chain goes on after: its
     /// footer, stamped, whose objects read their data as they upload ([`objects`]).
     pub fn close(self, chain: &mut Chain) -> Footer {
-        self.close_forking(chain, Vec::new())
+        self.close_ending(chain, Vec::new(), Vec::new())
     }
 
     /// Closes it on `chain`, as [`Plan::close`] does, with forks of the branch at its end to
-    /// `forks`, their children.
-    fn close_forking(self, chain: &mut Chain, forks: Vec<Child>) -> Footer {
-        chain.close(Contents { forks, ..self.contents(chain.branch()) })
+    /// `forks`, their children, and the versions `versions` cut there (TASK-476).
+    fn close_ending(
+        self,
+        chain: &mut Chain,
+        forks: Vec<Child>,
+        versions: Vec<VersionCut>,
+    ) -> Footer {
+        chain.close(Contents { forks, versions, ..self.contents(chain.branch()) })
     }
 }
 
@@ -240,18 +245,30 @@ impl SegmentBuilder {
     /// Closes it on `chain`, its writer's, as the writer's next segment, which the chain goes on
     /// after: its footer, stamped, its data yet to be framed.
     pub fn close(self, chain: &mut Chain) -> Unframed {
-        self.close_forking(chain, Vec::new())
+        self.close_ending(chain, Vec::new(), Vec::new())
     }
 
     /// Closes it on `chain`, as [`SegmentBuilder::close`] does, with a fork of the branch to
     /// `child` at its end, of its owner, a point if it says so: a fork ends its segment, which its
     /// child inherits the whole of (doc-7, Forks, Points).
     pub fn fork(self, child: Child, chain: &mut Chain) -> Unframed {
-        self.close_forking(chain, vec![child])
+        self.close_ending(chain, vec![child], Vec::new())
     }
 
-    fn close_forking(self, chain: &mut Chain, forks: Vec<Child>) -> Unframed {
-        let footer = self.plan.close_forking(chain, forks);
+    /// cladefs: closes it on `chain`, as [`Batch::close`] does, with the version `cut` cut at its end:
+    /// a name for the branch's state there, which the acknowledgement naming the segment names in
+    /// the branch's head (doc-18, TASK-476).
+    pub fn cut(self, cut: VersionCut, chain: &mut Chain) -> Unframed {
+        self.close_ending(chain, Vec::new(), vec![cut])
+    }
+
+    fn close_ending(
+        self,
+        chain: &mut Chain,
+        forks: Vec<Child>,
+        versions: Vec<VersionCut>,
+    ) -> Unframed {
+        let footer = self.plan.close_ending(chain, forks, versions);
         Unframed { footer, data: Data { segment: self.data, own: self.own } }
     }
 }

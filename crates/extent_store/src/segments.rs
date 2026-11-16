@@ -26,7 +26,7 @@ use crate::wal::{LogHeader, log_header, new_salt};
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
 use extent_bucket::keys::Ring;
 use extent_frame::PART;
-use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, epoch_of};
+use extent_frame::segment::{Chain, Child, Contents, Continued, Footer, VersionCut, epoch_of};
 use extent_frame::{KeyId, Secret};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io;
@@ -230,6 +230,9 @@ pub(crate) struct Segments<F> {
     close_wanted: bool,
     /// The forks the next commit makes at its end, which close the open segment.
     forking: Vec<Child>,
+    /// cladefs: the versions the next commit cuts at its end, which close the open segment
+    /// (TASK-476).
+    cutting: Vec<VersionCut>,
     /// What the commits since it opened changed, which its footer records.
     window: Window,
     /// cladefs: the chain of the footers' writer, the writer of the branch in object storage, as the
@@ -337,6 +340,7 @@ impl<F: File> Segments<F> {
             opened: Instant::now(),
             close_wanted: false,
             forking: Vec::new(),
+            cutting: Vec::new(),
             window: Window::starting(branch, epoch + 1),
             chain,
             files: Files::new(open_files),
@@ -587,6 +591,13 @@ impl<F: File> Segments<F> {
         self.forking.push(child);
     }
 
+    /// cladefs: has the next commit cut the version `cut` at its end, which its contents name, and
+    /// close the open segment, whose footer names the version (doc-18, TASK-476).
+    pub fn close_for_version(&mut self, cut: VersionCut) {
+        self.close_wanted = true;
+        self.cutting.push(cut);
+    }
+
     /// Whether the open segment holds commits up to `epoch`, the last, which closing it records.
     /// cladefs: or the first full one, which holds those made before it filled, the open segment
     /// none since (TASK-92.41).
@@ -708,6 +719,7 @@ impl<F: File> Segments<F> {
         contents.capacity = capacity;
         contents.next_sequence = next_sequence;
         contents.forks = std::mem::take(&mut self.forking);
+        contents.versions = std::mem::take(&mut self.cutting);
         self.window.fold(&contents);
         self.committed_len = self.tracked[&self.open].len;
         records.push((self.open, contents));
@@ -1759,6 +1771,8 @@ struct Window {
     root: Option<Vec<u8>>,
     capacity: Option<u64>,
     forks: Vec<Child>,
+    /// cladefs: the versions cut at their ends (TASK-476).
+    versions: Vec<VersionCut>,
     /// cladefs: the runs of the commit its segment's footer goes on with, which the segments after
     /// it end, if any: the last thing it folds (TASK-92.41).
     continued: Option<Continued>,
@@ -1794,6 +1808,7 @@ impl Window {
             self.capacity = commit.capacity;
         }
         self.forks.extend_from_slice(&commit.forks);
+        self.versions.extend_from_slice(&commit.versions);
         if let Some(&last) = commit.commits.last() {
             self.last = Some(epoch_of(last));
         }
@@ -1822,6 +1837,7 @@ impl Window {
             forks: self.forks,
             capacity: self.capacity,
             continued: self.continued,
+            versions: self.versions,
         }
     }
 }
