@@ -71,7 +71,7 @@ fn bench(dir: &std::path::Path, tenant: u64, name: &str, forks: usize) {
         store.write(extent, 0, &[VolatileSlice::from(&data[..])]).unwrap();
     }
     store.commit(Some(b"root")).unwrap();
-    if let Some(kms) = cladefs::bucket::kms() {
+    if let Some(kms) = cladefs::bucket::kms().unwrap() {
         // The pool of the tenant's new cell KEKs, filled as its store opened, off the forks' path.
         futures::executor::block_on(kms.filled(tenant));
     }

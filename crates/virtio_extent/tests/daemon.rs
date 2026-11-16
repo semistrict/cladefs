@@ -24,6 +24,16 @@ use zerocopy::{FromBytes, Immutable, IntoBytes};
 const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
 const RESPONSE: usize = size_of::<Response>();
 
+/// The bounds of a device of the test's stores, which have no window (TASK-470).
+fn bounds() -> Bounds {
+    Bounds {
+        block_size: BLOCK as u64,
+        max_extent: MAX_EXTENT,
+        map_alignment: cladefs::pages::page_size(),
+        window: 0,
+    }
+}
+
 /// Makes this process a host of the multi-node system, as an extent daemon's must be: its stores'
 /// branches in a bucket in its memory, as of placement 1, unless the test's environment names
 /// others (scripts/test.sh's firecracker part names memory:///vmm). The daemon logs to standard
@@ -139,7 +149,8 @@ fn serve(
     let mut written = vec![0xa5; writable];
     let buffers = buffers(&mut readable, &mut written, split);
     let notices = Notices::default();
-    let used = futures::executor::block_on(handle(store, &notices, CacheType::Writeback, buffers));
+    let served = handle(store, &notices, CacheType::Writeback, bounds(), buffers);
+    let used = futures::executor::block_on(served);
     (used as usize, written)
 }
 
@@ -422,8 +433,14 @@ fn answers_whatever_a_driver_asks() {
     use proptest::test_runner::{Config, TestRunner};
 
     let (store, _dir) = store_of(64 << 20);
+    // cladefs TASK-470: and blocks' multiples, which reads and writes take.
     let near_or_far = || {
-        prop_oneof![0u64..(1 << 22), any::<u64>(), (0u64..4096).prop_map(|back| u64::MAX - back)]
+        prop_oneof![
+            0u64..(1 << 22),
+            (0u64..16).prop_map(|blocks| blocks * BLOCK as u64),
+            any::<u64>(),
+            (0u64..4096).prop_map(|back| u64::MAX - back)
+        ]
     };
     let branch = prop_oneof![Just(store.branch()), any::<u64>()];
     let args = (branch, 0u64..64, near_or_far(), near_or_far(), any::<u32>());

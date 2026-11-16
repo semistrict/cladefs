@@ -79,6 +79,10 @@ pub enum Fault {
 #[derive(Default)]
 pub struct SimBucket {
     inner: Mutex<Inner>,
+    /// What the simulation's hosts know of it without asking it again ([`Bucket::known`]): one for
+    /// them all, kept through their crashes, so that what one learned another may use, stale, as
+    /// a read from earlier, which the protocol allows for (TASK-449).
+    known: crate::known::Known,
 }
 
 impl SimBucket {
@@ -431,6 +435,10 @@ impl Bucket for SimBucket {
 
     fn now(&self) -> u64 {
         self.inner.lock().unwrap().clock
+    }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        Some(&self.known)
     }
 }
 
@@ -882,7 +890,7 @@ mod tests {
             pool.spawner()
                 .spawn_local(async move {
                     let created = create(&*sim, key, bytes.to_vec()).await;
-                    results.borrow_mut().push((key, matches!(created, Created::Created)));
+                    results.borrow_mut().push((key, matches!(created, Created::Created(_))));
                 })
                 .unwrap();
         }

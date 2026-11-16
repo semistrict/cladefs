@@ -63,6 +63,7 @@ pub mod head;
 #[cfg(test)]
 mod heap;
 pub mod keys;
+pub mod known;
 pub mod layout;
 pub mod local;
 pub mod marks;
@@ -74,8 +75,8 @@ pub mod passed;
 pub mod peer;
 pub mod record;
 pub mod recovery;
-#[cfg(test)]
-mod s3_server;
+#[cfg(any(test, feature = "testing"))]
+pub mod s3_server;
 pub mod sweep;
 pub mod trace;
 pub mod wal;
@@ -92,7 +93,7 @@ pub use fetch::read;
 pub use layout::Location;
 pub use recovery::{Recovered, State, recover};
 pub use wal::{Rebased, TakenBranch, Wal};
-pub use writer::{Body, Objects, Writer};
+pub use writer::{Body, Objects, Taker, Writer};
 
 /// Extent IDs' sequence numbers carry the epoch of the writer that minted them above this bit,
 /// so that a writer never mints an ID one before it minted, even one whose upload landed after it

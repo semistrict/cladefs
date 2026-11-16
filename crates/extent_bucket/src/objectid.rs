@@ -108,7 +108,7 @@ async fn take(bucket: &impl Bucket) -> u64 {
     loop {
         let block = 1 + rand::random::<u64>() % (ID_BLOCKS - 1);
         match bucket::create(bucket, &layout::objectid_block(block), bytes.clone()).await {
-            Created::Created => return block,
+            Created::Created(_) => return block,
             // Another's: another block.
             Created::Exists(_) => {}
         }
