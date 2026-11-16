@@ -63,7 +63,7 @@ A request ordering every request completed before it ahead of every one submitte
 
 **Commit**:
 A barrier that also records the branch's new root; the unit the store recovers to.
-_Avoid_: flush, sync (a sync waits for a commit to be durable)
+_Avoid_: flush, sync (a sync waits for a commit's level)
 
 **Root**:
 The one mutable record of a branch: where its filesystem's metadata starts.
