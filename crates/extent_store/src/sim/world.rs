@@ -750,13 +750,23 @@ impl World {
             Event::VersionDropped { id, result } => {
                 let cut = self.versions.get_mut(&id).unwrap();
                 cut.dropping = false;
+                let branch = cut.branch;
                 match result {
                     Ok(()) => cut.dropped = true,
                     Err(Error::Lost(_) | Error::Corrupt(_)) => {
                         self.violation(format!("dropping version {id:x}: {result:?}"));
                     }
-                    // Its writer taken over, or its branch deleted: dropped not.
-                    Err(_) => {}
+                    // Its writer taken over, or its branch deleted: dropped as its swap of the head
+                    // landed or not, which a write that took effect, answered unavailable, then
+                    // found changed by the taking over, can't tell its writer (TASK-499): as the
+                    // head says, the writer writing it no more.
+                    Err(_) => {
+                        let direct = Direct(self.bucket.clone());
+                        let head = block_on(extent_bucket::head::get(&direct, sim_branch(branch)));
+                        let named =
+                            head.ok().flatten().is_some_and(|head| head.version(id).is_some());
+                        self.versions.get_mut(&id).unwrap().dropped = !named;
+                    }
                 }
             }
             Event::Restored { child, result } => {

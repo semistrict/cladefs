@@ -242,6 +242,7 @@ fn one() {
         "wals" => wals(),
         "forked_wals" => forked_wals(),
         "late_checkpoints" => late_checkpoints(),
+        "versions" => versions(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());

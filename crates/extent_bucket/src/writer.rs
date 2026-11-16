@@ -577,7 +577,9 @@ impl<B: Bucket> Writer<B> {
     /// segments it is yet to acknowledge, which its acknowledgements name not: the head
     /// swapped to name them no more, with the condition every swap has (rule `head_swap`), a writer
     /// taken over failing and stopping ([`Error::Fenced`]). The collector's next pass over the
-    /// branch's cell keeps their states no more (doc-18, TASK-476).
+    /// branch's cell keeps their states no more (doc-18, TASK-476). Failing so, they may be dropped
+    /// all the same: a swap that took effect, its answer lost, and the head taken over before its
+    /// retry found it its own, fails as one that didn't (TASK-499); the head says which.
     pub async fn drop_versions(&self, ids: &BTreeSet<u64>) -> Result<(), Error> {
         self.inner().dropped.extend(ids);
         self.change_versions(|head| head.without(ids)).await
