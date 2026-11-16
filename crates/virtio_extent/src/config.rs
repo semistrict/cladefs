@@ -58,9 +58,9 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_window_size: Option<u64>,
     /// cladefs: the most private pages a writer's window holds, as it copies on write (doc-4's
-    /// `DAX`, cladefs's backlog doc-13), which cladefs's extent daemon reserves against the store's
-    /// tenant's memory as the guest activates the device: 1 GiB's pages without it, or the
-    /// window's if fewer, whatever its size (TASK-227). A follower's window copies nothing.
+    /// `DAX`, cladefs's backlog doc-13), the VM process's memory, for which cladefs's extent daemon
+    /// reserves nothing (TASK-501): 1 GiB's pages without it, or the window's if fewer, whatever
+    /// its size (TASK-227). A follower's window copies nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dax_private_max: Option<u64>,
     /// The socket of cladefs's extent daemon, which serves the store.
