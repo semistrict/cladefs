@@ -7,7 +7,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-10 08:58'
-updated_date: '2026-11-14 22:15'
+updated_date: '2026-11-16 01:31'
 labels: []
 dependencies: []
 priority: medium
@@ -40,4 +40,6 @@ On ubu1 (Ubuntu 26.04, kernel 7.0.0-43, home on ZFS rpool/USERDATA) tests/store.
 2026-11-14 (TASK-406 runs on ubu1): fails at main 123a2cbb4 too, and with TMPDIR on the ext4 scratch disk (/mnt/fxdax-scratch), so the test's temporary directory's filesystem isn't the cause; only the target dir was on ZFS then. Panics at crates/extent_store/tests/store.rs:2241: '0 of the open segment's 8 pages cached'.
 
 Seen again 2026-11-14 (TASK-411 Linux run, target under ~/src on ZFS); rerun with CARGO_TARGET_DIR on /mnt/fxdax-scratch.
+
+Obsolete: the test it names was removed in 3139c4bdd (TASK-433.1); stores' segments are no longer held in the host's page cache.
 <!-- SECTION:NOTES:END -->

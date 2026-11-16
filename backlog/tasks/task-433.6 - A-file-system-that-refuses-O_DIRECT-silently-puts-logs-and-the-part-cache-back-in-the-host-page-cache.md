@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 13:55'
+updated_date: '2026-11-16 01:31'
 labels: []
 dependencies: []
 references:
@@ -37,3 +38,9 @@ Found by the second-vendor review (Codex via scripts/review-change.sh, TASK-444.
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Store half done in 744df100e (TASK-433.5): DiskDir::file refuses a file that can't bypass (InvalidInput naming the file system), logs included; HostDir's direct flag is gone. Left: extent_remote cache.rs opened() and direct.rs's dir helper still run buffered when bypass fails; AC #2/#3 open.
+<!-- SECTION:NOTES:END -->
