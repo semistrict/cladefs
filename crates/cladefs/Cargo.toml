@@ -33,7 +33,7 @@ failpoints = ["fail/failpoints"]
 loom = ["dep:loom"]
 # cladefs: a host whose environment names no KMS and gives no master key encrypts under the tests' KMS,
 # every tenant's KEK one known key (`remote::testing`, TASK-411.28), as every process does that
-# this crate's tests and sqlite_extents' start (cladefs-extentd, cladefsctl, cladefs-mount), agreeing
+# this crate's tests and sqlite_extents' start (cladefsd, cladefsctl, cladefs-mount), agreeing
 # with them: every store is encrypted, and a process given no KMS refuses to start, but a test's needs
 # none. Never a host's: a release build refuses it.
 tests-kms = ["testing"]

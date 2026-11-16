@@ -17,8 +17,8 @@
 #
 # Each COMMIT is one origin has. CLADEFS_FORK_TIME_FILES, CLADEFS_FORK_TIME_FILE_MIB and
 # CLADEFS_FORK_TIME_FORKS size the base and the forks (the host script), and reach the test host, as
-# every other CLADEFS_* does (scripts/lib/host.sh). CLADEFS_TEST_HOST_LIMIT caps the run (default
-# 4h).
+# every other CLADEFS_* and CLADEFSD_* does (scripts/lib/host.sh). CLADEFS_TEST_HOST_LIMIT caps the
+# run (default 4h).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

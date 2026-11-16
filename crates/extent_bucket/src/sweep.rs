@@ -334,9 +334,17 @@ impl<B: Bucket> Bucket for Counted<B> {
         self.bucket.head(key)
     }
 
+    /// A request a page of [`crate::bucket::LIST_PAGE`] objects, as S3 and GCS serve it, whatever
+    /// the bucket under it does (TASK-455).
     fn list(&self, prefix: &str) -> impl Future<Output = Result<Vec<Meta>, BucketError>> + Send {
-        self.count(Request::List);
-        self.bucket.list(prefix)
+        let listing = self.bucket.list(prefix);
+        async move {
+            let listed = listing.await;
+            let objects = listed.as_ref().map_or(0, Vec::len);
+            let pages = crate::bucket::list_pages(objects);
+            self.counts[Request::List as usize].fetch_add(pages, Ordering::Relaxed);
+            listed
+        }
     }
 
     fn list_delimited(
@@ -817,6 +825,7 @@ mod tests {
             skipped: 0,
             locked: 0,
             uncompacted: 0,
+            removed: 0,
         };
         assert_eq!(swept.report, expected);
         // Of each cell: the segment holding what the next freed, that one, and the one freeing
@@ -892,22 +901,88 @@ mod tests {
         assert_eq!(pass(holding(LEASE, Some(now - 1)), 0x55), Err(Error::Left(Left::Swept)));
         // In full, the cell changed by the deletes of the pass before.
         assert_eq!(pass(holding(LEASE, Some(now)), 0x56), Ok(Report::default()));
-        // Holding for no time: taken, holding nothing, nothing let go; the cell unchanged since
-        // the pass before, skipped (TASK-395.6).
+        // The cell unchanged since the pass before, skipped (TASK-395.6), by a look: the lease
+        // read, not taken, holding for no time or for a time (TASK-455).
         sim.advance(1);
         let skipped = Report { skipped: 1, ..Report::default() };
         assert_eq!(pass(holding(0, None), 0x57), Ok(skipped));
-        assert_eq!(lease(&bucket), (4, 0x57, 0, now));
+        assert_eq!(lease(&bucket), (3, 0x56, 0, now));
         sim.advance(1);
         assert_eq!(pass(holding(LEASE, None), 0x58), Ok(skipped));
-        assert_eq!(lease(&bucket), (5, 0x58, 0, now + 2));
+        assert_eq!(lease(&bucket), (3, 0x56, 0, now));
     }
+    /// TASK-455's AC #4: a listing is counted as the pages S3 and GCS serve it in, 1,000 keys a
+    /// page, one at least: before, one, however many.
+    #[test]
+    fn listings_are_counted_by_their_pages() {
+        let bucket = Arc::new(Direct(SimBucket::new()));
+        block_on(async {
+            for n in 0..2001 {
+                crate::bucket::create(&*bucket, &format!("many/{n:05}"), vec![1]).await;
+            }
+        });
+        let counted = Counted::new(bucket);
+        for (prefix, objects, pages) in [("none/", 0, 1), ("many/0000", 10, 1), ("many/", 2001, 3)]
+        {
+            let before = counted.requests().of(Request::List);
+            let listed = block_on(counted.list(prefix)).unwrap();
+            assert_eq!(listed.len(), objects, "{prefix}");
+            assert_eq!(counted.requests().of(Request::List) - before, pages, "{prefix}");
+        }
+        assert_eq!([0, 1, 1000, 1001, 2000].map(crate::bucket::list_pages), [1, 1, 1, 2, 2]);
+    }
+
+    /// TASK-455: cells whose branches, roots of IDs an allocator gave, were deleted go whole in the
+    /// sweep that first passes over them, and cost the sweeps after it the listing of the bucket's
+    /// tenants alone, a request, however many there were: none of their objects is left.
+    #[test]
+    fn dead_cells_go_whole_and_cost_later_sweeps_a_listing_however_many() {
+        for n in [4u64, 40] {
+            let bucket = Arc::new(Direct(SimBucket::new()));
+            let ids = crate::objectid::Allocator::new();
+            block_on(async {
+                for id in 1..=n {
+                    let cell = Cell { tenant: 1, id };
+                    let branch = Branch { cell, id: ids.next(&*bucket).await };
+                    branch::create(&*bucket, branch, 0).await.unwrap();
+                    let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
+                    let extent = ExtentId::new(branch.id, writer.chain().next_sequence());
+                    let commit = Commit {
+                        tag: 1,
+                        extents: vec![(extent, vec![7; 64])],
+                        ..Commit::default()
+                    };
+                    let framed = SegmentBuilder::from(commit)
+                        .close(&mut writer.chain())
+                        .frame(writer.keys().encrypting());
+                    let segment = writer.add_segment(framed).unwrap();
+                    writer.upload(segment).await.unwrap();
+                    writer.acknowledge().await.unwrap();
+                    writer.checkpoint().await.unwrap();
+                    drop(writer);
+                    branch::delete(&*bucket, branch, 11, 1, &crate::keys::testing::host_kms())
+                        .await
+                        .unwrap();
+                    crate::cell::forget(&*bucket, cell, branch.id).await.unwrap();
+                }
+            });
+            let swept = [0; 3].map(|_| block_on(sweep(1).run(&bucket, |_| {})));
+            let removed = swept.each_ref().map(|swept| (swept.report.removed, swept.visited));
+            assert_eq!(removed, [(n as usize, n as usize), (0, 0), (0, 0)], "{n} cells");
+            let mut listing = Requests::default();
+            listing.0[Request::ListDelimited as usize] = 1;
+            assert_eq!([swept[1].requests, swept[2].requests], [listing, listing], "{n} cells");
+            let left = block_on(bucket.list("tenants/")).unwrap();
+            assert_eq!(left, Vec::new(), "{n} cells");
+        }
+    }
+
     /// TASK-395.5 with TASK-395.6: two processes sweeping one bucket by turns, each a pass over an
     /// idle cell, skip it by what the other's pass recorded: whoever went over it last, the record
     /// stays the one the last pass in full wrote, as a pass that skips records nothing new, and
-    /// what holds and lets go of the lease is outside the listing's digest. A skipping pass costs
-    /// the lease's taking (a GET and a PUT), one LIST, and its letting go (a GET and a PUT); and it
-    /// ends as a pass in full does, so that a sweep begun before it leaves the cell. A write to the
+    /// what holds and lets go of the lease is outside the listing's digest. A skipping pass is a
+    /// look: the lease's read (a GET) and one LIST, writing nothing (TASK-455), so that a sweep
+    /// begun before it, after the pass in full, looks too. A write to the
     /// cell makes the next pass, either process's, go in full, and the other's skip after it. A
     /// process of other options decides anew, as does the next of the first's after it.
     #[test]
@@ -924,7 +999,7 @@ mod tests {
         };
         let skipped = Report { skipped: 1, ..Report::default() };
         let mut idle = Requests::default();
-        for (request, count) in [(Request::Get, 2), (Request::Update, 2), (Request::List, 1)] {
+        for (request, count) in [(Request::Get, 1), (Request::List, 1)] {
             idle.0[request as usize] = count;
         }
         // In full, deleting; in full again, the cell changed by those deletes, and settled.
@@ -938,15 +1013,13 @@ mod tests {
             assert_eq!((swept.report, swept.requests), (skipped, idle), "turn {turn}");
             assert_eq!(recorded().as_ref(), Some(&settled), "turn {turn}");
         }
-        // A sweep that began before the last pass, which skipped, ended leaves the cell to it.
+        // A sweep that began before the last look, after the pass in full, looks too: a look
+        // records nothing, ending nothing (TASK-455).
         let began = bucket.now() - 1;
         let mut late = Collector::new(NOW)
             .kms(Some(crate::keys::testing::kms()))
             .holding(Holding { lease: LEASE, since: Some(began) });
-        assert_eq!(
-            block_on(late.collect_cell(&*bucket, cell, 0x77)),
-            Err(Error::Left(Left::Swept))
-        );
+        assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
         // A record written in the cell: the next pass, either's, goes over it in full.
         block_on(branch::create(&*bucket, Branch { cell, id: 2 }, 0)).unwrap();

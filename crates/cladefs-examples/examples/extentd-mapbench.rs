@@ -129,9 +129,7 @@ mod bench {
         let connections = number(4, 0);
         // A host of the multi-node system, as the daemon is (TASK-45): a bucket in its memory,
         // and placement 1, unless the environment names others.
-        for (var, default) in
-            [("CLADEFS_EXTENTD_REMOTE", "memory:///mapbench"), ("CLADEFS_EXTENTD_TOKEN", "1")]
-        {
+        for (var, default) in [("CLADEFSD_REMOTE", "memory:///mapbench"), ("CLADEFSD_TOKEN", "1")] {
             if std::env::var_os(var).is_none() {
                 // SAFETY: Before this process starts any other thread.
                 unsafe { std::env::set_var(var, default) };

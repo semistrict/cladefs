@@ -55,7 +55,7 @@ mod host {
         let cladefsctl = std::env::var_os("CLADEFSCTL_BIN").context("CLADEFSCTL_BIN")?;
         let output = std::process::Command::new(cladefsctl)
             .args(["stats", "--json"])
-            .env("CLADEFS_EXTENTD_GRPC", extentd.with_extension("control"))
+            .env("CLADEFSD_GRPC", extentd.with_extension("control"))
             .output()?;
         let stdout = String::from_utf8(output.stdout)?;
         ensure!(
@@ -171,7 +171,7 @@ mod host {
             let store = test_setup.tmp_dir.join("extents");
             let root = setup_rootfs(&test_setup)?;
             let extentd = PathBuf::from(
-                std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD names the daemon"),
+                std::env::var_os("CLADEFSD").expect("CLADEFSD names the daemon"),
             );
             let mut vm = Vm::new(2, 512)?;
             vm.guest_kernel()?;

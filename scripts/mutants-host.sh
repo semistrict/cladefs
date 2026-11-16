@@ -13,11 +13,11 @@
 #   scripts/mutants-host.sh resume RUN RESULTS | cancel RUN
 #
 # CLADEFS_MUTANTS_CRATES names the crates, separated by spaces (default: scripts/mutants.sh's),
-# CLADEFS_MUTANTS_SHARD the shard (K/N) and CLADEFS_MUTANTS_JOBS the mutants at once (default: a third
-# of the test host's CPUs); CLADEFS_MUTANTS_LIST a file in the repository listing the mutants to run
-# alone (scripts/mutants.sh). Shard a sweep longer than a run's limit (CLADEFS_TEST_HOST_LIMIT,
-# default 7h). Every other CLADEFS_* and PJDFSTEST_* variable set here reaches the test host too
-# (scripts/lib/host.sh).
+# CLADEFS_MUTANTS_SHARD the shard (K/N) and CLADEFS_MUTANTS_JOBS the mutants at once (default: a
+# third of the test host's CPUs); CLADEFS_MUTANTS_LIST a file in the repository listing the mutants
+# to run alone (scripts/mutants.sh). Shard a sweep longer than a run's limit
+# (CLADEFS_TEST_HOST_LIMIT, default 7h). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable
+# set here reaches the test host too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

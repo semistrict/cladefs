@@ -37,8 +37,8 @@ fn main() {
     local.create(5).unwrap();
     // SAFETY: before any thread of the process's reads the environment.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///fork-bench");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", "memory:///fork-bench");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
         std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display()));
     }
     let tenants: &[(u64, &str)] = &[(5, "encrypted")];

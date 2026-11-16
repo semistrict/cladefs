@@ -17,7 +17,7 @@
 //! held until their framings, which it lets go of first, before any tenant's page: derived, their
 //! framings read them back (`super::memory::held_parts`, TASK-400).
 //!
-//! A daemon given its memory's size (`cladefs-extentd SOCKET MEMORY_BYTES`) is not governed: its
+//! A daemon given its memory's size (`cladefsd SOCKET MEMORY_BYTES`) is not governed: its
 //! memory is that, as a test's daemon's may be.
 
 use super::memory;
@@ -28,12 +28,12 @@ use std::time::Duration;
 pub const INTERVAL: Duration = Duration::from_millis(100);
 
 /// What the governor leaves free of the memory available to the daemon:
-/// `CLADEFS_EXTENTD_HEADROOM` bytes, or a sixteenth of the host's memory, 1 GiB at least: room for
+/// `CLADEFSD_HEADROOM` bytes, or a sixteenth of the host's memory, 1 GiB at least: room for
 /// VMs' memory to grow into between looks, and for the host's own.
 pub fn headroom(total: u64) -> Result<u64, String> {
-    match std::env::var("CLADEFS_EXTENTD_HEADROOM") {
+    match std::env::var("CLADEFSD_HEADROOM") {
         Ok(bytes) if !bytes.is_empty() => {
-            bytes.parse().map_err(|_| format!("CLADEFS_EXTENTD_HEADROOM is bytes, not {bytes:?}"))
+            bytes.parse().map_err(|_| format!("CLADEFSD_HEADROOM is bytes, not {bytes:?}"))
         }
         _ => Ok((total / 16).max(1 << 30)),
     }

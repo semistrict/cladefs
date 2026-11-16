@@ -37,11 +37,15 @@ pub use extent_frame::segment::{
 /// a KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
 /// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their branch's DEK
 /// (none in the clear since TASK-411.28, which changed no format), own extents' footers naming
-/// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is
-/// written once (TASK-407): segments' and checkpoints' keys name their writers' epochs, a branch's
-/// head ([`head`], [`Head`]) names the segments it holds and its newest checkpoint, replacing its
-/// lease, and footers name no segment they follow; nothing reads 10's.
-pub const FORMAT: u32 = 11;
+/// their extents, and moves' the object they are the moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints'
+/// keys name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it
+/// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
+/// nothing reads 10's. 12: a fork of a point, made, says so
+/// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
+/// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a point says whether
+/// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
+/// clone's reference is retired marked (TASK-455's review); nothing reads 12's.
+pub const FORMAT: u32 = 13;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";

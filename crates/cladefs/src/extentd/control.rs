@@ -41,7 +41,10 @@ const THREADS: usize = 2;
 pub const BLOCKING_THREADS: usize = 32;
 
 /// Serves the control API to the callers that connect to `listener`, until accepting fails; the
-/// sockets of the tenants it grants go in the directory `tenants`.
+/// sockets of the tenants it grants go in the directory `tenants`. cladefs: and the Mount service of
+/// the daemon's FUSE mount of cells, if it has one ([`super::mount`], TASK-475.2): its calls,
+/// counted and refused as the daemon drains as the API's are; without a mount, they fail
+/// `UNIMPLEMENTED`.
 pub fn serve_control(
     listener: std::os::unix::net::UnixListener,
     tenants: impl Into<PathBuf>,
@@ -74,6 +77,8 @@ pub fn serve_control(
         tonic::transport::Server::builder()
             .add_service(health)
             .add_service(Drained(ExtentdServer::new(control)))
+            // cladefs: its FUSE mount's, if it mounts cells (TASK-475.2).
+            .add_optional_service(super::mount::service().map(Drained))
             .serve_with_incoming(incoming)
             .await
             .map_err(std::io::Error::other)

@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 // The extent daemon's control API (TASK-43.3): what the host's VM manager, which launches the
-// VMMs, asks cladefs-extentd to do with the VMs' disks, the extent stores it serves them. It is
-// served over a Unix socket (`CLADEFS_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
+// VMMs, asks cladefsd to do with the VMs' disks, the extent stores it serves them. It is
+// served over a Unix socket (`CLADEFSD_GRPC`), the daemon's user's alone, mode 0600 whatever
 // its umask (TASK-159), as every caller may do everything. VM processes do not use it: they keep
 // the extent protocol on the daemon's VM sockets, which carries their memory as file descriptors.
 //
@@ -2056,9 +2056,9 @@ type GetStatsResponse struct {
 	TakenUnixNs uint64 `protobuf:"varint,1,opt,name=taken_unix_ns,json=takenUnixNs,proto3" json:"taken_unix_ns,omitempty"`
 	// The commit the daemon was built of.
 	Build string `protobuf:"bytes,2,opt,name=build,proto3" json:"build,omitempty"`
-	// Its counters: those its metrics name cladefs_extentd_NAME_total, as `window_open_maps_refused`.
+	// Its counters: those its metrics name cladefsd_NAME_total, as `window_open_maps_refused`.
 	Counters map[string]uint64 `protobuf:"bytes,3,rep,name=counters,proto3" json:"counters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
-	// Its gauges: those its metrics name cladefs_extentd_NAME.
+	// Its gauges: those its metrics name cladefsd_NAME.
 	Gauges map[string]uint64 `protobuf:"bytes,4,rep,name=gauges,proto3" json:"gauges,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	// Its VM processes that opened a store, in the order they connected.
 	Vms           []*VmStats `protobuf:"bytes,5,rep,name=vms,proto3" json:"vms,omitempty"`
@@ -3147,7 +3147,7 @@ func (*SetDiskLimitResponse) Descriptor() ([]byte, []int) {
 // The hosts sharing the daemon's bucket.
 type SetPeersRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Each `HOST:PORT`, as it serves its peers (its CLADEFS_EXTENTD_PEER_ADDRESS), spelled as every
+	// Each `HOST:PORT`, as it serves its peers (its CLADEFSD_PEER_ADDRESS), spelled as every
 	// host spells it: this host's among them or not.
 	Addresses     []string `protobuf:"bytes,1,rep,name=addresses,proto3" json:"addresses,omitempty"`
 	unknownFields protoimpl.UnknownFields

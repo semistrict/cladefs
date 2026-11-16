@@ -12,7 +12,7 @@
 //! blocks once however many links it has, as `du -sx` counts them. One rule for what is shared: a
 //! file is the tenant's whose directory holds it, and one in no tenant's directory is no tenant's.
 //! A fork's directory holds what the fork wrote; what it shares of its base is in the bucket, and
-//! read through the host's part cache (`CLADEFS_EXTENTD_CACHE`), which is no tenant's: copies of the
+//! read through the host's part cache (`CLADEFSD_CACHE`), which is no tenant's: copies of the
 //! bucket's objects that any tenant's stores read, a closed segment's too once acknowledged, which
 //! its own capacity and floor bound, evicting what it must to keep within them. A tenant's reads
 //! can't fill the disk through it, and no tenant's limit depends on what another read. The default

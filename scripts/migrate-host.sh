@@ -23,8 +23,8 @@
 # which the run leaves; by default, with one test host for both, a directory of the run's own there
 # (file://). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here, or
 # CLADEFS_GUEST_KERNEL_BUILD the one each test host builds (release by default,
-# scripts/test-host.sh). Every other CLADEFS_* and PJDFSTEST_* variable set here reaches the test
-# hosts too (scripts/lib/host.sh).
+# scripts/test-host.sh). Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here reaches
+# the test hosts too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"
@@ -76,8 +76,8 @@ migrate() {
     trap cleanup EXIT
     (( status == 0 )) || return "$status"
     host_ssh "mkdir -p $(printf %q "$held")" || return
-    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFS_EXTENTD_REMOTE=$remote/branches" \
-        "CLADEFS_EXTENTD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
+    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_REMOTE=$remote/branches" \
+        "CLADEFSD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
         test-linux-host.sh fxfs-guest-migrate-dax > "$results/remote.log" 2>&1 || status=$?
     if [[ $host_state == ended ]]; then
         host_fetch || status=$?

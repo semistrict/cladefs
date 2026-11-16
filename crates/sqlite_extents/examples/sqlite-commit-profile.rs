@@ -269,11 +269,8 @@ fn main() {
     // here, placement 1.
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var(
-            "CLADEFS_EXTENTD_REMOTE",
-            format!("file://{}/", root.join("bucket").display()),
-        );
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", format!("file://{}/", root.join("bucket").display()));
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     println!("Under {}.", root.display());
     for blocks in [1, 5] {

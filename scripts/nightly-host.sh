@@ -25,7 +25,18 @@
 # may hold the bench slot for as long as it needs (CLADEFS_NIGHTLY_LIMIT, 8h). scripts/nightly.py
 # report judges what came back (scripts/ab-rounds.py's bounds, CLADEFS_AB_*BOUND*), and publish
 # commits it to main and pushes it. A side that failed to build, or a round that ran nothing, is a
-# night that could not run: a result, said in the history page, not a crash.
+# night that could not run: a result, said in the history page, not a crash; the next night measures
+# the same commits again (nightly.py plan).
+#
+# The scratch disk, /mnt/fxdax-scratch, is every job's on ubu1, and the first night found it full as
+# its measurement began (TASK-489). So a night first removes its own earlier runs' directories,
+# those of the nightly's name whose job is not running (scripts/lib/host.sh's
+# CLADEFS_TEST_HOST_SWEEP; one night runs at a time, the lock below), and keeps only the artifacts
+# the next night reuses, tonight's two sides' (CLADEFS_NIGHTLY_KEEP_COUNT, 2: tonight's head is its
+# base, and a night that measured nothing is measured again); then checks the disk has the room it
+# needs before it builds and before it measures (nightly.py room: CLADEFS_NIGHTLY_ROOM_BUILD and
+# CLADEFS_NIGHTLY_ROOM_MEASURE, or more if earlier nights took more), and, short of it, is a night
+# that could not run, its report naming the disk, the free space found and the need.
 #
 # What it measures, by default: the fs bench's cases that an agent sandbox's work stands on, the
 # guest's Fxfs with DAX (sandboxes run DAX): its io group (cold and warm reads, sequential and
@@ -73,18 +84,28 @@ if [[ $what == skip ]]; then
     exit 0
 fi
 
-results=$repo/docs/measurements/$(hostname -s)-nightly-$(date -u +%Y-%m-%dT%H%MZ)-${head:0:8}
-mkdir -p "$results"
+# To the second, and made afresh: a night measured again (nightly.py plan) never shares its
+# results with the one before.
+results=$repo/docs/measurements/$(hostname -s)-nightly-$(date -u +%Y-%m-%dT%H%M%SZ)-${head:0:8}
+mkdir -p "$(dirname "$results")"
+mkdir "$results"
 say "measuring ${base:0:12} (base) against ${head:0:12} (head, main) into $results"
 export CLADEFS_BENCH_CASES=${CLADEFS_NIGHTLY_CASES:-bench-fs-ext4-guest-kernel bench-fs-fxfs-guest-dax bench-fork-fxfs-guest-dax-cold bench-fork-fxfs-guest-dax-warm}
 export CLADEFS_BENCH_GROUPS=${CLADEFS_NIGHTLY_GROUPS:-io,files,fsync,sync}
 export CLADEFS_AB_ROUNDS=${CLADEFS_NIGHTLY_ROUNDS:-3}
 export CLADEFS_BENCH_ITERATIONS=${CLADEFS_BENCH_ITERATIONS:-2}
+rooms=$("$repo/scripts/nightly.py" --root "$repo" room)
+read -r room room_measure <<< "$rooms"
+say "the night needs $room bytes free on the scratch disk before building, $room_measure before" \
+    "measuring"
 status=0
 CLADEFS_TEST_HOST=local CLADEFS_TEST_HOST_REPO=$repo CLADEFS_TEST_HOST_RUN=nightly \
+    CLADEFS_TEST_HOST_SWEEP=1 \
+    CLADEFS_TEST_HOST_ROOM=$room CLADEFS_TEST_HOST_ROOM_MEASURE=$room_measure \
     CLADEFS_TEST_HOST_LIMIT=${CLADEFS_NIGHTLY_LIMIT:-8h} \
     CLADEFS_AB_A=base=$base CLADEFS_AB_B=head=$head \
     CLADEFS_AB_KEEP=${CLADEFS_NIGHTLY_KEEP:-/mnt/fxdax-scratch/cladefs-nightly/artifacts} \
+    CLADEFS_AB_KEEP_COUNT=${CLADEFS_NIGHTLY_KEEP_COUNT:-2} \
     CLADEFS_AB_COUNTS=1 CLADEFS_AB_RERUN=1 \
     "$repo/scripts/bench-ab-host.sh" "$results" > "$results/driver.log" 2>&1 || status=$?
 say "the A/B ended $status"

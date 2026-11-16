@@ -273,7 +273,7 @@ mod host {
         Ok(std::thread::spawn(move || {
             let control = match &store {
                 Some(_) => {
-                    let extentd = std::env::var_os("CLADEFS_EXTENTD").expect("CLADEFS_EXTENTD set");
+                    let extentd = std::env::var_os("CLADEFSD").expect("CLADEFSD set");
                     Some(crate::common::control(Path::new(&extentd))?)
                 }
                 None => None,

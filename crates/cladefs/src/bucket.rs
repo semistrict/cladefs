@@ -12,7 +12,7 @@
 //! (`extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
 //! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
-//! (`CLADEFS_EXTENTD_REMOTE`), made on each tenant's first use (TASK-411.27); else none, which every
+//! (`CLADEFSD_REMOTE`), made on each tenant's first use (TASK-411.27); else none, which every
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
@@ -26,22 +26,22 @@ use extent_store::upload::{Failure, Runtime, UPLOAD_BYTES};
 use std::sync::Arc;
 use storage_device::ExtentId;
 
-/// The fencing token of this host's placement, `CLADEFS_EXTENTD_TOKEN`, which the system's control
+/// The fencing token of this host's placement, `CLADEFSD_TOKEN`, which the system's control
 /// plane gives it, and which the copies of stores here that were never placed ([`place`]) take
 /// their branches with, as stores restored or taken here are. Not 0, which would fence nothing:
 /// a host without one keeps no branch (TASK-45).
 pub fn host_token() -> Result<u64, Failure> {
     let missing = || {
         Failure::msg(
-            "CLADEFS_EXTENTD_TOKEN names no placement token: this host's placement's, from the \
+            "CLADEFSD_TOKEN names no placement token: this host's placement's, from the \
              system's control plane, which fences earlier placements",
         )
     };
-    match std::env::var("CLADEFS_EXTENTD_TOKEN") {
+    match std::env::var("CLADEFSD_TOKEN") {
         Ok(token) if !token.is_empty() => match token.parse() {
             Ok(0) => Err(missing()),
             Ok(token) => Ok(token),
-            Err(err) => Err(Failure::local(err, format!("CLADEFS_EXTENTD_TOKEN {token:?}"))),
+            Err(err) => Err(Failure::local(err, format!("CLADEFSD_TOKEN {token:?}"))),
         },
         _ => Err(missing()),
     }
@@ -52,18 +52,18 @@ pub fn host_token() -> Result<u64, Failure> {
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
-    /// The bucket's URL, `CLADEFS_EXTENTD_REMOTE`.
+    /// The bucket's URL, `CLADEFSD_REMOTE`.
     pub bucket: String,
-    /// The placement's fencing token, `CLADEFS_EXTENTD_TOKEN` ([`host_token`]).
+    /// The placement's fencing token, `CLADEFSD_TOKEN` ([`host_token`]).
     pub token: u64,
 }
 
 impl Host {
     /// The host the environment names, or why it names none.
     pub fn from_env() -> Result<Self, String> {
-        let bucket = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
+        let bucket = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
         let bucket = bucket.ok_or_else(|| {
-            "CLADEFS_EXTENTD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
+            "CLADEFSD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
              stores' branches in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;
@@ -176,10 +176,10 @@ fn host_keys() -> &'static Result<HostKeys, String> {
     })
 }
 
-/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFS_EXTENTD_REMOTE`).
+/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_REMOTE`).
 fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
-    let url = std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty());
-    let url = url.ok_or("CLADEFS_EXTENTD_REMOTE names none")?;
+    let url = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
+    let url = url.ok_or("CLADEFSD_REMOTE names none")?;
     crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 
@@ -377,7 +377,7 @@ static UPLOADS: std::sync::LazyLock<Arc<Budget>> = std::sync::LazyLock::new(|| {
 static UPLOAD_MEMORY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
 
 /// cladefs: has the host's uploads hold at most `bytes` of the objects they upload at once
-/// (TASK-317): extentd's `CLADEFS_EXTENTD_UPLOAD_MEMORY`. However far behind the bucket its stores
+/// (TASK-317): extentd's `CLADEFSD_UPLOAD_MEMORY`. However far behind the bucket its stores
 /// fall, what waits for it is on the host's disk, their write-ahead logs, and what of it is in
 /// memory is what this lets upload at once. Before any store opens; no less than the largest
 /// object a store uploads, an extent's of 64 MiB, which goes alone.
@@ -3334,7 +3334,7 @@ mod tests {
         // SAFETY: this test's process is its own (nextest), no store open yet.
         unsafe {
             std::env::remove_var("CLADEFS_KMS");
-            std::env::set_var("CLADEFS_EXTENTD_REMOTE", url);
+            std::env::set_var("CLADEFSD_REMOTE", url);
             std::env::set_var("CLADEFS_MASTER_KEY", &master);
         }
         let bucket = crate::host_store::bucket(url).unwrap();

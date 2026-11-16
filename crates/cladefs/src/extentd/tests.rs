@@ -27,8 +27,8 @@ fn host() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", "memory:///branches");
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", "memory:///branches");
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
 }
 
@@ -206,7 +206,7 @@ fn windows_budget_by_the_mappings_the_daemon_says_the_host_allows() {
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
 }
 
-/// cladefs: with `CLADEFS_EXTENTD_REMOTE` naming a bucket, the stores the daemon opens keep their
+/// cladefs: with `CLADEFSD_REMOTE` naming a bucket, the stores the daemon opens keep their
 /// branches there: a durable commit is an uploaded one.
 #[test]
 fn keeps_branches_in_object_storage() {
@@ -263,7 +263,7 @@ fn keeps_branches_in_the_buckets_their_stores_name() {
 
 /// cladefs: the daemon keeps what its bucket did, its requests and bytes, what the stores'
 /// followers are, how many and how far behind, what serving the stores cost, and the requests it
-/// served, in the file `CLADEFS_EXTENTD_STATS` names, soon after each change: the bench reports it
+/// served, in the file `CLADEFSD_STATS` names, soon after each change: the bench reports it
 /// (`scripts/bench-report.py`).
 #[test]
 fn keeps_object_storage_and_follower_stats() {
@@ -271,7 +271,7 @@ fn keeps_object_storage_and_follower_stats() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("stats.txt");
     // SAFETY: as in host.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_STATS", &file) };
+    unsafe { std::env::set_var("CLADEFSD_STATS", &file) };
     let path = dir.path().join("store");
     let (store, served) = connect(&path, 1 << 20);
     let branch = store.branch();
@@ -1118,7 +1118,7 @@ fn metrics_gauge_the_extent_cache_and_the_windows_mappings() {
             "window_pages",
         ]
         .map(|name| {
-            let name = format!("cladefs_extentd_{name} ");
+            let name = format!("cladefsd_{name} ");
             let line = metrics.lines().find_map(|line| line.strip_prefix(&name));
             line.unwrap_or_else(|| panic!("no {name}in {metrics}")).parse::<u64>().unwrap()
         })
@@ -1159,18 +1159,16 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
     host();
     let builds = || {
         let metrics = super::metrics::render();
-        let series = ["cladefs_extentd_build_info{", "cladefs_extentd_vm_build_info{"];
+        let series = ["cladefsd_build_info{", "cladefsd_vm_build_info{"];
         (metrics.lines())
             .filter(|line| series.iter().any(|name| line.starts_with(name)))
             .map(str::to_owned)
             .collect::<Vec<_>>()
     };
     let commit = crate::BUILD_COMMIT;
-    let daemon = format!("cladefs_extentd_build_info{{commit=\"{commit}\"}} 1");
+    let daemon = format!("cladefsd_build_info{{commit=\"{commit}\"}} 1");
     let vms = |branch: u64, count: usize| {
-        format!(
-            "cladefs_extentd_vm_build_info{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}"
-        )
+        format!("cladefsd_vm_build_info{{branch=\"{branch:x}\",commit=\"{commit}\"}} {count}")
     };
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 24);
@@ -1207,7 +1205,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     let series = |name: &str, vm: &super::stats::Vm| -> Option<u64> {
         let metrics = super::metrics::render();
         let labels = format!("{{branch=\"{:x}\",connection=\"{}\"}} ", vm.branch, vm.connection);
-        let name = format!("cladefs_extentd_{name}{labels}");
+        let name = format!("cladefsd_{name}{labels}");
         metrics
             .lines()
             .find_map(|line| line.strip_prefix(&name))
@@ -1377,11 +1375,11 @@ fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> 
 
 /// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
 /// and, if set, that it runs on once it has, until its input closes.
-const CHILD_SOCKET: &str = "CLADEFS_EXTENTD_TEST_SOCKET";
-const CHILD_STORE: &str = "CLADEFS_EXTENTD_TEST_STORE";
-const CHILD_EXTENT: &str = "CLADEFS_EXTENTD_TEST_EXTENT";
-const CHILD_RUNS_ON: &str = "CLADEFS_EXTENTD_TEST_RUNS_ON";
-const CHILD_CLOSES: &str = "CLADEFS_EXTENTD_TEST_CLOSES";
+const CHILD_SOCKET: &str = "CLADEFSD_TEST_SOCKET";
+const CHILD_STORE: &str = "CLADEFSD_TEST_STORE";
+const CHILD_EXTENT: &str = "CLADEFSD_TEST_EXTENT";
+const CHILD_RUNS_ON: &str = "CLADEFSD_TEST_RUNS_ON";
+const CHILD_CLOSES: &str = "CLADEFSD_TEST_CLOSES";
 
 /// Opens the store at `store` through the daemon at `socket`, once the daemon has seen a connection
 /// that had it open go.
@@ -1501,7 +1499,7 @@ fn two_processes_map_the_same_pages() {
 }
 /// The connection a VM process of [`vm_processes_tell_the_daemon_what_their_windows_cost`] is
 /// given: its descriptor's number.
-const CHILD_CONNECTION: &str = "CLADEFS_EXTENTD_TEST_CONNECTION";
+const CHILD_CONNECTION: &str = "CLADEFSD_TEST_CONNECTION";
 
 /// A VM process, for [`vm_processes_tell_the_daemon_what_their_windows_cost`]: changes its window
 /// six times, each a stage operation, a page made private the last, and closes its store; then
@@ -2364,7 +2362,7 @@ fn daemons_with_roots_serve_no_stores_outside_them() {
     std::fs::create_dir(&ours).unwrap();
     std::fs::create_dir(&theirs).unwrap();
     // SAFETY: as in host.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_ROOTS", &ours) };
+    unsafe { std::env::set_var("CLADEFSD_ROOTS", &ours) };
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
@@ -2629,7 +2627,7 @@ fn control_takes_branches_at_the_placements_given() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
     // SAFETY: as in host.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", &url) };
+    unsafe { std::env::set_var("CLADEFSD_REMOTE", &url) };
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
@@ -3396,8 +3394,8 @@ fn metrics_count_requests_as_they_are_served() {
     };
     let before = get("/metrics");
     assert!(before.starts_with("HTTP/1.1 200 OK\r\n"), "{before}");
-    assert_eq!(metric(&before, "cladefs_extentd_requests_total{kind=\"write\"}"), 0);
-    assert_eq!(metric(&before, "cladefs_extentd_connections"), 0);
+    assert_eq!(metric(&before, "cladefsd_requests_total{kind=\"write\"}"), 0);
+    assert_eq!(metric(&before, "cladefsd_connections"), 0);
 
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 20);
@@ -3407,27 +3405,23 @@ fn metrics_count_requests_as_they_are_served() {
     }
     assert_eq!(read(&store, extent, 0, BLOCK), Ok(pattern(1, BLOCK)));
     let metrics = get("/metrics");
-    let requests = |kind: &str| {
-        metric(&metrics, &format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}}"))
-    };
+    let requests =
+        |kind: &str| metric(&metrics, &format!("cladefsd_requests_total{{kind=\"{kind}\"}}"));
     assert_eq!(
         [requests("open"), requests("transfer"), requests("write"), requests("read")],
         [1, 1, 3, 1]
     );
-    let histogram = "cladefs_extentd_request_duration_seconds";
+    let histogram = "cladefsd_request_duration_seconds";
     assert_eq!(metric(&metrics, &format!("{histogram}_count{{kind=\"write\"}}")), 3);
     assert_eq!(metric(&metrics, &format!("{histogram}_bucket{{kind=\"write\",le=\"+Inf\"}}")), 3);
-    assert_eq!(metric(&metrics, "cladefs_extentd_request_errors_total{kind=\"write\"}"), 0);
-    assert_eq!(metric(&metrics, "cladefs_extentd_connections"), 1);
-    assert_eq!(metric(&metrics, "cladefs_extentd_stores_open"), 1);
+    assert_eq!(metric(&metrics, "cladefsd_request_errors_total{kind=\"write\"}"), 0);
+    assert_eq!(metric(&metrics, "cladefsd_connections"), 1);
+    assert_eq!(metric(&metrics, "cladefsd_stores_open"), 1);
     // TASK-91.3: its uploader's lag, nothing once a durable commit is uploaded.
     store.commit(None).unwrap();
     let metrics = get("/metrics");
     let upload = |name: &str| {
-        format!(
-            "cladefs_extentd_upload_{name}{{branch=\"{}\"}}",
-            branch_at(&dir.path().join("store"))
-        )
+        format!("cladefsd_upload_{name}{{branch=\"{}\"}}", branch_at(&dir.path().join("store")))
     };
     assert_eq!(
         [
@@ -3441,7 +3435,7 @@ fn metrics_count_requests_as_they_are_served() {
     let failures = |request: &str| {
         metric(
             &metrics,
-            &format!("cladefs_extentd_object_storage_failures_total{{request=\"{request}\"}}"),
+            &format!("cladefsd_object_storage_failures_total{{request=\"{request}\"}}"),
         )
     };
     assert_eq!([failures("create"), failures("get-range"), failures("update")], [0, 0, 0]);
@@ -4371,7 +4365,7 @@ fn restores_over_what_a_failed_cleanup_left_fork_anew() {
 /// How many requests of `kind` the daemon has served, as its metrics count them.
 fn served(kind: &str) -> u64 {
     let metrics = super::metrics::render();
-    let name = format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}} ");
+    let name = format!("cladefsd_requests_total{{kind=\"{kind}\"}} ");
     let line = metrics.lines().find_map(|line| line.strip_prefix(&name));
     line.unwrap_or_else(|| panic!("no {kind} requests counted in {metrics}")).parse().unwrap()
 }
@@ -6126,10 +6120,10 @@ const SHARED_LOCKS: &[&str] = &[
 ];
 
 /// What [`child_panics_holding`] panics holding, as its parent says.
-const PANIC_HOLDING: &str = "CLADEFS_EXTENTD_TEST_PANIC_HOLDING";
+const PANIC_HOLDING: &str = "CLADEFSD_TEST_PANIC_HOLDING";
 
 /// Run by [`a_panic_holding_a_shared_lock_stops_the_daemon`], in a process of its own: a daemon,
-/// aborting on panics as `cladefs-extentd` does, serves a VM process's window and store, which
+/// aborting on panics as `cladefsd` does, serves a VM process's window and store, which
 /// write, commit, map and fault a page in, and close, a panic holding the lock [`PANIC_HOLDING`]
 /// names as it is next taken. It says if it got to the end.
 #[test]
@@ -6319,7 +6313,7 @@ fn drains_give_up_past_their_bound() {
     let connection = super::server::CONNECTIONS.begin().unwrap();
     let left = super::drain::drain(std::time::Duration::from_millis(100));
     let left = left.err().expect("a drain gave up");
-    assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0 });
+    assert_eq!(left, super::drain::Left { connections: 1, calls: 0, uploaders: 0, mount: false });
     assert_eq!(
         left.to_string(),
         "1 VM processes' connections, 0 control calls and 0 stores' uploaders left"
@@ -6344,7 +6338,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     std::fs::create_dir(&cache).unwrap();
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
-    unsafe { std::env::set_var("CLADEFS_EXTENTD_CACHE", &cache) };
+    unsafe { std::env::set_var("CLADEFSD_CACHE", &cache) };
     let bucket = super::stores::daemon_bucket().unwrap();
     // Files of a few parts each, so that what the check reads is in segments the bucket
     // acknowledged before it, as the import's close waits for its uploads.
@@ -6450,8 +6444,8 @@ fn durable_commits_through_the_daemon() {
     let _ = super::logging::to_stderr();
     // SAFETY: As in host.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", &url);
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", &url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
     let (store, _served) = connect(&dir.path().join("store"), 1 << 30);

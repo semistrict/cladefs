@@ -25,16 +25,18 @@
 //! writes: what a pass in full over the VM's cell recovers, a state a point.
 //!
 //! With `--deleted`, every cell's branch is deleted once written, as its host deletes it
-//! (TASK-443.4): cells nothing lives in, of which a pass keeps the cell's object, its branch's
-//! record and head, and its collector lease, for good.
+//! (TASK-443.4): cells nothing lives in, which a pass removes whole (TASK-455).
 //!
 //! With `--clones`, the cells are sandboxes made and deleted (TASK-443.4). Each tenant's first cell
 //! is a base, its branch of LARGEST segments of EXTENTS extents each, as a VM's, forked at its last
 //! to a point, the tenant's second cell; and CELLS sandboxes after them (`T/3` on), each a cell
 //! whose branch is a clone of the point, as a host makes one (`branch::fork_point`: its record,
 //! then its reference under the base's cell), which wrote SEGMENTS segments of garbage and a
-//! checkpoint and was deleted. The pass over each retires its reference, leaving its mark under the
-//! base's cell for good: what a pass over a popular base's cell lists.
+//! checkpoint and was deleted. The pass over each retires its reference, unmarked, and removes its
+//! cell (TASK-455): what a pass over a popular base's cell lists is its live clones' alone.
+//!
+//! Every cell's branch but a VM's or a base's, of ID 1, and their points', is of an ID an
+//! allocator gave, as hosts give them (`extent_bucket::objectid`).
 //!
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
@@ -50,6 +52,7 @@ use extent_bucket::bucket::Bucket as _;
 use extent_bucket::keys::{self, CachingKms};
 use extent_bucket::layout::{Branch, Cell, Child, Origin};
 use extent_bucket::object_bucket::ObjectBucket;
+use extent_bucket::objectid::Allocator;
 use extent_bucket::{Bytes, Writer, branch, cell};
 use object_store::ObjectStore as _;
 use object_store::local::LocalFileSystem;
@@ -261,6 +264,9 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
             }
         })
         .collect();
+    // What gives the IDs of the cells' branches, as a host's does: one for the filling, its blocks
+    // taken in the bucket of the cell that first needs one, copied with it.
+    let ids = Allocator::new();
     let threads = std::thread::available_parallelism().map_or(4, |threads| threads.get());
     let next = AtomicUsize::new(0);
     let sums: Vec<Result<Vec<(Cell, Sum)>, String>> = std::thread::scope(|scope| {
@@ -271,8 +277,9 @@ fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
                     while let Some(&(cell, shape, of)) =
                         shapes.get(next.fetch_add(1, Ordering::Relaxed))
                     {
-                        let sum = futures::executor::block_on(fill(&files, kms, cell, shape, of))
-                            .map_err(|err| format!("cell {cell}: {err}"))?;
+                        let sum =
+                            futures::executor::block_on(fill(&files, kms, cell, shape, of, &ids))
+                                .map_err(|err| format!("cell {cell}: {err}"))?;
                         sums.push((cell, sum));
                     }
                     Ok(sums)
@@ -314,8 +321,9 @@ async fn fill(
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
+    ids: &Allocator,
 ) -> Result<Sum, String> {
-    let written = write(kms, cell, shape, of).await?;
+    let written = write(kms, cell, shape, of, ids).await?;
     Ok(copy(&written.bucket, files, of).await?.0)
 }
 
@@ -327,7 +335,7 @@ async fn fill_base(
     cell: Cell,
     shape: Shape,
 ) -> Result<(Sum, Point), String> {
-    let written = write(kms, cell, shape, None).await?;
+    let written = write(kms, cell, shape, None, &Allocator::new()).await?;
     let (branch, origin) = written.point.ok_or("a base forked to no point")?;
     let (sum, objects) = copy(&written.bucket, files, None).await?;
     Ok((sum, Point { branch, origin, objects }))
@@ -335,11 +343,13 @@ async fn fill_base(
 
 /// Writes `cell`, its branch as `shape` says, and a VM's points' cells, into a bucket in memory:
 /// one starting from `of`'s objects, the branch a clone of that point, if given.
+/// Its branch's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
     kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
+    ids: &Allocator,
 ) -> Result<Written, String> {
     let memory = Arc::new(InMemory::new());
     for (key, bytes) in of.into_iter().flat_map(|point| &point.objects) {
@@ -352,7 +362,10 @@ async fn write(
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
     let failed = |err: extent_bucket::Error| err.to_string();
     make_cell(&bucket, kms, cell).await.map_err(failed)?;
-    let id = Branch { cell, id: 1 };
+    let id = match shape {
+        Shape::Vm { .. } => Branch { cell, id: 1 },
+        Shape::Garbage { .. } => Branch { cell, id: ids.next(&*bucket).await },
+    };
     match of {
         None => branch::create(&*bucket, id, 0).await.map_err(failed)?,
         Some(point) => branch::fork_point(&*bucket, id, point.branch, point.origin, WRITER.0)
@@ -375,7 +388,7 @@ async fn write(
                     Shape::Vm { .. } => vm_extent_bytes(n, i),
                 };
                 let bytes = (0..len).map(|at| ((at as u64 * 7 + n + i) % 251) as u8);
-                (ExtentId::new(1, first + i), bytes.collect())
+                (ExtentId::new(id.id, first + i), bytes.collect())
             })
             .collect();
         let batch = match shape {
@@ -557,39 +570,28 @@ mod tests {
         listed.into_iter().map(|meta| meta.key).collect()
     }
 
-    /// TASK-443.4: what `--deleted` and `--clones` fill, as sweeps find it. A dead cell keeps four
-    /// objects for good, its object, its branch's record and head, and its collector's lease, and
-    /// costs every sweep after the second five requests: two GETs and two updates of its lease, and
-    /// its listing. A sandbox's retirement leaves its mark under its base's cell, whose pass skips
-    /// only once two sweeps went by without a sandbox made or retired.
+    /// TASK-443.4, TASK-455: what `--deleted` and `--clones` fill, as sweeps find it. A dead cell,
+    /// its branch a root or a clone of an ID an allocator gave, is removed whole by its first pass,
+    /// and costs the sweeps after it nothing: they list no cell of it. A sandbox's reference is
+    /// retired unmarked, leaving its base's cell nothing of it: that cell's pass lists the point's
+    /// reference alone, and skips once a sweep went by without a sandbox made or retired, a look
+    /// costing the lease's read and the listing.
     #[test]
-    fn dead_cells_keep_four_objects_and_cost_a_sweep_five_requests() {
+    fn dead_cells_are_removed_whole_and_cost_later_sweeps_nothing() {
         let directory = tempfile::tempdir().unwrap();
         let url = |dir: &std::path::Path| format!("file://{}/", dir.display());
-        let left = |cell: Cell| {
-            let branch = Branch { cell, id: 1 };
-            let mut keys = [
-                layout::cell(cell),
-                layout::collector_lease(cell),
-                layout::head(branch),
-                layout::record(branch),
-            ];
-            keys.sort();
-            keys.to_vec()
-        };
 
-        // Roots, deleted: none skipped until its own deletes are a sweep behind it.
+        // Roots, deleted: each removed by its first pass; the sweeps after list no tenant.
         let deleted =
             Args { dir: directory.path().join("deleted"), ..args([1, 3, 2, 2], Kind::Deleted) };
         assert_eq!(run(&deleted, &kms()).unwrap().cells, 3);
         let bucket = Arc::new(ObjectBucket::from_url(&url(&deleted.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
-        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 0, 3]);
-        assert_eq!(requests(&swept[2]), [6, 6, 3, 2, 17]);
-        for id in 1..=3 {
-            let cell = Cell { tenant: 1, id };
-            assert_eq!(keys(&bucket, &cell.prefix()), left(cell));
-        }
+        assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [3, 0, 0]);
+        assert_eq!(swept.each_ref().map(|swept| swept.visited), [3, 0, 0]);
+        assert_eq!(requests(&swept[1]), [0, 0, 0, 1, 1]);
+        assert_eq!(requests(&swept[2]), [0, 0, 0, 1, 1]);
+        assert_eq!(keys(&bucket, "tenants/"), Vec::<String>::new());
 
         // Sandboxes of a point of a base, deleted: the base's cell 1, the point's 2, theirs after.
         let clones = Args {
@@ -600,14 +602,15 @@ mod tests {
         assert_eq!(filled.cells, 5);
         let bucket = Arc::new(ObjectBucket::from_url(&url(&clones.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
-        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 1, 5]);
-        // Each sandbox's second pass, in full for its own deletes, retires its reference again,
-        // finding its mark there and the reference gone.
-        assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [3, 3, 0]);
-        assert_eq!(requests(&swept[2]), [10, 10, 5, 2, 27]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [3, 0, 0]);
+        // The base's second pass in full, for its sandboxes' retirements after its first.
+        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [0, 1, 2]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [3, 0, 0]);
+        // A look at each of the base's and the point's cells: its lease read, its listing.
+        assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
         for id in 3..=5 {
             let cell = Cell { tenant: 1, id };
-            assert_eq!(keys(&bucket, &cell.prefix()), left(cell));
+            assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
         }
         let base = Cell { tenant: 1, id: 1 };
         let of_base = |bucket: &ObjectBucket| {
@@ -620,29 +623,33 @@ mod tests {
                 count(|kind| matches!(kind, Key::Retired { .. })),
             ]
         };
-        // The point's reference, and a mark a sandbox.
-        assert_eq!(of_base(&bucket), [1, 3]);
+        // The point's reference alone, no mark of a sandbox.
+        assert_eq!(of_base(&bucket), [1, 0]);
 
         // A sandbox more, made and deleted: the base's pass goes in full for its reference, then
-        // for its retirement, the sandbox's for its own deletes.
+        // for its retirement; the sandbox's removes it.
         let files = LocalFileSystem::new_with_prefix(&clones.dir).unwrap();
         let sandbox = Shape::Garbage { segments: 2, deleted: true };
         let cell = Cell { tenant: 1, id: 6 };
+        let ids = Allocator::new();
         let sum = futures::executor::block_on(fill(
             &files,
             &kms(),
             cell,
             sandbox,
             Some(&filled.points[0]),
+            &ids,
         ));
-        // Its cell's object, its record, its head, two segments, a checkpoint, and its reference.
-        assert_eq!(sum.unwrap().objects, 7);
-        assert_eq!(of_base(&bucket), [2, 3]);
+        // Its cell's object, its record, its head, two segments, a checkpoint, its reference, and
+        // the block of IDs its allocator took.
+        assert_eq!(sum.unwrap().objects, 8);
+        assert_eq!(of_base(&bucket), [2, 0]);
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
-        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [4, 4, 6]);
-        assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [1, 1, 0]);
-        assert_eq!(requests(&swept[2]), [12, 12, 6, 2, 32]);
-        assert_eq!(keys(&bucket, &cell.prefix()), left(cell));
-        assert_eq!(of_base(&bucket), [1, 4]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [1, 0, 0]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.skipped), [1, 1, 2]);
+        assert_eq!(swept.each_ref().map(|swept| swept.report.retired), [1, 0, 0]);
+        assert_eq!(requests(&swept[2]), [2, 0, 2, 2, 6]);
+        assert_eq!(keys(&bucket, &cell.prefix()), Vec::<String>::new());
+        assert_eq!(of_base(&bucket), [1, 0]);
     }
 }

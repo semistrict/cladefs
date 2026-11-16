@@ -7,10 +7,10 @@
 //! forks, its page-ins, its uploads and their bucket requests, and its relief of memory
 //! (`extent_bucket::trace`, which makes them).
 //!
-//! Off unless `CLADEFS_EXTENTD_TRACES` is `otlp` ([`from_env`]); then, configured by
+//! Off unless `CLADEFSD_TRACES` is `otlp` ([`from_env`]); then, configured by
 //! OpenTelemetry's own variables: `OTEL_EXPORTER_OTLP_ENDPOINT` (or
 //! `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`) the collector they go to, over HTTP, protobuf
-//! (`http://localhost:4318` by default), `OTEL_SERVICE_NAME` their service (`cladefs-extentd` by
+//! (`http://localhost:4318` by default), `OTEL_SERVICE_NAME` their service (`cladefsd` by
 //! default), and `OTEL_TRACES_SAMPLER` and `OTEL_TRACES_SAMPLER_ARG` which are kept. A request, a
 //! commit or an upload starts a trace, and the daemon makes thousands a second: unless
 //! `OTEL_TRACES_SAMPLER` says otherwise, it keeps one in [`DEFAULT_RATIO`] of the traces they
@@ -23,14 +23,14 @@ use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
 use std::sync::OnceLock;
 
 /// The variable that turns the daemon's spans on: `otlp`, or nothing.
-pub const OPTION: &str = "CLADEFS_EXTENTD_TRACES";
+pub const OPTION: &str = "CLADEFSD_TRACES";
 
 /// The ratio of the traces the daemon keeps, unless `OTEL_TRACES_SAMPLER` or
 /// `OTEL_TRACES_SAMPLER_ARG` says otherwise: one in a hundred.
 pub const DEFAULT_RATIO: f64 = 0.01;
 
 /// The service the daemon's spans are of, unless `OTEL_SERVICE_NAME` says otherwise.
-pub const SERVICE: &str = "cladefs-extentd";
+pub const SERVICE: &str = "cladefsd";
 
 /// The attribute of a request's kind, as metrics name it (`metrics::KINDS`).
 pub const REQUEST_KIND: &str = "cladefs.request.kind";
@@ -44,7 +44,7 @@ pub const ERRNO: &str = "cladefs.errno";
 /// The tracer provider spans go to, once started ([`install`]): what [`shutdown`] flushes.
 static PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
-/// Starts the daemon's spans if `CLADEFS_EXTENTD_TRACES` says to: `otlp`, exported to the collector
+/// Starts the daemon's spans if `CLADEFSD_TRACES` says to: `otlp`, exported to the collector
 /// OpenTelemetry's variables name. Returns whether it did; an error for another value of it, or
 /// for OpenTelemetry's variables it can't take.
 pub fn from_env() -> Result<bool, String> {
@@ -175,7 +175,7 @@ mod tests {
         set(OPTION, Some("jaeger"));
         assert_eq!(
             from_env(),
-            Err("CLADEFS_EXTENTD_TRACES must be `otlp` or unset, not `jaeger`".to_owned())
+            Err("CLADEFSD_TRACES must be `otlp` or unset, not `jaeger`".to_owned())
         );
         assert!(!extent_bucket::trace::enabled());
     }

@@ -8,7 +8,7 @@ the scripts that drive them read in place of grepping logs.
 
 A run's results directory (test-e2e.sh's CLADEFS_E2E_RESULTS) holds:
 
-- run.json: the run's commit (scripts/build-commit.sh), its knobs, every CLADEFS_* and PJDFSTEST_*
+- run.json: the run's commit (scripts/build-commit.sh), its knobs, every CLADEFS_*, CLADEFSD_* and PJDFSTEST_*
   variable it was given but those that say where it writes (WHERE), its repeats and its cases;
 - CASE/repeat-K.json: each repeat's outcome, as the runner writes it (`runner test --outcome`):
   pass, fail, timeout, skip or report, why, the checks failed, what it took of its limit, the commit, the
@@ -16,7 +16,7 @@ A run's results directory (test-e2e.sh's CLADEFS_E2E_RESULTS) holds:
 - summary.json: each case's outcome, its last repeat's (`unrun` before it starts, `running` between
   repeats), the cases that failed, and the run's exit status once it ended (null before), rewritten
   as each repeat ends; and what each extent daemon downloaded against what it read (`daemons`, a
-  case's; `daemon`, the run's), from its stats file (CLADEFS_EXTENTD_STATS: the run's
+  case's; `daemon`, the run's), from its stats file (CLADEFSD_STATS: the run's
   extentd-stats.txt, a case's daemon's NAME-stats.txt in its directory).
 
     guest_results.py start RESULTS REPEATS CASE...  (test-e2e.sh, before its first case)
@@ -44,7 +44,7 @@ def knobs(environment):
     """The knobs of a run given `environment`."""
     where = WHERE | ({"CLADEFS_GUEST_KERNEL"} if environment.get("CLADEFS_GUEST_KERNEL_BUILD") else set())
     return {name: value for name, value in sorted(environment.items())
-            if name.startswith(("CLADEFS_", "PJDFSTEST_")) and name not in where}
+            if name.startswith(("CLADEFS_", "CLADEFSD_", "PJDFSTEST_")) and name not in where}
 
 
 def write(path, value):

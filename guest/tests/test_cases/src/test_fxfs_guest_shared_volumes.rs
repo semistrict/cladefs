@@ -49,7 +49,7 @@ mod host {
         fn run(&self, test_setup: &TestSetup) -> anyhow::Result<()> {
             let dir = &test_setup.tmp_dir;
             let extentd: PathBuf =
-                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
+                std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
             let control = control(&extentd)?;
             let window = if self.dax { crate::common::dax_window(WINDOW)? } else { 0 };
             let root = setup_rootfs(test_setup)?;

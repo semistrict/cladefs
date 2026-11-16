@@ -500,7 +500,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
         root: &'a Path,
         /// The daemon's VM socket.
         socket: PathBuf,
-        /// Its stats file (CLADEFS_EXTENTD_STATS).
+        /// Its stats file (CLADEFSD_STATS).
         stats: PathBuf,
         base: PathBuf,
         /// The DAX window of the VMs on forks of the base, if not 0.
@@ -583,7 +583,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
             let socket = sockets.path().join("extentd.sock");
             let given = std::env::var_os("CLADEFS_BUCKET_LATENCY_MS");
-            let bucket = std::env::var_os("CLADEFS_EXTENTD_REMOTE");
+            let bucket = std::env::var_os("CLADEFSD_REMOTE");
             let latency = added_latency(given.as_deref(), bucket.as_deref());
             let stats = dir.join("extentd-stats.txt");
             // cladefs: its metrics, which say what its memory holds (`crate::measure`).
@@ -591,8 +591,8 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let metrics_at = metrics.to_string();
             let env = [
                 ("CLADEFS_BUCKET_LATENCY_MS", latency),
-                ("CLADEFS_EXTENTD_STATS", stats.as_os_str()),
-                ("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at)),
+                ("CLADEFSD_STATS", stats.as_os_str()),
+                ("CLADEFSD_METRICS", OsStr::new(&metrics_at)),
             ];
             // Its memory a page cache of the host's free memory, as production's (TASK-358): with a
             // fixed 1 GiB, the guest's working set, a 2 GiB window's, didn't fit, and faults paged
@@ -634,7 +634,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 let cache = dir.join("extentd-cold-cache");
                 std::fs::create_dir_all(&cache)?;
                 let mut env = env.to_vec();
-                env.push(("CLADEFS_EXTENTD_CACHE", cache.as_os_str()));
+                env.push(("CLADEFSD_CACHE", cache.as_os_str()));
                 daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,

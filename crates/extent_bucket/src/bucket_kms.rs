@@ -724,9 +724,7 @@ mod tests {
         }
         let bucket = bucket();
         let chosen = |bucket: Option<&Arc<Direct>>| {
-            from_env(|| {
-                bucket.cloned().ok_or_else(|| "CLADEFS_EXTENTD_REMOTE names none".to_owned())
-            })
+            from_env(|| bucket.cloned().ok_or_else(|| "CLADEFSD_REMOTE names none".to_owned()))
         };
         let kind = |chosen: &Result<HostKms<Direct>, String>| match chosen {
             Ok(HostKms::Named(_)) => "named".to_owned(),
@@ -757,7 +755,7 @@ mod tests {
         assert_eq!(
             kind(&chosen(None)),
             "CLADEFS_MASTER_KEY: the bucket KMS keeps tenants' KEKs in the host's bucket: \
-             CLADEFS_EXTENTD_REMOTE names none"
+             CLADEFSD_REMOTE names none"
         );
         set(MASTER_KEY_FILE_VAR, Some("/nonexistent"));
         assert_eq!(

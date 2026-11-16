@@ -31,9 +31,7 @@ const RESPONSE: usize = size_of::<Response>();
 /// why (cladefs TASK-220).
 fn host() {
     let _ = cladefs::extentd::logging::to_stderr();
-    for (name, value) in
-        [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")]
-    {
+    for (name, value) in [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.
@@ -91,7 +89,7 @@ fn store() -> (DaemonExtentStore, TestDir) {
 /// The requests of `kind` the daemons of this process have served (their metrics).
 fn served(kind: &str) -> u64 {
     let metrics = cladefs::extentd::metrics::render();
-    let name = format!("cladefs_extentd_requests_total{{kind=\"{kind}\"}} ");
+    let name = format!("cladefsd_requests_total{{kind=\"{kind}\"}} ");
     let line = (metrics.lines()).find_map(|line| line.strip_prefix(&name));
     let line = line.unwrap_or_else(|| panic!("no {kind} requests counted in {metrics}"));
     line.parse().unwrap()

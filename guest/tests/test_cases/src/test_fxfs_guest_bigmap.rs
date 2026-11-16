@@ -111,7 +111,7 @@ mod host {
             let socket = sockets.path().join("extentd.sock");
             let metrics = crate::measure::metrics_address()?;
             let metrics_at = metrics.to_string();
-            let env = [("CLADEFS_EXTENTD_METRICS", OsStr::new(&metrics_at))];
+            let env = [("CLADEFSD_METRICS", OsStr::new(&metrics_at))];
             // The file whole in its memory, as a host keeps a base's pages for its forks, and room.
             let memory = Some(bytes + (2 << 30));
             let daemon = crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, memory)?;

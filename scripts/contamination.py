@@ -42,7 +42,7 @@ The record says, over the round:
   the why, and judged by no bound.
 
 What the round runs outside its cgroup is others' to this: scripts/test-e2e.sh's
-CLADEFS_EXTENTD_MEMORY_MAX runs the extent daemon in a systemd scope of its own, whose writes would
+CLADEFSD_MEMORY_MAX runs the extent daemon in a systemd scope of its own, whose writes would
 mark the round. No measurement's driver sets it.
 
 The bounds, on others' writes to the round's disks together, in MB (10^6 bytes) a second:

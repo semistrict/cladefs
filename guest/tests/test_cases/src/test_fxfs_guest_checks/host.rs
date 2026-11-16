@@ -68,7 +68,7 @@ pub(crate) fn seed() -> u64 {
 const SETUP: Duration = Duration::from_secs(30);
 
 /// cladefs: what the checks' budgets are scaled by where the daemon keeps their stores in a real
-/// bucket (`CLADEFS_EXTENTD_REMOTE`): the most a check took of its budget on GCS, 3.3 times (GCE
+/// bucket (`CLADEFSD_REMOTE`): the most a check took of its budget on GCS, 3.3 times (GCE
 /// r980), and half that again (TASK-165.11).
 const REAL_BUCKET_SCALE: f64 = 5.0;
 
@@ -88,7 +88,7 @@ impl TestFxfsGuestChecks {
     fn run(&self) -> anyhow::Result<(Vec<(usize, &'static Check)>, f64)> {
         let checks = self.checks(&self.only()).map_err(anyhow::Error::msg)?;
         anyhow::ensure!(!checks.is_empty(), "CLADEFS_CHECKS names none of this suite's checks");
-        let real_bucket = std::env::var_os("CLADEFS_EXTENTD_REMOTE").is_some_and(|r| !r.is_empty());
+        let real_bucket = std::env::var_os("CLADEFSD_REMOTE").is_some_and(|r| !r.is_empty());
         let storage = if real_bucket { REAL_BUCKET_SCALE } else { 1.0 };
         let given = match std::env::var(SCALE) {
             Ok(given) => given.parse().with_context(|| format!("{SCALE} is {given:?}"))?,

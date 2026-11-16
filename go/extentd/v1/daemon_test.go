@@ -4,10 +4,10 @@
 
 //go:build extentd
 
-// The client against the daemon itself, cladefs-extentd, which CLADEFS_EXTENTD names, built from the
+// The client against the daemon itself, cladefsd, which CLADEFSD names, built from the
 // same commit: Linux's alone, as the daemon is (scripts/test.sh's go part).
 //
-//	CLADEFS_EXTENTD=target/debug/cladefs-extentd go test -tags extentd ./...
+//	CLADEFSD=target/debug/cladefsd go test -tags extentd ./...
 
 package extentdv1_test
 
@@ -29,19 +29,19 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// daemon starts cladefs-extentd, a host as the Rust tests have it (an in-memory bucket), serving its
+// daemon starts cladefsd, a host as the Rust tests have it (an in-memory bucket), serving its
 // control API in dir until the test ends, and returns a client of it once it is SERVING.
 func daemon(t *testing.T, dir string) *extentdv1.Client {
-	binary := os.Getenv("CLADEFS_EXTENTD")
+	binary := os.Getenv("CLADEFSD")
 	if binary == "" {
-		t.Fatal("CLADEFS_EXTENTD names no cladefs-extentd to test against")
+		t.Fatal("CLADEFSD names no cladefsd to test against")
 	}
 	control := filepath.Join(dir, "control.sock")
 	command := exec.Command(binary, filepath.Join(dir, "vms.sock"))
 	command.Env = append(os.Environ(),
-		"CLADEFS_EXTENTD_GRPC="+control,
-		"CLADEFS_EXTENTD_REMOTE=memory:///branches",
-		"CLADEFS_EXTENTD_TOKEN=1",
+		"CLADEFSD_GRPC="+control,
+		"CLADEFSD_REMOTE=memory:///branches",
+		"CLADEFSD_TOKEN=1",
 		// cladefs: every store encrypted, under the bucket KMS of a test master key, known to all
 		// (TASK-411.28): a daemon given no KMS refuses to start.
 		"CLADEFS_MASTER_KEY=7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e",

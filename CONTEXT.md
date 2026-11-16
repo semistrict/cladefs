@@ -494,11 +494,12 @@ identifiers too (types, protos, env vars, binaries), not prose alone; the names 
 code does not have yet are said so.
 
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
-- **remote**: retired, in code too; say **bucket** or **daemon client**. `CLADEFS_EXTENTD_REMOTE`
-  keeps it until TASK-475 names the daemon's env vars.
+- **remote**: retired, in code too; say **bucket** or **daemon client**. `CLADEFSD_REMOTE`, the
+  name TASK-475 gave the daemon's bucket variable, keeps it.
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
-- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code says volume
-  (`cell::Volume`, `CreateVolume`) until TASK-475 lands; then `cell::Vdisk`, `CreateVdisk`.
+- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code still says
+  volume (`cell::Volume`, `CreateVolume`); `cell::Vdisk`, `CreateVdisk` once renamed, TASK-475 having
+  landed.
 - **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
 - **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
   StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
@@ -519,5 +520,6 @@ code does not have yet are said so.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.
-- **cache**: env vars name theirs: the part cache's are `CLADEFSD_PART_CACHE`,
-  `CLADEFSD_PART_CACHE_BYTES` once TASK-475 lands (`CLADEFS_EXTENTD_CACHE*` until then).
+- **cache**: env vars name theirs: the part cache's are to be `CLADEFSD_PART_CACHE`,
+  `CLADEFSD_PART_CACHE_BYTES`; the code says `CLADEFSD_CACHE`, `CLADEFSD_CACHE_BYTES`, TASK-475's
+  names, until then.

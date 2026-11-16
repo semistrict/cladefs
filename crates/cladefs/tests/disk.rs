@@ -125,8 +125,8 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let opened = wals + forks.len() as u64 * LOG_HEADER;
     assert_eq!((full, du(&acme)), (taken + 16 * EXTENT + opened, taken + 16 * EXTENT + opened));
     let tenant = "{tenant=\"1\"}";
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_disk_limit_bytes{tenant}")), limit);
-    assert_eq!(metric(&format!("cladefs_extentd_tenant_disk_bytes{tenant}")), full);
+    assert_eq!(metric(&format!("cladefsd_tenant_disk_limit_bytes{tenant}")), limit);
+    assert_eq!(metric(&format!("cladefsd_tenant_disk_bytes{tenant}")), full);
     // A store its VM makes is refused too.
     let made = DaemonExtentStore::connect(&acme_socket, acme.join("more"), CAPACITY);
     assert_eq!(made.map(drop).map_err(|error| error.errno()), Err(Some(Errno::ENOSPC)));
@@ -166,7 +166,7 @@ fn tenants_past_their_disk_limits_are_refused_while_others_write() {
     let (every, none) = daemon.tenant_disk(None).unwrap();
     assert_eq!(none, None);
     daemon.set_disk_limit(None, Some(every + 2 * EXTENT)).unwrap();
-    assert_eq!(metric("cladefs_extentd_disk_limit_bytes"), every + 2 * EXTENT);
+    assert_eq!(metric("cladefsd_disk_limit_bytes"), every + 2 * EXTENT);
     write(&vms[1], 1, 3001).unwrap();
     write(&theirs, 100, 3002).unwrap();
     assert_eq!(write(&vms[2], 1, 3003), Err(Errno::ENOSPC));

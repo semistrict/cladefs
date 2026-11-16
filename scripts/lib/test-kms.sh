@@ -4,7 +4,7 @@
 # found in the LICENSE file.
 
 # cladefs: a master key for the scripts that measure or test cladefs's processes with no KMS of their
-# own (TASK-411.28): every store is encrypted, and every process that opens stores (cladefs-extentd,
+# own (TASK-411.28): every store is encrypted, and every process that opens stores (cladefsd,
 # cladefsctl, cladefs-mount, cladefs-gc, cladefs-gc-fill) refuses to start given neither CLADEFS_KMS nor a
 # master key. test_master_key exports CLADEFS_MASTER_KEY, a key known to all, never a host's, unless
 # the environment names a KMS or gives a master key already; the bucket KMS then keeps tenants'

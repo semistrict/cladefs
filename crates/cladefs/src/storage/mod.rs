@@ -83,7 +83,7 @@ impl Storage {
     /// until the filesystem writes to it, and must be formatted before it is mounted. Its branch
     /// is kept in a file bucket of its own, beside its directory (`<image>.bucket`), which its
     /// forks share and which outlives it; or, on a host of cladefs's system, in the host's bucket
-    /// (`CLADEFS_EXTENTD_REMOTE`).
+    /// (`CLADEFSD_REMOTE`).
     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
         Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), true, Self::keeping()?)
     }

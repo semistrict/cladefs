@@ -155,6 +155,20 @@ fn hold_blocking(key: &Path) -> Result<Hold, Errno> {
     Ok(hold)
 }
 
+/// cladefs: holds the store at `path` for the daemon's FUSE mount of cells, which attaches it
+/// (TASK-475.3): until what it returns is dropped, as the mount detaches it, a VM process opening
+/// it, or the control API working on it, fails with `EBUSY` at once. `EBUSY` if a connection not
+/// going writes it, or followers have it open; waits for one going, or the daemon's work, at most
+/// [`CLOSING_WAIT`]. The point kept open of it for forks, if any, closed. It blocks.
+pub(crate) fn hold_mounted(path: &Path) -> Result<MountHold, Errno> {
+    let (hold, point) = table().hold_mounted(&store_key(path), CLOSING_WAIT)?;
+    close_point_blocking(point);
+    Ok(MountHold(hold))
+}
+
+/// cladefs: a store the daemon's FUSE mount holds ([`hold_mounted`]), let go as it is dropped.
+pub(crate) struct MountHold(#[allow(dead_code, reason = "held for its drop")] Hold);
+
 /// Holds the store at `path` for the daemon, as [`hold_blocking`] does, holding no thread while
 /// it waits.
 async fn hold(path: &Path) -> Result<Hold, Errno> {
@@ -1166,7 +1180,7 @@ pub(super) fn follower_views() -> usize {
     open_instances().iter().map(|store| store.view_stats().views).sum()
 }
 
-/// cladefs: the bucket `CLADEFS_EXTENTD_REMOTE` names, which the stores opened keep their branches in:
+/// cladefs: the bucket `CLADEFSD_REMOTE` names, which the stores opened keep their branches in:
 /// `EIO` if it names none, as the daemon's host must (`crate::bucket::Host`, TASK-45).
 pub(crate) fn daemon_bucket() -> Result<Arc<extent_bucket::object_bucket::ObjectBucket>, Errno> {
     if let Some(bucket) = BUCKET.get() {
@@ -1177,7 +1191,7 @@ pub(crate) fn daemon_bucket() -> Result<Arc<extent_bucket::object_bucket::Object
         Errno::EIO
     })?;
     let bucket = crate::host_store::bucket(&host.bucket).map_err(|err| {
-        log::error!("extentd: CLADEFS_EXTENTD_REMOTE: {err:#}");
+        log::error!("extentd: CLADEFSD_REMOTE: {err:#}");
         Errno::EIO
     })?;
     Ok(BUCKET
@@ -1204,7 +1218,7 @@ pub(super) fn uploads_when_asked() {
 }
 
 /// Makes `bucket` the daemon's, before any store opens: for tests that put themselves between the
-/// daemon's stores and their objects. The stores naming `CLADEFS_EXTENTD_REMOTE`'s bucket open it
+/// daemon's stores and their objects. The stores naming `CLADEFSD_REMOTE`'s bucket open it
 /// (`host_store::use_bucket`).
 #[cfg(test)]
 pub(super) fn use_bucket(bucket: extent_bucket::object_bucket::ObjectBucket) {
@@ -1269,12 +1283,12 @@ impl FollowerStats {
 /// ([`FollowerStats`]), what serving the stores cost ([`daemon_line`]), the requests served
 /// (`super::metrics::requests_line`), what its uploads hold ([`uploads_line`]) and what its process
 /// holds and spent (`super::process::line`, sampled every poll, as the metrics report it, file or
-/// not), while it lives: in the file `CLADEFS_EXTENTD_STATS` names, if it names one, a line each, rewritten whole within [`STATS_POLL`] of each change, which the
+/// not), while it lives: in the file `CLADEFSD_STATS` names, if it names one, a line each, rewritten whole within [`STATS_POLL`] of each change, which the
 /// bench reports (`scripts/bench-report.py`); and the bucket's in the log every [`STATS_EVERY`]
 /// that it changed. cladefs: what it keeps but the bucket's, it looks at only to keep it in the file
 /// (TASK-92.17).
 fn watch_stats(bucket: std::sync::Weak<extent_bucket::object_bucket::ObjectBucket>) {
-    let file = std::env::var_os("CLADEFS_EXTENTD_STATS").filter(|file| !file.is_empty());
+    let file = std::env::var_os("CLADEFSD_STATS").filter(|file| !file.is_empty());
     let file = file.map(PathBuf::from);
     let watching = std::thread::Builder::new().name("extentd stats".into()).spawn(move || {
         let mut logged = Stats::default();
@@ -1483,24 +1497,24 @@ static STATS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 const CACHE_FLOOR: u64 = 4 << 30;
 
 /// cladefs: where the daemon keeps its part cache, and how much it may keep there, as the environment
-/// says: the directory `CLADEFS_EXTENTD_CACHE` names, if it names one (empty, it names none); the
-/// bytes of objects `CLADEFS_EXTENTD_CACHE_BYTES` gives, a budget, as a host whose cache shares its
+/// says: the directory `CLADEFSD_CACHE` names, if it names one (empty, it names none); the
+/// bytes of objects `CLADEFSD_CACHE_BYTES` gives, a budget, as a host whose cache shares its
 /// disk with its stores needs (TASK-406.1), or, unset, as many as leave [`CACHE_FLOOR`] free. Read
 /// at the daemon's start, to refuse what it can't use, and again by its first store to open.
 pub fn cache_config() -> Result<Option<(std::path::PathBuf, u64)>, String> {
     let set = |var| std::env::var_os(var).filter(|value| !value.is_empty());
-    let dir = set("CLADEFS_EXTENTD_CACHE");
-    let capacity = match set("CLADEFS_EXTENTD_CACHE_BYTES") {
+    let dir = set("CLADEFSD_CACHE");
+    let capacity = match set("CLADEFSD_CACHE_BYTES") {
         None => u64::MAX,
         Some(_) if dir.is_none() => {
-            return Err("CLADEFS_EXTENTD_CACHE_BYTES is set, but CLADEFS_EXTENTD_CACHE names no \
+            return Err("CLADEFSD_CACHE_BYTES is set, but CLADEFSD_CACHE names no \
                         directory for the cache"
                 .to_owned());
         }
         Some(bytes) => match bytes.to_str().and_then(|bytes| bytes.parse().ok()) {
             Some(0) | None => {
                 return Err(format!(
-                    "CLADEFS_EXTENTD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
+                    "CLADEFSD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
                 ));
             }
             Some(bytes) => bytes,
@@ -1531,7 +1545,7 @@ pub(super) fn part_cache() -> Result<Option<Arc<Cache>>, Errno> {
         Some((dir, capacity)) => match Cache::open(&dir, capacity, CACHE_FLOOR) {
             Ok(cache) => Some(Arc::new(cache)),
             Err(err) => {
-                log::error!("extentd: CLADEFS_EXTENTD_CACHE: {err}");
+                log::error!("extentd: CLADEFSD_CACHE: {err}");
                 return Err(Errno::EIO);
             }
         },
@@ -1553,7 +1567,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
-        unsafe { std::env::set_var("CLADEFS_EXTENTD_CACHE", dir.path()) };
+        unsafe { std::env::set_var("CLADEFSD_CACHE", dir.path()) };
         let at_once = std::sync::Barrier::new(16);
         let caches: Vec<_> = std::thread::scope(|scope| {
             let opening: Vec<_> = (0..16)
@@ -1566,15 +1580,15 @@ mod tests {
                 .collect();
             opening.into_iter().map(|opening| opening.join().unwrap()).collect()
         });
-        let first = caches[0].clone().expect("a cache").expect("CLADEFS_EXTENTD_CACHE's");
+        let first = caches[0].clone().expect("a cache").expect("CLADEFSD_CACHE's");
         for cache in caches {
-            let cache = cache.expect("a cache").expect("CLADEFS_EXTENTD_CACHE's");
+            let cache = cache.expect("a cache").expect("CLADEFSD_CACHE's");
             assert!(Arc::ptr_eq(&cache, &first), "two caches of one directory");
         }
         assert_eq!(first.capacity(), u64::MAX, "a cache with no budget");
     }
 
-    /// TASK-406.1: the daemon's cache keeps no more than `CLADEFS_EXTENTD_CACHE_BYTES`, as a host
+    /// TASK-406.1: the daemon's cache keeps no more than `CLADEFSD_CACHE_BYTES`, as a host
     /// whose cache shares its disk with its stores needs.
     #[test]
     fn the_cache_takes_its_budget() {
@@ -1582,10 +1596,10 @@ mod tests {
         // SAFETY: nextest runs each test in a process of its own, whose other threads don't read
         // the environment yet.
         unsafe {
-            std::env::set_var("CLADEFS_EXTENTD_CACHE", dir.path());
-            std::env::set_var("CLADEFS_EXTENTD_CACHE_BYTES", "268435456");
+            std::env::set_var("CLADEFSD_CACHE", dir.path());
+            std::env::set_var("CLADEFSD_CACHE_BYTES", "268435456");
         }
-        let cache = part_cache().expect("a cache").expect("CLADEFS_EXTENTD_CACHE's");
+        let cache = part_cache().expect("a cache").expect("CLADEFSD_CACHE's");
         assert_eq!(cache.capacity(), 256 << 20);
     }
 
@@ -1595,26 +1609,22 @@ mod tests {
     fn budgets_the_cache_cant_take_are_refused() {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: as above.
-        unsafe { std::env::remove_var("CLADEFS_EXTENTD_CACHE") };
-        let set = |bytes: &str| unsafe { std::env::set_var("CLADEFS_EXTENTD_CACHE_BYTES", bytes) };
+        unsafe { std::env::remove_var("CLADEFSD_CACHE") };
+        let set = |bytes: &str| unsafe { std::env::set_var("CLADEFSD_CACHE_BYTES", bytes) };
         set("1");
         assert_eq!(
             cache_config(),
-            Err(
-                "CLADEFS_EXTENTD_CACHE_BYTES is set, but CLADEFS_EXTENTD_CACHE names no directory \
+            Err("CLADEFSD_CACHE_BYTES is set, but CLADEFSD_CACHE names no directory \
                  for the cache"
-                    .to_owned()
-            )
+                .to_owned())
         );
         // SAFETY: as above.
-        unsafe { std::env::set_var("CLADEFS_EXTENTD_CACHE", dir.path()) };
+        unsafe { std::env::set_var("CLADEFSD_CACHE", dir.path()) };
         for bytes in ["0", "-1", "1G", "x"] {
             set(bytes);
             assert_eq!(
                 cache_config(),
-                Err(format!(
-                    "CLADEFS_EXTENTD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"
-                ))
+                Err(format!("CLADEFSD_CACHE_BYTES must be a positive number of bytes: {bytes:?}"))
             );
         }
         set("");

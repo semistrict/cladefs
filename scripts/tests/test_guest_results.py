@@ -100,7 +100,7 @@ class GuestResults(unittest.TestCase):
             self.assertEqual(guest_results.main(["report", str(self.results)]), 1)
 
     def test_each_daemon_says_what_it_downloaded_against_what_it_read(self):
-        """TASK-165.12: each extent daemon's last counts (its stats file, CLADEFS_EXTENTD_STATS, the
+        """TASK-165.12: each extent daemon's last counts (its stats file, CLADEFSD_STATS, the
         run's and each case's own, `NAME-stats.txt`): the bytes it downloaded from its bucket
         against those its page-ins read of the bucket's data, through its part cache, and of its
         store's. A case's daemon with no part cache downloaded the same parts four times over (GCE

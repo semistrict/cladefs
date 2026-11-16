@@ -31,10 +31,10 @@ impl Drop for KillOnDrop {
 fn daemon(dir: &Path) -> (KillOnDrop, PathBuf) {
     let socket = dir.join("extentd.sock");
     let bucket = format!("file://{}/", dir.canonicalize().unwrap().join("bucket").display());
-    let daemon = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"))
+    let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
-        .env("CLADEFS_EXTENTD_REMOTE", bucket)
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
+        .env("CLADEFSD_REMOTE", bucket)
+        .env("CLADEFSD_TOKEN", "1")
         .spawn()
         .unwrap();
     let daemon = KillOnDrop(daemon);

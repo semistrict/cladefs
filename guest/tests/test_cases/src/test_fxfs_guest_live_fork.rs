@@ -72,7 +72,7 @@ mod host {
             let dir = &test_setup.tmp_dir;
             let root = setup_rootfs(test_setup)?;
             let extentd: PathBuf =
-                std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD not set")?.into();
+                std::env::var_os("CLADEFSD").context("CLADEFSD not set")?.into();
             let (store, fork) = (dir.join("store"), dir.join("fork"));
             // Short, as Unix sockets' paths must be.
             let uds = std::env::temp_dir().join(format!("cladefs-fork-{}.vsock", std::process::id()));

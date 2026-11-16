@@ -141,7 +141,7 @@ mod host {
             f.expect("seen")?;
             w.tell("done")?;
             w.expect("unmounted")?;
-            let extentd = std::env::var_os("CLADEFS_EXTENTD").context("CLADEFS_EXTENTD unset")?;
+            let extentd = std::env::var_os("CLADEFSD").context("CLADEFSD unset")?;
             let control = crate::common::control(Path::new(&extentd))?;
             let before = control.committed(&store)?;
             w.tell("mount read-only")?;

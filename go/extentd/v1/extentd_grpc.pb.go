@@ -3,8 +3,8 @@
 // found in the LICENSE file.
 
 // The extent daemon's control API (TASK-43.3): what the host's VM manager, which launches the
-// VMMs, asks cladefs-extentd to do with the VMs' disks, the extent stores it serves them. It is
-// served over a Unix socket (`CLADEFS_EXTENTD_GRPC`), the daemon's user's alone, mode 0600 whatever
+// VMMs, asks cladefsd to do with the VMs' disks, the extent stores it serves them. It is
+// served over a Unix socket (`CLADEFSD_GRPC`), the daemon's user's alone, mode 0600 whatever
 // its umask (TASK-159), as every caller may do everything. VM processes do not use it: they keep
 // the extent protocol on the daemon's VM sockets, which carries their memory as file descriptors.
 //
@@ -250,7 +250,7 @@ type ExtentdClient interface {
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
 	// them, for it before the bucket, and it serves them the parts it owns. Those it had are kept,
 	// down or not. FAILED_PRECONDITION (ENOTSUP) if the daemon serves no peers (it was started
-	// without CLADEFS_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
+	// without CLADEFSD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(ctx context.Context, in *SetPeersRequest, opts ...grpc.CallOption) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the
@@ -672,7 +672,7 @@ type ExtentdServer interface {
 	// host that owns a part, by rendezvous hashing of the object's key and the part's number over
 	// them, for it before the bucket, and it serves them the parts it owns. Those it had are kept,
 	// down or not. FAILED_PRECONDITION (ENOTSUP) if the daemon serves no peers (it was started
-	// without CLADEFS_EXTENTD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
+	// without CLADEFSD_PEER_ADDRESS); INVALID_ARGUMENT (EINVAL) for an address that is no
 	// HOST:PORT.
 	SetPeers(context.Context, *SetPeersRequest) (*SetPeersResponse, error)
 	// Shreds a cell (TASK-411.7, doc-16 Shredding): takes every wrapped KEK out of its object in the

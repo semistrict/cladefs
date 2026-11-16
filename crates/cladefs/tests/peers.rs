@@ -43,17 +43,17 @@ struct Daemon {
 fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let (vms, control, stats) =
         (dir.join("extentd.sock"), dir.join("control.sock"), dir.join("stats"));
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
-        .env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", bucket.display()))
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env("CLADEFS_EXTENTD_CACHE", dir.join("cache"))
-        .env("CLADEFS_EXTENTD_STATS", &stats)
-        .env("CLADEFS_EXTENTD_GRPC", &control);
+        .env("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_CACHE", dir.join("cache"))
+        .env("CLADEFSD_STATS", &stats)
+        .env("CLADEFSD_GRPC", &control);
     if let Some(peers) = peers {
-        command.env("CLADEFS_EXTENTD_PEER_ADDRESS", &peers[0]);
-        command.env("CLADEFS_EXTENTD_PEERS", peers.join(","));
+        command.env("CLADEFSD_PEER_ADDRESS", &peers[0]);
+        command.env("CLADEFSD_PEERS", peers.join(","));
     }
     let process = KillOnDrop(command.spawn().unwrap());
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -204,18 +204,18 @@ fn peers_are_set_at_runtime() {
 #[test]
 fn a_cache_budget_the_daemon_cant_take_stops_it() {
     let dir = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"))
+    let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(dir.path().join("extentd.sock"))
-        .env("CLADEFS_EXTENTD_REMOTE", format!("file://{}/", dir.path().display()))
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env("CLADEFS_EXTENTD_CACHE", dir.path().join("cache"))
-        .env("CLADEFS_EXTENTD_CACHE_BYTES", "1G")
+        .env("CLADEFSD_REMOTE", format!("file://{}/", dir.path().display()))
+        .env("CLADEFSD_TOKEN", "1")
+        .env("CLADEFSD_CACHE", dir.path().join("cache"))
+        .env("CLADEFSD_CACHE_BYTES", "1G")
         .output()
         .unwrap();
     assert!(!output.status.success(), "the daemon started");
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(
-        said.contains("CLADEFS_EXTENTD_CACHE_BYTES must be a positive number of bytes: \"1G\""),
+        said.contains("CLADEFSD_CACHE_BYTES must be a positive number of bytes: \"1G\""),
         "{said}"
     );
 }

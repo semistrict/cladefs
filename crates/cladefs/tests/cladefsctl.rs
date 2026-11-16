@@ -14,10 +14,10 @@ const BLOCK: usize = ExtentStore::BLOCK_SIZE as usize;
 /// The environment of a host of the multi-node system, as tests have it: a bucket in each
 /// process's memory, and placement 1.
 const HOST: [(&str, &str); 2] =
-    [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "1")];
+    [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "1")];
 
 /// cladefsctl, acting on stores itself, with `env` in its environment, or through a daemon,
-/// `cladefs-extentd`, of its own.
+/// `cladefsd`, of its own.
 struct Cladefsctl {
     /// The daemon's control socket, and the daemon, which goes with this.
     daemon: Option<(PathBuf, KillOnDrop)>,
@@ -49,11 +49,11 @@ impl Cladefsctl {
     fn run(&self, args: &[&Path]) -> Result<String, String> {
         let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsctl"));
         command.args(args);
-        for name in ["CLADEFS_EXTENTD_GRPC", "CLADEFS_EXTENTD_REMOTE", "CLADEFS_EXTENTD_TOKEN"] {
+        for name in ["CLADEFSD_GRPC", "CLADEFSD_REMOTE", "CLADEFSD_TOKEN"] {
             command.env_remove(name);
         }
         if let Some((control, _)) = &self.daemon {
-            command.env("CLADEFS_EXTENTD_GRPC", control);
+            command.env("CLADEFSD_GRPC", control);
         }
         command.envs(self.env.iter().map(|(name, value)| (name, value)));
         let output = command.output().expect("running cladefsctl failed");
@@ -71,8 +71,8 @@ impl Cladefsctl {
 fn daemon(dir: &Path, env: &[(&str, &str)], stderr: std::process::Stdio) -> (PathBuf, KillOnDrop) {
     use std::time::{Duration, Instant};
     let control = dir.join("control.sock");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
-    command.arg(dir.join("vms.sock")).env("CLADEFS_EXTENTD_GRPC", &control).stderr(stderr);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
+    command.arg(dir.join("vms.sock")).env("CLADEFSD_GRPC", &control).stderr(stderr);
     let child = command.envs(HOST).envs(env.iter().copied()).spawn().unwrap();
     let child = KillOnDrop(child);
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -154,7 +154,7 @@ fn copies_are_dropped_locally() {
     // A host's bucket, which the copy takes the branch from.
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    copies_are_dropped(Cladefsctl::with_env(&[("CLADEFS_EXTENTD_REMOTE", &bucket)]), dir.path());
+    copies_are_dropped(Cladefsctl::with_env(&[("CLADEFSD_REMOTE", &bucket)]), dir.path());
 }
 
 #[cfg(target_os = "linux")]
@@ -171,10 +171,7 @@ fn points_are_shared_and_unshared_locally() {
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}", dir.path().join("bucket").display());
     std::fs::create_dir(dir.path().join("bucket")).unwrap();
-    let cladefsctl = Cladefsctl::with_env(&[
-        ("CLADEFS_EXTENTD_REMOTE", &bucket),
-        ("CLADEFS_EXTENTD_TOKEN", "1"),
-    ]);
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_REMOTE", &bucket), ("CLADEFSD_TOKEN", "1")]);
     let (base, point) = (dir.path().join("base"), dir.path().join("point"));
     cladefsctl.run(&[Path::new("create"), &base, Path::new("16777216")]).unwrap();
     let printed =
@@ -314,10 +311,7 @@ fn images_imported_where_no_daemon_is_fork_there() {
     use futures::executor::block_on;
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let cladefsctl = Cladefsctl::with_env(&[
-        ("CLADEFS_EXTENTD_REMOTE", &bucket),
-        ("CLADEFS_EXTENTD_TOKEN", "1"),
-    ]);
+    let cladefsctl = Cladefsctl::with_env(&[("CLADEFSD_REMOTE", &bucket), ("CLADEFSD_TOKEN", "1")]);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
     let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
@@ -356,7 +350,7 @@ fn commands_through_the_daemon() {
     use cladefs::import::testing::{Entry, Kind, layer};
     let dir = tempfile::tempdir().unwrap();
     let bucket = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
-    let env = [("CLADEFS_EXTENTD_REMOTE", bucket.as_str()), ("CLADEFS_EXTENTD_TOKEN", "1")];
+    let env = [("CLADEFSD_REMOTE", bucket.as_str()), ("CLADEFSD_TOKEN", "1")];
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &env);
     let image = dir.path().join("layer.tar");
     std::fs::write(&image, layer(&[Entry::new("hello", Kind::File(b"hello\n"))]).unwrap()).unwrap();
@@ -442,7 +436,7 @@ fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
 
     drop(store);
     let refused = Cladefsctl::local().run(&[Path::new("stats"), Path::new("--json")]);
-    assert!(refused.unwrap_err().contains("CLADEFS_EXTENTD_GRPC"));
+    assert!(refused.unwrap_err().contains("CLADEFSD_GRPC"));
 }
 
 /// What `child`, whose standard error is piped, writes there once sent SIGQUIT (TASK-44.13): its
@@ -511,7 +505,7 @@ fn cladefsctl_writes_its_stacks_on_sigquit() {
     listener.set_nonblocking(true).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args([Path::new("stat"), &dir.path().join("store")])
-        .env("CLADEFS_EXTENTD_GRPC", &control)
+        .env("CLADEFSD_GRPC", &control)
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -610,13 +604,13 @@ fn existing_stores_change_only_with_a_bucket_and_a_token() {
     let delete = [Path::new("delete"), &path];
 
     let error = Cladefsctl::with_env(&[]).run(&delete).expect_err("deleted with no bucket");
-    assert!(error.contains("CLADEFS_EXTENTD_REMOTE names no bucket"), "{error}");
-    let bucket = [("CLADEFS_EXTENTD_REMOTE", "memory:///branches")];
+    assert!(error.contains("CLADEFSD_REMOTE names no bucket"), "{error}");
+    let bucket = [("CLADEFSD_REMOTE", "memory:///branches")];
     let error = Cladefsctl::with_env(&bucket).run(&delete).expect_err("deleted with no token");
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
-    let zero = [("CLADEFS_EXTENTD_REMOTE", "memory:///branches"), ("CLADEFS_EXTENTD_TOKEN", "0")];
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
+    let zero = [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "0")];
     let error = Cladefsctl::with_env(&zero).run(&delete).expect_err("deleted with token 0");
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(path.exists());
 
     // New stores, made where no bucket is.
@@ -691,9 +685,9 @@ fn stores_grow_here_and_shrink_only_through_the_daemon() {
 fn the_daemon_needs_a_bucket_and_a_token() {
     let dir = tempfile::tempdir().unwrap();
     let start = |env: &[(&str, &str)]| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefs-extentd"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
         command.arg(dir.path().join("vms.sock"));
-        for name in ["CLADEFS_EXTENTD_REMOTE", "CLADEFS_EXTENTD_TOKEN"] {
+        for name in ["CLADEFSD_REMOTE", "CLADEFSD_TOKEN"] {
             command.env_remove(name);
         }
         let output = command.envs(env.iter().copied()).output().unwrap();
@@ -701,10 +695,10 @@ fn the_daemon_needs_a_bucket_and_a_token() {
         String::from_utf8_lossy(&output.stderr).into_owned()
     };
     let error = start(&[]);
-    assert!(error.contains("CLADEFS_EXTENTD_REMOTE names no bucket"), "{error}");
-    let error = start(&[("CLADEFS_EXTENTD_REMOTE", "memory:///branches")]);
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
-    let error = start(&[("CLADEFS_EXTENTD_REMOTE", "memory:///b"), ("CLADEFS_EXTENTD_TOKEN", "0")]);
-    assert!(error.contains("CLADEFS_EXTENTD_TOKEN names no placement token"), "{error}");
+    assert!(error.contains("CLADEFSD_REMOTE names no bucket"), "{error}");
+    let error = start(&[("CLADEFSD_REMOTE", "memory:///branches")]);
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
+    let error = start(&[("CLADEFSD_REMOTE", "memory:///b"), ("CLADEFSD_TOKEN", "0")]);
+    assert!(error.contains("CLADEFSD_TOKEN names no placement token"), "{error}");
     assert!(!dir.path().join("vms.sock").exists(), "it listened");
 }

@@ -46,7 +46,7 @@ pub struct Sample {
 /// (`physmem`'s memfd), bounded by `MEMORY_BYTES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnonBudget {
-    /// Its uploads': its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
+    /// Its uploads': its upload memory, `CLADEFSD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
     /// every store's PUTs holding their objects within it, once each however often each is tried.
     pub uploads: u64,
     /// Its framings': [`FRAMING`] for each store written at once, the most so far.
@@ -145,9 +145,6 @@ static STATE: Mutex<State> = Mutex::new(State {
 
 struct State {
     sample: Sample,
-    /// The most stores written at once so far, and the most the tenants' connections held in
-    /// flight at once.
-=======
     /// The most stores written at once so far, the most the tenants' connections held in flight
     /// at once, and the most the stores' maps of their extents held at once.
     writers: u64,
