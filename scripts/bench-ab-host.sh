@@ -34,7 +34,7 @@
 #
 # CLADEFS_AB_SUITE=qualify runs the qualification in place of the fs bench (scripts/qualify.sh,
 # TASK-330.4): LangSmith's pin as side A, the candidate as B, before the candidate is handed to
-# them, ab.md each metric that moved and each side's failed checks (README's testing section says
+# them, ab.md each metric that moved and each side's failed checks (docs/testing.md says
 # how). Its harness this tree's, the same for both sides (scripts/lib/bench-ab-linux-host.sh);
 # CLADEFS_QUALIFY_SANDBOXES and CLADEFS_QUALIFY_SOAK_SECS size each round; its results go to
 # docs/measurements/HOST-qualify-ab-<time>-<mark>, and its job may take 12 h in a cgroup of 16 GiB,

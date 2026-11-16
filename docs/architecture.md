@@ -1,0 +1,157 @@
+# Architecture
+
+How cladefs's parts work together: what the guest asks of its extent store device, how the DAX
+window is kept, and what the extent daemon owns and whom it trusts. `README.md` is the overview;
+`CONTEXT.md` defines the words used here; the designs are the backlog's docs (`backlog/docs`:
+doc-2 the split between guest and host, doc-4 the device, doc-13 copy-on-write DAX, doc-7 and
+doc-14 the bucket and local disk). Running a daemon is `operating-a-host.md`.
+
+## How it fits together
+
+```
+guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX loads and stores
+  │  virtio extent-store device: READ, WRITE, MAP, COMMIT...
+Firecracker (one VM     vendor/firecracker: the extent device, a client of the
+  process)               daemon
+  │  Unix socket; the daemon's memory (a memfd), mapped into the DAX window
+cladefsd            crates/cladefs: extentd, the stores, the extent cache,
+  │                      the DAX windows
+physical memory          crates/physmem: arenas of shared memory (memfds),
+  │                      their caps, relief and quarantine
+extent store             crates/extent_store: segments, large extents' files,
+                         an index
+```
+
+- **Requests:** the guest's Fxfs reads, writes, frees and commits extents
+  through the device, which forwards each request to the daemon.
+- **DAX:** `MAP` maps a range of a sealed extent into the VM's DAX window, a
+  range of guest physical memory the daemon keeps the page tables of, read-only:
+  the extent's pages from the cache, which reads them in from the store, or
+  zeros. The window copies on write (backlog doc-13): a page the guest writes
+  becomes the VM's own, a private copy at the same address, at most
+  `private_max` of them, until a `MAP` or `UNMAP` over it. The guest writes its
+  dirty pages back as it would without DAX, with `WRITE`s to new extents and a
+  commit, and once a commit seals those, maps the pages back to them, sharing
+  them again. Files a mount creates go through the guest's page cache until
+  their inodes are next read in.
+- **Sizing (TASK-227):** the window is address space, not memory: size it to
+  the data, as virtio-pmem maps a whole image. A page the daemon holds is one
+  copy however many windows map it, and a window costs for what its guest
+  reaches alone: the guest's struct pages, the VM process's state, its
+  mappings and KVM's page tables are the same through 8 GiB and 64 GiB windows
+  (GCE r881, r882). A window is 64 GiB at most (`MAX_WINDOW`, which bounds what
+  the daemon keeps for it). `private_max` is memory, reserved against the
+  tenant's: 1 GiB unless configured (`dax_private_max`), whatever the window's
+  size. The daemon's memory (`MEMORY_BYTES`) is what keeps a VM's rereads
+  fast, as a host's page cache keeps a pmem image's: a Linux tree's warm
+  reread through an 8 GiB window took 13.15 s with a daemon of 1 GiB,
+  600 ms with 8 GiB, against ext4's 586 ms from its guest's page cache. The
+  guest tests' windows are the host's memory (at most 64 GiB) and their daemons
+  8 GiB, unless a case says.
+- **Hypervisor mirror:** the daemon maps pages at the window's addresses, and
+  the VM process maps the same pages of the daemon's physical memory (memfds)
+  into the host memory KVM follows for the window, keeping it in step with
+  userfaultfd.
+
+## DAX on Linux
+
+KVM maps a guest's memory from the host memory backing its
+memory slot, and follows the host's mappings. On arm64, though, a fault it
+can't resolve there is reported only as `EFAULT`, with no address. So that
+memory must never fault that way. The VM process hands it to its store's
+connection to the daemon (`create_dax_window_in_host_memory`), which keeps it
+like this:
+
+- Pages the window hasn't mapped are anonymous memory registered with
+  userfaultfd for missing faults.
+- Mapped pages are the daemon's pages mapped again, from its physical memory
+  (memfds), at their offset there. They stay read-write, and userfaultfd
+  write-protects them while the window maps them read-only.
+- A fault thread in the VM process passes each event to the daemon, which
+  resolves them concurrently, as futures, so a fault waiting for a page to be
+  read in holds up no other.
+- Changing a page's mapping replaces its memory in several system calls. Until
+  userfaultfd tracks the new memory, it is inaccessible, or read-only where a
+  store would go untracked, so a fault in between fails with `EFAULT` rather
+  than resolving wrongly, and the VMM retries the vCPU.
+
+x86 KVM faults pages in for writing from a worker, whatever the guest's
+access. So a write the window refuses is resolved as a read, and the vCPU's own
+access decides: a load copies nothing, and a store to a page mapped read-only
+copies it once, to the VM's private page.
+
+KVM would map each page for the guest on a fault of its own, which nested
+virtualization makes slow. Mapping an extent maps the pages it has in memory, and the window
+tells the VMM of the pages it maps (`Prefault`), which the VMM has KVM map
+ahead of the guest (`KVM_PRE_FAULT_MEMORY`).
+
+Handling KVM's faults needs `/dev/userfaultfd` access (`operating-a-host.md`, Access to userfaultfd). The host's
+kernel must be Linux 6.1 or later: `/dev/userfaultfd` (6.1), userfaultfd's
+write protection of shared memory (`UFFD_FEATURE_WP_HUGETLBFS_SHMEM`, 5.19) and
+`MADV_POPULATE_WRITE` (5.14). In a jail, whose VMM has no privileges left,
+the device node must be in the jail, rather than `vm.unprivileged_userfaultfd=1`
+set, which every process on the host would get (TASK-50.4). Firecracker's
+jailer makes it there when the host has it, owned by the VMM's uid and gid,
+mode 0600; a jail made otherwise needs the same (`mknod dev/userfaultfd c 10
+MINOR`, its minor as the host's `/dev/userfaultfd` has it).
+
+## The extent daemon
+
+The VMM runs one VM per process, so extents cached in a
+VM process would be shared by that VM alone. `cladefsd` (the `extentd`
+module) is one process on a host that owns the physical memory, the extent
+cache and the stores, and serves them to VM processes over a Unix socket: the
+only way the VMM's extent device has a store, at the socket its configuration
+names (`extentd_socket`). Physical memory is memfds, which each VM process
+receives once: its
+window's pages are pages of it, which the VM process maps into its own memory
+at the offsets the daemon names, so two VMs mapping one extent map the same
+pages. The daemon's changes to a window reach the VM process in order before
+the replies after them, unmapping and write-protecting acknowledged before the
+daemon frees or shares a page; guests' faults go from the VM process's
+userfaultfd to the daemon. One daemon serves every tenant on a host. Guest
+isolation is the security boundary: a guest reaches only what its window maps,
+so one tenant for everything is secure. As defence in depth against a VM
+process escaped from its guest, physical memory is in arenas, each
+its own memfd (TASK-43): a tenant's stores' pages are of its arena, and public
+bases' pages, which every tenant's forks share, one copy, of the default arena.
+A tenant's VM process holds its tenant's arena and the default one, read-only
+(mapped private, so the window can track stores to it), and nothing of another
+tenant's. An extent's pages are of the arena it is cached in alone. A VM's
+private DAX pages, those its guest wrote, are its VM process's own memory,
+laid out as its window is, at most `private_max` of them, which the daemon
+reserves against the tenant's memory as the window is made.
+The host's VM manager drives the daemon
+through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
+`crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
+`github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
+imports, forks, places, syncs, resizes and deletes stores, and grants tenants
+(TASK-43.4). Every call names a tenant by its ID in the bucket (TASK-364), a
+64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
+`<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
+connection's tenant is the socket it came in on, and it names stores in the
+tenant's directory alone. The stores in its directory are vdisks of its own
+cells, and its VM processes open no store of another tenant's cell, but fork
+the points of others' its VM manager gives it. Revoked, a tenant's socket
+goes, and once its VM processes do, its arena and cached pages.
+The daemon's own VM socket is the default tenant's, ID 0, which is granted
+nothing and has no limits of its own, only every tenant's: its connections name
+stores in the daemon's roots alone (`CLADEFSD_ROOTS`), or anywhere without
+any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
+another user, reaches a tenant's socket and no other, whatever is mounted
+(TASK-155). Below a tenant, a VM process's user does not matter: nothing there
+is separated.
+A tenant's VM process names no branch: what it says is ignored, so that another
+tenant's ID gets it nothing. A VM snapshot restored on another host needs its point
+there, which the VM manager makes in the tenant's directory first (`CreateStore`
+of the point's branch), and may drop once done (`DropStore`, which leaves the
+branch in the bucket); the proto says how (TASK-154). A point is immutable: any
+number of hosts fork one at once, and none writes it (TASK-158). A base forked
+on several hosts is made a point first (`ForkStore`'s `point`).
+The daemon must be able to kill each VM process (it is the daemon's user's, or
+the daemon has `CAP_KILL`), and refuses a connection whose process it could
+not kill: one that stops acknowledging the daemon's changes to its window,
+frozen, holds the pages it may still map until the daemon has killed it
+(TASK-79.9). It knows the process by the socket's pidfd (`SO_PEERPIDFD`, Linux
+6.5), or, on an older kernel, by the pid of the process that connected
+(`pidfd_open`).

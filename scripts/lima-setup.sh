@@ -45,7 +45,7 @@ if (( ${#missing[@]} > 0 )); then
     sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq "${missing[@]}"
 fi
 
-# The guests' KVM, and DAX's userfaultfd, through the kvm group (see the README).
+# The guests' KVM, and DAX's userfaultfd, through the kvm group (docs/operating-a-host.md).
 sudo usermod -aG kvm "$USER"
 echo 'KERNEL=="userfaultfd", GROUP="kvm", MODE="0660"' |
     sudo tee /etc/udev/rules.d/99-userfaultfd.rules >/dev/null

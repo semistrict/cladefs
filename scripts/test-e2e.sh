@@ -41,7 +41,7 @@
 # caps its memory, in bytes. cladefs: every store of the run is encrypted, under a local KMS of the
 # run's (CLADEFS_KMS), and checked so, holding no key, case by case and at the end (TASK-411.15,
 # below). LIBCLANG_PATH names libclang's directory where
-# llvm-config cannot, and DAX needs access to /dev/userfaultfd (see the README).
+# llvm-config cannot, and DAX needs access to /dev/userfaultfd (docs/operating-a-host.md).
 set -euo pipefail
 root=$(cd "${CLADEFS_E2E_ROOT:-$(dirname "$0")/..}" && pwd)
 harness="$root/guest/tests"

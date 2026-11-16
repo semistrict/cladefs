@@ -21,6 +21,14 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## README describes the project; its reference sections are in docs/ (TASK-498, 2026-11-16)
+
+Decided without you, after "the readme does not really describe the project":
+- **README.md is an overview** (225 lines, was 845): what cladefs is and for whom, why it is split between guest and host, what it does, one diagram, status and requirements, three things to run, a map of the tree and of the docs. *Instead:* a new introduction on top of the old README, which would have left 800 lines of internals under it. *Undo:* `git revert` of the commit.
+- **The old sections moved, their text kept:** `docs/architecture.md`, `docs/operating-a-host.md`, `docs/code.md`, `docs/testing.md`. A branch that edited a README section meets a conflict and re-applies its edit in that file.
+- **Two stale statements corrected on the way:** the KMS backends (`openbao://`, `aws-kms://`, `gcp-kms://` beside `local:///DIR`, as `extent_keys::kms::from_url` has them), and the daemon's memory, governed by default since TASK-358, not 1 GiB. The rest of the moved text was not audited against the code.
+- **Status says LangSmith's sandboxes are its first user, at a commit they pin.** Say if the README should not name them.
+
 ## A restore in 6 round trips: what a host knows, cells held by forks, one runtime for calls from no task (TASK-449, 2026-11-16)
 
 Decided without you:
