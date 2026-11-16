@@ -55,10 +55,10 @@ pub struct TestFxfsGuestFollowTorture {
 #[cfg_attr(feature = "guest", allow(dead_code))]
 pub enum Mutant {
     /// Their batches' drops and settling: the window between a batch applied and settled.
-    Invalidation,
+    Drop,
     /// Their batches' drops and settling, with the window between a DAX fault's extents and its
     /// mapping widened instead: a fault maps what a batch changed after, which nothing drops.
-    InvalidationFaults,
+    DropFaults,
     /// Their readers' fill barrier (TASK-42.10): the window between a batch dropping what the
     /// kernel keeps of what it changes and applying it, and between its apply and its attributes
     /// set. A reader's fault maps an extent of the state before a batch after the batch let its
@@ -147,13 +147,13 @@ mod host {
                     vm.env(c"fxfs.follow_apply_delay_us=200");
                     vm.env(c"fxfs.follow_iomap_delay_us=50");
                 }
-                Some(Mutant::Invalidation) => {
+                Some(Mutant::Drop) => {
                     vm.env(c"fxfs.follow_apply_delay_us=200");
-                    vm.env(c"fxfs.follow_skip_invalidate=1");
+                    vm.env(c"fxfs.follow_skip_drop=1");
                 }
-                Some(Mutant::InvalidationFaults) => {
+                Some(Mutant::DropFaults) => {
                     vm.env(c"fxfs.follow_iomap_delay_us=50");
-                    vm.env(c"fxfs.follow_skip_invalidate=1");
+                    vm.env(c"fxfs.follow_skip_drop=1");
                 }
                 Some(Mutant::Barrier) => {
                     vm.env(c"fxfs.follow_apply_delay_us=200");
@@ -396,7 +396,7 @@ mod host {
                 // stale (STALE), a fault maps an extent a batch let go of, which extentd refuses
                 // and the VMM aborts on (ABORTED), or a reader finds what it can't, and stops (no
                 // line). Caught, none passes, and what they read is a wrong history.
-                Some(Mutant::Invalidation | Mutant::InvalidationFaults | Mutant::Barrier) => {
+                Some(Mutant::Drop | Mutant::DropFaults | Mutant::Barrier) => {
                     let lines: Vec<&str> = output.lines().collect();
                     let caught = lines.first() == Some(&"OK writer")
                         && lines.last() == Some(&"WRONG history")
@@ -588,7 +588,7 @@ mod guest {
     const SHAPE_OBJECTS: u64 = 1 << 61;
 
     /// The commits a follower's state is as of (fs/fxfs's FXFS_IOC_FOLLOW_COMMITS): every batch up
-    /// to `settled`'s invalidated, none past `applied`'s applied.
+    /// to `settled`'s settled, none past `applied`'s applied.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
     struct FollowCommits {

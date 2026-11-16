@@ -354,7 +354,7 @@ if (( traces )); then
             grep -E '^Error|is violated|No error has been found' "$log" | sed -n 1,20p
         fi
     done
-    # The mutant's runs, which invalidate before they apply: none may be matched.
+    # The mutant's runs, whose batches drop nothing: none may be matched.
     rejected=0
     for run in "$runs"/mutant-*; do
         log="$run/tlc.log"
@@ -366,7 +366,7 @@ if (( traces )); then
             rejected=$((rejected + 1))
         else
             unmatched=$((unmatched + 1))
-            echo "FAIL follower/traces: $(basename "$run"), which invalidates first, was matched:"
+            echo "FAIL follower/traces: $(basename "$run"), which drops nothing, was matched:"
             grep -E '^Error|is violated|No error has been found' "$log" < /dev/null | sed -n 1,20p
         fi
     done

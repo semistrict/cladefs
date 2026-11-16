@@ -4578,7 +4578,7 @@ mod tests {
         assert_eq!(block_on(read_as_a_point_goes_under_a_clone()), Ok(b"held".to_vec()));
     }
 
-    /// The clone's reference written once it is made, as specs/bucket's NoClonesReferFirst has
+    /// The clone's reference written once it is made, as specs/bucket's NoForksReferFirst has
     /// it: the sweeps between find neither the point nor a reference.
     #[test]
     fn clones_keeping_what_they_inherit_as_their_points_go_need_clones_refer_first() {
@@ -5308,7 +5308,7 @@ mod tests {
     }
 
     /// Without the rule, a host dying between the reference and the record leaves the reference,
-    /// which no record names, for ever, with what it keeps: specs/bucket's NoClonesRecordFirst.
+    /// which no record names, for ever, with what it keeps: specs/bucket's NoForksRecordFirst.
     #[test]
     fn clones_whose_hosts_die_need_clones_record_first() {
         crate::set_rules(crate::Rules { clones_record_first: false, ..crate::Rules::ALL });
