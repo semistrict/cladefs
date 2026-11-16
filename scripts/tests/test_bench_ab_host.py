@@ -163,6 +163,29 @@ class Kept(unittest.TestCase):
         self.assertEqual((status, out), (0, "end\n"))
 
 
+class Tidy(unittest.TestCase):
+    def test_the_rounds_size_is_kept_and_their_stores_removed(self):
+        """TASK-489: what the rounds wrote, before what is not results goes, tells the nightly
+        what room a measurement needs (scripts/nightly.py's room)."""
+        directory = Path(tempfile.mkdtemp())
+        results = directory / "results"
+        for path in ("head-r1/extents/0", "head-r1/rootfs/sh", "head-r1/rootfs.ext4",
+                     "head-r1/fxfs.img", "head-r1/results.json"):
+            (results / path).parent.mkdir(parents=True, exist_ok=True)
+            (results / path).write_text("x\n")
+        bin_ = directory / "bin"
+        bin_.mkdir()
+        (bin_ / "du").write_text('#!/bin/sh\n[ "$1 $2" = "-sk $RESULTS" ] && printf \'7\\t%s\\n\' "$2"\n')
+        (bin_ / "du").chmod(0o755)
+        status, out, err = bash(f"source {SCRIPTS / 'lib' / 'bench-ab-linux-host.sh'}\n"
+                                f"results={results} ab_tidy",
+                                {"PATH": f"{bin_}:/usr/bin:/bin", "RESULTS": str(results)})
+        self.assertEqual((status, out, err), (0, "", ""))
+        self.assertEqual(sorted(str(path.relative_to(results)) for path in results.rglob("*")),
+                         ["head-r1", "head-r1/results.json", "rounds-size.txt"])
+        self.assertEqual((results / "rounds-size.txt").read_text(), "7168\n")
+
+
 class Sides(unittest.TestCase):
     def side(self, spec):
         # The driver's function alone, without its sourcing of host.sh, which names a run.

@@ -43,6 +43,18 @@
 # scripts/guest-mutants-host.py's mutants). CLADEFS_GUEST_KERNEL names a guest kernel here, which the
 # run copies to the host and boots.
 #
+# The scratch disk is every job's on the host, and others' runs may fill it. A run that names the
+# room it needs there, in bytes, checks the disk has it before it builds, CLADEFS_HOST_ROOM (in
+# host_start, before its directory is made), and, a measurement, before it measures,
+# CLADEFS_HOST_ROOM_MEASURE (host_job): short of it, it stops there, ending 28, rather than fail
+# midway, as the nightly's first night did, whose measurement could not write even its status
+# (TASK-489). Each check is a line of RESULTS/room.txt, `PHASE FREE NEED ok|short DISK`, PHASE
+# build or measure, DISK where the disk is mounted; and, once a measurement's build ended, the
+# bytes its run's directory holds, `built BYTES`, which tells a later run what a build takes.
+# CLADEFS_HOST_SWEEP=1 first removes the runs of earlier drivers of the same name,
+# CLADEFS_HOST_RUN, whose job is not running (host-remote.sh's sweep), as a driver that runs under
+# one name, one at a time, needs: the nightly (scripts/nightly-host.sh).
+#
 # The drivers run these functions under `||`, where errexit stops nothing, so each checks the
 # status of its every step itself.
 
@@ -148,6 +160,8 @@ host_start() {
     done
     mkdir -p "$results" || return
     results=$(cd "$results" && pwd) || return
+    if [[ ${CLADEFS_HOST_SWEEP:-} == 1 ]]; then host_sweep || return; fi
+    host_room build CLADEFS_HOST_ROOM || return
     host_state=prepared
     trap host_exit EXIT
     if [[ -n ${CLADEFS_HOST_PATCH:-} ]]; then
@@ -175,6 +189,45 @@ host_start() {
             if [[ $label == . && -n ${kernel:-} ]]; then echo "guest kernel ${kernel%% *}"; fi
         } > "$out/source.txt" || return
     done <<< "$prepared"
+}
+
+# host_sweep removes the runs of earlier drivers of CLADEFS_HOST_RUN's name whose job is not
+# running (host-remote.sh's sweep).
+host_sweep() {
+    [[ -n ${CLADEFS_HOST_RUN:-} ]] ||
+        { echo "CLADEFS_HOST_SWEEP sweeps the runs of CLADEFS_HOST_RUN's name: name them" >&2
+          return 2; }
+    host_side sweep "$host_scratch" "$host_repo" "$CLADEFS_HOST_RUN"
+}
+
+# host_room PHASE VARIABLE checks the scratch disk has the bytes the variable VARIABLE names free,
+# if it names any, before the run's PHASE, build or measure, and records it in RESULTS/room.txt;
+# short of it, it says so and fails, 28.
+host_room() {
+    local phase=$1 variable=$2 need=${!2:-} said free disk verdict=ok
+    [[ -n $need ]] || return 0
+    [[ $need =~ ^[0-9]+$ ]] || { echo "$variable is a count of bytes: $need" >&2; return 2; }
+    said=$(host_side room "$host_scratch") || return
+    read -r free disk <<< "$said"
+    if (( free < need )); then verdict=short; fi
+    echo "$phase $free $need $verdict $disk" >> "$results/room.txt" || return
+    if [[ $verdict == short ]]; then
+        echo "Not enough room: the scratch disk $disk has $free bytes free before the run" \
+            "${phase}s, which needs $need ($variable)." >&2
+        return 28
+    fi
+}
+
+# host_built records in RESULTS/room.txt the bytes the run's directory holds once its build ended,
+# for a run that checks its room (host_room). A failure to tell is said, and measures on.
+host_built() {
+    local size
+    [[ -n ${CLADEFS_HOST_ROOM:-} ]] || return 0
+    if size=$(host_side size "$host_dir"); then
+        echo "built $size" >> "$results/room.txt"
+    else
+        echo "The size of $host_dir, built, is unknown (above): room.txt lacks it." >&2
+    fi
 }
 
 # host_command [NAME=VALUE...] SCRIPT [ARG...] prints the job's command, which runs the host script
@@ -289,7 +342,8 @@ host_env_local() {
 # scripts/lib/measurement.sh refuses there. A build inside the measurement held its cores and
 # memory from every other measurement for as long as it compiled, an hour on 4 cores (TASK-330.4,
 # TASK-368). A driver stopped while its run builds leaves its `resume` the build alone: run the
-# driver again. Any other run's is one job, of no phase.
+# driver again. Any other run's is one job, of no phase. Between the two, the run checks its room
+# for the measurement (host_room).
 host_job() {
     if (( ! host_bench )); then
         host_launch "${CLADEFS_HOST_MEM:-12G}" CLADEFS_HOST_PHASE= "$@"
@@ -299,6 +353,8 @@ host_job() {
     # for the qualification's).
     host_bench=0 host_launch 12G CLADEFS_HOST_PHASE=build "$@" \
         > "$results/remote-build.log" 2>&1 || return
+    host_built
+    host_room measure CLADEFS_HOST_ROOM_MEASURE || return
     host_launch "${CLADEFS_HOST_MEM:-12G}" CLADEFS_HOST_PHASE=measure "$@"
 }
 
@@ -324,9 +380,10 @@ host_launch() {
 # host_wait waits for the run's job, as host_job does, for one whose driver stopped waiting for it
 # too: reconnecting as a connection drops, and giving up after 20 tries none of which connected,
 # the job running on. A job whose shell is gone without its status, as one is when its host
-# restarted under it, is lost.
+# restarted under it, is lost; so is one whose status file holds no number, as a full disk leaves
+# it (host-remote.sh's wait, TASK-489).
 host_wait() {
-    local said tries=0
+    local said why tries=0
     while true; do
         said=$(host_side wait "$host_dir" 2> /dev/null) || true
         case ${said##*$'\n'} in
@@ -335,9 +392,13 @@ host_wait() {
                 host_side log "$host_dir" || echo "fetching $host_run's log failed" >&2
                 return "${said##*status }"
                 ;;
-            lost)
+            lost | "lost unreadable")
                 host_state=ended
-                echo "$host_run on $host is lost: its job ended without its status." >&2
+                why=''
+                if [[ $said == *unreadable ]]; then
+                    why=" (its status file empty or unreadable: was its disk full?)"
+                fi
+                echo "$host_run on $host is lost: its job ended without its status$why." >&2
                 host_side log "$host_dir" || echo "fetching $host_run's log failed" >&2
                 return 1
                 ;;

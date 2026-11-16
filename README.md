@@ -699,8 +699,9 @@ make check-tla             # about two hours, each model in minutes, on Java; fe
 
 Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from the nightly's own
 clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change since
-the night before (its newest commit that changed more than `docs/measurements` and `backlog`), it
-does nothing. Otherwise it measures main's head against the commit the night before measured, as an
+the last night that measured (its newest commit that changed more than `docs/measurements` and
+`backlog`), it does nothing. Otherwise it measures main's head against the commit that night
+measured, as an
 A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_HOST=local`): the head built as work, the
 base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three rounds of both
 sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent sandbox stands on:
@@ -727,15 +728,23 @@ night pushes it first.
 
 - Results: `docs/measurements/ubu1-nightly-<time>-<head>/nightly.md` for each night, and
   `docs/measurements/nightly-history.md` for all of them, newest first.
-- A night that **could not run** (a side failed to build, or no round ran) or that has **no
-  result** (every round was left out: the disk was busy, or the host drifted) measured nothing:
-  its row says why, and its `nightly.md` lists each round and why it was left out. The next night
-  measures from the same base. Three such nights in a row file a task (`[nightly:no-result]`).
+- A night that **could not run** (a side failed to build, no round ran, or the scratch disk was
+  short of room) or that has **no result** (every round was left out: the disk was busy, or the
+  host drifted) measured nothing: its row says why, and its `nightly.md` lists each round and why
+  it was left out. The next night measures the same commits again, or main's newer head against
+  the same base. Three such nights in a row file a task (`[nightly:no-result]`).
+- The scratch disk, `/mnt/fxdax-scratch`, is every job's (TASK-489). A night first removes its own
+  earlier runs' directories (`run-nightly-*` whose job isn't running) and keeps the artifacts of
+  tonight's two sides alone; then checks the disk has room before it builds and before it
+  measures: `CLADEFS_NIGHTLY_ROOM_BUILD` (100G) and `CLADEFS_NIGHTLY_ROOM_MEASURE` (20G), or a
+  fifth more than the most the last 7 nights took, if more (`scripts/nightly.py`'s `ROOM` says
+  why). Short of it, the night could not run, and its `nightly.md` names the disk, the free space
+  found and the need.
   A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
 - The log: `~/.local/state/cladefs/nightly/nightly.log` on ubu1, a line a step; cron's output in
   `cron.log` beside it.
 
-A night by hand, on ubu1 (it skips if main's code was measured already):
+A night by hand, on ubu1 (it skips if a night measured main's code already):
 
 ```sh
 ~/src/cladefs-nightly/scripts/nightly-host.sh

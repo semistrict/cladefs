@@ -271,6 +271,8 @@ echo "$(basename "$0") $phase $where" >> "$results/jobs.txt"
 if [[ $phase != measure ]]; then
     measurement_refuses "$(basename "$0")'s build"
     [[ ${{CLADEFS_FAKE_HOST:-}} != fail-build ]] || exit 4
+    # The build fills the scratch disk to CLADEFS_FAKE_FILL KiB free (fake_ssh.py's df).
+    if [[ -n ${{CLADEFS_FAKE_FILL:-}} ]]; then echo "$CLADEFS_FAKE_FILL" > "$HOME/df-free"; fi
 fi
 if [[ $phase == build ]]; then exit 0; fi
 {{
@@ -580,14 +582,7 @@ class Runs(unittest.TestCase):
             (run / "job").mkdir(parents=True)
             (run / "job" / "lock").touch()
         # The running one's job holds its lock.
-        holder = subprocess.Popen(
-            [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1]); "
-             "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()",
-             running / "job" / "lock"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
-        self.addCleanup(holder.stdout.close)
-        self.addCleanup(holder.wait)
-        self.addCleanup(holder.stdin.close)
-        self.assertEqual(holder.stdout.readline(), "held\n")
+        hold(self, running / "job" / "lock")
         for run in (old, running):
             os.utime(run, (0, 0))
         status, out, errors = fleet.drive(RAN)
@@ -660,6 +655,103 @@ class Runs(unittest.TestCase):
                                   r"fxdax.slice/fxdax-bench.slice/fxjob-\d+.scope\), holding its "
                                   r"cores and memory from every other measurement")
         self.assertTrue(refusal.endswith("(TASK-368)\n"), refusal)
+
+
+GIB = 1 << 30
+
+
+def hold(test, lock):
+    """Holds `lock`, a file, as a running job holds its run's, until `test` ends."""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", "import fcntl, sys; f = open(sys.argv[1]); "
+         "fcntl.flock(f, fcntl.LOCK_EX); print('held', flush=True); sys.stdin.read()", lock],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    test.addCleanup(holder.stdout.close)
+    test.addCleanup(holder.wait)
+    test.addCleanup(holder.stdin.close)
+    test.assertEqual(holder.stdout.readline(), "held\n")
+
+
+class Room(unittest.TestCase):
+    """TASK-489: a run that names the room it needs on the scratch disk, which every job on the
+    host shares, checks it is there before it builds (CLADEFS_HOST_ROOM) and before its
+    measurement (CLADEFS_HOST_ROOM_MEASURE), each check a line of RESULTS/room.txt; and its earlier
+    runs of the same name go first (CLADEFS_HOST_SWEEP)."""
+
+    def test_a_run_short_of_room_prepares_nothing(self):
+        fleet = Fleet()
+        (fleet.home("ubu1") / "df-free").write_text(f"{GIB >> 10}\n")
+        status, out, errors = fleet.drive(RAN, environment={"CLADEFS_HOST_ROOM": str(2 * GIB)})
+        self.assertEqual((status, out, errors), (
+            28, "", "Not enough room: the scratch disk /mnt/fake-scratch has 1073741824 bytes free "
+                    "before the run builds, which needs 2147483648 (CLADEFS_HOST_ROOM).\n"))
+        self.assertEqual((fleet.directory / "results" / "room.txt").read_text(),
+                         "build 1073741824 2147483648 short /mnt/fake-scratch\n")
+        self.assertEqual((fleet.calls(), fleet.runs()), (["ubu1 bash -s -- room"], []))
+
+    def test_a_measurement_whose_build_filled_the_disk_measures_nothing(self):
+        """The first night on ubu1: its sides built, the disk was full as its measurement began,
+        which could not write even its status."""
+        for fill, status_, jobs, measured in [
+            (str(4 * GIB >> 10), "status 0", ["test-linux-host.sh build work",
+                                              "test-linux-host.sh measure bench"],
+             "measure 4294967296 2147483648 ok"),
+            ("1024", "status 28", ["test-linux-host.sh build work"],
+             "measure 1048576 2147483648 short"),
+        ]:
+            with self.subTest(fill=fill):
+                fleet = Fleet()
+                (fleet.home("ubu1") / "df-free").write_text(f"{8 * GIB >> 10}\n")
+                (fleet.home("ubu1") / "du-size").write_text("3\n")
+                status, out, errors = fleet.drive(RAN, environment={
+                    "CLADEFS_HOST_BENCH": "1", "CLADEFS_HOST_ROOM": str(2 * GIB),
+                    "CLADEFS_HOST_ROOM_MEASURE": str(2 * GIB), "CLADEFS_FAKE_FILL": fill})
+                self.assertEqual((status, out, errors), (0, f"{status_}\n", ""))
+                results = fleet.directory / "results"
+                self.assertEqual((results / "jobs.txt").read_text().splitlines(), jobs)
+                self.assertEqual((results / "room.txt").read_text().splitlines(), [
+                    "build 8589934592 2147483648 ok /mnt/fake-scratch", "built 3072",
+                    f"{measured} /mnt/fake-scratch"])
+                self.assertEqual(fleet.runs(), [])
+        self.assertEqual((results / "remote.log").read_text(),
+                         "Not enough room: the scratch disk /mnt/fake-scratch has 1048576 bytes "
+                         "free before the run measures, which needs 2147483648 "
+                         "(CLADEFS_HOST_ROOM_MEASURE).\n")
+
+    def test_a_run_names_bytes(self):
+        fleet = Fleet()
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_ROOM": "100G"}),
+                         (2, "", "CLADEFS_HOST_ROOM is a count of bytes: 100G\n"))
+
+    def test_the_earlier_runs_of_its_name_go_but_a_running_one_and_others(self):
+        fleet = Fleet()
+        fleet.scratch.mkdir()
+        ended, running = (fleet.scratch / f"run-nightly-2026111{n}T070003Z-{n}1111111"
+                          for n in (5, 4))
+        others = [fleet.scratch / name for name in (
+            "run-t435-20261115T070003Z-22222222", "run-nightlyx-20261115T070003Z-33333333",
+            "run-20261115T070003Z-44444444", "run-nightly-old", "kernels")]
+        for run in (ended, running, *others):
+            (run / "job").mkdir(parents=True)
+            (run / "job" / "lock").touch()
+            (run / "trees" / "head" / "target").mkdir(parents=True)
+        (ended / "job" / "status").write_text("0\n")
+        hold(self, running / "job" / "lock")
+        status, out, errors = fleet.drive(
+            RAN, environment={"CLADEFS_HOST_RUN": "nightly", "CLADEFS_HOST_SWEEP": "1"})
+        self.assertEqual((status, out, errors), (
+            0, "status 0\n", f"Keeping {running}: its job runs.\n"
+                             f"Removing {ended}, an earlier run of nightly's.\n"))
+        self.assertEqual(fleet.runs(), [
+            "run-20261115T070003Z-44444444", running.name, "run-nightly-old",
+            "run-nightlyx-20261115T070003Z-33333333", "run-t435-20261115T070003Z-22222222"])
+        self.assertTrue((fleet.scratch / "kernels").is_dir())
+
+    def test_only_a_named_run_sweeps(self):
+        fleet = Fleet()
+        self.assertEqual(fleet.drive(RAN, environment={"CLADEFS_HOST_SWEEP": "1"}),
+                         (2, "", "CLADEFS_HOST_SWEEP sweeps the runs of CLADEFS_HOST_RUN's name: "
+                                 "name them\n"))
 
 
 class Source(unittest.TestCase):
@@ -881,6 +973,23 @@ class Resume(unittest.TestCase):
         self.assertIn(f"{run} on ubu1 is lost: its job ended without its status.\n",
                       (results / "remote.log").read_text())
         self.assertEqual(fleet.runs(), [])
+
+    def test_a_job_whose_status_is_empty_is_lost(self):
+        """TASK-489: on a full disk the job's shell made its status file and could write nothing in
+        it; the wait read `status ` and bash's return refused the empty number."""
+        fleet, run = self.left({})
+        directory = fleet.scratch / run
+        fleet.drive(f'host_name {run}; host_side wait "$host_dir"')
+        for written in ("", "no space\n"):
+            with self.subTest(status=written):
+                (directory / "job" / "status").write_text(written)
+                status, out, errors = fleet.drive(
+                    f'host_name {run}; host_state=launched; status=0; '
+                    'host_wait > /dev/null || status=$?; echo "status $status $host_state"')
+                self.assertEqual((status, out, errors), (
+                    0, "status 1 ended\n",
+                    f"{run} on ubu1 is lost: its job ended without its status (its status file "
+                    "empty or unreadable: was its disk full?).\n"))
 
     def test_a_running_job_is_cancelled(self):
         fleet, run = self.left({"CLADEFS_FAKE_HOST": "wait"})
