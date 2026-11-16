@@ -52,7 +52,8 @@ pub struct ConfigState {
     pub path_on_host: String,
     pub capacity: u64,
     pub dax_window_size: Option<u64>,
-    /// cladefs: the window's private pages at most, as configured (doc-13).
+    /// cladefs: the window's private pages at most, as configured (doc-13): a count of pages, as
+    /// snapshots before TASK-502 hold it, which configurations now give in bytes.
     pub dax_private_max: Option<u64>,
     pub extentd_socket: String,
     /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
@@ -67,7 +68,9 @@ impl From<&Config> for ConfigState {
             path_on_host: config.path_on_host.clone(),
             capacity: config.capacity,
             dax_window_size: config.dax_window_size,
-            dax_private_max: config.dax_private_max,
+            dax_private_max: config
+                .dax_private_max_bytes
+                .map(|bytes| bytes / cladefs::pages::page_size()),
             extentd_socket: config.extentd_socket.clone(),
             cache_type: config.cache_type,
         }
@@ -84,7 +87,9 @@ impl From<&ConfigState> for Config {
             path_on_host: config.path_on_host.clone(),
             capacity: config.capacity,
             dax_window_size: config.dax_window_size,
-            dax_private_max: config.dax_private_max,
+            dax_private_max_bytes: config
+                .dax_private_max
+                .map(|pages| pages * cladefs::pages::page_size()),
             extentd_socket: config.extentd_socket.clone(),
             read_only: false,
             cache_type: config.cache_type,
@@ -213,7 +218,8 @@ mod tests {
         assert_eq!(restored, mappings);
     }
 
-    /// A snapshot's configuration is a writer's, as it was configured.
+    /// A snapshot's configuration is a writer's, as it was configured. cladefs TASK-502: its
+    /// private pages' cap a count of pages, as snapshots before held it, the configuration's bytes.
     #[test]
     fn configurations_come_back_a_writers() {
         let config = Config {
@@ -222,11 +228,12 @@ mod tests {
             path_on_host: "/store".into(),
             capacity: 1 << 30,
             dax_window_size: Some(64 << 20),
-            dax_private_max: Some(16),
+            dax_private_max_bytes: Some(16 * cladefs::pages::page_size()),
             extentd_socket: "/extentd.sock".into(),
             read_only: false,
             cache_type: CacheType::Unsafe,
         };
+        assert_eq!(ConfigState::from(&config).dax_private_max, Some(16));
         assert_eq!(Config::from(&ConfigState::from(&config)), config);
     }
 }

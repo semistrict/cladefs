@@ -609,7 +609,7 @@ fn config(dir: &TestDir, path: &str) -> Config {
         path_on_host: dir.0.join(path).display().to_string(),
         capacity: 1 << 20,
         dax_window_size: None,
-        dax_private_max: None,
+        dax_private_max_bytes: None,
         extentd_socket: dir.socket().display().to_string(),
         read_only: false,
         cache_type: CacheType::Writeback,

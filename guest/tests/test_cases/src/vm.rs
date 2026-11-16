@@ -199,13 +199,16 @@ impl Vm {
         });
         if window != 0 {
             device["dax_window_size"] = window.into();
-            // cladefs: the window's private pages at most, CLADEFS_DAX_PRIVATE_MAX if set; the
-            // device's default otherwise, half its pages (TASK-164.11).
+            // cladefs: the window's private pages at most, CLADEFS_DAX_PRIVATE_MAX pages if set,
+            // given the device in bytes (TASK-502); the device's default otherwise, 1 GiB
+            // (TASK-227).
             if let Some(most) =
                 std::env::var("CLADEFS_DAX_PRIVATE_MAX").ok().filter(|m| !m.is_empty())
             {
                 let most: u64 = most.parse().expect("CLADEFS_DAX_PRIVATE_MAX is a count of pages");
-                device["dax_private_max"] = most.into();
+                // SAFETY: Plain system call.
+                let page = unsafe { nix::libc::sysconf(nix::libc::_SC_PAGESIZE) } as u64;
+                device["dax_private_max_bytes"] = (most * page).into();
             }
         }
         push(&mut self.config["extent"], device);
