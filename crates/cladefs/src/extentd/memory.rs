@@ -158,7 +158,8 @@ pub fn governed_bytes() -> u64 {
 /// from them, but what the headroom leaves between looks. cladefs: the stores' page cache
 /// (`extent_store::pages`, TASK-433) as the parts held are, its clean pages evicted, its dirty
 /// ones written back to be: what it holds counted as the process's, where the host's page cache
-/// was counted free.
+/// was counted free; and sized to what is left it ([`extent_store::pages::PageCache::size_to`]),
+/// as Linux sizes its page cache to the memory free.
 pub fn govern(allowance: u64) {
     GOVERNED.store(allowance, Ordering::Relaxed);
     let parts = held_parts();
@@ -168,6 +169,8 @@ pub fn govern(allowance: u64) {
     }
     let pages = extent_store::pages::shared();
     let room = room.saturating_sub(parts.bytes());
+    // Sized to what it may hold, as Linux's page cache to the memory free (TASK-433.8).
+    pages.size_to(room);
     if pages.bytes() > room {
         pages.evict_to(room);
     }

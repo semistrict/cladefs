@@ -6469,3 +6469,17 @@ fn durable_commits_through_the_daemon() {
         took[took.len() - 1]
     );
 }
+
+/// TASK-433.8: the governor sizes the stores' page cache to what it leaves it, as Linux sizes its
+/// page cache to the memory free: a tenth of it dirty before the flusher writes back, a fifth
+/// before writers wait, all of it held.
+#[test]
+fn the_stores_page_cache_is_sized_to_what_the_governor_leaves() {
+    let allowance = 8 << 30;
+    super::memory::govern(allowance);
+    let sized = extent_store::pages::shared().options();
+    assert_eq!(
+        (sized.background, sized.hard, sized.most),
+        (allowance / 10, allowance / 5, allowance)
+    );
+}
