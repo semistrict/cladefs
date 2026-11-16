@@ -3,9 +3,10 @@ id: TASK-488
 title: >-
   host_wait returns an empty status when the test host's disk is full: "return:
   : numeric argument required", exit 255
-status: To Do
+status: Done
 assignee: []
 created_date: '2026-11-16 08:34'
+updated_date: '2026-11-16 11:16'
 labels:
   - bug
   - scripts
@@ -31,3 +32,9 @@ Seen 2026-11-16 (run t474c on ubu1): the scratch disk filled (No space left on d
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Duplicate of TASK-489, which fixed it on main (host-remote.sh says `lost unreadable` for an empty status; host_wait reports it lost).
+<!-- SECTION:FINAL_SUMMARY:END -->

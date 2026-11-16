@@ -332,7 +332,7 @@ fn window_bytes(window: Window, given: Option<&str>, meminfo: &str) -> anyhow::R
 /// free (TASK-358). It logs to `<name>.log` in the test's directory.
 /// cladefs: it keeps what its stores read from their bucket in a part cache of its own,
 /// `<name>-cache` in the test's directory, as production's daemon keeps it on the host's disk
-/// (`CLADEFSD_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
+/// (`CLADEFSD_PART_CACHE`, doc-7), unless `env` or this process says otherwise, empty for none: one
 /// daemon at a time has a cache's directory (TASK-164.12). And it keeps what it did in
 /// `<name>-stats.txt` beside its log, unless `env` names a file (`CLADEFSD_STATS`): what it
 /// downloaded against what it read, which the run's summary says (scripts/guest_results.py,
@@ -362,18 +362,18 @@ pub fn spawn_daemon(
     if let Some(memory) = memory {
         command.arg(memory.to_string());
     }
-    if !named("CLADEFSD_REMOTE") {
+    if !named("CLADEFSD_BUCKET") {
         let bucket = test_setup.tmp_dir.join(format!("{name}.bucket"));
-        command.env("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
+        command.env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()));
     }
     if !named("CLADEFSD_TOKEN") {
         command.env("CLADEFSD_TOKEN", "1");
     }
-    let given = env.iter().find(|(var, _)| *var == "CLADEFSD_CACHE").map(|(_, value)| *value);
-    let ours = std::env::var_os("CLADEFSD_CACHE");
+    let given = env.iter().find(|(var, _)| *var == "CLADEFSD_PART_CACHE").map(|(_, value)| *value);
+    let ours = std::env::var_os("CLADEFSD_PART_CACHE");
     if let Some(cache) = part_cache(given, ours.as_deref(), &test_setup.tmp_dir, name) {
         fs::create_dir_all(&cache)?;
-        command.env("CLADEFSD_CACHE", cache);
+        command.env("CLADEFSD_PART_CACHE", cache);
     }
     let given = env.iter().any(|(var, _)| *var == "CLADEFSD_STATS");
     if let Some(stats) = stats_file(given, &test_setup.tmp_dir, name) {
@@ -395,8 +395,8 @@ pub fn spawn_daemon(
 }
 
 /// cladefs: the part cache a test's daemon `name` is given, in `dir`, the test's directory, as
-/// production's daemon keeps one on the host's disk (`CLADEFSD_CACHE`, doc-7), unless
-/// `CLADEFSD_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
+/// production's daemon keeps one on the host's disk (`CLADEFSD_PART_CACHE`, doc-7), unless
+/// `CLADEFSD_PART_CACHE` is said, `given` the daemon or `ours` this process, which it then takes
 /// as it is, empty for none. Without one, a fork paged in what it inherited from the bucket a ranged
 /// GET at a time: forked-dax 0.304 in the perf gate, 0.849 with it (TASK-164.12, GCE r790, r792).
 fn part_cache(
@@ -499,7 +499,7 @@ mod tests {
     }
 
     /// TASK-164.12: a test's daemon keeps a part cache of its own in the test's directory, as
-    /// production's does, unless CLADEFSD_CACHE is said, by the daemon's environment or this
+    /// production's does, unless CLADEFSD_PART_CACHE is said, by the daemon's environment or this
     /// process's, which it takes as it is, empty for none.
     #[test]
     fn daemons_keep_a_part_cache_unless_told_otherwise() {

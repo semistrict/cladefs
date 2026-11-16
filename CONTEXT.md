@@ -132,7 +132,7 @@ A file created in this mount, served from the guest's page cache until it is nex
 
 **Extent daemon**:
 The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
-_Avoid_: server, remote; `extentd` in code today, `cladefsd` once TASK-475 merges the host's daemons
+_Avoid_: server, remote; `cladefsd` is its name on the command line, `extentd` its module and protocol
 
 **Daemon client**:
 A VM process's connection to the extent daemon, through which its extent device has a store.
@@ -494,8 +494,7 @@ identifiers too (types, protos, env vars, binaries), not prose alone; the names 
 code does not have yet are said so.
 
 - **seal**: extents' alone; encryption is **encrypted**, in code too.
-- **remote**: retired, in code too; say **bucket** or **daemon client**. `CLADEFSD_REMOTE`, the
-  name TASK-475 gave the daemon's bucket variable, keeps it.
+- **remote**: retired, in code too; say **bucket** or **daemon client** (`CLADEFSD_BUCKET`).
 - **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
 - **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code still says
   volume (`cell::Volume`, `CreateVolume`); `cell::Vdisk`, `CreateVdisk` once renamed, TASK-475 having
@@ -507,7 +506,8 @@ code does not have yet are said so.
 - **lease**: only the collector's; branches have none since TASK-407.
 - **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
   `COMMIT_UPLOADED`, the `local_lag` stats, the trace's `cladefs.level`).
-- **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it.
+- **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it,
+  env vars too (`CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`).
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
@@ -520,6 +520,3 @@ code does not have yet are said so.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
 - **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.
-- **cache**: env vars name theirs: the part cache's are to be `CLADEFSD_PART_CACHE`,
-  `CLADEFSD_PART_CACHE_BYTES`; the code says `CLADEFSD_CACHE`, `CLADEFSD_CACHE_BYTES`, TASK-475's
-  names, until then.

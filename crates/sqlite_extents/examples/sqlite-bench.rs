@@ -212,7 +212,7 @@ fn main() {
     // SAFETY: before this process starts any other thread.
     unsafe {
         std::env::set_var(
-            "CLADEFSD_REMOTE",
+            "CLADEFSD_BUCKET",
             format!("file://{}/", root.join("daemon.bucket").display()),
         );
         std::env::set_var("CLADEFSD_TOKEN", "1");
@@ -228,7 +228,7 @@ fn main() {
         let device = Storage::create(&image, 64 << 30).unwrap().into_device();
         let volume = Volume::open(device, Options::default()).unwrap();
         on_volume("extents", volume, "", scale);
-        // The image, and what the bucket its branch is kept in holds (CLADEFSD_REMOTE).
+        // The image, and what the bucket its branch is kept in holds (CLADEFSD_BUCKET).
         sizes.push(("extents", disk_bytes(&image) + bucket_bytes(&root)));
     }
     #[cfg(target_os = "linux")]

@@ -148,7 +148,7 @@ def encrypted_env(dir):
     if not any(env.get(name) for name in ("CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE")):
         bucket = Path(dir) / "bucket"
         bucket.mkdir(exist_ok=True)
-        env.setdefault("CLADEFSD_REMOTE", f"file://{bucket}/")
+        env.setdefault("CLADEFSD_BUCKET", f"file://{bucket}/")
         env.setdefault("CLADEFSD_TOKEN", "1")
         env["CLADEFS_MASTER_KEY"] = TEST_MASTER_KEY
     return env

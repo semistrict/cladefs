@@ -46,9 +46,9 @@ fn daemon(dir: &Path, bucket: &Path, peers: Option<&[String]>) -> Daemon {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(&vms)
-        .env("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()))
         .env("CLADEFSD_TOKEN", "1")
-        .env("CLADEFSD_CACHE", dir.join("cache"))
+        .env("CLADEFSD_PART_CACHE", dir.join("cache"))
         .env("CLADEFSD_STATS", &stats)
         .env("CLADEFSD_GRPC", &control);
     if let Some(peers) = peers {
@@ -206,16 +206,16 @@ fn a_cache_budget_the_daemon_cant_take_stops_it() {
     let dir = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(dir.path().join("extentd.sock"))
-        .env("CLADEFSD_REMOTE", format!("file://{}/", dir.path().display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}/", dir.path().display()))
         .env("CLADEFSD_TOKEN", "1")
-        .env("CLADEFSD_CACHE", dir.path().join("cache"))
-        .env("CLADEFSD_CACHE_BYTES", "1G")
+        .env("CLADEFSD_PART_CACHE", dir.path().join("cache"))
+        .env("CLADEFSD_PART_CACHE_BYTES", "1G")
         .output()
         .unwrap();
     assert!(!output.status.success(), "the daemon started");
     let said = String::from_utf8_lossy(&output.stderr);
     assert!(
-        said.contains("CLADEFSD_CACHE_BYTES must be a positive number of bytes: \"1G\""),
+        said.contains("CLADEFSD_PART_CACHE_BYTES must be a positive number of bytes: \"1G\""),
         "{said}"
     );
 }

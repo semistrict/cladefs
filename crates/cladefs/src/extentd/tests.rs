@@ -27,7 +27,7 @@ fn host() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///branches");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
 }
@@ -206,7 +206,7 @@ fn windows_budget_by_the_mappings_the_daemon_says_the_host_allows() {
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
 }
 
-/// cladefs: with `CLADEFSD_REMOTE` naming a bucket, the stores the daemon opens keep their
+/// cladefs: with `CLADEFSD_BUCKET` naming a bucket, the stores the daemon opens keep their
 /// branches there: a durable commit is an uploaded one.
 #[test]
 fn keeps_branches_in_object_storage() {
@@ -2627,7 +2627,7 @@ fn control_takes_branches_at_the_placements_given() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("file://{}/", dir.path().canonicalize().unwrap().join("bucket").display());
     // SAFETY: as in host.
-    unsafe { std::env::set_var("CLADEFSD_REMOTE", &url) };
+    unsafe { std::env::set_var("CLADEFSD_BUCKET", &url) };
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || serve(listener));
@@ -6338,7 +6338,7 @@ fn imports_read_what_they_made_from_the_hosts_cache() {
     std::fs::create_dir(&cache).unwrap();
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
-    unsafe { std::env::set_var("CLADEFSD_CACHE", &cache) };
+    unsafe { std::env::set_var("CLADEFSD_PART_CACHE", &cache) };
     let bucket = super::stores::daemon_bucket().unwrap();
     // Files of a few parts each, so that what the check reads is in segments the bucket
     // acknowledged before it, as the import's close waits for its uploads.
@@ -6444,7 +6444,7 @@ fn durable_commits_through_the_daemon() {
     let _ = super::logging::to_stderr();
     // SAFETY: As in host.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", &url);
+        std::env::set_var("CLADEFSD_BUCKET", &url);
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();

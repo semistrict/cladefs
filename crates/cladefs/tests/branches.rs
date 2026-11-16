@@ -23,7 +23,7 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
 fn branch(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_BUCKET", url)
         .env("CLADEFSD_TOKEN", "1")
         .env_remove("CLADEFSD_GRPC")
         .output()
@@ -117,7 +117,7 @@ fn forks_and_takes_branches_in(url: &str) {
 fn branch_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_BUCKET", url)
         .env("CLADEFSD_TOKEN", "1")
         .env_remove("CLADEFSD_GRPC")
         .output()

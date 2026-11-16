@@ -22,8 +22,8 @@
 # each workload, into the cases' logs. CLADEFS_BENCH_FILES and CLADEFS_BENCH_PGBENCH_SECS and
 # CLADEFS_BENCH_PGBENCH_SCALE size the metadata workloads and pgbench, and CLADEFS_BENCH_VCPUS and
 # CLADEFS_BENCH_JOBS the VMs' vCPUs and the scaling group's jobs (test_fs_bench.rs).
-# CLADEFSD_REMOTE, if set, names the bucket the extent daemon keeps the stores' branches in (an
-# object store's URL the test host reaches), and CLADEFSD_CACHE the directory it keeps what it reads
+# CLADEFSD_BUCKET, if set, names the bucket the extent daemon keeps the stores' branches in (an
+# object store's URL the test host reaches), and CLADEFSD_PART_CACHE the directory it keeps what it reads
 # from there in. CLADEFS_ZSTD_LEVEL is the zstd level stores compress their parts at (default 1; 0
 # stores them raw), to measure others. CLADEFS_BUCKET_LATENCY_MS adds that many milliseconds to each
 # of the bucket's requests (extent_bucket's object_store_at), as a farther object store would.

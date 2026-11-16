@@ -148,16 +148,16 @@ class HostCommand(unittest.TestCase):
         # Knobs for the host: where its stores keep their branches, and its daemons what they read
         # from them. And a path of this machine's build that the host scripts set themselves.
         host = {
-            "CLADEFSD_REMOTE": "s3://bucket/prefix",
+            "CLADEFSD_BUCKET": "s3://bucket/prefix",
             "CLADEFS_S3_URL": "s3://bucket/test",
-            "CLADEFSD_CACHE": "/cache",
+            "CLADEFSD_PART_CACHE": "/cache",
             "CLADEFS_FIRECRACKER": "/laptop/firecracker",
         }
         self.assertEqual(
             self.host_command({**here, **host}, "test-linux-host.sh")[1],
             sorted(BASE + [
-                "CLADEFSD_CACHE=/cache",
-                "CLADEFSD_REMOTE=s3://bucket/prefix",
+                "CLADEFSD_PART_CACHE=/cache",
+                "CLADEFSD_BUCKET=s3://bucket/prefix",
                 "CLADEFS_FIRECRACKER=/laptop/firecracker",
                 "CLADEFS_S3_URL=s3://bucket/test",
             ]),
@@ -201,17 +201,17 @@ class HostCommand(unittest.TestCase):
 
     def test_a_path_in_home_is_in_the_hosts(self):
         self.assertEqual(
-            self.host_command({"CLADEFSD_CACHE": "~/cache"}, "test-linux-host.sh")[1],
-            sorted(BASE + [f"CLADEFSD_CACHE={HOST_HOME}/cache"]),
+            self.host_command({"CLADEFSD_PART_CACHE": "~/cache"}, "test-linux-host.sh")[1],
+            sorted(BASE + [f"CLADEFSD_PART_CACHE={HOST_HOME}/cache"]),
         )
 
     def test_the_callers_values_replace_this_machines(self):
         self.assertEqual(
             self.host_command(
-                {"CLADEFSD_REMOTE": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
+                {"CLADEFSD_BUCKET": "s3://bucket/prefix", "CLADEFS_ZSTD_LEVEL": "3",
                  # The run's own, which no caller's replaces.
                  "CLADEFS_TEST_HOST_WORK": "/laptop/work"},
-                "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
+                "CLADEFSD_BUCKET=s3://bucket/prefix/run-x",
                 "CLADEFS_MIGRATE_BUNDLE=~/run-x/bundle",
                 # Empty, unset there.
                 "CLADEFS_ZSTD_LEVEL=",
@@ -220,7 +220,7 @@ class HostCommand(unittest.TestCase):
             )[1:],
             (
                 sorted(BASE + [
-                    "CLADEFSD_REMOTE=s3://bucket/prefix/run-x",
+                    "CLADEFSD_BUCKET=s3://bucket/prefix/run-x",
                     f"CLADEFS_MIGRATE_BUNDLE={HOST_HOME}/run-x/bundle",
                 ]),
                 COMMAND + ["CLADEFS_NOT=an argument"],
@@ -1087,12 +1087,12 @@ class Drivers(unittest.TestCase):
         status, _, errors = fleet.run_driver(
             "test-host.sh", str(results),
             environment={"CLADEFS_E2E_TEST": "fxfs-guest --tag dax-gate",
-                         "CLADEFSD_REMOTE": "s3://bucket/p"})
+                         "CLADEFSD_BUCKET": "s3://bucket/p"})
         self.assertEqual(status, 0, errors)
         ran = (results / "ran.txt").read_text().splitlines()
         self.assertEqual(ran[0], "test-linux-host.sh fxfs-guest --tag dax-gate")
         run = (results / "run.txt").read_text().split()[1]
-        self.assertIn(f"CLADEFSD_REMOTE=s3://bucket/p/{run}", ran)
+        self.assertIn(f"CLADEFSD_BUCKET=s3://bucket/p/{run}", ran)
         self.assertEqual(errors.splitlines()[-1], f"Results: {results}")
         self.assertEqual(fleet.runs(), [])
 
@@ -1278,7 +1278,7 @@ class Drivers(unittest.TestCase):
         for side, phase, token in [(a, "source", "1"), (b, "target", "2")]:
             self.assertIn(f"CLADEFS_MIGRATE_PHASE={phase}", side)
             self.assertIn(f"CLADEFSD_TOKEN={token}", side)
-            self.assertIn(f"CLADEFSD_REMOTE=file://{held}/bucket/branches", side)
+            self.assertIn(f"CLADEFSD_BUCKET=file://{held}/bucket/branches", side)
             self.assertIn(f"CLADEFS_MIGRATE_BUNDLE={held}/bundle", side)
         self.assertEqual((results / "b" / "remote.log").read_text(),
                          "ran test-linux-host.sh fxfs-guest-migrate-dax\n"

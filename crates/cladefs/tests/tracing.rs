@@ -78,7 +78,7 @@ fn daemon(socket: &Path, traces: Option<&str>, endpoint: &str) -> KillOnDrop {
     let mut command = Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     command
         .arg(socket)
-        .env("CLADEFSD_REMOTE", "memory:///branches")
+        .env("CLADEFSD_BUCKET", "memory:///branches")
         .env("CLADEFSD_TOKEN", "1")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_TRACES_SAMPLER", "always_on")

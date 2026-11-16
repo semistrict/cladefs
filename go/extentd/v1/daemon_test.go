@@ -40,7 +40,7 @@ func daemon(t *testing.T, dir string) *extentdv1.Client {
 	command := exec.Command(binary, filepath.Join(dir, "vms.sock"))
 	command.Env = append(os.Environ(),
 		"CLADEFSD_GRPC="+control,
-		"CLADEFSD_REMOTE=memory:///branches",
+		"CLADEFSD_BUCKET=memory:///branches",
 		"CLADEFSD_TOKEN=1",
 		// cladefs: every store encrypted, under the bucket KMS of a test master key, known to all
 		// (TASK-411.28): a daemon given no KMS refuses to start.

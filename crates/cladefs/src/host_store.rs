@@ -9,7 +9,7 @@
 //! acknowledged in the bucket, whose collector takes it back (TASK-165.8).
 //!
 //! Every store keeps its branch in a bucket, which its description names (TASK-165.6): one made on
-//! a host of cladefs's system, this host's (`CLADEFSD_REMOTE`); one made elsewhere, as an image
+//! a host of cladefs's system, this host's (`CLADEFSD_BUCKET`); one made elsewhere, as an image
 //! of the cladefs CLI's or a test's is, a file bucket of its own, beside its directory, which its
 //! forks share ([`create`]). Opening a store opens its bucket ([`Opened`]), the one this process
 //! has of that URL ([`bucket`]). A store made by older code, of an older format, is refused
@@ -170,10 +170,10 @@ pub(crate) fn use_bucket(url: &str, bucket: Arc<ObjectBucket>) {
 }
 
 /// The URL of the bucket a store made at `path`, a directory, keeps its branches in: this host's,
-/// if it is a host of cladefs's system (`CLADEFSD_REMOTE`, as [`crate::bucket::Host`] has
+/// if it is a host of cladefs's system (`CLADEFSD_BUCKET`, as [`crate::bucket::Host`] has
 /// it); else a file bucket of the store's own ([`bucket_named`]).
 fn bucket_for(path: &Path) -> anyhow::Result<String> {
-    let host = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
+    let host = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
     bucket_named(host, path)
 }
 

@@ -193,7 +193,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", format!("file://{}/", bucket.display()));
+        std::env::set_var("CLADEFSD_BUCKET", format!("file://{}/", bucket.display()));
         std::env::set_var("CLADEFSD_TOKEN", "1");
         std::env::set_var("CLADEFS_BUCKET_FAULTS", &faults);
         std::env::set_var("CLADEFSD_STATS", &stats);

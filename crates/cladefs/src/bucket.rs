@@ -12,7 +12,7 @@
 //! (`extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
 //! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
 //! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
-//! (`CLADEFSD_REMOTE`), made on each tenant's first use (TASK-411.27); else none, which every
+//! (`CLADEFSD_BUCKET`), made on each tenant's first use (TASK-411.27); else none, which every
 //! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
@@ -52,7 +52,7 @@ pub fn host_token() -> Result<u64, Failure> {
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
-    /// The bucket's URL, `CLADEFSD_REMOTE`.
+    /// The bucket's URL, `CLADEFSD_BUCKET`.
     pub bucket: String,
     /// The placement's fencing token, `CLADEFSD_TOKEN` ([`host_token`]).
     pub token: u64,
@@ -61,9 +61,9 @@ pub struct Host {
 impl Host {
     /// The host the environment names, or why it names none.
     pub fn from_env() -> Result<Self, String> {
-        let bucket = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
+        let bucket = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
         let bucket = bucket.ok_or_else(|| {
-            "CLADEFSD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
+            "CLADEFSD_BUCKET names no bucket: a host of cladefs's multi-node system keeps its \
              stores' branches in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;
@@ -176,10 +176,10 @@ fn host_keys() -> &'static Result<HostKeys, String> {
     })
 }
 
-/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_REMOTE`).
+/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
 fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
-    let url = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
-    let url = url.ok_or("CLADEFSD_REMOTE names none")?;
+    let url = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
+    let url = url.ok_or("CLADEFSD_BUCKET names none")?;
     crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
 }
 
@@ -3334,7 +3334,7 @@ mod tests {
         // SAFETY: this test's process is its own (nextest), no store open yet.
         unsafe {
             std::env::remove_var("CLADEFS_KMS");
-            std::env::set_var("CLADEFSD_REMOTE", url);
+            std::env::set_var("CLADEFSD_BUCKET", url);
             std::env::set_var("CLADEFS_MASTER_KEY", &master);
         }
         let bucket = crate::host_store::bucket(url).unwrap();

@@ -29,7 +29,7 @@
 //! CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
 //! CLADEFS_SOAK_LOAD_SECS fixes the loads' time; CLADEFS_SOAK_STATE is where runs keep their state,
 //! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
-//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFSD_REMOTE's, under
+//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFSD_BUCKET's, under
 //! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
 //! with failpoints (scripts/test-e2e.sh's CLADEFSD_FAILPOINTS).
 
@@ -178,7 +178,7 @@ mod host {
             let key = format!("{:016x}", soak::fnv(run.as_bytes()));
             let state = root.join(&key);
             let host = state.join("host");
-            let (bucket, bucket_dir) = match std::env::var("CLADEFSD_REMOTE") {
+            let (bucket, bucket_dir) = match std::env::var("CLADEFSD_BUCKET") {
                 Ok(url) if !url.is_empty() => {
                     (format!("{}/soak-{key}", url.trim_end_matches('/')), None)
                 }
@@ -409,9 +409,9 @@ mod host {
             let latency = if faulty { self.plan.latency_ms } else { 0 }.to_string();
             let failpoints = if faulty { self.plan.failpoints() } else { None }.unwrap_or_default();
             let env = [
-                ("CLADEFSD_REMOTE", self.paths.bucket.as_ref()),
+                ("CLADEFSD_BUCKET", self.paths.bucket.as_ref()),
                 ("CLADEFSD_TOKEN", token.as_ref()),
-                ("CLADEFSD_CACHE", self.paths.cache.as_os_str()),
+                ("CLADEFSD_PART_CACHE", self.paths.cache.as_os_str()),
                 ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];

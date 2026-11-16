@@ -41,7 +41,7 @@ docker run -d --name jaeger -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one
 CLADEFSD_TRACES=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_TRACES_SAMPLER=always_on \
-CLADEFSD_REMOTE=... CLADEFSD_TOKEN=... \
+CLADEFSD_BUCKET=... CLADEFSD_TOKEN=... \
 cladefsd /run/cladefs/extentd.sock
 ```
 

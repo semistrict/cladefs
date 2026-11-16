@@ -199,7 +199,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   (fsck), and forks images: a fork's branch is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFSD_REMOTE`); the fork's directory is a store of its own, which
+  (`CLADEFSD_BUCKET`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
   deletes forks and images alike: the branch in its bucket, whose collector
   reclaims what no other branch inherited, and the directory; forks live on.
@@ -362,7 +362,7 @@ extents, each file's blocks once, as `du -sx` counts them (TASK-94). One rule
 for what is shared: a file is the tenant's whose directory holds it, and one in
 no tenant's directory is no tenant's. A fork's directory holds what the fork
 wrote, its base's data being in the bucket, read through the host's part cache
-(`CLADEFSD_CACHE`), which is no tenant's: copies of objects any tenant
+(`CLADEFSD_PART_CACHE`), which is no tenant's: copies of objects any tenant
 reads, bounded by its own capacity and floor, evicting to keep within them. The
 daemon walks a tenant's directory as it is granted, every 10 s, soon after a
 write of it is refused, and as `GetTenantDisk` asks, and counts each write it
@@ -385,7 +385,7 @@ and its open segment.
 copies of it, whose placements fence each other with their tokens: a placement
 cut off neither takes a branch back nor deletes it from under a later one
 (TASK-39.7, TASK-45). The daemon runs as a host of that system, with the bucket
-(`CLADEFSD_REMOTE`) and its placement's token from the control plane
+(`CLADEFSD_BUCKET`) and its placement's token from the control plane
 (`CLADEFSD_TOKEN`, not 0), and refuses to start without them: there is no
 single-node mode. Tests and development use an in-memory bucket
 (`memory:///NAME`), or one in a directory of the host's (`file:///DIR`), which

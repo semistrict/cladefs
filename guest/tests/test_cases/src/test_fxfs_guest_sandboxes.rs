@@ -11,7 +11,7 @@
 //! all the while.
 //!
 //! scripts/sandboxes.sh runs it: it starts the S3 server with its data on the disk the case's
-//! directory is on, names its bucket (CLADEFSD_REMOTE, an `s3://` URL, and the server's
+//! directory is on, names its bucket (CLADEFSD_BUCKET, an `s3://` URL, and the server's
 //! address and credentials, AWS_*) and its data's directory (CLADEFS_SANDBOX_BUCKET_DIR), which this
 //! checks is on the case's disk. CLADEFS_SANDBOX_MODE says how much: `short` (the default), eight
 //! VMs at once, minutes, for every push to main (.github/workflows/sandboxes.yml); or `long`,
@@ -546,10 +546,10 @@ RUN apk add --no-cache postgresql postgresql-contrib git
             let dir = &test_setup.tmp_dir;
             let mut tally = Tally::default();
             // The topology: the bucket an S3 server's, its data on the case's disk.
-            let bucket_url = std::env::var("CLADEFSD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap_or_default();
             ensure!(
                 bucket_url.starts_with("s3://"),
-                "CLADEFSD_REMOTE is {bucket_url:?}, not an S3 server's bucket: scripts/sandboxes.sh \
+                "CLADEFSD_BUCKET is {bucket_url:?}, not an S3 server's bucket: scripts/sandboxes.sh \
                  starts one"
             );
             let bucket_dir = std::env::var_os("CLADEFS_SANDBOX_BUCKET_DIR")
