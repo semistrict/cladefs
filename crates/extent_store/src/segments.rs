@@ -1706,7 +1706,7 @@ fn commit_contents(
     let mut contents = Contents { frees: frees.into_iter().collect(), ..Contents::default() };
     let mut continued: BTreeMap<SegmentId, Vec<Run>> = BTreeMap::new();
     for extent in touched {
-        let entry = extents.get(&extent).expect("touched and held");
+        let entry = extents.get(&extent).expect("touched and held").into_cow();
         match &entry.data {
             Data::Pieces(pieces) => {
                 let [piece] = pieces[..] else { bail!("{extent:?} is not sealed in one run") };

@@ -14,7 +14,7 @@
 
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
-use crate::extents::Extents;
+use crate::extents::{Entry, Extents};
 use crate::framed::{Files, Framed};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
@@ -35,7 +35,6 @@ use anyhow::{Error, bail};
 use extent_frame::segment::Branch;
 use extent_frame::segment::Location;
 use extent_frame::spent::Spent;
-use std::borrow::Cow;
 #[cfg(any(test, feature = "audit"))]
 use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
@@ -178,14 +177,14 @@ pub(crate) enum Reader {
 }
 
 /// cladefs: where an extent is in its life, as the store's state has it, found in one place
-/// ([`State::life`], TASK-160.18), which readers and writers decide by. cladefs: its entry the store's
-/// own, or made of where the bucket's layer places it ([`Extents::get`], TASK-453).
+/// ([`State::life`], TASK-160.18), which readers and writers decide by. cladefs: its entry borrowed
+/// from the layer of the store's map that holds it ([`Entry`], TASK-453).
 pub(crate) enum Life<'a> {
     /// Written since the last commit, which seals it: its entry, as the writes that finished left
     /// it, if one did.
-    Open(Option<Cow<'a, Extent>>),
+    Open(Option<Entry<'a>>),
     /// Sealed, and held.
-    Held(Cow<'a, Extent>),
+    Held(Entry<'a>),
     /// Freed by a commit, and kept: for the bucket, views or pins ([`Kept`]).
     Kept(&'a Kept),
     /// Sealed once, and freed, and not kept: its number the branch writes no more (TASK-79.6).
@@ -194,11 +193,11 @@ pub(crate) enum Life<'a> {
     Unknown,
 }
 
-impl Life<'_> {
+impl<'a> Life<'a> {
     /// Its entry, if the store holds it: open or sealed.
-    pub fn held(&self) -> Option<&Extent> {
-        match self {
-            Life::Open(entry) => entry.as_deref(),
+    pub fn held(&self) -> Option<Entry<'a>> {
+        match *self {
+            Life::Open(entry) => entry,
             Life::Held(entry) => Some(entry),
             Life::Kept(_) | Life::Spent | Life::Unknown => None,
         }
@@ -258,7 +257,7 @@ impl<F: File> State<F> {
             }
         };
         match life {
-            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.into_owned()),
+            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.to_extent()),
             Life::Kept(kept) if readable(kept) => Ok(kept.entry.clone()),
             // Kept for another, freed before what the view holds: what it let go of.
             Life::Kept(_) if matches!(reader, Reader::View { .. }) => {
@@ -704,6 +703,7 @@ impl<F: File> State<F> {
         let mut recount = Recount::default();
         let mut own_files = HashSet::new();
         for (extent, entry) in self.extents.iter() {
+            let entry = entry.into_cow();
             let sealed = !self.uncommitted.is_open(extent);
             recount.holds(extent, &entry, sealed);
             if sealed && own(&extent, &entry) {
@@ -1064,7 +1064,7 @@ impl<F> Uncommitted<F> {
         assert_eq!(self.overwritten, overwritten, "written over");
         for (extent, open) in &self.open {
             assert!(open.opening <= self.openings, "{extent:?} opened past the openings");
-            let entry = extents.get(extent);
+            let entry = extents.get(extent).map(Entry::into_cow);
             let data = entry.as_deref().map(|entry| (entry.len, &entry.data));
             match (&open.placement, data) {
                 (Placement::Segment, Some((len, Data::Pieces(pieces)))) => {

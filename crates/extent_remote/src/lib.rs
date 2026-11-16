@@ -59,6 +59,8 @@ pub mod direct;
 pub mod faults;
 pub mod fetch;
 pub mod head;
+#[cfg(test)]
+mod heap;
 pub mod keys;
 pub mod layout;
 pub mod local;

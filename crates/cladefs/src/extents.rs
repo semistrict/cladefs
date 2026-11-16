@@ -1150,6 +1150,24 @@ impl ExtentStore {
         self.store.shares_extents_with(&other.store).unwrap()
     }
 
+    /// cladefs: `extent`'s length, and whether it is open, if its store holds it, as reads ask
+    /// (`extent_store::Store::extent`).
+    #[cfg(test)]
+    pub(crate) fn stored_extent(&self, extent: ExtentId) -> Result<Option<(u64, bool)>> {
+        self.store.extent(extent.into()).map_err(errno)
+    }
+
+    /// cladefs: a read's of `extent` from the extent cache ([`ExtentStore::read_cached`]).
+    #[cfg(test)]
+    pub(crate) fn read_from_cache(
+        &self,
+        extent: ExtentId,
+        offset: u64,
+        data: &mut [u8],
+    ) -> Result<bool> {
+        self.read_cached(extent, offset, data)
+    }
+
     /// The branch whose extents the guest mints, by its ID, in its cell.
     pub fn branch(&self) -> Branch {
         self.store.description().branch

@@ -6,7 +6,7 @@
 
 use crate::dir::{Dir, File, not_found, read_file};
 use crate::durability::{Batch, Durability, FileSyncs, Syncs};
-use crate::extents::Extents;
+use crate::extents::{Entry, Extents};
 use crate::framed::{Aligned, Framed, Packed, Part, Source, Unpacked, read_aligned};
 use crate::framing::{self, Look, Seen};
 use crate::held::{HeldParts, Hold};
@@ -404,7 +404,11 @@ impl<D: Dir> Drop for Write<'_, D> {
 }
 
 /// Where `entry`'s data is.
-fn place_of(entry: &Extent) -> Place {
+fn place_of(entry: Entry<'_>) -> Place {
+    let entry = match entry {
+        Entry::Own(entry) => entry,
+        Entry::Bucket(location) => return Place::Remote(location.clone()),
+    };
     match &entry.data {
         Data::Pieces(pieces) => match pieces[..] {
             [piece] if piece.extent_offset == 0 && piece.len == entry.len => Place::Run {
@@ -1241,7 +1245,7 @@ impl<D: Dir> Store<D> {
 
     /// Where `extent`'s data is, if the branch holds it.
     pub fn place(&self, extent: ExtentId) -> Result<Option<Place>, Error> {
-        Ok(self.state()?.extents.get(&extent).as_deref().map(place_of))
+        Ok(self.state()?.extents.get(&extent).map(place_of))
     }
 
     /// The extents the branch holds, with their lengths and where they are, in order.
@@ -1250,7 +1254,7 @@ impl<D: Dir> Store<D> {
         let mut extents: Vec<_> = state
             .extents
             .iter()
-            .map(|(extent, entry)| (extent, entry.len, place_of(&entry)))
+            .map(|(extent, entry)| (extent, entry.len(), place_of(entry)))
             .collect();
         extents.sort_by_key(|(extent, ..)| *extent);
         Ok(extents)
@@ -1511,14 +1515,14 @@ impl<D: Dir> Store<D> {
             let life = state.life(extent);
             Self::check_opens(&state, &life, extent)?;
             let current = life.held();
-            let grows = end.saturating_sub(current.map_or(0, |entry| entry.len));
+            let grows = end.saturating_sub(current.map_or(0, Entry::len));
             let to_segment = match state.uncommitted.placement(extent) {
                 Some(placement) => matches!(placement, Placement::Segment),
                 None => end < self.options.large_extent,
             };
             // cladefs: what it writes over, in a segment, takes room too (TASK-79.2), as the writes
             // that finished left the extent: not its holes (TASK-160.16).
-            let overwrites = match current.map(|entry| &entry.data) {
+            let overwrites = match current.and_then(Entry::own).map(|entry| &entry.data) {
                 Some(Data::Pieces(pieces)) if to_segment => covered(pieces, offset, end),
                 _ => 0,
             };
@@ -2105,7 +2109,7 @@ impl<D: Dir> Store<D> {
         state: &State<D::File>,
         extent: ExtentId,
     ) -> Option<(seals::Why, u64, usize)> {
-        let entry = state.extents.get(&extent)?;
+        let entry = state.extents.get(&extent)?.own()?;
         match (&entry.data, state.uncommitted.placement(extent)) {
             (Data::Own, Some(Placement::Own(_))) => Some((seals::Why::Own, entry.len, 1)),
             (Data::Pieces(pieces), _) => {
@@ -2160,7 +2164,7 @@ impl<D: Dir> Store<D> {
     /// (`Segments::fill`, TASK-92.41); a copy past the open segment's room filling it, and going in
     /// the next. Returns the bytes it copied, if it copied them.
     fn seal(&self, state: &mut State<D::File>, extent: ExtentId) -> Result<u64, Error> {
-        let Some(entry) = state.extents.get(&extent).map(std::borrow::Cow::into_owned) else {
+        let Some(entry) = state.extents.get(&extent) else {
             // cladefs: opened by a write abandoned, none since: its raw file, if it has one, holds
             // nothing, and goes now, as the commit waited for the writes in progress; not with the
             // commit's flush, which the extent's next write, making another, may come before
@@ -2173,6 +2177,8 @@ impl<D: Dir> Store<D> {
             }
             return Ok(0);
         };
+        // In the bucket: sealed there.
+        let Some(entry) = entry.own().cloned() else { return Ok(0) };
         let large = entry.len >= self.options.large_extent;
         match (&entry.data, state.uncommitted.placement(extent)) {
             (Data::Remote(_), _) => return Ok(0),
@@ -3206,7 +3212,7 @@ impl<D: Dir> Store<D> {
         let state = self.state()?;
         let life = state.life(extent);
         let open = matches!(life, Life::Open(_));
-        Ok(life.held().map(|entry| (entry.len, open)))
+        Ok(life.held().map(|entry| (entry.len(), open)))
     }
 
     /// cladefs: whether an extent is open: written since the last commit, which seals it.

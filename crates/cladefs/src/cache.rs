@@ -729,7 +729,8 @@ impl CachedExtent {
 
     /// Reads its bytes at `offset` into `data`, reading in its pages that aren't in memory, as a
     /// read of the extent that maps nothing does: blocks the calling thread while they are read
-    /// in. Past its end, zeros.
+    /// in. Past its end, zeros. cladefs: a page in memory is copied as it is found, allocating
+    /// nothing; one not, brought in first (`Source::bring_in`, a future boxed), TASK-453.
     pub(crate) fn read(self: &Arc<Self>, offset: u64, data: &mut [u8]) -> Result<()> {
         let ps = page_size();
         let held = self.len.saturating_sub(offset).min(data.len() as u64) as usize;
@@ -740,15 +741,19 @@ impl CachedExtent {
             let at = offset + done as u64;
             let (page, within) = (at / ps, (at % ps) as usize);
             let len = (ps as usize - within).min(bytes.len() - done);
+            {
+                let pages = self.pages.with(Mutex::lock);
+                if let Some(Slot::Present(frame)) = pages.slots.get(page as usize) {
+                    // SAFETY: The page is the extent's, in memory while its lock is held, and
+                    // sealed: only read.
+                    let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
+                    bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
+                    done += len;
+                    continue;
+                }
+            }
+            // Read in, then copied, unless evicted meanwhile: read in again.
             futures::executor::block_on(self.clone().bring_in(page))?;
-            let pages = self.pages.with(Mutex::lock);
-            // Evicted meanwhile: read in again.
-            let Some(Slot::Present(frame)) = pages.slots.get(page as usize) else { continue };
-            // SAFETY: The page is the extent's, in memory while its lock is held, and sealed: only
-            // read.
-            let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
-            bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
-            done += len;
         }
         Ok(())
     }

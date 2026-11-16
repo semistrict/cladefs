@@ -68,9 +68,12 @@ pub struct AnonBudget {
     /// decoded state the stores open share, its map once, however many share it, the bucket's
     /// layer of each of them (`crate::host_store::decoded_held`); and of each store, what it holds
     /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
-    /// layer that shares no decoded state (`extent_store::own_entries`). Each entry at its bound
-    /// (`extent_remote::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), which
-    /// `remote::tests::bench_fork_extent_memory` holds them to. Not bounded otherwise: a host's
+    /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
+    /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
+    /// (`extent_remote::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
+    /// changes to a shared map, a path of its nodes copied, at its
+    /// (`extent_remote::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
+    /// holds them to. Not bounded otherwise: a host's
     /// stores' extents, as many as their guests write, are its density's limit, which the budget
     /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
     pub extents: u64,
@@ -174,8 +177,7 @@ fn budget(state: &mut State) -> AnonBudget {
 /// What the stores' maps of their extents hold now, at their entries' bounds ([`AnonBudget`]'s
 /// `extents`): the decoded states they share, each once, and what each holds of its own.
 pub fn extents_held() -> u64 {
-    let own = extent_store::own_entries() * extent_store::OWN_ENTRY_BYTES;
-    own + crate::host_store::decoded_held().bytes()
+    extent_store::own_held().bytes() + crate::host_store::decoded_held().bytes()
 }
 
 /// Samples what the daemon holds and spent now, against its budget now; and returns the sample.

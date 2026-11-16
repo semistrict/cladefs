@@ -51,3 +51,27 @@ fresh process (6 of 6), and once in 6 live runs (32,768 x 100: 213 B). With both
 process, as main runs them, it passed 3 of 3 at 1,024 x 10: first-time allocations of a cold
 process, the class TASK-471 is about, not held per fork. The benchmark checks it last now, after
 its other numbers and assertions.
+
+## Scattered changes to a shared map (review of TASK-453, 2026-11-15)
+
+imbl's OrdMap copies the path to the leaf it changes (a leaf of 16 entries, their locations' keys
+cloned, and the branches over it) when the map is shared. Changes side by side share one path;
+scattered, each copies its own. The benchmark now has one fork free every 32nd extent it
+inherited, commit, checkpoint, upload and close, then open it again from its checkpoint (its map
+made of the base's, `rebased`), beside an idle fork. Sim profile, 10 forks:
+
+| base | frees | held by the frees (closing it, past an idle fork) | counted before | counted after | reopened, its map (past a 64 KiB idle bound) | counted before | counted after |
+|---|---|---|---|---|---|---|---|
+| 1,024 | 32 | 75,598 (2,362 a free) | 32,768 | 163,840 | 26,804 (92,340 in all) | 16,384 | 147,456 |
+| 32,768 | 1,024 | 2,127,182 (2,077) | 1,048,576 | 5,242,880 | 1,912,597 | 524,288 | 4,718,592 |
+| 300,000 | 9,375 | 19,174,879 (2,045) | (not run) | 48,000,000 | 17,787,175 | (not run) | 43,200,000 |
+
+The accounting now charges `extent_remote::recovery::RUN_BYTES` (4,096) for each run of changes
+no unchanged entry separates, beside each entry's bound, capped at a full copy of the map
+(`Changes::within`; extent_store's `Own::runs`, the runs of what a store hides of its bucket's
+layer, kept as it hides them, its own entries one more). `recovery::tests::
+changes_bound_what_maps_made_of_others_copy` measures the map alone at 1,024 / 32,768 / 300,000
+entries, one change in 3 to one in 16,384, a block of an eighth and an eighth more at the end:
+689-3,298 B a scattered change (the sparsest, at 300,000, the most branches each), 230-254 B a
+change in a block; one in 3 to one in 8 copy the whole map, 7.5 MB at 32,768 (230 B an entry),
+counted at the cap, 512 an entry.

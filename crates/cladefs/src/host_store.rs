@@ -154,12 +154,10 @@ pub(crate) fn bucket(url: &str) -> anyhow::Result<Arc<Bucket>> {
 #[cfg(any(target_os = "linux", test))]
 pub(crate) fn decoded_held() -> extent_remote::recovery::Held {
     let buckets = BUCKETS.lock().unwrap();
-    let mut held = extent_remote::recovery::Held::default();
-    for decoded in buckets.values().filter_map(|bucket| extent_remote::Bucket::decoded(&**bucket)) {
-        let of = decoded.held();
-        (held.states, held.entries) = (held.states + of.states, held.entries + of.entries);
-    }
-    held
+    (buckets.values())
+        .filter_map(|bucket| extent_remote::Bucket::decoded(&**bucket))
+        .map(extent_remote::recovery::Decoded::held)
+        .fold(extent_remote::recovery::Held::default(), std::ops::Add::add)
 }
 
 /// Makes `bucket` this process's of `url`, before any store naming it opens, as the tests do the

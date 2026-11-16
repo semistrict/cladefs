@@ -599,8 +599,8 @@ impl<'a, B: Bucket> Checkpoints<'a, B> {
 /// checkpoints a live store's writer writes for each of its forks hold the same extents, and a
 /// fork's own checkpoint, as it opens again, its base's but its own, each decoded apart a copy of
 /// them all, 230 bytes an extent a fork (TASK-443.2). What they hold, each map once, and each made
-/// of another held still by what it changed, it says ([`Decoded::held`]), which the extent daemon
-/// counts.
+/// of another held still by what it changed ([`Changes`]), it says ([`Decoded::held`]), which the
+/// extent daemon counts.
 #[derive(Default)]
 pub struct Decoded {
     kept: Mutex<Kept>,
@@ -617,11 +617,11 @@ struct Kept {
 
 /// A state decoded, which others may hold still ([`Decoded`]): how many of its extents each branch
 /// has, by its ID, which its likeness to another's is reckoned by; and, if it was made of another
-/// ([`rebased`]), that one and how many entries it changed of it.
+/// ([`rebased`]), that one and what it changed of it.
 struct Live {
     state: Weak<State>,
     branches: BTreeMap<u64, usize>,
-    made_of: Option<(Weak<State>, usize)>,
+    made_of: Option<(Weak<State>, Changes)>,
 }
 
 /// What the states a [`Decoded`] keeps, or others hold still, hold ([`Decoded::held`]).
@@ -632,12 +632,26 @@ pub struct Held {
     /// The entries of their extents' maps, each held once however many share it: of a state made
     /// of another held still, those it changed; of the others, all of them.
     pub entries: usize,
+    /// The runs the entries changed of maps made of others make ([`Changes`]).
+    pub runs: usize,
 }
 
 impl Held {
-    /// The most bytes of the heap they hold ([`ENTRY_BYTES`]).
+    /// The most bytes of the heap they hold: [`ENTRY_BYTES`] an entry, [`RUN_BYTES`] a run.
     pub fn bytes(&self) -> u64 {
-        self.entries as u64 * ENTRY_BYTES
+        self.entries as u64 * ENTRY_BYTES + self.runs as u64 * RUN_BYTES
+    }
+}
+
+impl std::ops::Add for Held {
+    type Output = Held;
+
+    fn add(self, other: Held) -> Held {
+        Held {
+            states: self.states + other.states,
+            entries: self.entries + other.entries,
+            runs: self.runs + other.runs,
+        }
     }
 }
 
@@ -646,6 +660,46 @@ impl Held {
 /// of another's copies: what [`Held::bytes`] counts each as. A bound, measured by cladefs's
 /// `bench_fork_extent_memory` (TASK-453), which fails past it.
 pub const ENTRY_BYTES: u64 = 512;
+
+/// The most bytes of the process's heap a run of changes to a map of extents shared with another
+/// copies, past [`ENTRY_BYTES`] for each entry changed: a persistent map's change copies the path
+/// to the leaf it is in, the leaf (16 entries, their locations' keys copied too) and the branches
+/// over it, unless a change before copied them, and, a leaf left too small, its sibling. Changes
+/// side by side share one path; scattered, each copies its own: measured 1.9-2.1 KB a change,
+/// every 32nd entry of 32,768 changed (`bench_fork_extent_memory`, TASK-453), and bounded at every
+/// spacing and size by `tests::changes_bound_what_maps_made_of_others_copy`. What
+/// [`Changes::bytes`], and extent_store's count of what its stores' writers change of the maps
+/// they share, count each run as.
+pub const RUN_BYTES: u64 = 4096;
+
+/// What a map of extents made of another changed of it ([`rebased`]): the entries, removed, added
+/// or placed anew, and the runs they make, in order, no entry of the other's it kept between those
+/// of a run, each copying a path of the persistent map's nodes ([`RUN_BYTES`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Changes {
+    pub entries: usize,
+    pub runs: usize,
+}
+
+impl Changes {
+    /// All of a map of `len` entries: made of none, or sharing nothing.
+    pub fn all(len: usize) -> Self {
+        Self { entries: len, runs: 0 }
+    }
+
+    /// The most bytes of the heap they hold: [`ENTRY_BYTES`] an entry, [`RUN_BYTES`] a run.
+    pub fn bytes(&self) -> u64 {
+        self.entries as u64 * ENTRY_BYTES + self.runs as u64 * RUN_BYTES
+    }
+
+    /// What a map of `len` entries made of another with these changes holds of its own: these,
+    /// or all of it, if less: its changes copy each of its nodes once at most, the map made then
+    /// one sharing nothing.
+    pub fn within(self, len: usize) -> Self {
+        let all = Self::all(len);
+        if self.bytes() > all.bytes() { all } else { self }
+    }
+}
 
 impl Decoded {
     /// How many states it keeps: a host's forks open from a few bases' newest checkpoints at once.
@@ -679,10 +733,10 @@ impl Decoded {
         };
         let mut made_of = None;
         if let Some(alike) = alike
-            && let Some((extents, changed)) = rebased(&state.extents, &alike.extents)
+            && let Some((extents, changes)) = rebased(&state.extents, &alike.extents)
         {
             state.extents = extents;
-            made_of = Some((Arc::downgrade(&alike), changed));
+            made_of = Some((Arc::downgrade(&alike), changes));
         }
         let mut kept = self.kept.lock().unwrap();
         if let Some(held) = kept.live.get(key).and_then(|live| live.state.upgrade()) {
@@ -703,27 +757,32 @@ impl Decoded {
     }
 
     /// What the states it keeps, and those others hold still, hold ([`Held`]): each map once,
-    /// however many share it; of a state made of another held still, what it changed of it,
-    /// counted with that one; of the others, made of none or of one no one holds any more, which
-    /// they hold the rest of, all of it. And it lets go of what it knew of those no one holds, as
-    /// each decoding does: their keys and weak references.
+    /// however many share it; of a state made of another held still, what it changed of it
+    /// ([`Changes::within`] the map), counted with that one; of the others, made of none or of one
+    /// no one holds any more, which they hold the rest of, all of it. And it lets go of what it
+    /// knew of those no one holds, as each decoding does: their keys and weak references.
     pub fn held(&self) -> Held {
         let mut kept = self.kept.lock().unwrap();
         kept.live.retain(|_, live| live.state.strong_count() > 0);
         // Each map, with the most of what its states hold of their own: one made of none, or of
         // one held no more, all of it.
-        let mut maps: Vec<(Arc<State>, usize)> = Vec::new();
+        let mut maps: Vec<(Arc<State>, Changes)> = Vec::new();
         for live in kept.live.values() {
             let Some(state) = live.state.upgrade() else { continue };
+            let len = state.extents.len();
             let made_of = live.made_of.as_ref().filter(|(made_of, _)| made_of.strong_count() > 0);
-            let own = made_of.map_or(state.extents.len(), |(_, changed)| *changed);
+            let own = made_of.map_or(Changes::all(len), |(_, changes)| changes.within(len));
             match maps.iter_mut().find(|(other, _)| other.extents.ptr_eq(&state.extents)) {
-                Some((_, most)) => *most = (*most).max(own),
+                Some((_, most)) if own.bytes() > most.bytes() => *most = own,
+                Some(_) => {}
                 None => maps.push((state, own)),
             }
         }
-        let entries = maps.iter().map(|(_, own)| own).sum();
-        Held { states: maps.len(), entries }
+        let (entries, runs) = maps
+            .iter()
+            .map(|(_, own)| (own.entries, own.runs))
+            .fold((0, 0), |(entries, runs), (more, others)| (entries + more, runs + others));
+        Held { states: maps.len(), entries, runs }
     }
 }
 
@@ -738,13 +797,15 @@ fn branches_of(extents: &Extents) -> BTreeMap<u64, usize> {
 
 /// cladefs: `fresh`, a state's extents just decoded, made of `alike`'s, another's of its branch, as
 /// persistent maps make one of another: `alike`'s changed where `fresh` differs from it, sharing
-/// with it the rest, with how many entries it changed (TASK-453). None if it changes as many as
+/// with it the rest, with what it changed ([`Changes`], TASK-453). None if it changes as many as
 /// half of them, which share little. One walk of both in order, their keys the extents'.
-fn rebased(fresh: &Extents, alike: &Extents) -> Option<(Extents, usize)> {
+fn rebased(fresh: &Extents, alike: &Extents) -> Option<(Extents, Changes)> {
     use std::cmp::Ordering;
     let most = fresh.len() / 2;
     let mut made = alike.clone();
-    let mut changed = 0;
+    let mut changes = Changes::default();
+    // Whether the last entry walked was a change: one after it is of its run.
+    let mut changing = false;
     let (mut old, mut new) = (alike.iter().peekable(), fresh.iter().peekable());
     loop {
         let order = match (old.peek(), new.peek()) {
@@ -765,17 +826,20 @@ fn rebased(fresh: &Extents, alike: &Extents) -> Option<(Extents, usize)> {
             Ordering::Equal => {
                 let ((_, was), (extent, is)) = (old.next().unwrap(), new.next().unwrap());
                 if was == is {
+                    changing = false;
                     continue;
                 }
                 made.insert(*extent, is.clone());
             }
         }
-        changed += 1;
-        if changed > most {
+        changes.runs += usize::from(!changing);
+        changing = true;
+        changes.entries += 1;
+        if changes.entries > most {
             return None;
         }
     }
-    Some((made, changed))
+    Some((made, changes))
 }
 
 /// The state of the branch `before` recovered, forked from `origin`, recovered on from it to what
@@ -1188,6 +1252,67 @@ mod tests {
     use crate::writer::{Objects, Writer};
     use object_store::memory::InMemory;
     use std::sync::Arc;
+
+    /// TASK-453: a map of extents made of another, `rebased`, holds no more of the heap past the
+    /// other's than its changes count (`Changes::within` it): of maps of 1,024, 32,768 and 300,000
+    /// entries, each its location's key a string of its own, as a checkpoint decodes them, changed
+    /// every 3rd to every 16,384th entry, by turns removed, placed anew and joined by a new one
+    /// after it; in one block of an eighth of them; and grown by as many new at its end.
+    #[test]
+    fn changes_bound_what_maps_made_of_others_copy() {
+        let branch = test_branch(1);
+        // The base's extents, every other sequence number, so that new ones go between; each its
+        // segment's key, 64 extents a segment, a string of its own.
+        let extent = |sequence: u64| ExtentId::new(branch.id, sequence);
+        let at = |sequence: u64, epoch: u64| Location {
+            key: crate::layout::segment(branch, sequence / 128 + 1, epoch),
+            offset: sequence % 128 * 4096,
+            len: 4096,
+        };
+        for len in [1_024u64, 32_768, 300_000] {
+            let alike: Extents = (0..len).map(|n| (extent(2 * n), at(2 * n, 1))).collect();
+            let scattered = [3u64, 4, 8, 32, 1024, 16_384].map(|every| {
+                let mut fresh = alike.clone();
+                for (turn, n) in (0..len).step_by(every as usize).enumerate() {
+                    match turn % 3 {
+                        0 => drop(fresh.remove(&extent(2 * n))),
+                        1 => drop(fresh.insert(extent(2 * n), at(2 * n, 2))),
+                        _ => drop(fresh.insert(extent(2 * n + 1), at(2 * n + 1, 2))),
+                    }
+                }
+                (format!("one in {every}"), fresh)
+            });
+            let mut block = alike.clone();
+            for n in len / 2..len / 2 + len / 8 {
+                block.insert(extent(2 * n), at(2 * n, 2));
+            }
+            let mut grown = alike.clone();
+            for n in len..len + len / 8 {
+                grown.insert(extent(2 * n), at(2 * n, 1));
+            }
+            let cases = scattered.into_iter().chain([
+                ("a block of an eighth".to_owned(), block),
+                ("an eighth more at its end".to_owned(), grown),
+            ]);
+            for (case, fresh) in cases {
+                // Decoded apart, as a checkpoint is: sharing nothing with `alike`.
+                let fresh: Extents =
+                    fresh.iter().map(|(extent, at)| (*extent, at.clone())).collect();
+                let before = crate::heap::held();
+                let (made, changes) = rebased(&fresh, &alike).expect(&case);
+                let held = (crate::heap::held() - before) as u64;
+                assert_eq!(made, fresh, "{len} entries, {case}: the map made");
+                let counted = changes.within(made.len());
+                println!(
+                    "{len} entries, {case}: {changes:?}, {held} bytes held, {} a change, counted \
+                     {counted:?}, {} bytes",
+                    held / changes.entries as u64,
+                    counted.bytes()
+                );
+                assert!(held <= counted.bytes(), "{len} entries, {case}: {held} bytes held");
+            }
+        }
+    }
 
     /// A segment's object holds the segment its key names: of its branch, of its number, by the
     /// writer of its epoch.
