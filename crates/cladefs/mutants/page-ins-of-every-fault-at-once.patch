@@ -7,7 +7,7 @@
 @@ -454,7 +454,7 @@
          requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
          drained: Arc::new(event_listener::Event::new()),
-         report: snapshot::Report::new(&peer.sender),
+         report: stats::Report::new(&peer.sender),
 -        page_ins: tokio::sync::Semaphore::new(PAGE_INS),
 +        page_ins: tokio::sync::Semaphore::new(tokio::sync::Semaphore::MAX_PERMITS),
          named: OnceLock::new(),

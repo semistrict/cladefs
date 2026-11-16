@@ -218,7 +218,7 @@ fn a_mount_dropped_unmounts_and_closes() {
 }
 
 /// TASK-411.7 (TASK-411's AC #3, FUSE mounts; Linux): a store of a sealed cell, its tenant's KEK
-/// in the host's KMS (the common tenant's, whose cells `Storage` makes), mounted through the
+/// in the host's KMS (the default tenant's, whose cells `Storage` makes), mounted through the
 /// kernel: a file written is read back through the mount and, unmounted and closed, from the store
 /// opened again; no file of the store's directory, nor of its bucket's, holds it in the clear.
 #[test]

@@ -2,15 +2,15 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: one snapshot of what the daemon, its VM processes and their guests have counted, each
-//! with the commit it was built of (TASK-111.4): the control API's `GetSnapshot`, which
-//! `cladefsctl stats --json` prints.
+//! cladefs: the stats of the daemon, its VM processes and their guests, what they have counted as
+//! of one moment, each with the commit it was built of (TASK-111.4): the control API's `GetStats`,
+//! which `cladefsctl stats --json` prints.
 //!
 //! The daemon asks every VM process that opened a store for its stats
 //! ([`super::wire::STATS_ASK`]); each says its stage counts and answers with its guest's stats,
 //! which its device asks the guest's driver for (backlog doc-4's `STATS`), or with none, if its
 //! guest takes no asks ([`super::wire::STATS`]). Once every one answered, or the wait is over, the daemon reads its own
-//! counters: the snapshot is as of then, each VM's within the wait before it, which says how long
+//! counters: the stats are as of then, each VM's within the wait before it, which says how long
 //! its answer took. Separate reads of `/metrics`, the guests' `/proc/fs/fxfs` and the VM processes'
 //! threads, which the sandbox team diffed, were taken at moments apart, and said no build.
 
@@ -24,16 +24,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 
-/// How long a snapshot waits for the VM processes' answers unless told: a guest's answer takes a
-/// configuration change and a request, under a millisecond on an idle host.
+/// How long a taking of stats waits for the VM processes' answers unless told: a guest's answer
+/// takes a configuration change and a request, under a millisecond on an idle host.
 pub(crate) const WAIT: Duration = Duration::from_secs(2);
 
-/// The most a snapshot waits for them, whatever it is told.
+/// The most a taking of stats waits for them, whatever it is told.
 pub(crate) const MOST_WAIT: Duration = Duration::from_secs(60);
 
-/// What the daemon and its VM processes counted, as of [`Snapshot::taken`].
+/// What the daemon and its VM processes counted, as of [`HostStats::taken`]: the host's stats, as
+/// against the daemon's own counters alone ([`crate::stats::Stats`]).
 #[derive(Debug)]
-pub(crate) struct Snapshot {
+pub(crate) struct HostStats {
     /// When the daemon read its own counters, its VM processes having answered.
     pub taken: SystemTime,
     /// The commit the daemon was built of.
@@ -154,7 +155,7 @@ static ASKS: AtomicU64 = AtomicU64::new(0);
 
 /// What the daemon and its VM processes counted, as of now: the VM processes asked first, and
 /// waited for, for `wait` at most ([`MOST_WAIT`] at most).
-pub(crate) async fn take(wait: Duration) -> Snapshot {
+pub(crate) async fn take(wait: Duration) -> HostStats {
     let ask = ASKS.fetch_add(1, Ordering::Relaxed) + 1;
     let deadline = tokio::time::Instant::now() + wait.min(MOST_WAIT);
     let asked: Vec<_> = (reports().into_iter())
@@ -180,13 +181,13 @@ pub(crate) async fn take(wait: Duration) -> Snapshot {
 }
 
 /// The daemon's counters and gauges, as of now, and `vms`.
-fn of_daemon(vms: Vec<Vm>) -> Snapshot {
+fn of_daemon(vms: Vec<Vm>) -> HostStats {
     let counters = (crate::stats::stats().named().into_iter())
         .map(|(name, value)| (name.replace('-', "_"), value))
         .chain([("window_open_maps_refused".to_owned(), crate::extents::open_maps_refused())])
         .collect();
     let gauges = super::metrics::gauges().into_iter().map(|(name, _, value)| (name, value));
-    Snapshot {
+    HostStats {
         taken: SystemTime::now(),
         build: crate::BUILD_COMMIT,
         counters,
@@ -215,7 +216,7 @@ pub(super) fn vm_builds() -> Vec<((u64, String), usize)> {
 }
 
 /// What the daemon reports of a connection's VM process, which the connection keeps up to date
-/// (TASK-111.4, TASK-111.5): what the daemon's metrics and snapshots hold, rather than the
+/// (TASK-111.4, TASK-111.5): what the daemon's metrics and stats hold, rather than the
 /// connection, the last to let go of which closes its store.
 pub(super) struct Report {
     /// The connection's number, the count of connections made as it was.
@@ -257,8 +258,8 @@ struct Asked {
     answered: tokio::sync::oneshot::Sender<Vm>,
 }
 
-/// The connections' reports, as they are made, each as long as its connection, or a snapshot,
-/// holds it.
+/// The connections' reports, as they are made, each as long as its connection, or a taking of
+/// stats, holds it.
 static REPORTS: Mutex<Vec<Weak<Report>>> = Mutex::new(Vec::new());
 
 /// The connections' numbers, given in turn ([`Report::id`]).
@@ -392,7 +393,7 @@ impl Report {
 
     /// Forgets ask `ask`, which its asker no longer waits for an answer to: a VM process that never
     /// answers, as one whose guest is paused, which its device asks all the same, holds none of
-    /// the asks given up on, which grew one a snapshot for as long as it lived.
+    /// the asks given up on, which grew one a taking of stats for as long as it lived.
     fn forget(&self, ask: u64) {
         self.asked.lock().unwrap().retain(|asked| asked.ask != ask);
     }

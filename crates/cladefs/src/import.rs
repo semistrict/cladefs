@@ -67,7 +67,7 @@ pub async fn store(
     reference: Option<&str>,
 ) -> Result<(), Error> {
     let keeping = crate::host_store::keeping().map_err(Error::new)?;
-    let made = (capacity, crate::host_store::NO_TENANT);
+    let made = (capacity, crate::host_store::DEFAULT_TENANT);
     make_store(path.as_ref(), made, keeping, |storage| fill(storage, image, reference)).await
 }
 
@@ -914,7 +914,7 @@ mod tests {
         let made = catch_unwind(AssertUnwindSafe(|| {
             block_on(make_store(
                 &path,
-                (64 << 20, crate::host_store::NO_TENANT),
+                (64 << 20, crate::host_store::DEFAULT_TENANT),
                 keeping(),
                 |storage| async {
                     let _fs = Filesystem::format(storage).await?;
@@ -938,7 +938,7 @@ mod tests {
             let (formatted, filling) = oneshot::channel();
             let made = Box::pin(make_store(
                 &path,
-                (64 << 20, crate::host_store::NO_TENANT),
+                (64 << 20, crate::host_store::DEFAULT_TENANT),
                 keeping(),
                 |storage| async {
                     let _fs = Filesystem::format(storage).await?;
@@ -969,7 +969,7 @@ mod tests {
         let half = layer(&[Entry::new("half", Kind::File(b"half an image"))]).unwrap();
         let made = block_on(make_store(
             Path::new(&path),
-            (64 << 20, crate::host_store::NO_TENANT),
+            (64 << 20, crate::host_store::DEFAULT_TENANT),
             keeping(),
             |storage| async move {
                 let fs = Filesystem::format(storage).await?;

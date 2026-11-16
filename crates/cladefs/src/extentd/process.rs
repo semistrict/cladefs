@@ -52,10 +52,10 @@ pub struct AnonBudget {
     pub framings: u64,
     /// Its fetches': [`FETCHES`].
     pub fetches: u64,
-    /// Its tenants' rooms': the most their requests' stream data and what the daemon queued for
-    /// their VM processes held at once, so far (`super::memory::InFlight`), each tenant's within
-    /// its room, as the protocol bounds it (TASK-149.35).
-    pub rooms: u64,
+    /// Its tenants' bytes in flight: the most their requests' stream data and what the daemon
+    /// queued for their VM processes held at once, so far (`super::memory::InFlight`), each
+    /// tenant's within its own, as the protocol bounds it (TASK-149.35).
+    pub in_flight: u64,
     /// The parts of segments its stores packed as they filled, held until their framings: the most
     /// held at once so far, which the memory governor bounds, letting them go before any tenant's
     /// pages as the host's memory runs short (`super::memory::held_parts`, TASK-400).
@@ -70,7 +70,13 @@ pub struct AnonBudget {
 impl AnonBudget {
     /// Its parts together: the budget.
     pub fn total(&self) -> u64 {
-        self.uploads + self.framings + self.fetches + self.rooms + self.held + self.pages + self.own
+        self.uploads
+            + self.framings
+            + self.fetches
+            + self.in_flight
+            + self.held
+            + self.pages
+            + self.own
     }
 }
 
@@ -118,14 +124,15 @@ static STATE: Mutex<State> = Mutex::new(State {
         max_over_budget: 0,
     },
     writers: 0,
-    rooms: 0,
+    in_flight: 0,
 });
 
 struct State {
     sample: Sample,
-    /// The most stores written at once so far, and the most the tenants' rooms held at once.
+    /// The most stores written at once so far, and the most the tenants' connections held in
+    /// flight at once.
     writers: u64,
-    rooms: u64,
+    in_flight: u64,
 }
 
 /// The budget of the daemon's anonymous memory as of now, its parts' most so far: so that what the
@@ -136,12 +143,12 @@ pub fn anon_budget() -> AnonBudget {
 
 fn budget(state: &mut State) -> AnonBudget {
     state.writers = state.writers.max(super::stores::open_count() as u64);
-    state.rooms = state.rooms.max(super::memory::rooms_held());
+    state.in_flight = state.in_flight.max(super::memory::in_flight_held());
     AnonBudget {
         uploads: crate::remote::upload_memory().budget,
         framings: state.writers * FRAMING,
         fetches: FETCHES,
-        rooms: state.rooms,
+        in_flight: state.in_flight,
         held: super::memory::held_parts().counts().peak,
         pages: extent_store::pages::shared().usage().peak,
         own: OWN,
@@ -252,9 +259,9 @@ mod tests {
         assert_eq!(FRAMING, 2 * (96 << 20) + (64 << 20) + (32 << 20));
         assert_eq!(FETCHES, 192 << 20);
         let (uploads, framings) = (512 << 20, 2 * FRAMING);
-        let (rooms, held) = (0, 40 << 20);
+        let (in_flight, held) = (0, 40 << 20);
         let budget =
-            AnonBudget { uploads, framings, fetches: FETCHES, rooms, held, pages: 0, own: OWN };
+            AnonBudget { uploads, framings, fetches: FETCHES, in_flight, held, pages: 0, own: OWN };
         let total = (512 << 20) + 2 * FRAMING + (192 << 20) + (40 << 20) + (64 << 20);
         assert_eq!(budget.total(), total);
     }

@@ -1204,7 +1204,7 @@ fn metrics_show_the_daemons_and_its_vm_processes_builds() {
 fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     host();
     let ps = page_size() as usize;
-    let series = |name: &str, vm: &super::snapshot::Vm| -> Option<u64> {
+    let series = |name: &str, vm: &super::stats::Vm| -> Option<u64> {
         let metrics = super::metrics::render();
         let labels = format!("{{branch=\"{:x}\",connection=\"{}\"}} ", vm.branch, vm.connection);
         let name = format!("cladefs_extentd_{name}{labels}");
@@ -1216,7 +1216,7 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     let dir = tempfile::tempdir().unwrap();
     let (store, served) = connect(&dir.path().join("store"), 1 << 24);
     let (follower, followed) = follow(&dir.path().join("store")).unwrap();
-    let vms = super::snapshot::vms();
+    let vms = super::stats::vms();
     assert_eq!(vms.iter().map(|vm| vm.follower).collect::<Vec<_>>(), [false, true]);
     let (writer, following) = (&vms[0], &vms[1]);
     assert!(writer.connection < following.connection);
@@ -1246,10 +1246,10 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     let pages = series("vm_window_pages", writer).unwrap();
     assert!((1..=3).contains(&pages), "{pages} pages");
 
-    // Its runs installed as it said, unmapping all but the page at 3: as of a snapshot, which
-    // it answers with them.
+    // Its runs installed as it said, unmapping all but the page at 3: as of a taking of stats,
+    // which it answers with them.
     store.unmap(0, 2 * ps as u64).unwrap();
-    snapshot(WAIT).join().unwrap();
+    take_stats(WAIT).join().unwrap();
     assert_eq!(series("vm_window_mappings", writer), Some(1));
     assert_eq!(series("vm_window_pages", writer), Some(1));
     assert_eq!(series("vm_host_mappings", writer), Some(1));
@@ -1257,18 +1257,18 @@ fn metrics_gauge_each_vm_processs_window_and_host_mappings() {
     drop((store, follower));
     served.join().unwrap();
     followed.join().unwrap();
-    assert_eq!(super::snapshot::vms(), []);
+    assert_eq!(super::stats::vms(), []);
     // SAFETY: Unmaps the memory, which nothing uses any more.
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 4 * ps) }, 0);
 }
 
-/// cladefs TASK-111.4: a snapshot holds the daemon's counters and gauges and its build, and each VM
+/// cladefs TASK-111.4: the stats hold the daemon's counters and gauges and its build, and each VM
 /// process's, as it answered: one whose guest answers, its guest's stats and build among it, its
 /// counts as of its answer; one with no guest to ask, at once, without; and one whose guest never
 /// answers, as the daemon has it once the wait is over. An answer to an ask answers those before
 /// it.
 #[test]
-fn snapshots_hold_the_daemons_vm_processes_and_guests_stats() {
+fn stats_hold_the_daemons_vm_processes_and_guests() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
@@ -1291,7 +1291,7 @@ fn snapshots_hold_the_daemons_vm_processes_and_guests_stats() {
     store.map(extent, 0, ps as u64, 0).unwrap();
 
     // The silent one's wait is the test's.
-    let taking = snapshot(std::time::Duration::from_secs(2));
+    let taking = take_stats(std::time::Duration::from_secs(2));
     let ask = asks.recv().unwrap();
     let guest = "seals 3\nseals_hist 0,2,1\ncommit abc\n";
     store.answer_stats(ask, Some(guest)).unwrap();
@@ -1330,7 +1330,7 @@ fn snapshots_hold_the_daemons_vm_processes_and_guests_stats() {
     // Two asks the guest is slow to answer, one answer, to the later, answering both.
     drop(silent);
     silent_served.join().unwrap();
-    let (first, second) = (snapshot(WAIT), snapshot(WAIT));
+    let (first, second) = (take_stats(WAIT), take_stats(WAIT));
     let asked = [asks.recv().unwrap(), asks.recv().unwrap()];
     store.answer_stats(asked[0].max(asked[1]), None).unwrap();
     for taking in [first, second] {
@@ -1346,10 +1346,10 @@ fn snapshots_hold_the_daemons_vm_processes_and_guests_stats() {
     assert_eq!(unsafe { libc::munmap(memory.as_ptr().cast(), 2 * ps) }, 0);
 }
 
-/// cladefs TASK-198: a snapshot that gives up on a VM process's answer forgets its ask, so that a
-/// VM process whose guest never answers, as one paused (its device asking it all the same), holds
-/// none of them: it held each, one more a snapshot, for as long as it lived, which a scraper
-/// polling GetSnapshot grew without end.
+/// cladefs TASK-198: a taking of stats that gives up on a VM process's answer forgets its ask, so
+/// that a VM process whose guest never answers, as one paused (its device asking it all the same),
+/// holds none of them: it held each, one more a taking, for as long as it lived, which a scraper
+/// polling GetStats grew without end.
 #[test]
 fn asks_given_up_on_are_forgotten() {
     host();
@@ -1357,22 +1357,22 @@ fn asks_given_up_on_are_forgotten() {
     let (silent, served) = connect(&dir.path().join("silent"), 1 << 24);
     silent.on_stats_asked(|_| true);
     for _ in 0..3 {
-        let taken = snapshot(std::time::Duration::from_millis(10)).join().unwrap();
+        let taken = take_stats(std::time::Duration::from_millis(10)).join().unwrap();
         assert!(taken.vms[0].answered.is_none(), "{:?}", taken.vms[0]);
     }
-    assert_eq!(super::snapshot::asks_waiting(), [0]);
+    assert_eq!(super::stats::asks_waiting(), [0]);
     drop(silent);
     served.join().unwrap();
 }
 
-/// How long a test's snapshot waits for answers that come, none of its VM processes silent.
+/// How long a test's taking of stats waits for answers that come, none of its VM processes silent.
 const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// cladefs: a snapshot the daemon takes, waiting `wait` at most for its VM processes, on a thread of
+/// cladefs: the stats the daemon takes, waiting `wait` at most for its VM processes, on a thread of
 /// its own, which they answer meanwhile (TASK-111.4).
-fn snapshot(wait: std::time::Duration) -> JoinHandle<super::snapshot::Snapshot> {
+fn take_stats(wait: std::time::Duration) -> JoinHandle<super::stats::HostStats> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    std::thread::spawn(move || runtime.block_on(super::snapshot::take(wait)))
+    std::thread::spawn(move || runtime.block_on(super::stats::take(wait)))
 }
 
 /// The environment a child process of [`two_processes_map_the_same_pages`] is told what to map in;
@@ -1744,14 +1744,14 @@ struct TwoVmProcesses {
     offset: u64,
 }
 
-/// [`TwoVmProcesses`], of a tenant `name`, its child with `env` set too.
-fn two_vm_processes(name: &str, env: &[&str]) -> TwoVmProcesses {
+/// [`TwoVmProcesses`], of a tenant, its child with `env` set too.
+fn two_vm_processes(env: &[&str]) -> TwoVmProcesses {
     use std::io::BufRead as _;
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
     // A tenant's VM processes, whose pages are of its arena alone.
-    let tenant = super::server::Tenant::new(name, 1, dir.path()).unwrap();
+    let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
     let (parent, child) = (dir.path().join("parent"), dir.path().join("child"));
     let extent = {
         // A volume of a cell of the tenant's (TASK-364).
@@ -1794,7 +1794,7 @@ fn frozen_vm_processes_are_killed() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
     let TwoVmProcesses { dir, tenant, socket, extent, ours, page, theirs, stdout, offset } =
-        two_vm_processes("frozen", &[]);
+        two_vm_processes(&[]);
     drop(stdout);
     freeze(&theirs.0);
 
@@ -1838,7 +1838,7 @@ fn frozen_vm_processes_are_killed() {
 fn vm_processes_that_close_their_connections_keep_their_pages_until_gone() {
     use std::os::unix::process::ExitStatusExt as _;
     let ps = page_size() as usize;
-    let two = two_vm_processes("closing", &[CHILD_CLOSES]);
+    let two = two_vm_processes(&[CHILD_CLOSES]);
     let TwoVmProcesses { dir, tenant, socket, mut theirs, mut stdout, offset, .. } = two;
     // Open as it runs on, for waiting for it not to close it.
     let _running = theirs.0.stdin.take();
@@ -2789,7 +2789,7 @@ fn tenants_arenas_go_with_them() {
     host();
     let ps = page_size() as usize;
     let dir = tempfile::tempdir().unwrap();
-    let tenant = super::Tenant::new("acme", 1, dir.path()).unwrap();
+    let tenant = super::Tenant::new(1, dir.path()).unwrap();
     let arena = tenant.arena();
     let (client, server) = UnixStream::pair().unwrap();
     let served = std::thread::spawn(move || serve_connection(server, tenant));
@@ -2962,15 +2962,15 @@ fn writers_that_go_with_writes_uncommitted_cut_their_followers_off() {
 }
 
 /// cladefs: a connection opens no store open in an arena not its own (TASK-79.36), whose pages its
-/// VM process's window could not map, or not as it maps them: neither a follower of no tenant's a
-/// store a tenant's writer has open, nor a tenant's writer one that followers of no tenant's have
-/// open (EBUSY), until the other is gone.
+/// VM process's window could not map, or not as it maps them: neither a follower of the default
+/// tenant's a store a granted tenant's writer has open, nor a granted tenant's writer one that
+/// followers of the default tenant's have open (EBUSY), until the other is gone.
 #[test]
 fn stores_open_in_another_arena_are_busy() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("store");
-    let tenant = super::Tenant::new("acme", 1, dir.path()).unwrap();
+    let tenant = super::Tenant::new(1, dir.path()).unwrap();
     let open_as_tenant = || {
         let (client, server) = UnixStream::pair().unwrap();
         let tenant = tenant.clone();
@@ -3970,7 +3970,7 @@ fn tenants_take_no_branch_by_naming_it() {
     let tenant = |name: &str, id: u64| {
         let stores = dir.path().join(name);
         std::fs::create_dir(&stores).unwrap();
-        let tenant = super::server::Tenant::new(name, id, &stores).unwrap();
+        let tenant = super::server::Tenant::new(id, &stores).unwrap();
         let socket = dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
@@ -4531,7 +4531,7 @@ fn openings_fail_on_refusals_of_what_they_ask() {
 }
 
 /// What a daemon by hand replies to an `OPEN`, of its store of `branch`: the default arena's memory
-/// its own, as of no tenant, and its wire version this one.
+/// its own, as of the default tenant, and its wire version this one.
 fn opened_args(branch: u64) -> [u64; 5] {
     let arena = crate::pages::ArenaId(1);
     super::codec::Opened { branch, arena, epoch: 0, max_map_count: None }.args()
@@ -5097,7 +5097,7 @@ fn shrinks_return_once_the_pages_they_evict_are_free() {
     const CHUNK: u64 = physmem::CHUNK_SIZE as u64;
     host();
     let dir = tempfile::tempdir().unwrap();
-    let tenant = super::server::Tenant::new("shrunk", 1, dir.path()).unwrap();
+    let tenant = super::server::Tenant::new(1, dir.path()).unwrap();
     let socket = dir.path().join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
@@ -5122,9 +5122,9 @@ fn shrinks_return_once_the_pages_they_evict_are_free() {
         let at = (sequence - 1) * CHUNK;
         served(Header::new(MAP, 6 + sequence).with_args(&[branch, sequence, 0, CHUNK, at]), &[]);
     }
-    assert_eq!(super::memory::shrink(Some("shrunk"), u64::MAX), Ok(2 * CHUNK));
+    assert_eq!(super::memory::shrink(Some(1), u64::MAX), Ok(2 * CHUNK));
 
-    let shrinking = std::thread::spawn(|| super::memory::shrink(Some("shrunk"), CHUNK));
+    let shrinking = std::thread::spawn(|| super::memory::shrink(Some(1), CHUNK));
     // The unmaps it is sent, which it never acknowledges, until the daemon lets it go.
     let mut unmapped = Vec::new();
     while let Ok(Some(message)) = receiver.receive(|| 0) {
@@ -5145,10 +5145,10 @@ fn the_governor_shares_memory_by_weight() {
     let dir = tempfile::tempdir().unwrap();
     let mut kept = Vec::new();
     for (id, (name, weight)) in (1..).zip([("heavy", 3), ("light", 1)]) {
-        super::memory::set_weight(name, weight).unwrap();
+        super::memory::set_weight(id, weight).unwrap();
         let tenant_dir = dir.path().join(name);
         std::fs::create_dir(&tenant_dir).unwrap();
-        let tenant = super::server::Tenant::new(name, id, &tenant_dir).unwrap();
+        let tenant = super::server::Tenant::new(id, &tenant_dir).unwrap();
         let socket = tenant_dir.join("extentd.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
@@ -5168,12 +5168,12 @@ fn the_governor_shares_memory_by_weight() {
             let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
             assert_eq!(served(read, &[]).payload, pattern(sequence as u8, CHUNK as usize));
         }
-        assert_eq!(super::memory::shrink(Some(name), u64::MAX), Ok(4 * CHUNK), "{name}");
+        assert_eq!(super::memory::shrink(Some(id), u64::MAX), Ok(4 * CHUNK), "{name}");
         kept.push((sender, receiver, stream));
     }
     super::memory::govern(4 * CHUNK);
-    let held = |name| super::memory::shrink(Some(name), u64::MAX).unwrap();
-    assert_eq!((held("heavy"), held("light")), (3 * CHUNK, CHUNK));
+    let held = |id| super::memory::shrink(Some(id), u64::MAX).unwrap();
+    assert_eq!((held(1), held(2)), (3 * CHUNK, CHUNK));
 }
 
 /// TASK-400: the governor, the host's memory running low, lets go of the parts of segments the
@@ -5187,7 +5187,7 @@ fn the_governor_lets_parts_held_go_before_tenants_pages() {
     let dir = tempfile::tempdir().unwrap();
     let tenant_dir = dir.path().join("cached");
     std::fs::create_dir(&tenant_dir).unwrap();
-    let tenant = super::server::Tenant::new("cached", 1, &tenant_dir).unwrap();
+    let tenant = super::server::Tenant::new(1, &tenant_dir).unwrap();
     let socket = tenant_dir.join("extentd.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
@@ -5218,7 +5218,7 @@ fn the_governor_lets_parts_held_go_before_tenants_pages() {
         let read = Header::new(READ, 5 + sequence).with_args(&[branch, sequence, 0, CHUNK]);
         assert!(served(read, &[]).payload == noise(sequence), "extent {sequence}");
     }
-    let cached = || super::memory::shrink(Some("cached"), u64::MAX).unwrap();
+    let cached = || super::memory::shrink(Some(1), u64::MAX).unwrap();
     assert_eq!(cached(), 4 * CHUNK);
     let parts = super::memory::held_parts();
     let _held: Vec<_> = (0..4).map(|_| parts.hold_bytes(CHUNK as usize / 2)).collect();
@@ -5266,11 +5266,11 @@ fn metrics_are_served_on_after_failing_to_accept() {
     assert!(scraped.starts_with("HTTP/1.1 200 OK\r\n"), "{scraped}");
 }
 
-/// TASK-79.17: a VM process opens no public base to write it, of no tenant as of any (`EPERM`):
-/// what it wrote would be every VM's that forks it, its pages the default arena's, which every VM
-/// process holds. Its forks it opens.
+/// TASK-79.17: a VM process opens no public base to write it, of the default tenant as of any
+/// (`EPERM`): what it wrote would be every VM's that forks it, its pages the default arena's, which
+/// every VM process holds. Its forks it opens.
 #[test]
-fn vm_processes_of_no_tenant_write_no_public_base() {
+fn vm_processes_of_any_tenant_write_no_public_base() {
     host();
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("extentd.sock");
@@ -5723,7 +5723,7 @@ fn whatever_a_vm_process_says_harms_no_other() {
     let dir = tempfile::tempdir().unwrap();
     let vms = dir.path().join("vms");
     std::fs::create_dir(&vms).unwrap();
-    let tenant = super::server::Tenant::new("tenant", 1, &vms).unwrap();
+    let tenant = super::server::Tenant::new(1, &vms).unwrap();
     let (socket, other_socket) = (dir.path().join("tenant.sock"), dir.path().join("other.sock"));
     let listener = UnixListener::bind(&socket).unwrap();
     std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
@@ -6220,7 +6220,7 @@ fn tenants_sockets_are_of_their_mode_from_the_first() {
     let (stores, sockets) = (dir.path().join("acme"), dir.path().join("tenants"));
     std::fs::create_dir(&stores).unwrap();
     std::fs::create_dir(&sockets).unwrap();
-    let socket = sockets.join("acme.sock");
+    let socket = sockets.join("1.sock");
     let (seen, modes) = std::sync::mpsc::channel();
     let at = socket.clone();
     fail::cfg_callback("extentd::bound", move || {
@@ -6231,8 +6231,7 @@ fn tenants_sockets_are_of_their_mode_from_the_first() {
     // SAFETY: Plain system calls. Nothing else of this test's process, its own, makes a file
     // meanwhile.
     let umask = unsafe { libc::umask(0) };
-    let granted =
-        super::grants::Grants::new(sockets.clone()).grant("acme", 1, &stores, (None, None));
+    let granted = super::grants::Grants::new(sockets.clone()).grant(1, &stores, (None, None));
     // SAFETY: As above.
     unsafe { libc::umask(umask) };
     fail::remove("extentd::bound");
@@ -6268,7 +6267,7 @@ fn drains_close_every_connection_and_take_no_more() {
     let (socket, tenant_socket) = (dir.path().join("extentd.sock"), dir.path().join("tenant.sock"));
     let listener = UnixListener::bind(&socket).unwrap();
     let serving = std::thread::spawn(move || serve(listener));
-    let tenant = super::server::Tenant::new("tenant", 1, &vms).unwrap();
+    let tenant = super::server::Tenant::new(1, &vms).unwrap();
     let listener = UnixListener::bind(&tenant_socket).unwrap();
     let serving_tenant = std::thread::spawn(move || super::server::serve_tenant(listener, tenant));
 

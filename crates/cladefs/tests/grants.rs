@@ -25,7 +25,8 @@ fn refused(socket: &Path, path: &Path) -> Option<Errno> {
 }
 
 /// Each tenant's VM processes open stores in its directory, and are refused another's, by
-/// whatever path; granting again returns the socket.
+/// whatever path; granting again returns the socket, named by the tenant's ID; the default tenant
+/// is granted nothing.
 #[test]
 fn tenants_name_stores_in_their_directory_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -33,9 +34,9 @@ fn tenants_name_stores_in_their_directory_alone() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let ours = daemon.grant("acme", 1, &acme, None).unwrap();
-    assert_eq!(ours, dir.path().join("tenants/acme.sock"));
-    let theirs = daemon.grant("globex", 2, &globex, None).unwrap();
+    let ours = daemon.grant(1, &acme, None).unwrap();
+    assert_eq!(ours, dir.path().join("tenants/1.sock"));
+    let theirs = daemon.grant(2, &globex, None).unwrap();
 
     let vm = RemoteExtentStore::connect(&ours, acme.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(1), b"acme");
@@ -51,7 +52,7 @@ fn tenants_name_stores_in_their_directory_alone() {
     ] {
         assert_eq!(refused(&ours, &path), Some(Errno::EACCES), "{}", path.display());
     }
-    // A snapshot's point to restore from, another tenant's.
+    // A VM snapshot's point to restore from, another tenant's.
     let restored = RemoteExtentStore::connect_forked(
         &ours,
         acme.join("restored"),
@@ -61,22 +62,16 @@ fn tenants_name_stores_in_their_directory_alone() {
     );
     assert_eq!(restored.err().and_then(|err| err.errno()), Some(Errno::EACCES));
 
-    assert_eq!(daemon.grant("acme", 1, &acme, None).unwrap(), ours);
-    assert_eq!(
-        failure(daemon.grant("acme", 1, &globex, None)),
-        (Code::AlreadyExists, Errno::EEXIST)
-    );
-    assert_eq!(
-        failure(daemon.grant("../acme", 1, &acme, None)),
-        (Code::InvalidArgument, Errno::EINVAL)
-    );
+    assert_eq!(daemon.grant(1, &acme, None).unwrap(), ours);
+    assert_eq!(failure(daemon.grant(1, &globex, None)), (Code::AlreadyExists, Errno::EEXIST));
+    assert_eq!(failure(daemon.grant(0, &acme, None)), (Code::InvalidArgument, Errno::EINVAL));
     let none = dir.path().join("none");
-    assert_eq!(failure(daemon.grant("initech", 3, &none, None)), (Code::NotFound, Errno::ENOENT));
+    assert_eq!(failure(daemon.grant(3, &none, None)), (Code::NotFound, Errno::ENOENT));
 }
 
 /// TASK-364: a granted tenant's ID is its tenant in the bucket. The stores its VM processes make,
 /// and those its VM manager makes or forks in its directory, are volumes of cells of its own; its
-/// VM manager makes it no new cell of another tenant's. Granted again, it keeps its ID.
+/// VM manager makes it no new cell of another tenant's.
 #[test]
 fn tenants_stores_are_their_own_cells() {
     let dir = tempfile::tempdir().unwrap();
@@ -84,8 +79,8 @@ fn tenants_stores_are_their_own_cells() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let ours = daemon.grant("acme", 0xa, &acme, None).unwrap();
-    daemon.grant("globex", 0xb, &globex, None).unwrap();
+    let ours = daemon.grant(0xa, &acme, None).unwrap();
+    daemon.grant(0xb, &globex, None).unwrap();
 
     let vm = RemoteExtentStore::connect(&ours, acme.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(1), b"acme");
@@ -96,24 +91,17 @@ fn tenants_stores_are_their_own_cells() {
     let theirs = daemon.create(&acme.join("theirs"), new(0xb), None);
     assert_eq!(failure(theirs), (Code::PermissionDenied, Errno::EPERM));
     assert!(!acme.join("theirs").exists(), "a store of another tenant's cell was made");
-    // Forked from a store of no tenant's: into its directory, a cell of its own; elsewhere, of the
-    // store's tenant.
+    // Forked from a store of the default tenant's: into its directory, a cell of its own;
+    // elsewhere, of the store's tenant.
     let base = dir.path().join("base");
     daemon.create(&base, new(0), None).unwrap();
     assert_eq!(daemon.fork(&base, &acme.join("fork")).unwrap().cell.tenant, 0xa);
     assert_eq!(daemon.fork(&base, &dir.path().join("loose")).unwrap().cell.tenant, 0);
 
-    assert_eq!(daemon.grant("acme", 0xa, &acme, None).unwrap(), ours);
-    assert_eq!(
-        failure(daemon.grant("acme", 0xc, &acme, None)),
-        (Code::AlreadyExists, Errno::EEXIST)
-    );
+    assert_eq!(daemon.grant(0xa, &acme, None).unwrap(), ours);
     let initech = dir.path().join("initech");
     std::fs::create_dir(&initech).unwrap();
-    assert_eq!(
-        failure(daemon.grant("initech", 0, &initech, None)),
-        (Code::InvalidArgument, Errno::EINVAL)
-    );
+    assert_eq!(failure(daemon.grant(0, &initech, None)), (Code::InvalidArgument, Errno::EINVAL));
 }
 
 /// TASK-364: a tenant's VM processes reach no store of another tenant's cell, though it be in
@@ -126,8 +114,8 @@ fn tenants_reach_no_store_of_another_tenants_cell() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let ours = daemon.grant("acme", 0xa, &acme, None).unwrap();
-    let theirs = daemon.grant("globex", 0xb, &globex, None).unwrap();
+    let ours = daemon.grant(0xa, &acme, None).unwrap();
+    let theirs = daemon.grant(0xb, &globex, None).unwrap();
     let their_vm = RemoteExtentStore::connect(&theirs, globex.join("vm"), CAPACITY).unwrap();
     write(&their_vm, &pattern(2), b"globex");
     drop(their_vm);
@@ -152,8 +140,8 @@ fn tenants_reach_no_memory_volume_of_another_tenants_cell() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let ours = daemon.grant("acme", 0xa, &acme, None).unwrap();
-    let theirs = daemon.grant("globex", 0xb, &globex, None).unwrap();
+    let ours = daemon.grant(0xa, &acme, None).unwrap();
+    let theirs = daemon.grant(0xb, &globex, None).unwrap();
     let size = 64 * 4096;
     let their_memory = MemoryVolume::open(&theirs, &globex.join("memory"), size).unwrap();
     their_memory.write(0, &[7; 4096]).unwrap();
@@ -183,7 +171,7 @@ fn tenants_restore_points_given_them_into_cells_of_their_own() {
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let globex = dir.path().join("here/globex");
     std::fs::create_dir(&globex).unwrap();
-    let socket = here.daemon.grant("globex", 2, &globex, None).unwrap();
+    let socket = here.daemon.grant(2, &globex, None).unwrap();
     let vm = RemoteExtentStore::connect(&socket, globex.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(5), b"globex");
     vm.fork_quiescent(&globex.join("point")).unwrap();
@@ -216,7 +204,7 @@ fn bases_made_shared_points_fork_into_other_tenants() {
     let mut here = Host::new(dir.path(), "here");
     let globex = dir.path().join("here/globex");
     std::fs::create_dir(&globex).unwrap();
-    let theirs = here.daemon.grant("globex", 2, &globex, None).unwrap();
+    let theirs = here.daemon.grant(2, &globex, None).unwrap();
     let base = here.acme.join("base");
     let vm = RemoteExtentStore::connect(&here.socket, &base, CAPACITY).unwrap();
     write(&vm, &pattern(8), b"base");
@@ -248,14 +236,14 @@ fn bases_made_shared_points_fork_into_other_tenants() {
 
 /// TASK-395.9: a tenant's store with a writer forks into no other tenant's directory, a fork nor a
 /// point (ForkStore), refused with EACCES, making nothing; into its own tenant's it forks. A store
-/// of the common tenant's (0) forks into both tenants' directories, a cell of each's.
+/// of the default tenant's (0) forks into both tenants' directories, a cell of each's.
 #[test]
 fn tenants_stores_with_writers_fork_into_no_other_tenants_directory() {
     let dir = tempfile::tempdir().unwrap();
     let mut here = Host::new(dir.path(), "here");
     let globex = dir.path().join("here/globex");
     std::fs::create_dir(&globex).unwrap();
-    here.daemon.grant("globex", 2, &globex, None).unwrap();
+    here.daemon.grant(2, &globex, None).unwrap();
     let vm = here.acme.join("vm");
     write(&RemoteExtentStore::connect(&here.socket, &vm, CAPACITY).unwrap(), &pattern(9), b"vm");
 
@@ -283,20 +271,20 @@ fn revoked_tenants_take_no_new_connections() {
     let mut daemon = Daemon::new(dir.path());
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
+    let socket = daemon.grant(1, &acme, None).unwrap();
     let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     write(&vm, &pattern(2), b"before");
 
-    daemon.revoke("acme").unwrap();
+    daemon.revoke(1).unwrap();
     assert!(!socket.exists(), "the socket is there");
     let connected = std::os::unix::net::UnixStream::connect(&socket);
     assert_eq!(connected.unwrap_err().kind(), std::io::ErrorKind::NotFound);
     vm.commit(Some(b"after")).unwrap();
     assert_eq!(vm.root().unwrap(), b"after");
-    assert_eq!(failure(daemon.revoke("acme")), (Code::NotFound, Errno::ENOENT));
+    assert_eq!(failure(daemon.revoke(1)), (Code::NotFound, Errno::ENOENT));
     drop(vm);
 
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
+    let socket = daemon.grant(1, &acme, None).unwrap();
     let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     assert_eq!(vm.root().unwrap(), b"after");
 }
@@ -310,13 +298,13 @@ fn tenants_granted_again_while_alive_go_on() {
     let mut daemon = Daemon::new(dir.path());
     let acme = dir.path().join("acme");
     std::fs::create_dir(&acme).unwrap();
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
+    let socket = daemon.grant(1, &acme, None).unwrap();
     let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), CAPACITY).unwrap();
     let bytes = pattern(4);
     cache(&vm, &bytes);
 
-    daemon.revoke("acme").unwrap();
-    let socket = daemon.grant("acme", 1, &acme, None).unwrap();
+    daemon.revoke(1).unwrap();
+    let socket = daemon.grant(1, &acme, None).unwrap();
     let follower = RemoteExtentStore::connect_read_only(&socket, acme.join("vm")).unwrap();
     assert_eq!(copies(follower.physical_memory(), &bytes), 1, "the VM's pages, in its memory");
 }
@@ -342,7 +330,7 @@ fn tenant_sockets_work_bind_mounted_into_jails() {
     std::fs::create_dir(&acme).unwrap();
     // SAFETY: Plain system calls.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
-    let socket = daemon.grant("acme", 1, &acme, Some(uid)).unwrap();
+    let socket = daemon.grant(1, &acme, Some(uid)).unwrap();
     let jail = dir.path().join("jail");
     std::fs::create_dir(&jail).unwrap();
     let jail_socket = jail.join("extentd.sock");
@@ -398,7 +386,7 @@ impl Host {
         let acme = dir.join("acme");
         std::fs::create_dir_all(&acme).unwrap();
         let mut daemon = Daemon::new(&dir);
-        let socket = daemon.grant(&format!("acme-{name}"), 1, &acme, None).unwrap();
+        let socket = daemon.grant(1, &acme, None).unwrap();
         Self { daemon, acme, socket }
     }
 
@@ -463,7 +451,7 @@ fn tenants_restore_on_another_host_what_their_vm_manager_took() {
     let (mut here, mut there) = (Host::new(dir.path(), "here"), Host::new(dir.path(), "there"));
     let snapshot = here.snapshot();
     here.forget_what_it_read();
-    let fetched = there.daemon.stats().fetched_bytes;
+    let fetched = there.daemon.counters().fetched_bytes;
 
     let (point, vm) = (there.acme.join("point"), there.acme.join("vm"));
     let refused = restore(&there.socket, &vm, &point, snapshot.branch.id);
@@ -475,7 +463,7 @@ fn tenants_restore_on_another_host_what_their_vm_manager_took() {
     assert_ne!(restored.branch(), snapshot.branch.id);
     assert_eq!(restored.root().unwrap(), b"snapshotted");
     assert!(snapshotted(&restored, snapshot.extent), "the restored VM reads other bytes");
-    let read = there.daemon.stats().fetched_bytes - fetched;
+    let read = there.daemon.counters().fetched_bytes - fetched;
     assert!(read >= 64 << 10, "{read} bytes came from the bucket");
     write(&restored, &pattern(6), b"restored");
 
@@ -498,7 +486,7 @@ fn tenants_take_no_branch_given_to_another() {
 
     let globex = dir.path().join("there/globex");
     std::fs::create_dir(&globex).unwrap();
-    let socket = there.daemon.grant("globex", 2, &globex, None).unwrap();
+    let socket = there.daemon.grant(2, &globex, None).unwrap();
     let (vm, point) = (globex.join("vm"), globex.join("point"));
     let refused = restore(&socket, &vm, &point, snapshot.branch.id);
     assert_eq!(refused.map(drop), Err(Some(Errno::ENOENT)));

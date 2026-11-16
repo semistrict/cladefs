@@ -40,7 +40,7 @@
 //! their whole lengths past the connection's room ([`what_requests_hold_is_within_the_room`]);
 //! a connection's faults paged in as many parts at once as it kept faults in flight
 //! ([`page_ins_in_flight_are_bounded`], TASK-149.34), which mallory's floods of page-ins do here;
-//! a tenant's connections held as many times their rooms as it had connections
+//! a tenant's connections held as many times their own rooms as it had connections
 //! ([`a_tenants_in_flight_data_is_bounded`], TASK-149.35); and a tenant's VM processes filled the
 //! host's disk as far as their stores' capacities let them, in as many stores as they made
 //! ([`a_tenant_filling_its_disk_leaves_others_committing`], TASK-94).
@@ -128,6 +128,10 @@ const FILL_EXTENT: u64 = 0xf111_0000;
 /// What mallory's disk may take, each case, past what it took as the case began (TASK-94): less
 /// than a store's capacity, so that its fills find its disk's limit before their store's.
 const FILL_ROOM: u64 = 4 << 20;
+
+/// Mallory's tenant's ID, and alice's.
+const MALLORY: u64 = 1;
+const ALICE: u64 = 2;
 const FLOOD_READ: u64 = 1 << 20;
 /// What a case's heap may hold past what mallory's connections' rooms do: alice's, mallory's stores
 /// as they open, and the bucket in memory taking what they upload.
@@ -1763,15 +1767,15 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
     let tenant = |name: &str, id: u64| {
         let stores = dir.path().join(name);
         std::fs::create_dir(&stores).unwrap();
-        let tenant = Tenant::new(name, id, &stores).unwrap();
+        let tenant = Tenant::new(id, &stores).unwrap();
         let socket = dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&socket).unwrap();
         let served = tenant.clone();
         std::thread::spawn(move || serve_tenant(listener, served));
         (stores, socket, tenant)
     };
-    let (vms, mallory_socket, mallory) = tenant("mallory", 1);
-    let (alices, alice_socket, alice_tenant) = tenant("alice", 2);
+    let (vms, mallory_socket, mallory) = tenant("mallory", MALLORY);
+    let (alices, alice_socket, alice_tenant) = tenant("alice", ALICE);
     let bob_socket = dir.path().join("bob.sock");
     let listener = UnixListener::bind(&bob_socket).unwrap();
     std::thread::spawn(move || serve(listener));
@@ -1875,11 +1879,11 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             LIMIT.store(limit as usize, Ordering::Relaxed);
             // Its disk limited a few MiB past what it takes, which its fills reach (TASK-94); but
             // as a connection of its floods, whose write, which its reads read, is to be admitted.
-            let (taken, _) = disk::count(Some("mallory")).unwrap();
+            let (taken, _) = disk::count(Some(MALLORY)).unwrap();
             let files_before = files_taking(&vms);
             let flooding = hostiles.iter().any(|hostile| hostile.flood);
             let disk_limit = (!flooding).then_some(taken + FILL_ROOM);
-            disk::set_limit(Some("mallory"), disk_limit).unwrap();
+            disk::set_limit(Some(MALLORY), disk_limit).unwrap();
 
             // Mallory's connections at once, and alice beside them.
             let start = Arc::new(std::sync::Barrier::new(hostiles.len()));
@@ -1955,14 +1959,14 @@ fn a_compromised_vm_process_harms_no_tenant_beside_it() {
             // compressing it saves under an eighth of it (`extent_store`'s `IN_PLACE_SAVING`),
             // framed in place, raw: its holes under an eighth of it, a seventh of the rest of it,
             // written and admitted; under 4/7 MiB of the case's `FILL_ROOM` (TASK-343).
-            let (counted, _) = disk::count(Some("mallory")).unwrap();
+            let (counted, _) = disk::count(Some(MALLORY)).unwrap();
             prop_assert!(
                 disk_limit.is_none_or(|limit| counted <= limit + (1 << 20)),
                 "mallory's disk takes {counted} bytes, past its limit of {disk_limit:?}, from \
                  {taken} as the case began; the files grown since: {}",
                 grown_since(&files_before, &files_taking(&vms))
             );
-            disk::set_limit(Some("mallory"), None).unwrap();
+            disk::set_limit(Some(MALLORY), None).unwrap();
             for status in seen.iter().flat_map(|seen| &seen.filled) {
                 match status {
                     Some(0) => fills_written.fetch_add(1, Ordering::Relaxed),
@@ -2064,7 +2068,7 @@ fn vm_processes_shrinking_their_memory_crash_nothing() {
     std::fs::create_dir(&vms).unwrap();
     let socket = dir.path().join("vms.sock");
     let listener = UnixListener::bind(&socket).unwrap();
-    let tenant = Tenant::new("vms", 1, &vms).unwrap();
+    let tenant = Tenant::new(1, &vms).unwrap();
     std::thread::spawn(move || serve_tenant(listener, tenant));
     let store = RemoteExtentStore::connect(&socket, vms.join("store"), 1 << 26).unwrap();
     let extent = |sequence| ExtentId { branch: store.branch(), sequence };
@@ -2361,41 +2365,42 @@ fn page_ins_in_flight_are_bounded() {
     );
 }
 
-/// TASK-149.35: what the daemon holds of one tenant's VM processes' requests is bounded by the room
-/// its connections share, not by how many connections it has: each connection has a room of its
-/// own (272 MiB without a window), and a tenant as many as 1,024, so one tenant, within the
-/// protocol, held some 272 GiB, every tenant's daemon with it. Here many of mallory's connections,
-/// of one tenant, each flood the daemon with reads whose replies they leave unread, filling the
-/// connection's queue, which the tenant's room bounds across them; alice, another tenant, flooding
-/// as hard, is unaffected, her room her own.
+/// TASK-149.35: what the daemon holds of one tenant's VM processes' requests is bounded by the
+/// bytes in flight its connections share, not by how many connections it has: each connection has
+/// a room of its own (272 MiB without a window), and a tenant as many as 1,024, so one tenant,
+/// within the protocol, held some 272 GiB, every tenant's daemon with it. Here many of mallory's
+/// connections, of one tenant, each flood the daemon with reads whose replies they leave unread,
+/// filling the connection's queue, which the tenant's bytes in flight bound across them; alice,
+/// another tenant, flooding as hard, is unaffected, her bytes in flight her own.
 #[test]
 fn a_tenants_in_flight_data_is_bounded() {
     const CONNECTIONS: usize = 8;
     const MIB: u64 = 1 << 20;
-    // A room a payload's size at least; small, so the green run holds little.
-    const ROOM: u64 = MAX_PAYLOAD;
+    // Bytes in flight a payload's size at least; small, so the green run holds little.
+    const IN_FLIGHT: u64 = MAX_PAYLOAD;
     host();
     let dir = tempfile::tempdir().unwrap();
-    // Two tenants, each flooding: mallory's many connections, alice's one, their rooms their own.
+    // Two tenants, each flooding: mallory's many connections, alice's one, their bytes in flight
+    // their own.
     let tenant = |name: &str, id: u64| {
         let stores = dir.path().join(name);
         std::fs::create_dir(&stores).unwrap();
-        let tenant = Tenant::new(name, id, &stores).unwrap();
+        let tenant = Tenant::new(id, &stores).unwrap();
         let socket = dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&socket).unwrap();
         let served = tenant.clone();
         std::thread::spawn(move || serve_tenant(listener, served));
         (stores, socket, tenant)
     };
-    let (mstores, msocket, mallory) = tenant("mallory", 1);
-    let (astores, asocket, alice) = tenant("alice", 2);
-    super::super::memory::set_room(Some("mallory"), Some(ROOM)).unwrap();
-    super::super::memory::set_room(Some("alice"), Some(ROOM)).unwrap();
+    let (mstores, msocket, mallory) = tenant("mallory", MALLORY);
+    let (astores, asocket, alice) = tenant("alice", ALICE);
+    super::super::memory::set_in_flight(Some(MALLORY), Some(IN_FLIGHT)).unwrap();
+    super::super::memory::set_in_flight(Some(ALICE), Some(IN_FLIGHT)).unwrap();
 
     // A connection flooding reads of an extent of its own, their replies unread, on a thread of
-    // its own: the daemon stops reading it once the tenant's room is full, which blocks its
-    // synchronous sends, as a real VM process's socket fills. It holds its sockets open, and never
-    // returns: the test's process ends with it (nextest runs each in its own).
+    // its own: the daemon stops reading it once the tenant's bytes in flight are full, which blocks
+    // its synchronous sends, as a real VM process's socket fills. It holds its sockets open, and
+    // never returns: the test's process ends with it (nextest runs each in its own).
     fn flood(socket: PathBuf, path: PathBuf) {
         std::thread::spawn(move || {
             let (sender, mut receiver, _stream, branch) =
@@ -2404,7 +2409,8 @@ fn a_tenants_in_flight_data_is_bounded() {
             sender.send(written, &super::pattern(1, MIB as usize), &[]).unwrap();
             assert_eq!(receiver.receive(|| 0).unwrap().unwrap().header.status, 0);
             // Reads past any room, none of whose replies it reads: what the daemon admits of them
-            // it queues, held in the tenant's room; the rest block here, as a full socket does.
+            // it queues, held in the tenant's bytes in flight; the rest block here, as a full
+            // socket does.
             for id in 0..300u64 {
                 let read = Header::new(READ, 100 + id).with_args(&[branch, 1, 0, MIB]);
                 if sender.send(read, &[], &[]).is_err() {
@@ -2417,7 +2423,8 @@ fn a_tenants_in_flight_data_is_bounded() {
     }
 
     let before = held();
-    // Mallory's connections flood at once; their queues fill as far as the tenant's room lets them.
+    // Mallory's connections flood at once; their queues fill as far as the tenant's bytes in
+    // flight let them.
     for n in 0..CONNECTIONS {
         flood(msocket.clone(), mstores.join(format!("store-{n}")));
     }
@@ -2436,7 +2443,8 @@ fn a_tenants_in_flight_data_is_bounded() {
     let (mallory_held, mallory_peak) =
         (mallory.in_flight().held() >> 20, mallory.in_flight().peak() >> 20);
 
-    // Alice, flooding as hard on her own room, is served: her write commits and her read answers.
+    // Alice, flooding as hard on her own bytes in flight, is served: her write commits and her read
+    // answers.
     let (asender, mut areceiver, _astream, abranch) =
         super::raw_connection(&asocket, &astores.join("store"), 1 << 24);
     let awritten = Header::new(WRITE, 2).with_args(&[abranch, 1]);
@@ -2452,20 +2460,21 @@ fn a_tenants_in_flight_data_is_bounded() {
         Header::new(READ, 4).with_args(&[abranch, 1, 0, MIB]),
         &[],
     );
-    let alice_room = alice.in_flight().room();
+    let alice_budget = alice.in_flight().budget();
 
     println!(
-        "mallory's {CONNECTIONS} connections held {mallory_held} MiB (peak {mallory_peak}), {heap}          MiB of the heap, of a {} MiB room; alice's room {} MiB, her write {alice_write}, commit {alice_commit}, her read          {} bytes",
-        ROOM >> 20,
-        alice_room >> 20,
+        "mallory's {CONNECTIONS} connections held {mallory_held} MiB (peak {mallory_peak}), {heap}          MiB of the heap, of {} MiB in flight; alice's {} MiB in flight, her write {alice_write}, commit {alice_commit}, her read          {} bytes",
+        IN_FLIGHT >> 20,
+        alice_budget >> 20,
         alice_read.payload.len(),
     );
-    // Mallory's tenant holds no more than its room, a connection's own slack over it at most (one
-    // request admitted as the room emptied): far less than its connections' rooms together.
+    // Mallory's tenant holds no more than its bytes in flight, a connection's own slack over them
+    // at most (one request admitted as they emptied): far less than its connections' rooms
+    // together.
     assert!(
-        mallory.in_flight().peak() <= ROOM + MAX_PAYLOAD,
-        "mallory's tenant held {mallory_peak} MiB, past its {} MiB room",
-        ROOM >> 20,
+        mallory.in_flight().peak() <= IN_FLIGHT + MAX_PAYLOAD,
+        "mallory's tenant held {mallory_peak} MiB, past its {} MiB in flight",
+        IN_FLIGHT >> 20,
     );
     // Alice, another tenant, flooding too, is unaffected: served throughout.
     assert_eq!(
@@ -2508,18 +2517,18 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     let tenant = |name: &str, id: u64| {
         let stores = dir.path().join(name);
         std::fs::create_dir(&stores).unwrap();
-        let tenant = Tenant::new(name, id, &stores).unwrap();
+        let tenant = Tenant::new(id, &stores).unwrap();
         let socket = dir.path().join(format!("{name}.sock"));
         let listener = UnixListener::bind(&socket).unwrap();
         let served = tenant.clone();
         std::thread::spawn(move || serve_tenant(listener, served));
         (stores, socket, tenant)
     };
-    let (mstores, msocket, mallory) = tenant("mallory", 1);
-    let (astores, asocket, _alice) = tenant("alice", 2);
-    let (taken, _) = disk::count(Some("mallory")).unwrap();
+    let (mstores, msocket, mallory) = tenant("mallory", MALLORY);
+    let (astores, asocket, _alice) = tenant("alice", ALICE);
+    let (taken, _) = disk::count(Some(MALLORY)).unwrap();
     let limit = taken + ROOM;
-    disk::set_limit(Some("mallory"), Some(limit)).unwrap();
+    disk::set_limit(Some(MALLORY), Some(limit)).unwrap();
 
     // Mallory's VM processes, each its own store, writing a MiB at a time until refused; alice's,
     // writing and committing as many beside them.
@@ -2557,7 +2566,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     let filled: Vec<_> = fills.into_iter().map(|fill| fill.join().unwrap()).collect();
     let written: u64 = filled.iter().map(|(_, written, _)| written).sum();
     let refusals: Vec<Errno> = filled.iter().map(|(_, _, refused)| *refused).collect();
-    let (counted, _) = disk::count(Some("mallory")).unwrap();
+    let (counted, _) = disk::count(Some(MALLORY)).unwrap();
     println!(
         "mallory's {CONNECTIONS} VM processes wrote {written} MiB, refused with {:?}; its disk \
          takes {} KiB, of a {} KiB limit; alice wrote and committed {ALICES} MiB",
@@ -2580,7 +2589,7 @@ fn a_tenant_filling_its_disk_leaves_others_committing() {
     for (store, _, _) in &filled {
         assert_eq!(store.commit(None), Ok(()));
     }
-    disk::set_limit(Some("mallory"), None).unwrap();
+    disk::set_limit(Some(MALLORY), None).unwrap();
     let (store, written, _) = &filled[0];
     let extent = ExtentId { branch: store.branch(), sequence: 1 + written };
     assert_eq!(write(store, extent, 0, &noise(0, MIB as usize)), Ok(()));

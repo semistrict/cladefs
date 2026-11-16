@@ -57,12 +57,12 @@ fn stores_through_the_control_api() {
             own_extents: 1,
             inherited_extents: 0,
             committed: 1,
-            // Closed, the stat opens it, as the daemon opens any store, taking its branch's lease
+            // Closed, the stat opens it, as the daemon opens any store, taking its branch's head
             // after its making's and its VM's (TASK-165.9): what it committed, uploaded.
             uploading: true,
-            lease_token: 1,
-            lease_epoch: 3,
-            lease_taken_unix_ms: stat.lease_taken_unix_ms,
+            taken_token: 1,
+            taken_epoch: 3,
+            taken_unix_ms: stat.taken_unix_ms,
             uploaded: 1,
             pending_upload_bytes: 0,
             oldest_pending_ms: 0,
@@ -97,16 +97,16 @@ fn stores_through_the_control_api() {
     daemon.delete(&taken).unwrap();
     assert_eq!(failure(daemon.stat(&taken)), (Code::NotFound, Errno::ENOENT));
 
-    let stats = daemon.stats();
-    let object_storage = stats.object_storage.expect("the daemon has a bucket");
+    let counters = daemon.counters();
+    let object_storage = counters.object_storage.expect("the daemon has a bucket");
     assert!(object_storage.requests["create"] > 0, "{object_storage:?}");
     assert!(object_storage.uploaded_bytes.values().sum::<u64>() >= 64 << 10, "{object_storage:?}");
 }
 
-/// TASK-50.5: the stores VM processes have open are listed, with their branches' leases, as this
-/// host's placement took them, and their uploads: synced, nothing waits.
+/// TASK-50.5: the stores VM processes have open are listed, with their writers' takings of their
+/// branches' heads, as this host's placement took them, and their uploads: synced, nothing waits.
 #[test]
-fn open_stores_are_listed_with_their_leases_and_uploads() {
+fn open_stores_are_listed_with_their_takings_and_uploads() {
     let dir = tempfile::tempdir().unwrap();
     let mut daemon = Daemon::new(dir.path());
     let (first, second) = (dir.path().join("first"), dir.path().join("second"));
@@ -131,8 +131,8 @@ fn open_stores_are_listed_with_their_leases_and_uploads() {
         assert_eq!((stat.branch, stat.open, stat.uploading), (branch, true, true));
         // TASK-454: the extent the first wrote; none, the second.
         assert_eq!((stat.own_extents, stat.inherited_extents), (extents, 0));
-        assert_eq!((stat.lease_token, stat.lease_epoch), (1, 1));
-        assert!((millis(before)..=millis(after)).contains(&stat.lease_taken_unix_ms), "{stat:?}");
+        assert_eq!((stat.taken_token, stat.taken_epoch), (1, 1));
+        assert!((millis(before)..=millis(after)).contains(&stat.taken_unix_ms), "{stat:?}");
         assert_eq!(stat.uploaded, stat.committed, "{stat:?}");
         assert_eq!((stat.pending_upload_bytes, stat.oldest_pending_ms), (0, 0));
     }

@@ -45,7 +45,7 @@ fn a_database_on_the_daemon_reads_in_place_and_survives_reopening() {
 }
 
 /// TASK-411.7 (TASK-411's AC #3, sqlite volumes, Linux): a database on a store of a sealed cell
-/// the daemon serves, its tenant's KEK in the host's KMS (the common tenant's, whose cells the
+/// the daemon serves, its tenant's KEK in the host's KMS (the default tenant's, whose cells the
 /// daemon makes for stores no tenant's grant names), reads in place and survives reopening as one
 /// in the clear does; and no file of the store's directory holds a row of noise it wrote in the
 /// clear.

@@ -2846,10 +2846,10 @@ mod tests {
     }
 
     /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the
-    /// common tenant's (0). Another tenant's store is refused with `EACCES` by every kind of fork,
-    /// into any other tenant's cell, the common tenant's too, leaving nothing at the fork's path
-    /// nor in the bucket; into its own tenant's it forks. A store of the common tenant's, as public
-    /// bases are, forks into two tenants' cells, each reading what it holds.
+    /// default tenant's (0). Another tenant's store is refused with `EACCES` by every kind of fork,
+    /// into any other tenant's cell, the default tenant's too, leaving nothing at the fork's path
+    /// nor in the bucket; into its own tenant's it forks. A store of the default tenant's, as
+    /// public bases are, forks into two tenants' cells, each reading what it holds.
     #[test]
     fn stores_with_writers_fork_into_other_tenants_cells_from_the_common_tenant_alone() {
         let dir = tempfile::tempdir().unwrap();
@@ -2876,7 +2876,7 @@ mod tests {
         let acme = store("acme", 1);
         let before = listed();
         let errno = |forked: Result<(), crate::Error>| forked.map_err(|err| err.errno());
-        for tenant in [2, crate::host_store::NO_TENANT] {
+        for tenant in [2, crate::host_store::DEFAULT_TENANT] {
             let to = dir.path().join(format!("refused-{tenant}"));
             let refused = [
                 ("fork", errno(acme.fork(&to, cell(tenant)).map(drop))),
@@ -2895,7 +2895,7 @@ mod tests {
         assert_eq!(acme.fork(&ours, cell(1)).unwrap().cell.tenant, 1);
         assert_eq!(reopened(&ours, idle()).unwrap().root().unwrap(), b"acme");
 
-        let base = store("base", crate::host_store::NO_TENANT);
+        let base = store("base", crate::host_store::DEFAULT_TENANT);
         for tenant in [1, 2] {
             let to = dir.path().join(format!("base-{tenant}"));
             assert_eq!(base.fork(&to, cell(tenant)).unwrap().cell.tenant, tenant);

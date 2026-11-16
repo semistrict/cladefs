@@ -31,8 +31,8 @@
 //! makings of stores (an `OPEN` making one, a `FORK`), which its guest sees as a full disk; the
 //! daemon goes on, and so do other tenants' writes. Past the limit of every tenant's together, any
 //! tenant's do. Commits go on: what was written commits, uploads, and leaves the disk, as do
-//! frees, which commits make. There are no limits until set. Its metrics name tenants by
-//! [`super::memory::label`]s.
+//! frees, which commits make. There are no limits until set. Its metrics name tenants by their
+//! IDs.
 //!
 //! **Not directory quotas.** A filesystem's quota of a tenant's directory (XFS project quotas,
 //! ext4's) refuses whichever write of the directory's comes past it: a store closing and framing a
@@ -41,7 +41,6 @@
 //! takes any of it. And it is the host's setup, a filesystem's that has them, which the daemon
 //! can't set as tenants are granted.
 
-use super::memory::label;
 use crate::Errno;
 use std::collections::{HashMap, HashSet};
 use std::os::unix::fs::MetadataExt as _;
@@ -73,9 +72,9 @@ struct Registry {
     /// The disks of the tenants alive: a tenant revoked and granted again with another directory,
     /// while its earlier VM processes live on, has two for a while, each limited.
     disks: Vec<Weak<Disk>>,
-    /// The tenants' limits, in bytes, by name: those granted later, or again, are limited as they
+    /// The tenants' limits, in bytes, by ID: those granted later, or again, are limited as they
     /// are made.
-    limits: Option<HashMap<String, u64>>,
+    limits: Option<HashMap<u64, u64>>,
 }
 
 impl Registry {
@@ -83,8 +82,8 @@ impl Registry {
         self.disks.iter().filter_map(Weak::upgrade)
     }
 
-    fn limit(&self, name: &str) -> Option<u64> {
-        self.limits.as_ref().and_then(|limits| limits.get(name).copied())
+    fn limit(&self, tenant: u64) -> Option<u64> {
+        self.limits.as_ref().and_then(|limits| limits.get(&tenant).copied())
     }
 }
 
@@ -96,7 +95,8 @@ static USED: AtomicU64 = AtomicU64::new(0);
 
 /// A tenant's disk: what its directory takes, as last counted, and what was admitted since.
 pub struct Disk {
-    name: String,
+    /// Its tenant's ID.
+    tenant: u64,
     dir: PathBuf,
     /// What it takes, in bytes: its directory's, as last walked, and the bytes of the writes
     /// admitted since that walk began, or not done as it began.
@@ -115,11 +115,11 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// The disk of the tenant `name`, whose directory is `dir`: counted now, among those alive,
-    /// limited as its name is.
-    pub(super) fn new(name: &str, dir: &Path) -> Arc<Self> {
+    /// The disk of the tenant of the ID `tenant`, whose directory is `dir`: counted now, among
+    /// those alive, limited as its ID is.
+    pub(super) fn new(tenant: u64, dir: &Path) -> Arc<Self> {
         let disk = Arc::new(Self {
-            name: name.to_owned(),
+            tenant,
             dir: dir.to_owned(),
             used: AtomicU64::new(0),
             writing: AtomicU64::new(0),
@@ -130,7 +130,7 @@ impl Disk {
         });
         disk.recount();
         let mut registry = REGISTRY.lock().unwrap();
-        disk.limit.store(registry.limit(name).unwrap_or(NONE), Ordering::Relaxed);
+        disk.limit.store(registry.limit(tenant).unwrap_or(NONE), Ordering::Relaxed);
         registry.disks.retain(|alive| alive.strong_count() > 0);
         registry.disks.push(Arc::downgrade(&disk));
         drop(registry);
@@ -182,9 +182,9 @@ impl Disk {
     fn refuse(&self) -> Errno {
         if !self.full.swap(true, Ordering::Relaxed) {
             log::warn!(
-                "extentd: tenant {}'s disk at its limit, its writes refused (ENOSPC): it takes {} \
-                 bytes, of {:?}; every tenant's, {} of {:?}",
-                self.name,
+                "extentd: tenant {:x}'s disk at its limit, its writes refused (ENOSPC): it takes \
+                 {} bytes, of {:?}; every tenant's, {} of {:?}",
+                self.tenant,
                 self.used(),
                 self.limit(),
                 total(),
@@ -206,8 +206,8 @@ impl Disk {
         let writing = self.writing.load(Ordering::SeqCst);
         if let Err(err) = extent_store::pages::shared().write_back_all() {
             log::warn!(
-                "extentd: writing back the stores' page cache to count tenant {}'s disk: {err}",
-                self.name
+                "extentd: writing back the stores' page cache to count tenant {:x}'s disk: {err}",
+                self.tenant
             );
         }
         let walked = walk(&self.dir);
@@ -339,19 +339,19 @@ fn walk(dir: &Path) -> u64 {
 /// lifts the limit, without `bytes`. A tenant's limit holds for it alive now, and granted later,
 /// until it is set again: one alive twice, revoked and granted again with another directory, has
 /// it for each.
-pub fn set_limit(tenant: Option<&str>, bytes: Option<u64>) -> Result<(), Errno> {
-    let Some(name) = tenant else {
+pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
+    let Some(id) = tenant else {
         TOTAL_LIMIT.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
         return Ok(());
     };
-    super::grants::check_name(name)?;
+    super::grants::check_tenant(id)?;
     let mut registry = REGISTRY.lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
-        Some(bytes) => limits.insert(name.to_owned(), bytes),
-        None => limits.remove(name),
+        Some(bytes) => limits.insert(id, bytes),
+        None => limits.remove(&id),
     };
-    for disk in registry.alive().filter(|disk| disk.name == name) {
+    for disk in registry.alive().filter(|disk| disk.tenant == id) {
         disk.limit.store(bytes.unwrap_or(NONE), Ordering::Relaxed);
     }
     Ok(())
@@ -370,44 +370,43 @@ pub fn total() -> u64 {
 /// What the disk of the tenant `tenant` takes, or every tenant's together, without one, counted
 /// now, and its limit, if it has one: `ENOENT` if no tenant `tenant` is alive. It blocks, as it
 /// walks their directories.
-pub fn count(tenant: Option<&str>) -> Result<(u64, Option<u64>), Errno> {
+pub fn count(tenant: Option<u64>) -> Result<(u64, Option<u64>), Errno> {
     let disks: Vec<_> =
-        alive().into_iter().filter(|disk| tenant.is_none_or(|name| disk.name == name)).collect();
+        alive().into_iter().filter(|disk| tenant.is_none_or(|id| disk.tenant == id)).collect();
     disks.iter().for_each(|disk| disk.recount());
-    let Some(name) = tenant else { return Ok((total(), total_limit())) };
+    let Some(id) = tenant else { return Ok((total(), total_limit())) };
     if disks.is_empty() {
         return Err(Errno::ENOENT);
     }
-    let limit = REGISTRY.lock().unwrap().limit(name);
+    let limit = REGISTRY.lock().unwrap().limit(id);
     Ok((disks.iter().map(|disk| disk.used()).sum(), limit))
 }
 
 /// A tenant's disk, as the metrics show it.
 pub struct TenantDisk {
-    /// Its [`label`].
-    pub label: String,
+    /// Its tenant's ID.
+    pub tenant: u64,
     /// What it takes, in bytes, as last counted, with what was admitted since.
     pub bytes: u64,
     /// Its limit, if it has one.
     pub limit: Option<u64>,
 }
 
-/// The disk of each tenant alive, by label: a tenant alive twice, revoked and granted again with
+/// The disk of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
 /// another directory, is counted once, with both its directories'.
 pub fn tenants() -> Vec<TenantDisk> {
     let registry = REGISTRY.lock().unwrap();
-    let mut disks: HashMap<&str, TenantDisk> = HashMap::new();
-    let alive: Vec<_> = registry.alive().collect();
-    for disk in &alive {
-        let entry = disks.entry(&disk.name).or_insert_with(|| TenantDisk {
-            label: label(&disk.name),
+    let mut disks: HashMap<u64, TenantDisk> = HashMap::new();
+    for disk in registry.alive() {
+        let entry = disks.entry(disk.tenant).or_insert_with(|| TenantDisk {
+            tenant: disk.tenant,
             bytes: 0,
-            limit: registry.limit(&disk.name),
+            limit: registry.limit(disk.tenant),
         });
         entry.bytes += disk.used();
     }
     let mut disks: Vec<_> = disks.into_values().collect();
-    disks.sort_by(|a, b| a.label.cmp(&b.label));
+    disks.sort_by_key(|disk| disk.tenant);
     disks
 }
 
@@ -425,9 +424,9 @@ mod tests {
     #[test]
     fn writes_not_done_stay_counted_across_walks() {
         let dir = tempfile::tempdir().unwrap();
-        let disk = Disk::new("acme", dir.path());
+        let disk = Disk::new(0xace, dir.path());
         let empty = disk.used();
-        set_limit(Some("acme"), Some(empty + 2 * MIB)).unwrap();
+        set_limit(Some(0xace), Some(empty + 2 * MIB)).unwrap();
         let writing = disk.admit(MIB).unwrap();
         disk.recount();
         assert_eq!(disk.used(), empty + MIB);

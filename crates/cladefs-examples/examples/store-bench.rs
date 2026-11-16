@@ -71,7 +71,7 @@ use std::time::{Duration, Instant};
 use storage_device::ExtentId;
 
 const BLOCK: usize = 4096;
-/// The benchmark's branch: of a cell of no tenant's (TASK-364).
+/// The benchmark's branch: of a cell of the default tenant's (TASK-364).
 const BRANCH: extent_store::Branch =
     extent_store::Branch { cell: extent_store::Cell { tenant: 0, id: 1 }, id: 1 };
 

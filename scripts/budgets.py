@@ -14,7 +14,7 @@ NAME-stats.txt), its last lines:
 - **memory**: no sample of the daemon's anonymous memory past its budget, which the daemon weighs
   each against as it takes it (`process:`'s `over-budget`, cladefs::extentd::process): the sum of
   what its design bounds, its uploads' memory, a framing for each store written at once, its
-  fetches', its tenants' rooms' and its own;
+  fetches', its tenants' bytes in flight and its own;
 - **uploads**: what they held at once within their budget, the host's upload memory
   (`uploads:`, TASK-317);
 - **disk**: what the daemon's process had its kernel write to its disk (`io_write_bytes`, every

@@ -296,21 +296,23 @@ through a gRPC control API on a Unix socket of its own (`CLADEFS_EXTENTD_GRPC`;
 `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
 `github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
-(TASK-43.4). Grant returns a tenant's own VM socket, for the VM manager to
-bind-mount into the tenant's jails; a connection's tenant is the socket it came
-in on, and it names stores in the tenant's directory alone. A grant names the
-tenant's ID in the bucket (TASK-364): the stores in its directory are volumes
-of its own cells, and its VM processes open no store of another tenant's cell,
-but restore from the points of others' its VM manager gives it. Revoked, a
-tenant's socket goes, and once its VM processes do, its arena and cached pages.
-The daemon's own VM socket is the default tenant's: its connections name
+(TASK-43.4). Every call names a tenant by its ID in the bucket (TASK-364), a
+64-bit number; no tenant has a name. Grant returns a tenant's own VM socket,
+`<ID in hex>.sock`, for the VM manager to bind-mount into the tenant's jails; a
+connection's tenant is the socket it came in on, and it names stores in the
+tenant's directory alone. The stores in its directory are volumes of its own
+cells, and its VM processes open no store of another tenant's cell, but restore
+from the points of others' its VM manager gives it. Revoked, a tenant's socket
+goes, and once its VM processes do, its arena and cached pages.
+The daemon's own VM socket is the default tenant's, ID 0, which is granted
+nothing and has no limits of its own, only every tenant's: its connections name
 stores in the daemon's roots alone (`CLADEFS_EXTENTD_ROOTS`), or anywhere without
 any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
 is separated.
 A tenant's VM process names no branch: what it says is ignored, so that another
-tenant's ID gets it nothing. A snapshot restored on another host needs its point
+tenant's ID gets it nothing. A VM snapshot restored on another host needs its point
 there, which the VM manager makes in the tenant's directory first (`CreateStore`
 of the point's branch), and may drop once done (`DropStore`, which leaves the
 branch in the bucket); the proto says how (TASK-154). A point is immutable: any
@@ -334,8 +336,7 @@ ago; past the total, or out of `MEMORY_BYTES`, any tenant's. With none left to
 evict, what would take more fails with `ENOMEM`, which the guest sees as an I/O
 error, and the daemon goes on. `ShrinkMemory` evicts toward a target at once,
 as the host's memory runs low. `/metrics` shows the memory held, every
-tenant's together and each tenant's, by the first 16 hex digits of its name's
-SHA-256 (`printf %s NAME | sha256sum | cut -c1-16`), not its name. Under cgroup
+tenant's together and each tenant's, by its ID in hex (`tenant="a"`). Under cgroup
 v2 the arenas' memfds are shmem, charged to the cgroup of the process that
 first touches each page, and uncharged when the chunk goes back (a hole
 punched): that is the daemon, which faults each chunk in as an arena takes it
@@ -365,8 +366,8 @@ tenant and of every tenant together (`SetDiskLimit`, none by default): past a
 tenant's limit its VMs' writes, and the stores they make, fail with `ENOSPC`,
 which the guest sees as a full disk; the daemon goes on, and other tenants'
 writes do. Its commits go on, and what leaves its disk, uploaded or freed, or a
-store deleted, lets it write again. `/metrics` shows each tenant's disk, by the
-hash of its name, as memory. A filesystem's directory quota would not do it: it
+store deleted, lets it write again. `/metrics` shows each tenant's disk, by its
+ID, as memory. A filesystem's directory quota would not do it: it
 refuses whichever write of the directory comes past it, a store framing a closed
 segment, which fails the store, or a flush appending a commit's record, rather
 than the guest's next write, which the daemon refuses before the store takes
@@ -594,7 +595,7 @@ sudo scripts/pjdfstest-fuse.py target/debug/cladefs-mount   # Linux
 What the extent daemon costs is a test's assertion too, its budgets the design's (TASK-330): its
 anonymous memory, sampled as its stats are, against the sum of what its design bounds
 (`cladefs::extentd::process`: its upload memory, a framing for each store written, its fetches,
-its tenants' rooms, its own), which its stats' `process:` line and its metrics say; and what it
+its tenants' bytes in flight, its own), which its stats' `process:` line and its metrics say; and what it
 writes, by kind, against what it says it wrote. `scripts/test-e2e.sh` fails a run whose daemons
 passed either (`scripts/budgets.py`, which says too what each wrote for each guest byte, by kind);
 a host's store held to what its design writes for a guest's large file and its small files, each

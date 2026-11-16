@@ -389,12 +389,13 @@ fn commands_through_the_daemon() {
     assert_eq!(refused, Some(cladefs::Errno::EROFS));
 }
 
-/// cladefs TASK-111.4: `stats --json` prints one snapshot through the daemon: its build and
-/// counters, and its VM process's, as its guest answered, with the guest's counters, histograms and
-/// build; without `--json`, the same as lines of a path and a value. Without the daemon, refused.
+/// cladefs TASK-111.4: `stats --json` prints the stats of one moment through the daemon: its build
+/// and counters, and its VM process's, as its guest answered, with the guest's counters, histograms
+/// and build; without `--json`, the same as lines of a path and a value. Without the daemon,
+/// refused.
 #[cfg(target_os = "linux")]
 #[test]
-fn stats_are_one_snapshot_of_the_daemon_and_its_vms() {
+fn stats_are_of_one_moment_of_the_daemon_and_its_vms() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::through_daemon(dir.path(), &[]);
     let path = dir.path().join("store");
@@ -552,22 +553,22 @@ fn tenants_are_granted_and_revoked() {
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let (uid, gid) = (uid.to_string(), gid.to_string());
     let (uid, gid) = (Path::new(&uid), Path::new(&gid));
-    let grant = [Path::new("grant"), Path::new("acme"), Path::new("a"), &acme, uid, gid];
-    let socket = dir.path().join("tenants/acme.sock");
+    let grant = [Path::new("grant"), Path::new("a"), &acme, uid, gid];
+    let socket = dir.path().join("tenants/a.sock");
     assert_eq!(cladefsctl.run(&grant).unwrap(), format!("{}\n", socket.display()));
-    assert_eq!(cladefsctl.run(&grant[..4]).unwrap(), format!("{}\n", socket.display()));
+    assert_eq!(cladefsctl.run(&grant[..3]).unwrap(), format!("{}\n", socket.display()));
     let vm = RemoteExtentStore::connect(&socket, acme.join("vm"), 1 << 24).unwrap();
     let refused = RemoteExtentStore::connect(&socket, other.join("vm"), 1 << 24);
     assert_eq!(refused.err().and_then(|err| err.errno()), Some(Errno::EACCES));
 
-    let revoke = [Path::new("revoke"), Path::new("acme")];
+    let revoke = [Path::new("revoke"), Path::new("a")];
     assert_eq!(cladefsctl.run(&revoke).unwrap(), "");
     assert!(!socket.exists(), "the revoked tenant's socket stayed");
     assert!(RemoteExtentStore::connect(&socket, acme.join("new"), 1 << 24).is_err());
     assert_eq!(vm.info().unwrap().capacity, 1 << 24);
     drop(vm);
     let error = cladefsctl.run(&revoke).expect_err("revoked a tenant not granted");
-    assert!(error.contains("revoking acme"), "{error}");
+    assert!(error.contains("revoking tenant a"), "{error}");
 }
 
 /// TASK-71: tenants' grants are the daemon's: without one, `grant` and `revoke` are refused,
@@ -577,8 +578,8 @@ fn grants_need_the_daemon() {
     let dir = tempfile::tempdir().unwrap();
     let cladefsctl = Cladefsctl::local();
     for args in [
-        [Path::new("grant"), Path::new("acme"), Path::new("a"), dir.path()].as_slice(),
-        &[Path::new("revoke"), Path::new("acme")],
+        [Path::new("grant"), Path::new("a"), dir.path()].as_slice(),
+        &[Path::new("revoke"), Path::new("a")],
     ] {
         let error = cladefsctl.run(args).expect_err("granted without a daemon");
         assert!(error.contains("tenants' grants are the extent daemon's"), "{error}");

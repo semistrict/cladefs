@@ -85,7 +85,7 @@ impl Storage {
     /// clones share and which outlives it; or, on a host of cladefs's system, in the host's bucket
     /// (`CLADEFS_EXTENTD_REMOTE`).
     pub fn create(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_store::NO_TENANT), true, Self::keeping()?)
+        Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), true, Self::keeping()?)
     }
 
     /// cladefs: the image at `path` of the branch `of` says, kept in the bucket at `bucket`
@@ -142,7 +142,7 @@ impl Storage {
     /// it is whole ([`Storage::made`]): what opens it before, or after its maker died part way,
     /// finds no store (TASK-196). As an import makes one, filling it first.
     pub fn create_unmade(path: impl AsRef<Path>, size: u64) -> Result<Self, Error> {
-        Self::make(path.as_ref(), (size, host_store::NO_TENANT), false, Self::keeping()?)
+        Self::make(path.as_ref(), (size, host_store::DEFAULT_TENANT), false, Self::keeping()?)
     }
 
     /// cladefs: a new image at `path`, as [`Storage::create_unmade`] makes it, the one volume of a

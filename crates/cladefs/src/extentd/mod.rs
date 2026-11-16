@@ -106,7 +106,7 @@ pub mod peers;
 mod pool;
 pub mod process;
 pub(crate) mod server;
-mod snapshot;
+mod stats;
 mod stores;
 pub(crate) mod wire;
 

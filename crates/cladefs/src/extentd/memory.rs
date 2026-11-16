@@ -9,7 +9,7 @@
 //! fails with `ENOMEM` (physical memory's relief, with `crate::cache`'s evictor), and the daemon
 //! goes on. cladefs: the private pages of a window that copies on write, its VM process's memory,
 //! are reserved against its tenant's as the window is made (`physmem::pin`), so that relief
-//! keeps room for them (backlog doc-13). Its metrics name tenants by [`label`]s.
+//! keeps room for them (backlog doc-13). Its metrics name tenants by their IDs.
 
 use super::server::{Parking, Tenant};
 use crate::Errno;
@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, Weak};
 static REGISTRY: Mutex<Registry> = Mutex::new(Registry {
     tenants: Vec::new(),
     limits: None,
-    rooms: None,
+    in_flight: None,
     weights: None,
     total: None,
 });
@@ -40,13 +40,13 @@ struct Registry {
     /// revoked and granted again goes on as it was ([`alive`]), but with another directory, when
     /// it is two at once for a while, each limited.
     tenants: Vec<Weak<Tenant>>,
-    /// The tenants' limits, in bytes, by name: those granted later, or again, are limited as they
+    /// The tenants' limits, in bytes, by ID: those granted later, or again, are limited as they
     /// are made.
-    limits: Option<HashMap<String, u64>>,
-    /// cladefs: the tenants' rooms ([`InFlight`]), in bytes, by name, as their limits are.
-    rooms: Option<HashMap<String, u64>>,
-    /// cladefs: the tenants' weights, by name, as their limits are ([`set_weight`], TASK-358).
-    weights: Option<HashMap<String, u64>>,
+    limits: Option<HashMap<u64, u64>>,
+    /// cladefs: the tenants' bytes in flight ([`InFlight`]), by ID, as their limits are.
+    in_flight: Option<HashMap<u64, u64>>,
+    /// cladefs: the tenants' weights, by ID, as their limits are ([`set_weight`], TASK-358).
+    weights: Option<HashMap<u64, u64>>,
     /// cladefs: the limit on every tenant's memory together the control API set, if it did, which
     /// the governor's allowance lowers further ([`govern`]).
     total: Option<u64>,
@@ -57,14 +57,14 @@ impl Registry {
         self.tenants.iter().filter_map(Weak::upgrade)
     }
 
-    fn limit(&self, name: &str) -> Option<u64> {
-        self.limits.as_ref().and_then(|limits| limits.get(name).copied())
+    fn limit(&self, tenant: u64) -> Option<u64> {
+        self.limits.as_ref().and_then(|limits| limits.get(&tenant).copied())
     }
 
-    fn weight(&self, name: &str) -> u64 {
+    fn weight(&self, tenant: u64) -> u64 {
         self.weights
             .as_ref()
-            .and_then(|weights| weights.get(name).copied())
+            .and_then(|weights| weights.get(&tenant).copied())
             .unwrap_or(DEFAULT_WEIGHT)
     }
 
@@ -76,30 +76,21 @@ impl Registry {
     }
 }
 
-/// A tenant's label in the metrics: the first 16 hexadecimal digits of the SHA-256 of its name,
-/// as `printf %s NAME | sha256sum | cut -c1-16` prints them, so that metrics, scraped elsewhere,
-/// name no tenant, and an operator who knows its name finds it.
-pub fn label(name: &str) -> String {
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(name.as_bytes());
-    digest[..8].iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-/// The tenant named `name`, whose stores are in `dir`, alive, if one is: one revoked whose VM
+/// The tenant of the ID `id`, whose stores are in `dir`, alive, if one is: one revoked whose VM
 /// processes live on, which a grant of it again goes on with (TASK-79.36).
-pub(super) fn alive(name: &str, dir: &std::path::Path) -> Option<Arc<Tenant>> {
+pub(super) fn alive(id: u64, dir: &std::path::Path) -> Option<Arc<Tenant>> {
     let registry = REGISTRY.lock().unwrap();
-    registry.alive().find(|tenant| tenant.name() == name && tenant.dir() == Some(dir))
+    registry.alive().find(|tenant| tenant.id() == id && tenant.dir() == Some(dir))
 }
 
-/// Counts `tenant`, new, among those alive, limited as its name is.
+/// Counts `tenant`, new, among those alive, limited as its ID is.
 pub(super) fn register(tenant: &Arc<Tenant>) {
     let mut registry = REGISTRY.lock().unwrap();
-    if let Some(bytes) = registry.limit(tenant.name()) {
+    if let Some(bytes) = registry.limit(tenant.id()) {
         physmem::set_arena_cap(tenant.arena(), Some(bytes));
     }
-    let room = registry.rooms.as_ref().and_then(|rooms| rooms.get(tenant.name()).copied());
-    tenant.in_flight().set_room(room);
+    let budget = registry.in_flight.as_ref().and_then(|set| set.get(&tenant.id()).copied());
+    tenant.in_flight().set_budget(budget);
     registry.tenants.retain(|alive| alive.strong_count() > 0);
     registry.tenants.push(Arc::downgrade(tenant));
 }
@@ -108,24 +99,24 @@ pub(super) fn register(tenant: &Arc<Tenant>) {
 /// together, without one; or lifts the limit, without `bytes`. A tenant's limit holds for it alive
 /// now, and granted later, until it is set again. `EINVAL` for a limit under 2 MiB, which would
 /// refuse every page.
-pub fn set_limit(tenant: Option<&str>, bytes: Option<u64>) -> Result<(), Errno> {
+pub fn set_limit(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
     if bytes.is_some_and(|bytes| bytes < CHUNK_SIZE as u64) {
         return Err(Errno::EINVAL);
     }
-    let Some(name) = tenant else {
+    let Some(id) = tenant else {
         let mut registry = REGISTRY.lock().unwrap();
         registry.total = bytes;
         registry.apply_total();
         return Ok(());
     };
-    super::grants::check_name(name)?;
+    super::grants::check_tenant(id)?;
     let mut registry = REGISTRY.lock().unwrap();
     let limits = registry.limits.get_or_insert_with(HashMap::new);
     match bytes {
-        Some(bytes) => limits.insert(name.to_owned(), bytes),
-        None => limits.remove(name),
+        Some(bytes) => limits.insert(id, bytes),
+        None => limits.remove(&id),
     };
-    for tenant in registry.alive().filter(|tenant| tenant.name() == name) {
+    for tenant in registry.alive().filter(|tenant| tenant.id() == id) {
         physmem::set_arena_cap(tenant.arena(), bytes);
     }
     Ok(())
@@ -136,10 +127,10 @@ pub fn set_limit(tenant: Option<&str>, bytes: Option<u64>) -> Result<(), Errno> 
 /// what it allows by weight, a tenant within its share kept, then any tenant's, least recently used
 /// first. Every tenant's weight is [`DEFAULT_WEIGHT`] until set, such as to the memory its VMs are
 /// given.
-pub fn set_weight(tenant: &str, weight: u64) -> Result<(), Errno> {
-    super::grants::check_name(tenant)?;
+pub fn set_weight(tenant: u64, weight: u64) -> Result<(), Errno> {
+    super::grants::check_tenant(tenant)?;
     let mut registry = REGISTRY.lock().unwrap();
-    registry.weights.get_or_insert_with(HashMap::new).insert(tenant.to_owned(), weight);
+    registry.weights.get_or_insert_with(HashMap::new).insert(tenant, weight);
     Ok(())
 }
 
@@ -180,21 +171,20 @@ pub fn govern(allowance: u64) {
     if pages.bytes() > room {
         pages.evict_to(room);
     }
-    let weighted: Vec<(String, u64)> = {
+    let weighted: Vec<(u64, u64)> = {
         let registry = REGISTRY.lock().unwrap();
         registry.apply_total();
         if physmem::arenas_bytes() <= allowance {
             return;
         }
-        let mut names: Vec<String> =
-            registry.alive().map(|tenant| tenant.name().to_owned()).collect();
-        names.sort();
-        names.dedup();
-        names.into_iter().map(|name| (name.clone(), registry.weight(&name))).collect()
+        let mut ids: Vec<u64> = registry.alive().map(|tenant| tenant.id()).collect();
+        ids.sort();
+        ids.dedup();
+        ids.into_iter().map(|id| (id, registry.weight(id))).collect()
     };
-    for (name, share) in super::governor::shares(allowance, &weighted) {
-        if held_by(&name) > share
-            && let Err(err) = shrink(Some(&name), share)
+    for (id, share) in super::governor::shares(allowance, &weighted) {
+        if held_by(id) > share
+            && let Err(err) = shrink(Some(id), share)
             && err != Errno::ENOENT
         {
             log::error!("extentd: shrinking a tenant's memory to its share: {err}");
@@ -207,12 +197,12 @@ pub fn govern(allowance: u64) {
     }
 }
 
-/// What the tenants alive named `name` hold.
-fn held_by(name: &str) -> u64 {
+/// What the tenants alive of the ID `id` hold.
+fn held_by(id: u64) -> u64 {
     let registry = REGISTRY.lock().unwrap();
     registry
         .alive()
-        .filter(|tenant| tenant.name() == name)
+        .filter(|tenant| tenant.id() == id)
         .map(|tenant| physmem::arena_bytes(tenant.arena()))
         .sum()
 }
@@ -224,9 +214,9 @@ fn held_by(name: &str) -> u64 {
 /// free once the VM process has unmapped it, or the daemon let it go (TASK-79.9): each extent's
 /// pages free before what is held is looked at again ([`Parking`]), so that it evicts no more than
 /// it must, and returns what is held once they are, not before.
-pub fn shrink(tenant: Option<&str>, target: u64) -> Result<u64, Errno> {
+pub fn shrink(tenant: Option<u64>, target: u64) -> Result<u64, Errno> {
     let parking = Parking::start();
-    let Some(name) = tenant else {
+    let Some(id) = tenant else {
         // Free memory first: the arenas' spare chunks.
         physmem::release_spares(None);
         crate::cache::evict_least_used(None, |_| {
@@ -237,7 +227,7 @@ pub fn shrink(tenant: Option<&str>, target: u64) -> Result<u64, Errno> {
         return Ok(physmem::arenas_bytes());
     };
     let arenas: Vec<_> = (REGISTRY.lock().unwrap().alive())
-        .filter(|tenant| tenant.name() == name)
+        .filter(|tenant| tenant.id() == id)
         .map(|tenant| tenant.arena())
         .collect();
     if arenas.is_empty() {
@@ -257,35 +247,35 @@ pub fn shrink(tenant: Option<&str>, target: u64) -> Result<u64, Errno> {
 
 /// A tenant's memory, as the metrics show it.
 pub struct TenantMemory {
-    /// Its [`label`].
-    pub label: String,
+    /// Its ID.
+    pub tenant: u64,
     /// What its arena holds, in bytes.
     pub bytes: u64,
     /// Its limit, if it has one.
     pub limit: Option<u64>,
 }
 
-/// The memory of each tenant alive, by label: a tenant alive twice, revoked and granted again with
+/// The memory of each tenant alive, by ID: a tenant alive twice, revoked and granted again with
 /// another directory, is counted once, with both its arenas'.
 pub fn tenants() -> Vec<TenantMemory> {
     let registry = REGISTRY.lock().unwrap();
-    let mut memory: HashMap<String, TenantMemory> = HashMap::new();
+    let mut memory: HashMap<u64, TenantMemory> = HashMap::new();
     for tenant in registry.alive() {
-        let entry = memory.entry(tenant.name().to_owned()).or_insert_with(|| TenantMemory {
-            label: label(tenant.name()),
+        let entry = memory.entry(tenant.id()).or_insert_with(|| TenantMemory {
+            tenant: tenant.id(),
             bytes: 0,
-            limit: registry.limit(tenant.name()),
+            limit: registry.limit(tenant.id()),
         });
         entry.bytes += physmem::arena_bytes(tenant.arena());
     }
     let mut memory: Vec<_> = memory.into_values().collect();
-    memory.sort_by(|a, b| a.label.cmp(&b.label));
+    memory.sort_by_key(|memory| memory.tenant);
     memory
 }
 
 /// cladefs: what every tenant's connections have the daemon hold of their VM processes' requests
 /// now, together ([`InFlight`]): the default tenant's, if made, and each granted one's alive.
-pub(super) fn rooms_held() -> u64 {
+pub(super) fn in_flight_held() -> u64 {
     let registry = REGISTRY.lock().unwrap();
     let granted: u64 = registry.alive().map(|tenant| tenant.in_flight().held()).sum();
     let default =
@@ -317,31 +307,32 @@ pub fn return_large_allocations() {
     }
 }
 
-/// cladefs: the room a tenant's connections share, unless one is set for it ([`set_room`]):
-/// what of its VM processes' requests the daemon holds at once, their stream data and what it has
-/// queued for them, together (TASK-149.35). Each connection has a room of its own too
+/// cladefs: the bytes in flight a tenant's connections share, unless they are set for it
+/// ([`set_in_flight`]): what of its VM processes' requests the daemon holds at once, their stream
+/// data and what it has queued for them, together (TASK-149.35). Each connection has a room of its
+/// own too
 /// (`server::Peer::room`, 272 MiB without a window), and a tenant as many as 1,024 connections:
 /// some 272 GiB of one tenant's, held within the protocol, every tenant's daemon with it. A VM
 /// process moves the data of its requests through its transfer area, up to 256 KiB each, 8 at once,
 /// which no room counts; past that, through the stream. 8 GiB is 30 VM processes at once keeping
 /// their rooms full, which none does but writing 64 MiB extents back to back, where a host's
 /// density case, 300 forks reading their base, held 16 MiB of the tenant's at most.
-pub const DEFAULT_TENANT_ROOM: u64 = 8 << 30;
+pub const DEFAULT_TENANT_IN_FLIGHT: u64 = 8 << 30;
 
-/// cladefs: the room of every tenant whose own isn't set ([`set_room`]).
-static TENANT_ROOM: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_ROOM);
+/// cladefs: the bytes in flight of every tenant whose own aren't set ([`set_in_flight`]).
+static TENANT_IN_FLIGHT: AtomicU64 = AtomicU64::new(DEFAULT_TENANT_IN_FLIGHT);
 
-/// cladefs: sets the room the connections of the tenant `tenant` share to `bytes`, or, without
-/// `bytes`, to every tenant's; or, without `tenant`, every tenant's whose own isn't set, the
-/// default's without `bytes` (TASK-149.35). A tenant's holds for it alive now, and granted later,
-/// until it is set again. `EINVAL` for a room under a payload's most, which a request of it
-/// couldn't be held in.
-pub fn set_room(tenant: Option<&str>, bytes: Option<u64>) -> Result<(), Errno> {
+/// cladefs: sets the bytes in flight the connections of the tenant `tenant` share to `bytes`, or,
+/// without `bytes`, to every tenant's; or, without `tenant`, every tenant's whose own aren't set,
+/// the default without `bytes` (TASK-149.35). A tenant's hold for it alive now, and granted later,
+/// until they are set again. `EINVAL` for fewer than a payload's most, which a request of it
+/// couldn't be held in, and for the default tenant, which is every tenant's with them.
+pub fn set_in_flight(tenant: Option<u64>, bytes: Option<u64>) -> Result<(), Errno> {
     if bytes.is_some_and(|bytes| bytes < super::wire::MAX_PAYLOAD) {
         return Err(Errno::EINVAL);
     }
-    let Some(name) = tenant else {
-        TENANT_ROOM.store(bytes.unwrap_or(DEFAULT_TENANT_ROOM), Ordering::Relaxed);
+    let Some(id) = tenant else {
+        TENANT_IN_FLIGHT.store(bytes.unwrap_or(DEFAULT_TENANT_IN_FLIGHT), Ordering::Relaxed);
         // Larger, it lets those waiting go on.
         let registry = REGISTRY.lock().unwrap();
         registry.alive().for_each(|tenant| tenant.in_flight().changed());
@@ -350,34 +341,34 @@ pub fn set_room(tenant: Option<&str>, bytes: Option<u64>) -> Result<(), Errno> {
         }
         return Ok(());
     };
-    super::grants::check_name(name)?;
+    super::grants::check_tenant(id)?;
     let mut registry = REGISTRY.lock().unwrap();
-    let rooms = registry.rooms.get_or_insert_with(HashMap::new);
+    let in_flight = registry.in_flight.get_or_insert_with(HashMap::new);
     match bytes {
-        Some(bytes) => rooms.insert(name.to_owned(), bytes),
-        None => rooms.remove(name),
+        Some(bytes) => in_flight.insert(id, bytes),
+        None => in_flight.remove(&id),
     };
-    for tenant in registry.alive().filter(|tenant| tenant.name() == name) {
-        tenant.in_flight().set_room(bytes);
+    for tenant in registry.alive().filter(|tenant| tenant.id() == id) {
+        tenant.in_flight().set_budget(bytes);
     }
     Ok(())
 }
 
 /// cladefs: what a tenant's connections have the daemon hold of its VM processes' requests together
 /// (TASK-149.35): what each counts against its own room, its requests' stream data and what it
-/// queued for its VM process, within the room they share, the tenant's own or every tenant's
-/// ([`DEFAULT_TENANT_ROOM`]). A request past it waits, before its payload is read, until what is
-/// held leaves it room; or, with nothing held, goes on, so that one as large as the room is
-/// served. Not let go, as a connection past its own room is: it keeps within its own, and the
-/// tenant's other VM processes, a healthy tenant's busy ones, take theirs.
+/// queued for its VM process, within the bytes in flight they share, its budget, the tenant's own
+/// or every tenant's ([`DEFAULT_TENANT_IN_FLIGHT`]). A request past it waits, before its payload
+/// is read, until what is held leaves it enough; or, with nothing held, goes on, so that one as
+/// large as the budget is served. Not let go, as a connection past its own room is: it keeps
+/// within its own, and the tenant's other VM processes, a healthy tenant's busy ones, take theirs.
 #[derive(Default)]
 pub struct InFlight {
     held: AtomicU64,
-    /// Its room, or 0, every tenant's ([`TENANT_ROOM`]).
-    room: AtomicU64,
+    /// Its budget, or 0, every tenant's ([`TENANT_IN_FLIGHT`]).
+    budget: AtomicU64,
     /// The most it held, which the tests measure.
     peak: AtomicU64,
-    /// What says it held less, or its room grew.
+    /// What says it held less, or its budget grew.
     less: event_listener::Event,
 }
 
@@ -392,26 +383,26 @@ impl InFlight {
         self.peak.load(Ordering::Relaxed)
     }
 
-    /// Its room: its own, or every tenant's.
-    pub fn room(&self) -> u64 {
-        match self.room.load(Ordering::Relaxed) {
-            0 => TENANT_ROOM.load(Ordering::Relaxed),
-            room => room,
+    /// Its budget: its own, or every tenant's.
+    pub fn budget(&self) -> u64 {
+        match self.budget.load(Ordering::Relaxed) {
+            0 => TENANT_IN_FLIGHT.load(Ordering::Relaxed),
+            budget => budget,
         }
     }
 
-    fn set_room(&self, bytes: Option<u64>) {
-        self.room.store(bytes.unwrap_or(0), Ordering::Relaxed);
+    fn set_budget(&self, bytes: Option<u64>) {
+        self.budget.store(bytes.unwrap_or(0), Ordering::Relaxed);
         self.changed();
     }
 
-    /// Tells those waiting for room that there may be some.
+    /// Tells those waiting within its budget that there may be enough.
     fn changed(&self) {
         self.less.notify(usize::MAX);
     }
 
-    /// Holds `bytes` more, room or not: what the daemon queued for a VM process, which it holds
-    /// whatever.
+    /// Holds `bytes` more, within its budget or not: what the daemon queued for a VM process, which
+    /// it holds whatever.
     pub fn add(&self, bytes: u64) {
         let held = self.held.fetch_add(bytes, Ordering::Relaxed) + bytes;
         self.peak.fetch_max(held, Ordering::Relaxed);
@@ -425,11 +416,11 @@ impl InFlight {
         }
     }
 
-    /// Holds `bytes` more, if they are within its room, or it holds nothing.
+    /// Holds `bytes` more, if they are within its budget, or it holds nothing.
     fn try_take(&self, bytes: u64) -> bool {
-        let room = self.room();
+        let budget = self.budget();
         let taken = self.held.try_update(Ordering::Relaxed, Ordering::Relaxed, |held| {
-            (held == 0 || held + bytes <= room).then_some(held + bytes)
+            (held == 0 || held + bytes <= budget).then_some(held + bytes)
         });
         if let Ok(held) = taken {
             self.peak.fetch_max(held + bytes, Ordering::Relaxed);
@@ -437,8 +428,8 @@ impl InFlight {
         taken.is_ok()
     }
 
-    /// Holds `bytes` more, once they are within its room, or it holds nothing: waiting, holding no
-    /// thread, until then.
+    /// Holds `bytes` more, once they are within its budget, or it holds nothing: waiting, holding
+    /// no thread, until then.
     pub async fn take(&self, bytes: u64) {
         loop {
             if self.try_take(bytes) {
