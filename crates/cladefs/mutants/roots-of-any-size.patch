@@ -12,4 +12,4 @@
 +                if root.is_some_and(|root| root.len() > MAX_PAYLOAD as usize) {
                      return Err(Errno::EINVAL);
                  }
-                 let commit = match (has(COMMIT_DURABLE), has(COMMIT_LOCAL)) {
+                 let commit = match (has(COMMIT_UPLOADED), has(COMMIT_LOCAL)) {

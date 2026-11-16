@@ -27,7 +27,7 @@
 //! The VMs send the host their histories, which it checks once they are done with TASK-42.1's
 //! checker (`follower_history`): the writer's operations, each with the files it changed, and the
 //! store's latest commit as each of its syncs returned; and its followers' reads, each with the
-//! commits its follower may have been as of (fs/fxfs's FXFS_IOC_FOLLOW_EPOCHS). Each reader must
+//! commits its follower may have been as of (fs/fxfs's FXFS_IOC_FOLLOW_COMMITS). Each reader must
 //! find what a prefix of the writer's operations those commits may hold left, a prefix no shorter
 //! than its last read's. A reader records each read that found what it last found of the file
 //! otherwise, and the others every RECORD_EVERY.
@@ -80,7 +80,7 @@ const PORT: u32 = 5054;
 /// The vsock port each VM sends its history on, which the host checks (TASK-42.1's checker,
 /// `follower_history`), one record a line: the writer's operations (`op AFTER NAME=OBJECT:CONTENTS
 /// ...`, `NAME=-` for none) and syncs (`sync`, which the host answers with the store's latest
-/// commit's epoch); a follower's reads (`read READER FROM TO NAME FOUND`) and reads of files it
+/// commit's number); a follower's reads (`read READER FROM TO NAME FOUND`) and reads of files it
 /// held open (`held READER FROM TO OBJECT FOUND`), FOUND a number, `-` for nothing, or `!WHAT` for
 /// what isn't whole, made as of a commit from FROM to TO.
 const HISTORY_PORT: u32 = 5056;
@@ -289,9 +289,9 @@ mod host {
                 writeln!(records, "{line}")?;
                 record(line, &history, &mut || {
                     let (control, store) = (control.as_ref().unwrap(), store.as_ref().unwrap());
-                    let epoch = control.committed(store)?;
-                    writeln!(answers, "{epoch}")?;
-                    Ok(epoch)
+                    let commit = control.committed(store)?;
+                    writeln!(answers, "{commit}")?;
+                    Ok(commit)
                 })
                 .map_err(|err| err.context(format!("the history's line {line:?}")))?;
             }
@@ -300,7 +300,7 @@ mod host {
         }))
     }
 
-    /// Takes the record `line` into `history`, a sync's epoch from `synced`.
+    /// Takes the record `line` into `history`, a sync's commit number from `synced`.
     fn record(
         line: &str,
         history: &Mutex<History<String, u64>>,
@@ -338,13 +338,13 @@ mod host {
                 history.lock().unwrap().operation(number(after)?, changes);
             }
             ["sync"] => {
-                let epoch = synced()?;
-                history.lock().unwrap().synced(epoch);
+                let commit = synced()?;
+                history.lock().unwrap().synced(commit);
             }
             ["read", reader, from, to, name, what] => {
                 let read = Read {
                     reader: number(reader)? as usize,
-                    epochs: number(from)?..=number(to)?,
+                    commits: number(from)?..=number(to)?,
                     name: name.to_owned(),
                     found: found(what)?,
                 };
@@ -354,7 +354,7 @@ mod host {
                 let found = found(what)?.and_then(|found| found.ok_or_else(|| "nothing".into()));
                 let read = HeldRead {
                     reader: number(reader)? as usize,
-                    epochs: number(from)?..=number(to)?,
+                    commits: number(from)?..=number(to)?,
                     object_id: number(object_id)?,
                     found,
                 };
@@ -568,13 +568,13 @@ mod guest {
             self.record(format_args!("op {after} {}", changes.join(" ")));
         }
 
-        /// The writer's sync, returned: the epoch of the store's latest commit, as the host says.
+        /// The writer's sync, returned: the number of the store's latest commit, as the host says.
         fn synced(&self) -> u64 {
             self.record(format_args!("sync"));
             self.flush();
-            let mut epoch = String::new();
-            self.answers.lock().unwrap().read_line(&mut epoch).unwrap();
-            epoch.trim_end().parse().unwrap()
+            let mut commit = String::new();
+            self.answers.lock().unwrap().read_line(&mut commit).unwrap();
+            commit.trim_end().parse().unwrap()
         }
 
         fn flush(&self) {
@@ -587,16 +587,16 @@ mod guest {
     const BLOCK_OBJECTS: u64 = 1 << 62;
     const SHAPE_OBJECTS: u64 = 1 << 61;
 
-    /// The commits a follower's state is as of (fs/fxfs's FXFS_IOC_FOLLOW_EPOCHS): every batch up
+    /// The commits a follower's state is as of (fs/fxfs's FXFS_IOC_FOLLOW_COMMITS): every batch up
     /// to `settled`'s invalidated, none past `applied`'s applied.
     #[repr(C)]
     #[derive(Clone, Copy, Default)]
-    struct Epochs {
+    struct FollowCommits {
         settled: u64,
         applied: u64,
     }
 
-    nix::ioctl_read!(follow_epochs, b'x', 0x42, Epochs);
+    nix::ioctl_read!(follow_commits, b'x', 0x42, FollowCommits);
 
     /// A follower's batches, and how long they waited for its fill barrier (fs/fxfs's
     /// FXFS_IOC_FOLLOW_STATS).
@@ -618,11 +618,11 @@ mod guest {
     }
 
     /// The commits the follower whose directory `dir` is is as of now.
-    fn epochs(dir: &fs::File) -> Epochs {
-        let mut epochs = Epochs::default();
-        // SAFETY: The ioctl writes an `Epochs`.
-        unsafe { follow_epochs(dir.as_raw_fd(), &mut epochs) }.expect("FXFS_IOC_FOLLOW_EPOCHS");
-        epochs
+    fn commits(dir: &fs::File) -> FollowCommits {
+        let mut commits = FollowCommits::default();
+        // SAFETY: The ioctl writes a `FollowCommits`.
+        unsafe { follow_commits(dir.as_raw_fd(), &mut commits) }.expect("FXFS_IOC_FOLLOW_COMMITS");
+        commits
     }
 
     /// What a reader found of a file: its contents, nothing, or, not whole, what it found.
@@ -650,10 +650,10 @@ mod guest {
 
         /// Reads the file `name` with `read`, recording what it found.
         fn read(&mut self, name: &str, read: impl FnOnce() -> Found) -> Found {
-            let before = epochs(&self.dir);
+            let before = commits(&self.dir);
             let found = read();
             if self.last.get(name) != Some(&found) || self.recorded.elapsed() >= RECORD_EVERY {
-                let after = epochs(&self.dir);
+                let after = commits(&self.dir);
                 let (id, from, to) = (self.id, before.settled, after.applied);
                 let what = show(&found);
                 self.history.record(format_args!("read {id} {from} {to} {name} {what}"));
@@ -665,9 +665,9 @@ mod guest {
 
         /// Reads the file held open whose object is `object` with `read`, recording what it found.
         fn held(&mut self, object: u64, read: impl FnOnce() -> Found) -> Found {
-            let before = epochs(&self.dir);
+            let before = commits(&self.dir);
             let found = read();
-            let after = epochs(&self.dir);
+            let after = commits(&self.dir);
             let (id, from, to, what) = (self.id, before.settled, after.applied, show(&found));
             self.history.record(format_args!("held {id} {from} {to} {object} {what}"));
             found
@@ -704,7 +704,7 @@ mod guest {
     /// writes what it left, in `done`.
     fn writer() {
         let history = History::connect();
-        // The store's epoch, as of its last sync: each operation since begins after it.
+        // The store's latest commit, as of its last sync: each operation since begins after it.
         let mut after = 0;
         fs::create_dir(path("tok")).unwrap();
         fs::write(path("tok/token.0"), b"").unwrap();

@@ -327,7 +327,7 @@ pub(super) fn test_xattrs_bounded() {
     let writes = fill_host.writes;
     assert!(writes >= sets, "{sets} sets: {fill_host}, not one written as each was set");
     assert!(writes <= sets + sets / 4, "{sets} sets: {fill_host}, more than 1.25 each");
-    assert_eq!(fill_host.durable_commits, 0, "{sets} sets: {fill_host}");
+    assert_eq!(fill_host.uploaded_commits, 0, "{sets} sets: {fill_host}");
     // cladefs: where its time goes, against its budget (TASK-168): what was set made durable, then
     // the files removed, and their room freed; and in each what was asked of the host, and what it
     // took, which the budget leaves out (TASK-263).

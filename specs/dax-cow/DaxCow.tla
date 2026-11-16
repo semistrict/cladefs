@@ -25,7 +25,7 @@
 (*   not counted waits, holding nothing, for the budget to have room for  *)
 (*   it (private_max).                                                     *)
 (* - the other task: writeback (->writepages), fsync (writeback, then the *)
-(*   seal that makes it durable), rebinding (a private page MAPped back to*)
+(*   seal that makes it durable), rebinding (a private page MAPped anew to*)
 (*   its extent's page, freeing it), and punching a page (truncate).      *)
 (*   Writeback swaps the dirty set out for an empty one (the writeback    *)
 (*   set), write-protects the PTEs (by the page tables), copies the pages *)

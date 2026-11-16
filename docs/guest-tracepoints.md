@@ -35,7 +35,7 @@ All of them are in tracefs under `events/fxfs/`.
 | `fxfs_dax_fault_end` | The fault returns | `ino`, `pgoff`, `ret` (its `vm_fault_t`) |
 | `fxfs_dax_reclaim` | The window tried to reclaim a file's range for room | `ino`, `chunk`, `reclaimed` |
 | `fxfs_dax_writeback_start`, `_end` | A DAX file's dirty pages are written back | `ino`; then `ino`, `ret` (pages written, or -errno) |
-| `fxfs_dax_rebind_start`, `_end` | A file's clean private pages are mapped back to their sealed extents | `ino`; then `ino`, `ret` (pages rebound) |
+| `fxfs_dax_rebind_start`, `_end` | A file's clean private pages are rebound to their sealed extents | `ino`; then `ino`, `ret` (pages rebound) |
 | `fxfs_fsync_start`, `_end` | fsync(2) and fdatasync(2), of any file | `ino`; then `ino`, `ret` |
 
 `why` in `fxfs_dax_map` takes one of four values:
@@ -43,7 +43,7 @@ All of them are in tracefs under `events/fxfs/`.
 - `reach` (0): a region's extent, mapped as far as a slice of it needs. Files share the region, so
   `ino` is 0.
 - `range` (1): a range's own pages.
-- `rebind` (2): a range's private pages, mapped back to their sealed extent.
+- `rebind` (2): a range's private pages, rebound to their sealed extent.
 - `zeros` (3): zeros past a file's new end.
 
 ### Matching a start to its end

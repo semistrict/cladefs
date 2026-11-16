@@ -57,8 +57,8 @@ pub(super) static IO: std::sync::LazyLock<tokio::runtime::Runtime> =
             .expect("extentd's runtime")
     });
 
-/// cladefs: how long a commit only ordered (`COMMIT` without `COMMIT_DURABLE`) waits at most to be
-/// made durable: the host's lag, which doc-2's requirement 11 bounds.
+/// cladefs: how long a commit only ordered (`COMMIT` without `COMMIT_UPLOADED`) waits at most to be
+/// made local: the host's lag, which doc-2's requirement 11 bounds.
 const FLUSH_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 /// cladefs: how long a follower's connection waits for a commit before it looks whether it is
@@ -883,7 +883,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Free(_) => (None, Some(1)),
         Request::FreeMany { rest, .. } => (None, Some(1 + rest.len() as u64)),
         Request::Commit { commit, .. } => {
-            span.set(trace::DURABLE, *commit == Commit::Durable);
+            span.set(trace::DURABLE, *commit == Commit::Uploaded);
             (None, None)
         }
         Request::Open { path, .. } | Request::Fork { path, .. } => {
@@ -1320,9 +1320,9 @@ impl Connection {
     ) -> Result<(), Errno> {
         if let Request::Open { path, opening: codec::Opening::ReadOnly } = request {
             let branch = self.follow(path)?;
-            let epoch = self.store().ok_or(Errno::EBADF)?.epoch()?;
+            let commit = self.store().ok_or(Errno::EBADF)?.view_commit()?;
             let max_map_count = max_map_count();
-            reply.args = Opened { branch, arena: self.arena_id(), epoch, max_map_count }.args();
+            reply.args = Opened { branch, arena: self.arena_id(), commit, max_map_count }.args();
             fds.extend(self.memories());
             return Ok(());
         }
@@ -1382,12 +1382,14 @@ impl Connection {
                 Ok(())
             }
             Request::Unmap { window_offset, len } => store.unmap(*window_offset, *len),
-            Request::Commit { commit: Commit::Durable, root } => store.commit(*root),
+            Request::Commit { commit: Commit::Uploaded, root } => store.commit(*root),
             Request::Commit { commit: Commit::Local, root } => store.commit_local(*root),
             Request::Commit { commit: Commit::Ordered, root } => store.commit_ordered(*root),
             Request::Root => store.root().map(|root| *payload = root),
-            Request::Advance => store.advance().map(|epoch| reply.args = Advanced { epoch }.args()),
-            Request::LetGo { epoch } => store.let_go(*epoch),
+            Request::Advance => {
+                store.advance().map(|commit| reply.args = Advanced { commit }.args())
+            }
+            Request::LetGo { commit } => store.let_go(*commit),
             Request::Pin(extent) => store.pin(*extent),
             Request::Unpin(extent) => store.unpin(*extent),
             // Authorized, as every path a request names ([`Connection::serve_in_turn`]).
@@ -1537,8 +1539,9 @@ impl Connection {
             return Err(Errno::EPERM);
         }
         let store = Arc::new(follower);
-        let (epoch, sender, told) = (store.epoch()?, self.peer.sender.clone(), store.clone());
-        self.start_behind(move |stopped| tell_commits(told, epoch, sender, stopped));
+        let (commit, sender, told) =
+            (store.view_commit()?, self.peer.sender.clone(), store.clone());
+        self.start_behind(move |stopped| tell_commits(told, commit, sender, stopped));
         let branch = store.branch().id;
         opening.opened(path, store, Phase::Following);
         Ok(branch)
@@ -1567,7 +1570,7 @@ impl Connection {
         let fds = match &opened {
             Ok(branch) => {
                 let (branch, arena, max_map_count) = (*branch, self.arena_id(), max_map_count());
-                reply.args = Opened { branch, arena, epoch: 0, max_map_count }.args();
+                reply.args = Opened { branch, arena, commit: 0, max_map_count }.args();
                 Vec::from(self.memories())
             }
             Err(_) => Vec::new(),
@@ -1833,27 +1836,27 @@ static FLUSHERS: std::sync::LazyLock<Pool> =
     std::sync::LazyLock::new(|| Pool::new("extentd flush", FLUSHES));
 
 /// cladefs: tells the VM process at the other end of `sender` of each commit of its follower's
-/// store after the commit of `epoch` ([`COMMITTED`]): the latest, of each run of them; until
+/// store after the one numbered `commit` ([`COMMITTED`]): the latest, of each run of them; until
 /// `stopped` says to stop. It waits for the writer's commits holding no thread (TASK-34), or
 /// [`COMMITS_POLL`] at most, for commits made otherwise. What it tells a VM process that stopped
 /// reading waits for it as one message, the latest commit's, rather than one for each, which the
 /// daemon would hold for it without end, the writer's commits going on (TASK-79.9).
 async fn tell_commits(
     store: Arc<ExtentStore>,
-    mut epoch: u64,
+    mut commit: u64,
     sender: Arc<AsyncSender>,
     mut stopped: tokio::sync::oneshot::Receiver<()>,
 ) {
     use tokio::sync::oneshot::error::TryRecvError;
     while let Err(TryRecvError::Empty) = stopped.try_recv() {
         let committed = store.commits();
-        let Some(latest) = store.newer(epoch, std::time::Duration::ZERO) else {
+        let Some(latest) = store.newer(commit, std::time::Duration::ZERO) else {
             let _ = tokio::time::timeout(COMMITS_POLL, committed).await;
             continue;
         };
-        epoch = latest;
+        commit = latest;
         // Sent holding no thread, as a send never waits (TASK-79.9).
-        if let Err(err) = sender.send_latest(Told::Committed { epoch: latest }.encode()) {
+        if let Err(err) = sender.send_latest(Told::Committed { commit: latest }.encode()) {
             log::warn!("extentd: telling a VM process of a commit: {err}");
             return;
         }

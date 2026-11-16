@@ -5,7 +5,7 @@
 //! Serving the device's requests: each request's buffers ([`Buffers`]) read, the store asked
 //! ([`Store`]), and what it returns and the response written back. The device applies requests in
 //! any order but across barriers (doc-4), so a guest's `MAP` doesn't wait for the writes and
-//! durable commits queued before it: each is served as a future ([`handle`]), several at once. On
+//! uploaded commits queued before it: each is served as a future ([`handle`]), several at once. On
 //! Linux, [`Requests`] serves them on the threads receiving the daemon's replies, which go on with
 //! them, completing each request (`cladefs::extentd::spawn_on_replies`): no thread is woken between
 //! the reply and the guest's interrupt, nor waits for the store's I/O (TASK-41).
@@ -107,7 +107,7 @@ async fn serve<S: Store>(
     let type_ = u32::from_le(header.type_);
     let flags = match cache {
         CacheType::Writeback => u32::from_le(header.flags),
-        CacheType::Unsafe => undurable(type_, u32::from_le(header.flags)),
+        CacheType::Unsafe => ordered_only(type_, u32::from_le(header.flags)),
     };
     match type_ {
         VIRTIO_EXTENT_T_READ => {
@@ -127,8 +127,9 @@ async fn serve<S: Store>(
                 return Err(Errno::EINVAL);
             }
             let data = reader.slices(len as usize)?;
-            // A barrier before orders, without waiting for durability (doc-4); one after, with
-            // WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either way.
+            // A barrier before orders, without waiting for the disk or the bucket (doc-4); one
+            // after, with WRITE_COMMIT, waits as a COMMIT does. One round trip to the daemon either
+            // way.
             let mut barriers = write_barriers(flags).ok_or(Errno::EINVAL)?;
             // cladefs: the root that commit sets, after the data (WRITE_ROOT).
             let root;
@@ -168,7 +169,7 @@ async fn serve<S: Store>(
             let args: MapArgs = reader.obj()?;
             // cladefs: every map is read-only; a window that copies on write, a writer's, maps
             // zeros, and a follower's none (backlog doc-13).
-            let map_flags = VIRTIO_EXTENT_MAP_AHEAD
+            let map_flags = VIRTIO_EXTENT_MAP_PREFAULT
                 | if store.copies_on_write() { VIRTIO_EXTENT_MAP_ZEROS } else { 0 };
             if flags & !(map_flags | VIRTIO_EXTENT_MAP_MANY) != 0 {
                 return Err(Errno::EINVAL);
@@ -191,7 +192,7 @@ async fn serve<S: Store>(
             }
             // Sent to the daemon at once, each as it would be alone: the first error fails the
             // request, whichever others it mapped (`F_MAP_MANY`). cladefs: what the guest reads
-            // next (`F_MAP_AHEAD`) is then mapped for it (TASK-112.1).
+            // next (`F_MAP_PREFAULT`) is then mapped for it (TASK-112.1).
             futures::future::try_join_all(maps.iter().map(|(args, flags)| async move {
                 let (window_offset, len) =
                     (u64::from_le(args.window_offset), u64::from_le(args.len));
@@ -201,7 +202,7 @@ async fn serve<S: Store>(
                     let offset = u64::from_le(args.offset);
                     store.map(args.id.into(), offset, len, window_offset).await?;
                 }
-                if flags & VIRTIO_EXTENT_MAP_AHEAD != 0 {
+                if flags & VIRTIO_EXTENT_MAP_PREFAULT != 0 {
                     store.prefault(window_offset, len);
                 }
                 Ok::<_, Errno>(())
@@ -233,10 +234,10 @@ async fn serve<S: Store>(
                 }
                 root = Some(reader.bytes(len as usize)?);
             }
-            // Without COMMIT_DURABLE, the commit completes once ordered: the daemon makes it
-            // durable soon after (doc-4).
-            let commit = if flags & VIRTIO_EXTENT_COMMIT_DURABLE != 0 {
-                Commit::Durable
+            // Without COMMIT_UPLOADED, the commit completes once ordered: the daemon makes it
+            // local soon after (doc-4).
+            let commit = if flags & VIRTIO_EXTENT_COMMIT_UPLOADED != 0 {
+                Commit::Uploaded
             } else {
                 Commit::Ordered
             };
@@ -298,16 +299,16 @@ async fn serve<S: Store>(
         }
         // cladefs: a follower's (doc-4's F_READ_ONLY); a writer's store refuses them (EINVAL).
         VIRTIO_EXTENT_T_ADVANCE => {
-            if room < size_of::<Epoch>() {
+            if room < size_of::<CommitNumber>() {
                 return Err(Errno::EINVAL);
             }
-            let epoch = Epoch { epoch: store.advance().await?.to_le(), reserved: 0 };
-            writer.obj(0, &epoch);
-            Ok(size_of::<Epoch>())
+            let number = CommitNumber { commit: store.advance().await?.to_le(), reserved: 0 };
+            writer.obj(0, &number);
+            Ok(size_of::<CommitNumber>())
         }
         VIRTIO_EXTENT_T_LET_GO => {
-            let epoch: Epoch = reader.obj()?;
-            store.let_go(u64::from_le(epoch.epoch)).await?;
+            let number: CommitNumber = reader.obj()?;
+            store.let_go(u64::from_le(number.commit)).await?;
             Ok(0)
         }
         VIRTIO_EXTENT_T_PIN => {
@@ -361,7 +362,7 @@ mod linux {
     pub struct Requests {
         store: Arc<RemoteExtentStore>,
         notices: Arc<Notices>,
-        /// cladefs: what it does with the guest's asks for durability (TASK-363).
+        /// cladefs: what it does with the guest's asks for uploaded commits (TASK-363).
         cache: CacheType,
         served: Served,
         /// The requests taken off the queue and not yet returned to the driver.
@@ -626,7 +627,7 @@ mod tests {
             Err(Errno::EINVAL)
         }
 
-        async fn let_go(&self, _epoch: u64) -> Result<(), Errno> {
+        async fn let_go(&self, _commit: u64) -> Result<(), Errno> {
             Err(Errno::EINVAL)
         }
 
@@ -733,7 +734,7 @@ mod tests {
         assert_eq!(request(&store, &read, writable).1, errno(Errno::ENOENT));
     }
 
-    /// A WRITE's flags order it: a barrier before; a commit after, durable or ordered, setting the
+    /// A WRITE's flags order it: a barrier before; a commit after, uploaded or ordered, setting the
     /// root after the data; none but a WRITE's.
     #[test]
     fn writes_carry_their_barriers() {
@@ -741,15 +742,15 @@ mod tests {
         let rooted = IoArgs { root_len: 6u32.to_le(), ..io(1, 0, 4) };
         let flags = VIRTIO_EXTENT_WRITE_BARRIER
             | VIRTIO_EXTENT_WRITE_COMMIT
-            | VIRTIO_EXTENT_WRITE_DURABLE
+            | VIRTIO_EXTENT_WRITE_UPLOADED
             | VIRTIO_EXTENT_WRITE_ROOT;
         let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(rooted), b"datasecond");
         assert_eq!(request(&store, &write, RESPONSE), (vec![], 0));
-        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Durable]);
+        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Uploaded]);
         assert_eq!(store.state().root, b"second");
         assert_eq!(store.state().extents[&id(1)].0, b"data");
-        // A root, or durability, without a commit; an unknown flag; a root past the most.
-        for flags in [VIRTIO_EXTENT_WRITE_ROOT, VIRTIO_EXTENT_WRITE_DURABLE, 1 << 4] {
+        // A root, or an upload, without a commit; an unknown flag; a root past the most.
+        for flags in [VIRTIO_EXTENT_WRITE_ROOT, VIRTIO_EXTENT_WRITE_UPLOADED, 1 << 4] {
             let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(rooted), b"datasecond");
             assert_eq!(request(&store, &write, RESPONSE).1, errno(Errno::EINVAL), "{flags:#x}");
         }
@@ -771,22 +772,22 @@ mod tests {
     fn unsafe_devices_commit_ordered() {
         let store = FakeStore::default();
         let notices = Notices::default();
-        let durable = bytes(
+        let uploaded = bytes(
             VIRTIO_EXTENT_T_COMMIT,
-            VIRTIO_EXTENT_COMMIT_DURABLE,
+            VIRTIO_EXTENT_COMMIT_UPLOADED,
             Some(CommitArgs::default()),
             &[],
         );
-        let flags = VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_DURABLE;
+        let flags = VIRTIO_EXTENT_WRITE_COMMIT | VIRTIO_EXTENT_WRITE_UPLOADED;
         let write = bytes(VIRTIO_EXTENT_T_WRITE, flags, Some(io(1, 0, 1)), b"x");
-        for request in [&durable, &write] {
+        for request in [&uploaded, &write] {
             let served = request_as(&store, &notices, CacheType::Unsafe, request, RESPONSE, 64);
             assert_eq!(served, (vec![], 0));
         }
         let served =
-            request_as(&store, &notices, CacheType::Writeback, &durable, RESPONSE, usize::MAX);
+            request_as(&store, &notices, CacheType::Writeback, &uploaded, RESPONSE, usize::MAX);
         assert_eq!(served, (vec![], 0));
-        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Ordered, Commit::Durable]);
+        assert_eq!(store.state().commits, vec![Commit::Ordered, Commit::Ordered, Commit::Uploaded]);
     }
 
     /// ROOT writes the root, zeros to its most, and its length; COMMIT with COMMIT_ROOT sets it;
@@ -827,7 +828,7 @@ mod tests {
     }
 
     /// The pieces a MAP_MANY carries are mapped each with its own flags, zeros only in a window
-    /// that copies on write, and those MAP_AHEAD says mapped ahead; flags of neither, refused.
+    /// that copies on write, and those MAP_PREFAULT says mapped ahead; flags of neither, refused.
     #[test]
     fn maps_carry_their_pieces() {
         let store = FakeStore { copies_on_write: true, ..FakeStore::default() };
@@ -840,12 +841,12 @@ mod tests {
         let entry = |map: MapArgs, flags: u32| MapEntry { map, flags: flags.to_le(), reserved: 0 };
         let pieces: Vec<u8> = [
             entry(map(2, 4096, 4096, 8192), 0),
-            entry(map(0, 0, 4096, 16384), VIRTIO_EXTENT_MAP_ZEROS | VIRTIO_EXTENT_MAP_AHEAD),
+            entry(map(0, 0, 4096, 16384), VIRTIO_EXTENT_MAP_ZEROS | VIRTIO_EXTENT_MAP_PREFAULT),
         ]
         .iter()
         .flat_map(|entry| entry.as_bytes().to_vec())
         .collect();
-        let flags = VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_AHEAD;
+        let flags = VIRTIO_EXTENT_MAP_MANY | VIRTIO_EXTENT_MAP_PREFAULT;
         let request_ = bytes(VIRTIO_EXTENT_T_MAP, flags, Some(map(1, 0, 4096, 0)), &pieces);
         assert_eq!(request(&store, &request_, RESPONSE), (vec![], 0));
         let mut maps = store.state().maps.clone();

@@ -438,7 +438,7 @@ mod guest {
                     std::thread::sleep(ahead.min(run.saturating_sub(started.elapsed())));
                 }
             }
-            // Every commit uploaded, as at its host's stop (`COMMIT_DURABLE`).
+            // Every commit uploaded, as at its host's stop (`COMMIT_UPLOADED`).
             let dir = fs::File::open(MNT).unwrap();
             let ret = unsafe { libc::syncfs(std::os::fd::AsRawFd::as_raw_fd(&dir)) };
             assert_eq!(ret, 0, "syncfs: {}", std::io::Error::last_os_error());

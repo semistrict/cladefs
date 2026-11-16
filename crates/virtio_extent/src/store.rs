@@ -51,7 +51,7 @@ pub trait Store: Send + Sync {
         window_offset: u64,
         len: u64,
     ) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `MAP_AHEAD`: maps `len` bytes of the window at `window_offset` for the guest ahead of its
+    /// `MAP_PREFAULT`: maps `len` bytes of the window at `window_offset` for the guest ahead of its
     /// accesses. It must not wait.
     fn prefault(&self, window_offset: u64, len: u64);
     /// `UNMAP`: unmaps `len` bytes of the window at `window_offset`.
@@ -81,10 +81,10 @@ pub trait Store: Send + Sync {
     ) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `RESIZED`: the guest took the shrink to `capacity` bytes it was asked to, if `took`.
     fn resized(&self, capacity: u64, took: bool) -> impl Future<Output = Result<(), Errno>> + Send;
-    /// `ADVANCE`: a follower's view moves to its writer's latest commit: its epoch.
+    /// `ADVANCE`: a follower's view moves to its writer's latest commit: its number.
     fn advance(&self) -> impl Future<Output = Result<u64, Errno>> + Send;
-    /// `LET_GO`: lets go of what the view held of the commits before epoch `epoch`.
-    fn let_go(&self, epoch: u64) -> impl Future<Output = Result<(), Errno>> + Send;
+    /// `LET_GO`: lets go of what the view held of the commits before the one numbered `commit`.
+    fn let_go(&self, commit: u64) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `PIN`: keeps `extent` whatever commit the view advances to.
     fn pin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send;
     /// `UNPIN`: lets go of `extent`'s pin.
@@ -194,8 +194,8 @@ impl Store for cladefs::RemoteExtentStore {
         self.advance_async()
     }
 
-    fn let_go(&self, epoch: u64) -> impl Future<Output = Result<(), Errno>> + Send {
-        self.let_go_async(epoch)
+    fn let_go(&self, commit: u64) -> impl Future<Output = Result<(), Errno>> + Send {
+        self.let_go_async(commit)
     }
 
     fn pin(&self, extent: ExtentId) -> impl Future<Output = Result<(), Errno>> + Send {

@@ -3105,7 +3105,7 @@ bool fxfs_vfs_follow_failing(void)
 	return READ_ONCE(fxfs_follow_fail_batch);
 }
 
-void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch)
+void fxfs_vfs_follow_commit(void *vfs, u32 which, u64 commit)
 {
 	struct fxfs_vfs_info *info = fxfs_vfs_follow_info(vfs);
 	u64 *at = which == FXFS_FOLLOW_APPLIED ? &info->follow_applied : &info->follow_settled;
@@ -3118,10 +3118,10 @@ void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch)
 	 * Its batches alone write it, and the commits they apply only move on; a batch settles what
 	 * it applied, never past it (doc-8, testing 1).
 	 */
-	WARN_ON_ONCE(epoch < READ_ONCE(*at));
-	WARN_ON_ONCE(which == FXFS_FOLLOW_SETTLED && epoch > READ_ONCE(info->follow_applied));
-	if (epoch > READ_ONCE(*at))
-		smp_store_release(at, epoch);
+	WARN_ON_ONCE(commit < READ_ONCE(*at));
+	WARN_ON_ONCE(which == FXFS_FOLLOW_SETTLED && commit > READ_ONCE(info->follow_applied));
+	if (commit > READ_ONCE(*at))
+		smp_store_release(at, commit);
 }
 
 /* cladefs: FXFS_IOC_FLUSH (vfs.h). The lock keeps the filesystem from freezing under the flush. */
@@ -3198,7 +3198,7 @@ static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned lon
 {
 	struct super_block *sb = file_inode(file)->i_sb;
 	struct fxfs_vfs_info *info = fxfs_vfs_info(sb);
-	struct fxfs_follow_epochs epochs;
+	struct fxfs_follow_commits commits;
 	struct fxfs_follow_stats stats;
 	u64 cached;
 
@@ -3222,10 +3222,10 @@ static long fxfs_vfs_dir_ioctl(struct file *file, unsigned int cmd, unsigned lon
 	if (!fxfs_vfs_follows(sb))
 		return -ENOTTY;
 	switch (cmd) {
-	case FXFS_IOC_FOLLOW_EPOCHS:
-		epochs.settled = smp_load_acquire(&info->follow_settled);
-		epochs.applied = smp_load_acquire(&info->follow_applied);
-		return copy_to_user((void __user *)arg, &epochs, sizeof(epochs)) ? -EFAULT : 0;
+	case FXFS_IOC_FOLLOW_COMMITS:
+		commits.settled = smp_load_acquire(&info->follow_settled);
+		commits.applied = smp_load_acquire(&info->follow_applied);
+		return copy_to_user((void __user *)arg, &commits, sizeof(commits)) ? -EFAULT : 0;
 	case FXFS_IOC_FOLLOW_STATS:
 		stats.batches = READ_ONCE(info->follow_batches);
 		stats.barrier_wait_ns = READ_ONCE(info->follow_barrier_wait_ns);

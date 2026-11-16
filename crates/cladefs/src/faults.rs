@@ -31,7 +31,7 @@ pub(crate) use failpoint;
 /// and its record, and the checkpoint that makes it; then
 /// the child's store made, taking its state from the bucket (TASK-165.7).
 pub const FORK_STEPS: [&str; 20] = [
-    "fork::durable",
+    "fork::uploaded",
     "remote::child_free",
     "fork::committed",
     "fork::flushed",
@@ -58,7 +58,7 @@ pub const FORK_STEPS: [&str; 20] = [
 /// the point's origin's cell (TASK-395.3, after the record since TASK-395.10), a read of the
 /// point's, and the record made; then the child's store. No upload, as it commits nothing.
 pub const RESTORE_STEPS: [&str; 10] = [
-    "fork::durable",
+    "fork::uploaded",
     "remote::child_free",
     "remote::forked",
     "point::record",

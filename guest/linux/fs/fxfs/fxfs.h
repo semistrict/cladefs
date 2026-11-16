@@ -136,11 +136,11 @@ void fxfs_release(struct fxfs *fs, u64 ino);
 void fxfs_vfs_follow_fill_begin(void *vfs);
 void fxfs_vfs_follow_fill_end(void *vfs);
 void fxfs_vfs_follow_assert_filling(void *vfs);
-/* The follower's state is as of a commit no later than `epoch`'s: its batch applied. */
+/* The follower's state is as of a commit no later than `commit`'s: its batch applied. */
 #define FXFS_FOLLOW_APPLIED 0
-/* The follower's state is as of a commit no earlier than `epoch`'s: its batch settled. */
+/* The follower's state is as of a commit no earlier than `commit`'s: its batch settled. */
 #define FXFS_FOLLOW_SETTLED 1
-void fxfs_vfs_follow_epoch(void *vfs, u32 which, u64 epoch);
+void fxfs_vfs_follow_commit(void *vfs, u32 which, u64 commit);
 /* cladefs: whether the tests have a follower's batches fail (vfs.h). */
 bool fxfs_vfs_follow_failing(void);
 /*

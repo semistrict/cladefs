@@ -85,7 +85,7 @@ export const layers: Layer[] = [
       "zstd-compressed segments at commits. Since doc-14 it is the bucket's WAL and cache, one " +
       "storage engine: what is durable here and not yet uploaded is the only state the bucket lacks.",
     dirs: ["crates/extent_store", "crates/extent_frame"],
-    anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_durable"],
+    anchors: ["store", "store_commit", "store_commit_fork", "es_write", "es_uploaded"],
     docs: ["doc-14", "doc-7"],
     provenance: "cladefs's own.",
   },
