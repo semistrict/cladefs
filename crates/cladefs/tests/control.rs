@@ -54,6 +54,8 @@ fn stores_through_the_control_api() {
             open: false,
             own: 64 << 10,
             inherited: 0,
+            own_extents: 1,
+            inherited_extents: 0,
             committed: 1,
             // Closed, the stat opens it, as the daemon opens any store, taking its branch's lease
             // after its making's and its VM's (TASK-165.9): what it committed, uploaded.
@@ -76,8 +78,9 @@ fn stores_through_the_control_api() {
     assert_ne!(forked, branch);
     let stat = daemon.stat(&fork).unwrap();
     assert_eq!((stat.branch, stat.used, stat.public), (forked.id, 64 << 10, false));
-    // TASK-49: all it holds, it inherited.
+    // TASK-49: all it holds, it inherited; TASK-454: the extent too.
     assert_eq!((stat.own, stat.inherited), (0, 64 << 10));
+    assert_eq!((stat.own_extents, stat.inherited_extents), (0, 1));
     daemon.make_public(&base).unwrap();
     assert!(daemon.stat(&base).unwrap().public);
     assert!(!daemon.stat(&fork).unwrap().public, "a fork of a public base is its own");
@@ -122,8 +125,12 @@ fn open_stores_are_listed_with_their_leases_and_uploads() {
     let millis = |time: std::time::SystemTime| {
         time.duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64
     };
-    for ((_, stat), branch) in listed.iter().zip([one.branch(), two.branch()]) {
+    for (((_, stat), branch), extents) in
+        listed.iter().zip([one.branch(), two.branch()]).zip([1, 0])
+    {
         assert_eq!((stat.branch, stat.open, stat.uploading), (branch, true, true));
+        // TASK-454: the extent the first wrote; none, the second.
+        assert_eq!((stat.own_extents, stat.inherited_extents), (extents, 0));
         assert_eq!((stat.lease_token, stat.lease_epoch), (1, 1));
         assert!((millis(before)..=millis(after)).contains(&stat.lease_taken_unix_ms), "{stat:?}");
         assert_eq!(stat.uploaded, stat.committed, "{stat:?}");
@@ -131,6 +138,45 @@ fn open_stores_are_listed_with_their_leases_and_uploads() {
     }
     assert_eq!(daemon.stat(&first).unwrap(), listed[0].1);
     drop((one, two));
+}
+
+/// TASK-454: StatStore and ListStores say how many extents a store holds, its own and those it
+/// inherited, as its VM writes and frees them, open and closed, and of its fork.
+#[test]
+fn extents_are_counted_through_the_control_api() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (base, fork) = (dir.path().join("base"), dir.path().join("fork"));
+    let write = |vm: &cladefs::RemoteExtentStore, sequence: u64| {
+        let extent = cladefs::ExtentId { branch: vm.branch(), sequence };
+        vm.write(extent, 0, &[cladefs::VolatileSlice::from(&pattern(sequence)[..4096])]).unwrap();
+        extent
+    };
+    let counts = |stat: &StatStoreResponse| (stat.own_extents, stat.inherited_extents);
+
+    let vm = daemon.open(&base, CAPACITY);
+    assert_eq!(counts(&daemon.stat(&base).unwrap()), (0, 0));
+    let written: Vec<_> = (1..=3).map(|sequence| write(&vm, sequence)).collect();
+    vm.commit(None).unwrap();
+    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
+    drop(vm);
+    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
+
+    daemon.fork(&base, &fork).unwrap();
+    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (0, 3));
+    let vm = daemon.open(&fork, CAPACITY);
+    let own = [write(&vm, 1), write(&vm, 2)];
+    vm.free(written[0]).unwrap();
+    vm.free(own[1]).unwrap();
+    // Open, as its VM has it, committed or not.
+    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (1, 2));
+    vm.commit(None).unwrap();
+    let canonical = fork.canonicalize().unwrap();
+    let listed = daemon.list().into_iter().find(|(path, _)| *path == canonical);
+    assert_eq!(listed.map(|(_, stat)| counts(&stat)), Some((1, 2)));
+    drop(vm);
+    assert_eq!(counts(&daemon.stat(&fork).unwrap()), (1, 2));
+    assert_eq!(counts(&daemon.stat(&base).unwrap()), (3, 0));
 }
 
 /// A store a VM process has open is its: the API refuses what would change it under its guest,

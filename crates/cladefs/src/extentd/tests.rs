@@ -2454,8 +2454,9 @@ fn stores_are_deleted_while_their_forks_are_open() {
 
 /// TASK-364: a store a connection makes is the one volume of a new cell, named as its directory
 /// is: an Fxfs one, or, made through `OPEN_SQLITE` as sqlite_extents makes its databases, a SQLite
-/// one, which a host's FUSE mount of the cell leaves be. The cell's object, under its tenant's
-/// prefix in the bucket, says so; and the store's branch's lease was taken with the cell's epoch.
+/// one, which a host's FUSE mount of the cell leaves be; or, through `OPEN_MEMORY`, a VM's memory
+/// (TASK-456.2). The cell's object, under its tenant's prefix in the bucket, says so; and the
+/// store's branch's lease was taken with the cell's epoch.
 #[test]
 fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
     host();
@@ -2467,14 +2468,21 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
     let fxfs = RemoteExtentStore::connect(&socket, &disk, 1 << 24).unwrap();
     let daemon = crate::DaemonConnection::connect(&socket).unwrap();
     let sqlite = daemon.open_sqlite(&db, 1 << 24).unwrap();
+    let memory = dir.path().join("memory");
+    let memory_store = crate::DaemonConnection::connect(&socket).unwrap();
+    let memory_store = memory_store.open_memory(&memory, 1 << 24).unwrap();
     let (disk_branch, db_branch) = (branch_at(&disk), branch_at(&db));
+    let memory_branch = branch_at(&memory);
     assert_eq!((fxfs.branch(), sqlite.branch()), (disk_branch.id, db_branch.id));
+    assert_eq!(memory_store.branch(), memory_branch.id);
     assert_ne!(disk_branch.cell, db_branch.cell, "each made alone, in a cell of its own");
     let bucket = super::stores::remote_bucket().unwrap();
     futures::executor::block_on(async {
-        for (branch, name, kind) in
-            [(disk_branch, "disk", Kind::Fxfs), (db_branch, "db.sqlite", Kind::Sqlite)]
-        {
+        for (branch, name, kind) in [
+            (disk_branch, "disk", Kind::Fxfs),
+            (db_branch, "db.sqlite", Kind::Sqlite),
+            (memory_branch, "memory", Kind::Memory),
+        ] {
             let cell = extent_remote::cell::read(&*bucket, branch.cell).await.unwrap().unwrap();
             let volume = extent_remote::cell::Volume { branch: branch.id, kind };
             let volumes = std::collections::BTreeMap::from([(name.to_owned(), volume)]);
@@ -2483,6 +2491,61 @@ fn stores_made_are_volumes_of_their_cells_of_their_kinds() {
             assert_eq!(head.token, cell.epoch, "{name}: its head taken with its cell's epoch");
         }
     });
+}
+
+/// TASK-456.2: a memory volume's pages and holes, committed at once, read back once it is opened
+/// again; a fork of it reads its pages and stores only those it writes, each page of the parent
+/// it leaves as it was, and its holes nothing.
+#[test]
+fn memory_volumes_commit_pages_and_holes_and_forks_store_only_their_own() {
+    use crate::memory_volume::MemoryVolume;
+    host();
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("extentd.sock");
+    let listener = UnixListener::bind(&socket).unwrap();
+    std::thread::spawn(move || serve(listener));
+    const PAGES: u64 = 256;
+    let path = dir.path().join("memory");
+    let memory = MemoryVolume::open(&socket, &path, PAGES * 4096).unwrap();
+    let page = memory.page_size();
+    assert_eq!(page, 4096);
+    let filled = |byte: u8, pages: u64| vec![byte; (pages * page) as usize];
+    memory.write(0, &filled(1, PAGES)).unwrap();
+    memory.punch(100 * page, 20 * page).unwrap();
+    memory.commit().unwrap();
+    let parent_extents = memory.extents().unwrap();
+    let fork = dir.path().join("fork");
+    let forked = memory.fork(&fork).unwrap();
+    memory.close().unwrap();
+
+    let mut expected = filled(1, PAGES);
+    expected[(100 * page) as usize..(120 * page) as usize].fill(0);
+    let reopened = MemoryVolume::open(&socket, &path, PAGES * 4096).unwrap();
+    let mut image = filled(0xee, PAGES);
+    reopened.read(0, &mut image).unwrap();
+    assert!(image == expected, "the image committed");
+    reopened.close().unwrap();
+
+    let child = MemoryVolume::open(&socket, &fork, PAGES * 4096).unwrap();
+    assert_eq!(child.branch(), forked);
+    let mut image = filled(0xee, PAGES);
+    child.read(0, &mut image).unwrap();
+    assert!(image == expected, "the fork reads its parent's pages");
+    child.write(3 * page, &filled(2, 4)).unwrap();
+    child.punch(10 * page, page).unwrap();
+    child.commit().unwrap();
+    expected[(3 * page) as usize..(7 * page) as usize].fill(2);
+    expected[(10 * page) as usize..(11 * page) as usize].fill(0);
+    child.read(0, &mut image).unwrap();
+    assert!(image == expected, "the fork's image");
+    // Its own extents: the pages it wrote, with the nodes naming them, a few blocks, one
+    // extent; the rest are the parent's.
+    let own: Vec<_> =
+        (child.extents().unwrap().into_iter()).filter(|extent| extent.branch == forked).collect();
+    assert_eq!(own.len(), 1, "the fork's own extents: {own:?}");
+    let inherited = child.extents().unwrap().into_iter().filter(|extent| extent.branch != forked);
+    assert!(inherited.into_iter().all(|extent| parent_extents.contains(&extent)));
+    child.close().unwrap();
 }
 
 /// TASK-39.4: with a bucket, deleting a store through the daemon deletes its branch there too,

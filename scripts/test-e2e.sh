@@ -84,6 +84,19 @@ if [[ -n $prebuilt && -n ${CLADEFS_FIRECRACKER_JAIL:-} && ! -x $prebuilt/jailer 
     echo "$prebuilt holds no jailer, built with no seccomp filter: CLADEFS_FIRECRACKER_JAIL needs one" >&2
     exit 2
 fi
+# Inside a measurement (fxjob --bench), nothing builds (TASK-368): its artifacts were built as work
+# beforehand, every one there; else it refuses, saying so, before anything runs.
+source "$(dirname "${BASH_SOURCE[0]}")/lib/measurement.sh"
+if [[ -n $prebuilt ]]; then
+    for artifact in "$harness_artifacts/runner" "$harness_artifacts/guest-agent" \
+        "$prebuilt/cladefs-extentd" "$prebuilt/cladefsctl" "$prebuilt/cladefs-gc" \
+        "$prebuilt/firecracker"; do
+        [[ -x $artifact ]] ||
+            { echo "$artifact: no such artifact (CLADEFS_E2E_BUILD_ONLY makes them)" >&2; exit 2; }
+    done
+else
+    measurement_refuses "test-e2e.sh${build_only:+ (CLADEFS_E2E_BUILD_ONLY)}, CLADEFS_E2E_PREBUILT unset,"
+fi
 
 if [[ $(uname -s) != Linux ]]; then
     echo "cladefs's guests run on Linux only: use scripts/test-e2e-linux.sh" >&2

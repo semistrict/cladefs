@@ -1738,6 +1738,50 @@ static void region_maps_at_once(void)
 	sim_device_check_unmapped("the files' ranges and region gone");
 }
 
+/*
+ * That two mappings of a page whose blocks another file shares, as two processes running one binary
+ * out of a filesystem's shared blocks have, loading it in turn, fault once each: a read of the page
+ * its entry already names replaces nothing (patch 0010, TASK-152). Replacing it unmapped the page
+ * from the other mapping, a fault each load, which kernel/mm.c's check of a mapping's held pages
+ * finds. tests/read_mappings_stay's, of blocks no other file shares, which Fxfs doesn't say
+ * shared, can't: interleave found it by one seed's interleaving, until later changes moved seeds
+ * (TASK-149.47).
+ */
+static void shared_reads_stay(void)
+{
+	static char bytes[4 * PAGE_SIZE];
+	unsigned long first, second, before, faults;
+	struct file *file, *clone;
+	int err, turn;
+	char got;
+
+	fill(bytes, sizeof(bytes), 3);
+	file = new_file(bytes, sizeof(bytes));
+	check(!sim_fsync(file), "the file's fsync");
+	clone = sim_file_new(mount);
+	err = sim_clone(file, 0, clone, 0, sizeof(bytes));
+	check(!err, "the clone: %d", err);
+	check(!sim_fsync(clone), "the clone's fsync");
+	drop_ranges(file);
+	drop_ranges(clone);
+	first = sim_mmap(file, 0, sizeof(bytes));
+	second = sim_mmap(file, 0, sizeof(bytes));
+	before = sim_mm_faults;
+	for (turn = 0; turn < 16; turn++) {
+		check(!sim_user_load(first, &got, 1), "a load of the first mapping");
+		check(got == bytes[0], "the first mapping reads %#x", got);
+		check(!sim_user_load(second, &got, 1), "a load of the second mapping");
+		check(got == bytes[0], "the second mapping reads %#x", got);
+	}
+	faults = sim_mm_faults - before;
+	check(faults == 2, "%lu faults in 16 turns, not one for each mapping", faults);
+	/* Read through a slice of the extent's region: the shared read this is of. */
+	check(sim_dax_stat(mount, "window_regions") == 1, "%llu regions: the page isn't a slice's",
+	      sim_dax_stat(mount, "window_regions"));
+	sim_munmap(second);
+	sim_munmap(first);
+}
+
 static const struct {
 	const char *name;
 	void (*run)(void);
@@ -1786,6 +1830,7 @@ static const struct {
 	SCENARIO(cow_writes_private_before_the_lock),
 	SCENARIO(cow_rebinds_map_ranges_at_once),
 	SCENARIO(region_maps_at_once),
+	SCENARIO(shared_reads_stay),
 };
 
 static void scenario(void *arg)

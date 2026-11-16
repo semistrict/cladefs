@@ -20,15 +20,28 @@
 # /var/lib/fxdax-test), CLADEFS_HOST_KERNELS a cache of guest kernels that
 # outlasts it (host_kernel), and CLADEFS_HOST_IN_PLACE=1 has each tree build where
 # it is (host_tree): scripts/lib/host.sh's runs set all four.
+#
+# A measurement's run is two jobs of the same work directory (scripts/lib/host.sh's
+# host_job), each a run of the host script, which CLADEFS_HOST_PHASE tells apart,
+# host_phase here: `build`, as work, its builds alone, into the work directory; then
+# `measure`, alone, under fxjob --bench, against what the build made there, building
+# nothing (host_artifacts, host_prebuilt), which scripts/lib/measurement.sh's guard
+# refuses there (host_cargo, host_kernel). Unset, `all`: one job does both.
 
 work=${CLADEFS_HOST_WORK:-/var/lib/fxdax-test}
 # The tools host_need installed, which host_record records.
 host_needed=()
+# This tree, whose scripts build what the host scripts measure.
+host_tools=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
+source "$host_tools/scripts/lib/measurement.sh"
 
 # host_setup provisions the host, once per host for what lasts: the packages,
 # the Rust toolchain and its musl target; and exports the environment the
-# builds and tests run in. It makes results absolute.
+# builds and tests run in. It makes results absolute, and sets host_phase.
 host_setup() {
+    host_phase=${CLADEFS_HOST_PHASE:-all}
+    [[ $host_phase == all || $host_phase == build || $host_phase == measure ]] ||
+        { echo "CLADEFS_HOST_PHASE is build or measure, or unset for both" >&2; return 2; }
     mkdir -p "$work/tools" "$results"
     results=$(cd "$results" && pwd)
     test "$(uname -m)" = x86_64
@@ -207,8 +220,8 @@ host_tree() {
 # (scripts/build-guest-kernel.sh): release; debug (lockdep, KCSAN, DEBUG_ATOMIC_SLEEP); kasan
 # (KASAN, KFENCE, lockdep); coverage (gcov of fs/fxfs); or rust-checks (its Rust's debug
 # assertions and overflow checks). It builds in the work directory WORK (default
-# $work/guest-kernel-KIND), at niceness host_build_nice (default 0), its log
-# host_kernel_log (default RESULTS/guest-kernel.log), and points host_kernel_image at the
+# $work/guest-kernel-KIND), its log host_kernel_log (default RESULTS/guest-kernel.log), and
+# refuses to inside a measurement (measurement.sh), and points host_kernel_image at the
 # kernel and host_kernel_work at where it was built. The kernel's Rust builds on guest/rust's own
 # toolchain, not the host's.
 #
@@ -263,10 +276,48 @@ host_kernel() {
 
 # host_kernel_build WORK builds host_kernel's kernel in the work directory WORK.
 host_kernel_build() {
-    nice -n "${host_build_nice:-0}" env -u RUSTUP_TOOLCHAIN CLADEFS_GUEST_KERNEL_WORK="$1" \
+    measurement_refuses "The $kind guest kernel's build"
+    env -u RUSTUP_TOOLCHAIN CLADEFS_GUEST_KERNEL_WORK="$1" \
         CLADEFS_GUEST_KERNEL_DEBUG="$debug" CLADEFS_GUEST_KERNEL_KASAN="$kasan" \
         CLADEFS_GUEST_KERNEL_COVERAGE="$coverage" CLADEFS_GUEST_KERNEL_RUST_CHECKS="$rust_checks" \
         "$repo/scripts/build-guest-kernel.sh" x86_64 > "$log" 2>&1
+}
+
+# host_cargo ARG... runs cargo ARG..., a build, which a measurement refuses (measurement.sh): a
+# measurement's builds run in its build phase (host_phase), as work.
+host_cargo() {
+    measurement_refuses "cargo $1"
+    cargo "$@"
+}
+
+# host_artifacts DIR NAME [KERNEL] builds what the guest cases run of repo into DIR, test-e2e.sh's
+# artifacts (CLADEFS_E2E_BUILD_ONLY), by this tree's scripts (CLADEFS_E2E_ROOT: repo may be of
+# before them), and, given KERNEL, a guest kernel, copies it there as vmlinux, recorded with them
+# in DIR/artifacts.txt; RESULTS/build-NAME.log says how the build went, and
+# RESULTS/artifacts-NAME.txt what it made. A measurement runs them (host_prebuilt), building
+# nothing.
+host_artifacts() {
+    local dir=$1 name=$2 kernel=${3:-}
+    if [[ -e $dir ]]; then rm -r -- "$dir" || return; fi
+    if ! CLADEFS_E2E_ROOT=$repo CLADEFS_E2E_BUILD_ONLY=$dir CLADEFS_E2E_RESULTS=$results/build-$name \
+        "$host_tools/scripts/test-e2e.sh" > "$results/build-$name.log" 2>&1; then
+        echo "Building $name's artifacts failed: see $results/build-$name.log" >&2
+        return 1
+    fi
+    if [[ -n $kernel ]]; then
+        cp "$kernel" "$dir/vmlinux" || return
+        (cd "$dir" && sha256sum vmlinux) >> "$dir/artifacts.txt" || return
+    fi
+    cp "$dir/artifacts.txt" "$results/artifacts-$name.txt"
+}
+
+# host_prebuilt DIR has the guest cases run what host_artifacts built into DIR, building nothing:
+# test-e2e.sh's CLADEFS_E2E_PREBUILT, and its guest kernel, if it holds one.
+host_prebuilt() {
+    [[ -f $1/artifacts.txt ]] ||
+        { echo "$1 holds no artifacts: CLADEFS_HOST_PHASE=build makes them" >&2; return 2; }
+    export CLADEFS_E2E_PREBUILT=$1
+    if [[ -f $1/vmlinux ]]; then export CLADEFS_GUEST_KERNEL=$1/vmlinux; fi
 }
 
 # host_kernel_key KIND prints the key of the guest kernel of KIND built from the source: KIND, and

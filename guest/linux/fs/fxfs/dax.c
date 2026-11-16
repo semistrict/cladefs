@@ -651,6 +651,7 @@ MODULE_PARM_DESC(dax_trace_dump, "Log the traced events of `ino page`, or `pfn N
  */
 static bool fxfs_dax_range_dirty(const struct fxfs_dax_range *range)
 {
+	lockdep_assert_held(&range->file->sem);
 	return fxfs_dax_pages_any_dirty(range->state);
 }
 
@@ -771,6 +772,7 @@ static long fxfs_dax_map_all(struct fxfs_dax *dax, struct fxfs_dax_range *range,
 	size_t i;
 	int err;
 
+	lockdep_assert_held_write(&range->file->sem);
 	if (!count)
 		return 0;
 	if (count > 1 && !rebind && fxfs_dax_inject(&fxfs_dax_fail_maps)) {
@@ -998,6 +1000,7 @@ static long fxfs_dax_rebind_range(struct fxfs_dax *dax, struct fxfs *fs,
 	long ret;
 
 	lockdep_assert_held_write(&range->file->sem);
+	lockdep_assert_held(&range->file->wb_lock);
 	first = fxfs_dax_pages_next_rebindable(range->state, 0, &end);
 	for (page = first; page < range->pages;
 	     page = fxfs_dax_pages_next_rebindable(range->state, end, &end)) {
@@ -1300,6 +1303,7 @@ static bool fxfs_dax_release(struct inode *inode, struct fxfs_dax_range *range)
 	loff_t start = fxfs_dax_chunk_start(range);
 	loff_t end = start + ((loff_t)range->pages << PAGE_SHIFT) - 1;
 
+	lockdep_assert_held(&range->file->sem);
 	if (fxfs_dax_range_dirty(range))
 		return false;
 	if (dax_layout_busy_page_range(mapping, start, end))
@@ -2173,7 +2177,8 @@ static int fxfs_dax_ran(struct fxfs_dax_batch *batch, const struct fxfs_dax_run_
  * that, and commits after the bytes; a store meanwhile reaches the copy or not, its page dirty
  * again either way. `parts` and `run` have room for FXFS_DAX_WRITEBACK_RUN. The first error of a
  * run whose pages are lost, the rest written still; a run Fxfs had no memory for keeps its pages,
- * `*kept` of them (fxfs_dax_run_failed).
+ * `*kept` of them (fxfs_dax_run_failed). With the file's writeback lock held, from the swap of its
+ * dirty set to the commit, which rebinding and truncation wait for (doc-13).
  */
 static int fxfs_dax_write_pages(struct fxfs_dax *dax, struct inode *inode,
 				struct fxfs_dax_batch *batch, size_t nr,
@@ -2186,6 +2191,7 @@ static int fxfs_dax_write_pages(struct fxfs_dax *dax, struct inode *inode,
 	size_t i, n = 0;
 	int err = 0, ran, id;
 
+	lockdep_assert_held(&fxfs_dax_file(inode)->wb_lock);
 	id = dax_read_lock();
 	for (i = 0; i < nr; i++) {
 		struct fxfs_dax_range *range = batch[i].range;
@@ -2317,9 +2323,20 @@ static size_t fxfs_dax_dirty_ranges(struct fxfs_dax_file *file)
 	unsigned long chunk;
 	size_t dirty = 0;
 
+	lockdep_assert_held(&file->sem);
 	xa_for_each(&file->ranges, chunk, range)
 		dirty += fxfs_dax_range_dirty(range);
 	return dirty;
+}
+
+/*
+ * cladefs: swaps `range`'s dirty set out into `set`, its writeback's: how many pages it held. With
+ * its file's semaphore held for writing, so that no iomap dirties a page of it meanwhile.
+ */
+static unsigned long fxfs_dax_range_swap(struct fxfs_dax_range *range, unsigned long *set)
+{
+	lockdep_assert_held_write(&range->file->sem);
+	return fxfs_dax_pages_swap(range->state, set);
 }
 
 static int fxfs_dax_write_back_keeping(struct inode *inode, bool keep)
@@ -2391,7 +2408,7 @@ static int fxfs_dax_write_back_keeping(struct inode *inode, bool keep)
 		batch[nr].range = range;
 		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */
 		atomic_inc(&range->users);
-		pages += fxfs_dax_pages_swap(range->state, batch[nr].pages);
+		pages += fxfs_dax_range_swap(range, batch[nr].pages);
 		bitmap_zero(batch[nr].kept, FXFS_DAX_PAGES);
 		nr++;
 	}

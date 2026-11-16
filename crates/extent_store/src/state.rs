@@ -14,10 +14,11 @@
 
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
+use crate::extents::{Entry, Extents};
 use crate::framed::{Files, Framed};
 use crate::kept::{Kept, KeptExtents};
 use crate::layout::{
-    Change, Data, EXTENTS, Extent, Extents, FileKey, Piece, SegmentId, branch_dir, extent_path,
+    Change, Data, EXTENTS, Extent, FileKey, Piece, SegmentId, branch_dir, extent_path,
 };
 use crate::raw::RawFile;
 #[cfg(any(test, feature = "audit"))]
@@ -176,13 +177,14 @@ pub(crate) enum Reader {
 }
 
 /// cladefs: where an extent is in its life, as the store's state has it, found in one place
-/// ([`State::life`], TASK-160.18), which readers and writers decide by.
+/// ([`State::life`], TASK-160.18), which readers and writers decide by. cladefs: its entry borrowed
+/// from the layer of the store's map that holds it ([`Entry`], TASK-453).
 pub(crate) enum Life<'a> {
     /// Written since the last commit, which seals it: its entry, as the writes that finished left
     /// it, if one did.
-    Open(Option<&'a Extent>),
+    Open(Option<Entry<'a>>),
     /// Sealed, and held.
-    Held(&'a Extent),
+    Held(Entry<'a>),
     /// Freed by a commit, and kept: for the bucket, views or pins ([`Kept`]).
     Kept(&'a Kept),
     /// Sealed once, and freed, and not kept: its number the branch writes no more (TASK-79.6).
@@ -191,11 +193,11 @@ pub(crate) enum Life<'a> {
     Unknown,
 }
 
-impl Life<'_> {
+impl<'a> Life<'a> {
     /// Its entry, if the store holds it: open or sealed.
-    pub fn held(&self) -> Option<&Extent> {
-        match self {
-            Life::Open(entry) => *entry,
+    pub fn held(&self) -> Option<Entry<'a>> {
+        match *self {
+            Life::Open(entry) => entry,
             Life::Held(entry) => Some(entry),
             Life::Kept(_) | Life::Spent | Life::Unknown => None,
         }
@@ -255,7 +257,7 @@ impl<F: File> State<F> {
             }
         };
         match life {
-            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.clone()),
+            Life::Open(Some(entry)) | Life::Held(entry) => Ok(entry.to_extent()),
             Life::Kept(kept) if readable(kept) => Ok(kept.entry.clone()),
             // Kept for another, freed before what the view holds: what it let go of.
             Life::Kept(_) if matches!(reader, Reader::View { .. }) => {
@@ -288,9 +290,7 @@ impl<F: File> State<F> {
     /// where they went, if they are named on their way there ([`Store::moved`](crate::Store::moved)).
     pub fn moved(&mut self, moved: &[(ExtentId, Location, Location)]) {
         for (extent, _, to) in moved {
-            if let Some(entry) = self.extents.get_mut(extent) {
-                entry.data.follow(to);
-            }
+            self.extents.follow(extent, to);
             self.kept.moved(*extent, to);
         }
     }
@@ -332,7 +332,7 @@ impl<F: File> State<F> {
         let cached_key = |key: &str| cached.then(|| key.to_owned());
         for extent in sealed {
             let entry =
-                self.extents.get_mut(&extent).expect("an extent sealed in a segment is held");
+                self.extents.own_mut(&extent).expect("an extent sealed in a segment is held");
             let Data::Pieces(pieces) = &entry.data else {
                 unreachable!("{extent:?}, sealed, is not")
             };
@@ -343,7 +343,7 @@ impl<F: File> State<F> {
         }
         let mut leaving = Vec::new();
         for (extent, location) in own {
-            if let Some(entry) = self.extents.get_mut(extent)
+            if let Some(entry) = self.extents.own_mut(extent)
                 && entry.data == Data::Own
             {
                 entry.data = Data::Remote(location.clone());
@@ -673,8 +673,7 @@ impl<F: File> State<F> {
         if !self.uncommitted.is_empty() || self.replay.begun.is_some() {
             return;
         }
-        let lengths: BTreeMap<ExtentId, u64> =
-            self.extents.iter().map(|(extent, entry)| (*extent, entry.len)).collect();
+        let lengths: BTreeMap<ExtentId, u64> = self.extents.lens().collect();
         assert_eq!(lengths, self.replay.extents.0, "the extents, as the footers say");
         let root = self.replay.root.as_deref().unwrap_or_default();
         assert_eq!(self.root, root, "the root, as the footers say");
@@ -696,19 +695,19 @@ impl<F: File> State<F> {
     /// says, it checks only as far as what it holds bounds them.
     pub fn audit(&self) {
         let branch = self.segments.open_segment().branch;
-        let held: Vec<_> = self.extents.iter().collect();
-        self.space.audit(branch, &held, self.gate.is_writing());
+        self.space.audit(branch, self.extents.lens(), self.gate.is_writing());
         self.uncommitted.audit(&self.extents);
         self.kept.audit();
         let own =
             |extent: &ExtentId, entry: &Extent| extent.branch == branch && entry.data == Data::Own;
         let mut recount = Recount::default();
         let mut own_files = HashSet::new();
-        for &(extent, entry) in &held {
-            let sealed = !self.uncommitted.is_open(*extent);
-            recount.holds(*extent, entry, sealed);
-            if sealed && own(extent, entry) {
-                own_files.insert(*extent);
+        for (extent, entry) in self.extents.iter() {
+            let entry = entry.into_cow();
+            let sealed = !self.uncommitted.is_open(extent);
+            recount.holds(extent, &entry, sealed);
+            if sealed && own(&extent, &entry) {
+                own_files.insert(extent);
             }
         }
         for (extent, kept) in self.kept.iter() {
@@ -741,18 +740,69 @@ impl<F: File> State<F> {
 /// (`ENOSPC`), which the guest's filesystem did not survive.
 pub(crate) struct Space {
     capacity: u64,
-    /// The bytes extents hold.
-    stored: u64,
-    /// cladefs: of those, the bytes of the extents the branch wrote (TASK-49).
-    own: u64,
+    /// The extents it holds and the bytes they hold: of them all, and of its own.
+    holding: Holding,
     /// The bytes writes in progress may add.
     reserved: u64,
 }
 
+/// cladefs: how many extents a branch holds, and the bytes they hold, as [`Space`] keeps them on
+/// as they change: of all of them, and of those the branch wrote (TASK-49), the rest inherited
+/// from the branches it was forked from. Kept on so that reading them walks nothing: a fork's map
+/// holds its base's extents too, hundreds of thousands of them (TASK-92.17, TASK-454).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Holding {
+    all: Held,
+    own: Held,
+}
+
+/// cladefs: a number of extents and the bytes they hold ([`Holding`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Held {
+    extents: u64,
+    bytes: u64,
+}
+
+impl Holding {
+    /// What `extents`, those of `branch` and those it inherited, by their lengths, hold: what an
+    /// opening counts, and the audit recounts.
+    pub fn of(branch: u64, extents: impl IntoIterator<Item = (ExtentId, u64)>) -> Self {
+        let mut holding = Self::default();
+        for (extent, len) in extents {
+            holding.entered(extent.branch == branch);
+            holding.grew(len, extent.branch == branch);
+        }
+        holding
+    }
+
+    /// The counts of all of them, and of the branch's own if `own`.
+    fn counts(&mut self, own: bool) -> impl Iterator<Item = &mut Held> {
+        std::iter::once(&mut self.all).chain(own.then_some(&mut self.own))
+    }
+
+    /// An extent is held, holding nothing yet: the branch's own if `own`.
+    fn entered(&mut self, own: bool) {
+        self.counts(own).for_each(|held| held.extents += 1);
+    }
+
+    /// An extent held holds `len` bytes more.
+    fn grew(&mut self, len: u64, own: bool) {
+        self.counts(own).for_each(|held| held.bytes += len);
+    }
+
+    /// An extent of `len` bytes is held no more.
+    fn removed(&mut self, len: u64, own: bool) {
+        self.counts(own).for_each(|held| {
+            held.extents -= 1;
+            held.bytes -= len;
+        });
+    }
+}
+
 impl Space {
-    /// The room of a branch of `capacity` bytes whose extents hold `stored`, `own` of them its own.
-    pub fn new(capacity: u64, stored: u64, own: u64) -> Self {
-        Self { capacity, stored, own, reserved: 0 }
+    /// The room of a branch of `capacity` bytes whose extents hold what `holding` says.
+    pub fn new(capacity: u64, holding: Holding) -> Self {
+        Self { capacity, holding, reserved: 0 }
     }
 
     /// The most bytes its extents may hold.
@@ -764,7 +814,7 @@ impl Space {
     /// bytes, views keeping `kept_for_views` of the frees, and writes since the last commit, this
     /// one's included, wasting `wasted` bytes.
     pub fn check(&self, grows: u64, kept_for_views: u64, wasted: u64) -> anyhow::Result<()> {
-        let used = self.stored + kept_for_views + self.past_slack(wasted);
+        let used = self.holding.all.bytes + kept_for_views + self.past_slack(wasted);
         if used + self.reserved + grows > self.capacity {
             return Err(anyhow::Error::new(NoSpace).context(format!(
                 "{used} bytes used, {} reserved and {grows} written past the capacity's {}",
@@ -789,26 +839,25 @@ impl Space {
         self.reserved -= grows;
     }
 
-    /// The extents hold `len` bytes more, of the branch's own if `own`.
-    pub fn added(&mut self, len: u64, own: bool) {
-        self.stored += len;
-        if own {
-            self.own += len;
-        }
+    /// cladefs: an extent is held, holding nothing yet, the branch's own if `own` (TASK-454).
+    pub fn entered(&mut self, own: bool) {
+        self.holding.entered(own);
     }
 
-    /// The extents hold `len` bytes less, of the branch's own if `own`.
+    /// An extent held holds `len` bytes more, of the branch's own if `own`.
+    pub fn grew(&mut self, len: u64, own: bool) {
+        self.holding.grew(len, own);
+    }
+
+    /// An extent of `len` bytes, of the branch's own if `own`, is held no more.
     pub fn removed(&mut self, len: u64, own: bool) {
-        self.stored -= len;
-        if own {
-            self.own -= len;
-        }
+        self.holding.removed(len, own);
     }
 
     /// Fails with [`TooSmall`] unless `capacity` holds what the extents hold, with what writes in
     /// progress may add.
     pub fn check_capacity(&self, capacity: u64) -> Result<(), TooSmall> {
-        let held = self.stored + self.reserved;
+        let held = self.holding.all.bytes + self.reserved;
         if capacity < held {
             return Err(TooSmall { capacity, held });
         }
@@ -824,28 +873,27 @@ impl Space {
     /// and writes since the last commit wasting `wasted` bytes, what is past the capacity's worth
     /// of which room is not available either.
     pub fn info(&self, next_sequence: u64, kept_for_views: u64, wasted: u64) -> Info {
-        let used = self.stored + kept_for_views;
+        let Holding { all, own } = self.holding;
+        let used = all.bytes + kept_for_views;
         let unavailable = used + self.past_slack(wasted) + self.reserved;
         Info {
             capacity: self.capacity,
             used,
             available: self.capacity.saturating_sub(unavailable),
             next_sequence,
-            own: self.own,
-            inherited: self.stored - self.own,
+            own: own.bytes,
+            inherited: all.bytes - own.bytes,
+            own_extents: own.extents,
+            inherited_extents: all.extents - own.extents,
         }
     }
 
-    /// cladefs: panics unless it counts what `held`, the extents of `branch`, hold, of them its own;
-    /// and, unless `writing`, writes in progress reserving none (TASK-160.16).
+    /// cladefs: panics unless it counts `held`, the extents of `branch`, and what they hold, of them
+    /// its own (TASK-454); and, unless `writing`, writes in progress reserving none (TASK-160.16).
     #[cfg(any(test, feature = "audit"))]
-    fn audit(&self, branch: u64, held: &[(&ExtentId, &Extent)], writing: bool) {
-        let stored: u64 = held.iter().map(|(_, entry)| entry.len).sum();
-        let own: u64 = (held.iter())
-            .filter(|(extent, _)| extent.branch == branch)
-            .map(|(_, entry)| entry.len)
-            .sum();
-        assert_eq!((self.stored, self.own), (stored, own), "the bytes the extents hold, own");
+    fn audit(&self, branch: u64, held: impl Iterator<Item = (ExtentId, u64)>, writing: bool) {
+        let recounted = Holding::of(branch, held);
+        assert_eq!(self.holding, recounted, "the bytes the extents hold, own, and their counts");
         assert!(writing || self.reserved == 0, "{} bytes reserved, no write in progress", {
             self.reserved
         });
@@ -1016,7 +1064,8 @@ impl<F> Uncommitted<F> {
         assert_eq!(self.overwritten, overwritten, "written over");
         for (extent, open) in &self.open {
             assert!(open.opening <= self.openings, "{extent:?} opened past the openings");
-            let data = extents.get(extent).map(|entry| (entry.len, &entry.data));
+            let entry = extents.get(extent).map(Entry::into_cow);
+            let data = entry.as_deref().map(|entry| (entry.len, &entry.data));
             match (&open.placement, data) {
                 (Placement::Segment, Some((len, Data::Pieces(pieces)))) => {
                     let written: u64 = pieces.iter().map(|piece| piece.len).sum();

@@ -52,6 +52,7 @@ rand.workspace = true
 physmem.workspace = true
 pin-project-lite.workspace = true
 storage_device.workspace = true
+extent_files.workspace = true
 zerocopy.workspace = true
 async-trait.workspace = true
 event-listener.workspace = true

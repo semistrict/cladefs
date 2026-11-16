@@ -10,13 +10,14 @@
 
 use crate::dir::{Dir, File};
 use crate::durability::Syncs;
+use crate::extents::Extents;
 use crate::framed::{Files, Framed, Source, read_parts};
 use crate::framing::{self, Look, Looked, Seen};
 use crate::held::Hold;
 use crate::layout::{
-    Change, Data, EXTENTS, Extents, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId,
-    branch_dir, extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number,
-    segment_path, spare_path,
+    Change, Data, EXTENTS, LOGS, OPEN_SEGMENTS, Piece, SEGMENTS, SPARE, SegmentId, branch_dir,
+    extent_path, framing_path, held_frees, log_path, open_segment_path, parse_number, segment_path,
+    spare_path,
 };
 use crate::raw::{RawFile, Sealer};
 use crate::store::{Options, Usage};
@@ -1703,7 +1704,7 @@ fn commit_contents(
     let mut contents = Contents { frees: frees.into_iter().collect(), ..Contents::default() };
     let mut continued: BTreeMap<SegmentId, Vec<Run>> = BTreeMap::new();
     for extent in touched {
-        let entry = extents.get(&extent).expect("touched and held");
+        let entry = extents.get(&extent).expect("touched and held").into_cow();
         match &entry.data {
             Data::Pieces(pieces) => {
                 let [piece] = pieces[..] else { bail!("{extent:?} is not sealed in one run") };
@@ -2493,7 +2494,7 @@ mod tests {
         let dir = MemDir::new();
         let mut segments = opened(&dir, 64);
         let (first, second) = (ExtentId::new(BRANCH.id, 1), ExtentId::new(BRANCH.id, 2));
-        let mut extents = Extents::new();
+        let mut extents = Extents::default();
         let mut commit = |segments: &mut Segments<MemFile>, epoch, extent, piece: Piece| {
             let data = Data::Pieces(vec![piece]);
             extents.insert(extent, Extent { len: BLOCK, data: data.clone() });

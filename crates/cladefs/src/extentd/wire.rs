@@ -76,8 +76,9 @@ impl Header {
 /// Version 5: a commit may complete once durable on the host's disk ([`COMMIT_LOCAL`],
 /// [`WRITE_LOCAL`], TASK-301). Version 6: an [`OPEN`] may make a SQLite volume of its cell
 /// ([`OPEN_SQLITE`], TASK-364), and stores are cells' volumes, in their cells' prefixes. Version
-/// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364).
-pub(crate) const VERSION: u64 = 7;
+/// 7: a [`FORK`] names no branch: its reply says the one the daemon gave (TASK-364). Version 8:
+/// an [`OPEN`] may make a memory volume of its cell ([`OPEN_MEMORY`], TASK-456.2).
+pub(crate) const VERSION: u64 = 8;
 
 /// cladefs: a flag of any request, which says the guest request it is a call for, the guest's
 /// number of it (`crate::request`, TASK-260): little-endian, not 0, in the first
@@ -261,6 +262,9 @@ pub(crate) const OPEN_READ_ONLY: u32 = 1 << 2;
 /// cladefs: with [`OPEN_CREATE`], the store made is a SQLite volume of its cell, which the
 /// sqlite_extents VFS alone opens, not an Fxfs one (TASK-364).
 pub(crate) const OPEN_SQLITE: u32 = 1 << 3;
+/// cladefs: with [`OPEN_CREATE`], the store made is a memory volume of its cell, a VM's memory
+/// (TASK-456.2), not an Fxfs one.
+pub(crate) const OPEN_MEMORY: u32 = 1 << 4;
 pub(crate) const MAP_ZEROS: u32 = 1 << 1;
 pub(crate) const FORK_QUIESCENT: u32 = 1 << 0;
 pub(crate) const MAPPING_ZEROS: u64 = 1 << 1;

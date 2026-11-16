@@ -66,7 +66,7 @@ export const anchors = {
   es_commit_ordered: { path: "crates/cladefs/src/extents.rs", snippet: "pub fn commit_ordered(&self, root: Option<&[u8]>) -> Result<()>", note: "A barrier: ordered, not yet durable." },
   guest_dirty: { path: "guest/linux/fs/fxfs/dax.c", snippet: "static int fxfs_dax_dirty(struct inode *inode, struct fxfs_dax_range *range, unsigned long first,", note: "Before a page is dirty, the host makes it private (PRIVATE): dirty implies private." },
   guest_rebind_range: { path: "guest/linux/fs/fxfs/dax.c", snippet: "static long fxfs_dax_rebind_range(struct fxfs_dax *dax, struct fxfs *fs,", note: "Rebinding: clean private pages MAPped back to their sealed extents, the semaphore held for writing." },
-  guest_swap: { path: "guest/linux/fs/fxfs/dax.c", snippet: "pages += fxfs_dax_pages_swap(range->state, batch[nr].pages);", note: "Writeback swaps the dirty set out for an empty one." },
+  guest_swap: { path: "guest/linux/fs/fxfs/dax.c", snippet: "pages += fxfs_dax_range_swap(range, batch[nr].pages);", note: "Writeback swaps the dirty set out for an empty one." },
   guest_write_back_keeping: { path: "guest/linux/fs/fxfs/dax.c", snippet: "static int fxfs_dax_write_back_keeping(struct inode *inode, bool keep)", note: "Writeback of a DAX file's dirty pages." },
   pages_swap: { path: "guest/linux/fs/fxfs/pages.c", snippet: "unsigned long fxfs_dax_pages_swap(struct fxfs_dax_pages *pages, unsigned long *set)", note: "The swap of a range's dirty set for its writeback set." },
   guest_device_private: { path: "guest/linux/fs/fxfs/device.c", snippet: "int fxfs_device_private(struct fxfs_device *dev, u64 window_offset, u64 len)", note: "PRIVATE: ask the host for a private copy of window pages." },

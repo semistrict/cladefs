@@ -13,7 +13,10 @@ stronger ones more (ImpossibleBench, doc-17). So a commit that does any of these
   checks isn't flagged, a net loss is.
 - bound-loosened: an assertion's bound moved the lenient way (`x < 10` to `x < 20`), the rest of
   it the same. A changed expected value (`assert_eq!(x, 3)` to 4) isn't flagged.
-- test-ignored: a test ignored, skipped, or expected to panic.
+- test-ignored: a test ignored, skipped, or expected to panic, unless the commit adds the test (a
+  benchmark run by hand, a test of a panic): one of a name its file had none of before, nor any
+  file the commit takes it from, with its test attribute, so that it checks nothing less than
+  before (TASK-468).
 - test-removed: more #[test]s, or Python test_ methods, removed than added.
 - count-lowered: a count of cases, seeds, rounds, iterations or operations lowered.
 - generator-narrowed: a property test's inputs filtered or assumed away, or a range in a test's
@@ -48,13 +51,16 @@ RUNS = re.compile(r"\.(rs|c|h|py|go|sh|ya?ml|toml)$|^scripts/[^.]+$")
 
 @dataclass(frozen=True)
 class Language:
-    """What an assertion, an ignored test, a test and a narrowed generator look like in a
-    language's code. A test pattern with a `name` group counts tests by name, else all alike."""
+    """What an assertion, an ignored test, a test, a narrowed generator and a function's
+    definition, by its `name`, look like in a language's code. A test pattern with a `name` group
+    counts tests by name, else all alike. An ignoring line beginning an attribute or a decorator
+    (`#[`, `@`) ignores the function defined after it, any other the one it is in."""
     comments: tuple
     assertion: re.Pattern
     ignored: re.Pattern = None
     test: re.Pattern = None
     narrowing: re.Pattern = None
+    definition: re.Pattern = None
 
 
 C = Language(("//", "/*", "*"), re.compile(
@@ -65,19 +71,22 @@ LANGUAGES = {
         re.compile(r"\b(assert(_eq|_ne|_matches)?|debug_assert\w*|prop_assert\w*)!"),
         ignored=re.compile(r"#\[\s*(ignore|should_panic)\b|cfg_attr\(.*\bignore\b"),
         test=re.compile(r"#\[\s*([\w:]+::)?test\b"),
-        narrowing=re.compile(r"\bprop_assume!|\.prop_filter(_map)?\(")),
+        narrowing=re.compile(r"\bprop_assume!|\.prop_filter(_map)?\("),
+        definition=re.compile(r"\bfn\s+(?P<name>\w+)")),
     ".c": C,
     ".h": C,
     ".py": Language(
         ("#",),
         re.compile(r"^\s*assert\s|\bself\.assert\w+\s*\("),
         ignored=re.compile(r"@unittest\.skip|\.skipTest\(|pytest\.mark\.(skip|xfail)"),
-        test=re.compile(r"^\s*def\s+(?P<name>test_\w+)")),
+        test=re.compile(r"^\s*def\s+(?P<name>test_\w+)"),
+        definition=re.compile(r"^\s*def\s+(?P<name>\w+)")),
     ".go": Language(
         ("//", "/*", "*"),
         re.compile(r"\bt\.(Fatal|Error)\w*\(|\b(assert|require)\.\w+\("),
         ignored=re.compile(r"\bt\.Skip\w*\("),
-        test=re.compile(r"^func\s+(?P<name>Test\w+)")),
+        test=re.compile(r"^func\s+(?P<name>Test\w+)"),
+        definition=re.compile(r"^func\s+(?P<name>\w+)")),
 }
 COUNT = re.compile(r"cases|seeds?\b|rounds|iterations|operations|\bops\b|PROPTEST_CASES|\s-s\s")
 TEST_FILE = re.compile(r"(^|/)tests?/|_tests?\.rs$|(^|/)tests\.rs$|(^|/)test_[^/]*\.py$")
@@ -200,6 +209,54 @@ def section(old_text, number):
     return current
 
 
+def runs(lines):
+    """Lines added one after another in a file, each run in order."""
+    found = []
+    for line in lines:
+        if found and found[-1][-1].path == line.path and found[-1][-1].number + 1 == line.number:
+            found[-1].append(line)
+        else:
+            found.append([line])
+    return found
+
+
+def defined(lines):
+    """The names of the functions the lines define."""
+    return {match.group("name") for line in lines if (match := matches(line, "definition"))}
+
+
+def ignoring_added_tests(added, removed, old_file):
+    """The lines of `added` ignoring, skipping or expecting a panic of a test the commit adds: its
+    definition, of a name defined in its file before nowhere, nor in a line the commit removes,
+    added with the ignoring line and its test attribute, one run of lines."""
+    gone = defined(removed)
+    before = {}
+
+    def new(path, name):
+        if path not in before:
+            text = old_file(path) or ""
+            before[path] = defined(Line(path, 0, text) for text in text.splitlines())
+        return name not in before[path] and name not in gone
+
+    found = set()
+    for run in runs(added):
+        definitions = [i for i, line in enumerate(run) if matches(line, "definition")]
+        for i, line in enumerate(run):
+            if not matches(line, "ignored"):
+                continue
+            if line.text.strip().startswith(("#[", "@")):
+                own = next((d for d in definitions if d > i), None)
+            else:
+                own = next((d for d in reversed(definitions) if d < i), None)
+            if own is None:
+                continue
+            start = max((d + 1 for d in definitions if d < own), default=0)
+            if new(line.path, matches(run[own], "definition").group("name")) and \
+                    any(matches(header, "test") for header in run[start:own + 1]):
+                found.add(line)
+    return found
+
+
 def flags(diff, old_file=lambda path: None):
     """What of a commit's diff weakens a check. old_file(path) is a file's text before it."""
     removed, added, deleted = parse(diff)
@@ -254,10 +311,12 @@ def flags(diff, old_file=lambda path: None):
                 found.append(Flag("invariant-removed", line))
     removed_texts = Counter(" ".join(line.text.split()) for line in removed)
     assertions_added = 0
+    added_tests = ignoring_added_tests(added, removed, old_file)
     for line in added:
-        if matches(line, "assertion") and removed_texts[" ".join(line.text.split())] == 0:
+        moved_here = removed_texts[" ".join(line.text.split())] > 0
+        if matches(line, "assertion") and not moved_here:
             assertions_added += 1
-        if matches(line, "ignored"):
+        if matches(line, "ignored") and not moved_here and line not in added_tests:
             found.append(Flag("test-ignored", line))
         if matches(line, "narrowing"):
             found.append(Flag("generator-narrowed", line))

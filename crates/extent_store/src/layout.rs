@@ -304,9 +304,6 @@ pub(crate) struct Extent {
     pub data: Data,
 }
 
-/// A branch's extents, by their IDs.
-pub(crate) type Extents = HashMap<ExtentId, Extent>;
-
 /// A file of extents' data.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum FileKey {
@@ -324,7 +321,8 @@ impl FileKey {
     }
 }
 
-/// The files `extents`' data is in.
+/// The files `extents`' data is in: of a branch's, those of its own layer
+/// ([`Extents::own`](crate::extents::Extents::own)), the bucket's in the bucket.
 pub(crate) fn files_of<'a>(
     extents: impl IntoIterator<Item = (&'a ExtentId, &'a Extent)>,
 ) -> BTreeSet<FileKey> {

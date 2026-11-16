@@ -140,6 +140,8 @@ impl Disk {
 
     /// What it takes, in bytes, as last counted, with what was admitted since.
     pub fn used(&self) -> u64 {
+        // Relaxed: a report. Only admit and recount, which decide by it, need its order with
+        // `writing` (SeqCst).
         self.used.load(Ordering::Relaxed)
     }
 
@@ -241,6 +243,8 @@ impl Drop for Admitted {
 
 impl Drop for Disk {
     fn drop(&mut self) {
+        // Relaxed: its last admission done (each holds the disk), nothing of its own is ordered
+        // with this; others' admissions see the total as any read-modify-write leaves it.
         USED.fetch_sub(self.used(), Ordering::Relaxed);
     }
 }
@@ -364,6 +368,7 @@ pub fn total_limit() -> Option<u64> {
 
 /// What every tenant's disk takes together.
 pub fn total() -> u64 {
+    // Relaxed: a report, as Disk::used.
     USED.load(Ordering::Relaxed)
 }
 

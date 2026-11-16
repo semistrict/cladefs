@@ -81,7 +81,10 @@
 //! store at DIR is and holds, one `name value` a line: its branch (hex), capacity, used and
 //! available bytes, and of those used, its own (its branch wrote them) and inherited (from the
 //! branches it was forked from), what billing it alone charges it and what it shares (TASK-49);
-//! whether it is public, and, through the daemon, open. `--version` prints the commit it was built
+//! how many extents it holds, own and inherited (`own_extents`, `inherited_extents`), which what an
+//! open store takes of the daemon's memory grows with (TASK-443.2, TASK-454); whether it is public,
+//! and, through the daemon, open. A store no VM has open, it opens, locally or through the daemon,
+//! as a VM's would, to say: time, and memory till it is done, as its extents. `--version` prints the commit it was built
 //! of (`cladefs::BUILD_COMMIT`, TASK-111.7).
 //!
 //! cladefs: on Linux, it logs on standard error what is as grave as a warning: as a read of an object
@@ -353,17 +356,22 @@ impl Command {
             Self::Stat { dir } => {
                 let stat = daemon.stat_store(&dir)?;
                 let cell = cladefs::Cell { tenant: stat.tenant, id: stat.cell };
-                let lines = stat_lines(
-                    cladefs::Branch { cell, id: stat.branch },
-                    stat.capacity,
-                    stat.used,
-                    stat.available,
-                    stat.own,
-                    stat.inherited,
-                    stat.public,
-                    Some(stat.open),
+                let whose = |own, inherited| cladefs::Whose { own, inherited };
+                print!(
+                    "{}",
+                    Stat {
+                        branch: cladefs::Branch { cell, id: stat.branch },
+                        capacity: stat.capacity,
+                        used: stat.used,
+                        available: stat.available,
+                        holding: cladefs::StoreHolding {
+                            bytes: whose(stat.own, stat.inherited),
+                            extents: whose(stat.own_extents, stat.inherited_extents),
+                        },
+                        public: stat.public,
+                        open: Some(stat.open),
+                    }
                 );
-                print!("{lines}");
             }
             Self::Stats { json } => {
                 let snapshot = snapshot_json(&daemon.snapshot(None)?);
@@ -492,44 +500,50 @@ impl Command {
             | Self::ShredTenant { .. } => unreachable!("refused above"),
             Self::Stat { dir } => {
                 let store = ExtentStore::open(&dir)?;
-                let (info, bytes) = (store.info()?, store.bytes()?);
-                let lines = stat_lines(
-                    store.branch(),
-                    info.capacity,
-                    info.used,
-                    info.available,
-                    bytes.own,
-                    bytes.inherited,
-                    store.is_public(),
-                    None,
+                let info = store.info()?;
+                print!(
+                    "{}",
+                    Stat {
+                        branch: store.branch(),
+                        capacity: info.capacity,
+                        used: info.used,
+                        available: info.available,
+                        holding: store.holding()?,
+                        public: store.is_public(),
+                        open: None,
+                    }
                 );
-                print!("{lines}");
             }
         }
         Ok(())
     }
 }
 
-/// What `stat` prints, one `name value` a line; whether the store is open, if known.
-#[allow(clippy::too_many_arguments)]
-fn stat_lines(
+/// What `stat` says of a store, which it prints one `name value` a line.
+struct Stat {
     branch: cladefs::Branch,
     capacity: u64,
     used: u64,
     available: u64,
-    own: u64,
-    inherited: u64,
+    holding: cladefs::StoreHolding,
     public: bool,
+    /// Whether the store is open, if known.
     open: Option<bool>,
-) -> String {
-    let mut lines = format!(
-        "branch {branch}\ncapacity {capacity}\nused {used}\navailable {available}\nown {own}\n\
-         inherited {inherited}\npublic {public}\n"
-    );
-    if let Some(open) = open {
-        lines += &format!("open {open}\n");
+}
+
+impl std::fmt::Display for Stat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let Self { branch, capacity, used, available, holding, public, open } = self;
+        let cladefs::StoreHolding { bytes, extents } = holding;
+        writeln!(f, "branch {branch}\ncapacity {capacity}\nused {used}\navailable {available}")?;
+        writeln!(f, "own {}\ninherited {}", bytes.own, bytes.inherited)?;
+        writeln!(f, "own_extents {}\ninherited_extents {}", extents.own, extents.inherited)?;
+        writeln!(f, "public {public}")?;
+        if let Some(open) = open {
+            writeln!(f, "open {open}")?;
+        }
+        Ok(())
     }
-    lines
 }
 
 /// cladefs: `snapshot` as `stats --json` prints it (TASK-111.4): see the module docs. Maps' keys in

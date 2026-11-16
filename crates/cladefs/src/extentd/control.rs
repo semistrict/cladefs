@@ -258,8 +258,10 @@ fn stat_response(state: stores::StoreState) -> StatStoreResponse {
         available: state.info.available,
         public: state.public,
         open: state.open,
-        own: state.bytes.own,
-        inherited: state.bytes.inherited,
+        own: state.holding.bytes.own,
+        inherited: state.holding.bytes.inherited,
+        own_extents: state.holding.extents.own,
+        inherited_extents: state.holding.extents.inherited,
         committed: state.committed,
         uploading: state.upload.is_some(),
         lease_token: upload.lease.map_or(0, |lease| lease.token),
@@ -322,6 +324,7 @@ impl Extentd for Control {
         let kind = match VolumeKind::try_from(kind) {
             Ok(VolumeKind::Fxfs) => Kind::Fxfs,
             Ok(VolumeKind::Sqlite) => Kind::Sqlite,
+            Ok(VolumeKind::Memory) => Kind::Memory,
             Err(_) => return Err(status(Errno::EINVAL)),
         };
         let tenant = match cell {

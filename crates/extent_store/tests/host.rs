@@ -112,6 +112,33 @@ fn stores_unmade_refuse_to_open() {
     assert_eq!(store.extent(ExtentId::new(BRANCH.id, 1)).unwrap(), Some((BLOCK as u64, false)));
 }
 
+/// cladefs: a store in a directory whose file system can't bypass the host's page cache, as the
+/// failpoint makes every one, isn't made, its first file's opening (`unmade`) failing, naming it,
+/// rather than the store running in the host's page cache, a memory no budget counts (TASK-433.6).
+#[test]
+fn stores_whose_file_system_cant_bypass_the_page_cache_fail() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store");
+    std::fs::create_dir(&path).unwrap();
+    let description = Description { block_size: BLOCK as u32, capacity: 1 << 20, branch: BRANCH };
+    let scenario = fail::FailScenario::setup();
+    fail::cfg("direct::bypass", "return").unwrap();
+    let err = create_host(
+        &path,
+        description,
+        "memory:///host",
+        extent_store::Volume { name: "root".into(), kind: extent_remote::cell::Kind::Fxfs },
+    )
+    .unwrap_err();
+    scenario.teardown();
+    let refused = format!(
+        "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE): {}",
+        path.join("unmade").display(),
+        std::io::Error::from_raw_os_error(libc::EINVAL)
+    );
+    assert_eq!(format!("{err:#}"), refused);
+}
+
 /// cladefs: a store's placement's token is its description's, placed durably, which opening it
 /// takes its branch's lease with (TASK-39.7, TASK-165.9); none, never placed.
 #[test]

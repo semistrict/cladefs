@@ -14,6 +14,10 @@
 # fork, stat), RESULTS/LABEL-stat.txt what each fork's stat said, and RESULTS/LABEL-stats.txt the
 # daemon's counters, where its tree keeps them.
 #
+# CLADEFS_HOST_PHASE (linux-host-setup.sh's host_phase) is what of it runs: `build` builds each
+# tree's binaries and makes the image, as work; `measure` times them, building nothing; unset,
+# both (scripts/fork-time-host.sh runs the two as jobs of their own, TASK-368).
+#
 # Usage: fork-time-linux-host.sh SOURCE RESULTS LABEL=TREE...
 set -euo pipefail
 # SOURCE, this script's tree, is the host scripts' first argument (host_command); the trees
@@ -38,30 +42,42 @@ mkdir -p "$scratch"
 
 # The base's image: a tar archive of one layer, as `docker export` makes, of random files.
 layer=$scratch/layer-$files-$mib.tar
-if [[ ! -f $layer ]]; then
-    echo "== the image: $files files of $mib MiB" >&2
-    made=$scratch/layer
-    if [[ -e $made ]]; then rm -r -- "$made"; fi
-    mkdir -p "$made/data"
-    for (( i = 0; i < files; i++ )); do
-        head -c $(( mib << 20 )) /dev/urandom > "$made/data/$i"
-    done
-    tar -cf "$layer.new" -C "$made" data
-    mv "$layer.new" "$layer"
-    rm -r -- "$made"
-fi
 # The store's capacity: the image's data, half again for Fxfs's own, and a GiB.
 capacity=$(( (files * mib << 20) * 3 / 2 + (1 << 30) ))
+for pair in "$@"; do
+    [[ ${pair%%=*} =~ ^[a-z0-9-]+$ ]] || { echo "${pair%%=*}: a label is a word" >&2; exit 2; }
+done
+
+# What the timing takes, made beforehand, as work: the image, and each tree's binaries.
+if [[ $host_phase != measure ]]; then
+    if [[ ! -f $layer ]]; then
+        echo "== the image: $files files of $mib MiB" >&2
+        made=$scratch/layer
+        if [[ -e $made ]]; then rm -r -- "$made"; fi
+        mkdir -p "$made/data"
+        for (( i = 0; i < files; i++ )); do
+            head -c $(( mib << 20 )) /dev/urandom > "$made/data/$i"
+        done
+        tar -cf "$layer.new" -C "$made" data
+        mv "$layer.new" "$layer"
+        rm -r -- "$made"
+    fi
+    for pair in "$@"; do
+        label=${pair%%=*}
+        tree=$(cd "${pair#*=}" && pwd)
+        echo "== $label: building $tree" >&2
+        (cd "$tree" && CARGO_TARGET_DIR=$scratch/target-$label host_cargo build --release -q \
+            -p cladefs --bin cladefs-extentd --bin cladefsctl)
+    done
+    if [[ $host_phase == build ]]; then exit 0; fi
+fi
+[[ -f $layer ]] || { echo "$layer: no image: CLADEFS_HOST_PHASE=build makes it" >&2; exit 2; }
 
 for pair in "$@"; do
     label=${pair%%=*}
-    tree=$(cd "${pair#*=}" && pwd)
-    [[ $label =~ ^[a-z0-9-]+$ ]] || { echo "$label: a label is a word" >&2; exit 2; }
-    echo "== $label: building $tree" >&2
-    target=$scratch/target-$label
-    (cd "$tree" && CARGO_TARGET_DIR=$target cargo build --release -q -p cladefs \
-        --bin cladefs-extentd --bin cladefsctl)
-    bin=$target/release
+    bin=$scratch/target-$label/release
+    [[ -x $bin/cladefs-extentd && -x $bin/cladefsctl ]] ||
+        { echo "$label: not built in $bin: CLADEFS_HOST_PHASE=build builds it" >&2; exit 2; }
     dir=$scratch/$label
     if [[ -e $dir ]]; then rm -r -- "$dir"; fi
     mkdir -p "$dir/stores" "$dir/bucket" "$dir/cache"

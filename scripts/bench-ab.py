@@ -25,39 +25,111 @@ run (a failure of a kind `PART.not-run`), compared nothing for it: that fails th
 first, before the tables, and it exits 1. A qualification's A/B ran hours with its sandboxes' part
 started on neither side, the tables just without its rows.
 
+A round others wrote beside (its contamination.json, scripts/contamination.py, TASK-375:
+`fxjob --bench` doesn't isolate the disk) is contaminated: its timings and rates are left out of
+the comparison, said before the tables and in each cell they are missing from, as a load beside a
+round skews them; its counts and sizes (bytes written for each guest byte, peak memory, requests)
+stay, as it doesn't skew those. A metric with no clean round on a side is NO RESULT, never a ratio
+nor "within drift": said first, and it exits 1. The rounds that were not checked (no record, or a
+host where others' I/O can't be told from the round's own) are listed, their timings kept.
+
 Usage: scripts/bench-ab.py [--control CASE] A_NAME A_DIR... -- B_NAME B_DIR...
 """
 
+import importlib.util
 import json
 import math
 import statistics
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 
-
-def pooled(directories):
-    """Each workload's values across `directories`' results, and its unit and direction."""
-    values, kinds = {}, {}
-    for directory in directories:
-        for path in sorted(Path(directory).glob("bench-*.json")):
-            for result in json.loads(path.read_text())["results"]:
-                values.setdefault(result["workload"], []).extend(result["values"])
-                kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
-    return values, kinds
+# By its path, which needs no module path naming this directory.
+spec = importlib.util.spec_from_file_location(
+    "contamination", Path(__file__).resolve().with_name("contamination.py")
+)
+contamination = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = contamination
+spec.loader.exec_module(contamination)
 
 
-def by_case(directories):
-    """Each case's workloads' values across `directories`' results, by (case, workload), the case
-    its backend, and each workload's unit and direction."""
-    values, kinds = {}, {}
+def measured(directories):
+    """What `directories`' rounds measured: each result of each round's cases (bench-*.json), with
+    its round's directory and its case, the report's backend."""
     for directory in directories:
         for path in sorted(Path(directory).glob("bench-*.json")):
             report = json.loads(path.read_text())
-            case = report.get("backend", path.stem)
             for result in report["results"]:
-                values.setdefault((case, result["workload"]), []).extend(result["values"])
-                kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
-    return values, kinds
+                yield directory, report.get("backend", path.stem), result
+
+
+def verdicts(directories):
+    """The rounds of `directories` by what their records say of them (contamination.load):
+    {verdict: {why: [round]}}."""
+    by = {}
+    for directory in directories:
+        record = contamination.load(directory)
+        by.setdefault(record["verdict"], {}).setdefault("; ".join(record["why"]), []).append(
+            Path(directory).name)
+    return by
+
+
+@dataclass
+class Side:
+    """A side's rounds' measurements, by workload, or by (case, workload): `values`, pooled, but
+    those a load beside their round skews (contamination.skewed) of the rounds others wrote
+    beside; `left`, how many of those rounds each is missing from; and each workload's unit and
+    direction, `kinds`."""
+
+    values: dict = field(default_factory=dict)
+    left: dict = field(default_factory=dict)
+    kinds: dict = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, directories, key):
+        """The side whose rounds are `directories`, its measurements by `key` of each's case and
+        workload."""
+        side, contaminated = cls(), set()
+        for directory in directories:
+            if contamination.load(directory)["verdict"] == "contaminated":
+                contaminated.add(directory)
+        left = {}
+        for directory, case, result in measured(directories):
+            name = key(case, result["workload"])
+            side.kinds[result["workload"]] = (result["unit"], result["higher_is_better"])
+            if directory in contaminated and contamination.skewed(result["unit"]):
+                left.setdefault(name, set()).add(directory)
+            else:
+                side.values.setdefault(name, []).extend(result["values"])
+        side.left = {name: len(rounds) for name, rounds in left.items()}
+        return side
+
+    def has(self, name):
+        """Whether a round of it measured `name`, left out or not."""
+        return name in self.values or name in self.left
+
+    def cell(self, name):
+        """What it measured of `name`, as a table's cell."""
+        if name not in self.values:
+            return (f"NO RESULT [contaminated rounds left out: {self.left[name]}]"
+                    if name in self.left else "-")
+        left = f" [contaminated rounds left out: {self.left[name]}]" if name in self.left else ""
+        return described(self.values[name]) + left
+
+    def no_result(self):
+        """What it has no clean round of."""
+        return [name for name in self.left if name not in self.values]
+
+
+def pooled(directories):
+    """The side of `directories`, each workload's values pooled across its rounds and cases."""
+    return Side.of(directories, lambda case, workload: workload)
+
+
+def by_case(directories):
+    """The side of `directories`, each case's workloads' values pooled across its rounds, by
+    (case, workload)."""
+    return Side.of(directories, lambda case, workload: (case, workload))
 
 
 def slower(a, b, higher_is_better):
@@ -81,26 +153,28 @@ def verdict(ratio, overlaps, control):
 
 
 def control_table(a_name, a_dirs, b_name, b_dirs, control):
-    (a, kinds), (b, _) = by_case(a_dirs), by_case(b_dirs)
+    a, b = by_case(a_dirs), by_case(b_dirs)
     lines = [
         f"| Case | Workload | Unit | {a_name} | {b_name} | {b_name} vs {a_name} | "
         f"{control} {b_name} vs {a_name} | Verdict |",
         "|---|---|---|---|---|---|---|---|",
     ]
-    for (case, workload), a_values in sorted(a.items()):
-        b_values = b.get((case, workload))
-        if not b_values or case == control:
+    for case, workload in sorted(name for name in {**a.values, **a.left} if b.has(name)):
+        if case == control:
             continue
-        unit, higher_is_better = kinds[workload]
-        ratio = slower(a_values, b_values, higher_is_better)
-        a_control, b_control = a.get((control, workload)), b.get((control, workload))
+        unit, higher_is_better = a.kinds[workload]
+        name, of_control = (case, workload), (control, workload)
         drift = None
-        if a_control and b_control:
-            drift = slower(a_control, b_control, higher_is_better)
+        if of_control in a.values and of_control in b.values:
+            drift = slower(a.values[of_control], b.values[of_control], higher_is_better)
+        ratio, said = "-", "NO RESULT"
+        if name in a.values and name in b.values:
+            times = slower(a.values[name], b.values[name], higher_is_better)
+            ratio = f"{times:.2f}×"
+            said = verdict(times, overlap(a.values[name], b.values[name]), drift)
         lines.append(
-            f"| {case} | {workload} | {unit} | {described(a_values)} | {described(b_values)} | "
-            f"{ratio:.2f}× | {'-' if drift is None else f'{drift:.2f}×'} | "
-            f"{verdict(ratio, overlap(a_values, b_values), drift)} |"
+            f"| {case} | {workload} | {unit} | {a.cell(name)} | {b.cell(name)} | {ratio} | "
+            f"{'-' if drift is None else f'{drift:.2f}×'} | {said} |"
         )
     return "\n".join(lines)
 
@@ -110,34 +184,56 @@ def described(values):
 
 
 def table(a_name, a_dirs, b_name, b_dirs):
-    (a, kinds), (b, b_kinds) = pooled(a_dirs), pooled(b_dirs)
+    a, b = pooled(a_dirs), pooled(b_dirs)
     lines = [
         f"| Workload | Unit | {a_name} | {b_name} | {b_name} vs {a_name} | Ranges overlap |",
         "|---|---|---|---|---|---|",
     ]
     # A's workloads, then those B alone measured.
-    kinds.update((workload, kind) for workload, kind in b_kinds.items() if workload not in kinds)
+    kinds = dict(a.kinds)
+    kinds.update((workload, kind) for workload, kind in b.kinds.items() if workload not in kinds)
     for workload, (unit, higher_is_better) in kinds.items():
-        if workload not in a or workload not in b:
-            lines.append(
-                f"| {workload} | {unit} | {described(a[workload]) if workload in a else '-'} | "
-                f"{described(b[workload]) if workload in b else '-'} | - | - |"
-            )
-            continue
-        a_median, b_median = statistics.median(a[workload]), statistics.median(b[workload])
-        slower = a_median / b_median if higher_is_better else b_median / a_median
-        overlap = max(min(a[workload]), min(b[workload])) <= min(max(a[workload]), max(b[workload]))
-        lines.append(
-            f"| {workload} | {unit} | {described(a[workload])} | {described(b[workload])} | "
-            f"{slower:.2f}× | {'yes' if overlap else 'no'} |"
-        )
+        ratio = overlaps = "-"
+        if workload in a.values and workload in b.values:
+            ratio = f"{slower(a.values[workload], b.values[workload], higher_is_better):.2f}×"
+            overlaps = "yes" if overlap(a.values[workload], b.values[workload]) else "no"
+        elif a.has(workload) and b.has(workload):
+            overlaps = "NO RESULT"
+        lines.append(f"| {workload} | {unit} | {a.cell(workload)} | {b.cell(workload)} | {ratio} | "
+                     f"{overlaps} |")
     return "\n".join(lines)
 
 
 def moved(a_dirs, b_dirs):
     """The workloads both sides measured whose ranges are apart."""
-    (a, _), (b, _) = pooled(a_dirs), pooled(b_dirs)
+    a, b = pooled(a_dirs).values, pooled(b_dirs).values
     return [workload for workload in a if workload in b and not overlap(a[workload], b[workload])]
+
+
+def others_beside(a_name, a_dirs, b_name, b_dirs, sides):
+    """What the rounds' records of others' I/O beside them (scripts/contamination.py) mean for
+    the comparison, as its sections, and what of them fails it, a line each: a metric with no
+    clean round on a side of `sides`, the two sides as the table pools them."""
+    sections, failed = [], []
+    for name, side in zip((a_name, b_name), sides):
+        missing = side.no_result()
+        if missing:
+            metrics = ", ".join(sorted(" ".join(metric) if isinstance(metric, tuple) else metric
+                                       for metric in missing))
+            failed.append(f"{name} has no clean round of: {metrics}")
+    if failed:
+        sections.append("## NO RESULT: every round that measured these was contaminated\n\n"
+                        + "\n".join(f"- {line}" for line in failed))
+    by = verdicts(a_dirs + b_dirs)
+    for verdict_, heading in (
+            ("contaminated", "## CONTAMINATED: others wrote beside these rounds; their timings "
+                             "are left out, their counts and sizes kept"),
+            ("unchecked", "## NOT CHECKED: whether others wrote beside these rounds is not "
+                          "known; their timings are kept")):
+        if verdict_ in by:
+            sections.append(heading + "\n\n" + "\n".join(
+                f"- {', '.join(rounds)}: {why}" for why, rounds in by[verdict_].items()))
+    return sections, failed
 
 
 def failures(directories):
@@ -205,6 +301,12 @@ def main():
         print("## NOT RUN: this comparison is incomplete\n")
         print("\n".join(f"- {line}" for line in missing) + "\n")
         print("NOT RUN: " + "; ".join(missing), file=sys.stderr)
+    sides = (by_case if control else pooled)(a_dirs), (by_case if control else pooled)(b_dirs)
+    sections, no_result = others_beside(a_name, a_dirs, b_name, b_dirs, sides)
+    if no_result:
+        print("NO RESULT: " + "; ".join(no_result), file=sys.stderr)
+    for section in sections:
+        print(section + "\n")
     if control:
         print(control_table(a_name, a_dirs, b_name, b_dirs, control))
     else:
@@ -213,7 +315,7 @@ def main():
     failed = failure_table(a_name, a_dirs, b_name, b_dirs)
     if failed:
         print(f"\n{failed}")
-    return 1 if missing else 0
+    return 1 if missing or no_result else 0
 
 
 if __name__ == "__main__":

@@ -3,9 +3,11 @@ id: TASK-433.6
 title: >-
   A file system that refuses O_DIRECT silently puts logs and the part cache back
   in the host page cache
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-15 13:55'
+updated_date: '2026-11-16 03:25'
 labels: []
 dependencies: []
 references:
@@ -26,14 +28,40 @@ Found by the second-vendor review (Codex via scripts/review-change.sh, TASK-444.
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A store or part cache opened with direct I/O on a file system that refuses it fails to open with an error naming the file system, rather than running buffered
-- [ ] #2 A test injecting a failed bypass sees the open fail (it fails today)
-- [ ] #3 direct.rs and the README say what happens where bypass is refused
+- [x] #1 A store or part cache opened with direct I/O on a file system that refuses it fails to open with an error naming the file system, rather than running buffered
+- [x] #2 A test injecting a failed bypass sees the open fail (it fails today)
+- [x] #3 direct.rs and the README say what happens where bypass is refused
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. extent_remote::direct::bypass(file, path) -> io::Result<()>: InvalidInput naming the path, no fallback; a direct::bypass failpoint refuses as eCryptfs would (decided with the user: an error, not a bool).
+2. read_at/write_at lose their direct flag; no buffered path left.
+3. Part cache: Cache::open probes its file system once (the holes probe's file, now probed()) and fails; every file it opens bypasses or fails.
+4. extent_store DiskDir::file uses it; HostDir::is_direct, DiskDir::bypassing, the dead bypass_page_cache and cladefs's Kind::Image.direct / ImageDevice::is_direct go (always true).
+5. Tests: direct::a_refused_bypass_fails, cache::a_cache_whose_file_system_cant_bypass_the_page_cache_fails_to_open, host::stores_whose_file_system_cant_bypass_the_page_cache_fail.
+6. Docs: direct.rs, README, AGENTS.md.
+7. Also (user, same session): delete store.rs's raw_files_are_read_through_the_page_cache and reads_of_raw_files_go_through_the_page_cache, and their counters.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Store half done in 744df100e (TASK-433.5): DiskDir::file refuses a file that can't bypass (InvalidInput naming the file system), logs included; HostDir's direct flag is gone. Left: extent_remote cache.rs opened() and direct.rs's dir helper still run buffered when bypass fails; AC #2/#3 open.
+
+Done in 53c30322f (main 41e2ce9af). Verified: macOS scripts/test.sh workspace 2514/2514, Shuttle 37/37, sims, mutants clean (its scripts part failed only on main's stale vendor/firecracker.lock, TASK-469, fixed on origin by 6710dd2d2 and green after the merge); clippy gate clean on the merge; ubu1 under fxjob at 41e2ce9af: workspace 2818/2818, scripts part OK; upstream-changes.py --check passes. New tests: direct::tests::a_refused_bypass_fails, cache::tests::a_cache_whose_file_system_cant_bypass_the_page_cache_fails_to_open, tests/host.rs stores_whose_file_system_cant_bypass_the_page_cache_fail (the first file, unmade, refused with its path). No upstream code touched.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A file system that can't bypass the host's page cache now fails the opening everywhere: extent_remote::direct::bypass returns InvalidInput naming the path (failpoint direct::bypass for tests), read_at/write_at have no direct flag, the part cache probes its file system once at open, extent_store's DiskDir uses the same check, and the always-true is_direct/direct fields are gone. Docs: direct.rs, README, AGENTS.md. Verified on macOS (2514/2514) and ubu1 (2818/2818).
+<!-- SECTION:FINAL_SUMMARY:END -->

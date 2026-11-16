@@ -26,6 +26,14 @@ thread_local! {
     static HELD: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Makes the calling thread's list of the shared locks it holds, room for as many as its first
+/// lock would make: what a pool's threads call as they start ([`tokio::runtime::Builder`]'s
+/// `on_thread_start`), so that the first lock a thread takes, whenever that is, allocates nothing,
+/// and a heap counted to the byte holds the same whichever of the pool's threads took locks.
+pub fn prepare_thread() {
+    HELD.with(|held| held.borrow_mut().reserve(4));
+}
+
 /// The shared locks the calling thread holds, by name.
 pub fn held() -> Vec<&'static str> {
     HELD.with(|held| held.borrow().clone())

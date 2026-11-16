@@ -18,7 +18,8 @@
 //! **Changes.** Writes go to chunks in memory, read in first unless written whole, until a commit
 //! ([`Pages::plan`], [`Plan::write`], [`Pages::apply`]) writes them to new extents, with the nodes
 //! above them, which name them, and the nodes above those, to the top: copy on write. A truncation
-//! cuts the chunks past it, which read as holes from then on.
+//! cuts the chunks past it, which read as holes from then on. A punch makes whole chunks holes,
+//! which a commit stores as nothing: a VM's memory keeps its zero pages so (TASK-456.2).
 //!
 //! **Space.** Each extent ends with its blocks' owners (`format`): which chunk or node each holds.
 //! A block a commit replaces is dead. The commit reads the owners of the extents it leaves blocks
@@ -225,8 +226,8 @@ pub(crate) struct Pages {
     size: u64,
     /// The chunks from which those of the last commit read as holes: cut since.
     cut: u64,
-    /// The chunks written since, whole.
-    dirty: BTreeMap<u64, Box<[u8]>>,
+    /// The chunks written since, whole, or punched: holes.
+    dirty: BTreeMap<u64, Option<Box<[u8]>>>,
     /// The window's region the file has, if one (`window`): its first byte's address, its length,
     /// and which of its chunks it maps, as the last commit has them or as before commits since
     /// ([`Pages::mark_stale`]).
@@ -577,7 +578,8 @@ impl Pages {
             let len = ((block_size - within as u64).min(end - at)) as usize;
             let out = &mut buf[(at - offset) as usize..][..len];
             match self.dirty.get(&index) {
-                Some(chunk) => out.copy_from_slice(&chunk[within..within + len]),
+                Some(Some(chunk)) => out.copy_from_slice(&chunk[within..within + len]),
+                Some(None) => out.fill(0),
                 None if len == block_size as usize => {
                     self.read_committed(device, index, out).await?
                 }
@@ -599,15 +601,31 @@ impl Pages {
         index: u64,
         whole: bool,
     ) -> Result<&mut [u8], Error> {
-        if !self.dirty.contains_key(&index) {
-            let mut chunk = vec![0; self.block_size()].into_boxed_slice();
-            if !whole {
-                self.load_chunks(device, index..index + 1).await?;
-                self.read_committed(device, index, &mut chunk).await?;
+        let zeros = || vec![0; self.block_size()].into_boxed_slice();
+        match self.dirty.get(&index) {
+            Some(Some(_)) => {}
+            Some(None) => {
+                self.dirty.insert(index, Some(zeros()));
             }
-            self.dirty.insert(index, chunk);
+            None => {
+                let mut chunk = zeros();
+                if !whole {
+                    self.load_chunks(device, index..index + 1).await?;
+                    self.read_committed(device, index, &mut chunk).await?;
+                }
+                self.dirty.insert(index, Some(chunk));
+            }
         }
-        Ok(self.dirty.get_mut(&index).unwrap())
+        Ok(self.dirty.get_mut(&index).unwrap().as_mut().unwrap())
+    }
+
+    /// Makes `chunks` holes, which read as zeros, those within the file: a commit stores them as
+    /// nothing, leaving what they held.
+    pub fn punch(&mut self, chunks: Range<u64>) {
+        let end = chunks.end.min(self::chunks(self.size, self.block_size()));
+        for index in chunks.start..end.max(chunks.start) {
+            self.dirty.insert(index, None);
+        }
     }
 
     /// Writes `data` at `offset`.
@@ -670,7 +688,7 @@ impl Pages {
 
         // The chunks to write: those written, and the live ones of the extents left sparse, whose
         // live nodes are written again too.
-        let mut written: BTreeMap<u64, Box<[u8]>> = self.dirty.clone();
+        let mut written: BTreeMap<u64, Option<Box<[u8]>>> = self.dirty.clone();
         let mut forced = BTreeSet::new();
         let mut owners_of =
             read_all_owners(device, self.committed.sparse.iter().copied(), block_size).await?;
@@ -693,7 +711,7 @@ impl Pages {
                 if index < self.cut && !written.contains_key(&index) {
                     let mut chunk = vec![0; block_size].into_boxed_slice();
                     self.read_committed(device, index, &mut chunk).await?;
-                    written.insert(index, chunk);
+                    written.insert(index, Some(chunk));
                 }
             } else if in_new((level, index)) {
                 forced.insert((level, index));
@@ -795,7 +813,10 @@ impl Pages {
         for &(level, index) in &rebuilt {
             let children = index * fanout..((index + 1) * fanout).min(counts[level as usize - 1]);
             let child_holds = |child: u64| match level - 1 {
-                0 => written.contains_key(&child) || committed_chunk(child).is_some(),
+                0 => match written.get(&child) {
+                    Some(chunk) => chunk.is_some(),
+                    None => committed_chunk(child).is_some(),
+                },
                 below => match holds.get(&(below, child)) {
                     Some(held) => *held,
                     None => tree.at((below, child)).is_some(),
@@ -807,7 +828,8 @@ impl Pages {
 
         // Where each block goes: the chunks, then the nodes, level by level, in extents of at most
         // `max_blocks`, each followed by its blocks' owners.
-        let total = written.len() + holds.values().filter(|held| **held).count();
+        let chunks_written = written.values().filter(|chunk| chunk.is_some()).count();
+        let total = chunks_written + holds.values().filter(|held| **held).count();
         let max_blocks = max_blocks as usize;
         let extents: Vec<(ExtentId, u32)> = (0..total.div_ceil(max_blocks))
             .map(|extent| (mint(), (total - extent * max_blocks).min(max_blocks) as u32))
@@ -821,6 +843,10 @@ impl Pages {
         };
         let mut next = 0;
         for (index, chunk) in &written {
+            let Some(chunk) = chunk else {
+                placed.insert((0, *index), None);
+                continue;
+            };
             data[next * block_size..][..block_size].copy_from_slice(chunk);
             placed.insert((0, *index), Some(next));
             owners.push(Owner::new(0, *index));
@@ -912,7 +938,9 @@ impl Pages {
         let dirty = std::mem::take(&mut self.dirty);
         if self.region.is_some() {
             self.recent.retain(|index, _| *index < cut.min(n));
-            self.recent.extend(dirty.into_iter().filter(|(index, _)| *index < n));
+            let zeros = || vec![0; self.tree.block_size].into_boxed_slice();
+            let wrote = dirty.into_iter().filter(|(index, _)| *index < n);
+            self.recent.extend(wrote.map(|(index, chunk)| (index, chunk.unwrap_or_else(zeros))));
         }
         merged(changed)
     }
@@ -1048,6 +1076,13 @@ mod tests {
             self.model.resize(size as usize, 0);
         }
 
+        fn punch(&mut self, chunks: Range<u64>) {
+            self.pages.punch(chunks.clone());
+            let end = (chunks.end * BLOCK as u64).min(self.model.len() as u64) as usize;
+            let start = ((chunks.start * BLOCK as u64) as usize).min(end);
+            self.model[start..end].fill(0);
+        }
+
         fn commit(&mut self) {
             let next = &mut self.next;
             let mint = || {
@@ -1141,6 +1176,25 @@ mod tests {
         model.commit();
         assert_eq!(model.pages.root().height, 3);
         model.check();
+    }
+
+    /// Punched chunks read as zeros, before their commit and after an opening, and the commit
+    /// stores nothing for them: a file of nothing but holes holds no extent (TASK-456.2).
+    #[test]
+    fn punched_chunks_are_holes_stored_as_nothing() {
+        let mut model = Model::new(64);
+        model.write(0, &vec![5; BLOCK * 40]);
+        model.commit();
+        model.punch(2..30);
+        model.check();
+        model.commit();
+        model.check();
+        model.reopen();
+        model.check();
+        model.punch(0..40);
+        model.commit();
+        model.check();
+        assert_eq!((model.pages.size(), model.device.extents()), (BLOCK as u64 * 40, Vec::new()));
     }
 
     #[test]
@@ -1240,8 +1294,12 @@ mod tests {
             let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
             let mut model = Model::new(rng.random_range(1..16));
             for _ in 0..200 {
-                match rng.random_range(0..12) {
+                match rng.random_range(0..13) {
                     0 => model.truncate(rng.random_range(0..BLOCK as u64 * 500)),
+                    11 => {
+                        let start = rng.random_range(0..500);
+                        model.punch(start..start + rng.random_range(1..40));
+                    }
                     1..4 => model.commit(),
                     4 => {
                         model.commit();

@@ -174,7 +174,8 @@ class Lima(Synced, unittest.TestCase):
         self.vm, checkout = Path(tempfile.mkdtemp()), Path(tempfile.mkdtemp())
         built(self.vm / "cladefs-test", checkout)
         (self.vm / "cladefs-test" / ".by-content").touch()
-        for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "test-linux.sh", "build-commit.sh"]:
+        for name in ["lib/lima.sh", "lib/linux-host-setup.sh", "lib/measurement.sh", "test-linux.sh",
+                     "build-commit.sh"]:
             (checkout / "scripts" / name).parent.mkdir(parents=True, exist_ok=True)
             (checkout / "scripts" / name).symlink_to(SCRIPTS / name)
         for name, text in [("bench.sh", SAYS), ("test.sh", SAYS), ("settings.sh", SETTINGS)]:
@@ -278,8 +279,9 @@ class Apt(unittest.TestCase):
         # scripts/test-e2e.sh, which bench.sh runs its cases through, runs scripts/test.sh's
         # firecracker part, under nextest (TASK-220): every host script reaching it needs it, or the
         # run fails there (GCE r1022, the bench host's). But for one whose runs build and run
-        # artifacts built once (CLADEFS_E2E_BUILD_ONLY, CLADEFS_E2E_PREBUILT), which run no tests of
-        # the VMM's (bench-ab-linux-host.sh, TASK-276).
+        # artifacts built once (CLADEFS_E2E_BUILD_ONLY, CLADEFS_E2E_PREBUILT; linux-host-setup.sh's
+        # host_prebuilt), which run no tests of the VMM's (bench-ab-linux-host.sh, TASK-276; and,
+        # its build and its measurement apart, bench-linux-host.sh, TASK-368).
         reaching = ("scripts/test-e2e.sh", "scripts/bench.sh")
         missing = [
             path.name
@@ -288,6 +290,7 @@ class Apt(unittest.TestCase):
             if any(script in text for script in reaching)
             and "host_need cargo-nextest" not in text
             and "CLADEFS_E2E_PREBUILT" not in text
+            and "host_prebuilt" not in text
         ]
         self.assertEqual(missing, [])
 

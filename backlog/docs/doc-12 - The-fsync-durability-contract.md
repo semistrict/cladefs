@@ -3,7 +3,7 @@ id: doc-12
 title: The fsync durability contract
 type: other
 created_date: '2026-10-31 22:17'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-15 14:47'
 ---
 # What an acknowledged fsync survives (TASK-66)
 
@@ -53,6 +53,17 @@ hold nothing, and an opening removes them (`ending`, TASK-334). A durable commit
 and opening the next for its upload, waited for those syncs one after another, ext4 journal
 commits, some 8 ms over the bucket's round trip on ubu1; 2 ms after
 (`durable_commits_through_the_daemon`, crash test `segments_upload_before_their_framed_files_are_durable`).
+
+*Noted 2026-11-15 (TASK-397):* none of the figures above ran with the store on ubu1's home, which
+is ZFS. The median, the p99 and the crash bound are GCE's (TASK-221), and TASK-384's 8 ms and 2 ms
+are of a store on ubu1's ext4 scratch disk (/mnt/fxdax-scratch) with the bucket on tmpfs. What did
+run on ZFS is every measurement scripts/bench-rounds.sh made before 2026-11-15: its results'
+directory, in the home, held each run's stores and its file bucket. Their durable syncs' rates
+(TASK-371's 3.2/s, 6.1/s, 10.8/s and 15.9/s; docs/measurements' ubu1-loop-baseline-2026-11-11, its
+-governed run and ubu1-unsafe-2026-11-11) are ZFS's syncs' as much as cladefs's, 91 ms a sync there
+against 32.5 ms with the store on ext4 and the bucket in memory, and say nothing of this
+contract's *durable locally*. bench-rounds.sh now keeps a run's stores on ext4 and its bucket on
+tmpfs, and refuses another filesystem (scripts/test-e2e-job.sh).
 
 The lag is bounded by commits and bytes (`remote::Options`: 4096 commits, 1 GiB, by default) and in
 time by the segment's age. Past the bound, commits wait: the lag is what a lost host can cost, and

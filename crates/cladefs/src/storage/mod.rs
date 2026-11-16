@@ -41,12 +41,11 @@ pub struct Storage {
 
 #[derive(Clone)]
 pub(crate) enum Kind {
-    /// An image: its directory, whether the device's I/O bypasses the page cache, the device's
-    /// writes and frees, which cloning the image pauses, and its store, kept in its bucket, which
-    /// a clone forks.
+    /// An image: its directory, the device's writes and frees, which cloning the image pauses,
+    /// and its store, kept in its bucket, which a clone forks. Its device's I/O bypasses the
+    /// host's page cache, or the image opens not at all (TASK-433.6).
     Image {
         dir: PathBuf,
-        direct: bool,
         writes: Arc<WriteGate>,
         image: Arc<Kept>,
     },
@@ -56,9 +55,7 @@ pub(crate) enum Kind {
 impl fmt::Debug for Kind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Image { dir, direct, .. } => {
-                f.debug_struct("Image").field("dir", dir).field("direct", direct).finish()
-            }
+            Self::Image { dir, .. } => f.debug_struct("Image").field("dir", dir).finish(),
             Self::Memory => write!(f, "Memory"),
         }
     }
@@ -198,8 +195,7 @@ impl Storage {
     /// The storage of the image at `dir` whose device is `device`, its writes going through
     /// `writes`.
     fn image(dir: PathBuf, writes: Arc<WriteGate>, device: ImageDevice) -> Self {
-        let (direct, image) = (device.is_direct(), device.image());
-        let kind = Kind::Image { dir, direct, writes, image };
+        let kind = Kind::Image { dir, writes, image: device.image() };
         Self { device: DeviceHolder::new(device), kind }
     }
 
@@ -216,9 +212,10 @@ impl Storage {
         Self { device: DeviceHolder::new(device), kind: Kind::Memory }
     }
 
-    /// Whether the storage is an image whose I/O bypasses the host's page cache.
+    /// Whether the storage's I/O bypasses the host's page cache: an image's does, or it opens not
+    /// at all (TASK-433.6); memory has none to bypass.
     pub fn bypasses_page_cache(&self) -> bool {
-        matches!(self.kind, Kind::Image { direct: true, .. })
+        matches!(self.kind, Kind::Image { .. })
     }
 
     /// Clones the image to a new image at `path`, which must not exist, and returns its storage.

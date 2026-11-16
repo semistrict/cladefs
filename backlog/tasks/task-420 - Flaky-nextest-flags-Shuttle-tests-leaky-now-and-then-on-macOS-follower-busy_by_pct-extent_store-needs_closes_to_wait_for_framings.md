@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-15 02:08'
-updated_date: '2026-11-15 05:35'
+updated_date: '2026-11-15 20:25'
 labels:
   - testing
   - flaky
@@ -40,4 +40,6 @@ Found by TASK-400's runs of scripts/test.sh's shuttle part on macOS (2026-11-15)
 2026-11-15 (claude, TASK-423): a macOS shuttle part run flagged follower_sim sim::tests::catches_followers_skipping_changes LEAK (0.96 s), passed: a third test, same flag.
 
 2026-11-15 (claude, TASK-423): cargo nextest run -p extent_store -p fxdax on macOS flagged 5 non-Shuttle extent_store tests LEAK at ~0.21 s each, early in the run (durability batches_take_the_commits_queued_in_order, syncs_sync_each_file_once_then_the_directories, framed files_close_the_least_lately_read_first, seals pieces_say_why, corrupt flipped_bytes_fail_reads_and_seals_of_open_extents_in_closed_segments), all passed: the leak flag is not Shuttle's alone.
+
+2026-11-15, another, not a Shuttle test: nextest flagged cladefs filesystem::tests::a_write_given_up_on_completes_before_the_unmount LEAK (passed, 0.228 s) in cargo nextest run -p cladefs -p extent_store -p extent_remote on macOS, branch t3/proactive-performance-reliability rebased onto main 76fabab76 (915 passed, 1 leaky); the branch touches no filesystem code. Not looked into: a handle of the test's process left open past its end, as with the others.
 <!-- SECTION:NOTES:END -->

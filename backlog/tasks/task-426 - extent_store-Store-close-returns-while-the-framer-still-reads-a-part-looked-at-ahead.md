@@ -3,9 +3,11 @@ id: TASK-426
 title: >-
   extent_store: Store::close returns while the framer still reads a part looked
   at ahead
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-15 05:35'
+updated_date: '2026-11-16 03:54'
 labels:
   - bug
   - extent_store
@@ -23,13 +25,25 @@ Found by TASK-423 (2026-11-15). Store::close waits for framings and the next log
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Once Store::close returns, no thread of the store reads its directory: a test holding a look ahead mid-read (failpoint) shows close waiting for it
-- [ ] #2 No framing or commit waits for a look ahead because of it
+- [x] #1 Once Store::close returns, no thread of the store reads its directory: a test holding a look ahead mid-read (failpoint) shows close waiting for it
+- [x] #2 No framing or commit waits for a look ahead because of it
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
-- [ ] #2 scripts/upstream-changes.py --check passes
-- [ ] #3 Deviations from upstream documented where they occur
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #2 scripts/upstream-changes.py --check passes
+- [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Store::close, once it marks the store closed (so the framer begins none of the looks queued, Framer::to_see), waits while Framing::looking, before it removes the raw files. Only close waits: framings and commits never do. Failpoint store::looking_ahead in Framer::see, after it lets the lock go. Test close_waits_for_a_look_ahead_reading (tests/store.rs) holds a look ahead mid-read and closes on another thread: without the wait close returns at once (fails 'closed, reading', Ok(false)); with it close returns only once released. extent_store 292/292 on macOS, clippy (plain and shuttle) clean, fmt clean.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Store::close waits for a look ahead reading its part once it marks the store closed, before removing raw files (56b37239e); nothing else waits for one. close_waits_for_a_look_ahead_reading, holding the read at failpoint store::looking_ahead, fails without the wait. extent_store 292/292 on macOS; main's CI run 43795958147 on 244b04ef3 green (Linux and macOS workspace).
+<!-- SECTION:FINAL_SUMMARY:END -->

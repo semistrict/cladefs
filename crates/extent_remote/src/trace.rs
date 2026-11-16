@@ -76,6 +76,7 @@ pub fn enable(on: bool) {
 /// Whether spans are made ([`enable`]).
 #[inline]
 pub fn enabled() -> bool {
+    // Relaxed: the tracer it says is there is TRACER's, whose get acquires it on its own.
     ENABLED.load(Ordering::Relaxed)
 }
 

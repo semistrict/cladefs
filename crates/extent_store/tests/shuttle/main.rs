@@ -490,7 +490,8 @@ impl Bucket {
         let head = extent_remote::layout::Head::default().holding(chain.epoch(), chain.next_seq());
         let taken = extent_remote::Taken::of(head, &state, chain);
         let keys = extent_remote::testing::ring([BRANCH]);
-        let opening = Opening { state, taken: Some(taken), cache: None, keys, held: None };
+        let opening =
+            Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
         Store::recover(dir).unwrap().open(OPTIONS, opening).unwrap()
     }
 

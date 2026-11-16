@@ -1084,8 +1084,8 @@ pub(super) async fn make_public(path: PathBuf, generation: bool) -> Result<(), E
 pub(super) struct StoreState {
     pub branch: Branch,
     pub info: ExtentInfo,
-    /// Whose the bytes its extents hold are (TASK-49).
-    pub bytes: crate::StoreBytes,
+    /// What its branch holds, bytes and extents, and whose (TASK-49, TASK-454).
+    pub holding: crate::StoreHolding,
     /// Whether it is a public base.
     pub public: bool,
     /// Whether a connection has it open.
@@ -1101,7 +1101,7 @@ fn state_of(store: &ExtentStore, open: bool) -> Result<StoreState, Errno> {
     Ok(StoreState {
         branch: store.branch(),
         info: store.info()?,
-        bytes: store.bytes()?,
+        holding: store.holding()?,
         public: store.is_public(),
         open,
         committed: store.committed()?,

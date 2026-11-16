@@ -11,7 +11,8 @@
 //!
 //! Its anonymous memory's budget ([`AnonBudget`]) is the sum of what the daemon holds by design,
 //! each part bounded where it is held (doc-7, Memory): its uploads', its framings', its fetches',
-//! its tenants' rooms', the parts its stores pack ahead of their framings, held, and its own. A sample past it is memory none of those holds: a copy no
+//! its tenants' rooms', the parts its stores pack ahead of their framings, held, its stores' maps
+//! of their extents, and its own. A sample past it is memory none of those holds: a copy no
 //! budget counts (TASK-317's per-try copy of each upload), what the allocator kept of what was
 //! freed (TASK-317's glibc arenas), a leak. Each sample is weighed against the budget as of then,
 //! [`over-budget`](Sample::over_budget) counting those past it; a soak's or a test's assertion
@@ -63,6 +64,19 @@ pub struct AnonBudget {
     /// The stores' page cache's: the most it held at once so far, which the memory governor bounds
     /// as it bounds the parts held (`extent_store::pages`, TASK-433).
     pub pages: u64,
+    /// The stores' maps of their extents: the most they held at once so far (TASK-453). Of each
+    /// decoded state the stores open share, its map once, however many share it, the bucket's
+    /// layer of each of them (`crate::host_store::decoded_held`); and of each store, what it holds
+    /// of its own, its writes, frees and moves, with its writer's entries for them, and a bucket's
+    /// layer that shares no decoded state, and what its writer's map, the bucket's layer's
+    /// shared, copies of it as it changes it (`extent_store::own_held`). Each entry at its bound
+    /// (`extent_remote::recovery::ENTRY_BYTES`, `extent_store::OWN_ENTRY_BYTES`), and each run of
+    /// changes to a shared map, a path of its nodes copied, at its
+    /// (`extent_remote::recovery::RUN_BYTES`), which `remote::tests::bench_fork_extent_memory`
+    /// holds them to. Not bounded otherwise: a host's
+    /// stores' extents, as many as their guests write, are its density's limit, which the budget
+    /// shows rather than hides, an idle fork adding what it writes, not its base (TASK-443.2).
+    pub extents: u64,
     /// Its own: [`OWN`].
     pub own: u64,
 }
@@ -70,7 +84,14 @@ pub struct AnonBudget {
 impl AnonBudget {
     /// Its parts together: the budget.
     pub fn total(&self) -> u64 {
-        self.uploads + self.framings + self.fetches + self.rooms + self.held + self.pages + self.own
+        self.uploads
+            + self.framings
+            + self.fetches
+            + self.rooms
+            + self.held
+            + self.pages
+            + self.extents
+            + self.own
     }
 }
 
@@ -119,13 +140,16 @@ static STATE: Mutex<State> = Mutex::new(State {
     },
     writers: 0,
     rooms: 0,
+    extents: 0,
 });
 
 struct State {
     sample: Sample,
-    /// The most stores written at once so far, and the most the tenants' rooms held at once.
+    /// The most stores written at once so far, the most the tenants' rooms held at once, and the
+    /// most the stores' maps of their extents held at once.
     writers: u64,
     rooms: u64,
+    extents: u64,
 }
 
 /// The budget of the daemon's anonymous memory as of now, its parts' most so far: so that what the
@@ -137,6 +161,7 @@ pub fn anon_budget() -> AnonBudget {
 fn budget(state: &mut State) -> AnonBudget {
     state.writers = state.writers.max(super::stores::open_count() as u64);
     state.rooms = state.rooms.max(super::memory::rooms_held());
+    state.extents = state.extents.max(extents_held());
     AnonBudget {
         uploads: crate::remote::upload_memory().budget,
         framings: state.writers * FRAMING,
@@ -144,8 +169,15 @@ fn budget(state: &mut State) -> AnonBudget {
         rooms: state.rooms,
         held: super::memory::held_parts().counts().peak,
         pages: extent_store::pages::shared().usage().peak,
+        extents: state.extents,
         own: OWN,
     }
+}
+
+/// What the stores' maps of their extents hold now, at their entries' bounds ([`AnonBudget`]'s
+/// `extents`): the decoded states they share, each once, and what each holds of its own.
+pub fn extents_held() -> u64 {
+    extent_store::own_held().bytes() + crate::host_store::decoded_held().bytes()
 }
 
 /// Samples what the daemon holds and spent now, against its budget now; and returns the sample.
@@ -253,9 +285,18 @@ mod tests {
         assert_eq!(FETCHES, 192 << 20);
         let (uploads, framings) = (512 << 20, 2 * FRAMING);
         let (rooms, held) = (0, 40 << 20);
-        let budget =
-            AnonBudget { uploads, framings, fetches: FETCHES, rooms, held, pages: 0, own: OWN };
-        let total = (512 << 20) + 2 * FRAMING + (192 << 20) + (40 << 20) + (64 << 20);
+        let extents = 3 << 20;
+        let budget = AnonBudget {
+            uploads,
+            framings,
+            fetches: FETCHES,
+            rooms,
+            held,
+            pages: 0,
+            extents,
+            own: OWN,
+        };
+        let total = (512 << 20) + 2 * FRAMING + (192 << 20) + (40 << 20) + (3 << 20) + (64 << 20);
         assert_eq!(budget.total(), total);
     }
 }

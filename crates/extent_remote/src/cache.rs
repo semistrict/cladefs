@@ -621,8 +621,8 @@ impl Found {
 /// The object at `key` the file at `path` holds, if its tail, at its end, passes its checks: its
 /// parts checked against their CRCs unless `holes`, the filesystem finding holes punched.
 fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
-    let (file, direct) = opened(path, false)?;
-    let read_exact_at = |bytes: &mut [u8], at: u64| read_exact(&file, direct, bytes, at);
+    let file = opened(path, false)?;
+    let read_exact_at = |bytes: &mut [u8], at: u64| read_exact(&file, bytes, at);
     let metadata = file.metadata()?;
     let size = metadata.len();
     let Some(at) = size.checked_sub(TRAILER) else { return Ok(None) };
@@ -657,26 +657,26 @@ fn found(path: &Path, key: &str, holes: bool) -> io::Result<Option<Found>> {
 }
 
 /// cladefs: the file at `path`, opened to read, and to write if `write`, bypassing the host's page
-/// cache if its file system allows ([`crate::direct::bypass`], TASK-433.4): and whether it does.
-fn opened(path: &Path, write: bool) -> io::Result<(File, bool)> {
+/// cache ([`crate::direct::bypass`], TASK-433.4), or failing if its file system can't (TASK-433.6).
+fn opened(path: &Path, write: bool) -> io::Result<File> {
     let file = File::options().read(true).write(write).open(path)?;
     // A directory where an object's file was is none, as a read of it would say, rather than
     // what bypassing the cache on it says (EPERM on macOS).
     if file.metadata()?.is_dir() {
         return Err(io::Error::from_raw_os_error(libc::EISDIR));
     }
-    let direct = crate::direct::bypass(&file);
-    Ok((file, direct))
+    crate::direct::bypass(&file, path)?;
+    Ok(file)
 }
 
 /// cladefs: reads all of `bytes` at `at` in `file`, as [`crate::direct::read_at`] does, failing as
 /// `read_exact_at` does if the file ends before them (`UnexpectedEof`): one that shrank behind
 /// the cache's back.
-fn read_exact(file: &File, direct: bool, bytes: &mut [u8], at: u64) -> io::Result<()> {
+fn read_exact(file: &File, bytes: &mut [u8], at: u64) -> io::Result<()> {
     if at + bytes.len() as u64 > file.metadata()?.len() {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }
-    crate::direct::read_at(file, direct, bytes, at)
+    crate::direct::read_at(file, bytes, at)
 }
 
 /// The ranges of `file`, of `size` bytes, that hold data, not holes, as `SEEK_DATA` and
@@ -711,10 +711,12 @@ fn data(file: &File, size: u64) -> io::Result<Vec<Range<u64>>> {
     Ok(ranges)
 }
 
-/// Whether the filesystem `dir` is on finds the holes of a file it punched a hole in, as
-/// `SEEK_DATA` finds them: a file of four blocks, the second written then punched, holding none.
-/// APFS doesn't: those a resize left read as data once a hole is punched.
-fn finds_holes(dir: &Path) -> io::Result<bool> {
+/// cladefs: the filesystem `dir` is on, checked once, as the cache opens: that its files bypass
+/// the host's page cache, or the cache fails to open, naming `dir` (TASK-433.6); and whether it
+/// finds the holes of a file it punched a hole in, as `SEEK_DATA` finds them: a file of four
+/// blocks, the second written then punched, holding none. APFS doesn't: those a resize left read
+/// as data once a hole is punched.
+fn probed(dir: &Path) -> io::Result<bool> {
     let path = dir.join(".holes");
     let mut options = std::fs::OpenOptions::new();
     let file = options.create(true).truncate(true).read(true).write(true).open(&path)?;
@@ -724,7 +726,9 @@ fn finds_holes(dir: &Path) -> io::Result<bool> {
         punch(&file, BLOCK, BLOCK)?;
         Ok(data(&file, 4 * BLOCK)?.is_empty())
     })();
+    let bypassed = crate::direct::bypass(&file, dir);
     std::fs::remove_file(&path)?;
+    bypassed?;
     found
 }
 
@@ -754,7 +758,7 @@ enum Change {
 #[derive(Debug)]
 struct Files {
     dir: PathBuf,
-    /// Whether its filesystem finds the holes punched in its files ([`finds_holes`]).
+    /// Whether its filesystem finds the holes punched in its files ([`probed`]).
     holes: bool,
     #[cfg(test)]
     cut: Option<std::sync::Arc<tests::Cut>>,
@@ -763,7 +767,7 @@ struct Files {
 impl Files {
     fn new(dir: PathBuf) -> io::Result<Self> {
         Ok(Self {
-            holes: finds_holes(&dir)?,
+            holes: probed(&dir)?,
             dir,
             #[cfg(test)]
             cut: None,
@@ -837,11 +841,11 @@ impl Files {
     /// cache ([`crate::direct`], TASK-433.4): the cache's copies are on its disk alone, what is
     /// held in memory the fetchers' to hold, within their budget.
     fn write(&self, key: &str, offset: u64, bytes: &[u8]) -> io::Result<()> {
-        let (file, direct) = opened(&self.path(key), true)?;
+        let file = opened(&self.path(key), true)?;
         for piece in self.pieces(Change::Write, offset..offset + bytes.len() as u64) {
             let from = (piece.start - offset) as usize..(piece.end - offset) as usize;
             let mut tail = crate::direct::Tail::default();
-            crate::direct::write_at(&file, direct, &mut tail, &bytes[from], piece.start)?;
+            crate::direct::write_at(&file, &mut tail, &bytes[from], piece.start)?;
         }
         Ok(())
     }
@@ -879,8 +883,8 @@ impl Files {
     /// cache ([`Files::write`]).
     fn read(&self, key: &str, place: Range<u64>) -> io::Result<Vec<u8>> {
         let mut bytes = vec![0; (place.end - place.start) as usize];
-        let (file, direct) = opened(&self.path(key), false)?;
-        read_exact(&file, direct, &mut bytes, place.start)?;
+        let file = opened(&self.path(key), false)?;
+        read_exact(&file, &mut bytes, place.start)?;
         Ok(bytes)
     }
 
@@ -1626,8 +1630,25 @@ mod tests {
     #[test]
     fn filesystems_find_holes_but_apfs() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(finds_holes(dir.path()).unwrap(), cfg!(target_os = "linux"));
+        assert_eq!(probed(dir.path()).unwrap(), cfg!(target_os = "linux"));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    /// TASK-433.6: a cache on a file system that can't bypass the host's page cache, as the
+    /// failpoint makes every one, fails to open, naming its directory, and leaves no file of its
+    /// probe there, rather than keep objects in the host's page cache, a memory no budget counts.
+    #[test]
+    fn a_cache_whose_file_system_cant_bypass_the_page_cache_fails_to_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("direct::bypass", "return").unwrap();
+        let err = Cache::open(dir.path(), 8 * PART, 0).err().unwrap();
+        scenario.teardown();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        let refused = "its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE)";
+        let prefix = format!("{}: {refused}", dir.path().join(FILES).display());
+        assert!(err.to_string().starts_with(&prefix), "{err}");
+        assert_eq!(files(dir.path()), Vec::<String>::new());
     }
 
     /// TASK-165.4: one cache at a time has a directory; another may once it is dropped.

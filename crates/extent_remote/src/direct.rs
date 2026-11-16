@@ -12,7 +12,10 @@
 //! by the blocks around it, into a buffer aligned so, and what is written that doesn't start or
 //! end at a block's edge is merged into the blocks it touches, read first, unless the caller holds
 //! the block that ends what it wrote before ([`Tail`]), as a log appended to does. A file that
-//! can't bypass the cache (a file system without `O_DIRECT`) is read and written as it is.
+//! can't bypass the cache (a file system without `O_DIRECT`, such as eCryptfs) is not read or
+//! written at all: [`bypass`] fails, and so does the opening of what it is for, a store's file or
+//! the part cache, rather than run in the host's page cache, a second memory no budget counts
+//! (TASK-433.6). Its setup is to be fixed: a file system that bypasses it.
 
 use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::fs::File;
@@ -20,26 +23,38 @@ use std::io;
 use std::ops::Range;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::FileExt as _;
+use std::path::Path;
 
 /// The block that direct I/O moves, and aligns memory to: the largest a host's disks have.
 pub const BLOCK: u64 = 4096;
 
-/// Makes I/O on `file` bypass the host's page cache, if its file system allows, and returns whether
-/// it does.
-pub fn bypass(file: &File) -> bool {
+/// Makes I/O on `file`, at `path`, bypass the host's page cache, or fails, naming `path`, if its
+/// file system refuses (`InvalidInput`): nothing is read or written through the host's cache. The
+/// `direct::bypass` failpoint refuses as such a file system does, for tests.
+pub fn bypass(file: &File, path: &Path) -> io::Result<()> {
+    let refused = |err: io::Error| {
+        let why = format!(
+            "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE): {err}",
+            path.display()
+        );
+        io::Error::new(io::ErrorKind::InvalidInput, why)
+    };
+    fail::fail_point!("direct::bypass", |_| Err(refused(io::Error::from_raw_os_error(
+        libc::EINVAL
+    ))));
     let fd = file.as_raw_fd();
     #[cfg(target_os = "linux")]
-    {
-        // SAFETY: Reads and sets the status flags of an open file descriptor.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT) == 0
-        }
-    }
+    // SAFETY: Reads and sets the status flags of an open file descriptor.
+    let set = unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        flags >= 0 && libc::fcntl(fd, libc::F_SETFL, flags | libc::O_DIRECT) == 0
+    };
     #[cfg(target_os = "macos")]
-    {
-        // SAFETY: Sets an option of an open file descriptor.
-        unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) == 0 }
+    // SAFETY: Sets an option of an open file descriptor.
+    let set = unsafe { libc::fcntl(fd, libc::F_NOCACHE, 1) == 0 };
+    match set {
+        true => Ok(()),
+        false => Err(refused(io::Error::last_os_error())),
     }
 }
 
@@ -109,14 +124,14 @@ fn read_fully(file: &File, mut buf: &mut [u8], mut offset: u64) -> io::Result<()
     Ok(())
 }
 
-/// Reads `buf.len()` bytes at `offset` in `file`, which bypasses the page cache if `direct`: by
+/// Reads `buf.len()` bytes at `offset` in `file`, which bypasses the page cache ([`bypass`]): by
 /// the blocks around them, into memory aligned to them. Bytes past the file's end read as zeros.
-pub fn read_at(file: &File, direct: bool, buf: &mut [u8], offset: u64) -> io::Result<()> {
+pub fn read_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
     let range = offset..offset + buf.len() as u64;
     let aligned_already = offset % BLOCK == 0
         && buf.len() as u64 % BLOCK == 0
         && (buf.as_ptr() as usize) % BLOCK as usize == 0;
-    if !direct || buf.is_empty() || aligned_already {
+    if buf.is_empty() || aligned_already {
         return read_fully(file, buf, offset);
     }
     let around = blocks(&range);
@@ -142,20 +157,14 @@ impl Tail {
     }
 }
 
-/// Writes `bytes` at `offset` in `file`, which bypasses the page cache if `direct`: whole blocks,
+/// Writes `bytes` at `offset` in `file`, which bypasses the page cache ([`bypass`]): whole blocks,
 /// from memory aligned to them, what `bytes` doesn't cover of the first and last block merged in,
 /// read from the file unless `tail` holds the last it wrote. The file's size is as a plain write's
 /// would leave it: the blocks written past the end of what was written are cut off. `tail` holds,
 /// after, the block that ends what this wrote, if it ends partway through one.
-pub fn write_at(
-    file: &File,
-    direct: bool,
-    tail: &mut Tail,
-    bytes: &[u8],
-    offset: u64,
-) -> io::Result<()> {
-    if !direct || bytes.is_empty() {
-        return file.write_all_at(bytes, offset);
+pub fn write_at(file: &File, tail: &mut Tail, bytes: &[u8], offset: u64) -> io::Result<()> {
+    if bytes.is_empty() {
+        return Ok(());
     }
     let range = offset..offset + bytes.len() as u64;
     let around = blocks(&range);
@@ -211,16 +220,13 @@ fn merge_from(
 mod tests {
     use super::*;
 
-    /// A file in `dir`, bypassing the page cache if the file system allows: whether it does.
-    fn opened(dir: &std::path::Path) -> (File, bool) {
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(dir.join("file"))
-            .unwrap();
-        let direct = bypass(&file);
-        (file, direct)
+    /// A file in `dir`, bypassing the page cache.
+    fn opened(dir: &Path) -> File {
+        let path = dir.join("file");
+        let options = std::fs::OpenOptions::new().read(true).write(true).create_new(true).clone();
+        let file = options.open(&path).unwrap();
+        bypass(&file, &path).unwrap();
+        file
     }
 
     /// Writes at any offset and of any length, appended or over what was written, read back at
@@ -229,11 +235,11 @@ mod tests {
     #[test]
     fn unaligned_writes_and_reads_are_as_plain_ones() {
         let dir = tempfile::tempdir().unwrap();
-        let (file, direct) = opened(dir.path());
+        let file = opened(dir.path());
         let mut tail = Tail::default();
         let mut model = Vec::new();
         let mut write = |bytes: &[u8], offset: u64, model: &mut Vec<u8>| {
-            write_at(&file, direct, &mut tail, bytes, offset).unwrap();
+            write_at(&file, &mut tail, bytes, offset).unwrap();
             let end = offset as usize + bytes.len();
             if model.len() < end {
                 model.resize(end, 0);
@@ -257,11 +263,33 @@ mod tests {
         assert_eq!(file.metadata().unwrap().len(), model.len() as u64);
         for (offset, len) in [(0, model.len()), (1, 4095), (4000, 200), (8191, 2), (19_999, 302)] {
             let mut read = vec![0; len];
-            read_at(&file, direct, &mut read, offset as u64).unwrap();
+            read_at(&file, &mut read, offset as u64).unwrap();
             let mut want = vec![0; len];
             let end = (offset + len).min(model.len());
             want[..end - offset].copy_from_slice(&model[offset..end]);
             assert_eq!(read, want, "{len} bytes at {offset}");
         }
+    }
+
+    /// A file system that refuses to bypass the page cache, as the failpoint makes every one, fails
+    /// the bypass, naming the file, rather than leave the file to be read and written through the
+    /// host's cache (TASK-433.6).
+    #[test]
+    fn a_refused_bypass_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        let file = File::create(&path).unwrap();
+        let scenario = fail::FailScenario::setup();
+        fail::cfg("direct::bypass", "return").unwrap();
+        let err = bypass(&file, &path).unwrap_err();
+        scenario.teardown();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        let want = format!(
+            "{}: its file system can't bypass the host's page cache (O_DIRECT, F_NOCACHE): \
+             {}",
+            path.display(),
+            io::Error::from_raw_os_error(libc::EINVAL)
+        );
+        assert_eq!(err.to_string(), want);
     }
 }
