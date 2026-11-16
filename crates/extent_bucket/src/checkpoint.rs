@@ -289,10 +289,11 @@ mod tests {
                 assert_eq!(read, block(extent));
                 assert!(read.1 < extent_frame::PART / 2, "{read:?} read");
             }
-            // Past the last extent, its block is read; before the first, none.
+            // Past the last extent, its block is read; before the first, none: IDs sort by
+            // sequence number, then branch, as the table's entries do.
             let past = ExtentId::new(3, 2_000_000);
             assert_eq!(lookup(past).await, (Ok(None), block(past)));
-            assert_eq!(lookup(ExtentId::new(2, 5)).await, (Ok(None), (0, 0)));
+            assert_eq!(lookup(ExtentId::new(2, 0)).await, (Ok(None), (0, 0)));
         });
     }
 }
