@@ -338,9 +338,12 @@ pub struct Rules {
     /// took the ID, which listing the records again finds (TASK-173).
     /// TLA+: `specs/bucket/mutations/NoRecoveriesByOrigins.cfg`.
     pub recoveries_by_origins: bool,
-    /// The collector drops no branch's record, a deleted root's neither: a writer of a parent slow
-    /// to record a fork whose child's ID a root took, and was deleted, would make the record again,
-    /// naming what the collector reclaimed (TASK-174).
+    /// The collector removes a record only with its cell, dead, and only a deleted root's or
+    /// clone's made, of an ID an allocator gave, which no recorder makes again
+    /// ([`record::Record::removable`], TASK-455): a writer of a parent slow to record a fork whose
+    /// child was deleted, or whose child's ID a root took, and was deleted, would make the record
+    /// again, naming what the collector reclaimed (TASK-174). Without it, a dead cell goes whole
+    /// whatever its records.
     /// TLA+: `specs/bucket/mutations/NoRecordsKept.cfg`.
     pub records_kept: bool,
     /// A host's write-ahead log is put after the branch's end only if the branch's last commit is
@@ -403,6 +406,43 @@ pub struct Rules {
     /// (TASK-395.14). Its write changes the parent's cell's listing, whose next pass finds it.
     /// TLA+: `specs/bucket/mutations/NoRetirementsMarked.cfg`.
     pub retirements_marked: bool,
+    /// cladefs: the collector removes a dead cell's root's or clone's record only if its ID is one
+    /// an allocator gave ([`objectid::given`]), which no fork names: one a guest named, a fork may
+    /// name too, its slow writer recording the child after the cell went (TASK-455). Without it,
+    /// whatever the ID.
+    /// TLA+: `specs/bucket/mutations/NoIdsGivenOnce.cfg` (the model's forks naming given IDs,
+    /// as the code's collector taking named ones for given).
+    pub ids_given: bool,
+    /// cladefs: a reference is retired unmarked only if its child is a clone made of an ID an
+    /// allocator gave: its host, its one writer, wrote it before it made it
+    /// ([`record::Record::retires_unmarked`], TASK-455), so that a base's cell keeps no mark of a
+    /// clone made and gone. Without it, any clone's, one being made among them, whose host, slow,
+    /// writes it after its retirement, unmarked, for good.
+    /// TLA+: `specs/bucket/mutations/NoForksMadeUnmarked.cfg`.
+    pub clones_made_unmarked: bool,
+    /// cladefs: a head of a branch whose record the pass did not list goes only if it is not
+    /// final, and no record of the branch is there to read: a stale taker's, of a branch removed
+    /// with its cell. A final one is a deletion's fence, of a fork's child whose record is yet to
+    /// come, the deletion's own or its parent's slow writer's (TASK-79.78): it stays, and keeps its
+    /// cell from removal ([`collector`], TASK-455's review). Without it, as a test shows it needed,
+    /// a pass over a cell of no record deletes it, a writer takes the child once its parent's
+    /// writer records it, and the deletion, going on, marks it deleted under that writer.
+    /// TLA+: `specs/bucket/mutations/NoFencesKept.cfg`.
+    pub fences_kept: bool,
+    /// cladefs: a fork of a point resumed by another than its host, a store opening its child,
+    /// writes its reference before it makes it, as its host does ([`branch::resume_point_fork`]).
+    /// Without it, as a test shows it needed, a host dying between the fork's record and its
+    /// reference leaves a clone made of no reference, whose origin's state at the fork point no
+    /// pass keeps once the point is gone.
+    /// TLA+: `specs/bucket/mutations/NoResumesRefer.cfg`.
+    pub resumes_refer: bool,
+    /// cladefs: a fork of a point resumed says so in its record ([`record::Record::resumed`]), with
+    /// a condition, before its reference is written again, and a clone made so retires its
+    /// reference marked: its host, slow, may write it after the clone was made, deleted and its
+    /// cell removed. Without it, as a test shows it needed, retired unmarked, that reference
+    /// stands for good, keeping its base's state at the fork point (TASK-455's review).
+    /// TLA+: `specs/bucket/mutations/NoResumesMarked.cfg`.
+    pub resumes_marked: bool,
 }
 
 impl Rules {
@@ -441,6 +481,11 @@ impl Rules {
         clones_record_first: true,
         references_taken_back: true,
         retirements_marked: true,
+        ids_given: true,
+        clones_made_unmarked: true,
+        fences_kept: true,
+        resumes_refer: true,
+        resumes_marked: true,
     };
 }
 

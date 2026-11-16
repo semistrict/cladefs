@@ -9,7 +9,7 @@
 # content, as a host's tree is (host_tree, scripts/lib/linux-host-setup.sh);
 # what the script leaves behind stays in the VM.
 #
-# The script takes this environment's cladefs settings, CLADEFS_* but CLADEFS_LIMA_INSTANCE, as they
+# The script takes this environment's cladefs settings, CLADEFS_* and CLADEFSD_* but CLADEFS_LIMA_INSTANCE, as they
 # are (a path among them names the VM's file, absolute: CLADEFS_GUEST_KERNEL a kernel
 # build-guest-kernel.sh built there), and LIBCLANG_PATH, which building Firecracker's bindings
 # needs where llvm-config doesn't find libclang. Its builds are of the checkout's commit
@@ -29,7 +29,7 @@ settings=
 for name in $(compgen -e); do
     case $name in
         CLADEFS_LIMA_INSTANCE) ;;
-        CLADEFS_* | LIBCLANG_PATH) settings+="export $name=$(printf '%q' "${!name}"); " ;;
+        CLADEFS_* | CLADEFSD_* | LIBCLANG_PATH) settings+="export $name=$(printf '%q' "${!name}"); " ;;
     esac
 done
 

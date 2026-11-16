@@ -150,6 +150,18 @@ ab_prune() {
     done < <(ls -1t "$CLADEFS_AB_KEEP" | sed -n "$((keep + 1)),\$p")
 }
 
+# ab_tidy records in RESULTS/rounds-size.txt the bytes the rounds' results hold, with the guests'
+# root filesystems and the stores failed cases leave in them, for the room a later run asks for
+# (scripts/nightly.py's room, TASK-489); then removes those, which are not results.
+ab_tidy() {
+    local kib
+    kib=$(du -sk "$results" | cut -f1)
+    echo "$((kib * 1024))" > "$results/rounds-size.txt"
+    find "$results" -type d \( -name rootfs -o -name extents -o -name '*.img' \) -prune \
+        -exec rm -rf {} +
+    find "$results" -type f \( -name '*.img' -o -name rootfs.ext4 \) -delete
+}
+
 # Sourced, as by the scripts' tests, it defines its functions and does nothing else.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 
@@ -309,10 +321,7 @@ sides+=(-- "$b_name")
 for (( r = 1; r <= ran; r++ )); do sides+=("$results/$b_name-r$r"); done
 "$tools/scripts/bench-ab.py" ${control:+--control "$control"} "$a_name" "${sides[@]}" \
     > "$results/ab.md" || status=1
-# The guests' root filesystems and the stores, which a failed case leaves, are not results.
-find "$results" -type d \( -name rootfs -o -name extents -o -name '*.img' \) -prune \
-    -exec rm -rf {} +
-find "$results" -type f \( -name '*.img' -o -name rootfs.ext4 \) -delete
+ab_tidy
 echo "Took ${SECONDS}s." | tee -a "$results/host.txt"
 cat "$results/ab.md"
 exit "$status"

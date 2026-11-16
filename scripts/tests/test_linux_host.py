@@ -36,7 +36,7 @@ exec env -i HOME="$FAKE_VM" PATH=/usr/bin:/bin bash "$@"
 # A script the VM runs, which says what it was given.
 SAYS = '#!/bin/bash\necho "$0 $*, LIBCLANG_PATH=${LIBCLANG_PATH:-}"\n'
 # A script the VM runs, which says the cladefs settings it was given.
-SETTINGS = '#!/bin/bash\nenv | grep ^CLADEFS_ | sort\n'
+SETTINGS = '#!/bin/bash\nenv | grep -E "^CLADEFSD?_" | sort\n'
 
 
 def write(path, text, mtime):

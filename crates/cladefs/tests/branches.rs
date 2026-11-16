@@ -23,9 +23,9 @@ fn pattern(seed: u8, len: usize) -> Vec<u8> {
 fn branch(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFS_EXTENTD_REMOTE", url)
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env_remove("CLADEFS_EXTENTD_GRPC")
+        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_TOKEN", "1")
+        .env_remove("CLADEFSD_GRPC")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -117,9 +117,9 @@ fn forks_and_takes_branches_in(url: &str) {
 fn branch_fails(url: &str, args: &[&str]) -> String {
     let output = Command::new(env!("CARGO_BIN_EXE_cladefsctl"))
         .args(args)
-        .env("CLADEFS_EXTENTD_REMOTE", url)
-        .env("CLADEFS_EXTENTD_TOKEN", "1")
-        .env_remove("CLADEFS_EXTENTD_GRPC")
+        .env("CLADEFSD_REMOTE", url)
+        .env("CLADEFSD_TOKEN", "1")
+        .env_remove("CLADEFSD_GRPC")
         .output()
         .unwrap();
     assert!(!output.status.success(), "cladefsctl {args:?} succeeded");

@@ -24,8 +24,8 @@ results under RESULTS, prints each mutant's fate, and exits 1 unless each was ki
 killed only if its killer failed, as the run's summary says (scripts/guest_results.py); MISSED if
 not; BROKEN if the run failed otherwise, as a build that doesn't compile or a test host lost,
 which says nothing of the killer. One whose killer is `none` isn't run. CLADEFS_MUTANT_KERNEL is
-the kernel of every mutant, in place of each's own; the other CLADEFS_* settings reach the test
-host as scripts/test-host.sh says.
+the kernel of every mutant, in place of each's own; the other CLADEFS_* and CLADEFSD_* settings
+reach the test host as scripts/test-host.sh says.
 
 --check runs nothing: every mutant's header names a kernel and a killer there is, and each of these
 patches applies to the sources as they are, as CI checks, and those of guest/sim's model of Fxfs

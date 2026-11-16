@@ -13,7 +13,7 @@ it.
 
 The guest's kernel runs Fxfs (`guest/`), which keeps its filesystem as
 extents: immutable pieces of data, written once and sealed by the next
-commit (backlog doc-4). On the host, cladefs's extent daemon, `cladefs-extentd`,
+commit (backlog doc-4). On the host, cladefs's extent daemon, `cladefsd`,
 keeps each VM's extents in an extent store on local disk, caches their pages
 in physical memory of its own, and maps them into the VMs' DAX windows. Its
 cache is shared by the host's VMs: two VMs mapping one extent, such as two
@@ -30,7 +30,7 @@ guest (Linux + Fxfs)     guest/: Fxfs in the kernel; DAX loads and stores
 Firecracker (one VM     vendor/firecracker: the extent device, a client of the
   process)               daemon
   │  Unix socket; the daemon's memory (a memfd), mapped into the DAX window
-cladefs-extentd            crates/cladefs: extentd, the stores, the extent cache,
+cladefsd            crates/cladefs: extentd, the stores, the extent cache,
   │                      the DAX windows
 physical memory          crates/physmem: arenas of shared memory (memfds),
   │                      their caps, relief and quarantine
@@ -157,7 +157,7 @@ of these stands in with the items the code copied from Fuchsia uses:
 - `cache.rs` holds the cache of sealed extents' pages, shared by every store
   in the process, each extent a table of its pages, read in a part at a time
   and evicted as memory runs out.
-- `extentd/` holds the daemon (`bin/cladefs-extentd.rs`) and its client,
+- `extentd/` holds the daemon (`bin/cladefsd.rs`) and its client,
   `DaemonExtentStore`, which a VMM's device is; see the extent daemon below.
 - `dax.rs` holds DAX windows, their mappings and the pages they have mapped,
   and the `SecondStage` trait that follows a window's pages: the daemon's connection to a VM process implements it;
@@ -180,14 +180,17 @@ of these stands in with the items the code copied from Fuchsia uses:
   Linux a mount through `/dev/fuse`, by mount(2) as root or `fusermount3`
   otherwise. `cladefs-mount STORE MOUNTPOINT` mounts a store nothing else has
   open, read-write, until it is unmounted or sent SIGINT or SIGTERM; with
-  `--new CAPACITY`, a new store it makes. `cladefs-mount --control SOCKET --stores
-  DIR MOUNTPOINT` is one mount for any number of stores (TASK-302): its control
-  API (`proto/cladefs/mount/v1/mount.proto`; `cladefs-mount attach`,
-  `create-volume`, `detach`, `list`) takes a tenant's cell of the bucket
-  (TASK-364), taking its volumes' heads with it, each Fxfs volume into
+  `--new CAPACITY`, a new store it makes. cladefsd, with `CLADEFSD_MOUNT`
+  naming a MOUNTPOINT and `CLADEFSD_MOUNT_STORES` a DIR, is one mount for any
+  number of stores (TASK-302, TASK-475.2): its Mount service, on the daemon's
+  control socket (`proto/cladefs/mount/v1/mount.proto`; `cladefsctl mount
+  attach`, `create-volume`, `detach`, `list`), takes a tenant's cell of the
+  bucket (TASK-364), taking its volumes' heads with it, each Fxfs volume into
   `DIR/TENANT/CELL/VOLUME` and shown at `MOUNTPOINT/TENANT/CELL/VOLUME`, and
-  detaches the cell once the kernel lets go of it, written back. macOS has no
-  open-source FUSE, so no mounts there.
+  detaches the cell once the kernel lets go of it, written back; the daemon's
+  drain closes the mount. A cell's volumes are so held by one process, whether
+  VMs or the mount serve them. macOS has no open-source FUSE, so no mounts
+  there.
 - `memory.rs` holds `VolatileSlice` and `VolatileSliceMut`, memory cladefs only
   copies into and out of, as a guest may change it concurrently.
 - `error.rs` holds `Errno`, Linux's errno values on every host, mapped from
@@ -196,7 +199,7 @@ of these stands in with the items the code copied from Fuchsia uses:
   (fsck), and forks images: a fork's branch is a fork of the image's in the
   bucket its store keeps it in, the image's own file bucket, `<image>.bucket`
   beside its directory, or on a host of cladefs's system the host's
-  (`CLADEFS_EXTENTD_REMOTE`); the fork's directory is a store of its own, which
+  (`CLADEFSD_REMOTE`); the fork's directory is a store of its own, which
   reads what it inherited from the bucket (TASK-165.7). `Storage::delete`
   deletes forks and images alike: the branch in its bucket, whose collector
   reclaims what no other branch inherited, and the directory; forks live on.
@@ -270,7 +273,7 @@ mode 0600; a jail made otherwise needs the same (`mknod dev/userfaultfd c 10
 MINOR`, its minor as the host's `/dev/userfaultfd` has it).
 
 **The extent daemon.** The VMM runs one VM per process, so extents cached in a
-VM process would be shared by that VM alone. `cladefs-extentd` (the `extentd`
+VM process would be shared by that VM alone. `cladefsd` (the `extentd`
 module) is one process on a host that owns the physical memory, the extent
 cache and the stores, and serves them to VM processes over a Unix socket: the
 only way the VMM's extent device has a store, at the socket its configuration
@@ -294,7 +297,7 @@ private DAX pages, those its guest wrote, are its VM process's own memory,
 laid out as its window is, at most `private_max` of them, which the daemon
 reserves against the tenant's memory as the window is made.
 The host's VM manager drives the daemon
-through a gRPC control API on a Unix socket of its own (`CLADEFS_EXTENTD_GRPC`;
+through a gRPC control API on a Unix socket of its own (`CLADEFSD_GRPC`;
 `crates/cladefs/proto/cladefs/extentd/v1/extentd.proto`, TASK-43.3; in Go,
 `github.com/semistrict/cladefs/go/extentd/v1`, TASK-219): it makes,
 imports, forks, places, syncs, resizes and deletes stores, and grants tenants
@@ -308,7 +311,7 @@ the points of others' its VM manager gives it. Revoked, a tenant's socket
 goes, and once its VM processes do, its arena and cached pages.
 The daemon's own VM socket is the default tenant's, ID 0, which is granted
 nothing and has no limits of its own, only every tenant's: its connections name
-stores in the daemon's roots alone (`CLADEFS_EXTENTD_ROOTS`), or anywhere without
+stores in the daemon's roots alone (`CLADEFSD_ROOTS`), or anywhere without
 any. It is the daemon's user's alone, mode 0600, so that a jailed VM process, of
 another user, reaches a tenant's socket and no other, whatever is mounted
 (TASK-155). Below a tenant, a VM process's user does not matter: nothing there
@@ -346,7 +349,7 @@ and writes pages before mapping them to a VM. So the daemon's cgroup is charged
 for every VM's cached file pages, and the VMs' cgroups are not: give the
 daemon a cgroup of its own whose `memory.max` holds `MEMORY_BYTES` and its heap
 (the stores' metadata, the connections' buffers, the uploads in flight), and limit tenants through the control API, as cgroups cannot see them apart.
-A bucket behind costs the heap no more than its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY`
+A bucket behind costs the heap no more than its upload memory, `CLADEFSD_UPLOAD_MEMORY`
 (512 MiB by default): what waits is on the host's disk (backlog doc-7, Uploads, Memory); on ubu1
 a docker build's backlog held the daemon's anonymous memory to 718 MB, against 5.9 GB before (TASK-317). A
 memory.max under that is met by the cgroup's OOM killer, not by eviction:
@@ -359,7 +362,7 @@ extents, each file's blocks once, as `du -sx` counts them (TASK-94). One rule
 for what is shared: a file is the tenant's whose directory holds it, and one in
 no tenant's directory is no tenant's. A fork's directory holds what the fork
 wrote, its base's data being in the bucket, read through the host's part cache
-(`CLADEFS_EXTENTD_CACHE`), which is no tenant's: copies of objects any tenant
+(`CLADEFSD_CACHE`), which is no tenant's: copies of objects any tenant
 reads, bounded by its own capacity and floor, evicting to keep within them. The
 daemon walks a tenant's directory as it is granted, every 10 s, soon after a
 write of it is refused, and as `GetTenantDisk` asks, and counts each write it
@@ -382,8 +385,8 @@ and its open segment.
 copies of it, whose placements fence each other with their tokens: a placement
 cut off neither takes a branch back nor deletes it from under a later one
 (TASK-39.7, TASK-45). The daemon runs as a host of that system, with the bucket
-(`CLADEFS_EXTENTD_REMOTE`) and its placement's token from the control plane
-(`CLADEFS_EXTENTD_TOKEN`, not 0), and refuses to start without them: there is no
+(`CLADEFSD_REMOTE`) and its placement's token from the control plane
+(`CLADEFSD_TOKEN`, not 0), and refuses to start without them: there is no
 single-node mode. Tests and development use an in-memory bucket
 (`memory:///NAME`), or one in a directory of the host's (`file:///DIR`), which
 outlives the daemon and is shared with cladefsctl and cladefs-gc. What a bucket has
@@ -698,19 +701,19 @@ make check-tla             # about two hours, each model in minutes, on Java; fe
 ### The nightly measurement on ubu1
 
 Every night at 02:00 a cron entry on ubu1 runs `scripts/nightly-host.sh` from the nightly's own
-clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change since
-the night before (its newest commit that changed more than `docs/measurements` and `backlog`), it
-does nothing. Otherwise it measures main's head against the commit the night before measured, as an
-A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_TEST_HOST=local`): the head built as
-work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`), then three
-rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases an agent
-sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends, SQLite's
-scans, small files' create, stat, readdir and read, create with fsync, sync, syncfs and freeze
-loops), a fork's boot cold and warm, and ext4 on virtio-blk, no cladefs in it, as the control. Beside them, counts that
-a load doesn't move: the guest's device requests, the extent daemon's counters, what each daemon
-wrote by kind for each guest byte and its peak memory (`scripts/budgets.py`'s figures), and three
-benchmarks run with each build (`scripts/counts.sh`: a sandbox's bucket requests by phase, an idle
-fork's heap, the collector's requests over dead cells).
+clone (`~/src/cladefs-nightly`), main's own copy of it (TASK-441). If main's code didn't change
+since the last night that measured (its newest commit that changed more than `docs/measurements` and
+`backlog`), it does nothing. Otherwise it measures main's head against the commit that night
+measured, as an A/B (`scripts/bench-ab-host.sh`, on ubu1 itself, `CLADEFS_TEST_HOST=local`): the
+head built as work, the base's artifacts kept from the night it was the head (`CLADEFS_AB_KEEP`),
+then three rounds of both sides interleaved alone in `fxjob --bench`, each of the fs bench's cases
+an agent sandbox stands on: the guest's Fxfs with DAX (cold and warm reads, fsynced appends,
+SQLite's scans, small files' create, stat, readdir and read, create with fsync, sync, syncfs and
+freeze loops), a fork's boot cold and warm, and ext4 on virtio-blk, no cladefs in it, as the
+control. Beside them, counts that a load doesn't move: the guest's device requests, the extent
+daemon's counters, what each daemon wrote by kind for each guest byte and its peak memory
+(`scripts/budgets.py`'s figures), and three benchmarks run with each build (`scripts/counts.sh`: a
+sandbox's bucket requests by phase, an idle fork's heap, the collector's requests over dead cells).
 
 `scripts/ab-rounds.py` judges each round apart. A round is left out when others wrote beside it
 (`contamination.py`) or when its control moved (the median of its timings' ratios past 5%), and
@@ -727,15 +730,23 @@ night pushes it first.
 
 - Results: `docs/measurements/ubu1-nightly-<time>-<head>/nightly.md` for each night, and
   `docs/measurements/nightly-history.md` for all of them, newest first.
-- A night that **could not run** (a side failed to build, or no round ran) or that has **no
-  result** (every round was left out: the disk was busy, or the host drifted) measured nothing:
-  its row says why, and its `nightly.md` lists each round and why it was left out. The next night
-  measures from the same base. Three such nights in a row file a task (`[nightly:no-result]`).
+- A night that **could not run** (a side failed to build, no round ran, or the scratch disk was
+  short of room) or that has **no result** (every round was left out: the disk was busy, or the
+  host drifted) measured nothing: its row says why, and its `nightly.md` lists each round and why
+  it was left out. The next night measures the same commits again, or main's newer head against
+  the same base. Three such nights in a row file a task (`[nightly:no-result]`).
+- The scratch disk, `/mnt/fxdax-scratch`, is every job's (TASK-489). A night first removes its own
+  earlier runs' directories (`run-nightly-*` whose job isn't running) and keeps the artifacts of
+  tonight's two sides alone; then checks the disk has room before it builds and before it
+  measures: `CLADEFS_NIGHTLY_ROOM_BUILD` (100G) and `CLADEFS_NIGHTLY_ROOM_MEASURE` (20G), or a
+  fifth more than the most the last 7 nights took, if more (`scripts/nightly.py`'s `ROOM` says
+  why). Short of it, the night could not run, and its `nightly.md` names the disk, the free space
+  found and the need.
   A single metric's NO RESULT means one of its rounds and that round's rerun were both left out.
 - The log: `~/.local/state/cladefs/nightly/nightly.log` on ubu1, a line a step; cron's output in
   `cron.log` beside it.
 
-A night by hand, on ubu1 (it skips if main's code was measured already):
+A night by hand, on ubu1 (it skips if a night measured main's code already):
 
 ```sh
 ~/src/cladefs-nightly/scripts/nightly-host.sh

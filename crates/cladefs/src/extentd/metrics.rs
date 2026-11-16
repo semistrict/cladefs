@@ -3,73 +3,73 @@
 // found in the LICENSE file.
 
 //! The daemon's metrics, in Prometheus' text exposition format, served over HTTP to whoever scrapes
-//! them (TASK-47): `GET /metrics` on the address `CLADEFS_EXTENTD_METRICS` names.
+//! them (TASK-47): `GET /metrics` on the address `CLADEFSD_METRICS` names.
 //!
-//! - `cladefs_extentd_requests_total{kind}`, `cladefs_extentd_request_errors_total{kind}`, and
-//!   `cladefs_extentd_request_duration_seconds{kind}`, a histogram: the VM processes' requests, by
+//! - `cladefsd_requests_total{kind}`, `cladefsd_request_errors_total{kind}`, and
+//!   `cladefsd_request_duration_seconds{kind}`, a histogram: the VM processes' requests, by
 //!   kind, as the daemon served them, from their dispatch to their reply's sending.
-//! - `cladefs_extentd_build_info{commit}`, 1: the commit the daemon was built of
-//!   (`crate::BUILD_COMMIT`); `cladefs_extentd_vm_build_info{branch,commit}`: the VM processes
+//! - `cladefsd_build_info{commit}`, 1: the commit the daemon was built of
+//!   (`crate::BUILD_COMMIT`); `cladefsd_vm_build_info{branch,commit}`: the VM processes
 //!   connected, by their store's branch, in hexadecimal, and the commit they said they were built
 //!   of (`wire::BUILD`), a writer and its followers counted together (TASK-111.7).
-//! - `cladefs_extentd_connections`, `cladefs_extentd_stores_open` and `cladefs_extentd_follower_views`:
+//! - `cladefsd_connections`, `cladefsd_stores_open` and `cladefsd_follower_views`:
 //!   the VM processes connected, the stores their connections write, and the followers' views.
-//! - `cladefs_extentd_extent_cache_pinned_entries` and `cladefs_extentd_extent_cache_idle_entries`:
+//! - `cladefsd_extent_cache_pinned_entries` and `cladefsd_extent_cache_idle_entries`:
 //!   the sealed extents cached that something but the cache holds, and those nothing else does
-//!   (`crate::cache::entries`); `cladefs_extentd_window_mappings`,
-//!   `cladefs_extentd_window_mapped_bytes` and `cladefs_extentd_window_pages`: the ranges the VMs'
+//!   (`crate::cache::entries`); `cladefsd_window_mappings`,
+//!   `cladefsd_window_mapped_bytes` and `cladefsd_window_pages`: the ranges the VMs'
 //!   windows map, their bytes, and the pages of them mapped in the VM processes (`crate::dax::live`,
-//!   TASK-131.6); cladefs: `cladefs_extentd_window_private_pages`, of those, the private copies of
-//!   windows that copy on write, and `cladefs_extentd_window_open_maps_refused_total`, the `MAP`s of
+//!   TASK-131.6); cladefs: `cladefsd_window_private_pages`, of those, the private copies of
+//!   windows that copy on write, and `cladefsd_window_open_maps_refused_total`, the `MAP`s of
 //!   open extents refused, which no guest makes (backlog doc-13).
 //! - cladefs: of each VM process connected that opened a store, by its store's branch, in
 //!   hexadecimal, and its connection's number (`connection`), which tells a writer and its
-//!   followers apart (TASK-111.5): `cladefs_extentd_vm_window_mappings`,
-//!   `cladefs_extentd_vm_window_mapped_bytes`, `cladefs_extentd_vm_window_pages` and
-//!   `cladefs_extentd_vm_window_private_pages`, its window's, as the gauges above count all windows';
-//!   `cladefs_extentd_vm_host_mappings`, the runs of pages its window's second stage has installed in
+//!   followers apart (TASK-111.5): `cladefsd_vm_window_mappings`,
+//!   `cladefsd_vm_window_mapped_bytes`, `cladefsd_vm_window_pages` and
+//!   `cladefsd_vm_window_private_pages`, its window's, as the gauges above count all windows';
+//!   `cladefsd_vm_host_mappings`, the runs of pages its window's second stage has installed in
 //!   its memory, each a mapping the host's `vm.max_map_count` limits, as it last said with its
-//!   stage operations, and `cladefs_extentd_vm_host_mapping_budget`, the most it keeps, as it said as
+//!   stage operations, and `cladefsd_vm_host_mapping_budget`, the most it keeps, as it said as
 //!   it made its window, from the limit the daemon told it (TASK-172).
-//! - `cladefs_extentd_<counter>_total`: the counters the control API's `GetCounters` reports
+//! - `cladefsd_<counter>_total`: the counters the control API's `GetCounters` reports
 //!   (`crate::stats::Stats::named`, its dashes underscores): maps, faults, page-ins, reads and
 //!   their nanoseconds and bytes; the VM processes' changes to their windows (`stage_ops`) and
 //!   their nanoseconds in them (`stage_ns`), whose ratio is what a window change costs a VM process.
-//! - `cladefs_extentd_memory_bytes`, `cladefs_extentd_memory_limit_bytes` and
-//!   `cladefs_extentd_memory_capacity_bytes`: the memory the daemon's cached extents' pages
+//! - `cladefsd_memory_bytes`, `cladefsd_memory_limit_bytes` and
+//!   `cladefsd_memory_capacity_bytes`: the memory the daemon's cached extents' pages
 //!   hold, every tenant's together, its limit, if any, and the most the daemon's kernel has
-//!   (TASK-50.3); `cladefs_extentd_tenant_memory_bytes{tenant}` and
-//!   `cladefs_extentd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
+//!   (TASK-50.3); `cladefsd_tenant_memory_bytes{tenant}` and
+//!   `cladefsd_tenant_memory_limit_bytes{tenant}`: each tenant's alive, by its ID, in
 //!   hexadecimal, as cells name it.
-//! - `cladefs_extentd_disk_bytes` and `cladefs_extentd_disk_limit_bytes`: the host's disk every
+//! - `cladefsd_disk_bytes` and `cladefsd_disk_limit_bytes`: the host's disk every
 //!   tenant's directory takes together, as last counted, and its limit, if any (TASK-94);
-//!   `cladefs_extentd_tenant_disk_bytes{tenant}` and `cladefs_extentd_tenant_disk_limit_bytes{tenant}`:
+//!   `cladefsd_tenant_disk_bytes{tenant}` and `cladefsd_tenant_disk_limit_bytes{tenant}`:
 //!   each tenant's alive, by its ID (`super::disk`).
-//! - `cladefs_extentd_upload_pending_bytes{branch}`, `cladefs_extentd_upload_oldest_pending_seconds
-//!   {branch}` and `cladefs_extentd_upload_stalls_total{branch}`: for each open store whose commits
+//! - `cladefsd_upload_pending_bytes{branch}`, `cladefsd_upload_oldest_pending_seconds
+//!   {branch}` and `cladefsd_upload_stalls_total{branch}`: for each open store whose commits
 //!   upload, its commits' bytes not yet uploaded, how long the oldest of them has waited, and how
 //!   many commits waited for the lag to shrink (TASK-91.3); its branch as `TENANT/CELL/ID`, in
 //!   hexadecimal (TASK-364).
-//! - cladefs: `cladefs_extentd_upload_held_bytes`, `cladefs_extentd_upload_held_max_bytes` and
-//!   `cladefs_extentd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
-//!   every store's together, now and at most, and their budget, `CLADEFS_EXTENTD_UPLOAD_MEMORY`
+//! - cladefs: `cladefsd_upload_held_bytes`, `cladefsd_upload_held_max_bytes` and
+//!   `cladefsd_upload_memory_bytes`: the bytes of objects the stores' uploads hold in memory,
+//!   every store's together, now and at most, and their budget, `CLADEFSD_UPLOAD_MEMORY`
 //!   (`crate::bucket::upload_memory`, TASK-317).
-//! - cladefs: `cladefs_extentd_part_cache_bytes` and `cladefs_extentd_part_cache_capacity_bytes`: what
+//! - cladefs: `cladefsd_part_cache_bytes` and `cladefsd_part_cache_capacity_bytes`: what
 //!   the host's part cache keeps, once a store opened it, and its budget,
-//!   `CLADEFS_EXTENTD_CACHE_BYTES` (TASK-406.1).
-//! - cladefs: `cladefs_extentd_peer_parts_total{outcome}`: the parts the stores' fetchers asked the
+//!   `CLADEFSD_CACHE_BYTES` (TASK-406.1).
+//! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the stores' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
-//!   `cladefs_extentd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
+//!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for
 //!   (`served`, `missing`), if it serves peers (TASK-406.2).
-//! - cladefs: `cladefs_extentd_process_cpu_seconds_total`, the daemon's CPU time;
-//!   `cladefs_extentd_process_anon_bytes` and `cladefs_extentd_process_anon_max_bytes`, its anonymous
-//!   memory, as last sampled and at most; `cladefs_extentd_process_anon_budget_bytes`, what its
-//!   design bounds that by, and `cladefs_extentd_process_anon_over_budget_total`, the samples past
-//!   it, what an operator alerts on; `cladefs_extentd_process_shmem_bytes`, its shared memory, the
+//! - cladefs: `cladefsd_process_cpu_seconds_total`, the daemon's CPU time;
+//!   `cladefsd_process_anon_bytes` and `cladefsd_process_anon_max_bytes`, its anonymous
+//!   memory, as last sampled and at most; `cladefsd_process_anon_budget_bytes`, what its
+//!   design bounds that by, and `cladefsd_process_anon_over_budget_total`, the samples past
+//!   it, what an operator alerts on; `cladefsd_process_shmem_bytes`, its shared memory, the
 //!   extent cache's pages (`super::process`, TASK-330.2).
-//! - `cladefs_extentd_object_storage_requests_total{request}`,
-//!   `cladefs_extentd_object_storage_uploaded_bytes_total{object}` and
-//!   `cladefs_extentd_object_storage_downloaded_bytes_total`: what the daemon did with its bucket,
+//! - `cladefsd_object_storage_requests_total{request}`,
+//!   `cladefsd_object_storage_uploaded_bytes_total{object}` and
+//!   `cladefsd_object_storage_downloaded_bytes_total`: what the daemon did with its bucket,
 //!   once it opened a store.
 
 use super::wire::*;
@@ -181,29 +181,26 @@ pub fn render() -> String {
     let mut out = String::new();
     let load = |count: &AtomicU64| count.load(Ordering::Relaxed);
 
-    out += "# HELP cladefs_extentd_requests_total VM processes' requests served, by kind.\n";
-    out += "# TYPE cladefs_extentd_requests_total counter\n";
+    out += "# HELP cladefsd_requests_total VM processes' requests served, by kind.\n";
+    out += "# TYPE cladefsd_requests_total counter\n";
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
-        let _ = writeln!(
-            out,
-            "cladefs_extentd_requests_total{{kind=\"{kind}\"}} {}",
-            load(&requests.count)
-        );
+        let _ =
+            writeln!(out, "cladefsd_requests_total{{kind=\"{kind}\"}} {}", load(&requests.count));
     }
-    out += "# HELP cladefs_extentd_request_errors_total VM processes' requests that failed, by kind.\n";
-    out += "# TYPE cladefs_extentd_request_errors_total counter\n";
+    out += "# HELP cladefsd_request_errors_total VM processes' requests that failed, by kind.\n";
+    out += "# TYPE cladefsd_request_errors_total counter\n";
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
         let _ = writeln!(
             out,
-            "cladefs_extentd_request_errors_total{{kind=\"{kind}\"}} {}",
+            "cladefsd_request_errors_total{{kind=\"{kind}\"}} {}",
             load(&requests.errors)
         );
     }
-    out += "# HELP cladefs_extentd_request_duration_seconds How long VM processes' requests took to \
+    out += "# HELP cladefsd_request_duration_seconds How long VM processes' requests took to \
             serve, from their dispatch to their reply, by kind.\n";
-    out += "# TYPE cladefs_extentd_request_duration_seconds histogram\n";
+    out += "# TYPE cladefsd_request_duration_seconds histogram\n";
     for ((_, kind), requests) in KINDS.iter().zip(REQUESTS.iter()) {
-        let name = "cladefs_extentd_request_duration_seconds";
+        let name = "cladefsd_request_duration_seconds";
         let mut cumulative = 0;
         for (bound, bucket) in BUCKETS.iter().zip(&requests.buckets) {
             cumulative += load(bucket);
@@ -216,11 +213,11 @@ pub fn render() -> String {
         let _ = writeln!(out, "{name}_count{{kind=\"{kind}\"}} {count}");
     }
 
-    let name = "cladefs_extentd_build_info";
+    let name = "cladefsd_build_info";
     let _ = writeln!(out, "# HELP {name} The daemon's build, by the commit it was built of.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     let _ = writeln!(out, "{name}{{commit=\"{}\"}} 1", label_value(crate::BUILD_COMMIT));
-    let name = "cladefs_extentd_vm_build_info";
+    let name = "cladefsd_vm_build_info";
     let _ = writeln!(
         out,
         "# HELP {name} VM processes connected, by their store's branch and the commit they were \
@@ -232,12 +229,12 @@ pub fn render() -> String {
     }
 
     for (name, help, value) in gauges() {
-        let _ = writeln!(out, "# HELP cladefs_extentd_{name} {help}");
-        let _ = writeln!(out, "# TYPE cladefs_extentd_{name} gauge");
-        let _ = writeln!(out, "cladefs_extentd_{name} {value}");
+        let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
+        let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
+        let _ = writeln!(out, "cladefsd_{name} {value}");
     }
     // cladefs: a tripwire (backlog doc-13): no guest maps an open extent.
-    let name = "cladefs_extentd_window_open_maps_refused_total";
+    let name = "cladefsd_window_open_maps_refused_total";
     let _ = writeln!(out, "# HELP {name} MAPs of open extents refused.");
     let _ = writeln!(out, "# TYPE {name} counter");
     let _ = writeln!(out, "{name} {}", crate::extents::open_maps_refused());
@@ -267,25 +264,25 @@ pub fn render() -> String {
         ),
     ];
     for (name, help, value) in series {
-        let _ = writeln!(out, "# HELP cladefs_extentd_{name} {help}");
-        let _ = writeln!(out, "# TYPE cladefs_extentd_{name} gauge");
+        let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
+        let _ = writeln!(out, "# TYPE cladefsd_{name} gauge");
         for vm in &vms {
             if let Some(value) = value(vm) {
                 let (branch, connection) = (vm.branch, vm.connection);
                 let labels = format!("branch=\"{branch:x}\",connection=\"{connection}\"");
-                let _ = writeln!(out, "cladefs_extentd_{name}{{{labels}}} {value}");
+                let _ = writeln!(out, "cladefsd_{name}{{{labels}}} {value}");
             }
         }
     }
 
     let tenants = super::memory::tenants();
-    let name = "cladefs_extentd_tenant_memory_bytes";
+    let name = "cladefsd_tenant_memory_bytes";
     let _ = writeln!(out, "# HELP {name} Memory a tenant's extents' pages hold, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
         let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
     }
-    let name = "cladefs_extentd_tenant_memory_limit_bytes";
+    let name = "cladefsd_tenant_memory_limit_bytes";
     let _ = writeln!(out, "# HELP {name} The limit of a tenant's memory, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
@@ -295,7 +292,7 @@ pub fn render() -> String {
     }
     // cladefs: their disks' (TASK-94).
     let tenants = super::disk::tenants();
-    let name = "cladefs_extentd_tenant_disk_bytes";
+    let name = "cladefsd_tenant_disk_bytes";
     let _ = writeln!(
         out,
         "# HELP {name} The host's disk a tenant's directory takes, as last counted, by its ID."
@@ -304,7 +301,7 @@ pub fn render() -> String {
     for tenant in &tenants {
         let _ = writeln!(out, "{name}{{tenant=\"{:x}\"}} {}", tenant.tenant, tenant.bytes);
     }
-    let name = "cladefs_extentd_tenant_disk_limit_bytes";
+    let name = "cladefsd_tenant_disk_limit_bytes";
     let _ = writeln!(out, "# HELP {name} The limit of a tenant's disk, by its ID.");
     let _ = writeln!(out, "# TYPE {name} gauge");
     for tenant in &tenants {
@@ -314,7 +311,7 @@ pub fn render() -> String {
     }
 
     for (name, value) in crate::stats::stats().named() {
-        let name = format!("cladefs_extentd_{}_total", name.replace('-', "_"));
+        let name = format!("cladefsd_{}_total", name.replace('-', "_"));
         let _ = writeln!(out, "# HELP {name} As the control API's GetCounters reports it.");
         let _ = writeln!(out, "# TYPE {name} counter");
         let _ = writeln!(out, "{name} {value}");
@@ -324,17 +321,17 @@ pub fn render() -> String {
     let memory = crate::bucket::upload_memory();
     for (name, help, value) in [
         (
-            "cladefs_extentd_upload_held_bytes",
+            "cladefsd_upload_held_bytes",
             "Bytes of objects the stores' uploads hold in memory now, every store's together.",
             memory.held,
         ),
         (
-            "cladefs_extentd_upload_held_max_bytes",
+            "cladefsd_upload_held_max_bytes",
             "The most bytes of objects the stores' uploads held in memory at once.",
             memory.max_held,
         ),
         (
-            "cladefs_extentd_upload_memory_bytes",
+            "cladefsd_upload_memory_bytes",
             "The most bytes of objects the stores' uploads may hold in memory at once.",
             memory.budget,
         ),
@@ -348,12 +345,12 @@ pub fn render() -> String {
     if let Some(cache) = super::stores::opened_cache() {
         for (name, help, value) in [
             (
-                "cladefs_extentd_part_cache_bytes",
+                "cladefsd_part_cache_bytes",
                 "Bytes of objects the host's part cache keeps.",
                 cache.bytes(),
             ),
             (
-                "cladefs_extentd_part_cache_capacity_bytes",
+                "cladefsd_part_cache_capacity_bytes",
                 "The most bytes of objects the host's part cache keeps.",
                 cache.capacity(),
             ),
@@ -366,7 +363,7 @@ pub fn render() -> String {
 
     // cladefs: the parts asked of peers, and served them (TASK-406.2).
     if let Some((counts, served, served_missing)) = super::peers::counts() {
-        let name = "cladefs_extentd_peer_parts_total";
+        let name = "cladefsd_peer_parts_total";
         let _ = writeln!(out, "# HELP {name} Parts asked of the peers that own them, by outcome.");
         let _ = writeln!(out, "# TYPE {name} counter");
         for (outcome, value) in
@@ -374,7 +371,7 @@ pub fn render() -> String {
         {
             let _ = writeln!(out, "{name}{{outcome=\"{outcome}\"}} {value}");
         }
-        let name = "cladefs_extentd_peer_served_parts_total";
+        let name = "cladefsd_peer_served_parts_total";
         let _ = writeln!(out, "# HELP {name} Parts the daemon's peers asked it for, by outcome.");
         let _ = writeln!(out, "# TYPE {name} counter");
         for (outcome, value) in [("served", served), ("missing", served_missing)] {
@@ -386,37 +383,37 @@ pub fn render() -> String {
     let process = super::process::last();
     let series: [(&str, &str, &str, String); 6] = [
         (
-            "cladefs_extentd_process_cpu_seconds_total",
+            "cladefsd_process_cpu_seconds_total",
             "counter",
             "The daemon's CPU time, user and system, in seconds.",
             (process.cpu_ns as f64 / 1e9).to_string(),
         ),
         (
-            "cladefs_extentd_process_anon_bytes",
+            "cladefsd_process_anon_bytes",
             "gauge",
             "The daemon's anonymous memory resident, as last sampled.",
             process.anon.to_string(),
         ),
         (
-            "cladefs_extentd_process_anon_max_bytes",
+            "cladefsd_process_anon_max_bytes",
             "gauge",
             "The most anonymous memory the daemon held, of its samples.",
             process.max_anon.to_string(),
         ),
         (
-            "cladefs_extentd_process_anon_budget_bytes",
+            "cladefsd_process_anon_budget_bytes",
             "gauge",
             "What the daemon's design bounds its anonymous memory by, as last sampled.",
             process.anon_budget.to_string(),
         ),
         (
-            "cladefs_extentd_process_anon_over_budget_total",
+            "cladefsd_process_anon_over_budget_total",
             "counter",
             "Samples of the daemon's anonymous memory past its budget.",
             process.over_budget.to_string(),
         ),
         (
-            "cladefs_extentd_process_shmem_bytes",
+            "cladefsd_process_shmem_bytes",
             "gauge",
             "The daemon's shared memory resident, its extent cache's pages, as last sampled.",
             process.shmem.to_string(),
@@ -453,17 +450,16 @@ pub fn render() -> String {
         ),
     ];
     for (name, kind, help, value) in series {
-        let _ = writeln!(out, "# HELP cladefs_extentd_{name} {help}");
-        let _ = writeln!(out, "# TYPE cladefs_extentd_{name} {kind}");
+        let _ = writeln!(out, "# HELP cladefsd_{name} {help}");
+        let _ = writeln!(out, "# TYPE cladefsd_{name} {kind}");
         for (branch, status) in &uploads {
-            let _ =
-                writeln!(out, "cladefs_extentd_{name}{{branch=\"{branch}\"}} {}", value(status));
+            let _ = writeln!(out, "cladefsd_{name}{{branch=\"{branch}\"}} {}", value(status));
         }
     }
 
     if let Some(stats) = super::stores::bucket_stats() {
         use extent_bucket::object_bucket::{Request, Upload};
-        let name = "cladefs_extentd_object_storage_requests_total";
+        let name = "cladefsd_object_storage_requests_total";
         let _ = writeln!(out, "# HELP {name} Requests to the bucket, by kind.");
         let _ = writeln!(out, "# TYPE {name} counter");
         for request in Request::ALL {
@@ -474,7 +470,7 @@ pub fn render() -> String {
                 stats.requests(request)
             );
         }
-        let name = "cladefs_extentd_object_storage_failures_total";
+        let name = "cladefsd_object_storage_failures_total";
         let _ = writeln!(
             out,
             "# HELP {name} Requests to the bucket that failed, unanswered, by kind: each retried, \
@@ -489,14 +485,14 @@ pub fn render() -> String {
                 stats.failures(request)
             );
         }
-        let name = "cladefs_extentd_object_storage_uploaded_bytes_total";
+        let name = "cladefsd_object_storage_uploaded_bytes_total";
         let _ = writeln!(out, "# HELP {name} Bytes uploaded to the bucket, by kind of object.");
         let _ = writeln!(out, "# TYPE {name} counter");
         for upload in Upload::ALL {
             let _ =
                 writeln!(out, "{name}{{object=\"{}\"}} {}", upload.name(), stats.uploaded(upload));
         }
-        let name = "cladefs_extentd_object_storage_downloaded_bytes_total";
+        let name = "cladefsd_object_storage_downloaded_bytes_total";
         let _ = writeln!(out, "# HELP {name} Bytes downloaded from the bucket.");
         let _ = writeln!(out, "# TYPE {name} counter");
         let _ = writeln!(out, "{name} {}", stats.downloaded);
@@ -504,7 +500,7 @@ pub fn render() -> String {
     out
 }
 
-/// The daemon's gauges, as of now, each with its name, without `cladefs_extentd_`, and what it is:
+/// The daemon's gauges, as of now, each with its name, without `cladefsd_`, and what it is:
 /// what its metrics and stats report (TASK-111.4). The memory's limit only if it has one, and
 /// the disk's.
 pub(super) fn gauges() -> Vec<(&'static str, &'static str, u64)> {

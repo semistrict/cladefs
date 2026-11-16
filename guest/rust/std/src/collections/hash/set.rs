@@ -4,7 +4,6 @@
 // kernel's std from the pinned toolchain's rust-src, its licenses and COPYRIGHT in guest/rust/std:
 // without its tests and stability attributes. Do not edit it here.
 
-
 use hashbrown::hash_set as base;
 
 use super::map::map_try_reserve_error;
@@ -125,11 +124,7 @@ use crate::ops::{BitAnd, BitOr, BitXor, Sub};
 /// static SET: Mutex<HashSet<String, BuildHasherDefault<DefaultHasher>>> =
 ///     Mutex::new(HashSet::with_hasher(BuildHasherDefault::new()));
 /// ```
-pub struct HashSet<
-    T,
-    S = RandomState,
-    A: Allocator = Global,
-> {
+pub struct HashSet<T, S = RandomState, A: Allocator = Global> {
     base: base::HashSet<T, S, A>,
 }
 
@@ -1400,10 +1395,7 @@ impl<K> Default for Iter<'_, K> {
 ///
 /// let mut iter = a.into_iter();
 /// ```
-pub struct IntoIter<
-    K,
-    A: Allocator = Global,
-> {
+pub struct IntoIter<K, A: Allocator = Global> {
     base: base::IntoIter<K, A>,
 }
 
@@ -1430,11 +1422,7 @@ impl<K> Default for IntoIter<K> {
 ///
 /// let mut drain = a.drain();
 /// ```
-pub struct Drain<
-    'a,
-    K: 'a,
-    A: Allocator = Global,
-> {
+pub struct Drain<'a, K: 'a, A: Allocator = Global> {
     base: base::Drain<'a, K, A>,
 }
 
@@ -1455,12 +1443,7 @@ pub struct Drain<
 /// ```
 #[must_use = "iterators are lazy and do nothing unless consumed; \
     use `retain` to remove and discard elements"]
-pub struct ExtractIf<
-    'a,
-    K,
-    F,
-    A: Allocator = Global,
-> {
+pub struct ExtractIf<'a, K, F, A: Allocator = Global> {
     base: base::ExtractIf<'a, K, F, A>,
 }
 
@@ -1483,12 +1466,7 @@ pub struct ExtractIf<
 /// ```
 #[must_use = "this returns the intersection as an iterator, \
               without modifying either input set"]
-pub struct Intersection<
-    'a,
-    T: 'a,
-    S: 'a,
-    A: Allocator = Global,
-> {
+pub struct Intersection<'a, T: 'a, S: 'a, A: Allocator = Global> {
     // iterator of the first set
     iter: Iter<'a, T>,
     // the second set
@@ -1514,12 +1492,7 @@ pub struct Intersection<
 /// ```
 #[must_use = "this returns the difference as an iterator, \
               without modifying either input set"]
-pub struct Difference<
-    'a,
-    T: 'a,
-    S: 'a,
-    A: Allocator = Global,
-> {
+pub struct Difference<'a, T: 'a, S: 'a, A: Allocator = Global> {
     // iterator of the first set
     iter: Iter<'a, T>,
     // the second set
@@ -1545,12 +1518,7 @@ pub struct Difference<
 /// ```
 #[must_use = "this returns the difference as an iterator, \
               without modifying either input set"]
-pub struct SymmetricDifference<
-    'a,
-    T: 'a,
-    S: 'a,
-    A: Allocator = Global,
-> {
+pub struct SymmetricDifference<'a, T: 'a, S: 'a, A: Allocator = Global> {
     iter: Chain<Difference<'a, T, S, A>, Difference<'a, T, S, A>>,
 }
 
@@ -1573,12 +1541,7 @@ pub struct SymmetricDifference<
 /// ```
 #[must_use = "this returns the union as an iterator, \
               without modifying either input set"]
-pub struct Union<
-    'a,
-    T: 'a,
-    S: 'a,
-    A: Allocator = Global,
-> {
+pub struct Union<'a, T: 'a, S: 'a, A: Allocator = Global> {
     iter: Chain<Iter<'a, T>, Difference<'a, T, S, A>>,
 }
 
@@ -2030,12 +1993,7 @@ where
 /// vec.sort_unstable();
 /// assert_eq!(vec, ["a", "b", "c", "d", "e"]);
 /// ```
-pub enum Entry<
-    'a,
-    T,
-    S,
-    A: Allocator = Global,
-> {
+pub enum Entry<'a, T, S, A: Allocator = Global> {
     /// An occupied entry.
     ///
     /// # Examples
@@ -2120,12 +2078,7 @@ impl<T: fmt::Debug, S, A: Allocator> fmt::Debug for Entry<'_, T, S, A> {
 /// assert_eq!(set.get(&"c"), None);
 /// assert_eq!(set.len(), 2);
 /// ```
-pub struct OccupiedEntry<
-    'a,
-    T,
-    S,
-    A: Allocator = Global,
-> {
+pub struct OccupiedEntry<'a, T, S, A: Allocator = Global> {
     base: base::OccupiedEntry<'a, T, S, A>,
 }
 
@@ -2163,12 +2116,7 @@ impl<T: fmt::Debug, S, A: Allocator> fmt::Debug for OccupiedEntry<'_, T, S, A> {
 /// }
 /// assert!(set.contains("b") && set.len() == 2);
 /// ```
-pub struct VacantEntry<
-    'a,
-    T,
-    S,
-    A: Allocator = Global,
-> {
+pub struct VacantEntry<'a, T, S, A: Allocator = Global> {
     base: base::VacantEntry<'a, T, S, A>,
 }
 

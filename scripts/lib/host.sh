@@ -44,6 +44,18 @@
 # the run applies to it (as scripts/guest-mutants-host.py's mutants). CLADEFS_GUEST_KERNEL names a
 # guest kernel here, which the run copies to the test host and boots.
 #
+# The scratch disk is every job's on the host, and others' runs may fill it. A run that names the
+# room it needs there, in bytes, checks the disk has it before it builds, CLADEFS_TEST_HOST_ROOM (in
+# host_start, before its directory is made), and, a measurement, before it measures,
+# CLADEFS_TEST_HOST_ROOM_MEASURE (host_job): short of it, it stops there, ending 28, rather than
+# fail midway, as the nightly's first night did, whose measurement could not write even its status
+# (TASK-489). Each check is a line of RESULTS/room.txt, `PHASE FREE NEED ok|short DISK`, PHASE build
+# or measure, DISK where the disk is mounted; and, once a measurement's build ended, the bytes its
+# run's directory holds, `built BYTES`, which tells a later run what a build takes.
+# CLADEFS_TEST_HOST_SWEEP=1 first removes the runs of earlier drivers of the same name,
+# CLADEFS_TEST_HOST_RUN, whose job is not running (host-remote.sh's sweep), as a driver that runs
+# under one name, one at a time, needs: the nightly (scripts/nightly-host.sh).
+#
 # The drivers run these functions under `||`, where errexit stops nothing, so each checks the
 # status of its every step itself.
 
@@ -153,6 +165,8 @@ host_start() {
     done
     mkdir -p "$results" || return
     results=$(cd "$results" && pwd) || return
+    if [[ ${CLADEFS_TEST_HOST_SWEEP:-} == 1 ]]; then host_sweep || return; fi
+    host_room build CLADEFS_TEST_HOST_ROOM || return
     host_state=prepared
     trap host_exit EXIT
     if [[ -n ${CLADEFS_TEST_HOST_PATCH:-} ]]; then
@@ -182,11 +196,51 @@ host_start() {
     done <<< "$prepared"
 }
 
+# host_sweep removes the runs of earlier drivers of CLADEFS_TEST_HOST_RUN's name whose job is not
+# running (host-remote.sh's sweep).
+host_sweep() {
+    [[ -n ${CLADEFS_TEST_HOST_RUN:-} ]] ||
+        { echo "CLADEFS_TEST_HOST_SWEEP sweeps the runs of CLADEFS_TEST_HOST_RUN's name:" \
+               "name them" >&2
+          return 2; }
+    host_side sweep "$host_scratch" "$host_repo" "$CLADEFS_TEST_HOST_RUN"
+}
+
+# host_room PHASE VARIABLE checks the scratch disk has the bytes the variable VARIABLE names free,
+# if it names any, before the run's PHASE, build or measure, and records it in RESULTS/room.txt;
+# short of it, it says so and fails, 28.
+host_room() {
+    local phase=$1 variable=$2 need=${!2:-} said free disk verdict=ok
+    [[ -n $need ]] || return 0
+    [[ $need =~ ^[0-9]+$ ]] || { echo "$variable is a count of bytes: $need" >&2; return 2; }
+    said=$(host_side room "$host_scratch") || return
+    read -r free disk <<< "$said"
+    if (( free < need )); then verdict=short; fi
+    echo "$phase $free $need $verdict $disk" >> "$results/room.txt" || return
+    if [[ $verdict == short ]]; then
+        echo "Not enough room: the scratch disk $disk has $free bytes free before the run" \
+            "${phase}s, which needs $need ($variable)." >&2
+        return 28
+    fi
+}
+
+# host_built records in RESULTS/room.txt the bytes the run's directory holds once its build ended,
+# for a run that checks its room (host_room). A failure to tell is said, and measures on.
+host_built() {
+    local size
+    [[ -n ${CLADEFS_TEST_HOST_ROOM:-} ]] || return 0
+    if size=$(host_side size "$host_dir"); then
+        echo "built $size" >> "$results/room.txt"
+    else
+        echo "The size of $host_dir, built, is unknown (above): room.txt lacks it." >&2
+    fi
+}
+
 # host_command [NAME=VALUE...] SCRIPT [ARG...] prints the job's command, which runs the host script
 # scripts/lib/SCRIPT of the run's worktree, as root, with the user's Rust, for at most $limit (or
 # CLADEFS_TEST_HOST_LIMIT), with the worktree, the results and the ARGs.
 #
-# The script runs in this machine's environment: every CLADEFS_* and PJDFSTEST_* variable set here,
+# The script runs in this machine's environment: every CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here,
 # but those that stay here (host_env_local); the run's own, its work directory, the test host's
 # cache of guest kernels and, with CLADEFS_GUEST_KERNEL set, the copy host_start made; and each
 # NAME=VALUE in place of the variable NAME. A value starting with ~/ names a path in the test host's
@@ -200,7 +254,7 @@ host_command() {
     # A measurement at the test host's own niceness: it builds nothing, and runs alone.
     if (( host_bench )); then nice=0; fi
     given=("CLADEFS_GUEST_KERNEL_JOBS=$jobs")
-    for name in ${!CLADEFS_@} ${!PJDFSTEST_@}; do
+    for name in ${!CLADEFS_@} ${!CLADEFSD_@} ${!PJDFSTEST_@}; do
         if ! host_env_local "$name"; then
             given+=("$name=${!name}")
         fi
@@ -251,10 +305,10 @@ host_command() {
 # the host scripts, or what they run, would take as they are. Set here, they name what this machine
 # built or fetched, its own daemon's sockets, address and directories, and where its own runs
 # write; sent, every build, test and daemon on the test host would use them in place of its own.
-# Those the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFS_EXTENTD
+# Those the host scripts always set themselves, such as CLADEFS_FIRECRACKER and CLADEFSD
 # (scripts/test-e2e.sh), need no place here. The others go: knobs a driver's caller sets for the
 # test host, what runs and how, and where its stores keep their branches and its daemons what they
-# read from them (CLADEFS_EXTENTD_REMOTE, CLADEFS_S3_URL, CLADEFS_EXTENTD_CACHE), or a driver's own,
+# read from them (CLADEFSD_REMOTE, CLADEFS_S3_URL, CLADEFSD_CACHE), or a driver's own,
 # which nothing there reads.
 host_env_local() {
     case $1 in
@@ -269,12 +323,12 @@ host_env_local() {
         # every extent daemon there reads them, those the tests start too, and
         # all of them would serve at the one socket and address, and write the
         # one file.
-        CLADEFS_EXTENTD_GRPC | CLADEFS_EXTENTD_STATS | CLADEFS_EXTENTD_METRICS) ;;
+        CLADEFSD_GRPC | CLADEFSD_STATS | CLADEFSD_METRICS) ;;
         # The directories a daemon serves stores in and puts its tenants'
         # sockets in: every extent daemon there would take them, those the
         # tests start too, whose stores are in directories of their own, and
         # with none of these roots there, a daemon refuses every store.
-        CLADEFS_EXTENTD_ROOTS | CLADEFS_EXTENTD_TENANTS) ;;
+        CLADEFSD_ROOTS | CLADEFSD_TENANTS) ;;
         # Where the benchmark's cases write their measurements, wherever they
         # run; bench-linux-host.sh alone sets it.
         CLADEFS_BENCH_RESULTS) ;;
@@ -294,7 +348,8 @@ host_env_local() {
 # which scripts/lib/measurement.sh refuses there. A build inside the measurement held its cores and
 # memory from every other measurement for as long as it compiled, an hour on 4 cores (TASK-330.4,
 # TASK-368). A driver stopped while its run builds leaves its `resume` the build alone: run the
-# driver again. Any other run's is one job, of no phase.
+# driver again. Any other run's is one job, of no phase. Between the two, the run checks its room
+# for the measurement (host_room).
 host_job() {
     if (( ! host_bench )); then
         host_launch "${CLADEFS_TEST_HOST_MEM:-12G}" CLADEFS_TEST_HOST_PHASE= "$@"
@@ -304,6 +359,8 @@ host_job() {
     # 16G for the qualification's).
     host_bench=0 host_launch 12G CLADEFS_TEST_HOST_PHASE=build "$@" \
         > "$results/remote-build.log" 2>&1 || return
+    host_built
+    host_room measure CLADEFS_TEST_HOST_ROOM_MEASURE || return
     host_launch "${CLADEFS_TEST_HOST_MEM:-12G}" CLADEFS_TEST_HOST_PHASE=measure "$@"
 }
 
@@ -329,9 +386,10 @@ host_launch() {
 # host_wait waits for the run's job, as host_job does, for one whose driver stopped waiting for it
 # too: reconnecting as a connection drops, and giving up after 20 tries none of which connected,
 # the job running on. A job whose shell is gone without its status, as one is when its test host
-# restarted under it, is lost.
+# restarted under it, is lost; so is one whose status file holds no number, as a full disk leaves
+# it (host-remote.sh's wait, TASK-489).
 host_wait() {
-    local said tries=0
+    local said why tries=0
     while true; do
         said=$(host_side wait "$host_dir" 2> /dev/null) || true
         case ${said##*$'\n'} in
@@ -340,9 +398,13 @@ host_wait() {
                 host_side log "$host_dir" || echo "fetching $host_run's log failed" >&2
                 return "${said##*status }"
                 ;;
-            lost)
+            lost | "lost unreadable")
                 host_state=ended
-                echo "$host_run on $host is lost: its job ended without its status." >&2
+                why=''
+                if [[ $said == *unreadable ]]; then
+                    why=" (its status file empty or unreadable: was its disk full?)"
+                fi
+                echo "$host_run on $host is lost: its job ended without its status$why." >&2
                 host_side log "$host_dir" || echo "fetching $host_run's log failed" >&2
                 return 1
                 ;;

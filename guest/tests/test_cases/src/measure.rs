@@ -67,7 +67,7 @@ mod host {
     use std::path::{Path, PathBuf};
     use std::time::Duration;
 
-    /// The daemon's metrics reported, by their names less `cladefs_extentd_`: besides them, any gauge
+    /// The daemon's metrics reported, by their names less `cladefsd_`: besides them, any gauge
     /// of private pages.
     const REPORTED: [&str; 6] = [
         "memory_bytes",
@@ -78,7 +78,7 @@ mod host {
         "page_ins_total",
     ];
 
-    /// An address on the loopback for an extent daemon's metrics (CLADEFS_EXTENTD_METRICS), free as
+    /// An address on the loopback for an extent daemon's metrics (CLADEFSD_METRICS), free as
     /// this returns.
     pub fn metrics_address() -> anyhow::Result<SocketAddr> {
         Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
@@ -173,7 +173,7 @@ mod host {
         Ok((body.lines())
             .filter_map(|line| {
                 let (name, value) = line.split_once(' ')?;
-                let name = name.strip_prefix("cladefs_extentd_")?;
+                let name = name.strip_prefix("cladefsd_")?;
                 let reported = REPORTED.contains(&name) || name.contains("private");
                 if name.contains('{') || !reported {
                     return None;

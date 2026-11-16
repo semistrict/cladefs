@@ -18,11 +18,13 @@
 //!    the open segment's too, which a store closed leaves for the next to open it, and its store
 //!    closed, as a connection whose VM process goes closes it.
 //! 3. It waits for the connections to be gone and the control API's calls in flight to be done
-//!    ([`Work`]); closes the points it keeps open for forks; and waits for every store's uploader
+//!    ([`Work`]); closes its FUSE mount of cells, if it has one, unmounted lazily, its volumes
+//!    written back and their stores closed once nothing uses it ([`super::mount::close`],
+//!    TASK-475.2); closes the points it keeps open for forks; and waits for every store's uploader
 //!    to have uploaded what its store made durable, and stopped, as each does as its store closes
 //!    ([`crate::bucket::uploaders`]).
 //!
-//! All of it within a bound, `CLADEFS_EXTENTD_DRAIN` seconds ([`bound`]): past it, what is left is
+//! All of it within a bound, `CLADEFSD_DRAIN` seconds ([`bound`]): past it, what is left is
 //! logged, and the daemon exits anyway, failing; its stores' commits that weren't durable are
 //! lost, as at a crash, and those durable that weren't uploaded are uploaded by the next daemon to
 //! open their stores.
@@ -46,19 +48,19 @@ pub(super) async fn started() {
     let _ = draining.wait_for(|draining| *draining).await;
 }
 
-/// How long a drain takes at most when `CLADEFS_EXTENTD_DRAIN` names none: long enough for a few
+/// How long a drain takes at most when `CLADEFSD_DRAIN` names none: long enough for a few
 /// stores' last uploads, short of an orchestrator's patience before it kills.
 pub const DEFAULT_BOUND: Duration = Duration::from_secs(60);
 
-/// How long a drain takes at most: `CLADEFS_EXTENTD_DRAIN` seconds, or [`DEFAULT_BOUND`].
+/// How long a drain takes at most: `CLADEFSD_DRAIN` seconds, or [`DEFAULT_BOUND`].
 pub fn bound() -> Result<Duration, String> {
-    match std::env::var("CLADEFS_EXTENTD_DRAIN") {
+    match std::env::var("CLADEFSD_DRAIN") {
         Err(std::env::VarError::NotPresent) => Ok(DEFAULT_BOUND),
         Ok(secs) => secs
             .parse()
             .map(Duration::from_secs)
-            .map_err(|_| format!("CLADEFS_EXTENTD_DRAIN {secs:?} is no number of seconds")),
-        Err(err) => Err(format!("CLADEFS_EXTENTD_DRAIN: {err}")),
+            .map_err(|_| format!("CLADEFSD_DRAIN {secs:?} is no number of seconds")),
+        Err(err) => Err(format!("CLADEFSD_DRAIN: {err}")),
     }
 }
 
@@ -71,16 +73,23 @@ pub struct Left {
     pub calls: usize,
     /// Stores whose uploaders have not stopped: open, or closing, uploading still.
     pub uploaders: usize,
+    /// Whether the FUSE mount of cells was left: not closed, as a file open in it holds it, or
+    /// closed failing, as a volume's write-back failed (logged).
+    pub mount: bool,
 }
 
 impl std::fmt::Display for Left {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let Self { connections, calls, uploaders } = self;
+        let Self { connections, calls, uploaders, mount } = self;
         write!(
             f,
             "{connections} VM processes' connections, {calls} control calls and {uploaders} \
              stores' uploaders left"
-        )
+        )?;
+        match mount {
+            true => write!(f, ", and the FUSE mount of cells"),
+            false => Ok(()),
+        }
     }
 }
 
@@ -94,17 +103,24 @@ pub fn drain(within: Duration) -> Result<(), Left> {
         tokio::time::timeout(within, async {
             super::server::CONNECTIONS.done().await;
             super::control::CALLS.done().await;
+            let mount = super::mount::close().await;
+            if let Err(err) = &mount {
+                log::error!("extentd: draining: {err:#}");
+            }
             super::stores::close_points().await;
-            crate::bucket::uploaders().wait_for(|uploading| *uploading == 0).await.map(drop)
+            let mut uploaders = crate::bucket::uploaders();
+            let uploaded = uploaders.wait_for(|uploading| *uploading == 0).await.is_ok();
+            mount.is_ok() && uploaded
         })
         .await
     });
     match drained {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) | Err(_) => Err(Left {
+        Ok(true) => Ok(()),
+        Ok(false) | Err(_) => Err(Left {
             connections: super::server::CONNECTIONS.count(),
             calls: super::control::CALLS.count(),
             uploaders: *crate::bucket::uploaders().borrow(),
+            mount: super::mount::left(),
         }),
     }
 }

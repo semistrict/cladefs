@@ -22,11 +22,14 @@ from pathlib import Path
 import fake_ssh
 from script import SCRIPTS
 from test_ab_rounds import CONTROL, write_round
+from test_host import hold
 
 # The host script of the A/B, as the nightly's tests have it: says each job of it, its phase, where
 # it ran (work, or a measurement) and the sides' revisions, a line of RESULTS/jobs.txt; builds the
 # sides, or fails the one CLADEFS_FAKE_NIGHTLY=fail-build-SIDE names, as the real one does
-# (RESULTS/build-failed); measures by copying the rounds CLADEFS_FAKE_ROUNDS holds.
+# (RESULTS/build-failed), and fills the scratch disk to CLADEFS_FAKE_FILL KiB free if set
+# (fake_ssh.py's df); measures by copying the rounds CLADEFS_FAKE_ROUNDS holds, and says the
+# rounds' results held CLADEFS_FAKE_ROUNDS_SIZE bytes (RESULTS/rounds-size.txt), if set.
 FAKE_AB = """#!/bin/bash
 set -euo pipefail
 tools=$1 results=$2 a_source=$3 b_source=$4
@@ -42,9 +45,13 @@ if [[ $phase == build ]]; then
         fi
         echo "built" > "$results/artifacts-$side.txt"
     done
+    if [[ -n ${CLADEFS_FAKE_FILL:-} ]]; then echo "$CLADEFS_FAKE_FILL" > "$HOME/df-free"; fi
     exit 0
 fi
 cp -R "$CLADEFS_FAKE_ROUNDS/." "$results/"
+if [[ -n ${CLADEFS_FAKE_ROUNDS_SIZE:-} ]]; then
+    echo "$CLADEFS_FAKE_ROUNDS_SIZE" > "$results/rounds-size.txt"
+fi
 """
 
 # Backlog.md's CLI, as the nightly calls it, its tasks in $BACKLOG_STATE: `task list --labels L
@@ -110,6 +117,9 @@ class Ubu1:
             f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "{bin_}/fake_backlog.py" "$@"\n')
         (bin_ / "backlog").chmod(0o755)
         self.state = self.home / ".local" / "state" / "cladefs" / "nightly"
+        # The scratch disk as fake_ssh.py's df has it, 250 GiB free, as ubu1's whole: room for a
+        # night, whatever this machine's disk has.
+        (self.home / "df-free").write_text(f"{250 << 20}\n")
         self.backlog = self.dir / "backlog.json"
         self.environment = {
             "PATH": f"{bin_}:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -346,6 +356,132 @@ class Nights(unittest.TestCase):
         self.assertIn("**The last night measured nothing**: a task is filed at 3.",
                       ubu1.history())
         self.assertEqual(ubu1.tasks(), [])
+
+    def test_a_night_that_measured_nothing_is_measured_again(self):
+        """TASK-489: the first night on ubu1 built both sides and measured nothing; main did not
+        move, and the next night did nothing, as the night had measured main's code."""
+        ubu1 = Ubu1()
+        parent = ubu1.main()
+        first = ubu1.advance("first")
+        left_out = {1: "contaminated", 2: "contaminated", 3: "contaminated"}
+        for rounds, environment in [(None, {}), (ubu1.rounds(1.0, left_out), {}),
+                                    (ubu1.rounds(1.0), {"CLADEFS_FAKE_NIGHTLY": "fail-build-b"}),
+                                    (ubu1.rounds(1.0), {})]:
+            status, _, err = ubu1.night(rounds, **environment)
+            self.assertEqual(status, 0, err)
+        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in ubu1.nights()],
+                         [(parent, first, "could not run"), (parent, first, "no result"),
+                          (parent, first, "could not run"), (parent, first, "measured")])
+        # Measured, it is not measured again; main's next head is, against it.
+        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual((status, len(ubu1.nights())), (0, 4), err)
+        second = ubu1.advance("second")
+        ubu1.night(ubu1.rounds(1.0, left_out))
+        third = ubu1.advance("third")
+        ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual([(r["base"], r["head"], r["outcome"]) for r in ubu1.nights()[4:]],
+                         [(first, second, "no result"), (first, third, "measured")])
+
+
+GIB = 1 << 30
+
+
+class Room(unittest.TestCase):
+    """TASK-489: the scratch disk, which every job on ubu1 shares, full as the first night's
+    measurement began."""
+
+    def test_a_night_short_of_room_before_measuring_says_so(self):
+        ubu1 = Ubu1()
+        (ubu1.home / "df-free").write_text(f"{200 * GIB >> 10}\n")
+        (ubu1.home / "du-size").write_text(f"{83 * GIB >> 10}\n")
+        ubu1.advance()
+        status, _, err = ubu1.night(ubu1.rounds(1.0), CLADEFS_FAKE_FILL=f"{5 * GIB >> 10}")
+        self.assertEqual(status, 0, err)
+        [record] = ubu1.nights()
+        why = ("the scratch disk /mnt/fake-scratch had 5.0 GiB free before measuring, the night "
+               "needs 20.0 GiB (see room.txt; CLADEFS_NIGHTLY_ROOM_MEASURE)")
+        self.assertEqual((record["outcome"], record["why"], record["status"]),
+                         ("could not run", why, 28))
+        self.assertEqual(record["room"], {
+            "checks": [{"phase": "build", "free": 200 * GIB, "need": 120 * GIB, "verdict": "ok",
+                        "disk": "/mnt/fake-scratch"},
+                       {"phase": "measure", "free": 5 * GIB, "need": 20 * GIB,
+                        "verdict": "short", "disk": "/mnt/fake-scratch"}],
+            "built": 83 * GIB, "rounds": None})
+        self.assertEqual(ubu1.jobs(record), [f"build work {record['base']} {record['head']}"])
+        directory = record_directory(ubu1, record)
+        self.assertEqual(ubu1.git(ubu1.origin, "show",
+                                  f"main:docs/measurements/{directory}/nightly.md").splitlines()[2:9],
+                         [f"Base {record['base']}, head (main) {record['head']}: could not run: "
+                          f"{why}.", "", "## The scratch disk", "",
+                          "- Before building: 200.0 GiB free on /mnt/fake-scratch, 120.0 GiB "
+                          "needed (ok).",
+                          "- Before measuring: 5.0 GiB free on /mnt/fake-scratch, 20.0 GiB "
+                          "needed (short).",
+                          "- The run's directory once built: 83.0 GiB."])
+        lines = [line.split(" ", 1)[1] for line in ubu1.log().splitlines()]
+        self.assertIn(f"night {record['base'][:8]}..{record['head'][:8]}: could not run: {why}; "
+                      "0 moved, 0 broke; tasks none", lines)
+
+    def test_a_night_short_of_room_before_building_builds_nothing(self):
+        ubu1 = Ubu1()
+        (ubu1.home / "df-free").write_text(f"{100 * GIB >> 10}\n")
+        ubu1.advance()
+        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual(status, 0, err)
+        [record] = ubu1.nights()
+        self.assertEqual((record["outcome"], record["why"]), (
+            "could not run", "the scratch disk /mnt/fake-scratch had 100.0 GiB free before "
+                             "building, the night needs 120.0 GiB (see room.txt; "
+                             "CLADEFS_NIGHTLY_ROOM_BUILD)"))
+        self.assertFalse((ubu1.home / "fxjob-calls").exists())
+
+    def test_the_need_follows_what_earlier_nights_took(self):
+        ubu1 = Ubu1()
+        (ubu1.home / "df-free").write_text(f"{250 * GIB >> 10}\n")
+        (ubu1.home / "du-size").write_text(f"{90 * GIB >> 10}\n")
+        ubu1.advance("first")
+        status, _, err = ubu1.night(ubu1.rounds(1.0), CLADEFS_FAKE_ROUNDS_SIZE=str(30 * GIB))
+        self.assertEqual(status, 0, err)
+        ubu1.advance("second")
+        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual(status, 0, err)
+        first, second = ubu1.nights()
+        self.assertEqual((first["room"]["built"], first["room"]["rounds"]), (90 * GIB, 30 * GIB))
+        # A fifth more than the most taken: 108 GiB built and 36 measured.
+        self.assertEqual([check["need"] for check in second["room"]["checks"]],
+                         [144 * GIB, 36 * GIB])
+        # Or the settings, if more.
+        self.assertEqual(
+            subprocess.run([sys.executable, str(SCRIPTS / "nightly.py"), "--root", str(ubu1.clone),
+                            "room"], capture_output=True, text=True, check=True,
+                           env={**ubu1.environment, "CLADEFS_NIGHTLY_ROOM_BUILD": "1T",
+                                "CLADEFS_NIGHTLY_ROOM_MEASURE": "40G"}).stdout,
+            f"{(1 << 40) + 40 * GIB} {40 * GIB}\n")
+
+    def test_earlier_nights_runs_go_but_what_others_and_the_next_night_use(self):
+        ubu1 = Ubu1()
+        scratch = ubu1.dir / "scratch"
+        ended = scratch / "run-nightly-20261116T070003Z-2ad571cf"
+        running = scratch / "run-nightly-20261115T070003Z-11111111"
+        others = [scratch / "run-t435-20261116T070003Z-22222222",
+                  scratch / "run-nightlyx-20261116T070003Z-33333333"]
+        for run in (ended, running, *others):
+            (run / "job").mkdir(parents=True)
+            (run / "job" / "lock").touch()
+            (run / "trees" / "head" / "target" / "release").mkdir(parents=True)
+        hold(self, running / "job" / "lock")
+        ubu1.advance()
+        status, _, err = ubu1.night(ubu1.rounds(1.0))
+        self.assertEqual(status, 0, err)
+        self.assertEqual(sorted(path.name for path in scratch.iterdir()),
+                         sorted([running.name] + [path.name for path in others]))
+        [record] = ubu1.nights()
+        driver = ubu1.git(ubu1.origin, "show", f"main:docs/measurements/"
+                                               f"{record_directory(ubu1, record)}/driver.log")
+        self.assertEqual(driver.splitlines()[:2], [f"Keeping {running}: its job runs.",
+                                                   f"Removing {ended}, an earlier run of "
+                                                   "nightly's."])
 
 
 def short(sha):

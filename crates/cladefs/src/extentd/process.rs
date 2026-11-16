@@ -46,7 +46,7 @@ pub struct Sample {
 /// (`physmem`'s memfd), bounded by `MEMORY_BYTES`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AnonBudget {
-    /// Its uploads': its upload memory, `CLADEFS_EXTENTD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
+    /// Its uploads': its upload memory, `CLADEFSD_UPLOAD_MEMORY` (`crate::bucket::UPLOADS`),
     /// every store's PUTs holding their objects within it, once each however often each is tried.
     pub uploads: u64,
     /// Its framings': [`FRAMING`] for each store written at once, the most so far.

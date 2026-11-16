@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! The control API of a FUSE mount of many stores (TASK-302): gRPC over a Unix socket, whose calls
-//! and errors are `proto/cladefs/mount/v1/mount.proto`'s. It attaches tenants' cells of the mount's
+//! The control API of a FUSE mount of many stores (TASK-302): gRPC, whose calls and errors are
+//! `proto/cladefs/mount/v1/mount.proto`'s, served on cladefsd's control socket (TASK-475.2). It attaches tenants' cells of the mount's
 //! bucket (TASK-364), each Fxfs volume of a cell taken into a store in the mount's directory of
 //! stores, at `TENANT/CELL/VOLUME`, and shown at that path in the mount; and detaches them.
 //!
@@ -22,17 +22,13 @@ use proto::*;
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use tonic::{Request, Response, Status};
 
 /// The API's messages and services, generated from its .proto.
 pub mod proto {
     tonic::include_proto!("cladefs.mount.v1");
 }
-
-/// How many threads serve the API's calls; the stores' opening and closing run on blocking
-/// threads of their own.
-const THREADS: usize = 2;
 
 /// Where a mount of many stores takes the cells it attaches from, and keeps their stores.
 #[derive(Clone, Debug)]
@@ -43,30 +39,15 @@ pub struct Stores {
     pub bucket: String,
 }
 
-/// Serves the control API of `server`, a server of many stores, which attaches cells as `stores`
-/// says, to the callers that connect to `listener`, until accepting fails.
-pub fn serve(
-    listener: std::os::unix::net::UnixListener,
-    server: Arc<Server>,
+/// The Mount service of `server`, a server of many stores, which attaches cells as `stores` says:
+/// what the daemon serves on its control socket, beside its other services, if it mounts cells
+/// (`crate::extentd::mount`, TASK-475.2).
+pub(crate) fn service(
+    server: &Arc<Server>,
     stores: Stores,
-) -> std::io::Result<()> {
-    listener.set_nonblocking(true)?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(THREADS)
-        .thread_name("fuse control")
-        .enable_all()
-        .build()?;
-    runtime.block_on(async {
-        let incoming = tokio_stream::wrappers::UnixListenerStream::new(
-            tokio::net::UnixListener::from_std(listener)?,
-        );
-        let control = Control { server, stores: Arc::new(stores), cells: Arc::default() };
-        tonic::transport::Server::builder()
-            .add_service(MountServer::new(control))
-            .serve_with_incoming(incoming)
-            .await
-            .map_err(std::io::Error::other)
-    })
+) -> MountServer<impl proto::mount_server::Mount + use<>> {
+    let (server, stores) = (Arc::downgrade(server), Arc::new(stores));
+    MountServer::new(Control { server, stores, cells: Arc::default(), holds: Arc::default() })
 }
 
 /// The path a volume of `cell` named `name` has in the mount, and in its directory of stores:
@@ -90,11 +71,38 @@ enum Attaching {
     Detaching,
 }
 
-/// The API's calls, served by a server of many stores.
+/// The API's calls, served by a server of many stores: the mount's, which the daemon's drain lets
+/// go of as it closes the mount, and its stores with it, which a call holding the server's last
+/// reference would keep open, their uploaders running, past the drain (TASK-475.2). Gone, calls
+/// fail with `UNAVAILABLE`.
 struct Control {
-    server: Arc<Server>,
+    server: Weak<Server>,
     stores: Arc<Stores>,
     cells: Cells,
+    holds: Holds,
+}
+
+/// cladefs: the daemon's holds of the stores attached, by their paths in the directory of stores
+/// (TASK-475.3): while the mount has a store, a VM process opening it, or the daemon's control API
+/// working on it, fails with `EBUSY` at once. Taken before a store opens, let go once it is
+/// detached, written back and closed, or failed to attach.
+type Holds = Arc<Mutex<BTreeMap<PathBuf, crate::extentd::stores::MountHold>>>;
+
+/// Opens the store at `path` as [`mount_volume`] does, held for the mount first ([`Holds`]): `open`
+/// opens it, given the hold, and keeps the hold in `holds` if it opens.
+fn held_open(
+    holds: &Holds,
+    path: &Path,
+    open: impl FnOnce() -> Result<Filesystem, Error>,
+) -> Result<Filesystem, Error> {
+    let hold = crate::extentd::stores::hold_mounted(path).map_err(|errno| {
+        Error::new(
+            anyhow::Error::new(errno).context(format!("holding {} for the mount", path.display())),
+        )
+    })?;
+    let fs = open()?;
+    holds.lock().unwrap().insert(path.to_owned(), hold);
+    Ok(fs)
 }
 
 /// The cell `cell` of `cells` as `reserving` finds it: marked `marked` if it says so, else left be.
@@ -145,6 +153,11 @@ fn mount_volume(
 const TAKEN_CAPACITY: u64 = Storage::BLOCK_SIZE as u64;
 
 impl Control {
+    /// The mount's server, unless the mount is closed.
+    fn server(&self) -> Result<Arc<Server>, Status> {
+        self.server.upgrade().ok_or_else(|| Status::unavailable("the mount of cells is closed"))
+    }
+
     /// Attaches the Fxfs volumes of `cell`'s `object` at their paths, as [`mount_volume`] takes
     /// and mounts them, placed at `token` if given; on a failure, detaches those it attached, at
     /// once, and fails. Returns them, by name.
@@ -154,6 +167,9 @@ impl Control {
         object: &cell::Object,
         token: Option<u64>,
     ) -> Result<Vec<proto::Volume>, Error> {
+        let Some(server) = self.server.upgrade() else {
+            return Err(Errno::ENOTCONN.into());
+        };
         let mut attached = Vec::new();
         for (name, volume) in &object.volumes {
             if volume.kind != Kind::Fxfs {
@@ -163,18 +179,24 @@ impl Control {
             let path = self.stores.dir.join(&shown);
             let url = self.stores.bucket.clone();
             let branch = Branch { cell, id: volume.branch };
+            let (holds, held) = (self.holds.clone(), path.clone());
             let open = async move {
                 let opened = tokio::task::spawn_blocking(move || {
-                    mount_volume(&path, &url, (BranchOf::Taken(branch), TAKEN_CAPACITY), token)
+                    held_open(&holds, &path, || {
+                        mount_volume(&path, &url, (BranchOf::Taken(branch), TAKEN_CAPACITY), token)
+                    })
                 });
                 opened.await.map_err(Error::new)?
             };
-            if let Err(err) = self.server.attach(&shown, open).await {
+            if let Err(err) = server.attach(&shown, open).await {
+                self.holds.lock().unwrap().remove(&held);
                 for name in attached.iter().map(|volume: &proto::Volume| &volume.name) {
-                    let detached = self.server.detach(&volume_path(cell, name), true).await;
+                    let shown = volume_path(cell, name);
+                    let detached = server.detach(&shown, true).await;
                     if let Err(why) = detached {
                         log::error!("fuse: detaching {name} of a cell attached part way: {why}");
                     }
+                    self.holds.lock().unwrap().remove(&self.stores.dir.join(&shown));
                 }
                 return Err(err);
             }
@@ -209,6 +231,7 @@ impl proto::mount_server::Mount for Control {
             server: self.server.clone(),
             stores: self.stores.clone(),
             cells: self.cells.clone(),
+            holds: self.holds.clone(),
         };
         let attached = whole(async move {
             let attached = async {
@@ -276,16 +299,23 @@ impl proto::mount_server::Mount for Control {
         if path.exists() {
             return Err(failed(Errno::EEXIST.into()));
         }
-        let (server, url) = (self.server.clone(), self.stores.bucket.clone());
+        let (server, url) = (self.server()?, self.stores.bucket.clone());
+        let holds = self.holds.clone();
         let made = whole(async move {
             let made = path.clone();
+            let theirs = holds.clone();
             let open = async move {
                 let opened = tokio::task::spawn_blocking(move || {
-                    mount_volume(&path, &url, (BranchOf::New(cell), capacity), token)
+                    held_open(&theirs, &path, || {
+                        mount_volume(&path, &url, (BranchOf::New(cell), capacity), token)
+                    })
                 });
                 opened.await.map_err(Error::new)?
             };
-            server.attach(&shown, open).await?;
+            if let Err(err) = server.attach(&shown, open).await {
+                holds.lock().unwrap().remove(&made);
+                return Err(err);
+            }
             // Its branch's ID, the bucket's to give (TASK-364), as its description says.
             extent_store::host_branch(&made).map_err(Error::new)
         });
@@ -305,7 +335,8 @@ impl proto::mount_server::Mount for Control {
             None => Err(Errno::ENOENT),
         })
         .map_err(|errno| failed(errno.into()))?;
-        let (server, cells) = (self.server.clone(), self.cells.clone());
+        let (server, cells, holds) = (self.server()?, self.cells.clone(), self.holds.clone());
+        let dir = self.stores.dir.clone();
         let prefix = format!("{:016x}/{:016x}/", cell.tenant, cell.id);
         let detached = whole(async move {
             let shown: Vec<String> = (server.attached().into_iter())
@@ -314,6 +345,12 @@ impl proto::mount_server::Mount for Control {
                 .collect();
             let detaching = shown.iter().map(|name| server.detach(name, force));
             let detached = futures::future::join_all(detaching).await;
+            // Their stores closed, or gone from the mount all the same: the daemon's again.
+            let mut held = holds.lock().unwrap();
+            for name in &shown {
+                held.remove(&dir.join(name));
+            }
+            drop(held);
             // A store that failed to unmount is gone from the mount all the same
             // (`Server::detach`): the cell is no longer attached, and attaching it again opens its
             // stores anew.
@@ -332,7 +369,7 @@ impl proto::mount_server::Mount for Control {
             .filter(|(_, attaching)| !matches!(attaching, Attaching::Busy))
             .map(|(cell, _)| *cell)
             .collect();
-        let (shown, dir) = (self.server.attached(), self.stores.dir.clone());
+        let (shown, dir) = (self.server()?.attached(), self.stores.dir.clone());
         let listed = tokio::task::spawn_blocking(move || {
             (attached.into_iter())
                 .map(|cell| {
@@ -392,7 +429,7 @@ fn failed(err: Error) -> Status {
 }
 
 /// A client of the control API of a FUSE mount of many stores that blocks, for callers without a
-/// runtime of their own: `cladefs-mount`'s commands, and tests. Its errors carry the errno a call
+/// runtime of their own: `cladefsctl mount`'s commands, and tests. Its errors carry the errno a call
 /// failed with, if it did ([`crate::Error::errno`]).
 pub struct Client {
     runtime: tokio::runtime::Runtime,
@@ -400,7 +437,7 @@ pub struct Client {
 }
 
 impl Client {
-    /// A client of the mount whose control socket is at `socket`.
+    /// A client of the mount of the daemon whose control socket is at `socket`.
     pub fn connect(socket: impl AsRef<Path>) -> Result<Self, Error> {
         let socket = socket.as_ref();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -409,7 +446,7 @@ impl Client {
             .map_err(Error::new)?;
         let channel = runtime.block_on(channel(socket)).map_err(|err| {
             Error::new(anyhow::Error::new(err).context(format!(
-                "connecting to the mount's control socket at {}",
+                "connecting to the daemon's control socket at {}",
                 socket.display()
             )))
         })?;

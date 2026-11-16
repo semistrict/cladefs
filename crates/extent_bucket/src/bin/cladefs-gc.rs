@@ -542,12 +542,18 @@ fn passed_line(passed: &Ran) -> Option<String> {
     }
 }
 
-/// What passes that delete did, as `report` says.
+/// What passes that delete did, as `report` says; and the dead cells they removed whole, if any
+/// (TASK-455).
 fn did(report: &Report) -> String {
-    let Report { deleted, compacted, retired, deleted_bytes, compacted_bytes, .. } = report;
+    let Report { deleted, compacted, retired, deleted_bytes, compacted_bytes, removed, .. } =
+        report;
+    let removed = match removed {
+        0 => String::new(),
+        removed => format!(", removed {removed} dead cells"),
+    };
     format!(
         "deleted {deleted} ({deleted_bytes} bytes), compacted {compacted} ({compacted_bytes} \
-         bytes), retired {retired} references{}",
+         bytes), retired {retired} references{removed}{}",
         locked(report)
     )
 }
@@ -634,6 +640,7 @@ impl Histogram {
 /// - `cladefs_gc_sweep_objects{action}` and `cladefs_gc_sweep_bytes{action}`: what its passes
 ///   `deleted`, `compacted` and `marked`, as listed, and the objects encrypted they left
 ///   `uncompacted`, without their cells' KEKs (TASK-411.6); `cladefs_gc_sweep_retired_references`,
+///   `cladefs_gc_sweep_removed_cells`, the dead cells removed whole (TASK-455),
 ///   `cladefs_gc_sweep_locked_cells`, the cells those were of, and
 ///   `cladefs_gc_sweep_resurrected_objects`.
 /// - `cladefs_gc_sweep_requests{request}`: the requests it made of each kind
@@ -720,6 +727,12 @@ fn metrics(sweeps: u64, swept: &Swept, passes: &Histogram, peak: u64, now: Syste
         "gauge",
         "The references its last sweep's passes retired.",
         &one(report.retired.to_string()),
+    );
+    family(
+        "cladefs_gc_sweep_removed_cells",
+        "gauge",
+        "The dead cells its last sweep's passes removed whole.",
+        &one(report.removed.to_string()),
     );
     family(
         "cladefs_gc_sweep_locked_cells",
@@ -1276,6 +1289,7 @@ mod tests {
             skipped: 4,
             locked: 2,
             uncompacted: 5,
+            removed: 2,
         };
         let mut requests = Requests::default();
         requests.0[Request::Get as usize] = 40;
@@ -1300,6 +1314,7 @@ mod tests {
             swept_lines(Mode::Delete, &swept),
             (
                 "cladefs-gc: deleted 3 (3000 bytes), compacted 2 (200 bytes), retired 1 references, \
+                 removed 2 dead cells, \
                  left 5 encrypted uncompacted in 2 cells, without their KEKs, over 7 cells (4 \
                  unchanged), 2 held by other passes, 3 swept by them since, 1 failed; requests: \
                  get 40, list-delimited 9, delete-batch 2"
@@ -1441,6 +1456,9 @@ cladefs_gc_sweep_bytes{action=\"marked\"} 0
 # HELP cladefs_gc_sweep_retired_references The references its last sweep's passes retired.
 # TYPE cladefs_gc_sweep_retired_references gauge
 cladefs_gc_sweep_retired_references 0
+# HELP cladefs_gc_sweep_removed_cells The dead cells its last sweep's passes removed whole.
+# TYPE cladefs_gc_sweep_removed_cells gauge
+cladefs_gc_sweep_removed_cells 0
 # HELP cladefs_gc_sweep_locked_cells The cells its last sweep's passes left encrypted objects uncompacted in, without their KEKs.
 # TYPE cladefs_gc_sweep_locked_cells gauge
 cladefs_gc_sweep_locked_cells 1

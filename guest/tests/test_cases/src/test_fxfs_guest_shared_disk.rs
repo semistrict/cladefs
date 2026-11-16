@@ -299,8 +299,8 @@ mod host {
 
     impl Test for TestFxfsGuestSharedDisk {
         fn should_run(&self) -> ShouldRun {
-            if std::env::var_os("CLADEFS_EXTENTD_BIN").is_none() {
-                return ShouldRun::No("CLADEFS_EXTENTD_BIN does not name the extent daemon");
+            if std::env::var_os("CLADEFSD_BIN").is_none() {
+                return ShouldRun::No("CLADEFSD_BIN does not name the extent daemon");
             }
             cladefs_guest_should_run()
         }

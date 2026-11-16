@@ -171,7 +171,7 @@ struct Host {
     root: bool,
     /// CLADEFS_NO_UNSHARE: set, the cases run as they are.
     no_unshare: bool,
-    /// CLADEFS_EXTENTD_REMOTE, the bucket cases' own extent daemons keep their stores in.
+    /// CLADEFSD_REMOTE, the bucket cases' own extent daemons keep their stores in.
     bucket: Option<String>,
     has: fn(&str) -> bool,
 }
@@ -182,7 +182,7 @@ impl Host {
             linux: cfg!(target_os = "linux"),
             root: nix::unistd::geteuid().is_root(),
             no_unshare: std::env::var_os("CLADEFS_NO_UNSHARE").is_some(),
-            bucket: std::env::var("CLADEFS_EXTENTD_REMOTE").ok().filter(|url| !url.is_empty()),
+            bucket: std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty()),
             has: on_path,
         }
     }
@@ -214,7 +214,7 @@ fn isolation(host: &Host) -> Isolation {
     } else if host.no_unshare {
         Isolation::None("CLADEFS_NO_UNSHARE is set")
     } else if host.bucket.as_deref().is_some_and(networked) {
-        Isolation::None("CLADEFS_EXTENTD_REMOTE names a bucket over the network")
+        Isolation::None("CLADEFSD_REMOTE names a bucket over the network")
     } else if !(host.has)("unshare") || !(host.has)("ip") {
         Isolation::None("unshare or ip is missing")
     } else if host.root {
@@ -914,7 +914,7 @@ mod tests {
         );
     }
 
-    /// A Linux host as root with every command, CLADEFS_EXTENTD_REMOTE `bucket`.
+    /// A Linux host as root with every command, CLADEFSD_REMOTE `bucket`.
     fn host(bucket: Option<&str>) -> Host {
         let bucket = bucket.map(str::to_owned);
         Host { linux: true, root: true, no_unshare: false, bucket, has: |_| true }
@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(isolation(&host(Some("memory:///vmm"))), Isolation::Net);
         assert_eq!(
             isolation(&host(Some("gs://bucket/run"))),
-            Isolation::None("CLADEFS_EXTENTD_REMOTE names a bucket over the network")
+            Isolation::None("CLADEFSD_REMOTE names a bucket over the network")
         );
         assert_eq!(isolation(&Host { root: false, ..host(None) }), Isolation::MappedNet);
         assert_eq!(

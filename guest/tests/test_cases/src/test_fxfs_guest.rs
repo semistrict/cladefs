@@ -501,7 +501,7 @@ mod host {
                         return TestOutcome::Fail(format!("no stray access: {output:?}"));
                     };
                     assert_eq!(output.lines().last(), Some(stray), "the stray access returned");
-                    let socket = std::env::var_os("CLADEFS_EXTENTD").unwrap();
+                    let socket = std::env::var_os("CLADEFSD").unwrap();
                     let other = test_setup.tmp_dir.join("after-the-stray");
                     cladefs::extentd::DaemonExtentStore::connect(socket, other, 1 << 24).unwrap();
                 }

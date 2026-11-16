@@ -19,29 +19,33 @@ pub use extent_frame::segment::{
 /// ([`Record::format`](crate::record::Record::format)): a reader refuses a branch of any other,
 /// newer or older, naming it, and reads none of it (doc-11, rule 1; TASK-141.2). 2: a footer holds
 /// its segment's [`Contents`], with the capacity its commits set, and a checkpoint the branch's
-/// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may
-/// span segments, a footer naming the runs in its data of the commit it goes on with
+/// capacity (TASK-165.3); nothing reads 1's, as nothing keeps any (AGENTS.md). 3: a commit may span
+/// segments, a footer naming the runs in its data of the commit it goes on with
 /// (`Contents::continued`, TASK-92.41); nothing reads 2's. 4: a checkpoint names the branch's
-/// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences),
-/// TASK-371); nothing reads 3's. 5: a branch's objects are under its tenant's cell's prefix, and
-/// footers, forks and origins name branches with their cells ([`Branch`], TASK-364); nothing reads
-/// 4's. 6: a checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose
-/// fences lack them. 7: a checkpoint names the branch's strays apart from its fences, each void or
-/// late ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
+/// fences, which the collector keeps ([`State::fences`](crate::recovery::State::fences), TASK-371);
+/// nothing reads 3's. 5: a branch's objects are under its tenant's cell's prefix, and footers,
+/// forks and origins name branches with their cells ([`Branch`], TASK-364); nothing reads 4's. 6: a
+/// checkpoint's fences count the branch's strays (TASK-383); nothing reads 5's, whose fences lack
+/// them. 7: a checkpoint names the branch's strays apart from its fences, each void or late
+/// ([`Stray`](crate::recovery::Stray), TASK-388); nothing reads 6's. 8: a point's record says
 /// whether other tenants may fork it ([`Record::shared`](crate::record::Record::shared),
 /// TASK-395.7); nothing reads 7's. 9: everything a cell's collection reads is under the cell's
 /// prefix: its objects' moves ([`moves`]), its collector's lease and marks ([`collector_lease`],
 /// [`marks`]), and the references of forks of its branches ([`reference`]), so that a pass of the
-/// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's lease
-/// were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in a
-/// KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
+/// collector lists the cell alone (TASK-395.2); nothing reads 8's, whose moves and collector's
+/// lease were at the bucket's root. 10: a cell's object keeps its KEKs, wrapped by its tenant's in
+/// a KMS, and a record its branch's DEKs, wrapped by its cell's ([`crate::keys`], doc-16,
 /// TASK-411.3); objects are framed in extent_frame's FORMAT 2, encrypted under their branch's DEK
 /// or in the clear, own extents' footers naming their extents, and moves' the object they are the
-/// moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints' keys
-/// name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it holds
-/// and its newest checkpoint, replacing its lease, and footers name no segment they follow;
-/// nothing reads 10's.
-pub const FORMAT: u32 = 11;
+/// moves of; nothing reads 9's. 11: a key is written once (TASK-407): segments' and checkpoints'
+/// keys name their writers' epochs, a branch's head ([`head`], [`Head`]) names the segments it
+/// holds and its newest checkpoint, replacing its lease, and footers name no segment they follow;
+/// nothing reads 10's. 12: a fork of a point, made, says so
+/// ([`Kind::Clone`](crate::record::Kind::Clone)), so that the collector removes a dead cell of
+/// given roots and clones whole (TASK-455); nothing reads 11's. 13: a fork of a point says whether
+/// another than its host resumed it ([`Record::resumed`](crate::record::Record::resumed)), whose
+/// clone's reference is retired marked (TASK-455's review); nothing reads 12's.
+pub const FORMAT: u32 = 13;
 
 /// cladefs: the prefix of every tenant's cells' objects: all the bucket's branches (TASK-364).
 pub const TENANTS: &str = "tenants/";

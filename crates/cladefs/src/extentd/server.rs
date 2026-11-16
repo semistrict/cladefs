@@ -929,23 +929,19 @@ impl Writer for Connection {
 }
 
 /// The directories the daemon serves stores in to the default tenant's connections,
-/// `CLADEFS_EXTENTD_ROOTS` (separated by colons), if it names any (TASK-43.4). One that doesn't exist
+/// `CLADEFSD_ROOTS` (separated by colons), if it names any (TASK-43.4). One that doesn't exist
 /// is no root, and with none, the daemon refuses every path.
 fn roots() -> Option<&'static [PathBuf]> {
     static ROOTS: OnceLock<Option<Vec<PathBuf>>> = OnceLock::new();
     ROOTS
         .get_or_init(|| {
-            let roots =
-                std::env::var_os("CLADEFS_EXTENTD_ROOTS").filter(|roots| !roots.is_empty())?;
+            let roots = std::env::var_os("CLADEFSD_ROOTS").filter(|roots| !roots.is_empty())?;
             Some(
                 std::env::split_paths(&roots)
                     .filter_map(|root| match root.canonicalize() {
                         Ok(root) => Some(root),
                         Err(err) => {
-                            log::error!(
-                                "extentd: CLADEFS_EXTENTD_ROOTS: {}: {err}",
-                                root.display()
-                            );
+                            log::error!("extentd: CLADEFSD_ROOTS: {}: {err}", root.display());
                             None
                         }
                     })

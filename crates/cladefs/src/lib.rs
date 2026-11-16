@@ -7,8 +7,8 @@
 //! cladefs has two uses of Fxfs:
 //!
 //! - **Extent stores** ([`ExtentStore`]), which a guest running Fxfs in its own kernel keeps its
-//!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's extent
-//!   daemon (`cladefs-extentd`, `extentd`) serves the stores of a host's VMs, and maps their
+//!   filesystem in, through a VMM's extent-store device (backlog doc-4). On Linux, cladefs's daemon,
+//!   `cladefsd`, one a host (`extentd`), serves the stores of a host's VMs, and maps their
 //!   extents into the VMs' DAX windows from one cache of their pages, which the VMs share; a VMM's
 //!   device is a `DaemonExtentStore`, a connection to it.
 //! - **A filesystem on the host** ([`Filesystem`]), which formats, fills and checks images, such
@@ -47,7 +47,7 @@
 //! - Errors are [`Errno`]s, Linux's values on every host.
 //!
 //! On Linux, [`fuse`] mounts a filesystem with FUSE, for any process to use; `cladefs-mount` mounts
-//! a store so.
+//! a store so, and cladefsd tenants' cells (`extentd::mount`, TASK-475.2).
 //!
 //! # Async
 //!
@@ -137,6 +137,7 @@ pub mod memory_volume;
 mod node;
 pub mod pages;
 mod profile;
+pub mod renamed;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod request;
 #[cfg(all(test, feature = "shuttle"))]

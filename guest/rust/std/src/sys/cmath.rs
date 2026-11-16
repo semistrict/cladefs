@@ -4,7 +4,6 @@
 // kernel's std from the pinned toolchain's rust-src, its licenses and COPYRIGHT in guest/rust/std:
 // without its tests and stability attributes. Do not edit it here.
 
-
 // These symbols are all defined by `libm`,
 // or by `compiler-builtins` on unsupported platforms.
 unsafe extern "C" {

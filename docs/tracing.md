@@ -1,6 +1,6 @@
 # Tracing extentd with OpenTelemetry
 
-`cladefs-extentd` can export spans of what it does over OTLP: the requests it serves, the commits
+`cladefsd` can export spans of what it does over OTLP: the requests it serves, the commits
 they cause and each commit's phases, uploads to the bucket and each bucket request, store opens
 and forks, extent-cache page-ins, and memory-relief passes. Tracing is off by default. While it is
 off, a span costs one relaxed atomic load (measured below), and nothing is allocated or exported.
@@ -11,9 +11,9 @@ The code is `crates/extent_bucket/src/trace.rs`, which makes the spans, and
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `CLADEFS_EXTENTD_TRACES` | `otlp` turns tracing on. Any other value except empty makes the daemon refuse to start. | off |
+| `CLADEFSD_TRACES` | `otlp` turns tracing on. Any other value except empty makes the daemon refuse to start. | off |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | The collector, OTLP over HTTP with protobuf. `/v1/traces` is appended. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` names the full URL instead. | `http://localhost:4318` |
-| `OTEL_SERVICE_NAME` | The service the spans belong to. | `cladefs-extentd` |
+| `OTEL_SERVICE_NAME` | The service the spans belong to. | `cladefsd` |
 | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | OpenTelemetry's standard sampler variables. | see Sampling |
 
 The other `OTEL_EXPORTER_OTLP_*` variables (headers, timeout, compression) work as the
@@ -38,14 +38,14 @@ Jaeger's all-in-one image (Apache-2.0) takes OTLP on 4318 and serves its UI on 1
 
 ```sh
 docker run -d --name jaeger -p 4318:4318 -p 16686:16686 jaegertracing/all-in-one:latest
-CLADEFS_EXTENTD_TRACES=otlp \
+CLADEFSD_TRACES=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 \
 OTEL_TRACES_SAMPLER=always_on \
-CLADEFS_EXTENTD_REMOTE=... CLADEFS_EXTENTD_TOKEN=... \
-cladefs-extentd /run/cladefs/extentd.sock
+CLADEFSD_REMOTE=... CLADEFSD_TOKEN=... \
+cladefsd /run/cladefs/extentd.sock
 ```
 
-Then open `http://localhost:16686` and choose the service `cladefs-extentd`. To route spans through
+Then open `http://localhost:16686` and choose the service `cladefsd`. To route spans through
 the OpenTelemetry Collector instead (`otel/opentelemetry-collector`, Apache-2.0), give it an `otlp`
 receiver with the `http` protocol and point `OTEL_EXPORTER_OTLP_ENDPOINT` at that receiver.
 
@@ -98,6 +98,6 @@ attribute is ever computed. The request path adds one more load per request, in
 - `crates/cladefs/src/extentd/tests/otel.rs` serves a write, a read and an uploaded commit through
   extentd into OpenTelemetry's in-memory exporter. It checks the span tree and its attributes, and
   that nothing is exported while tracing is off.
-- `crates/cladefs/tests/tracing.rs` runs the `cladefs-extentd` binary against an OTLP/HTTP collector
+- `crates/cladefs/tests/tracing.rs` runs the `cladefsd` binary against an OTLP/HTTP collector
   in the test. It checks that the spans arrive at `/v1/traces` and that nothing is sent without
-  `CLADEFS_EXTENTD_TRACES`.
+  `CLADEFSD_TRACES`.

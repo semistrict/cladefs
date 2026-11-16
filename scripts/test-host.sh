@@ -17,13 +17,12 @@
 # resume waits for the run RUN, as the test host names it (run.txt's in its results), whose driver
 # stopped waiting for it, and fetches its results as a run would; cancel ends it (host_actions).
 #
-# CLADEFS_E2E_TEST names the guest tests' cases to run, separated by spaces, by name or
-# `--tag SUITE`, as scripts/test-e2e.sh's arguments, instead of its default suite, each
-# CLADEFS_E2E_REPEATS times, under Firecracker's seccomp filter with
-# CLADEFS_FIRECRACKER_SECCOMP, in its jailer's jail with CLADEFS_FIRECRACKER_JAIL
-# (scripts/test-e2e.sh), fxfs-guest-checks' checks alone with CLADEFS_CHECKS (such as
-# `sparse,acls`), their budgets scaled by CLADEFS_CHECKS_SCALE (such as 2, on a test host others
-# load). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here
+# CLADEFS_E2E_TEST names the guest tests' cases to run, separated by spaces, by name or `--tag
+# SUITE`, as scripts/test-e2e.sh's arguments, instead of its default suite, each CLADEFS_E2E_REPEATS
+# times, under Firecracker's seccomp filter with CLADEFS_FIRECRACKER_SECCOMP, in its jailer's jail
+# with CLADEFS_FIRECRACKER_JAIL (scripts/test-e2e.sh), fxfs-guest-checks' checks alone with
+# CLADEFS_CHECKS (such as `sparse,acls`), their budgets scaled by CLADEFS_CHECKS_SCALE (such as 2,
+# on a test host others load). CLADEFS_GUEST_KERNEL names cladefs's x86-64 guest kernel here
 # (scripts/build-guest-kernel.sh), for the guest Fxfs tests, or CLADEFS_GUEST_KERNEL_BUILD (release,
 # debug, kasan, coverage or rust-checks) has the test host build one from the source, or take the
 # one built before from the same sources (host_kernel, scripts/lib/linux-host-setup.sh), a release
@@ -31,9 +30,9 @@
 # fxfs.follow_apply_delay_us=200). CLADEFS_TEST_HOST_LIMIT caps the run's time on the test host
 # (timeout's DURATION, default 6h). CLADEFS_WORKSPACE_TESTS=0 runs the guest tests alone,
 # CLADEFS_GUEST_TESTS=0 the workspace's alone, and CLADEFS_TEST_ARGS are cargo nextest's arguments
-# for the workspace's, such as a filter. CLADEFS_EXTENTD_REMOTE, if set, names a bucket the guest
-# tests' extent daemons keep their stores' branches in (an object store's URL the test host
-# reaches), under a prefix of the run's own. Every other CLADEFS_* and PJDFSTEST_* variable set here
+# for the workspace's, such as a filter. CLADEFSD_REMOTE, if set, names a bucket the guest tests'
+# extent daemons keep their stores' branches in (an object store's URL the test host reaches), under
+# a prefix of the run's own. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_* variable set here
 # reaches the test host too (scripts/lib/host.sh), such as CLADEFS_FOLLOW_SECONDS and
 # CLADEFS_PJDFSTEST_TESTS, and the run's CLADEFS_TEST_HOST_* settings are scripts/lib/host.sh's.
 set -euo pipefail
@@ -60,9 +59,9 @@ host_start
 echo "Results: $results" >&2
 # The run's own prefix of the bucket, if one is named.
 remote=
-if [[ -n ${CLADEFS_EXTENTD_REMOTE:-} ]]; then remote=${CLADEFS_EXTENTD_REMOTE%/}/$host_run; fi
+if [[ -n ${CLADEFSD_REMOTE:-} ]]; then remote=${CLADEFSD_REMOTE%/}/$host_run; fi
 # shellcheck disable=SC2086 # The tests' selectors are words separated by spaces.
-host_job "CLADEFS_EXTENTD_REMOTE=$remote" test-linux-host.sh ${CLADEFS_E2E_TEST:-} \
+host_job "CLADEFSD_REMOTE=$remote" test-linux-host.sh ${CLADEFS_E2E_TEST:-} \
     > "$results/remote.log" 2>&1 || status=$?
 if [[ $host_state == ended ]]; then
     host_fetch || status=$?

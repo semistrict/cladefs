@@ -1938,6 +1938,15 @@ impl World {
             // Its cells are in the clear: nothing encrypted is left uncompacted (TASK-411.6).
             locked: 0,
             uncompacted: 0,
+            // cladefs: the cells whose records went, as only a dead cell's removal deletes them,
+            // all of them at once (TASK-455).
+            removed: (gone())
+                .filter_map(|key| match layout::kind(key) {
+                    layout::Kind::Record { branch } => Some(branch.cell),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .len(),
         };
         match report {
             Some(Ok(report)) if report == expected(&report) => {}

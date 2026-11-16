@@ -24,9 +24,9 @@
 # of its suite, from its summary (scripts/guest_results.py): its repeats, or the repeat it failed
 # in, its checks failed, and the command that replays it. CLADEFS_SOAK_REPEATS scales each group's
 # repeats by a factor (1 by default), CLADEFS_SOAK_CAP caps them (for a short check of the soak
-# itself), and every CLADEFS_* setting scripts/test-host.sh takes reaches the test host. Each run is
-# of the commit scripts/test-host.sh runs (scripts/lib/host.sh's CLADEFS_TEST_HOST_COMMIT, HEAD by
-# default).
+# itself), and every CLADEFS_* and CLADEFSD_* setting scripts/test-host.sh takes reaches the test
+# host. Each run is of the commit scripts/test-host.sh runs (scripts/lib/host.sh's
+# CLADEFS_TEST_HOST_COMMIT, HEAD by default).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 results=${1:?usage: soak-workloads-host.sh RESULTS [GROUP...]}
@@ -49,7 +49,7 @@ soak() {
     local group=$1 repeats=$(($2 * factor)) kernel=$3 seconds=$4 own=()
     if [[ -n $cap ]] && (( repeats > cap )); then repeats=$cap; fi
     if [[ $group == mixed ]]; then
-        own=(CLADEFS_EXTENTD_FAILPOINTS=1)
+        own=(CLADEFSD_FAILPOINTS=1)
     fi
     env ${own[@]+"${own[@]}"} CLADEFS_WORKSPACE_TESTS=0 CLADEFS_E2E_TEST="--tag soak-$group" \
         CLADEFS_E2E_REPEATS=$repeats CLADEFS_GUEST_KERNEL_BUILD=$kernel \

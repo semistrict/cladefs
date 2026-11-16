@@ -29,8 +29,8 @@ fn serve() -> (tempfile::TempDir, PathBuf) {
 fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var("CLADEFS_EXTENTD_REMOTE", url);
-        std::env::set_var("CLADEFS_EXTENTD_TOKEN", "1");
+        std::env::set_var("CLADEFSD_REMOTE", url);
+        std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();
     let socket = sockets.path().join("extentd.sock");

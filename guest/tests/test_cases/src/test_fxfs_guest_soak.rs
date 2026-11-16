@@ -29,9 +29,9 @@
 //! CLADEFS_SOAK_FAULTS leaves faults out (`crate::soak::Fault`'s names, or `none`);
 //! CLADEFS_SOAK_LOAD_SECS fixes the loads' time; CLADEFS_SOAK_STATE is where runs keep their state,
 //! /var/tmp/cladefs-soak by default: on disk, as /tmp may be memory (tmpfs, as on some Ubuntu 26.04 hosts,
-//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFS_EXTENTD_REMOTE's, under
+//! where the soak's stores and cache took the host's RAM, and their measures said nothing of disk). The bucket is CLADEFSD_REMOTE's, under
 //! a prefix of the run's, or a file bucket in the state. The daemons fail uploads only if built
-//! with failpoints (scripts/test-e2e.sh's CLADEFS_EXTENTD_FAILPOINTS).
+//! with failpoints (scripts/test-e2e.sh's CLADEFSD_FAILPOINTS).
 
 use macros::{guest, host};
 
@@ -178,7 +178,7 @@ mod host {
             let key = format!("{:016x}", soak::fnv(run.as_bytes()));
             let state = root.join(&key);
             let host = state.join("host");
-            let (bucket, bucket_dir) = match std::env::var("CLADEFS_EXTENTD_REMOTE") {
+            let (bucket, bucket_dir) = match std::env::var("CLADEFSD_REMOTE") {
                 Ok(url) if !url.is_empty() => {
                     (format!("{}/soak-{key}", url.trim_end_matches('/')), None)
                 }
@@ -374,7 +374,7 @@ mod host {
             };
             let mut plan = Plan::new(ledger.seed, ledger.repeats + 1, &faults, load_secs);
             // A daemon without failpoints would fail no upload, and the repeat say it did.
-            if std::env::var_os("CLADEFS_EXTENTD_FAILPOINTS").is_none() {
+            if std::env::var_os("CLADEFSD_FAILPOINTS").is_none() {
                 plan.upload_fails_after = None;
             }
             // Latency is added to every bucket the plan names: a file bucket's reads take it since
@@ -409,9 +409,9 @@ mod host {
             let latency = if faulty { self.plan.latency_ms } else { 0 }.to_string();
             let failpoints = if faulty { self.plan.failpoints() } else { None }.unwrap_or_default();
             let env = [
-                ("CLADEFS_EXTENTD_REMOTE", self.paths.bucket.as_ref()),
-                ("CLADEFS_EXTENTD_TOKEN", token.as_ref()),
-                ("CLADEFS_EXTENTD_CACHE", self.paths.cache.as_os_str()),
+                ("CLADEFSD_REMOTE", self.paths.bucket.as_ref()),
+                ("CLADEFSD_TOKEN", token.as_ref()),
+                ("CLADEFSD_CACHE", self.paths.cache.as_os_str()),
                 ("CLADEFS_BUCKET_LATENCY_MS", latency.as_ref()),
                 ("FAILPOINTS", failpoints.as_ref()),
             ];

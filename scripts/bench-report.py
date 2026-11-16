@@ -15,7 +15,7 @@ over 2 are in bold. Runs before cladefs left libkrun (TASK-40) measured the defa
 virtio-blk and libkrun's virtio-fs device too, which the others compared with: the report still
 reads them.
 
-When the extent daemon kept stores in a bucket (CLADEFS_EXTENTD_REMOTE), a section after the table
+When the extent daemon kept stores in a bucket (CLADEFSD_REMOTE), a section after the table
 counts its requests by kind, with their estimated cost, and the bytes it uploaded and downloaded,
 from the stats it kept in logs/extentd-stats.txt (extent_bucket::object_bucket::Stats::line). Another
 says what the VM processes' requests took the daemon, by kind, and its commits, by phase.
@@ -60,7 +60,7 @@ UPLOADS = ["segments", "extents", "checkpoints", "moves", "other"]
 
 def daemon_stats(directory, kind):
     """The extent daemon's stats of `kind`, by name, if it kept them: its stats file
-    (CLADEFS_EXTENTD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
+    (CLADEFSD_STATS, which scripts/test-e2e.sh sets), a line of `NAME=COUNT` after `KIND:`
     for each kind: object-store (what it did with object storage, if it kept stores there),
     followers (what the stores' followers were), daemon (what serving the stores cost it) and
     requests (the VM processes' requests it served, by kind)."""

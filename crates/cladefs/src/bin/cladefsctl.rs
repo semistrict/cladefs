@@ -26,17 +26,21 @@
 //! cladefsctl revoke TENANT
 //! cladefsctl shred-cell TENANT/CELL
 //! cladefsctl forget-tenant-keys TENANT
+//! cladefsctl mount attach TENANT CELL [TOKEN]
+//! cladefsctl mount create-volume TENANT CELL NAME CAPACITY
+//! cladefsctl mount detach [--force] TENANT CELL
+//! cladefsctl mount list
 //! cladefsctl --version
 //! ```
 //!
-//! With `CLADEFS_EXTENTD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
+//! With `CLADEFSD_GRPC` naming the control socket of the extent daemon (TASK-43.5), every
 //! command goes through its control API (`cladefs::extentd::control`), and acts on stores as the
 //! daemon serves them: on a store a VM has open, live, or not at all (`EBUSY`). Without, cladefsctl
 //! acts on stores itself, on stores nothing has open, as their lock says, which an extent daemon
 //! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
 //! make new stores, work so anywhere, as when building base images where no daemon runs. The others change
 //! existing stores' branches, which are in the bucket each store's description names: they need
-//! this host's (`CLADEFS_EXTENTD_REMOTE`) and its placement's fencing token (`CLADEFS_EXTENTD_TOKEN`),
+//! this host's (`CLADEFSD_REMOTE`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one volume of a
@@ -44,7 +48,7 @@
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in hex,
 //! a volume of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! extentd opens it,
-//! with `CLADEFS_EXTENTD_REMOTE` naming the branch's bucket, it takes what the branch holds there,
+//! with `CLADEFSD_REMOTE` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
 //! point, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
 //! `place` places the store at DIR at the placement whose fencing token,
@@ -118,6 +122,18 @@
 //! forget the keys of the tenant TENANT (hex), once its KEK is destroyed, or revoked, in the KMS:
 //! its stores there are halted, their pages leave the cache, its fetchers' and KMS's keys of it
 //! go. Each prints what the daemon forgot, one `name value` a line.
+//!
+//! `mount`, through the daemon alone, calls the Mount service of its FUSE mount of tenants' cells
+//! (`CLADEFSD_MOUNT`, TASK-475.2; `proto/cladefs/mount/v1/mount.proto`), TENANT and CELL in hex.
+//! `attach` takes CELL (0 for a new one, of no volumes) from the daemon's bucket, at the placement
+//! whose fencing token is TOKEN if given, the daemon's otherwise, and shows each Fxfs volume of it
+//! at `MOUNT/TENANT/CELL/VOLUME`; it prints the cell, then each volume, `NAME BRANCH`, a line each.
+//! `create-volume` makes a new Fxfs volume NAME of a cell attached, of CAPACITY bytes, its
+//! filesystem empty, and prints its branch. `detach` takes the cell's volumes away, and returns once
+//! their stores are unmounted and written back: once nothing has a file of them open, or a
+//! directory of them as its current one; with `--force`, at once, what is open of them failing
+//! from then on. `list` prints the cells attached, a line each, `TENANT CELL`, and under each its
+//! volumes, `NAME BRANCH`, and `detaching` for one being detached.
 
 use anyhow::{Context as _, bail};
 use cladefs::ExtentStore;
@@ -134,7 +150,10 @@ fn usage() -> anyhow::Error {
          cladefsctl public-attach-only DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
          cladefsctl stats [--json] | cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
-         cladefsctl forget-tenant-keys TENANT | cladefsctl --version"
+         cladefsctl forget-tenant-keys TENANT | cladefsctl mount attach TENANT CELL [TOKEN] | \
+         cladefsctl mount create-volume TENANT CELL NAME CAPACITY | \
+         cladefsctl mount detach [--force] TENANT CELL | cladefsctl mount list | \
+         cladefsctl --version"
     )
 }
 
@@ -241,6 +260,92 @@ enum Command {
     ForgetTenantKeys {
         tenant: u64,
     },
+    /// cladefs: the daemon's FUSE mount of cells (TASK-475.2).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    Mount(Mount),
+}
+
+/// What cladefsctl was asked to do with the daemon's FUSE mount of cells (`cladefsctl mount`,
+/// TASK-475.2): its Mount service's calls.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum Mount {
+    /// A cell attached, a new one of its tenant's if its ID is 0, at `token`'s placement if given.
+    Attach { cell: cladefs::Cell, token: Option<u64> },
+    /// A new Fxfs volume of a cell attached.
+    CreateVolume { cell: cladefs::Cell, name: String, capacity: u64 },
+    /// A cell detached, at once if `force`.
+    Detach { cell: cladefs::Cell, force: bool },
+    /// The cells attached.
+    List,
+}
+
+impl Mount {
+    /// The `mount` command `args` say, the words after `mount`.
+    fn parse(args: &[&str]) -> anyhow::Result<Self> {
+        let hex = |what: &str, given: &str| {
+            u64::from_str_radix(given, 16).with_context(|| format!("{what} must be hexadecimal"))
+        };
+        let cell = |tenant: &str, cell: &str| -> anyhow::Result<cladefs::Cell> {
+            Ok(cladefs::Cell { tenant: hex("TENANT", tenant)?, id: hex("CELL", cell)? })
+        };
+        Ok(match args {
+            ["attach", tenant, id, rest @ ..] if rest.len() <= 1 => Self::Attach {
+                cell: cell(tenant, id)?,
+                token: rest
+                    .first()
+                    .map(|token| token.parse())
+                    .transpose()
+                    .context("TOKEN must be a number")?,
+            },
+            ["create-volume", tenant, id, name, capacity] => Self::CreateVolume {
+                cell: cell(tenant, id)?,
+                name: (*name).to_owned(),
+                capacity: capacity.parse().context("CAPACITY must be a number")?,
+            },
+            ["detach", "--force", tenant, id] => {
+                Self::Detach { cell: cell(tenant, id)?, force: true }
+            }
+            ["detach", tenant, id] => Self::Detach { cell: cell(tenant, id)?, force: false },
+            ["list"] => Self::List,
+            _ => bail!(usage()),
+        })
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Mount {
+    /// Calls the Mount service of the daemon whose control socket is at `socket`, and prints what
+    /// it answers: `attach`, the cell, then each volume shown, `NAME BRANCH`, a line each;
+    /// `create-volume`, the volume's branch; `list`, each cell, `TENANT CELL`, and under it its
+    /// volumes, `detaching` after one being detached. IDs in 16 hexadecimal digits.
+    fn through(self, socket: &Path) -> anyhow::Result<()> {
+        let failed = |err: cladefs::Error| anyhow::anyhow!("{err:#}");
+        let mount = cladefs::fuse::control::Client::connect(socket).map_err(failed)?;
+        match self {
+            Self::Attach { cell, token } => {
+                let (cell, volumes) = mount.attach(cell, token).map_err(failed)?;
+                println!("{:016x}", cell.id);
+                for volume in volumes {
+                    println!("{} {:016x}", volume.name, volume.branch);
+                }
+            }
+            Self::CreateVolume { cell, name, capacity } => {
+                let made = mount.create_volume(cell, &name, capacity).map_err(failed)?;
+                println!("{:016x}", made.id);
+            }
+            Self::Detach { cell, force } => mount.detach(cell, force).map_err(failed)?,
+            Self::List => {
+                for cell in mount.list().map_err(failed)? {
+                    println!("{:016x} {:016x}", cell.tenant, cell.cell);
+                    for volume in cell.volumes {
+                        let detaching = if volume.detaching { " detaching" } else { "" };
+                        println!("  {} {:016x}{detaching}", volume.name, volume.branch);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Command {
@@ -299,6 +404,7 @@ impl Command {
                 Self::ShredCell { cell: cladefs::Cell { tenant: hex(tenant)?, id: hex(id)? } }
             }
             ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
+            ["mount", ref rest @ ..] => Self::Mount(Mount::parse(rest)?),
             _ => bail!(usage()),
         })
     }
@@ -306,6 +412,9 @@ impl Command {
     /// Does it through the control API of the daemon whose control socket is at `socket`.
     #[cfg(target_os = "linux")]
     fn through(self, socket: &Path) -> anyhow::Result<()> {
+        if let Self::Mount(mount) = self {
+            return mount.through(socket);
+        }
         let daemon = cladefs::extentd::control::Client::connect(socket)?;
         match self {
             Self::Create { dir, capacity } => {
@@ -373,6 +482,7 @@ impl Command {
                     format!("tenant {tenant}: its KEK is revoked or destroyed, cladefsctl says");
                 print!("{}", forgotten_lines(&daemon.forget_tenant_keys(tenant, &why)?));
             }
+            Self::Mount(_) => unreachable!("served above"),
         }
         Ok(())
     }
@@ -391,10 +501,11 @@ impl Command {
             Self::ShredCell { .. } | Self::ForgetTenantKeys { .. } => {
                 Some("shredding and forgetting keys are")
             }
+            Self::Mount(_) => Some("its FUSE mount of cells is"),
             _ => None,
         };
         if let Some(what) = daemons {
-            bail!("{what} the extent daemon's: name its control socket (CLADEFS_EXTENTD_GRPC)");
+            bail!("{what} the extent daemon's: name its control socket (CLADEFSD_GRPC)");
         }
         // What stat reads needs no branch changed, nor does a copy dropped, its branch left be.
         let existing = !matches!(
@@ -407,7 +518,7 @@ impl Command {
         );
         if let Some(Err(why)) = existing.then(cladefs::bucket::Host::from_env) {
             bail!(
-                "without the extent daemon (CLADEFS_EXTENTD_GRPC), cladefsctl changes no existing \
+                "without the extent daemon (CLADEFSD_GRPC), cladefsctl changes no existing \
                  store's branch here: {why}"
             );
         }
@@ -454,7 +565,7 @@ impl Command {
                 if capacity < store.info()?.capacity {
                     bail!(
                         "shrinking a store needs its guest to agree: resize it through the \
-                         extent daemon serving its VM (CLADEFS_EXTENTD_GRPC)"
+                         extent daemon serving its VM (CLADEFSD_GRPC)"
                     );
                 }
                 store.set_capacity(capacity)?;
@@ -469,7 +580,8 @@ impl Command {
             | Self::Grant { .. }
             | Self::Revoke { .. }
             | Self::ShredCell { .. }
-            | Self::ForgetTenantKeys { .. } => unreachable!("refused above"),
+            | Self::ForgetTenantKeys { .. }
+            | Self::Mount(_) => unreachable!("refused above"),
             Self::Stat { dir } => {
                 let store = ExtentStore::open(&dir)?;
                 let info = store.info()?;
@@ -589,6 +701,7 @@ fn flattened(value: &serde_json::Value) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    cladefs::renamed::refuse_old_variables().map_err(anyhow::Error::msg)?;
     // cladefs: its threads' stacks on SIGQUIT, as an import that hung needed (TASK-98, TASK-44.13).
     #[cfg(target_os = "linux")]
     cladefs::stacks::on_sigquit()?;
@@ -606,7 +719,7 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let command = Command::parse(&args)?;
-    match std::env::var_os("CLADEFS_EXTENTD_GRPC").filter(|socket| !socket.is_empty()) {
+    match std::env::var_os("CLADEFSD_GRPC").filter(|socket| !socket.is_empty()) {
         Some(socket) => command.through(socket.as_ref()),
         None => command.locally(),
     }

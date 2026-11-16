@@ -12,7 +12,7 @@
 //! ```
 //!
 //! It puts an object of OBJECT_MIB MiB (default 512) of bytes that don't compress under URL (a
-//! bucket and prefix, as `CLADEFS_EXTENTD_REMOTE` names them: `gs://bucket/prefix`), then, for each
+//! bucket and prefix, as `CLADEFSD_REMOTE` names them: `gs://bucket/prefix`), then, for each
 //! part size from 256 KiB to 4 MiB and each number of GETs in flight from 1 to 128, GETs parts of
 //! it at random for SECS seconds (default 10), and prints a Markdown table of what each did: MiB/s,
 //! GETs/s, and their latencies' median and 99th percentile. Then it deletes the object.

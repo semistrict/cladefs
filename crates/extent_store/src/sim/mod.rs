@@ -206,6 +206,11 @@ fn one() {
             "references_held" => rules.references_held = false,
             "references_relisted" => rules.references_relisted = false,
             "fork_points_kept" => rules.fork_points_kept = false,
+            "ids_given" => rules.ids_given = false,
+            "clones_made_unmarked" => rules.clones_made_unmarked = false,
+            "fences_kept" => rules.fences_kept = false,
+            "resumes_refer" => rules.resumes_refer = false,
+            "resumes_marked" => rules.resumes_marked = false,
             other => panic!("no rule {other}"),
         }
     }
@@ -664,6 +669,17 @@ test_leaks!(restores_need_references_taken_back, references_taken_back, restores
 // `stale_recorders_references_need_retirements_marked`.
 test_leaks!(restores_need_retirements_marked, retirements_marked, restores());
 
+// cladefs: a clone's reference retired unmarked while it is being made, its host writing it after,
+// stays for ever: no record names it, and no mark has its parent's cell's pass delete it
+// (TASK-455). Its model is specs/bucket's NoForksMadeUnmarked.
+test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores());
+
+// cladefs: a clone a store resumed, its host having died after its record, made with no reference:
+// once its point goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
+// direct test is extent_bucket's `clones_resumed_need_resumes_refer`; its model specs/bucket's
+// NoResumesRefer.
+test_needs!(restores_need_resumes_refer, resumes_refer, restores());
+
 /// Restores as [`restores`] makes them, fewer and among more forks, so that more take the IDs of
 /// forks' children whose segments are not yet acknowledged, as guests may name any: whichever's
 /// record comes first takes the ID, the other refused (TASK-173). Its rule,
@@ -698,6 +714,11 @@ fn usurped() -> Profile {
 test_holds!(forks_ids_taken_by_roots_deleted, usurped());
 
 test_needs!(collection_needs_records_kept, records_kept, usurped());
+
+// cladefs: the roots' IDs here named, as a guest's, no allocator's: a dead cell of them goes whole
+// only if the collector takes them for given, when a slow writer of a parent records its fork to
+// one after (TASK-455).
+test_needs!(collection_needs_ids_given, ids_given, usurped());
 
 // cladefs: the per-cell collector's rules (TASK-395.3, TASK-395.4), every fork of the simulation's
 // to a cell of its own. A base's cell's pass, the base deleted, keeps what its forks inherited only

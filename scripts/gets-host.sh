@@ -18,8 +18,8 @@
 # URL the test host reaches (s3://bucket/prefix, with CLADEFS_S3_* for an S3 server's address and
 # keys; or file:///path/, a directory there, which measures that disk); CLADEFS_GETS_MIB is the
 # object's size (default 512) and CLADEFS_GETS_SECS the seconds each measurement takes (default 10).
-# CLADEFS_BENCH_NOTE says what the run is for. Every other CLADEFS_* and PJDFSTEST_* variable set
-# here reaches the test host too (scripts/lib/host.sh).
+# CLADEFS_BENCH_NOTE says what the run is for. Every other CLADEFS_*, CLADEFSD_* and PJDFSTEST_*
+# variable set here reaches the test host too (scripts/lib/host.sh).
 set -euo pipefail
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/host.sh"

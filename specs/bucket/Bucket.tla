@@ -60,13 +60,14 @@
 (* collector runs passes per cell (TASK-395), each under its cell's        *)
 (* collector lease, at once with other cells' and with writers: the cell's *)
 (* listing and records, its live branches recovered from their heads, the  *)
-(* states at their fork points of its branches' forks to other cells       *)
-(* kept, its records and references listed again, then compaction and      *)
-(* deletion within the cell, and the references of its deleted children    *)
-(* retired once nothing in it lives. A fork to another cell writes a       *)
-(* reference under its parent's cell, naming the parent, the fork point    *)
-(* and the child, which keeps the parent's whole state at the fork point   *)
-(* there while it stands, whatever the child frees of it since: the        *)
+(* states at their fork points of its branches' forks to other cells kept, *)
+(* its records and references listed again, then compaction and deletion   *)
+(* within the cell, and the references of its deleted children retired     *)
+(* once nothing in it lives, and the cell removed whole if its records are *)
+(* all given roots' and points' forks' (TASK-455). A fork to another cell  *)
+(* writes a reference under its parent's cell, naming the parent, the fork *)
+(* point and the child, which keeps the parent's whole state at the fork   *)
+(* point there while it stands, whatever the child frees of it since: the  *)
 (* collector is conservative.                                              *)
 (*                                                                         *)
 (* Each rule is a member of Rules; specs/bucket/mutations removes one      *)
@@ -138,9 +139,16 @@
 (*   (TASK-173). Since TASK-395.1, the restore's reference keeps its       *)
 (*   origin's state at the fork point too: its mutation removes references *)
 (*   with it.                                                              *)
-(* - recordsKept (NoRecordsKept): the collector drops no record, a deleted *)
-(*   root's neither: a parent's writer slow to record a fork whose child's *)
-(*   ID a root took, and was deleted, would make it again (TASK-174).      *)
+(* - recordsKept (NoRecordsKept): the collector removes a record only with *)
+(*   its cell, dead (no live branch, no reference, no mark of its own),    *)
+(*   and only if every record of the cell is one no recorder makes again:  *)
+(*   a given root's (Given) or a given point's fork's, made, by its        *)
+(*   restore alone. A writable fork's child's, a point's, a claim's, a     *)
+(*   deletion's of no record and a point's fork's never made stay, for     *)
+(*   good: a parent's writer slow to record a fork, or its next writer,    *)
+(*   would make the child's again, a deleted branch live again, naming     *)
+(*   what the collector reclaimed (TASK-174, TASK-455). Without the rule,  *)
+(*   any dead cell's go (RemovedStayGone).                                 *)
 (* - deletionsDoneByOthers (NoDeletionsDoneByOthers): a deletion whose     *)
 (*   recovery of the branch finds what it needs lost, the record deleted   *)
 (*   since, is done (TASK-178; branch::delete, with no field of Rules).    *)
@@ -209,6 +217,40 @@
 (*   next pass deletes it, by its mark (ReferencesRetiredMarked). A writer *)
 (*   finding the child's record live and its own writes none: its maker's  *)
 (*   came first (referencesFirst), and stands.                             *)
+(* - idsGivenOnce (NoIdsGivenOnce): the IDs the bucket's allocators give   *)
+(*   (Given, doc-7 Object IDs) no fork names, nor a contest: each goes to  *)
+(*   one making, a root or a restore, and to no other ever, its cell       *)
+(*   removed or not. Without it, a fork's child, named by a guest, may be  *)
+(*   a given point's fork's ID, recorded by the fork's slow writer after   *)
+(*   its cell went (RemovedStayGone).                                      *)
+(* - forksMadeUnmarked (NoForksMadeUnmarked): a reference is retired       *)
+(*   unmarked only if its child is a given point's fork made: its restore, *)
+(*   the only writer of it, wrote it before it made the fork, and no       *)
+(*   recorder writes it, no fork naming the ID; so a base's cell keeps no  *)
+(*   mark of a point's fork made and gone (TASK-455). Any other is marked  *)
+(*   first (retirementsMarked). Without the rule, every point's fork's     *)
+(*   goes unmarked, one being made among them, whose restore, slow, writes *)
+(*   its reference after its retirement (ReferencesRetiredMarked).         *)
+(* - fencesKept (NoFencesKept): a head of a branch whose record a pass    *)
+(*   did not read goes only if it is not final: a stale taker's, of a      *)
+(*   branch removed. A final one is a deletion's fence, of a fork's child  *)
+(*   whose record is yet to come, the deletion's own or its parent's slow  *)
+(*   writer's: it stays, and keeps its cell from removal. Without it, a    *)
+(*   pass over a cell of no record deletes it, the parent's writer         *)
+(*   records the child live, and a writer takes it, which the deletion,    *)
+(*   going on, marks deleted under it (DeletedUntaken; TASK-455's review). *)
+(* - resumesRefer (NoResumesRefer): a fork of a point resumed by another   *)
+(*   than the restore that began it, a store opening its child, writes its *)
+(*   reference before it makes it, as the restore does. Without it, a      *)
+(*   restore dying between its record and its reference leaves a fork made *)
+(*   of no reference, whose origin's state at the fork point no pass keeps *)
+(*   once the point is gone (ReferencesStand).                             *)
+(* - resumesMarked (NoResumesMarked): a fork of a point resumed says so in *)
+(*   its record, with a condition, before its reference, and a fork made   *)
+(*   so retires its reference marked: the restore that began it, slow, may *)
+(*   write it after, the fork made, deleted and its cell removed. A resume *)
+(*   finding it made writes none. Without it, retired unmarked, it stands  *)
+(*   for good (ReferencesRetiredMarked; TASK-455's review).                *)
 (*                                                                         *)
 (* Gone with the head (TASK-407), with what they guarded: a create where   *)
 (* nothing is as a writer's fence, the fence segment a takeover made, gaps *)
@@ -274,7 +316,9 @@ CONSTANTS
     Can,            \* the kinds of step the model takes
     None,           \* a model value: nothing
     Rules,          \* the protocol's rules in force (all, but in a mutation)
-    CellOf          \* CellOf[b]: the cell b is a volume of, whose prefix holds its objects
+    CellOf,         \* CellOf[b]: the cell b is a volume of, whose prefix holds its objects
+    Given           \* the IDs the bucket's allocators give (objectid), each to one making alone:
+                    \* the root's, if given, and those of restores that take one (idsGivenOnce)
 
 AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "recordsAfterAck",
              "candidatesFirst", "forksFromStates", "tokens", "deleteTokens", "forkClaimsIds",
@@ -284,17 +328,19 @@ AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "reco
              "deletionsDoneByOthers", "walFollows", "acksBetweenCommits",
              "wholeCommitsKept", "references", "referencesFirst", "forksReferFirst",
              "referencesHeld", "referencesRelisted", "forkPointsKept", "forksRecordFirst",
-             "referencesTakenBack", "retirementsMarked", "movesByPass"}
+             "referencesTakenBack", "retirementsMarked", "movesByPass", "idsGivenOnce",
+             "forksMadeUnmarked", "fencesKept", "resumesRefer", "resumesMarked"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "fork", "point", "restore", "unfork",
            "contest", "delete", "deletePoints", "place", "checkpoint", "collect", "compact",
            "compactMoves", "crash", "disk", "staleTake", "overlap", "span", "spanOn", "cut",
-           "forkOwn", "deleteRoot", "landInOrder", "forkNext"}
+           "forkOwn", "deleteRoot", "landInOrder", "forkNext", "deleteEarly", "resume"}
 
 ASSUME Rules \subseteq AllRules
 ASSUME Can \subseteq AllCan
 ASSUME Root \in Branches
 ASSUME CellOf \in [Branches -> Nat \ {0}]
+ASSUME Given \subseteq Branches
 
 \* The maps of branches to cells a model's CellOf may be: one cell, which is the whole-bucket
 \* collector before TASK-395; a cell each, as hosts make them (a store, a fork, a point and a
@@ -303,6 +349,12 @@ ASSUME CellOf \in [Branches -> Nat \ {0}]
 OneCell == [b \in Branches |-> 1]
 CellEach == [b \in Branches |-> b]
 Pair == [b \in Branches |-> IF b <= 2 THEN 1 ELSE b]
+
+\* The IDs given, as a model's Given may be: the root's alone, every other ID one a guest names;
+\* or none, every ID a guest's, as before TASK-455, which removes no cell: for models of rules
+\* removal changes nothing of, kept to the size they had.
+RootGiven == {Root}
+NoneGiven == {}
 
 Cells == {CellOf[b] : b \in Branches}
 CellBranches(c) == {b \in Branches : CellOf[b] = c}
@@ -341,6 +393,8 @@ VARIABLES
                 \* variables, as it changes with them)
     written,    \* what happened: every <<key, object>> written at a segment's, a checkpoint's or
                 \* moves' key (KeysWrittenOnce)
+    gone,       \* what happened: the branches whose records a pass removed with their cells
+                \* (recordsKept), which their IDs, given once, never name again
     \* The hosts.
     ses,        \* ses[h][b]: h's writer of b, or None
     wal,        \* wal[h][b]: h's WAL of b, a sequence of [s, o]: kept by a crash, or lost
@@ -364,7 +418,7 @@ VARIABLES
     \* Bounds.
     gen, takes, passes, places, crashes, mints
 
-bucketVars == <<seg, own, ckpt, rec, head, moves, mflight, inflight, refs, marked, retired, written>>
+bucketVars == <<seg, own, ckpt, rec, head, moves, mflight, inflight, refs, marked, retired, written, gone>>
 hostVars == <<ses, wal, tok, proc>>
 truthVars == <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed, errors>>
 countVars == <<gen, takes, passes, places, crashes, mints>>
@@ -384,15 +438,21 @@ Put(f, x, v) == [y \in DOMAIN f \cup {x} |-> IF y = x THEN v ELSE f[y]]
 Drop(f, x) == [y \in DOMAIN f \ {x} |-> f[y]]
 Nothing == [x \in {} |-> None]
 
+\* Whether a guest may name c, a fork's child's ID or a contest's: one with no record, and none an
+\* allocator gives (idsGivenOnce), which goes to its one making alone; without the rule, a given one
+\* too, its record removed or not yet made.
+Nameable(c) == rec[c] = None /\ (R("idsGivenOnce") => c \notin Given)
+
 \* What a record writes for the owner `o` of its making: nothing, without recordsOwned.
 Owner(o) == IF R("recordsOwned") THEN o ELSE <<"anyone">>
 
 \* A record: its kind ("root", "fork", "point", "forking", "claim"), its origin <<parent, at>>,
-\* the point a fork being made is of, its owner and whether deleted; and, not in the bucket's
-\* bytes, the commit its branch starts from and the making it is of.
+\* the point a fork being made is of, its owner, whether deleted, and, of a fork of a point,
+\* whether another than the restore that began it resumed it (resumesMarked); and, not in the
+\* bucket's bytes, the commit its branch starts from and the making it is of.
 Record(kind, origin, point, o, base) ==
     [kind |-> kind, origin |-> origin, point |-> point, owner |-> Owner(o), deleted |-> FALSE,
-     base |-> base, maker |-> o]
+     resumed |-> FALSE, base |-> base, maker |-> o]
 
 \* Whether r is the record of the child of the fork whose owner is o.
 ChildOf(r, o) == r.kind # "root" /\ r.owner = Owner(o)
@@ -747,8 +807,26 @@ Open(h, b) ==
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
     /\ gen' = gen + 1
     /\ takes' = takes + 1
-    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, wal, tok,
+    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, wal, tok,
                    proc, gc>>
+    /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
+    /\ UNCHANGED <<passes, places, crashes, mints>>
+
+\* With "staleTake", a taking of b whose first read of b's record came before b's deletion, b's
+\* cell removed since (recordsKept): its swap finds no head and creates one, its read of the record
+\* again finds none, and it stops, leaving the head: garbage, which a pass over the cell deletes,
+\* the cell holding no record (Writer::take).
+OpenGone(h, b) ==
+    /\ "staleTake" \in Can /\ takes < MaxTakes
+    /\ b \in gone /\ rec[b] = None /\ head[b] = None
+    /\ IF ses[h][b] = None THEN TRUE ELSE ses[h][b].pc = "stopped"
+    /\ head' = [head EXCEPT ![b] = [epoch |-> 1, token |-> tok[h][b], holder |-> gen + 1, end |-> 0,
+                                    chain |-> <<>>, ckpt |-> <<>>]]
+    /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
+    /\ gen' = gen + 1
+    /\ takes' = takes + 1
+    /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone,
+                   hostVars, gc>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, placed, errors>>
     /\ UNCHANGED <<passes, places, crashes, mints>>
 
@@ -874,7 +952,7 @@ RecordForks(h, b) ==
              /\ refs' = refs \ back
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, written, wal, tok, proc, gc>>
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, written, gone, wal, tok, proc, gc>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, doomed, taken, placed, errors>>
        /\ UNCHANGED countVars
 
@@ -916,7 +994,7 @@ Ops(h, b) ==
         open == IF "span" \in Can THEN s.open ELSE {}
         \* The IDs a fork's child may take: any with no record; with "forkNext", the least, as
         \* an allocator gives them out, for models whose choice of ID would only multiply states.
-        free == {c \in Branches \ {b, Root} : rec[c] = None}
+        free == {c \in Branches \ {b, Root} : Nameable(c)}
     IN (IF "commit" \in Can THEN {op("plain", None, 0, FALSE)} ELSE {})
        \cup {op("seg", x, 0, FALSE) : x \in IF "seg" \in Can THEN s.open ELSE {}}
        \cup {op("own", x, 0, FALSE) : x \in IF "own" \in Can THEN s.open ELSE {}}
@@ -974,7 +1052,7 @@ Commit(h, b) ==
                           THEN refs \cup RefsOf(b, {[child |-> op.c, at |-> s.seq]})
                           ELSE refs
        /\ nextTag' = t + 1
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, tok, proc,
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, gone, tok, proc,
                       gc>>
        /\ UNCHANGED <<acked, minted, twice, makers, doomed, taken, placed, errors, countVars>>
 
@@ -989,7 +1067,7 @@ Upload(h, b) ==
                  ELSE own \cup {[b |-> b, e |-> w.o.epoch, s |-> w.s, x |-> w.o.own]}
        /\ inflight' = inflight \cup {[h |-> h, b |-> b, g |-> s.gen, s |-> w.s, o |-> w.o]}
        /\ ses' = [ses EXCEPT ![h][b].up = @ \cup {w.s}]
-       /\ UNCHANGED <<seg, ckpt, rec, head, moves, mflight, refs, marked, retired, written, wal, tok, proc,
+       /\ UNCHANGED <<seg, ckpt, rec, head, moves, mflight, refs, marked, retired, written, gone, wal, tok, proc,
                       gc, truthVars, countVars>>
 
 \* A PUT lands, whenever, though its writer has gone: at its key, its writer's alone, over what
@@ -1006,7 +1084,7 @@ Land(m) ==
        /\ seg' = [seg EXCEPT ![m.b][m.s][k[4]] = m.o]
        /\ written' = written \cup {<<k, m.o>>}
        /\ ses' = IF mine THEN [ses EXCEPT ![m.h][m.b].done = @ \cup {m.s}] ELSE ses
-       /\ UNCHANGED <<own, ckpt, rec, head, moves, mflight, refs, marked, retired, wal, tok, proc, gc,
+       /\ UNCHANGED <<own, ckpt, rec, head, moves, mflight, refs, marked, retired, gone, wal, tok, proc, gc,
                       truthVars, countVars>>
 
 \* The acknowledgement of the WAL's prefix landed: the head swapped to name it, with the
@@ -1034,7 +1112,7 @@ Ack(h, b) ==
                             [s2 EXCEPT !.pc = IF Unrecorded(b, s2.st, s) THEN "record"
                                               ELSE "ready"]]
                /\ acked' = [acked EXCEPT ![b] = @ \cup CommitsOf(P)]
-       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, tok,
+       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, tok,
                       proc, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, minted, twice, makers, doomed, taken, placed, errors>>
 
@@ -1066,7 +1144,7 @@ CheckpointLand(h, b) ==
        /\ ckpt' = [ckpt EXCEPT ![b][s.ckptPut.q][k[4]] = s.ckptPut.st]
        /\ written' = written \cup {<<k, s.ckptPut.st>>}
        /\ ses' = [ses EXCEPT ![h][b].ckptPut.landed = TRUE]
-       /\ UNCHANGED <<seg, own, rec, head, moves, mflight, inflight, refs, marked, retired, wal, tok, proc,
+       /\ UNCHANGED <<seg, own, rec, head, moves, mflight, inflight, refs, marked, retired, gone, wal, tok, proc,
                       gc, truthVars, countVars>>
 
 \* The checkpoint landed swapped into the head, with the condition that it is the writer's taking
@@ -1081,7 +1159,7 @@ CheckpointSwap(h, b) ==
        /\ IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED head
           ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
-       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, wal,
+       /\ UNCHANGED <<seg, own, ckpt, rec, moves, mflight, inflight, refs, marked, retired, written, gone, wal,
                       tok, proc, gc, truthVars, countVars>>
 
 \* The swap answered, the writer names what the checkpoint moved where it went, only forward
@@ -1094,7 +1172,7 @@ CheckpointTaken(h, b) ==
 
 WriterNext ==
     \E h \in Hosts, b \in Branches :
-        \/ Open(h, b) \/ RecoverRead(h, b) \/ RecordForks(h, b) \/ Mint(h, b) \/ Commit(h, b)
+        \/ Open(h, b) \/ OpenGone(h, b) \/ RecoverRead(h, b) \/ RecordForks(h, b) \/ Mint(h, b) \/ Commit(h, b)
         \/ Upload(h, b) \/ Ack(h, b) \/ Checkpoint(h, b) \/ CheckpointLand(h, b)
         \/ CheckpointSwap(h, b) \/ CheckpointTaken(h, b)
 
@@ -1145,10 +1223,10 @@ Place(h, b) ==
 
 \* Another branch takes the ID c, as a guest may give any (TASK-79.82).
 Contest(c) ==
-    /\ "contest" \in Can /\ c # Root /\ rec[c] = None
+    /\ "contest" \in Can /\ c # Root /\ Nameable(c)
     /\ rec' = [rec EXCEPT ![c] = Record("root", <<>>, 0, <<"root", c>>, 0)]
     /\ makers' = [makers EXCEPT ![c] = @ \cup {<<"root", c>>}]
-    /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, hostVars,
+    /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone, hostVars,
                    gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, doomed, taken, placed, errors>>
 
@@ -1169,6 +1247,24 @@ StartDelete(h, b) ==
     /\ doomed' = IF tok[h][b] >= taken[b] THEN doomed \cup {rec[b].maker} ELSE doomed
     /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
     /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
+
+\* With "deleteEarly", a deletion of b, a fork's child whose record is yet to come: asked by its
+\* placement once the fork was acknowledged, before its parent's writer recorded it, slow (the
+\* TASK-79.78 race). branch::delete ends a branch's head first, made final where it has none, then
+\* writes its record deleted, unless the fork's came first, which it then recovers and marks
+\* deleted. It may delete the fork's making.
+StartDeleteEarly(h, b) ==
+    LET F == {f \in UNION {ses[w[1]][w[2]].st.forks :
+                              w \in {w \in Hosts \X Branches : ses[w[1]][w[2]] # None}} :
+                f.child = b}
+    IN /\ "deleteEarly" \in Can /\ proc[h] = None /\ rec[b] = None /\ F # {}
+       /\ proc' = [proc EXCEPT ![h] = [op |-> "delete", b |-> b, pc |-> "end", c |-> 0, p |-> 0,
+                                       at |-> 0, ep |-> 0, o |-> <<>>, live |-> FALSE,
+                                       tk |-> tok[h][b], fs |-> {}, ws |-> {}, og |-> <<>>,
+                                       bs |-> 0]]
+       /\ doomed' = doomed \cup {f.owner : f \in F}
+       /\ UNCHANGED <<bucketVars, ses, wal, tok, gc, countVars>>
+       /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, taken, placed, errors>>
 
 \* The deletion of a fork that failed, its writer stopped before acknowledging it
 \* (delete_fork): of the child, if its record is the fork's or it has none.
@@ -1200,7 +1296,8 @@ Forking(q) == Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p,
 \* A fork of point P to C (fork_point), of the origin P names: first C's record, saying it is
 \* being made (forksPending), then its reference (forksRecordFirst), before it reads P's
 \* (forksReferFirst); without forksRecordFirst, the reference first. From a host's copy of P,
-\* stale perhaps.
+\* stale perhaps. C is an ID an allocator gives (Given), or one a guest names; never one given
+\* before, its cell removed (gone).
 StartRestore(h, c, p) ==
     LET q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0, ep |-> 0,
               o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c], fs |-> {},
@@ -1208,7 +1305,7 @@ StartRestore(h, c, p) ==
         refers == R("forksReferFirst") /\ PointForkRefs(q) # {}
         first == refers /\ ~R("forksRecordFirst")
     IN /\ "restore" \in Can /\ proc[h] = None
-       /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p}
+       /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p} \cup gone
        /\ IF first THEN
              /\ refs' = refs \cup PointForkRefs(q)
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = "fork"]]
@@ -1217,8 +1314,26 @@ StartRestore(h, c, p) ==
              /\ rec' = [rec EXCEPT ![c] = Forking(q)]
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
              /\ UNCHANGED refs
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, ses, wal,
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, marked, retired, written, gone, ses, wal,
                       tok, gc, truthVars, countVars>>
+
+\* With "resume", the fork of a point to c, being made, resumed by another than the restore that
+\* began it: a store opening c, its restore's host dead or slow (upload.rs's record). Its record
+\* said resumed first, with a condition, unless made or deleted (resumesMarked); then, as a
+\* restore goes on, its reference (resumesRefer), the point's record read, and the fork made.
+\* Without resumesRefer, no reference: the fork made as the point is read.
+ResumeRestore(h, c) ==
+    LET r == rec[c]
+        q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> r.point, at |-> 0,
+              ep |-> 0, o |-> r.maker, live |-> FALSE, tk |-> tok[h][c], fs |-> {}, ws |-> {},
+              og |-> r.origin, bs |-> r.base]
+        refers == R("resumesRefer") /\ R("forksReferFirst") /\ PointForkRefs(q) # {}
+    IN /\ "resume" \in Can /\ proc[h] = None
+       /\ r # None /\ r.kind = "forking" /\ ~r.deleted
+       /\ rec' = [rec EXCEPT ![c].resumed = TRUE]
+       /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = IF refers THEN "refer" ELSE "check"]]
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written,
+                      gone, ses, wal, tok, gc, truthVars, countVars>>
 
 Done(h) == proc' = [proc EXCEPT ![h] = None]
 \* A deletion of the branch proc[h] names, after a failed fork's or restore's.
@@ -1260,8 +1375,8 @@ ProcStep(h) ==
                          /\ UNCHANGED rec
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "recover" /\ rec[b] = None ->
-                 \* Its record dropped since, as only a deleted root's is, without recordsKept:
-                 \* done, as by another deletion.
+                 \* Its record removed since, with its cell, as a given root's or point's fork's is
+                 \* (recordsKept): done, as by another deletion.
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "delete" /\ q.pc = "recover" /\ rec[b] # None ->
@@ -1398,12 +1513,13 @@ ProcStep(h) ==
                                [] OTHER -> {}
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
-       /\ UNCHANGED <<written, ses, wal, tok, gc, countVars>>
+       /\ UNCHANGED <<written, gone, ses, wal, tok, gc, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, taken, placed>>
 
 HostNext ==
     \/ \E h \in Hosts : Crash(h) \/ ProcStep(h)
     \/ \E h \in Hosts, b \in Branches : Place(h, b) \/ StartDelete(h, b) \/ StartUnfork(h, b)
+                                     \/ StartDeleteEarly(h, b) \/ ResumeRestore(h, b)
     \/ \E h \in Hosts, c, p \in Branches : StartRestore(h, c, p)
     \/ \E c \in Branches : Contest(c)
     \/ \E m \in inflight : Land(m)
@@ -1541,10 +1657,10 @@ GcRecords(i) ==
 GcRecover(i) ==
     LET g == gc[i]
         pointRec(p) == IF CellOf[p] = g.cell THEN g.recs[p] ELSE rec[p]
-        gone(p) == pointRec(p) = None \/ pointRec(p).deleted
+        pointGone(p) == pointRec(p) = None \/ pointRec(p).deleted
         ab == IF R("collectorAbandons")
               THEN {b \in Branches : g.recs[b] # None /\ ~g.recs[b].deleted
-                                     /\ g.recs[b].kind = "forking" /\ gone(g.recs[b].point)}
+                                     /\ g.recs[b].kind = "forking" /\ pointGone(g.recs[b].point)}
               ELSE {}
         rec1 == [b \in Branches |-> IF b \in ab /\ rec[b] # None /\ rec[b].kind = "forking"
                                        THEN [rec[b] EXCEPT !.deleted = TRUE] ELSE rec[b]]
@@ -1566,7 +1682,7 @@ GcRecover(i) ==
                                                  !.pts = acc.pts, !.fromCkpt = acc.fromCkpt,
                                                  !.pc = "relist"]]
              /\ UNCHANGED errors
-       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written,
+       /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written, gone,
                       hostVars, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
@@ -1599,13 +1715,34 @@ GcRelist(i) ==
        /\ UNCHANGED <<bucketVars, hostVars, countVars>>
        /\ UNCHANGED <<commits, nextTag, acked, minted, twice, makers, doomed, taken, placed>>
 
+\* Whether a dead cell may be removed with b's record r (recordsKept): deleted, a given root's, or a
+\* given point's fork's made, its restore's alone, which no recorder makes again, no fork naming its
+\* ID (idsGivenOnce). A writable fork's child's, a point's, a claim's, a deletion's of no record, or
+\* a point's fork's never made, its restore perhaps yet to write its reference, stays. Without the
+\* rule, any.
+Removable(b, r) ==
+    /\ r.deleted
+    /\ ~R("recordsKept") \/ (b \in Given /\ (r.kind = "root" \/ (r.kind = "fork" /\ r.point # 0)))
+
+\* Whether the reference of the deleted point's fork c, whose record is r, is retired unmarked
+\* (forksMadeUnmarked): c given and made, by the restore that began it alone, the reference's one
+\* writer, having written it before it made it; not one another resumed (resumesMarked), which the
+\* restore that began it, slow, may write after. Without the rule, any point's fork's, made or not;
+\* without resumesMarked, a resumed one's too.
+Unmarked(c, r) ==
+    /\ r.point # 0
+    /\ R("forksMadeUnmarked") =>
+          (c \in Given /\ r.kind = "fork" /\ (R("resumesMarked") => ~r.resumed))
+
 \* Compaction, then deletion, unless a later pass of the cell took its lease: of what was listed,
 \* what the live branches and the fork points kept do not need, nor their heads may yet name
 \* (collectorEpochs). A fork point's state is behind (waysFromSeals): the child names what it
 \* inherited where it read it. Then the references of the cell's deleted children retired, under
 \* their parents' cells, once the cell has no live branch and no reference of its own
-\* (referencesHeld): no branch anywhere inherits from them, a fork of one in the cell by its
-\* record, in another cell by its reference. Without the rule, once the child is deleted.
+\* (referencesHeld): no branch anywhere inherits from them, a fork of one in the cell by its record,
+\* in another cell by its reference. Without the rule, once the child is deleted. A dead cell, no
+\* mark under it, its records each Removable, goes whole (TASK-455): its records and heads too, the
+\* rest of it doomed already; a given point's fork's reference is retired unmarked (Unmarked).
 GcFinish(i) ==
     LET g == gc[i]
         objs == IF R("candidatesFirst") THEN g.objs ELSE Listing(g.cell)
@@ -1660,6 +1797,21 @@ GcFinish(i) ==
                                   /\ ~ahead(k[2], k[3], k[4])
                              ELSE "compactMoves" \in Can /\ Depth(k) < Hops
                           /\ movesOf(k) = {}}
+        dead == /\ \A b \in CellBranches(g.cell) : recs[b] = None \/ recs[b].deleted
+                /\ g.refs = {}
+        \* Removed whole: dead, no mark of a reference under it, which a stale writer's reference
+        \* written again goes by, and every record it read one it may go with. A stale writer's
+        \* head, of a branch removed (OpenGone), goes with a cell of no record.
+        \* A fence (fencesKept): the head of a branch of no record read, final, a deletion's, whose
+        \* record may yet come, the deletion's own or a slow writer's of its parent, and a writer
+        \* taking the branch then must find it. Any other head of no record, a stale taker's of a
+        \* branch removed (OpenGone), is garbage.
+        fence(b) == /\ R("fencesKept") /\ recs[b] = None
+                    /\ head[b] # None /\ head[b].epoch = Final
+        removed == /\ dead
+                   /\ \A r \in marked : CellOf[r.p] # g.cell
+                   /\ \A b \in CellBranches(g.cell) : recs[b] = None \/ Removable(b, recs[b])
+                   /\ \A b \in CellBranches(g.cell) : <<"head", b>> \in objs => ~fence(b)
         doomedKey(k) ==
             CASE k[1] = "ckpt" -> k \notin touched /\ ~ckptAhead(k[2], k[3], k[4])
               [] k[1] = "seg" -> /\ ~ahead(k[2], k[3], k[4]) /\ k \notin touched
@@ -1671,17 +1823,16 @@ GcFinish(i) ==
                    /\ k \notin hops
                    /\ IF k \in named THEN Depth(k) < Hops /\ movesOf(k) # {}
                       ELSE Key(k[2], k[3], k[4], SubSeq(Way(k), 1, Depth(k) - 1)) \notin objs
-              \* No record (recordsKept): a deleted root's stays too, as a deleted fork's does,
+              \* Records and heads only with the cell (recordsKept): a deleted fork's record stays,
               \* which a slow writer of a parent naming its ID as a fork's child would make again
-              \* (TASK-174). Without the rule, a deleted root's goes once no recovery read it.
-              [] k[1] = "rec" -> /\ ~R("recordsKept")
-                                 /\ recs[k[2]] # None /\ recs[k[2]].deleted
-                                 /\ recs[k[2]].kind = "root" /\ k \notin touched
-              \* Heads stay, as records do: the final one fences a deleted branch's writers.
-              [] k[1] = "head" -> FALSE
+              \* (TASK-174), and a deleted branch's final head fences its writers. A head of no
+              \* record read goes, unless a fence (fencesKept), whatever the cell; without the rule,
+              \* with the cell.
+              [] k[1] = "rec" -> removed
+              [] k[1] = "head" -> IF R("fencesKept") /\ recs[k[2]] = None
+                                  THEN head[k[2]] # None /\ ~fence(k[2])
+                                  ELSE removed
         D == IF Fenced(i) THEN {} ELSE {k \in objs : doomedKey(k)}
-        dead == /\ \A b \in CellBranches(g.cell) : recs[b] = None \/ recs[b].deleted
-                /\ g.refs = {}
         \* Each deleted child's reference, of an origin in another cell, its key by the child's
         \* record: the origin it names, never listed, marked (retirementsMarked), whether it is
         \* there or not (collector's retired).
@@ -1705,11 +1856,13 @@ GcFinish(i) ==
        /\ ckpt' = [b \in Branches |-> [s \in Seqs |-> [e \in Epochs |->
                      IF <<"ckpt", b, s, e>> \in D THEN None ELSE ckpt[b][s][e]]]]
        /\ rec' = [b \in Branches |-> IF <<"rec", b>> \in D THEN None ELSE rec[b]]
+       /\ head' = [b \in Branches |-> IF <<"head", b>> \in D THEN None ELSE head[b]]
+       /\ gone' = gone \cup {b \in Branches : <<"rec", b>> \in D}
        /\ refs' = refs \ (retiring \cup stale)
        /\ retired' = retired \cup retiring
-       /\ marked' = marked \cup Marks(retiring)
+       /\ marked' = marked \cup Marks({r \in retiring : ~Unmarked(r.c, recs[r.c])})
        /\ gc' = [gc EXCEPT ![i] = Idle(g)]
-       /\ UNCHANGED <<head, inflight, written, hostVars, truthVars, countVars>>
+       /\ UNCHANGED <<inflight, written, hostVars, truthVars, countVars>>
 
 \* A compaction's PUT lands, whenever, though its pass ended, or a later one took the cell's
 \* collector lease: created, unless moves are at its key (collector::compact_object's create).
@@ -1720,7 +1873,7 @@ GcLand(m) ==
           /\ moves' = [moves EXCEPT ![m.k[2]][m.k[3]][m.k[4]][m.k[5]] = m.o]
           /\ written' = written \cup {<<m.k, m.o>>}
        ELSE UNCHANGED <<moves, written>>
-    /\ UNCHANGED <<seg, own, ckpt, rec, head, inflight, refs, marked, retired, hostVars, gc,
+    /\ UNCHANGED <<seg, own, ckpt, rec, head, inflight, refs, marked, retired, gone, hostVars, gc,
                    truthVars, countVars>>
 
 GcNext ==
@@ -1744,6 +1897,7 @@ Init ==
     /\ marked = {}
     /\ retired = {}
     /\ written = {}
+    /\ gone = {}
     /\ ses = [h \in Hosts |-> [b \in Branches |-> None]]
     /\ wal = [h \in Hosts |-> [b \in Branches |-> <<>>]]
     /\ tok = [h \in Hosts |-> [b \in Branches |-> 0]]
@@ -1866,6 +2020,19 @@ ReferencesNamed ==
 \* recorder take it back, the fork recorded; its parent's cell's listing it changes, and that
 \* cell's next pass deletes it, by its mark.
 ReferencesRetiredMarked == \A r \in refs \cap retired : r \in marked
+
+\* A branch whose record a pass removed with its cell never lives again, nor is being made again
+\* (TASK-455): no recorder makes its record, nor a fork names its ID. A deletion run again may
+\* leave it a record deleted.
+RemovedStayGone == \A b \in gone : rec[b] = None \/ rec[b].deleted
+
+\* No writer holds a deleted branch (TASK-455's review): a deletion's final head, its fence, stands
+\* from its swap until the record says the branch is deleted, and after, while the record does;
+\* no writer takes it, and the one that held it stops at its next swap.
+DeletedUntaken ==
+    \A h \in Hosts, b \in Branches :
+        (ses[h][b] # None /\ ses[h][b].pc \in {"record", "ready"} /\ Taking(ses[h][b], b))
+            => rec[b] # None /\ ~rec[b].deleted
 
 \* Every live branch forked from another cell, and every point's fork, has its reference under
 \* its origin's cell, naming its fork point (TASK-395): written before its record, retired only

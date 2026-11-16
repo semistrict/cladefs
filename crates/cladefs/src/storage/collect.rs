@@ -217,13 +217,16 @@ fn pass(collector: &mut Collector, bucket: &ObjectBucket) -> Report {
                 skipped,
                 locked,
                 uncompacted,
+                removed,
             } = report;
-            // Encrypted objects it leaves uncompacted, its collector having no KMS (TASK-411.6).
+            // Encrypted objects it leaves uncompacted, its collector having no KMS (TASK-411.6);
+            // dead cells removed whole (TASK-455).
             log::info!(
                 "cladefs: an image's bucket collected: deleted {deleted} ({deleted_bytes} bytes), \
                  compacted {compacted} ({compacted_bytes} bytes), retired {retired} references, \
                  {skipped} cells unchanged, {uncompacted} encrypted left uncompacted in {locked} \
-                 cells"
+                 cells, \
+                 {removed} dead cells removed"
             );
             return report;
         }

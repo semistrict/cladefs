@@ -3,16 +3,19 @@
 // found in the LICENSE file.
 
 // The control API of a host FUSE mount of many stores (TASK-302), of tenants' cells (TASK-364):
-// `cladefs-mount --control SOCKET --stores DIR MOUNTPOINT` serves one FUSE mount, however many
-// stores: one OS mount, not one per store. Attach takes a cell of the mount's bucket, as its
-// holder, and every Fxfs volume of it into a store at DIR/TENANT/CELL/VOLUME, its lease with it,
-// each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and CELL in 16 hexadecimal digits as the
-// bucket's keys have them; Detach writes them back, so that a VM, or another mount, may take the
-// cell. A cell's other volumes are not shown: its SQLite volumes' databases open through
-// sqlite_extents' VFS alone, and its volumes VMs attach are theirs, on the same host.
+// cladefsd, with CLADEFSD_MOUNT naming a MOUNTPOINT and CLADEFSD_MOUNT_STORES a DIR, serves one FUSE
+// mount, however many stores: one OS mount, not one per store (TASK-475.2). Attach takes a cell of
+// the daemon's bucket, as its holder, and every Fxfs volume of it into a store at
+// DIR/TENANT/CELL/VOLUME, its lease with it, each shown at MOUNTPOINT/TENANT/CELL/VOLUME, TENANT and
+// CELL in 16 hexadecimal digits as the bucket's keys have them; Detach writes them back, so that
+// another host may take the cell. A cell's other volumes are not shown: its SQLite volumes'
+// databases open through sqlite_extents' VFS alone, and its volumes VMs attach are theirs, in the
+// same daemon.
 //
-// It is served over a Unix socket, the mounting user's alone, mode 0600 whatever its umask, as
-// every caller may do everything.
+// It is served on the daemon's control socket (CLADEFSD_GRPC), beside the extent service
+// (cladefs/extentd/v1/extentd.proto), the daemon's user's alone, mode 0600 whatever its umask, as
+// every caller may do everything. A daemon mounting no cells has no Mount service: its calls fail
+// UNIMPLEMENTED. As the daemon drains, its calls fail UNAVAILABLE.
 //
 // Errors are gRPC statuses whose code follows the errno the mount failed with, which the
 // `cladefs-errno` metadata entry carries, as a decimal number (Linux's), as the extent daemon's
