@@ -18,7 +18,7 @@ GCOV_PROFILE_super.o := y
 CFLAGS_device.o += -I$(src)
 
 CLADEFS_BUILD_COMMIT ?= unknown
-CFLAGS_super.o += -DFXFS_BUILD_COMMIT='"$(CLADEFS_BUILD_COMMIT)"'
+CFLAGS_super.o += -DCLADEFS_BUILD_COMMIT='"$(CLADEFS_BUILD_COMMIT)"'
 
 # The filesystem's Rust, which cargo builds (see Kconfig), as one relocatable object: the members
 # of the archive the kernel's calls reach. Link-time optimization makes the filesystem's code one

@@ -132,9 +132,9 @@ if ($sym) {
 }
 if ($ARGV =~ m{(^|/)(guest/linux|guest/sim|guest/mutants|crates/fxfs-sim-diff/shim|scripts/cocci|scripts/bpftrace)/|(^|/)scripts/[^/]+\.bt$}) {
     s/%sfxfs:/%scladefs:/g;
-    s/(?<![A-Za-z0-9_])(?<!crates\/)fxfs(?!-(?:guest|posix|sim-diff|automount)|::)/cladefs/g;
+    s/(?<![A-Za-z0-9_])(?<!crates\/)fxfs(?!-(?:guest|posix|sim-diff|automount)|::|_sim_diff)/cladefs/g;
     s/(?<=_)fxfs(?=_)(?!_guest)/cladefs/g;
-    s/(?<![A-Za-z0-9])FXFS/CLADEFS/g;
+    s/(?:(?<![A-Za-z0-9])|(?<=-D))FXFS/CLADEFS/g;
 }
 if ($ARGV =~ m{(^|/)guest/rust/}) { s/"fxfs: /"cladefs: /g; }
 if ($ARGV =~ m{(^|/)(guest/tests|crates/fxfs-automount)/}) {

@@ -124,6 +124,24 @@ class Tree(unittest.TestCase):
             "src/vmm/src/devices/virtio/mod.rs": "pub mod block;\npub mod extent;\n",
         })
 
+    def test_the_guest_kernels_c_is_renamed_whole_but_what_fxfs_names(self):
+        self.write("guest/linux/fs/fxfs/Makefile",
+                   "obj-$(CONFIG_FXFS_FS) += fxfs.o\nfxfs-y := super.o\n"
+                   "CFLAGS_super.o += -DFXFS_BUILD_COMMIT='\"$(FXFS_BUILD_COMMIT)\"'\n")
+        self.write("crates/fxfs-sim-diff/shim/shim.c",
+                   "void fxfs_sim_diff_panic(void); /* fxfs-guest-checks, crates/fxfs */\n"
+                   "struct fxfs *fxfs_sim_new(void); int trace_fxfs_dax_map; "
+                   "/* the_models_past_drifts_from_fxfs */\n")
+        self.assertEqual(self.rename(), {
+            "guest/linux/fs/cladefs/Makefile":
+                "obj-$(CONFIG_CLADEFS_FS) += cladefs.o\ncladefs-y := super.o\n"
+                "CFLAGS_super.o += -DCLADEFS_BUILD_COMMIT='\"$(CLADEFS_BUILD_COMMIT)\"'\n",
+            "crates/fxfs-sim-diff/shim/shim.c":
+                "void fxfs_sim_diff_panic(void); /* fxfs-guest-checks, crates/fxfs */\n"
+                "struct cladefs *cladefs_sim_new(void); int trace_cladefs_dax_map; "
+                "/* the_models_past_drifts_from_fxfs */\n",
+        })
+
     def test_a_line_the_rename_takes_past_its_width_is_wrapped_unless_it_was_unformatted(self):
         long = ("    fn insert_extent_device(&mut self, cfg: ExtentDeviceConfig) -> Result<VmmData, "
                 "VmmActionError> {\n")
