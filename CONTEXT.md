@@ -399,7 +399,7 @@ A vdisk's data key, under whose subkeys its objects are encrypted.
 
 **Encrypted**:
 Of a cell, store or object: held under its tenant's keys.
-_Avoid_: sealed (sealing is extents'), in the clear for its opposite (say **unencrypted**)
+_Avoid_: sealed (sealing is extents'); its opposite is **unencrypted**, or in the clear
 
 **Shred**:
 Making data unreadable by destroying the key that wraps it: a tenant's KEK, or a cell's wrapped KEKs.
