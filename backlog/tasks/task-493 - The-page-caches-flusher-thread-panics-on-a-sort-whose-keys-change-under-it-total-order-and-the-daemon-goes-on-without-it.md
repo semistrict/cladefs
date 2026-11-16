@@ -3,9 +3,11 @@ id: TASK-493
 title: >-
   The page cache's flusher thread panics on a sort whose keys change under it
   (total order), and the daemon goes on without it
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-16 10:31'
+updated_date: '2026-11-16 10:52'
 labels:
   - bug
 dependencies: []
@@ -32,3 +34,26 @@ Found 2026-11-16 on ubu1 running extentd::tests::soak::a_degraded_bucket_costs_t
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test first: Shifting fake files whose keys change on every read (scrambled), through evict_to and write_back_to (then the flusher's pass): Rust's sort panics as on ubu1.
+2. PageCache::files_by(key): each file's key taken once, then sorted; evict_to, write_back_to and the flusher's pass (PageCache::flush_pass, extracted) order by it.
+3. Shared::pages(): pages lock tolerating poison without counting a use; dirtied()/evict_clean() use it (a writer's panic otherwise killed the flusher next).
+4. Dead flusher: shared::Holding::work(FLUSHER) held for the flusher's life, so the daemon's abort_on_panics hook aborts on its panic (TASK-149.24's rule); elsewhere Dying records flusher_died, logs error, wakes writers; throttle panics if the flusher died instead of waiting for good. Tests: child-process SIGABRT naming the flusher; no-hook death known and throttle panics.
+5. Soak: abort_on_panics as the daemon, flusher_lives() each tick and at the end.
+6. Search every sort/max_by/min_by/BinaryHeap/select over shared keys in extent_store, extent_remote, cladefs.
+7. clippy as CI, nextest workspace + shuttle part on macOS; soak on ubu1 by the parent.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Blind spot: no test ordered files whose keys change during the sort (pages.rs tests had one file, or files idle while ordering); the flusher's death had no observer (thread result never read, no hook marker), so the soak passed.
+Class test: pages::tests::files_ordered_by_keys_changing_as_they_are_read: Shifting fake files whose keys (used, dirtied) change on every read of any file (scrambled counter), 0..=256 files, through evict_to, write_back_to and flush_pass. Red before the fix with the ubu1 panic (smallsort.rs:854 "does not correctly implement a total order"); a monotone key did not trip detection, a scrambled one does.
+Structure: the cache orders files only through PageCache::files_by (keys taken once, then sorted); the flusher's pass extracted to PageCache::flush_pass so tests run it without the thread. Also Shared::pages(): dirtied()/evict_clean() unwrapped the pages lock, so a writer's panic poisoning it killed the flusher at its next pass; now poison-tolerant as lock() already was.
+Dead flusher: shared::Holding (the HELD marker, now also Shared<G>'s) with Holding::work(FLUSHER) held for the flusher thread's life: cladefsd's abort_on_panics aborts at its panic naming "page cache flusher" (TASK-149.24's rule; decision in OPEN_QUESTIONS.md). Without the hook: Dying guard sets flusher_died, logs an error, wakes writers; throttle panics instead of waiting for good. Tests: a_panic_on_the_flusher_aborts_the_daemon (child process SIGABRT naming it; red with the Holding line removed: the child lived on), a_dead_flusher_is_known_and_holds_no_writer_for_good (red with Dying removed).
+Soak: abort_on_panics as cladefsd does, flusher_lives() each second and at the end. Linux-only: cross-checked (cargo check --target aarch64-unknown-linux-musl -p cladefs --lib --profile test); not run here (ubu1).
+Look-around (sort, sort_by*, sort_unstable*, sort_by_cached_key, max_by*, min_by*, BinaryHeap, select_nth, binary_search_by over extent_store, extent_remote, cladefs src): only pages.rs read live keys. Others sort owned values or snapshot tuples: cladefs cache.rs evict_in_order and let_go_least_used (keys collected into tuples first), dax/uffd.rs runs (tuples), extent_store views.rs min_by_key (under the views lock; min/max_by_key compute each key once anyway), extent_remote recovery.rs max_by_key (under the kept lock), extent_remote cache.rs found.modified (metadata snapshot), store/collector/passed/sweep/keys/memory/disk/control (fields of owned items). No BinaryHeap or select_nth. A syntactic rust-rules.py rule was tried and dropped (dead-ends/sort-keys-syntactic-rule.md: it flagged a pure accessor in fxfs-posix).
+<!-- SECTION:NOTES:END -->
