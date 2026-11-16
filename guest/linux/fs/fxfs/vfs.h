@@ -118,10 +118,10 @@ struct fxfs_vfs_info {
 	 * mmap_lock, which a fault holds, and before an inode's invalidate_lock; a batch takes no
 	 * i_rwsem. How long batches waited for it, and how many did (FXFS_IOC_FOLLOW_STATS).
 	 */
-	struct rw_semaphore follow_barrier;
+	struct rw_semaphore fill_barrier;
 	u64 follow_batches;
-	u64 follow_barrier_wait_ns;
-	u64 follow_barrier_wait_max_ns;
+	u64 fill_barrier_wait_ns;
+	u64 fill_barrier_wait_max_ns;
 };
 
 /*
@@ -209,7 +209,7 @@ DECLARE_STATIC_KEY_FALSE(fxfs_vfs_followers);
  */
 extern unsigned int fxfs_follow_apply_delay_us;
 extern unsigned int fxfs_follow_iomap_delay_us;
-extern bool fxfs_follow_skip_invalidate;
+extern bool fxfs_follow_skip_drop;
 extern bool fxfs_follow_skip_barrier;
 extern bool fxfs_follow_read_faults;
 extern bool fxfs_follow_fail_batch;
@@ -228,20 +228,20 @@ static inline bool fxfs_vfs_follows(struct super_block *sb)
 static inline void fxfs_vfs_fill_begin(struct super_block *sb)
 {
 	if (fxfs_vfs_follows(sb) && !fxfs_follow_skip_barrier)
-		down_read(&fxfs_vfs_info(sb)->follow_barrier);
+		down_read(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 /* As fxfs_vfs_fill_begin, but only if no batch holds the barrier, or waits for it. */
 static inline bool fxfs_vfs_fill_try(struct super_block *sb)
 {
 	return !fxfs_vfs_follows(sb) || fxfs_follow_skip_barrier ||
-	       down_read_trylock(&fxfs_vfs_info(sb)->follow_barrier);
+	       down_read_trylock(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 static inline void fxfs_vfs_fill_end(struct super_block *sb)
 {
 	if (fxfs_vfs_follows(sb) && !fxfs_follow_skip_barrier)
-		up_read(&fxfs_vfs_info(sb)->follow_barrier);
+		up_read(&fxfs_vfs_info(sb)->fill_barrier);
 }
 
 /*

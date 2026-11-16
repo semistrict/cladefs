@@ -15,7 +15,7 @@
 (* the branch's head names it. The head, one object per branch, is the     *)
 (* writer's lease and its commit: its epoch, the token and holder of its   *)
 (* taking, the segments committed (`end`, and each one's epoch: `chain`),  *)
-(* and the newest checkpoint (`ck`), swapped with a condition (S3          *)
+(* and the newest checkpoint (`ckpt`), swapped with a condition (S3        *)
 (* If-Match, GCS generation). A takeover swaps it to the next epoch, and   *)
 (* the writer taken over fails at its next swap: the head is the fence.    *)
 (* Readers read the head, then what it names, and nothing else; an object  *)
@@ -118,8 +118,8 @@
 (*   forks being made of points deleted.                                   *)
 (* - recordsRelisted (NoRecordsRelisted): the collector lists the records  *)
 (*   again after reading states with checkpoints of their own. Since       *)
-(*   TASK-395.1, a clone's reference, listed after the states, finds it    *)
-(*   too: its mutation removes references with it.                         *)
+(*   TASK-395.1, a point's fork's reference, listed after the states,      *)
+(*   finds it too: its mutation removes references with it.                *)
 (* - recordsOwned (NoRecordsOwned): records name their makings' owners.    *)
 (* - waysFromSeals (NoWaysFromSeals): the collector keeps every moves on   *)
 (*   the way to an extent from where it was sealed, unless the state       *)
@@ -156,7 +156,7 @@
 (*   wal::recover): a store whose log ends inside a commit refuses to      *)
 (*   open.                                                                 *)
 (* - references (NoReferences): a fork of a branch to a child in another   *)
-(*   cell, a writable fork or a point's clone, has a reference under the   *)
+(*   cell, a writable fork or a fork of a point, has a reference under the *)
 (*   parent's cell, which that cell's passes keep the parent's state at    *)
 (*   the fork point for: its pass lists nothing of the child's cell, and   *)
 (*   the parent deleted, would delete what the child inherits.             *)
@@ -165,7 +165,7 @@
 (*   writer, the next, or the parent's deletion, before that marks the     *)
 (*   parent deleted. Without it, a pass reading the parent deleted finds   *)
 (*   no reference.                                                         *)
-(* - clonesReferFirst (NoClonesReferFirst): a point's clone writes its     *)
+(* - forksReferFirst (NoForksReferFirst): a fork of a point writes its     *)
 (*   reference before its record and before it reads the point's record:   *)
 (*   one that read the point live then wrote it before the point's         *)
 (*   deletion, which a pass reading the point deleted, or finding its      *)
@@ -176,17 +176,17 @@
 (*   by its reference.                                                     *)
 (* - referencesRelisted (NoReferencesRelisted): a pass lists its cell's    *)
 (*   references after the states, as it lists the records again: listed    *)
-(*   with the candidates, it misses a clone's of a point a checkpoint      *)
+(*   with the candidates, it misses a fork's of a point a checkpoint       *)
 (*   dropped since.                                                        *)
 (* - forkPointsKept (NoForkPointsKept): a pass keeps, of the parent's      *)
 (*   state at a referenced fork point, what recovering it reads, not only  *)
 (*   the objects holding its extents: a child with no checkpoint of its    *)
 (*   own recovers through it.                                              *)
-(* - clonesRecordFirst (NoClonesRecordFirst): a point's clone creates its  *)
+(* - forksRecordFirst (NoForksRecordFirst): a fork of a point creates its  *)
 (*   record, being made, before its reference (and reads the point's after *)
-(*   both, clonesReferFirst): a reference always has a record naming its   *)
+(*   both, forksReferFirst): a reference always has a record naming its    *)
 (*   origin, by which its child's cell's pass retires it, whatever comes   *)
-(*   of the clone. Written first, a host dying between leaves a reference  *)
+(*   of the fork. Written first, a host dying between leaves a reference   *)
 (*   no record names, which no pass retires (ReferencesNamed).             *)
 (* - referencesTakenBack (NoReferencesTakenBack): whoever finds the record *)
 (*   of a writable fork's child naming another origin, or none, deletes    *)
@@ -281,8 +281,8 @@ AllRules == {"headSwap", "epochKeys", "collectorEpochs", "epochSequences", "reco
              "collectorAbandons", "recordsRelisted", "recordsOwned", "waysFromSeals",
              "movesTakenFirst", "passesFencedStop", "recoveriesByOrigins", "recordsKept",
              "deletionsDoneByOthers", "walFollows", "acksBetweenCommits",
-             "wholeCommitsKept", "references", "referencesFirst", "clonesReferFirst",
-             "referencesHeld", "referencesRelisted", "forkPointsKept", "clonesRecordFirst",
+             "wholeCommitsKept", "references", "referencesFirst", "forksReferFirst",
+             "referencesHeld", "referencesRelisted", "forkPointsKept", "forksRecordFirst",
              "referencesTakenBack", "retirementsMarked", "movesByPass"}
 
 AllCan == {"commit", "mint", "seg", "own", "free", "fork", "point", "restore", "unfork",
@@ -324,9 +324,9 @@ VARIABLES
     own,        \* the extents stored on their own: [b, e, s, x], at the key of writer e's segment s
     ckpt,       \* ckpt[b][s][e]: b's checkpoint as of segment s by the writer of epoch e, or None
     rec,        \* rec[b]: b's record, or None
-    head,       \* head[b]: [epoch, token, holder, end, chain, ck], or None: the holder its
+    head,       \* head[b]: [epoch, token, holder, end, chain, ckpt], or None: the holder its
                 \* taking's, unique; the segments 0..end-1 committed, chain[s + 1] the epoch of s;
-                \* ck the newest checkpoint, <<s, e>>, or <<>>
+                \* ckpt the newest checkpoint, <<s, e>>, or <<>>
     moves,      \* moves[b][s][e][p]: the moves the collector's passes p made of segment <<s, e>> of
                 \* b: p = <<i>>, pass i's moves of the segment; <<i, j>>, pass j's of those; or None.
                 \* Each [pass, names]: its pass, and the extents it holds
@@ -410,7 +410,7 @@ KP(i) == IF R("movesByPass") THEN i ELSE 1
 \* its depth.
 SegKey(b, s, e) == <<"seg", b, s, KE(e)>>
 Key(b, s, e, p) == IF p = <<>> THEN <<"seg", b, s, e>> ELSE <<"moves", b, s, e, p>>
-CkKey(b, s, e) == <<"ckpt", b, s, KE(e)>>
+CkptKey(b, s, e) == <<"ckpt", b, s, KE(e)>>
 Way(loc) == IF loc[1] = "seg" THEN <<>> ELSE loc[5]
 Depth(loc) == Len(Way(loc))
 
@@ -495,11 +495,11 @@ FollowChain(b, st, s, to, chain, t) ==
 \* The head of b's fields, none if it has no head.
 End(b) == IF head[b] = None THEN 0 ELSE head[b].end
 Chain(b) == IF head[b] = None THEN <<>> ELSE head[b].chain
-HeadCk(b) == IF head[b] = None THEN <<>> ELSE head[b].ck
+HeadCkpt(b) == IF head[b] = None THEN <<>> ELSE head[b].ckpt
 HeadEpoch(b) == IF head[b] = None THEN 0 ELSE head[b].epoch
 
 \* b's checkpoints listed as of segment `at` or before: <<s, e>>.
-CksTo(b, at) == {k \in Seqs \X Epochs : k[1] <= at /\ ckpt[b][k[1]][k[2]] # None}
+CkptsTo(b, at) == {k \in Seqs \X Epochs : k[1] <= at /\ ckpt[b][k[1]][k[2]] # None}
 \* The newest of the checkpoints K.
 Newest(K) == CHOOSE k \in K : \A j \in K : GE2(k, j)
 
@@ -507,7 +507,7 @@ RECURSIVE StateAt(_, _)
 \* b's state as of its segment at, which its head names: its newest checkpoint to there, listed,
 \* or its origin's state, then the segments its head names to there; or a failure, something gone.
 StateAt(b, at) ==
-    LET cs == CksTo(b, at) IN
+    LET cs == CkptsTo(b, at) IN
     IF End(b) <= at THEN [ok |-> FALSE, st |-> Fresh, touched |-> {}]
     ELSE IF cs # {} THEN
        LET c == Newest(cs)
@@ -519,17 +519,18 @@ StateAt(b, at) ==
          IF ~p.ok THEN p
          ELSE FollowChain(b, Inherit(p.st), 0, at + 1, Chain(b), p.touched \cup {<<"rec", b>>})
 
-Lost == [ok |-> FALSE, st |-> Fresh, end |-> 0, touched |-> {}, ck |-> <<>>]
+Lost == [ok |-> FALSE, st |-> Fresh, end |-> 0, touched |-> {}, ckpt |-> <<>>]
 
 \* b's state, forked from origin, as its head names it: the head's checkpoint, or its origin's
 \* state, then the segments the head names after it. Something named gone, a failure.
 Recover(b, origin) ==
-    LET ck == HeadCk(b)
-        with(r) == [ok |-> r.ok, st |-> r.st, end |-> End(b), touched |-> r.touched, ck |-> ck]
-    IN IF ck # <<>> THEN
-          LET k == CkKey(b, ck[1], ck[2]) IN
+    LET newest == HeadCkpt(b)
+        with(r) == [ok |-> r.ok, st |-> r.st, end |-> End(b), touched |-> r.touched,
+                    ckpt |-> newest]
+    IN IF newest # <<>> THEN
+          LET k == CkptKey(b, newest[1], newest[2]) IN
           IF Obj(k) = None THEN Lost
-          ELSE with(FollowChain(b, Obj(k), ck[1] + 1, End(b), Chain(b), {k}))
+          ELSE with(FollowChain(b, Obj(k), newest[1] + 1, End(b), Chain(b), {k}))
        ELSE IF origin = <<>> THEN with(FollowChain(b, Fresh, 0, End(b), Chain(b), {}))
        ELSE LET p == StateAt(origin[1], origin[2]) IN
             IF ~p.ok THEN Lost
@@ -583,11 +584,12 @@ Further(loc, loc2) == /\ loc[1] # "own" /\ loc2[1] = "moves"
                       /\ Depth(loc2) > Depth(loc)
                       /\ SubSeq(Way(loc2), 1, Depth(loc)) = Way(loc)
 
-\* The state st, its extents named where the state ck names them if that is further along their
+\* The state st, its extents named where the state ckptSt names them if that is further along their
 \* ways (Writer::take_moves).
-TakeMoves(st, ck) ==
+TakeMoves(st, ckptSt) ==
     [st EXCEPT !.ext = [x \in DOMAIN st.ext |->
-                          IF x \in DOMAIN ck.ext /\ Further(st.ext[x], ck.ext[x]) THEN ck.ext[x]
+                          IF x \in DOMAIN ckptSt.ext /\ Further(st.ext[x], ckptSt.ext[x])
+                          THEN ckptSt.ext[x]
                           ELSE st.ext[x]]]
 
 -----------------------------------------------------------------------------
@@ -700,19 +702,20 @@ Unrecorded(b, st, s) ==
 
 \* The head the writer whose session is s writes: its taking, with what it committed.
 HeadOf(s) == [epoch |-> s.epoch, token |-> s.token, holder |-> s.gen, end |-> s.end,
-              chain |-> s.chain, ck |-> s.hck]
+              chain |-> s.chain, ckpt |-> s.hckpt]
 
 \* s, the session of a writer of b, its recovery started from b's head H as it swapped it: from
 \* the head's checkpoint, or its origin's state; stopped, what that needs gone.
 Started(s, b, H) ==
     LET p == StateAt(s.origin[1], s.origin[2])
-        ck == IF H = None THEN <<>> ELSE H.ck
+        newest == IF H = None THEN <<>> ELSE H.ckpt
         s1 == [s EXCEPT !.end = IF H = None THEN 0 ELSE H.end,
                         !.chain = IF H = None THEN <<>> ELSE H.chain,
-                        !.hck = ck]
-    IN IF ck # <<>> THEN
-          IF Obj(CkKey(b, ck[1], ck[2])) = None THEN [s1 EXCEPT !.pc = "stopped"]
-          ELSE [s1 EXCEPT !.pc = "read", !.st = Obj(CkKey(b, ck[1], ck[2])), !.at = ck[1] + 1]
+                        !.hckpt = newest]
+    IN IF newest # <<>> THEN
+          IF Obj(CkptKey(b, newest[1], newest[2])) = None THEN [s1 EXCEPT !.pc = "stopped"]
+          ELSE [s1 EXCEPT !.pc = "read", !.st = Obj(CkptKey(b, newest[1], newest[2])),
+                          !.at = newest[1] + 1]
        ELSE IF s.origin = <<>> THEN [s1 EXCEPT !.pc = "read", !.st = Fresh, !.at = 0]
        ELSE IF p.ok THEN [s1 EXCEPT !.pc = "read", !.st = Inherit(p.st), !.at = 0]
        ELSE [s1 EXCEPT !.pc = "stopped"]
@@ -733,11 +736,11 @@ Open(h, b) ==
     /\ LET e == IF head[b] = None THEN 1 ELSE head[b].epoch + 1
            s == [gen |-> gen + 1, pc |-> "read", epoch |-> e, token |-> tok[h][b],
                  origin |-> rec[b].origin, st |-> Fresh, at |-> 0, end |-> 0, chain |-> <<>>,
-                 hck |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
-                 recorded |-> {}, reffed |-> {}, reading |-> {}, ckd |-> -1, ckp |-> None,
-                 durable |-> None]
+                 hckpt |-> <<>>, seq |-> 0, next |-> <<0, 0>>, up |-> {}, done |-> {}, open |-> {},
+                 recorded |-> {}, reffed |-> {}, reading |-> {}, ckptThrough |-> -1,
+                 ckptPut |-> None, durable |-> None]
        IN /\ head' = [head EXCEPT ![b] = [epoch |-> e, token |-> tok[h][b], holder |-> gen + 1,
-                                          end |-> End(b), chain |-> Chain(b), ck |-> HeadCk(b)]]
+                                          end |-> End(b), chain |-> Chain(b), ckpt |-> HeadCkpt(b)]]
           /\ ses' = [ses EXCEPT ![h][b] = IF rec[b].deleted THEN [s EXCEPT !.pc = "stopped"]
                                           ELSE Started(s, b, head[b])]
     /\ taken' = [taken EXCEPT ![b] = IF tok[h][b] > @ THEN tok[h][b] ELSE @]
@@ -1045,11 +1048,11 @@ Checkpoint(h, b) ==
                            !.forks = {f \in s.st.forks :
                                          ~(rec[f.child] # None /\ rec[f.child].deleted)}]
         kept == [s.st EXCEPT !.forks = st.forks]
-    IN /\ "checkpoint" \in Can /\ Ready(h, b) /\ q >= 0 /\ q > s.ckd /\ s.ckp = None
+    IN /\ "checkpoint" \in Can /\ Ready(h, b) /\ q >= 0 /\ q > s.ckptThrough /\ s.ckptPut = None
        /\ ses' = [ses EXCEPT ![h][b].st = IF R("movesTakenFirst") THEN TakeMoves(kept, st)
                                          ELSE kept,
-                             ![h][b].ckd = q,
-                             ![h][b].ckp = [q |-> q, st |-> st, landed |-> FALSE,
+                             ![h][b].ckptThrough = q,
+                             ![h][b].ckptPut = [q |-> q, st |-> st, landed |-> FALSE,
                                             swapped |-> FALSE]]
        /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
@@ -1057,11 +1060,11 @@ Checkpoint(h, b) ==
 \* though it stopped.
 CheckpointLand(h, b) ==
     LET s == ses[h][b]
-        k == CkKey(b, s.ckp.q, s.epoch)
-    IN /\ s # None /\ s.ckp # None /\ ~s.ckp.landed
-       /\ ckpt' = [ckpt EXCEPT ![b][s.ckp.q][k[4]] = s.ckp.st]
-       /\ written' = written \cup {<<k, s.ckp.st>>}
-       /\ ses' = [ses EXCEPT ![h][b].ckp.landed = TRUE]
+        k == CkptKey(b, s.ckptPut.q, s.epoch)
+    IN /\ s # None /\ s.ckptPut # None /\ ~s.ckptPut.landed
+       /\ ckpt' = [ckpt EXCEPT ![b][s.ckptPut.q][k[4]] = s.ckptPut.st]
+       /\ written' = written \cup {<<k, s.ckptPut.st>>}
+       /\ ses' = [ses EXCEPT ![h][b].ckptPut.landed = TRUE]
        /\ UNCHANGED <<seg, own, rec, head, moves, mflight, inflight, refs, marked, retired, wal, tok, proc,
                       gc, truthVars, countVars>>
 
@@ -1069,10 +1072,11 @@ CheckpointLand(h, b) ==
 \* still (headSwap); failing, the writer stops.
 CheckpointSwap(h, b) ==
     LET s == ses[h][b]
-        s2 == [s EXCEPT !.hck = <<s.ckp.q, s.epoch>>,
-                        !.ckp = IF R("movesTakenFirst") THEN None ELSE [@ EXCEPT !.swapped = TRUE]]
-    IN /\ s # None /\ s.pc \in {"ready", "record"} /\ s.ckp # None /\ s.ckp.landed
-       /\ ~s.ckp.swapped
+        s2 == [s EXCEPT !.hckpt = <<s.ckptPut.q, s.epoch>>,
+                        !.ckptPut = IF R("movesTakenFirst") THEN None
+                                    ELSE [@ EXCEPT !.swapped = TRUE]]
+    IN /\ s # None /\ s.pc \in {"ready", "record"} /\ s.ckptPut # None /\ s.ckptPut.landed
+       /\ ~s.ckptPut.swapped
        /\ IF R("headSwap") /\ ~Taking(s, b) THEN Stopped(h, b) /\ UNCHANGED head
           ELSE /\ head' = [head EXCEPT ![b] = HeadOf(s2)]
                /\ ses' = [ses EXCEPT ![h][b] = s2]
@@ -1083,8 +1087,8 @@ CheckpointSwap(h, b) ==
 \* along their ways (without movesTakenFirst).
 CheckpointTaken(h, b) ==
     LET s == ses[h][b] IN
-    /\ s # None /\ s.ckp # None /\ s.ckp.swapped
-    /\ ses' = [ses EXCEPT ![h][b].st = TakeMoves(s.st, s.ckp.st), ![h][b].ckp = None]
+    /\ s # None /\ s.ckptPut # None /\ s.ckptPut.swapped
+    /\ ses' = [ses EXCEPT ![h][b].st = TakeMoves(s.st, s.ckptPut.st), ![h][b].ckptPut = None]
     /\ UNCHANGED <<bucketVars, wal, tok, proc, gc, truthVars, countVars>>
 
 WriterNext ==
@@ -1187,25 +1191,25 @@ StartUnfork(h, b) ==
 \* its records before the states and its references after, and the point's own reference, in
 \* another cell, may be retired between, its point deleted, while the child's record came after
 \* the records were read (BucketOverlap found it).
-CloneRefs(q) == IF R("references") THEN {RefOf(q.og[1], q.og[2], q.c)} ELSE {}
+PointForkRefs(q) == IF R("references") THEN {RefOf(q.og[1], q.og[2], q.c)} ELSE {}
 
 \* The record of the child of the restore q, being made (forksPending).
 Forking(q) == Record(IF R("forksPending") THEN "forking" ELSE "fork", q.og, q.p, q.o, q.bs)
 
 \* A fork of point P to C (fork_point), of the origin P names: first C's record, saying it is
-\* being made (forksPending), then its reference (clonesRecordFirst), before it reads P's
-\* (clonesReferFirst); without clonesRecordFirst, the reference first. From a host's copy of P,
+\* being made (forksPending), then its reference (forksRecordFirst), before it reads P's
+\* (forksReferFirst); without forksRecordFirst, the reference first. From a host's copy of P,
 \* stale perhaps.
 StartRestore(h, c, p) ==
     LET q == [op |-> "restore", b |-> c, pc |-> "check", c |-> c, p |-> p, at |-> 0, ep |-> 0,
               o |-> <<"restore", c, h>>, live |-> FALSE, tk |-> tok[h][c], fs |-> {},
               ws |-> {}, og |-> rec[p].origin, bs |-> rec[p].base]
-        refers == R("clonesReferFirst") /\ CloneRefs(q) # {}
-        first == refers /\ ~R("clonesRecordFirst")
+        refers == R("forksReferFirst") /\ PointForkRefs(q) # {}
+        first == refers /\ ~R("forksRecordFirst")
     IN /\ "restore" \in Can /\ proc[h] = None
        /\ rec[p] # None /\ rec[p].kind = "point" /\ rec[c] = None /\ c \notin {Root, p}
        /\ IF first THEN
-             /\ refs' = refs \cup CloneRefs(q)
+             /\ refs' = refs \cup PointForkRefs(q)
              /\ proc' = [proc EXCEPT ![h] = [q EXCEPT !.pc = "fork"]]
              /\ UNCHANGED rec
           ELSE
@@ -1223,7 +1227,7 @@ Deleting(h) == proc' = [proc EXCEPT ![h] = [@ EXCEPT !.op = "delete", !.pc = "en
 Ended(b) ==
     head' = [head EXCEPT ![b] = IF @ = None
                                 THEN [epoch |-> Final, token |-> 0, holder |-> 0, end |-> 0,
-                                      chain |-> <<>>, ck |-> <<>>]
+                                      chain |-> <<>>, ckpt |-> <<>>]
                                 ELSE [@ EXCEPT !.epoch = Final, !.token = 0, !.holder = 0]]
 
 ProcStep(h) ==
@@ -1342,11 +1346,11 @@ ProcStep(h) ==
                  /\ Done(h)
                  /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "refer" ->
-                 \* Its reference, its record made (clonesRecordFirst), before the point's read.
+                 \* Its reference, its record made (forksRecordFirst), before the point's read.
                  /\ proc' = [proc EXCEPT ![h].pc = "check"]
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "fork" ->
-                 \* Without clonesRecordFirst: the child's record, its reference made, unless its ID
+                 \* Without forksRecordFirst: the child's record, its reference made, unless its ID
                  \* was taken since: the reference then taken back (referencesTakenBack), or left
                  \* for good.
                  /\ IF rec[b] = None THEN /\ rec' = [rec EXCEPT ![b] = Forking(q)]
@@ -1362,7 +1366,7 @@ ProcStep(h) ==
                  /\ UNCHANGED <<seg, own, ckpt, rec, head, moves, mflight, inflight, makers, errors>>
             [] q.op = "restore" /\ q.pc = "make" ->
                  \* No longer being made, with a condition: unless deleted, given up on. Without
-                 \* clonesReferFirst, its reference made now, after the point's read.
+                 \* forksReferFirst, its reference made now, after the point's read.
                  /\ IF rec[b] # None /\ ~rec[b].deleted THEN
                        /\ rec' = [rec EXCEPT ![b].kind = IF @ = "forking" THEN "fork" ELSE @]
                        /\ makers' = [makers EXCEPT ![b] = @ \cup {q.o}]
@@ -1374,7 +1378,7 @@ ProcStep(h) ==
                     THEN doomed \cup {q.o} ELSE doomed
        \* A deletion's references of the forks it found, as their records read (record_fork):
        \* taken back, those records another's (referencesTakenBack), or written, in a step after,
-       \* those with none; and taken back as it records the children; a clone's. Taken back,
+       \* those with none; and taken back as it records the children; a point's fork's. Taken back,
        \* marked (retirementsMarked).
        /\ LET back == CASE q.op = "delete" /\ q.pc = "refs" -> RefsTakenBack(b, q.fs)
                          [] q.op = "delete" /\ q.pc = "record" ->
@@ -1386,10 +1390,10 @@ ProcStep(h) ==
                        \cup CASE q.op = "delete" /\ q.pc = "refs" /\ ~R("referencesFirst") ->
                                   RefsWritten(b, q.fs)
                                [] q.op = "delete" /\ q.pc = "write" -> RefsOf(b, q.ws)
-                               [] q.op = "restore" /\ q.pc = "refer" -> CloneRefs(q)
+                               [] q.op = "restore" /\ q.pc = "refer" -> PointForkRefs(q)
                                [] (/\ q.op = "restore" /\ q.pc = "make"
-                                   /\ ~R("clonesReferFirst") /\ rec[b] # None
-                                   /\ ~rec[b].deleted) -> CloneRefs(q)
+                                   /\ ~R("forksReferFirst") /\ rec[b] # None
+                                   /\ ~rec[b].deleted) -> PointForkRefs(q)
                                [] OTHER -> {}
              /\ retired' = retired \cup back
              /\ marked' = marked \cup Marks(back)
@@ -1411,7 +1415,7 @@ NoRecs == [b \in Branches |-> None]
 \* was from a checkpoint, the references it listed, and the fork points' states it keeps, each
 \* [ext, touched]. Idle, a pass keeps its cell: its epoch is that cell's collector lease's.
 GcIdle == [pc |-> "idle", cell |-> 0, objs |-> {}, recs |-> NoRecs, live |-> Nothing,
-           ck |-> FALSE, refs |-> {}, pts |-> {}, stale |-> {}]
+           fromCkpt |-> FALSE, refs |-> {}, pts |-> {}, stale |-> {}]
 Idle(g) == [GcIdle EXCEPT !.cell = g.cell]
 
 \* Every object's key under cell c's prefix but references, which are no pass's candidates: the
@@ -1446,10 +1450,10 @@ RefPoints(Rs) ==
         lost |-> \E pt \in P : lost(pt)]
 
 \* Whether the writer of b may name the extents of its state, recovered from its head's checkpoint
-\* ck (<<>> if none), anywhere on their ways from where they were sealed (waysFromSeals): unless
+\* newest (<<>> if none), anywhere on their ways from where they were sealed (waysFromSeals): unless
 \* the checkpoint is of the head's epoch (collector::behind). A fork's inherited extents, which a
 \* fork with no checkpoint holds, always.
-Behind(b, ck) == R("waysFromSeals") /\ (ck = <<>> \/ ck[2] # HeadEpoch(b))
+Behind(b, newest) == R("waysFromSeals") /\ (newest = <<>> \/ newest[2] # HeadEpoch(b))
 
 \* Whether acc holds a recovery of q, <<b, origin>>: by that origin (recoveriesByOrigins), or,
 \* without the rule, by any.
@@ -1481,10 +1485,10 @@ RecoverAll(queue, recs, acc) ==
             ELSE IF r.ok THEN
                RecoverAll(rest \cup kids, recs,
                           [acc EXCEPT !.live = Put(@, q, [ext |-> r.st.ext, end |-> r.end,
-                                                          epoch |-> HeadEpoch(b), ck |-> r.ck,
+                                                          epoch |-> HeadEpoch(b), ckpt |-> r.ckpt,
                                                           touched |-> r.touched,
-                                                          behind |-> Behind(b, r.ck)]),
-                                      !.ck = @ \/ r.ck # <<>>,
+                                                          behind |-> Behind(b, r.ckpt)]),
+                                      !.fromCkpt = @ \/ r.ckpt # <<>>,
                                       !.pts = @ \cup {Kept(fp) : fp \in fps}])
             ELSE IF rec[b] = None \/ rec[b].deleted THEN RecoverAll(rest, recs, acc)
             ELSE IF rec[b].kind = "claim" /\ Unwritten(b)
@@ -1546,7 +1550,7 @@ GcRecover(i) ==
         recs == [b \in Branches |-> IF b \in ab THEN rec1[b] ELSE g.recs[b]]
         queue == {<<b, recs[b].origin>> :
                     b \in {b \in Branches : recs[b] # None /\ ~recs[b].deleted}}
-        acc == RecoverAll(queue, recs, [live |-> g.live, ck |-> FALSE, claims |-> {},
+        acc == RecoverAll(queue, recs, [live |-> g.live, fromCkpt |-> FALSE, claims |-> {},
                                         lost |-> FALSE, pts |-> g.pts])
     IN /\ g.pc = "recover"
        /\ IF acc.lost THEN
@@ -1558,7 +1562,7 @@ GcRecover(i) ==
              /\ rec' = [b \in Branches |->
                          IF b \in acc.claims THEN [rec1[b] EXCEPT !.deleted = TRUE] ELSE rec1[b]]
              /\ gc' = [gc EXCEPT ![i] = [g EXCEPT !.recs = recs, !.live = acc.live,
-                                                 !.pts = acc.pts, !.ck = acc.ck,
+                                                 !.pts = acc.pts, !.fromCkpt = acc.fromCkpt,
                                                  !.pc = "relist"]]
              /\ UNCHANGED errors
        /\ UNCHANGED <<seg, own, ckpt, head, moves, mflight, inflight, refs, marked, retired, written,
@@ -1571,12 +1575,12 @@ GcRecover(i) ==
 \* is of a fork whose parent's state at its fork point this pass kept, or never listed: a
 \* writable fork's child is recorded, with its reference first, before its parent's deletion
 \* marks it, which the pass read live, its state naming the fork, or deleted, after; and a
-\* point's clone writes its reference before it reads the point's record, so that one reading
+\* point's fork writes its reference before it reads the point's record, so that one reading
 \* it live made its reference before the point's deletion, before the pass read the point
 \* deleted, or its own reference retired by its cell's pass, after.
 GcRelist(i) ==
     LET g == gc[i]
-        recs == IF g.ck /\ R("recordsRelisted") THEN CellRecs(g.cell) ELSE g.recs
+        recs == IF g.fromCkpt /\ R("recordsRelisted") THEN CellRecs(g.cell) ELSE g.recs
         listed == IF R("referencesRelisted") THEN RefsUnder(g.cell) ELSE g.refs
         kept == RefPoints(listed)
     IN /\ g.pc = "relist"
@@ -1640,9 +1644,9 @@ GcFinish(i) ==
                                 /\ e >= L[k].epoch /\ s >= L[k].end
         \* Likewise its checkpoint as of s by that writer: newer than the head's, by s, then by
         \* epoch (a writer taking over may checkpoint what the head's did, at its own key).
-        ckAhead(b, s, e) ==
+        ckptAhead(b, s, e) ==
             \E k \in DOMAIN L : /\ k[1] = b /\ R("collectorEpochs") /\ e >= L[k].epoch
-                                /\ L[k].ck = <<>> \/ ~GE2(L[k].ck, <<s, e>>)
+                                /\ L[k].ckpt = <<>> \/ ~GE2(L[k].ckpt, <<s, e>>)
         \* The moves of the object at k listed, any pass's: each holds what was named there as
         \* its pass read it, which no later state names more of.
         movesOf(k) == {Key(k[2], k[3], k[4], q) : q \in On(Way(k))} \cap objs
@@ -1656,7 +1660,7 @@ GcFinish(i) ==
                              ELSE "compactMoves" \in Can /\ Depth(k) < Hops
                           /\ movesOf(k) = {}}
         doomedKey(k) ==
-            CASE k[1] = "ckpt" -> k \notin touched /\ ~ckAhead(k[2], k[3], k[4])
+            CASE k[1] = "ckpt" -> k \notin touched /\ ~ckptAhead(k[2], k[3], k[4])
               [] k[1] = "seg" -> /\ ~ahead(k[2], k[3], k[4]) /\ k \notin touched
                                  /\ (k \notin named \/ movesOf(k) # {})
               [] k[1] = "own" -> k \notin named /\ ~ahead(k[2], k[4], k[3])
@@ -1838,7 +1842,7 @@ KeysWrittenOnce == \A p, q \in written : p[1] = q[1] => p[2] = q[2]
 \* the child's cell's pass retires it by once the child is deleted (TASK-395.10); or is of a fork
 \* whose records' writers are yet to name or take it back: a live parent's state names the fork,
 \* whose next writer or deletion records it again; a writer or a deletion of it records it now; a
-\* clone of a point is being made; or it is marked, retired or taken back before, a stale writer's,
+\* fork of a point is being made; or it is marked, retired or taken back before, a stale writer's,
 \* which its parent's cell's next pass deletes (retirementsMarked). Any other no pass retires, for
 \* ever.
 RefPending(r) ==
@@ -1862,7 +1866,7 @@ ReferencesNamed ==
 \* cell's next pass deletes it, by its mark.
 ReferencesRetiredMarked == \A r \in refs \cap retired : r \in marked
 
-\* Every live branch forked from another cell, and every point's clone, has its reference under
+\* Every live branch forked from another cell, and every point's fork, has its reference under
 \* its origin's cell, naming its fork point (TASK-395): written before its record, retired only
 \* once it is deleted.
 ReferencesStand ==

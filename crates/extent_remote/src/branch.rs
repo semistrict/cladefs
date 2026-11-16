@@ -392,7 +392,7 @@ pub async fn record_fork_under(
 /// collector gave it up as its point went, or its host died, whose directory, left unmade, names
 /// no child. A fork refused by a record there writes none. Written first, a host dying before the
 /// record left a reference no record names, which nothing retired: specs/bucket's
-/// NoClonesRecordFirst. Forked again, the record its own, it writes it again, which stands.
+/// NoForksRecordFirst. Forked again, the record its own, it writes it again, which stands.
 pub async fn fork_point(
     bucket: &impl Bucket,
     child: Branch,

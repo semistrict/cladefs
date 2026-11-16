@@ -35,11 +35,11 @@ mod ffi {
     use core::ffi::c_void;
 
     unsafe extern "C" {
-        pub fn fxfs_vfs_follow_fill_begin(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_fill_end(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_assert_filling(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_barrier_take(vfs: *mut c_void);
-        pub fn fxfs_vfs_follow_barrier_release(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_begin_extern(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_end_extern(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_assert_held(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_take(vfs: *mut c_void);
+        pub fn fxfs_vfs_fill_barrier_release(vfs: *mut c_void);
         pub fn fxfs_vfs_follow_epoch(vfs: *mut c_void, which: u32, epoch: u64);
         pub fn fxfs_vfs_follow_failing() -> bool;
         pub fn fxfs_vfs_drop_file(vfs: *mut c_void, ino: u64, ranges: *const Range, count: usize);
@@ -109,7 +109,7 @@ impl GuestKernel {
     /// read of the trees must, on behalf of a reader.
     pub fn assert_filling(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_assert_filling(self.vfs) };
+        unsafe { ffi::fxfs_vfs_fill_barrier_assert_held(self.vfs) };
     }
 
     fn ours<'a>(&self, objects: impl IntoIterator<Item = &'a StoreObject>) -> Vec<u64> {
@@ -123,22 +123,22 @@ impl Kernel for GuestKernel {
 
     fn fill_begin(&self) {
         // SAFETY: The superblock outlives the filesystem.
-        unsafe { ffi::fxfs_vfs_follow_fill_begin(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_begin_extern(self.vfs) }
     }
 
     fn fill_end(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_fill_end(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_end_extern(self.vfs) }
     }
 
     fn barrier_take(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_barrier_take(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_barrier_take(self.vfs) }
     }
 
     fn barrier_release(&self) {
         // SAFETY: As above.
-        unsafe { ffi::fxfs_vfs_follow_barrier_release(self.vfs) }
+        unsafe { ffi::fxfs_vfs_fill_barrier_release(self.vfs) }
     }
 
     fn drop_cached(&self, changes: &Arc<GuestChanges>) {

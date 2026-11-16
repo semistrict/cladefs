@@ -130,12 +130,13 @@ void fxfs_release(struct fxfs *fs, u64 ino);
 
 /*
  * cladefs: a follower's primitives, of the superblock `vfs` (super.c), which the filesystem's Rust
- * runs its protocol on (crates/follower): its fill barrier, held shared by a reader
- * (fxfs_vfs_fill_begin, vfs.h), which a tree read checks it holds, in a debug kernel.
+ * runs its protocol on (crates/follower): its fill barrier, held shared by a reader's fill, each
+ * fxfs_vfs_fill_*_extern the inline fxfs_vfs_fill_* (vfs.h) out of line, for the Rust; and which
+ * a tree read checks is held, in a debug kernel.
  */
-void fxfs_vfs_follow_fill_begin(void *vfs);
-void fxfs_vfs_follow_fill_end(void *vfs);
-void fxfs_vfs_follow_assert_filling(void *vfs);
+void fxfs_vfs_fill_begin_extern(void *vfs);
+void fxfs_vfs_fill_end_extern(void *vfs);
+void fxfs_vfs_fill_barrier_assert_held(void *vfs);
 /* The follower's state is as of a commit no later than `epoch`'s: its batch applied. */
 #define FXFS_FOLLOW_APPLIED 0
 /* The follower's state is as of a commit no earlier than `epoch`'s: its batch settled. */
@@ -147,8 +148,8 @@ bool fxfs_vfs_follow_failing(void);
  * cladefs: a follower's batch takes its fill barrier exclusively, waiting for the readers holding it,
  * from before it drops what it changes until it has applied and settled it; and lets go of it.
  */
-void fxfs_vfs_follow_barrier_take(void *vfs);
-void fxfs_vfs_follow_barrier_release(void *vfs);
+void fxfs_vfs_fill_barrier_take(void *vfs);
+void fxfs_vfs_fill_barrier_release(void *vfs);
 
 /* cladefs: bytes of a follower's file a batch changed, from `start` to `end`, exclusive. */
 struct fxfs_range {
@@ -156,7 +157,7 @@ struct fxfs_range {
 	u64 end;
 };
 /*
- * cladefs: a follower's batch, holding its fill barrier (fxfs_vfs_follow_barrier_take), drops what
+ * cladefs: a follower's batch, holding its fill barrier (fxfs_vfs_fill_barrier_take), drops what
  * the kernel keeps of what it changes before it applies the change: the `count` `ranges` of the
  * file `ino`'s data; the dentries of the directory `ino`, which revalidate. Once applied, the file
  * `ino`'s inode takes its attributes, `attr`, or, `gone`, none, no name linking it.
