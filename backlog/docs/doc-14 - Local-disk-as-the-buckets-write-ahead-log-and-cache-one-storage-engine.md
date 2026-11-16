@@ -67,9 +67,9 @@ Per store directory (one branch, `<b>` its ID; `extent_store::layout`):
 |---|---|---|
 | `store` | the description (`layout::FORMAT`, local format 12): block size, the branch, as `TENANT/CELL/ID` (TASK-364), the bucket's URL, the placement's fencing token, the capacity a store takes before a commit of its branch sets one, and the vdisk of its cell it is, by name and kind (`vdisk`, `kind`), which its opening adds to the cell | the store is deleted |
 | `unmade` | a marker `Store::make` writes before anything else, which its maker removes once the store is whole; opening refuses a store holding it (TASK-196) | the store is whole |
-| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: an encrypted store's encrypted, AES-256-XTS by 4 KiB sector (doc-16, TASK-411.5) | it closes and its framed file is synced |
-| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit local, whether the segment is open or being framed; cladefs: an encrypted store's header names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16) | as above |
-| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: an encrypted store's encrypted as open segments are, its salt in memory alone | sealed |
+| `open-segments/<b>/<n>` | the open segment's data, raw: pieces of open extents and the runs commits sealed; cladefs: encrypted, AES-256-XTS by 4 KiB sector, as every store is encrypted (doc-16, TASK-411.5, TASK-411.28) | it closes and its framed file is synced |
+| `logs/<b>/<n>` | the commits made in it: one record per commit (its `Contents`, below), each hashed, appended and synced by the flush that makes the commit local, whether the segment is open or being framed; cladefs: its header (`FXLOG\0\0\x03`) names the DEK and salt of the raw file's key and is MACed, as each record is (doc-16; a clear store's `\x02` header is no more, TASK-411.28) | as above |
+| `open-extents/<b>/<sequence>` | large open extents (`Options::large_extent`), raw; cladefs: encrypted as open segments are, its salt in memory alone | sealed |
 | `segments/<b>/<n>` | a closed segment, framed, numbered locally, its footer stamped by the writer's chain as it closed: the object `segments/<branch>/<epoch>.<segment>` byte for byte, but for a rebase's restamping, which is in memory, the upload restamping the bytes (`extent_frame::restamp`) | acknowledged, then moved into the part cache |
 | `extents/<b>/<sequence>` | its extents stored on their own, framed: the objects `extents/<branch>/<epoch>.<segment>.<sequence>` | likewise |
 | `wal` | the WAL's start, the commit its first segment was stamped over: two 4 KiB slots, written and synced before what an acknowledgement let go of leaves (`wal::START`) | the store is deleted |
@@ -186,7 +186,7 @@ the commits in turn.
    and stamped by the new chain. Writes after the last local commit are dropped, as now.
    *(TASK-411.9)* The WAL's recovery (`Store::recover`) decides this before the store's keys are
    known, and frames nothing: the segment keeps its raw file and log until `Recovering::open`,
-   holding the store's keys (doc-16), frames it first of all, encrypted if the branch is.
+   holding the store's keys (doc-16), frames it first of all, encrypted, as every store is (TASK-411.28).
 4. **Put the WAL after the branch's end** (`extent_bucket::Wal::rebase`, new), by commits, as the
    head the writer took names it (`TakenBranch`; until TASK-407, as the branch was after the fence,
    `wal_after_fence`, which might have applied the WAL's own segments landed since recovery found

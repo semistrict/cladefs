@@ -85,7 +85,7 @@ fn in_bucket(
         let record = record.ok_or("no record")?;
         let origin = record.origin();
         let kms = crate::bucket::kms().map_err(|err| err.to_string())?;
-        let keys = extent_bucket::keys::writing(&**bucket, kms.as_ref(), child, &record).await;
+        let keys = extent_bucket::keys::writing(&**bucket, &kms, child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
         let recovering = extent_bucket::recovery::recover_under(&**bucket, child, origin, &keys);
         let state = recovering.await.map_err(|err| err.to_string())?.state;
@@ -103,16 +103,15 @@ fn in_bucket(
     })
 }
 
-/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS, if it
-/// has one: what the deletion records of an encrypted branch's forks to other cells is
-/// authenticated (TASK-411.4).
+/// Deletes `branch` as an operator does, as `holder`, of no placement, under the host's KMS: what
+/// the deletion records of a branch's forks to other cells is authenticated (TASK-411.4).
 async fn operator_delete(
     bucket: &Arc<ObjectBucket>,
     branch: crate::Branch,
     holder: u64,
 ) -> Result<(), extent_bucket::Error> {
     let kms = crate::bucket::kms().unwrap();
-    branch::delete_under(&**bucket, branch, holder, u64::MAX, kms.as_ref()).await
+    branch::delete(&**bucket, branch, holder, u64::MAX, &kms).await
 }
 
 impl Hosts {
@@ -440,11 +439,13 @@ impl Hosts {
                     })
                 }
                 // cladefs: a block of object IDs taken stays for good (TASK-364), a reference's
-                // mark, retired or taken back (TASK-395.13), and every branch's head (TASK-407).
+                // mark, retired or taken back (TASK-395.13), every branch's head (TASK-407), and a
+                // tenant's KEK object (TASK-411.27).
                 Kind::Head { .. }
                 | Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Kek { .. }
                 | Kind::Retired { .. } => false,
                 _ => true,
             })

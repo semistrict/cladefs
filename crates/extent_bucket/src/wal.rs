@@ -221,7 +221,7 @@ mod tests {
         batch: impl Into<SegmentBuilder>,
     ) -> u64 {
         let Unframed { footer, data } = batch.into().close(&mut writer.chain());
-        let segment = writer.add_segment(data.frame(&footer)).unwrap();
+        let segment = writer.add_segment(data.frame(&footer, writer.keys().encrypting())).unwrap();
         wal.push(footer, data);
         segment
     }
@@ -238,7 +238,8 @@ mod tests {
     async fn rebase(writer: &Writer<ObjectBucket>, wal: &mut Wal<Data>) -> Result<Vec<u64>, Error> {
         let Rebased { landed } = wal.rebase(writer.taken())?;
         for (footer, data) in wal.segments() {
-            let segment = writer.add_segment(data.frame(footer)).unwrap();
+            let segment =
+                writer.add_segment(data.frame(footer, writer.keys().encrypting())).unwrap();
             land(writer, segment).await;
         }
         wal.acknowledge(writer.state().through.unwrap());
@@ -366,7 +367,8 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let segment = first.add_segment(data.frame(&footer)).unwrap();
+                let segment =
+                    first.add_segment(data.frame(&footer, first.keys().encrypting())).unwrap();
                 wal.push(footer, data);
                 segment
             };
@@ -405,7 +407,8 @@ mod tests {
             let mut close_contents = |contents: Contents| {
                 let footer = first.chain().close(contents);
                 let data = Data::default();
-                let segment = first.add_segment(data.frame(&footer)).unwrap();
+                let segment =
+                    first.add_segment(data.frame(&footer, first.keys().encrypting())).unwrap();
                 wal.push(footer, data);
                 segment
             };
@@ -479,7 +482,7 @@ mod tests {
             let state = second.state();
             for (extent, bytes) in [(inside, &b"inside"[..]), (own, b"own")] {
                 assert_eq!(
-                    crate::read(&bucket, extent, &state.extents[&extent]).await,
+                    crate::testing::read(&bucket, extent, &state.extents[&extent]).await,
                     Ok(bytes.into())
                 );
             }
@@ -552,7 +555,7 @@ mod tests {
             let segment = close(&first, &mut wal, commit(1));
             let Unframed { footer, data } =
                 SegmentBuilder::default().fork(child(test_branch(2)), &mut first.chain());
-            first.add_segment(data.frame(&footer)).unwrap();
+            first.add_segment(data.frame(&footer, first.keys().encrypting())).unwrap();
             wal.push(footer, data);
             close(&first, &mut wal, commit(3));
             land(&first, segment).await;

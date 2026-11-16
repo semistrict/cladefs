@@ -3542,6 +3542,107 @@ func (x *ForgetTenantKeysResponse) GetForgotten() *Forgotten {
 	return nil
 }
 
+// Shreds a tenant.
+type ShredTenantRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The tenant's ID in the bucket, as StatStore names it.
+	Tenant        uint64 `protobuf:"varint,1,opt,name=tenant,proto3" json:"tenant,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShredTenantRequest) Reset() {
+	*x = ShredTenantRequest{}
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShredTenantRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShredTenantRequest) ProtoMessage() {}
+
+func (x *ShredTenantRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShredTenantRequest.ProtoReflect.Descriptor instead.
+func (*ShredTenantRequest) Descriptor() ([]byte, []int) {
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *ShredTenantRequest) GetTenant() uint64 {
+	if x != nil {
+		return x.Tenant
+	}
+	return 0
+}
+
+// The tenant is shredded, and this host forgot its keys.
+type ShredTenantResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Whether this call put the tombstone there: false if it was shredded already.
+	ShreddedNow bool `protobuf:"varint,1,opt,name=shredded_now,json=shreddedNow,proto3" json:"shredded_now,omitempty"`
+	// What this host forgot.
+	Forgotten     *Forgotten `protobuf:"bytes,2,opt,name=forgotten,proto3" json:"forgotten,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ShredTenantResponse) Reset() {
+	*x = ShredTenantResponse{}
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ShredTenantResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ShredTenantResponse) ProtoMessage() {}
+
+func (x *ShredTenantResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ShredTenantResponse.ProtoReflect.Descriptor instead.
+func (*ShredTenantResponse) Descriptor() ([]byte, []int) {
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *ShredTenantResponse) GetShreddedNow() bool {
+	if x != nil {
+		return x.ShreddedNow
+	}
+	return false
+}
+
+func (x *ShredTenantResponse) GetForgotten() *Forgotten {
+	if x != nil {
+		return x.Forgotten
+	}
+	return nil
+}
+
 // What a host forgot of a tenant's or a cell's keys.
 type Forgotten struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -3561,7 +3662,7 @@ type Forgotten struct {
 
 func (x *Forgotten) Reset() {
 	*x = Forgotten{}
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[59]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3573,7 +3674,7 @@ func (x *Forgotten) String() string {
 func (*Forgotten) ProtoMessage() {}
 
 func (x *Forgotten) ProtoReflect() protoreflect.Message {
-	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[57]
+	mi := &file_cladefs_extentd_v1_extentd_proto_msgTypes[59]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3586,7 +3687,7 @@ func (x *Forgotten) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Forgotten.ProtoReflect.Descriptor instead.
 func (*Forgotten) Descriptor() ([]byte, []int) {
-	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{57}
+	return file_cladefs_extentd_v1_extentd_proto_rawDescGZIP(), []int{59}
 }
 
 func (x *Forgotten) GetStores() uint32 {
@@ -3879,7 +3980,12 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\x12\x10\n" +
 	"\x03why\x18\x02 \x01(\tR\x03why\"W\n" +
 	"\x18ForgetTenantKeysResponse\x12;\n" +
-	"\tforgotten\x18\x01 \x01(\v2\x1d.cladefs.extentd.v1.ForgottenR\tforgotten\"}\n" +
+	"\tforgotten\x18\x01 \x01(\v2\x1d.cladefs.extentd.v1.ForgottenR\tforgotten\",\n" +
+	"\x12ShredTenantRequest\x12\x16\n" +
+	"\x06tenant\x18\x01 \x01(\x04R\x06tenant\"u\n" +
+	"\x13ShredTenantResponse\x12!\n" +
+	"\fshredded_now\x18\x01 \x01(\bR\vshreddedNow\x12;\n" +
+	"\tforgotten\x18\x02 \x01(\v2\x1d.cladefs.extentd.v1.ForgottenR\tforgotten\"}\n" +
 	"\tForgotten\x12\x16\n" +
 	"\x06stores\x18\x01 \x01(\rR\x06stores\x12\x14\n" +
 	"\x05rings\x18\x02 \x01(\rR\x05rings\x12\x12\n" +
@@ -3889,7 +3995,7 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\tVdiskKind\x12\x13\n" +
 	"\x0fVDISK_KIND_FXFS\x10\x00\x12\x15\n" +
 	"\x11VDISK_KIND_SQLITE\x10\x01\x12\x15\n" +
-	"\x11VDISK_KIND_MEMORY\x10\x022\xab\x13\n" +
+	"\x11VDISK_KIND_MEMORY\x10\x022\x8b\x14\n" +
 	"\aExtentd\x12^\n" +
 	"\vCreateStore\x12&.cladefs.extentd.v1.CreateStoreRequest\x1a'.cladefs.extentd.v1.CreateStoreResponse\x12^\n" +
 	"\vImportImage\x12&.cladefs.extentd.v1.ImportImageRequest\x1a'.cladefs.extentd.v1.ImportImageResponse\x12X\n" +
@@ -3921,7 +4027,8 @@ const file_cladefs_extentd_v1_extentd_proto_rawDesc = "" +
 	"\rGetTenantDisk\x12(.cladefs.extentd.v1.GetTenantDiskRequest\x1a).cladefs.extentd.v1.GetTenantDiskResponse\x12U\n" +
 	"\bSetPeers\x12#.cladefs.extentd.v1.SetPeersRequest\x1a$.cladefs.extentd.v1.SetPeersResponse\x12X\n" +
 	"\tShredCell\x12$.cladefs.extentd.v1.ShredCellRequest\x1a%.cladefs.extentd.v1.ShredCellResponse\x12m\n" +
-	"\x10ForgetTenantKeys\x12+.cladefs.extentd.v1.ForgetTenantKeysRequest\x1a,.cladefs.extentd.v1.ForgetTenantKeysResponseB7Z5github.com/semistrict/cladefs/go/extentd/v1;extentdv1b\x06proto3"
+	"\x10ForgetTenantKeys\x12+.cladefs.extentd.v1.ForgetTenantKeysRequest\x1a,.cladefs.extentd.v1.ForgetTenantKeysResponse\x12^\n" +
+	"\vShredTenant\x12&.cladefs.extentd.v1.ShredTenantRequest\x1a'.cladefs.extentd.v1.ShredTenantResponseB7Z5github.com/semistrict/cladefs/go/extentd/v1;extentdv1b\x06proto3"
 
 var (
 	file_cladefs_extentd_v1_extentd_proto_rawDescOnce sync.Once
@@ -3936,7 +4043,7 @@ func file_cladefs_extentd_v1_extentd_proto_rawDescGZIP() []byte {
 }
 
 var file_cladefs_extentd_v1_extentd_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_cladefs_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 68)
+var file_cladefs_extentd_v1_extentd_proto_msgTypes = make([]protoimpl.MessageInfo, 70)
 var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
 	(VdiskKind)(0),                    // 0: cladefs.extentd.v1.VdiskKind
 	(*CreateStoreRequest)(nil),        // 1: cladefs.extentd.v1.CreateStoreRequest
@@ -3996,95 +4103,100 @@ var file_cladefs_extentd_v1_extentd_proto_goTypes = []any{
 	(*ShredCellResponse)(nil),         // 55: cladefs.extentd.v1.ShredCellResponse
 	(*ForgetTenantKeysRequest)(nil),   // 56: cladefs.extentd.v1.ForgetTenantKeysRequest
 	(*ForgetTenantKeysResponse)(nil),  // 57: cladefs.extentd.v1.ForgetTenantKeysResponse
-	(*Forgotten)(nil),                 // 58: cladefs.extentd.v1.Forgotten
-	nil,                               // 59: cladefs.extentd.v1.GetStatsResponse.CountersEntry
-	nil,                               // 60: cladefs.extentd.v1.GetStatsResponse.GaugesEntry
-	nil,                               // 61: cladefs.extentd.v1.VmStats.CountersEntry
-	nil,                               // 62: cladefs.extentd.v1.VmStats.GaugesEntry
-	nil,                               // 63: cladefs.extentd.v1.VmStats.WindowEntry
-	nil,                               // 64: cladefs.extentd.v1.GuestStats.CountersEntry
-	nil,                               // 65: cladefs.extentd.v1.GuestStats.HistogramsEntry
-	nil,                               // 66: cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
-	nil,                               // 67: cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
-	nil,                               // 68: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
+	(*ShredTenantRequest)(nil),        // 58: cladefs.extentd.v1.ShredTenantRequest
+	(*ShredTenantResponse)(nil),       // 59: cladefs.extentd.v1.ShredTenantResponse
+	(*Forgotten)(nil),                 // 60: cladefs.extentd.v1.Forgotten
+	nil,                               // 61: cladefs.extentd.v1.GetStatsResponse.CountersEntry
+	nil,                               // 62: cladefs.extentd.v1.GetStatsResponse.GaugesEntry
+	nil,                               // 63: cladefs.extentd.v1.VmStats.CountersEntry
+	nil,                               // 64: cladefs.extentd.v1.VmStats.GaugesEntry
+	nil,                               // 65: cladefs.extentd.v1.VmStats.WindowEntry
+	nil,                               // 66: cladefs.extentd.v1.GuestStats.CountersEntry
+	nil,                               // 67: cladefs.extentd.v1.GuestStats.HistogramsEntry
+	nil,                               // 68: cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
+	nil,                               // 69: cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
+	nil,                               // 70: cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
 }
 var file_cladefs_extentd_v1_extentd_proto_depIdxs = []int32{
 	0,  // 0: cladefs.extentd.v1.CreateStoreRequest.kind:type_name -> cladefs.extentd.v1.VdiskKind
 	27, // 1: cladefs.extentd.v1.ListStoresResponse.stores:type_name -> cladefs.extentd.v1.ListedStore
 	24, // 2: cladefs.extentd.v1.ListedStore.stat:type_name -> cladefs.extentd.v1.StatStoreResponse
 	35, // 3: cladefs.extentd.v1.GetCountersResponse.object_storage:type_name -> cladefs.extentd.v1.ObjectStorageStats
-	59, // 4: cladefs.extentd.v1.GetStatsResponse.counters:type_name -> cladefs.extentd.v1.GetStatsResponse.CountersEntry
-	60, // 5: cladefs.extentd.v1.GetStatsResponse.gauges:type_name -> cladefs.extentd.v1.GetStatsResponse.GaugesEntry
+	61, // 4: cladefs.extentd.v1.GetStatsResponse.counters:type_name -> cladefs.extentd.v1.GetStatsResponse.CountersEntry
+	62, // 5: cladefs.extentd.v1.GetStatsResponse.gauges:type_name -> cladefs.extentd.v1.GetStatsResponse.GaugesEntry
 	32, // 6: cladefs.extentd.v1.GetStatsResponse.vms:type_name -> cladefs.extentd.v1.VmStats
-	61, // 7: cladefs.extentd.v1.VmStats.counters:type_name -> cladefs.extentd.v1.VmStats.CountersEntry
-	62, // 8: cladefs.extentd.v1.VmStats.gauges:type_name -> cladefs.extentd.v1.VmStats.GaugesEntry
-	63, // 9: cladefs.extentd.v1.VmStats.window:type_name -> cladefs.extentd.v1.VmStats.WindowEntry
+	63, // 7: cladefs.extentd.v1.VmStats.counters:type_name -> cladefs.extentd.v1.VmStats.CountersEntry
+	64, // 8: cladefs.extentd.v1.VmStats.gauges:type_name -> cladefs.extentd.v1.VmStats.GaugesEntry
+	65, // 9: cladefs.extentd.v1.VmStats.window:type_name -> cladefs.extentd.v1.VmStats.WindowEntry
 	33, // 10: cladefs.extentd.v1.VmStats.guest:type_name -> cladefs.extentd.v1.GuestStats
-	64, // 11: cladefs.extentd.v1.GuestStats.counters:type_name -> cladefs.extentd.v1.GuestStats.CountersEntry
-	65, // 12: cladefs.extentd.v1.GuestStats.histograms:type_name -> cladefs.extentd.v1.GuestStats.HistogramsEntry
-	66, // 13: cladefs.extentd.v1.ObjectStorageStats.requests:type_name -> cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
-	67, // 14: cladefs.extentd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
-	68, // 15: cladefs.extentd.v1.ObjectStorageStats.failures:type_name -> cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
-	58, // 16: cladefs.extentd.v1.ShredCellResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
-	58, // 17: cladefs.extentd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
-	34, // 18: cladefs.extentd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.extentd.v1.Histogram
-	1,  // 19: cladefs.extentd.v1.Extentd.CreateStore:input_type -> cladefs.extentd.v1.CreateStoreRequest
-	3,  // 20: cladefs.extentd.v1.Extentd.ImportImage:input_type -> cladefs.extentd.v1.ImportImageRequest
-	5,  // 21: cladefs.extentd.v1.Extentd.ForkStore:input_type -> cladefs.extentd.v1.ForkStoreRequest
-	7,  // 22: cladefs.extentd.v1.Extentd.DeleteStore:input_type -> cladefs.extentd.v1.DeleteStoreRequest
-	9,  // 23: cladefs.extentd.v1.Extentd.DropStore:input_type -> cladefs.extentd.v1.DropStoreRequest
-	11, // 24: cladefs.extentd.v1.Extentd.ResizeStore:input_type -> cladefs.extentd.v1.ResizeStoreRequest
-	13, // 25: cladefs.extentd.v1.Extentd.PlaceStore:input_type -> cladefs.extentd.v1.PlaceStoreRequest
-	17, // 26: cladefs.extentd.v1.Extentd.MakePublic:input_type -> cladefs.extentd.v1.MakePublicRequest
-	15, // 27: cladefs.extentd.v1.Extentd.SharePoint:input_type -> cladefs.extentd.v1.SharePointRequest
-	19, // 28: cladefs.extentd.v1.Extentd.AttachBase:input_type -> cladefs.extentd.v1.AttachBaseRequest
-	21, // 29: cladefs.extentd.v1.Extentd.SyncStore:input_type -> cladefs.extentd.v1.SyncStoreRequest
-	23, // 30: cladefs.extentd.v1.Extentd.StatStore:input_type -> cladefs.extentd.v1.StatStoreRequest
-	25, // 31: cladefs.extentd.v1.Extentd.ListStores:input_type -> cladefs.extentd.v1.ListStoresRequest
-	28, // 32: cladefs.extentd.v1.Extentd.GetCounters:input_type -> cladefs.extentd.v1.GetCountersRequest
-	30, // 33: cladefs.extentd.v1.Extentd.GetStats:input_type -> cladefs.extentd.v1.GetStatsRequest
-	36, // 34: cladefs.extentd.v1.Extentd.Grant:input_type -> cladefs.extentd.v1.GrantRequest
-	38, // 35: cladefs.extentd.v1.Extentd.Revoke:input_type -> cladefs.extentd.v1.RevokeRequest
-	40, // 36: cladefs.extentd.v1.Extentd.SetMemoryLimit:input_type -> cladefs.extentd.v1.SetMemoryLimitRequest
-	42, // 37: cladefs.extentd.v1.Extentd.SetMemoryWeight:input_type -> cladefs.extentd.v1.SetMemoryWeightRequest
-	44, // 38: cladefs.extentd.v1.Extentd.SetTenantInFlight:input_type -> cladefs.extentd.v1.SetTenantInFlightRequest
-	46, // 39: cladefs.extentd.v1.Extentd.ShrinkMemory:input_type -> cladefs.extentd.v1.ShrinkMemoryRequest
-	48, // 40: cladefs.extentd.v1.Extentd.SetDiskLimit:input_type -> cladefs.extentd.v1.SetDiskLimitRequest
-	52, // 41: cladefs.extentd.v1.Extentd.GetTenantDisk:input_type -> cladefs.extentd.v1.GetTenantDiskRequest
-	50, // 42: cladefs.extentd.v1.Extentd.SetPeers:input_type -> cladefs.extentd.v1.SetPeersRequest
-	54, // 43: cladefs.extentd.v1.Extentd.ShredCell:input_type -> cladefs.extentd.v1.ShredCellRequest
-	56, // 44: cladefs.extentd.v1.Extentd.ForgetTenantKeys:input_type -> cladefs.extentd.v1.ForgetTenantKeysRequest
-	2,  // 45: cladefs.extentd.v1.Extentd.CreateStore:output_type -> cladefs.extentd.v1.CreateStoreResponse
-	4,  // 46: cladefs.extentd.v1.Extentd.ImportImage:output_type -> cladefs.extentd.v1.ImportImageResponse
-	6,  // 47: cladefs.extentd.v1.Extentd.ForkStore:output_type -> cladefs.extentd.v1.ForkStoreResponse
-	8,  // 48: cladefs.extentd.v1.Extentd.DeleteStore:output_type -> cladefs.extentd.v1.DeleteStoreResponse
-	10, // 49: cladefs.extentd.v1.Extentd.DropStore:output_type -> cladefs.extentd.v1.DropStoreResponse
-	12, // 50: cladefs.extentd.v1.Extentd.ResizeStore:output_type -> cladefs.extentd.v1.ResizeStoreResponse
-	14, // 51: cladefs.extentd.v1.Extentd.PlaceStore:output_type -> cladefs.extentd.v1.PlaceStoreResponse
-	18, // 52: cladefs.extentd.v1.Extentd.MakePublic:output_type -> cladefs.extentd.v1.MakePublicResponse
-	16, // 53: cladefs.extentd.v1.Extentd.SharePoint:output_type -> cladefs.extentd.v1.SharePointResponse
-	20, // 54: cladefs.extentd.v1.Extentd.AttachBase:output_type -> cladefs.extentd.v1.AttachBaseResponse
-	22, // 55: cladefs.extentd.v1.Extentd.SyncStore:output_type -> cladefs.extentd.v1.SyncStoreResponse
-	24, // 56: cladefs.extentd.v1.Extentd.StatStore:output_type -> cladefs.extentd.v1.StatStoreResponse
-	26, // 57: cladefs.extentd.v1.Extentd.ListStores:output_type -> cladefs.extentd.v1.ListStoresResponse
-	29, // 58: cladefs.extentd.v1.Extentd.GetCounters:output_type -> cladefs.extentd.v1.GetCountersResponse
-	31, // 59: cladefs.extentd.v1.Extentd.GetStats:output_type -> cladefs.extentd.v1.GetStatsResponse
-	37, // 60: cladefs.extentd.v1.Extentd.Grant:output_type -> cladefs.extentd.v1.GrantResponse
-	39, // 61: cladefs.extentd.v1.Extentd.Revoke:output_type -> cladefs.extentd.v1.RevokeResponse
-	41, // 62: cladefs.extentd.v1.Extentd.SetMemoryLimit:output_type -> cladefs.extentd.v1.SetMemoryLimitResponse
-	43, // 63: cladefs.extentd.v1.Extentd.SetMemoryWeight:output_type -> cladefs.extentd.v1.SetMemoryWeightResponse
-	45, // 64: cladefs.extentd.v1.Extentd.SetTenantInFlight:output_type -> cladefs.extentd.v1.SetTenantInFlightResponse
-	47, // 65: cladefs.extentd.v1.Extentd.ShrinkMemory:output_type -> cladefs.extentd.v1.ShrinkMemoryResponse
-	49, // 66: cladefs.extentd.v1.Extentd.SetDiskLimit:output_type -> cladefs.extentd.v1.SetDiskLimitResponse
-	53, // 67: cladefs.extentd.v1.Extentd.GetTenantDisk:output_type -> cladefs.extentd.v1.GetTenantDiskResponse
-	51, // 68: cladefs.extentd.v1.Extentd.SetPeers:output_type -> cladefs.extentd.v1.SetPeersResponse
-	55, // 69: cladefs.extentd.v1.Extentd.ShredCell:output_type -> cladefs.extentd.v1.ShredCellResponse
-	57, // 70: cladefs.extentd.v1.Extentd.ForgetTenantKeys:output_type -> cladefs.extentd.v1.ForgetTenantKeysResponse
-	45, // [45:71] is the sub-list for method output_type
-	19, // [19:45] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	66, // 11: cladefs.extentd.v1.GuestStats.counters:type_name -> cladefs.extentd.v1.GuestStats.CountersEntry
+	67, // 12: cladefs.extentd.v1.GuestStats.histograms:type_name -> cladefs.extentd.v1.GuestStats.HistogramsEntry
+	68, // 13: cladefs.extentd.v1.ObjectStorageStats.requests:type_name -> cladefs.extentd.v1.ObjectStorageStats.RequestsEntry
+	69, // 14: cladefs.extentd.v1.ObjectStorageStats.uploaded_bytes:type_name -> cladefs.extentd.v1.ObjectStorageStats.UploadedBytesEntry
+	70, // 15: cladefs.extentd.v1.ObjectStorageStats.failures:type_name -> cladefs.extentd.v1.ObjectStorageStats.FailuresEntry
+	60, // 16: cladefs.extentd.v1.ShredCellResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
+	60, // 17: cladefs.extentd.v1.ForgetTenantKeysResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
+	60, // 18: cladefs.extentd.v1.ShredTenantResponse.forgotten:type_name -> cladefs.extentd.v1.Forgotten
+	34, // 19: cladefs.extentd.v1.GuestStats.HistogramsEntry.value:type_name -> cladefs.extentd.v1.Histogram
+	1,  // 20: cladefs.extentd.v1.Extentd.CreateStore:input_type -> cladefs.extentd.v1.CreateStoreRequest
+	3,  // 21: cladefs.extentd.v1.Extentd.ImportImage:input_type -> cladefs.extentd.v1.ImportImageRequest
+	5,  // 22: cladefs.extentd.v1.Extentd.ForkStore:input_type -> cladefs.extentd.v1.ForkStoreRequest
+	7,  // 23: cladefs.extentd.v1.Extentd.DeleteStore:input_type -> cladefs.extentd.v1.DeleteStoreRequest
+	9,  // 24: cladefs.extentd.v1.Extentd.DropStore:input_type -> cladefs.extentd.v1.DropStoreRequest
+	11, // 25: cladefs.extentd.v1.Extentd.ResizeStore:input_type -> cladefs.extentd.v1.ResizeStoreRequest
+	13, // 26: cladefs.extentd.v1.Extentd.PlaceStore:input_type -> cladefs.extentd.v1.PlaceStoreRequest
+	17, // 27: cladefs.extentd.v1.Extentd.MakePublic:input_type -> cladefs.extentd.v1.MakePublicRequest
+	15, // 28: cladefs.extentd.v1.Extentd.SharePoint:input_type -> cladefs.extentd.v1.SharePointRequest
+	19, // 29: cladefs.extentd.v1.Extentd.AttachBase:input_type -> cladefs.extentd.v1.AttachBaseRequest
+	21, // 30: cladefs.extentd.v1.Extentd.SyncStore:input_type -> cladefs.extentd.v1.SyncStoreRequest
+	23, // 31: cladefs.extentd.v1.Extentd.StatStore:input_type -> cladefs.extentd.v1.StatStoreRequest
+	25, // 32: cladefs.extentd.v1.Extentd.ListStores:input_type -> cladefs.extentd.v1.ListStoresRequest
+	28, // 33: cladefs.extentd.v1.Extentd.GetCounters:input_type -> cladefs.extentd.v1.GetCountersRequest
+	30, // 34: cladefs.extentd.v1.Extentd.GetStats:input_type -> cladefs.extentd.v1.GetStatsRequest
+	36, // 35: cladefs.extentd.v1.Extentd.Grant:input_type -> cladefs.extentd.v1.GrantRequest
+	38, // 36: cladefs.extentd.v1.Extentd.Revoke:input_type -> cladefs.extentd.v1.RevokeRequest
+	40, // 37: cladefs.extentd.v1.Extentd.SetMemoryLimit:input_type -> cladefs.extentd.v1.SetMemoryLimitRequest
+	42, // 38: cladefs.extentd.v1.Extentd.SetMemoryWeight:input_type -> cladefs.extentd.v1.SetMemoryWeightRequest
+	44, // 39: cladefs.extentd.v1.Extentd.SetTenantInFlight:input_type -> cladefs.extentd.v1.SetTenantInFlightRequest
+	46, // 40: cladefs.extentd.v1.Extentd.ShrinkMemory:input_type -> cladefs.extentd.v1.ShrinkMemoryRequest
+	48, // 41: cladefs.extentd.v1.Extentd.SetDiskLimit:input_type -> cladefs.extentd.v1.SetDiskLimitRequest
+	52, // 42: cladefs.extentd.v1.Extentd.GetTenantDisk:input_type -> cladefs.extentd.v1.GetTenantDiskRequest
+	50, // 43: cladefs.extentd.v1.Extentd.SetPeers:input_type -> cladefs.extentd.v1.SetPeersRequest
+	54, // 44: cladefs.extentd.v1.Extentd.ShredCell:input_type -> cladefs.extentd.v1.ShredCellRequest
+	56, // 45: cladefs.extentd.v1.Extentd.ForgetTenantKeys:input_type -> cladefs.extentd.v1.ForgetTenantKeysRequest
+	58, // 46: cladefs.extentd.v1.Extentd.ShredTenant:input_type -> cladefs.extentd.v1.ShredTenantRequest
+	2,  // 47: cladefs.extentd.v1.Extentd.CreateStore:output_type -> cladefs.extentd.v1.CreateStoreResponse
+	4,  // 48: cladefs.extentd.v1.Extentd.ImportImage:output_type -> cladefs.extentd.v1.ImportImageResponse
+	6,  // 49: cladefs.extentd.v1.Extentd.ForkStore:output_type -> cladefs.extentd.v1.ForkStoreResponse
+	8,  // 50: cladefs.extentd.v1.Extentd.DeleteStore:output_type -> cladefs.extentd.v1.DeleteStoreResponse
+	10, // 51: cladefs.extentd.v1.Extentd.DropStore:output_type -> cladefs.extentd.v1.DropStoreResponse
+	12, // 52: cladefs.extentd.v1.Extentd.ResizeStore:output_type -> cladefs.extentd.v1.ResizeStoreResponse
+	14, // 53: cladefs.extentd.v1.Extentd.PlaceStore:output_type -> cladefs.extentd.v1.PlaceStoreResponse
+	18, // 54: cladefs.extentd.v1.Extentd.MakePublic:output_type -> cladefs.extentd.v1.MakePublicResponse
+	16, // 55: cladefs.extentd.v1.Extentd.SharePoint:output_type -> cladefs.extentd.v1.SharePointResponse
+	20, // 56: cladefs.extentd.v1.Extentd.AttachBase:output_type -> cladefs.extentd.v1.AttachBaseResponse
+	22, // 57: cladefs.extentd.v1.Extentd.SyncStore:output_type -> cladefs.extentd.v1.SyncStoreResponse
+	24, // 58: cladefs.extentd.v1.Extentd.StatStore:output_type -> cladefs.extentd.v1.StatStoreResponse
+	26, // 59: cladefs.extentd.v1.Extentd.ListStores:output_type -> cladefs.extentd.v1.ListStoresResponse
+	29, // 60: cladefs.extentd.v1.Extentd.GetCounters:output_type -> cladefs.extentd.v1.GetCountersResponse
+	31, // 61: cladefs.extentd.v1.Extentd.GetStats:output_type -> cladefs.extentd.v1.GetStatsResponse
+	37, // 62: cladefs.extentd.v1.Extentd.Grant:output_type -> cladefs.extentd.v1.GrantResponse
+	39, // 63: cladefs.extentd.v1.Extentd.Revoke:output_type -> cladefs.extentd.v1.RevokeResponse
+	41, // 64: cladefs.extentd.v1.Extentd.SetMemoryLimit:output_type -> cladefs.extentd.v1.SetMemoryLimitResponse
+	43, // 65: cladefs.extentd.v1.Extentd.SetMemoryWeight:output_type -> cladefs.extentd.v1.SetMemoryWeightResponse
+	45, // 66: cladefs.extentd.v1.Extentd.SetTenantInFlight:output_type -> cladefs.extentd.v1.SetTenantInFlightResponse
+	47, // 67: cladefs.extentd.v1.Extentd.ShrinkMemory:output_type -> cladefs.extentd.v1.ShrinkMemoryResponse
+	49, // 68: cladefs.extentd.v1.Extentd.SetDiskLimit:output_type -> cladefs.extentd.v1.SetDiskLimitResponse
+	53, // 69: cladefs.extentd.v1.Extentd.GetTenantDisk:output_type -> cladefs.extentd.v1.GetTenantDiskResponse
+	51, // 70: cladefs.extentd.v1.Extentd.SetPeers:output_type -> cladefs.extentd.v1.SetPeersResponse
+	55, // 71: cladefs.extentd.v1.Extentd.ShredCell:output_type -> cladefs.extentd.v1.ShredCellResponse
+	57, // 72: cladefs.extentd.v1.Extentd.ForgetTenantKeys:output_type -> cladefs.extentd.v1.ForgetTenantKeysResponse
+	59, // 73: cladefs.extentd.v1.Extentd.ShredTenant:output_type -> cladefs.extentd.v1.ShredTenantResponse
+	47, // [47:74] is the sub-list for method output_type
+	20, // [20:47] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_cladefs_extentd_v1_extentd_proto_init() }
@@ -4108,7 +4220,7 @@ func file_cladefs_extentd_v1_extentd_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_cladefs_extentd_v1_extentd_proto_rawDesc), len(file_cladefs_extentd_v1_extentd_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   68,
+			NumMessages:   70,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

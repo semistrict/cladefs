@@ -61,7 +61,7 @@ fn create<D: Dir>(dir: D, capacity: u64) -> Store<D> {
 fn opened_on(dir: MemDir, state: extent_bucket::State, chain: Chain) -> Store<MemDir> {
     let head = extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
     let taken = extent_bucket::TakenBranch::of(head, &state, chain);
-    let keys = extent_bucket::keys::Ring::clear();
+    let keys = extent_bucket::testing::ring([BRANCH]);
     let opening = Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
     Store::recover_unmade(dir).unwrap().open(OPTIONS, opening).unwrap()
 }
@@ -307,7 +307,11 @@ fn segments_close_framed_by_the_commits_flush() {
     assert_eq!(reads().collect::<Vec<_>>(), written);
     let closed = store.closed(usize::MAX).unwrap();
     let [segment] = &closed[..] else { panic!("{} segments closed", closed.len()) };
-    let data = extent_frame::data(&segment.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
+    let data = extent_frame::data(
+        &segment.bytes().unwrap(),
+        &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+    )
+    .unwrap();
     assert_eq!(&data[..BLOCK], &pattern(0, 0, BLOCK)[..]);
 }
 
@@ -366,10 +370,15 @@ fn the_write_ahead_log_keeps_freed_data_until_acknowledged() {
     error_is(store.read(extent(17), 0, &mut [0; BLOCK]), NoExtent(extent(17)));
     let [(_, own_bytes)] = &writing.own_bytes().unwrap()[..] else { panic!("no extent's own") };
     assert_eq!(
-        extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap(),
+        extent_frame::data(own_bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+            .unwrap(),
         pattern(17, 0, 32 << 10)
     );
-    let data = extent_frame::data(&writing.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
+    let data = extent_frame::data(
+        &writing.bytes().unwrap(),
+        &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+    )
+    .unwrap();
     assert_eq!(&data[2 * BLOCK..3 * BLOCK], &pattern(3, 0, BLOCK)[..]);
     store.commit(None).unwrap();
     assert_eq!(dir.list(&of("extents", BRANCH.id)).unwrap().len(), 1);
@@ -623,7 +632,8 @@ fn closed_segments_hold_the_branchs_history() {
     let file = dir.open(&format!("{}/{number:016x}", of("segments", BRANCH.id)), true).unwrap();
     let mut bytes = vec![0; extent_store::File::size(&file).unwrap() as usize];
     extent_store::File::read_at(&file, &mut bytes, 0).unwrap();
-    let data = extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap();
+    let data =
+        extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id)).unwrap();
     assert_eq!(data[offset as usize..][..BLOCK], pattern(40, 0, BLOCK));
 
     // Old.
@@ -1025,12 +1035,17 @@ fn segments_close_for_the_writer_of_their_chain() {
         Footer::decode(extent_frame::footer(&bytes, &extent_frame::NoKeys).unwrap()).unwrap();
     assert_eq!(footer, first.footer);
     assert_eq!(
-        extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()[..BLOCK],
+        extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id)).unwrap()
+            [..BLOCK],
         pattern(1, 0, BLOCK)
     );
     let [(key, own_bytes)] = &first.own_bytes().unwrap()[..] else { panic!("no extent's own") };
     assert_eq!(
-        (key, extent_frame::data(own_bytes, &extent_frame::NoKeys).unwrap()),
+        (
+            key,
+            extent_frame::data(own_bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+                .unwrap()
+        ),
         (&own.key, pattern(2, 0, 32 << 10))
     );
 
@@ -1185,8 +1200,8 @@ fn framings_write_back_as_they_go() {
     let framed = dir.open(&format!("{}/{:016x}", of("segments", BRANCH.id), 0), true).unwrap();
     let size = framed.size().unwrap();
     assert!((10 << 20..16 << 20).contains(&size), "a copy of 24 MiB, half zeros: {size} bytes");
-    // A commit's sync: its 16 extents of 16 KiB, and its record.
-    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 611);
+    // A commit's sync: its 16 extents of 16 KiB, and its record, MACed (TASK-411.5).
+    assert_eq!(dir.io().most_synced_unwritten, (256 << 10) + 611 + 32);
     for sequence in 1..=1536 {
         assert_eq!(read(&store, extent(sequence), 0, len), data(sequence));
     }
@@ -1339,7 +1354,7 @@ fn incompressible_large_extents_are_framed_in_place() {
     store.commit(None).unwrap();
     // cladefs: its footer names it (TASK-411.3).
     let footer = extent_bucket::layout::encode(&extent(1));
-    let framed = extent_frame::framed(&data, &footer, None);
+    let framed = extent_frame::framed(&data, &footer, extent_bucket::testing::encrypting(BRANCH));
     assert_eq!(own_written_since(before), framed.len() - data.len());
     let name = format!("{:016x}", 1);
     assert_eq!(names(&dir, "open-extents"), Vec::<String>::new());
@@ -1580,12 +1595,23 @@ fn segments_framed_in_copies_take_their_parts_held() {
     let (evicted_bytes, evicted_read_back, _, evicted_after) = framed(true, MemDir::serial());
     assert_eq!(evicted_read_back, 6 * MIB as u64 + BLOCK as u64, "every part read back");
     assert_eq!((evicted_after.evicted_parts, evicted_after.taken), (6, 0));
-    assert!(bytes == evicted_bytes, "framed otherwise, held or not");
+    // Each framing encrypted under a salt of its own (TASK-411.28): alike once opened.
+    let opened = |bytes: &[u8]| {
+        let keys = extent_bucket::testing::ring([BRANCH]);
+        let keys = keys.of(BRANCH.id);
+        let parts = extent_frame::Parts::of(bytes, &keys).unwrap();
+        let stored: Vec<_> = parts.stored.iter().map(|part| (part.encoding, part.len)).collect();
+        (stored, extent_frame::data(bytes, &keys).unwrap())
+    };
+    assert!(opened(&bytes) == opened(&evicted_bytes), "framed otherwise, held or not");
     // A directory whose I/O runs on the store's threads: its parts packed ahead on threads of
     // their own, at the host's lowest priority, held as they are packed, or read and packed by the
     // framing, if not yet: framed alike whichever.
     let (concurrent_bytes, _, _, concurrent_after) = framed(false, MemDir::new());
-    assert!(bytes == concurrent_bytes, "framed otherwise, packed ahead on threads");
+    assert!(
+        opened(&bytes) == opened(&concurrent_bytes),
+        "framed otherwise, packed ahead on threads"
+    );
     assert_eq!(concurrent_after.bytes, 0, "{concurrent_after:?}");
 }
 
@@ -1644,7 +1670,8 @@ fn compressible_large_extents_are_framed_in_copies() {
         let before = extent_store::written();
         store.commit(None).unwrap();
         let footer = extent_bucket::layout::encode(&extent(sequence));
-        let framed = extent_frame::framed(data, &footer, None);
+        let framed =
+            extent_frame::framed(data, &footer, extent_bucket::testing::encrypting(BRANCH));
         assert!(framed.len() < data.len() + framed.len() / 2, "extent {sequence} compresses");
         assert_eq!(own_written_since(before), framed.len(), "extent {sequence}");
     }
@@ -2334,7 +2361,8 @@ fn segment_data(dir: &MemDir) -> Vec<u64> {
             let mut bytes = vec![0; file.size().unwrap() as usize];
             file.read_at(&mut bytes, 0).unwrap();
             let data = if kind == "segments" {
-                extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap()
+                extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+                    .unwrap()
             } else {
                 bytes
             };
@@ -2554,7 +2582,11 @@ fn rewrites_take_no_segment_past_a_segment_and_an_extent() {
     assert_eq!(segment_files(&store, &dir, "open-segments"), ["0000000000000004"]);
     assert_eq!(dir.list(&of("segments", BRANCH.id)).unwrap(), segments);
     for closed in store.closed(usize::MAX).unwrap() {
-        let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys).unwrap();
+        let data = extent_frame::data(
+            &closed.bytes().unwrap(),
+            &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+        )
+        .unwrap();
         assert_eq!(data.len(), 0, "segment {}, no extent's data in it, framed", closed.number);
     }
     let store = reopened(store, &dir);
@@ -3448,7 +3480,12 @@ fn extents_larger_than_a_framing_chunk_seal_whole() {
     let file = dir.open(&format!("{}/{:016x}", of("extents", BRANCH.id), 1), true).unwrap();
     let mut framed = vec![0; file.size().unwrap() as usize];
     file.read_at(&mut framed, 0).unwrap();
-    assert_eq!(extent_frame::data(&framed, &extent_frame::NoKeys).unwrap().len(), data.len());
+    assert_eq!(
+        extent_frame::data(&framed, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+            .unwrap()
+            .len(),
+        data.len()
+    );
     drop(store);
     let store = Store::open(dir, OPTIONS).unwrap();
     assert!(read(&store, extent(1), 0, data.len()) == data, "the extent reads other data");
@@ -3513,8 +3550,12 @@ fn writes_to_segments_are_whole_sectors() {
         store.place(extent(1)).unwrap(),
         Some(Place::Run { branch: BRANCH.id, number: 0, offset: 0 })
     );
-    // Large, in a file of its own: not a segment's.
-    let large = OPTIONS.large_extent as usize + 512;
+    // Large, in a file of its own: not a segment's; whole sectors too, as its raw file, encrypted, takes
+    // them alone (TASK-411.5).
+    let large = OPTIONS.large_extent as usize + BLOCK;
+    let unsectored = store.write(extent(2), 0, &vec![2; large + 512]).expect_err("succeeded");
+    let at = Unsectored { offset: 0, len: large as u64 + 512 };
+    assert_eq!(unsectored.downcast_ref::<Unsectored>().copied(), Some(at));
     store.write(extent(2), 0, &vec![2; large]).unwrap();
     store.commit(None).unwrap();
     assert_eq!(store.place(extent(2)).unwrap(), Some(Place::Own));

@@ -745,7 +745,7 @@ impl CachedExtent {
                 let pages = self.pages.with(Mutex::lock);
                 if let Some(Slot::Present(frame)) = pages.slots.get(page as usize) {
                     // SAFETY: The page is the extent's, in memory while its lock is held, and
-                    // sealed: only read.
+                    // encrypted: only read.
                     let memory = unsafe { std::slice::from_raw_parts(frame.as_ptr(), ps as usize) };
                     bytes[done..done + len].copy_from_slice(&memory[within..within + len]);
                     done += len;

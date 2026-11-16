@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-16 06:41'
+updated_date: '2026-11-16 14:34'
 labels:
   - perf
 dependencies: []
@@ -34,3 +35,9 @@ TASK-449 cut a restore (a fork of a point and its child's first open) to 7 reque
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Measured (TASK-411.28's merge with TASK-449, restores_ask_the_bucket_what_the_protocol_needs, which now pins the encrypted restore every restore is): point-open 7 requests in 6 round trips (the point's cell, the base's record and cell read for the keys), fork 7 in 6 (give_inherited after the record: the cell created with a pooled KEK, the record read and updated with its DEKs), fork-open 7 in 7 (the cell read twice, the base's record twice: TASK-460). A restore 14 requests in 13 round trips against a clear one's 8 in 6. TASK-449's clear-cell path for KMS-less hosts is gone: every host has a KMS.
+<!-- SECTION:NOTES:END -->

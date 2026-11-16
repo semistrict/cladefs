@@ -31,7 +31,7 @@ tokio.workspace = true
 # take effect when it says, and the protocol's rules, which it turns off.
 extent_bucket = { workspace = true, features = ["testing"] }
 # Its own tests audit the store's counts (the `audit` feature).
-extent_store = { path = ".", features = ["audit"] }
+extent_store = { path = ".", features = ["audit", "unkept"] }
 # And set its failpoints (TASK-189).
 fail = { version = "0.5.1", features = ["failpoints"] }
 object_store.workspace = true
@@ -55,3 +55,7 @@ audit = []
 # cladefs: tests' panics holding a lock shared beyond one store (shared::testing, TASK-149.24): cladefs's
 # tests have it.
 testing = []
+# cladefs: stores kept in no bucket, encrypted under a DEK of the tests' (`Store::create`, `Store::open`,
+# `Opening::new`, `UNKEPT_DEK`, TASK-411.28): for tests, benches and simulations, as every store is
+# encrypted and one kept nowhere has no record to keep its DEK in. Never a host's.
+unkept = []

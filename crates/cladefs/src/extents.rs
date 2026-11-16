@@ -2547,9 +2547,9 @@ mod tests {
     /// the test's process's): its cell made encrypted, its branch given a DEK, and no byte of what
     /// it wrote in its bucket; read back, by a follower, and opened again. TASK-411.4: its fork into
     /// a new cell keeps the DEK it inherits rewrapped under its own cell's KEK, and reads what it
-    /// inherits; the store, the default tenant's, forks into no cell of a tenant with no KEK, in
-    /// the clear (`ENOTSUP`), nothing made. A store of a tenant with no KEK there is in the clear,
-    /// forking as before.
+    /// inherits. TASK-411.28: a tenant with no KEK there gets no store, refused as destroyed
+    /// (`EACCES`), and the store, the common tenant's, forks into no cell of its (`EACCES`), nothing
+    /// made.
     #[test]
     fn encrypted_stores_serve_follow_reopen_and_fork_into_encrypted_cells_alone() {
         let keys = tempfile::tempdir().unwrap();
@@ -2604,15 +2604,12 @@ mod tests {
         assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
         assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data));
 
-        let clear =
-            ExtentStore::create_in(dir.path().join("clear"), 1 << 20, host_store::new_cell(6));
-        let clear = clear.unwrap();
-        assert!(clear.store.keys().is_empty());
-        write(&clear, id(&clear, 1), 0, &pattern(1, BLOCK)).unwrap();
-        clear.commit(None).unwrap();
-        clear.fork_to(dir.path().join("forked"), host_store::fork_child(clear.branch())).unwrap();
-        let forked = ExtentStore::open(dir.path().join("forked")).unwrap();
-        assert_eq!(read(&forked, id(&clear, 1), 0, BLOCK), Ok(pattern(1, BLOCK)));
+        // A store of a tenant with no KEK there: none, its cell refused, as destroyed.
+        let none =
+            ExtentStore::create_in(dir.path().join("none"), 1 << 20, host_store::new_cell(6));
+        let refused = none.err().expect("a store of a tenant with no KEK");
+        assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
+        assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
         // The default tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
@@ -2627,12 +2624,67 @@ mod tests {
         common.commit(None).unwrap();
         let into =
             crate::Branch { cell: host_store::new_cell(6), id: rand::random::<u64>().max(1) };
-        let refused = common.fork_to(dir.path().join("into-clear"), into).unwrap_err();
-        assert_eq!(refused.errno(), Some(Errno::ENOTSUP), "{refused:#}");
-        assert!(!dir.path().join("into-clear").exists());
+        let refused = common.fork_to(dir.path().join("into-none"), into).unwrap_err();
+        assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
+        assert!(!dir.path().join("into-none").exists());
         let found =
             extent_store::upload::block_on(extent_bucket::branch::record(&**common.bucket(), into));
         assert_eq!(found.unwrap().unwrap(), None);
+    }
+
+    /// TASK-411.18: a store of a tenant whose KEK is a key in Google Cloud KMS, `CLADEFS_KMS` naming
+    /// it as a host is configured (`gcp-kms://...`): its cell made encrypted, its KEK wrapped by the
+    /// tenant's key, which unwraps it to the KEK its branch's DEK is wrapped under; written, read
+    /// back, opened again and forked into an encrypted cell. Skipped, saying why, without an access
+    /// token (`extent_keys::testing::gcp`).
+    #[test]
+    fn encrypted_stores_open_through_google_cloud_kms() {
+        let test = "encrypted_stores_open_through_google_cloud_kms";
+        let Some(admin) = extent_keys::testing::gcp::Admin::from_env(test) else { return };
+        let url = admin.url("fxdax-test-{tenant}", None);
+        extent_store::upload::block_on(admin.key("fxdax-test-5")).unwrap();
+        // SAFETY: nextest runs each test in a process of its own, this one's other threads not
+        // reading the environment yet.
+        unsafe { std::env::set_var("CLADEFS_KMS", &url) };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store");
+        let store = ExtentStore::create_in(&path, 1 << 20, host_store::new_cell(5)).unwrap();
+        let dek = *store.store.keys().encrypting().0.expose();
+        let a = id(&store, 1);
+        let data = crate::test_data::noise(1, 2 * BLOCK);
+        write(&store, a, 0, &data).unwrap();
+        store.commit(Some(b"root")).unwrap();
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
+
+        let branch = store.branch();
+        let bucket = store.bucket().clone();
+        let cell = extent_store::upload::block_on(extent_bucket::cell::read(&*bucket, branch.cell));
+        let cell = cell.unwrap().unwrap().unwrap();
+        let [kek] = &cell.keks[..] else { panic!("{:?}", cell.keks) };
+        assert!(kek.wrapped.0.starts_with(b"fxkr\x01\x07gcp-kms"), "{:?}", kek.wrapped);
+        let kms = extent_keys::kms::from_url(&url).unwrap();
+        let unwrapped = extent_store::upload::block_on(kms.unwrap_dyn(5, &kek.wrapped)).unwrap();
+        let unwrapped = unwrapped.unwrap();
+        let record =
+            extent_store::upload::block_on(extent_bucket::branch::record(&*bucket, branch));
+        let record = record.unwrap().unwrap().unwrap();
+        let wrapped_dek = extent_bucket::keys::unwrap_dek(&unwrapped, branch, &record.deks[0]);
+        assert_eq!(wrapped_dek.unwrap().expose(), &dek);
+        let other = extent_store::upload::block_on(kms.unwrap_dyn(6, &kek.wrapped)).unwrap();
+        assert_eq!(
+            other.map(drop).unwrap_err().to_string(),
+            "tenant 6: not authentic: a wrapped key, wrapped under another key"
+        );
+
+        drop(store);
+        let store = ExtentStore::open(&path).unwrap();
+        assert_eq!((store.branch(), store.root()), (branch, Ok(b"root".to_vec())));
+        assert_eq!(read(&store, a, 0, 2 * BLOCK), Ok(data.clone()));
+        let child = host_store::fork_child(store.branch());
+        store.fork_to(dir.path().join("fork"), child).unwrap();
+        let fork = ExtentStore::open(dir.path().join("fork")).unwrap();
+        assert!(!fork.store.keys().is_empty());
+        assert_eq!(read(&fork, a, 0, 2 * BLOCK), Ok(data));
     }
 
     /// Reads of sealed extents come from the extent cache (TASK-32): a fork reading what its base

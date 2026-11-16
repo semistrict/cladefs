@@ -41,11 +41,15 @@
 //! Each cell is written by a writer of its own into memory, then copied into DIR, its files
 //! written without `fsync` (the measurement's bucket, not data to keep), many cells at once, one
 //! a thread; a sandbox's memory starting from its base's and its point's objects, which it reads.
+//! Encrypted, as every cell is (TASK-411.28): under the host's KMS, as every cladefs process chooses
+//! it (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, or the bucket KMS over DIR given
+//! `CLADEFS_MASTER_KEY`), which the collector compacts it under; none chosen, it refuses to start.
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
 use extent_bucket::batch::{Commit, SegmentBuilder};
 use extent_bucket::bucket::Bucket as _;
+use extent_bucket::keys::{self, CachingKms};
 use extent_bucket::layout::{Branch, Cell, Child, Origin};
 use extent_bucket::object_bucket::ObjectBucket;
 use extent_bucket::objectid::Allocator;
@@ -189,7 +193,8 @@ struct Filled {
 }
 
 fn main() -> Result<(), String> {
-    let filled = run(&parse(std::env::args().skip(1))?)?;
+    let args = parse(std::env::args().skip(1))?;
+    let filled = run(&args, &host_kms(&args.dir)?)?;
     println!(
         "cells {} objects {} bytes {} largest-objects {} largest-bytes {}",
         filled.cells,
@@ -201,8 +206,19 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// Fills `args`' directory, made if missing and empty, as `args` say.
-fn run(args: &Args) -> Result<Filled, String> {
+/// The host's KMS, as every cladefs process chooses it ([`extent_bucket::bucket_kms::from_env`]):
+/// the bucket KMS's over `dir`, made if missing, given master keys.
+fn host_kms(dir: &std::path::Path) -> Result<Arc<CachingKms>, String> {
+    std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
+    let dir = dir.canonicalize().map_err(|err| format!("{}: {err}", dir.display()))?;
+    let url = format!("file://{}/", dir.display());
+    let kms = extent_bucket::bucket_kms::from_env(|| Ok(Arc::new(ObjectBucket::from_url(&url)?)))?;
+    Ok(CachingKms::new(kms.shared()))
+}
+
+/// Fills `args`' directory, made if missing and empty, as `args` say, encrypting its cells under
+/// `kms`.
+fn run(args: &Args, kms: &Arc<CachingKms>) -> Result<Filled, String> {
     let &Args { tenants, cells, segments, largest, kind, .. } = args;
     let dir = &args.dir;
     std::fs::create_dir_all(dir).map_err(|err| format!("{}: {err}", dir.display()))?;
@@ -218,7 +234,7 @@ fn run(args: &Args) -> Result<Filled, String> {
         let base = Shape::Vm { segments: largest, extents, points: 1, first: 2 };
         for tenant in 1..=tenants {
             let cell = Cell { tenant, id: 1 };
-            let (sum, point) = futures::executor::block_on(fill_base(&files, cell, base))
+            let (sum, point) = futures::executor::block_on(fill_base(&files, kms, cell, base))
                 .map_err(|err| format!("cell {cell}: {err}"))?;
             filled.cells += 2;
             filled.total += sum;
@@ -261,8 +277,9 @@ fn run(args: &Args) -> Result<Filled, String> {
                     while let Some(&(cell, shape, of)) =
                         shapes.get(next.fetch_add(1, Ordering::Relaxed))
                     {
-                        let sum = futures::executor::block_on(fill(&files, cell, shape, of, &ids))
-                            .map_err(|err| format!("cell {cell}: {err}"))?;
+                        let sum =
+                            futures::executor::block_on(fill(&files, kms, cell, shape, of, &ids))
+                                .map_err(|err| format!("cell {cell}: {err}"))?;
                         sums.push((cell, sum));
                     }
                     Ok(sums)
@@ -300,12 +317,13 @@ struct Written {
 /// into memory, then into `files`: what it took, `of`'s own objects apart.
 async fn fill(
     files: &LocalFileSystem,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
     ids: &Allocator,
 ) -> Result<Sum, String> {
-    let written = write(cell, shape, of, ids).await?;
+    let written = write(kms, cell, shape, of, ids).await?;
     Ok(copy(&written.bucket, files, of).await?.0)
 }
 
@@ -313,10 +331,11 @@ async fn fill(
 /// `files`: what it took, and its point, for its clones.
 async fn fill_base(
     files: &LocalFileSystem,
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
 ) -> Result<(Sum, Point), String> {
-    let written = write(cell, shape, None, &Allocator::new()).await?;
+    let written = write(kms, cell, shape, None, &Allocator::new()).await?;
     let (branch, origin) = written.point.ok_or("a base forked to no point")?;
     let (sum, objects) = copy(&written.bucket, files, None).await?;
     Ok((sum, Point { branch, origin, objects }))
@@ -326,6 +345,7 @@ async fn fill_base(
 /// one starting from `of`'s objects, the branch a clone of that point, if given.
 /// Its branch's ID, but a VM's or a base's, 1, given by `ids`.
 async fn write(
+    kms: &Arc<CachingKms>,
     cell: Cell,
     shape: Shape,
     of: Option<&Point>,
@@ -341,7 +361,7 @@ async fn write(
     }
     let bucket = Arc::new(ObjectBucket::new(memory, ""));
     let failed = |err: extent_bucket::Error| err.to_string();
-    cell::create(&*bucket, cell, WRITER, None).await.map_err(failed)?;
+    make_cell(&bucket, kms, cell).await.map_err(failed)?;
     let id = match shape {
         Shape::Vm { .. } => Branch { cell, id: 1 },
         Shape::Garbage { .. } => Branch { cell, id: ids.next(&*bucket).await },
@@ -352,7 +372,7 @@ async fn write(
             .await
             .map_err(failed)?,
     }
-    let writer = Writer::open(bucket.clone(), id, WRITER.0, WRITER.1).await.map_err(failed)?;
+    let writer = Writer::open_under(bucket.clone(), id, WRITER, kms).await.map_err(failed)?;
     let (segments, per_segment) = match shape {
         Shape::Garbage { segments, .. } => (segments, EXTENTS),
         Shape::Vm { segments, extents, .. } => (segments, extents),
@@ -387,12 +407,13 @@ async fn write(
         let point = point_at(shape, cell.tenant, n);
         let closed = match point {
             Some(point) => {
-                cell::create(&*bucket, point.cell, WRITER, None).await.map_err(failed)?;
+                make_cell(&bucket, kms, point.cell).await.map_err(failed)?;
                 batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
             }
             None => batch.close(&mut writer.chain()),
         };
-        let segment = writer.add_segment(closed.frame()).map_err(failed)?;
+        let segment =
+            writer.add_segment(closed.frame(writer.keys().encrypting())).map_err(failed)?;
         writer.upload(segment).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
         if let Some(point) = point {
@@ -403,10 +424,21 @@ async fn write(
     drop(writer);
     if let Shape::Garbage { deleted: true, .. } = shape {
         // As a host deletes a branch (`extent_store::upload::delete_branch`).
-        branch::delete(&*bucket, id, DELETER, WRITER.1).await.map_err(failed)?;
+        branch::delete(&*bucket, id, DELETER, WRITER.1, kms).await.map_err(failed)?;
         cell::forget(&*bucket, cell, id.id).await.map_err(failed)?;
     }
     Ok(Written { bucket, point: forked })
+}
+
+/// Makes `cell` in `bucket` with a KEK of `kms`, the host's: its branch's record is given its DEK
+/// by its writer.
+async fn make_cell(
+    bucket: &ObjectBucket,
+    kms: &Arc<CachingKms>,
+    cell: Cell,
+) -> Result<(), extent_bucket::Error> {
+    let (_, kek) = keys::new_cell_kek(kms, cell.tenant).await?;
+    cell::create(bucket, cell, WRITER, kek).await.map(drop)
 }
 
 /// Copies every object of `bucket`, one in memory, into `files`, but those of `but`, which the
@@ -500,6 +532,16 @@ mod tests {
         }
     }
 
+    /// The tests' KMS (`extent_keys::testing::KnownKms`), whose KEKs every test and sweep shares.
+    fn known() -> extent_keys::kms::Shared {
+        Arc::new(extent_keys::testing::KnownKms)
+    }
+
+    /// A host's KMS over the tests' ([`known`]).
+    fn kms() -> Arc<CachingKms> {
+        CachingKms::new(known())
+    }
+
     /// A sweep of every cell of `bucket`, a pass at a time, deleting what is free at once.
     fn sweep(bucket: &Arc<ObjectBucket>) -> Swept {
         let sweep = Sweep {
@@ -509,7 +551,7 @@ mod tests {
             lease: 600_000,
             slowest: 0,
             spawned: false,
-            kms: None,
+            kms: Some(known()),
         };
         futures::executor::block_on(sweep.run(bucket, |_| {}))
     }
@@ -542,7 +584,7 @@ mod tests {
         // Roots, deleted: each removed by its first pass; the sweeps after list no tenant.
         let deleted =
             Args { dir: directory.path().join("deleted"), ..args([1, 3, 2, 2], Kind::Deleted) };
-        assert_eq!(run(&deleted).unwrap().cells, 3);
+        assert_eq!(run(&deleted, &kms()).unwrap().cells, 3);
         let bucket = Arc::new(ObjectBucket::from_url(&url(&deleted.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
         assert_eq!(swept.each_ref().map(|swept| swept.report.removed), [3, 0, 0]);
@@ -556,7 +598,7 @@ mod tests {
             dir: directory.path().join("clones"),
             ..args([1, 3, 2, 2], Kind::Clones { extents: 4 })
         };
-        let filled = run(&clones).unwrap();
+        let filled = run(&clones, &kms()).unwrap();
         assert_eq!(filled.cells, 5);
         let bucket = Arc::new(ObjectBucket::from_url(&url(&clones.dir)).unwrap());
         let swept = [sweep(&bucket), sweep(&bucket), sweep(&bucket)];
@@ -590,8 +632,14 @@ mod tests {
         let sandbox = Shape::Garbage { segments: 2, deleted: true };
         let cell = Cell { tenant: 1, id: 6 };
         let ids = Allocator::new();
-        let sum =
-            futures::executor::block_on(fill(&files, cell, sandbox, Some(&filled.points[0]), &ids));
+        let sum = futures::executor::block_on(fill(
+            &files,
+            &kms(),
+            cell,
+            sandbox,
+            Some(&filled.points[0]),
+            &ids,
+        ));
         // Its cell's object, its record, its head, two segments, a checkpoint, its reference, and
         // the block of IDs its allocator took.
         assert_eq!(sum.unwrap().objects, 8);

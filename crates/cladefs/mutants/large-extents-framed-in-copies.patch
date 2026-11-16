@@ -6,14 +6,14 @@
 # Killer: bucket::write_budgets::a_hosts_store_writes_what_its_design_says
 --- a/crates/extent_store/src/store.rs
 +++ b/crates/extent_store/src/store.rs
-@@ -2111,10 +2111,6 @@ impl<D: Dir> Store<D> {
-             raw.read_cached(buf, at)?;
+@@ -2267,10 +2267,6 @@
+             }
              let end = packer.end();
              let packed = packer.push(buf);
 -            // As they are, where they are, as those before.
--            if framed.is_none() && end == at && clear.is_some() && packed[..] == buf[..] {
+-            if framed.is_none() && in_place && packer.stored_raw() {
 -                continue;
 -            }
              let file = match &mut framed {
                  Some(file) => file,
-                 None => {
+                 // Its raw parts before are no parts of a copy's, encrypted with AES-GCM: framed anew,

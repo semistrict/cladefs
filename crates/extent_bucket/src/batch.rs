@@ -178,15 +178,20 @@ pub type Read = Arc<dyn Fn(ExtentId, &mut [u8]) -> std::io::Result<()> + Send + 
 
 /// The objects of the segment `footer` stamps, a plan's ([`Plan::close`]), and of the extents it
 /// says are stored on their own, by their keys: each read, its extents' data by `read`, and
-/// framed, only as it uploads.
-pub fn objects(footer: Footer, read: Read) -> Objects {
+/// framed, only as it uploads. cladefs: encrypted under `encrypting`, the writer's DEK and which it is
+/// (TASK-411.3).
+pub fn objects(
+    footer: Footer,
+    read: Read,
+    (dek, id): (Arc<extent_frame::Secret>, extent_frame::KeyId),
+) -> Objects {
     let own = (footer.own())
         .map(|(extent, location)| {
-            let (len, read) = (location.len, read.clone());
+            let (len, read, dek) = (location.len, read.clone(), dek.clone());
             let body = Body::new(len, move || {
                 let mut data = vec![0; len as usize];
                 read(extent, &mut data)?;
-                Ok(layout::own_extent(extent, &data, None))
+                Ok(layout::own_extent(extent, &data, (&dek, id)))
             });
             (location.key.clone(), body)
         })
@@ -199,7 +204,7 @@ pub fn objects(footer: Footer, read: Read) -> Objects {
         for &(extent, offset, len) in &framed.contents.extents {
             read(extent, &mut data[offset as usize..(offset + len) as usize])?;
         }
-        Ok(Segment { data, footer: framed.clone() }.encode())
+        Ok(Segment { data, footer: framed.clone() }.encode((&dek, id)))
     });
     Objects { footer, segment, own }
 }
@@ -280,14 +285,10 @@ pub struct Unframed {
 }
 
 impl Unframed {
-    /// Its objects, framed: the segment's, and its extents of their own's, at their keys.
-    pub fn frame(self) -> Objects {
-        self.frame_under(None)
-    }
-
-    /// cladefs: its objects, framed, encrypted as `encryption` says (TASK-411.3).
-    pub fn frame_under(self, encryption: layout::EncryptionKey<'_>) -> Objects {
-        self.data.frame_under(&self.footer, encryption)
+    /// Its objects, framed: the segment's, and its extents of their own's, at their keys. cladefs:
+    /// encrypted as `encrypting` says, its writer's DEK (TASK-411.3).
+    pub fn frame(self, encrypting: layout::EncryptionKey<'_>) -> Objects {
+        self.data.frame(&self.footer, encrypting)
     }
 }
 
@@ -304,21 +305,17 @@ pub struct Data {
 
 impl Data {
     /// The objects of the segment `footer` stamps, holding this data: the segment's, and its
-    /// extents of their own's, at the keys `footer` names them at.
-    pub fn frame(&self, footer: &Footer) -> Objects {
-        self.frame_under(footer, None)
-    }
-
-    /// cladefs: its objects, as [`Data::frame`], encrypted as `encryption` says (TASK-411.3).
-    pub fn frame_under(&self, footer: &Footer, encryption: layout::EncryptionKey<'_>) -> Objects {
+    /// extents of their own's, at the keys `footer` names them at. cladefs: encrypted as
+    /// `encrypting` says (TASK-411.3).
+    pub fn frame(&self, footer: &Footer, encrypting: layout::EncryptionKey<'_>) -> Objects {
         let own = (footer.own())
             .map(|(extent, location)| {
                 let data = self.own.get(&extent.sequence).expect("sealed on its own");
-                (location.key.clone(), layout::own_extent(extent, data, encryption).into())
+                (location.key.clone(), layout::own_extent(extent, data, encrypting).into())
             })
             .collect();
         let segment = Segment { data: self.segment.clone(), footer: footer.clone() };
-        Objects { footer: footer.clone(), segment: segment.encode_under(encryption).into(), own }
+        Objects { footer: footer.clone(), segment: segment.encode(encrypting).into(), own }
     }
 }
 
@@ -330,7 +327,9 @@ mod tests {
 
     /// The next sequence number the footer of `commit`'s segment, closed on `chain`, names.
     fn next_sequence(commit: Commit, chain: &mut Chain) -> u64 {
-        let objects = SegmentBuilder::from(commit).close(chain).frame();
+        let objects = SegmentBuilder::from(commit)
+            .close(chain)
+            .frame(crate::testing::encrypting(test_branch(1)));
         layout::footer::<Footer>(&objects.segment.read().unwrap()).unwrap().contents.next_sequence
     }
 
@@ -378,7 +377,9 @@ mod tests {
         batch.commit(Commit { tag: 8, own, frees, root, capacity, ..Commit::default() });
         batch.commit(Commit { tag: 9, ..Commit::default() });
         assert!(!batch.is_empty());
-        let objects = batch.fork(child(test_branch(9)), &mut chain).frame();
+        let objects = batch
+            .fork(child(test_branch(9)), &mut chain)
+            .frame(crate::testing::encrypting(test_branch(1)));
         let segment = objects.segment.read().unwrap();
         let footer: Footer = layout::footer(&segment).unwrap();
         assert_eq!(footer, objects.footer);
@@ -395,12 +396,14 @@ mod tests {
             (contents.frees, contents.root, contents.forks, contents.capacity),
             (vec![freed], Some(b"two".to_vec()), vec![child(test_branch(9))], Some(2 << 20))
         );
-        assert_eq!(layout::data(&segment).unwrap(), b"small");
+        let keys = crate::testing::ring([test_branch(1)]);
+        let data = |bytes: &[u8]| layout::data_under(bytes, &keys.of(1)).unwrap();
+        assert_eq!(data(&segment), b"small");
         let [(own_key, own)] = &objects.own[..] else {
             panic!("{} objects of their own", objects.own.len())
         };
         let own = own.read().unwrap();
-        assert_eq!((own_key, layout::data(&own).unwrap()), (&key, b"large".to_vec()));
+        assert_eq!((own_key, data(&own)), (&key, b"large".to_vec()));
         assert_eq!(chain.next_segment(), 1);
     }
 
@@ -422,7 +425,7 @@ mod tests {
         let extents = vec![(written, b"written".to_vec())];
         let frees = vec![small, large, written, inherited];
         batch.commit(Commit { tag: 8, extents, frees, ..Commit::default() });
-        let objects = batch.close(&mut chain).frame();
+        let objects = batch.close(&mut chain).frame(crate::testing::encrypting(test_branch(1)));
         let footer = objects.footer;
         assert_eq!(footer.contents.extents, [(kept, 5, 4)]);
         let key = layout::extent(layout::TEST_CELL, 2, 0, other);
@@ -456,7 +459,9 @@ mod tests {
             capacity: Some(1 << 20),
         };
         let chain = Chain::new(test_branch(1), 2, 0, 0);
-        let batch = SegmentBuilder::from(commit).close(&mut chain.clone()).frame();
+        let batch = SegmentBuilder::from(commit)
+            .close(&mut chain.clone())
+            .frame(crate::testing::encrypting(test_branch(1)));
         let mut plan = Plan::default();
         for (extent, own) in [(small, false), (other, false), (large, true)] {
             let len = data[&extent].len() as u64;
@@ -476,15 +481,24 @@ mod tests {
                 Ok(())
             })
         };
-        let planned = objects(plan.close(&mut chain.clone()), read);
+        let (dek, id) = crate::testing::encrypting(test_branch(1));
+        let encrypting = (Arc::new(extent_frame::Secret::from_bytes(dek.expose())), id);
+        let planned = objects(plan.close(&mut chain.clone()), read, encrypting);
         assert_eq!(planned.footer, batch.footer);
         let read = || reads.lock().unwrap().clone();
         assert_eq!(read(), []);
-        assert_eq!(planned.segment.read().unwrap(), batch.segment.read().unwrap());
+        // Each encrypted under a salt of its own: alike once opened.
+        let keys = crate::testing::ring([test_branch(1)]);
+        let opened = |bytes: Vec<u8>| {
+            let footer: Footer = layout::footer(&bytes).unwrap();
+            (footer, layout::data_under(&bytes, &keys.of(1)).unwrap())
+        };
+        assert_eq!(opened(planned.segment.read().unwrap()), opened(batch.segment.read().unwrap()));
         assert_eq!(read(), [small, other]);
         let [(key, own)] = &planned.own[..] else { panic!("{} of their own", planned.own.len()) };
         assert_eq!(key, &batch.own[0].0);
-        assert_eq!(own.read().unwrap(), batch.own[0].1.read().unwrap());
+        let opened = |bytes: Vec<u8>| layout::data_under(&bytes, &keys.of(1)).unwrap();
+        assert_eq!(opened(own.read().unwrap()), opened(batch.own[0].1.read().unwrap()));
         assert_eq!(read(), [small, other, large]);
     }
 }

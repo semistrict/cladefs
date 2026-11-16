@@ -42,6 +42,9 @@ func daemon(t *testing.T, dir string) *extentdv1.Client {
 		"CLADEFSD_GRPC="+control,
 		"CLADEFSD_BUCKET=memory:///branches",
 		"CLADEFSD_TOKEN=1",
+		// cladefs: every store encrypted, under the bucket KMS of a test master key, known to all
+		// (TASK-411.28): a daemon given no KMS refuses to start.
+		"CLADEFS_MASTER_KEY=7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e7e",
 	)
 	command.Stderr = os.Stderr
 	if err := command.Start(); err != nil {

@@ -83,6 +83,12 @@ impl KeyNames {
             None => self.template.replace(TENANT, &format!("{tenant:x}")),
         }
     }
+
+    /// The tenants overridden and their keys' names, in no order: for a backend to check each is
+    /// a name its KMS has, before any call (TASK-411.18).
+    pub fn overridden(&self) -> impl Iterator<Item = (u64, &str)> {
+        self.overrides.iter().map(|(&tenant, name)| (tenant, name.as_str()))
+    }
 }
 
 #[cfg(test)]

@@ -81,26 +81,93 @@ branches on the same terms, and makes new stores (`take`, `import`) anywhere.
 
 ## Encryption and shredding
 
-Backlog doc-16 is the design. With `CLADEFS_KMS` naming the
-host's KMS (`openbao://`, `aws-kms://` or `gcp-kms://`; `local:///DIR`, a fake
-for tests and development, its KEKs files in a directory), the cells of a tenant whose KEK it holds
-are encrypted: the bucket, the stores' directories and the part cache hold their
-data encrypted. To shred a **tenant**, destroy its KEK in the KMS, then tell
-every host (`cladefsctl forget-tenant-keys TENANT`, the control API's
-`ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
-version of every object, was wrapped by it. To shred a **cell**, run
-`cladefsctl shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon:
-it takes the cell's wrapped KEKs out of its object `<C>cell` and has each host
-forget them. That is only as strong as the bucket keeps no older version of
-that object, so a bucket with versioning on needs a lifecycle rule expiring
-non-current versions: on S3, `NoncurrentVersionExpiration` (with
-`NoncurrentDays` as short as the deployment's recovery needs allow); on GCS,
-object versioning off, or a lifecycle rule deleting non-current versions
-(`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
-old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
-versioning off needs nothing. A host told either halts the stores of the
-tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
-a halted store's own keys stay in memory until its VM process closes it.
+Backlog doc-16 is the design. Every store is encrypted, always:
+the bucket, the stores' directories and the part cache hold its data encrypted,
+under its cell's KEK, which its tenant's KEK wraps. Every process that opens
+stores (cladefsd, cladefsctl, cladefs-mount, cladefs-gc to collect) refuses to start
+unless `CLADEFS_KMS` names the host's KMS or `CLADEFS_MASTER_KEY` gives a master key
+for the bucket KMS (below); a tenant the KMS has no KEK of gets no store,
+refused as destroyed (`EACCES`). The KMS `CLADEFS_KMS` names is `local:///DIR`, a
+fake for tests and development, AWS KMS or Google Cloud KMS (below), or
+OpenBao's Transit engine:
+`openbao://HOST[:PORT]/MOUNT?key=cladefs-tenant-{tenant}` (`openbaos://` over TLS,
+`&ca=FILE` for a private CA; `&namespace=NS`; `&keys=FILE` naming tenants' own
+keys), each tenant's KEK the Transit key the template names, `{tenant}` its ID
+in hex. Its token is `CLADEFS_KMS_OPENBAO_TOKEN`'s, or in the file
+`CLADEFS_KMS_OPENBAO_TOKEN_FILE` names (read again when refused, as OpenBao Agent
+renews it), its policy `update` on `MOUNT/encrypt/*` and `MOUNT/decrypt/*` and
+`read` on `MOUNT/keys/*`, and not `create`, which would make a key for every
+tenant (doc-16, Real KMSes: OpenBao). To shred a **tenant**, destroy its KEK in
+the KMS, then tell every host (`cladefsctl forget-tenant-keys TENANT`, the control
+API's `ForgetTenantKeys`): absolute, as every cell KEK of the tenant, in every
+version of every object, was wrapped by it. To shred a **cell**, run `cladefsctl
+shred-cell TENANT/CELL` (`ShredCell`) against every host's daemon: it takes the
+cell's wrapped KEKs out of its object `<C>cell` and has each host forget them.
+That is only as strong as the bucket keeps no older version of that object, so a
+bucket with versioning on needs a lifecycle rule expiring non-current versions:
+on S3, `NoncurrentVersionExpiration` (with `NoncurrentDays` as short as the
+deployment's recovery needs allow); on GCS, object versioning off, or a
+lifecycle rule deleting non-current versions (`isLive: false`, or
+`daysSinceNoncurrentTime`). Until that rule has run, the old version's wrapped
+KEK unwraps while the tenant's KEK lives. A bucket with versioning off needs
+nothing. A host told either halts the stores of the tenant or cell it has open
+(`EACCES`) and drops their keys and cached pages; a halted store's own keys stay
+in memory until its VM process closes it.
+
+**The bucket KMS** (doc-16, The bucket KMS), the default. With no `CLADEFS_KMS`, a
+host given a master key, `CLADEFS_MASTER_KEY` (64 hex digits: `openssl rand -hex
+32`) or `CLADEFS_MASTER_KEY_FILE` (a file of 32 raw bytes, or of the same text),
+keeps each tenant's KEK in its bucket, at `tenants/<tenant>/kek`, wrapped by the
+master key and made on the tenant's first use: every tenant's cells are encrypted,
+with no setup per tenant. Every process that opens stores (cladefsd, cladefsctl,
+mounts, cladefs-gc) is given the same key, and the bucket never holds it; logs and
+errors name it only by its ID, a short hash. To rotate it, give every host
+`CLADEFS_MASTER_KEY=NEW,OLD` (comma- or line-separated, the newest first: it
+wraps, any unwraps), run `cladefs-gc URL --rotate-master-key`, which rewraps every
+tenant's KEK under NEW, then give the hosts NEW alone. To shred a tenant, run
+`cladefsctl shred-tenant TENANT` (`ShredTenant`) against every host's daemon: it
+replaces the tenant's KEK object by a tombstone, so that nothing of the tenant's
+unwraps anywhere and no KEK is made for it again, and has each host forget its
+keys (a host not told refuses it within a minute). As for a cell, a bucket with
+versioning on needs non-current versions of `tenants/<tenant>/kek` expired, by
+the rule above. It is not BYOK: a tenant holding its own key uses a real KMS.
+
+**AWS KMS** (doc-16, Real KMSes: AWS KMS). `CLADEFS_KMS=aws-kms://REGION?key=TEMPLATE`,
+say `aws-kms://us-east-1?key=alias/cladefs-tenant-{tenant}`: each tenant's KEK is a
+symmetric KMS key, named by the template with `{tenant}` in hexadecimal (a key
+ID, key ARN, alias name or alias ARN), and `&keys=FILE` names a file of
+overrides, lines `TENANT_HEX NAME`, for tenants that bring their own key, in
+their own account by its key ARN. `&endpoint=URL` names a VPC endpoint (or an
+emulator). Credentials are the standard AWS chain's: the environment, the
+shared profile (SSO, `credential_process`), web identity, the ECS task's or
+the instance's role. cladefs's role needs `kms:Encrypt` and `kms:Decrypt` on each
+tenant's key, and nothing else; every call carries the encryption context
+`cladefs-tenant` = the tenant in hexadecimal, so a policy can tie each key to its
+tenant with the condition `"StringEquals": {"kms:EncryptionContext:cladefs-tenant": "2a"}`.
+A tenant bringing a key in another account allows cladefs's role those two
+actions under that condition in its key policy, cladefs's IAM policy allows them
+on the key's ARN, and the overrides file names it. A tenant revokes cladefs's use
+by disabling its key or removing that statement, and shreds itself by
+scheduling its key's deletion (every host refuses its cells from then on);
+forget its keys on every host and stop serving it before the waiting period
+ends, as AWS then forgets the key (TASK-411.19). Rotating a key needs nothing
+of cladefs: what its older versions wrapped still unwraps. The tests run against
+local-kms, an emulator (`scripts/test-local-kms.sh`, Go to install it).
+
+**Google Cloud KMS** (backlog doc-16, Real KMSes). With
+`CLADEFS_KMS=gcp-kms://projects/P/locations/L/keyRings/R?key=cladefs-tenant-{tenant}`,
+each tenant's KEK is the key `cladefs-tenant-<tenant in hex>` in that key ring
+(symmetric, purpose `ENCRYPT_DECRYPT`), a wrap its `:encrypt`, bound to the
+tenant as associated data. A tenant bringing its own key, in a project of its
+own, is named in a file given as `&keys=FILE`, a line `TENANT
+projects/P2/locations/L2/keyRings/R2/cryptoKeys/K` each. Each tenant grants
+the hosts' service account `roles/cloudkms.cryptoKeyEncrypterDecrypter` on its
+key alone; taking the role away, or disabling the key's versions, revokes it;
+destroying them shreds the tenant. Hosts authenticate with Application Default
+Credentials, as for `gs://` buckets (`GOOGLE_APPLICATION_CREDENTIALS`, or the
+metadata server); `CLADEFS_KMS_GCP_TOKEN`, an access token, is for development.
+A tenant that rotates its key keeps its old versions enabled: cells made
+before stay wrapped under them (TASK-411.21).
 
 ## Access to userfaultfd
 

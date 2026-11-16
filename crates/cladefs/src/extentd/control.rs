@@ -691,6 +691,22 @@ impl Extentd for Control {
             }),
         )
     }
+
+    async fn shred_tenant(
+        &self,
+        request: Request<ShredTenantRequest>,
+    ) -> Result<Response<ShredTenantResponse>, Status> {
+        let ShredTenantRequest { tenant } = request.into_inner();
+        let (destroyed, forgotten) = crate::bucket::shred_tenant(tenant).await.map_err(|why| {
+            log::error!("extentd: shredding tenant {tenant}: {why}");
+            saying(Errno::ENOTSUP, why)
+        })?;
+        let shredded_now = destroyed == extent_bucket::bucket_kms::Destroyed::Now;
+        Ok(Response::new(ShredTenantResponse {
+            shredded_now,
+            forgotten: Some(forgotten_of(forgotten)),
+        }))
+    }
 }
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, as the API has it (TASK-411.7).
@@ -1004,6 +1020,16 @@ impl Client {
         let response =
             self.call(what, |mut c| async move { c.forget_tenant_keys(request).await })?;
         Ok(response.forgotten.unwrap_or_default())
+    }
+
+    /// cladefs: shreds the tenant `tenant` under the daemon's bucket KMS, its KEK object replaced by
+    /// a tombstone, and has the daemon forget its keys (`ShredTenant`, TASK-411.27): whether this
+    /// call shredded it (not already), and what the daemon forgot.
+    pub fn shred_tenant(&self, tenant: u64) -> Result<(bool, Forgotten), crate::Error> {
+        let request = ShredTenantRequest { tenant };
+        let what = format!("shredding tenant {tenant}");
+        let response = self.call(what, |mut c| async move { c.shred_tenant(request).await })?;
+        Ok((response.shredded_now, response.forgotten.unwrap_or_default()))
     }
 
     /// cladefs: what the disk of the tenant `tenant`, or of every tenant without one, takes, counted

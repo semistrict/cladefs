@@ -598,7 +598,7 @@ mod tests {
         let made = (64 * MIB as u64, crate::host_store::BranchOf::New(cell), true);
         let keeping = crate::host_store::keeping().unwrap();
         let device = ImageDevice::create(&image, made, keeping, Default::default()).unwrap();
-        assert!(device.store.keys().encrypting().is_some());
+        assert!(device.store.keys().encrypts());
         let branch = device.branch();
         let (small, large) = (ExtentId::new(branch, 1), ExtentId::new(branch, 2));
         let small_data = crate::test_data::noise(1, 4 * BLOCK as usize);

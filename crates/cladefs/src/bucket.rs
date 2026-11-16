@@ -7,13 +7,16 @@
 //! fetches run on and their budgets ([`runtime`], [`HostFetcher`]), and the errno of each failure
 //! ([`errno`]). The uploader is extent_store's (`extent_store::upload`, TASK-165.9).
 //!
-//! cladefs: and its KMS ([`kms`], TASK-411.3), `CLADEFS_KMS`, which every process of the host's
-//! opening stores reads, the extent daemon, the cladefs CLI's mounts and `cladefsctl` alike: a
-//! `local:///DIR` alone, a directory of tenants' KEKs (`extent_keys::kms::LocalKms`), until real
-//! KMSes come (doc-16). A cell is made encrypted iff the host has a KMS and the cell's tenant has a
-//! KEK there; a host without one makes its cells in the clear, and opens no encrypted one.
+//! cladefs: and its KMS ([`kms`], TASK-411.3), which every process of the host's opening stores
+//! chooses alike, the extent daemon, the cladefs CLI's mounts and `cladefsctl`
+//! (`extent_bucket::bucket_kms::from_env`): the one `CLADEFS_KMS` names (doc-16: `local:///DIR`,
+//! OpenBao, AWS KMS, Google Cloud KMS); else, given a master key (`CLADEFS_MASTER_KEY` or
+//! `CLADEFS_MASTER_KEY_FILE`), the bucket KMS, tenants' KEKs kept in the host's bucket
+//! (`CLADEFSD_BUCKET`), made on each tenant's first use (TASK-411.27); else none, which every
+//! such process refuses to start with ([`require_kms`], TASK-411.28): every cell is encrypted.
 
 use crate::Errno;
+use extent_bucket::bucket_kms::BucketKms;
 use extent_bucket::cache::Cache;
 use extent_bucket::fetch::{self, Budget, Limits, Priority};
 use extent_bucket::keys;
@@ -94,20 +97,14 @@ pub(crate) fn errno(failure: &Failure) -> Option<crate::Errno> {
         // cladefs: a tenant's KEK the KMS refused, revoked, destroyed, or unreached: its stores
         // open no more until it is given back (TASK-411.3).
         Failure::Bucket(Error::Kms(_)) => Some(Errno::EACCES),
-        // cladefs: an encrypted branch inherited by one whose record can't hold its keys: a fork of
-        // it into a cell in the clear (TASK-411.4).
+        // cladefs: an encrypted branch inherited by one whose record holds not its keys (TASK-411.4).
         Failure::Bucket(Error::Inherited { .. }) => Some(Errno::ENOTSUP),
         // A branch of a newer format than this host reads, until it is upgraded (doc-11).
         Failure::Bucket(Error::Format { .. }) => Some(Errno::ENOTSUP),
         // The collector's alone (TASK-395.5). cladefs: data encrypted under a key the host doesn't
         // hold is unread, as data it failed to read is (TASK-411.2).
         Failure::Bucket(
-            Error::Lost(_)
-            | Error::Corrupt(_)
-            | Error::Read(_)
-            | Error::Left(_)
-            | Error::NoKey(_)
-            | Error::Downgrade(_),
+            Error::Lost(_) | Error::Corrupt(_) | Error::Read(_) | Error::Left(_) | Error::NoKey(_),
         )
         | Failure::Local(_) => None,
     }
@@ -123,7 +120,7 @@ impl From<crate::faults::Failpoint> for Failure {
 /// host's keys, its KMS and those its fetchers share (TASK-411.3). Fails if the runtime can't be
 /// made, a later call making it anew ([`bucket_runtime`]).
 pub fn runtime() -> Result<Runtime, Failure> {
-    let keys = keys::Host { kms: kms()?, ring: MEMORY.keys().clone() };
+    let keys = keys::Host::new(kms()?, MEMORY.keys().clone());
     Ok(Runtime { handle: bucket_runtime()?, uploads: UPLOADS.clone(), keys })
 }
 
@@ -135,27 +132,78 @@ pub(crate) fn bucket_runtime() -> Result<tokio::runtime::Handle, Failure> {
     Ok(extent_store::upload::bucket_runtime()?.handle().clone())
 }
 
-/// cladefs: the host's KMS, as `CLADEFS_KMS` names it the first time it is asked for, or [`set_kms`]
-/// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
-/// refusing every call, naming why: the host then opens no encrypted store and makes no cell,
-/// encrypted or in the clear, rather than make in the clear what its tenants have it encrypt. Fails, keeping
-/// nothing, if the runtime its pools refill on can't be made ([`bucket_runtime`]).
-pub fn kms() -> Result<Option<Arc<keys::CachingKms>>, Failure> {
-    if let Some(kms) = KMS.get() {
+/// cladefs: the host's KMS, as its environment chooses it the first time it is asked for
+/// (`extent_bucket::bucket_kms::from_env`: `CLADEFS_KMS`'s, else the bucket KMS over the host's
+/// bucket given a master key, TASK-411.27), or [`set_kms`] set it before (TASK-411.3), its pools of
+/// new cell KEKs refilled on the bucket runtime. None chosen, or one that can't be had (a bad
+/// `CLADEFS_KMS`, a master key unreadable, or given with no host's bucket to keep tenants' KEKs
+/// in), it is a KMS refusing every call, naming why: the host then opens no store and makes no
+/// cell. Every process that opens stores refuses to start so first ([`require_kms`],
+/// TASK-411.28). Fails, keeping nothing, if the runtime its pools refill on can't be made
+/// ([`bucket_runtime`], TASK-449's review).
+pub fn kms() -> Result<Arc<keys::CachingKms>, Failure> {
+    if let Some(kms) = POOLED.get() {
         return Ok(kms.clone());
     }
     let runtime = bucket_runtime()?;
-    let kms = KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
-        Ok(url) if !url.is_empty() => {
-            let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
-                log::error!("cladefs: CLADEFS_KMS: {why}");
-                Arc::new(Unreached(why))
-            });
-            Some(host_kms(kms, runtime))
-        }
-        _ => None,
+    let kms = POOLED.get_or_init(|| match host_keys() {
+        Ok(keys) => host_kms(keys.kms.clone(), runtime),
+        Err(why) => host_kms(Arc::new(Unreached(why.clone())), runtime),
     });
     Ok(kms.clone())
+}
+
+/// cladefs: [`kms`], once made.
+static POOLED: std::sync::OnceLock<Arc<keys::CachingKms>> = std::sync::OnceLock::new();
+
+/// cladefs: whether the host has a KMS ([`kms`]): the refusal, naming `CLADEFS_KMS` and
+/// `CLADEFS_MASTER_KEY`, if its environment chooses none, or why the one it chooses can't be had.
+/// What every process that opens stores asks as it starts, refusing to start with none
+/// (TASK-411.28): cladefsd, cladefsctl, the cladefs CLI's mounts.
+pub fn require_kms() -> Result<(), String> {
+    host_keys().as_ref().map(drop).map_err(|why| format!("the host's KMS: {why}"))
+}
+
+/// cladefs: the host's bucket KMS, if [`kms`] is that (TASK-411.27): what shreds a tenant here
+/// ([`shred_tenant`]).
+pub fn bucket_kms() -> Option<Arc<BucketKms<ObjectBucket>>> {
+    host_keys().as_ref().ok().and_then(|keys| keys.bucket.clone())
+}
+
+/// cladefs: the host's KMS ([`kms`]), chosen once: or why it has none.
+fn host_keys() -> &'static Result<HostKeys, String> {
+    KMS.get_or_init(|| match extent_bucket::bucket_kms::from_env(host_bucket) {
+        Ok(chosen) => Ok(HostKeys { kms: chosen.shared(), bucket: chosen.bucket().cloned() }),
+        // cladefs: this crate's own unit tests, given no KMS, encrypt under the tests' KMS, each
+        // tenant's KEK made on its first use, which the tests' readers share
+        // (`extent_bucket::keys::testing`, TASK-411.28).
+        #[cfg(test)]
+        Err(why) if why == extent_bucket::bucket_kms::no_kms() => {
+            Ok(HostKeys { kms: extent_bucket::keys::testing::kms(), bucket: None })
+        }
+        // cladefs: its integration tests, and the processes they start, given no KMS, encrypt under
+        // the tests' KMS, every tenant's KEK one known key (`testing::encrypted`, TASK-411.28).
+        #[cfg(all(feature = "tests-kms", not(test)))]
+        Err(why) if why == extent_bucket::bucket_kms::no_kms() => Ok(testing::host_keys()),
+        Err(why) => {
+            log::error!("cladefs: the host's KMS: {why}");
+            Err(why)
+        }
+    })
+}
+
+/// cladefs: the host's bucket, which the bucket KMS keeps tenants' KEKs in (`CLADEFSD_BUCKET`).
+fn host_bucket() -> Result<Arc<ObjectBucket>, String> {
+    let url = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
+    let url = url.ok_or("CLADEFSD_BUCKET names none")?;
+    crate::host_store::bucket(&url).map_err(|err| format!("{url}: {err:#}"))
+}
+
+/// cladefs: the host's KMS, as its environment chose it, and the bucket KMS it is over, if it is
+/// that.
+struct HostKeys {
+    kms: extent_keys::kms::Shared,
+    bucket: Option<Arc<BucketKms<ObjectBucket>>>,
 }
 
 /// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on `runtime`, the
@@ -169,12 +217,42 @@ fn host_kms(
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
 pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
-    let runtime = bucket_runtime().map_err(|err| err.to_string())?;
-    KMS.set(Some(host_kms(kms, runtime))).map_err(|_| "the host's KMS is set already".to_owned())
+    KMS.set(Ok(HostKeys { kms, bucket: None }))
+        .map_err(|_| "the host's KMS is set already".to_owned())
 }
 
-/// cladefs: the host's KMS ([`kms`]).
-static KMS: std::sync::OnceLock<Option<Arc<keys::CachingKms>>> = std::sync::OnceLock::new();
+/// cladefs: the host's KMS ([`host_keys`]).
+static KMS: std::sync::OnceLock<Result<HostKeys, String>> = std::sync::OnceLock::new();
+
+/// cladefs: the KMS tests' and benches' processes encrypt under, their environment naming none
+/// (TASK-411.28): every store is encrypted, and a process given no KMS opens none.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use super::HostKeys;
+    use std::sync::Arc;
+
+    /// Has this process's stores encrypt under the tests' KMS, every tenant's KEK one known key
+    /// (`extent_keys::testing::KnownKms`), unless its environment names a KMS (`CLADEFS_KMS`) or
+    /// gives a master key (`CLADEFS_MASTER_KEY`, `CLADEFS_MASTER_KEY_FILE`): a bench's first step,
+    /// which measures a host's work, a real host's KMS adding its calls. cladefs's tests have it
+    /// whatever they do, and the processes they start (the `tests-kms` feature). Before any store
+    /// opens.
+    pub fn encrypted() {
+        let named = ["CLADEFS_KMS", "CLADEFS_MASTER_KEY", "CLADEFS_MASTER_KEY_FILE"]
+            .into_iter()
+            .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+        if !named {
+            let set = super::KMS.set(Ok(host_keys()));
+            assert!(set.is_ok(), "the tests' KMS, set before any store opens");
+        }
+    }
+
+    /// The host's keys under the tests' KMS, which every process has alike: a test's, and those it
+    /// starts, whatever bucket each keeps its stores in.
+    pub(super) fn host_keys() -> HostKeys {
+        HostKeys { kms: Arc::new(extent_keys::testing::KnownKms), bucket: None }
+    }
+}
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -211,9 +289,11 @@ pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
         crate::halt::halt_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &halted);
     let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
     let kept = MEMORY.forget_kept(scope);
-    // Its KMS, if it made one: one not made yet unwrapped nothing.
-    let kms = KMS.get().cloned().flatten();
-    let rings = keys::Host { kms, ring: MEMORY.keys().clone() }.forget(scope, why);
+    // Its KMS, if it made it: one not made yet unwrapped nothing.
+    if let Some(kms) = POOLED.get() {
+        kms.forget(scope, why);
+    }
+    let rings = MEMORY.keys().forget(scope);
     let forgotten = Forgotten { stores, rings, kept, extents, bytes };
     log::warn!("cladefs: {scope}'s keys forgotten, {why}: {forgotten:?}");
     forgotten
@@ -233,7 +313,30 @@ pub async fn shred_cell(
     Ok((removed, forget(keys::Scope::Cell(cell), &why)))
 }
 
-/// cladefs: a KMS `CLADEFS_KMS` names that can't be had: every call refused, saying why.
+/// cladefs: shreds `tenant` under the host's bucket KMS (doc-16, The bucket KMS; TASK-411.27): its
+/// KEK object in the host's bucket replaced by a tombstone, so that no key its KEK wrapped unwraps
+/// anywhere and none is made it again ([`extent_bucket::bucket_kms::destroy`]); then has this host
+/// forget its keys ([`forget`]). Shredded already, it finds it so, and the host forgets them all
+/// the same: what each host told does. Refused, changing nothing, if the host's KMS is not the
+/// bucket KMS: another KMS's tenant is shredded by destroying its KEK there, then
+/// `ForgetTenantKeys`. Only as strong as the bucket keeps no older version of the KEK object.
+pub async fn shred_tenant(
+    tenant: u64,
+) -> Result<(extent_bucket::bucket_kms::Destroyed, Forgotten), String> {
+    let Some(kms) = bucket_kms() else {
+        return Err(format!(
+            "tenant {tenant}: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no \
+             CLADEFS_KMS): destroy the tenant's KEK in its KMS, then have every host forget its keys"
+        ));
+    };
+    let destroyed = kms.destroy(tenant).await;
+    let why = extent_keys::kms::Error::Destroyed { tenant }.to_string();
+    Ok((destroyed, forget(keys::Scope::Tenant(tenant), &why)))
+}
+
+/// cladefs: a KMS the environment chose that can't be had (a bad `CLADEFS_KMS`, master keys
+/// unreadable or with no host's bucket, TASK-411.27), or none chosen (TASK-411.28): every call
+/// refused, saying why.
 struct Unreached(String);
 
 impl extent_keys::kms::Kms for Unreached {
@@ -258,7 +361,7 @@ impl extent_keys::kms::Kms for Unreached {
 
 impl Unreached {
     fn refusal(&self, tenant: u64) -> extent_keys::kms::Error {
-        let source = std::io::Error::other(format!("CLADEFS_KMS: {}", self.0));
+        let source = std::io::Error::other(self.0.clone());
         extent_keys::kms::Error::Io { tenant, source }
     }
 }
@@ -448,7 +551,8 @@ mod tests {
     use crate::{ExtentId, ExtentStore, VolatileSlice};
     use extent_bucket::cache::Cache;
     use extent_bucket::object_bucket::ObjectBucket;
-    use extent_bucket::{branch, read, recover};
+    use extent_bucket::testing::read;
+    use extent_bucket::{branch, recover};
     use object_store::memory::InMemory;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -632,7 +736,9 @@ mod tests {
         let mut segments = Vec::new();
         for tag in [1, 2] {
             let commit = Commit { tag, ..Commit::default() };
-            let objects = SegmentBuilder::from(commit).close(&mut before.chain()).frame();
+            let objects = SegmentBuilder::from(commit)
+                .close(&mut before.chain())
+                .frame(before.keys().encrypting());
             segments.push(before.add_segment(objects).unwrap());
         }
         // A store takes the branch over, opening, its fence after the writer's.
@@ -2645,14 +2751,16 @@ mod tests {
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
         let cell = sizes[&layout::cell(branch.cell)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
-        // holder's as it was and naming the branch (TASK-364); the head, read once, at once with
-        // the record and the cell, the recovery starting from it, then swapped to take it
-        // (TASK-449). The segments' tails it names, all at once: no listing (TASK-407).
+        // holder's as it was and naming the branch (TASK-364), and read before for the KEK its
+        // recovery unwraps the branch's DEK under, every branch encrypted (TASK-411.28, TASK-460);
+        // the head, read once, at once with the record and the cell, the recovery starting from it,
+        // then swapped to take it (TASK-449). The segments' tails it names, all at once: no listing
+        // (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
-                    ("get", 4),
+                    ("get", 5),
                     ("get-range", 4),
                     ("head", 0),
                     ("list", 0),
@@ -2663,7 +2771,7 @@ mod tests {
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + head + cell
+                tails + 2 * record + head + 2 * cell
             )
         );
         let mut data = vec![0; 1 << 20];
@@ -3092,7 +3200,7 @@ mod tests {
             futures::executor::block_on(pass).unwrap();
         }
         kms.destroy(1).unwrap();
-        crate::bucket::kms().unwrap().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
+        crate::bucket::kms().unwrap().revoked(1, "tenant 1: its KEK is destroyed");
         crate::cache::evict_least_used(None, |_| false);
         let theirs = reopened(dir.path().join("theirs"), idle()).unwrap();
         assert_eq!(theirs.root().unwrap(), b"base");
@@ -3101,6 +3209,33 @@ mod tests {
         assert!(data == pattern(1, BLOCK), "the fork reads other bytes");
         let refused = source.fork_to(dir.path().join("after"), of(1)).map_err(|err| err.errno());
         assert_eq!(refused, Err(Some(crate::Errno::EACCES)));
+    }
+
+    /// TASK-411.19, as TASK-411.28 left it: a tenant whose KEK the KMS has forgotten (answering
+    /// as for a tenant that never had one), and a tenant that never had one, get no store opened
+    /// here, encrypted or in the clear: `EACCES`, the cell not made.
+    #[test]
+    fn tenants_with_no_kek_in_the_kms_open_no_store() {
+        let keys = tempfile::tempdir().unwrap();
+        let local = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
+        local.create(1).unwrap();
+        local.destroy(1).unwrap();
+        crate::bucket::set_kms(Arc::new(extent_keys::testing::Forgetting::new(local))).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let bucket = Arc::new(ObjectBucket::new(Arc::new(InMemory::new()), ""));
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        for (name, tenant) in [("forgotten", 1), ("never", 2)] {
+            let branch = of(tenant);
+            let refused = kept_in(dir.path().join(name), (1 << 30, Some(branch)), &bucket, idle());
+            let refused = refused.map(drop).map_err(|err| err.errno());
+            assert_eq!(refused, Err(Some(crate::Errno::EACCES)), "{name}");
+            let cell =
+                futures::executor::block_on(extent_bucket::cell::read(&*bucket, branch.cell));
+            assert_eq!(cell, Ok(None), "{name}");
+        }
     }
 
     /// TASK-411.7: a host told a cell is shredded, or a tenant's KEK destroyed, forgets their keys:
@@ -3182,7 +3317,7 @@ mod tests {
             [Err(crate::Errno::EACCES), Err(crate::Errno::EACCES), Ok(true)]
         );
         assert_eq!(cached(), [false, false, true]);
-        assert_eq!(crate::bucket::kms().unwrap().unwrap().in_pool(1), 0);
+        assert_eq!(crate::bucket::kms().unwrap().in_pool(1), 0);
 
         // Closed by their holders, the stores of the tenant open no more; the other's does.
         let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
@@ -3194,6 +3329,102 @@ mod tests {
         let pieces: Vec<&[u8]> = written[..2].iter().map(|data| &data[..64]).collect();
         let held = crate::testing::files_holding(dir.path(), &pieces);
         assert_eq!(held, Vec::<String>::new(), "files holding a store's data");
+    }
+
+    /// TASK-411.27: a host given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` keeps its
+    /// tenants' KEKs in its bucket: every tenant's store is encrypted, its KEK made on its first use
+    /// at `tenants/<t>/kek`. Shredding a tenant here leaves a tombstone there, halts its store
+    /// (`EACCES`), which opens no more, nor any new store of the tenant's, nothing made; another
+    /// tenant's reads on. Shredding it again finds it so.
+    #[test]
+    fn hosts_given_a_master_key_alone_encrypt_every_store_under_the_bucket_kms() {
+        use extent_bucket::bucket_kms::Destroyed;
+        use extent_bucket::layout;
+        let url = "memory:///bucket-kms";
+        let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+        // SAFETY: this test's process is its own (nextest), no store open yet.
+        unsafe {
+            std::env::remove_var("CLADEFS_KMS");
+            std::env::set_var("CLADEFSD_BUCKET", url);
+            std::env::set_var("CLADEFS_MASTER_KEY", &master);
+        }
+        let bucket = crate::host_store::bucket(url).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let of = |tenant| crate::Branch {
+            cell: crate::host_store::new_cell(tenant),
+            id: rand::random::<u64>().max(1),
+        };
+        let names = ["ours", "theirs"];
+        let stores: Vec<(ExtentStore, ExtentId, Vec<u8>)> = (names.iter().zip([1, 2]))
+            .enumerate()
+            .map(|(at, (name, tenant))| {
+                let store =
+                    kept_in(dir.path().join(name), (1 << 30, Some(of(tenant))), &bucket, idle());
+                let store = store.unwrap();
+                let data = noise(at as u64 + 1, 4 * BLOCK);
+                let extent = write(&store, 1, &data);
+                store.commit(None).unwrap();
+                store.wait_uploaded().unwrap();
+                (store, extent, data)
+            })
+            .collect();
+        assert!(crate::bucket::bucket_kms().is_some());
+        for (store, _, _) in &stores {
+            let record = futures::executor::block_on(branch::record(&*bucket, store.branch()));
+            assert_eq!(record.unwrap().unwrap().deks.len(), 1);
+            let cell = futures::executor::block_on(extent_bucket::cell::read(
+                &*bucket,
+                store.branch().cell,
+            ));
+            assert_eq!(cell.unwrap().unwrap().keks.len(), 1);
+        }
+        let kek = |tenant| {
+            let key = layout::kek(tenant);
+            let got = futures::executor::block_on(extent_bucket::bucket::get(&*bucket, &key));
+            got.map(|object| object.bytes)
+        };
+        assert_eq!(kek(1).map(|bytes| bytes.len()), Some(extent_keys::kms::bucket::KEK_OBJECT_LEN));
+        let read = |at: usize| {
+            let (store, extent, data) = &stores[at];
+            let mut read = vec![0; data.len()];
+            let done = store.read(*extent, 0, &mut [crate::VolatileSliceMut::from(&mut read[..])]);
+            done.map(|()| read == *data)
+        };
+
+        let shredded = futures::executor::block_on(crate::bucket::shred_tenant(1));
+        let (destroyed, forgotten) = shredded.unwrap();
+        assert_eq!((destroyed, forgotten.stores, forgotten.rings), (Destroyed::Now, 1, 1));
+        assert_eq!(kek(1), Some(b"fxkt\x01\x02\0\0\0\0\0\0\0\x01".to_vec()));
+        assert_eq!((read(0), read(1)), (Err(crate::Errno::EACCES), Ok(true)));
+        let written: Vec<Vec<u8>> = stores.into_iter().map(|(_, _, data)| data).collect();
+        let reopened_errno = |name: &str| {
+            reopened(dir.path().join(name), idle()).map(drop).map_err(|err| err.errno())
+        };
+        assert_eq!(reopened_errno("ours"), Err(Some(crate::Errno::EACCES)));
+        assert_eq!(reopened_errno("theirs"), Ok(()));
+        let new = of(1);
+        let refused = kept_in(dir.path().join("new"), (1 << 30, Some(new)), &bucket, idle());
+        assert_eq!(refused.map(drop).map_err(|err| err.errno()), Err(Some(crate::Errno::EACCES)));
+        let cell = futures::executor::block_on(extent_bucket::cell::read(&*bucket, new.cell));
+        assert_eq!(cell, Ok(None));
+        let again = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap();
+        assert_eq!(again.0, Destroyed::Already);
+        assert_eq!(written.len(), 2);
+    }
+
+    /// TASK-411.27: a host whose KMS is not the bucket KMS shreds no tenant: its KEK is its KMS's
+    /// to destroy. Nothing is written.
+    #[test]
+    fn hosts_of_another_kms_shred_no_tenant() {
+        let keys = tempfile::tempdir().unwrap();
+        let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
+        crate::bucket::set_kms(kms).unwrap();
+        let refused = futures::executor::block_on(crate::bucket::shred_tenant(1)).unwrap_err();
+        assert_eq!(
+            refused,
+            "tenant 1: this host's KMS is not the bucket KMS (CLADEFS_MASTER_KEY, no CLADEFS_KMS): \
+             destroy the tenant's KEK in its KMS, then have every host forget its keys"
+        );
     }
 
     /// TASK-395.9: a store with a writer forks into a cell of another tenant's only if it is the
@@ -3789,10 +4020,16 @@ mod tests {
         extent_bucket::record::Kind::Root.of(0)
     }
 
-    /// `record`, but for its owner, which its maker chose at random: as the tests that are not of
-    /// owners compare records.
+    /// `record`, but for its owner, which its maker chose at random, and its keys, wrapped under
+    /// keys made at random (TASK-411.28): as the tests that are not of owners or keys compare
+    /// records.
     fn unowned(record: extent_bucket::record::Record) -> extent_bucket::record::Record {
-        extent_bucket::record::Record { owner: 0, ..record }
+        extent_bucket::record::Record {
+            owner: 0,
+            deks: Vec::new(),
+            inherited: Vec::new(),
+            ..record
+        }
     }
 
     /// The store of another branch, `branch`, at `path`, attached to `bucket`, holding an extent

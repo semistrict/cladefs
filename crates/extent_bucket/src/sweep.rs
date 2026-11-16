@@ -450,7 +450,9 @@ mod tests {
                 commits.push(Commit { tag: 4, frees: vec![large], ..Commit::default() });
             }
             for commit in commits {
-                let framed = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+                let framed = SegmentBuilder::from(commit)
+                    .close(&mut writer.chain())
+                    .frame(writer.keys().encrypting());
                 let segment = writer.add_segment(framed).unwrap();
                 writer.upload(segment).await.unwrap();
                 writer.acknowledge().await.unwrap();
@@ -520,7 +522,7 @@ mod tests {
             lease: LEASE,
             slowest: 3,
             spawned: false,
-            kms: None,
+            kms: Some(crate::keys::testing::kms()),
         }
     }
 
@@ -877,13 +879,16 @@ mod tests {
         };
         let holding = |lease, since| Holding { lease, since };
         let pass = |holding: Holding, holder| {
-            let mut collector = Collector::new(NOW).holding(holding);
+            let mut collector =
+                Collector::new(NOW).kms(Some(crate::keys::testing::kms())).holding(holding);
             block_on(collector.collect_cell(&*bucket, cell, holder))
         };
         sim.advance(10);
         // Gone mid-pass: its lease held till 10 + LEASE.
         let gone = Arc::new(Gone(Direct(sim.clone())));
-        let mut collector = Collector::new(NOW).holding(holding(LEASE, None));
+        let mut collector = Collector::new(NOW)
+            .kms(Some(crate::keys::testing::kms()))
+            .holding(holding(LEASE, None));
         stalled(collector.collect_cell(&*gone, cell, 0x51));
         let held = (1, 0x51, 10 + LEASE, 0);
         assert_eq!(lease(&bucket), held);
@@ -943,7 +948,6 @@ mod tests {
                 for id in 1..=n {
                     let cell = Cell { tenant: 1, id };
                     let branch = Branch { cell, id: ids.next(&*bucket).await };
-                    crate::cell::create(&*bucket, cell, (10, 1), None).await.unwrap();
                     branch::create(&*bucket, branch, 0).await.unwrap();
                     let writer = Writer::open(bucket.clone(), branch, 10, 1).await.unwrap();
                     let extent = ExtentId::new(branch.id, writer.chain().next_sequence());
@@ -952,13 +956,17 @@ mod tests {
                         extents: vec![(extent, vec![7; 64])],
                         ..Commit::default()
                     };
-                    let framed = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+                    let framed = SegmentBuilder::from(commit)
+                        .close(&mut writer.chain())
+                        .frame(writer.keys().encrypting());
                     let segment = writer.add_segment(framed).unwrap();
                     writer.upload(segment).await.unwrap();
                     writer.acknowledge().await.unwrap();
                     writer.checkpoint().await.unwrap();
                     drop(writer);
-                    branch::delete(&*bucket, branch, 11, 1).await.unwrap();
+                    branch::delete(&*bucket, branch, 11, 1, &crate::keys::testing::host_kms())
+                        .await
+                        .unwrap();
                     crate::cell::forget(&*bucket, cell, branch.id).await.unwrap();
                 }
             });
@@ -1012,7 +1020,9 @@ mod tests {
         // A sweep that began before the last look, after the pass in full, looks too: a look
         // records nothing, ending nothing (TASK-455).
         let began = bucket.now() - 1;
-        let mut late = Collector::new(NOW).holding(Holding { lease: LEASE, since: Some(began) });
+        let mut late = Collector::new(NOW)
+            .kms(Some(crate::keys::testing::kms()))
+            .holding(Holding { lease: LEASE, since: Some(began) });
         assert_eq!(block_on(late.collect_cell(&*bucket, cell, 0x77)), Ok(skipped));
 
         // A record written in the cell: the next pass, either's, goes over it in full.

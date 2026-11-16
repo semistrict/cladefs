@@ -638,6 +638,13 @@ fn bucket_lifecycle_by_phase() {
 /// the base's head and the checkpoint the point names (3): 12 in 9, where they were 25 in 21.
 /// Requests are counted as they reach the object store, round trips as the longest chain of them
 /// each begun once the one before it was answered.
+///
+/// cladefs: those counts were a clear restore's. Every restore is encrypted since TASK-411.28, and
+/// asks more, pinned here as it is: the point's open reads the point's cell and the base's record
+/// and cell, for the keys its recovery unwraps (7 requests in 6); the fork gives the child its keys
+/// after its record is made, the cell made with a KEK of the host's pool and the record given its
+/// DEKs (7 in 6); and the child's open holds the cell then, reading it twice and the base's record
+/// twice (7 in 7, TASK-460). A restore 14 in 13, against a clear one's 8 in 6: TASK-485's to cut.
 #[test]
 fn restores_ask_the_bucket_what_the_protocol_needs() {
     let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
@@ -660,11 +667,11 @@ fn restores_ask_the_bucket_what_the_protocol_needs() {
     assert_eq!(
         costs,
         [
-            ("cold point-open", (4, 3)),
-            ("cold fork", (5, 4)),
-            ("cold fork-open", (3, 2)),
-            ("warm fork", (5, 4)),
-            ("warm fork-open", (3, 2)),
+            ("cold point-open", (7, 6)),
+            ("cold fork", (7, 6)),
+            ("cold fork-open", (7, 7)),
+            ("warm fork", (7, 6)),
+            ("warm fork-open", (7, 7)),
         ]
     );
     drop((vm, cold, taken));
@@ -695,7 +702,7 @@ fn restores_refused_to_placements_superseded_since_their_forks() {
         &elsewhere,
         clone.cell,
         (later, later),
-        (false, None),
+        None,
         Some(("another", vdisk)),
     );
     extent_store::upload::block_on(holding).unwrap().unwrap();

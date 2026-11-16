@@ -4,21 +4,23 @@
 
 //! cladefs: a store's raw files, as it writes and reads them (backlog doc-16, TASK-411.5): an open
 //! segment's (`open-segments/`) and a large extent's own while it is open (`open-extents/`), which
-//! hold a guest's writes until they are framed, read back by offset meanwhile. A store whose branch
-//! is in the clear writes them as they are written, as it always did. An encrypted store's are
-//! encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
+//! hold a guest's writes until they are framed, read back by offset meanwhile. Every store is
+//! encrypted (TASK-411.28), its raw files encrypted a sector at a time ([`SECTOR`]), AES-256-XTS, the sector's place in the file its
 //! tweak, under a key of the file's own: derived from the branch's DEK, the newest, and a salt
 //! drawn for the file ([`RawEncryption`]). Every write reaching such a file is whole sectors
 //! (TASK-411.8), so none reads, changes and writes a sector again. An open segment's salt and DEK
 //! are in its log's header, which is MACed, as its records are, under another subkey of the same
-//! DEK and salt (`wal::LogHeader`); a large extent's raw file never outlives its process (opening a
-//! store removes those left), so its salt is kept in memory alone.
+//! DEK and salt (`wal::LogHeader`); a large extent's raw file never outlives its process (opening
+//! a store removes those left), so its salt is kept in memory alone.
+//!
+//! cladefs: the file's key is an object's ([`extent_frame::ObjectKey::sectors`], TASK-411.23): a
+//! encrypted raw file framed in place is an object of its sectors as they are, its trailer naming the
+//! DEK and the salt, each part tagged under another subkey of them ([`RawFile::sectors`]).
 
 use crate::dir::File;
 use crate::framed::Aligned;
-use extent_frame::{KeyId, Salt, Secret};
+use extent_frame::{KeyId, ObjectKey, Salt, Secret};
 use extent_keys::MAC_LEN;
-use extent_keys::xts::Xts;
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
@@ -27,25 +29,32 @@ use std::sync::Arc;
 /// place in the file its tweak. What reaches an open segment is whole sectors (TASK-411.8).
 pub const SECTOR: u64 = extent_keys::xts::SECTOR as u64;
 
-/// cladefs: how an encrypted store's raw file is encrypted, and its log authenticated: under
-/// subkeys of its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5).
+/// The most a raw file's write encrypts at once, through a buffer of its own ([`RawFile`]'s
+/// `write_at`): whole sectors.
+const ENCRYPTING_MOST: usize = 1 << 20;
+const _: () = assert!((ENCRYPTING_MOST as u64).is_multiple_of(SECTOR));
+
+/// cladefs: how an encrypted store's raw file is encrypted, and its log authenticated: under subkeys of
+/// its branch's DEK `key`, from a salt of the file's own, `salt` (TASK-411.5). Its sectors' key is
+/// the key of the object the file is once framed in place (TASK-411.23).
 pub(crate) struct RawEncryption {
     pub key: KeyId,
     pub salt: Salt,
-    xts: Xts,
+    sectors: Arc<ObjectKey>,
     mac: Secret,
 }
 
 impl RawEncryption {
-    /// The encryption of a new raw file, under `dek`, which `key` names, from a salt drawn now.
+    /// The encryption of a new raw file, under `dek`, which `key` names, from a salt drawn now
+    /// ([`crate::sync::salt`]).
     pub fn new(dek: &Secret, key: KeyId) -> Self {
-        Self::of(dek, key, Salt::random())
+        Self::of(dek, key, crate::sync::salt())
     }
 
     /// The encryption of a raw file encrypted under `dek`, which `key` names, from `salt`.
     pub fn of(dek: &Secret, key: KeyId, salt: Salt) -> Self {
-        let xts = Xts::derive(dek, &salt, b"cladefs raw file");
-        Self { key, salt, xts, mac: dek.derive(&salt, &[b"cladefs raw file log mac"]) }
+        let sectors = Arc::new(ObjectKey::sectors(dek, key, salt));
+        Self { key, salt, sectors, mac: dek.derive(&salt, &[b"cladefs raw file log mac"]) }
     }
 
     /// The MAC of `bytes`, of the file's log, at `at` in it: so that none is taken for another's,
@@ -61,12 +70,12 @@ impl RawEncryption {
 
     /// Encrypts `sectors` in place, whole sectors at `at`, a multiple of [`SECTOR`], in the file.
     fn encrypt(&self, at: u64, sectors: &mut [u8]) {
-        self.xts.encrypt(at / SECTOR, sectors);
+        self.sectors.encrypt_sectors(at / SECTOR, sectors);
     }
 
     /// Decrypts `sectors` in place, as [`RawEncryption::encrypt`] encrypted them.
     pub fn decrypt(&self, at: u64, sectors: &mut [u8]) {
-        self.xts.decrypt(at / SECTOR, sectors);
+        self.sectors.decrypt_sectors(at / SECTOR, sectors);
     }
 }
 
@@ -78,64 +87,59 @@ fn at_bytes(at: u64, bytes: &[u8]) -> Vec<u8> {
     all
 }
 
-/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, in the clear, or
-/// encrypted a sector at a time. As a [`File`] it reads and writes what was written, encrypting and
-/// decrypting if encrypted: an encrypted one takes writes of whole sectors alone, and reads the
-/// sectors a read is in whole. What it stores, as stored, is [`RawFile::file`]'s.
+/// cladefs: a raw file of a store's (see the module's docs): its bytes as written, encrypted a
+/// sector at a time. As a [`File`] it reads and writes what was written, encrypting and
+/// decrypting: it takes writes of whole sectors alone, and reads the sectors a read is in whole.
+/// What it stores, as stored, is [`RawFile::file`]'s.
 pub struct RawFile<F> {
     file: Arc<F>,
-    encryption: Option<Arc<RawEncryption>>,
+    encryption: Arc<RawEncryption>,
 }
 
 impl<F> RawFile<F> {
-    /// The file, if it is in the clear: what a framing in place writes the tail of its frame into
-    /// (TASK-310), which an encrypted one never is, its sectors not the encrypted object's bytes.
-    pub(crate) fn clear(&self) -> Option<&Arc<F>> {
-        self.encryption.is_none().then_some(&self.file)
+    /// cladefs: its sectors' key: the key of the object it is once framed in place, its parts its
+    /// sectors as they are, each tagged under it ([`extent_frame::Packer::in_place`],
+    /// TASK-411.23).
+    pub(crate) fn sectors(&self) -> &Arc<ObjectKey> {
+        &self.encryption.sectors
     }
 }
 
 impl<F: File> RawFile<F> {
-    /// `file`, raw, encrypted by `encryption` if any, in the clear otherwise.
-    pub(crate) fn new(file: F, encryption: Option<Arc<RawEncryption>>) -> Self {
+    /// `file`, raw, encrypted by `encryption`.
+    pub(crate) fn new(file: F, encryption: Arc<RawEncryption>) -> Self {
         Self { file: Arc::new(file), encryption }
     }
 
-    /// The file as it stores the bytes, encrypted if it is: for a reader of them as stored, as a
+    /// The file as it stores the bytes, encrypted: for a reader of them as stored, as a
     /// log's records hold them (`wal::LogRecord`), syncs and writing back; and for an I/O of a
     /// caller's own, of bytes [`RawFile::read_range`] and [`RawFile::decrypt`] read, or that
-    /// [`crate::Write::stored`] gives. Never for writing anything else.
+    /// [`crate::Write::stored`] gives. Never for writing anything else, but a framing in place's
+    /// tail, past its data (TASK-310), in the clear, as any object's is (TASK-411.23).
     pub fn file(&self) -> &Arc<F> {
         &self.file
     }
 
     /// The range of the file a read of the `len` bytes at `offset` in it reads: the sectors they
-    /// are in, if it is encrypted, which decrypt whole ([`RawFile::decrypt`]); those bytes, if not.
+    /// are in, which decrypt whole ([`RawFile::decrypt`]).
     pub fn read_range(&self, offset: u64, len: u64) -> Range<u64> {
-        match self.encryption {
-            None => offset..offset + len,
-            Some(_) => offset / SECTOR * SECTOR..(offset + len).next_multiple_of(SECTOR),
-        }
+        offset / SECTOR * SECTOR..(offset + len).next_multiple_of(SECTOR)
     }
 
-    /// Decrypts `bytes` in place, read as stored at `at`, the start of a [`RawFile::read_range`],
-    /// if it is encrypted: whole sectors then. Nothing if it is in the clear.
+    /// Decrypts `bytes` in place, read as stored at `at`, the start of a [`RawFile::read_range`]:
+    /// whole sectors.
     pub fn decrypt(&self, at: u64, bytes: &mut [u8]) {
-        if let Some(encryption) = &self.encryption {
-            encryption.decrypt(at, bytes);
-        }
+        self.encryption.decrypt(at, bytes);
     }
 
-    /// Encrypts `bytes` in place, to be written at `at`, if it is encrypted: whole sectors then,
-    /// refused otherwise. Nothing if it is in the clear.
+    /// Encrypts `bytes` in place, to be written at `at`: whole sectors, refused otherwise.
     pub(crate) fn encrypt(&self, at: u64, bytes: &mut [u8]) -> io::Result<()> {
-        let Some(encryption) = &self.encryption else { return Ok(()) };
         if !at.is_multiple_of(SECTOR) || !(bytes.len() as u64).is_multiple_of(SECTOR) {
             let len = bytes.len();
             let error = format!("{len} bytes at {at}: not whole sectors of an encrypted raw file");
             return Err(io::Error::new(io::ErrorKind::InvalidInput, error));
         }
-        encryption.encrypt(at, bytes);
+        self.encryption.encrypt(at, bytes);
         Ok(())
     }
 
@@ -146,9 +150,6 @@ impl<F: File> RawFile<F> {
         offset: u64,
         read: impl Fn(&F, &mut [u8], u64) -> io::Result<()>,
     ) -> io::Result<()> {
-        if self.encryption.is_none() {
-            return read(&self.file, buf, offset);
-        }
         let range = self.read_range(offset, buf.len() as u64);
         if range == (offset..offset + buf.len() as u64) {
             read(&self.file, buf, offset)?;
@@ -173,16 +174,19 @@ impl<F: File> File for RawFile<F> {
         self.read_with(buf, offset, |file, buf, offset| file.read_cached(buf, offset))
     }
 
-    /// Writes `buf` at `offset`, encrypted through a buffer of its own if encrypted, whole sectors
-    /// then.
+    /// Writes `buf` at `offset`, encrypted through a buffer of its own, whole sectors: of
+    /// [`ENCRYPTING_MOST`] bytes at most, a write larger written a piece at a time, so that it holds
+    /// that much more, not its own size again, outside what its caller bounds (the extent daemon's
+    /// room for requests' buffers). A crash may leave some pieces written, as it may of any write.
     fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
-        if self.encryption.is_none() {
-            return self.file.write_at(buf, offset);
+        let mut encrypted = Aligned::new(buf.len().min(ENCRYPTING_MOST));
+        for (piece, at) in buf.chunks(ENCRYPTING_MOST).zip((offset..).step_by(ENCRYPTING_MOST)) {
+            let encrypted = &mut encrypted.as_mut_slice()[..piece.len()];
+            encrypted.copy_from_slice(piece);
+            self.encrypt(at, encrypted)?;
+            self.file.write_at(encrypted, at)?;
         }
-        let mut encrypted = Aligned::new(buf.len());
-        encrypted.as_mut_slice().copy_from_slice(buf);
-        self.encrypt(offset, encrypted.as_mut_slice())?;
-        self.file.write_at(encrypted.as_slice(), offset)
+        Ok(())
     }
 
     fn write_back(&self, offset: u64, len: u64) -> io::Result<()> {
@@ -216,14 +220,32 @@ mod tests {
         Arc::new(RawEncryption::new(&Secret::from_bytes(&[5; 32]), key))
     }
 
-    /// An encrypted raw file stores no byte of what was written, and reads it back, at any offset
-    /// and length, whole sectors or not; refuses writes of parts of sectors; one in the clear
-    /// stores what was written as it was.
+    /// A write larger than [`ENCRYPTING_MOST`], encrypted and written a piece at a time, stores
+    /// what encrypting it whole would, each sector under its own tweak, and reads back whole.
+    #[test]
+    fn large_writes_are_encrypted_a_piece_at_a_time_as_if_whole() {
+        let dir = MemDir::new();
+        let len = 2 * ENCRYPTING_MOST + 3 * SECTOR as usize;
+        let data: Vec<u8> = (0..len).map(|at| (at % 253) as u8).collect();
+        let raw = RawFile::new(dir.create("encrypted", true).unwrap(), encryption());
+        raw.write_at(&data, SECTOR).unwrap();
+        let mut whole = data.clone();
+        raw.encrypt(SECTOR, &mut whole).unwrap();
+        let mut stored = vec![0; len];
+        raw.file().read_at(&mut stored, SECTOR).unwrap();
+        assert!(stored == whole, "stored otherwise than encrypted whole");
+        let mut read = vec![0; len];
+        raw.read_at(&mut read, SECTOR).unwrap();
+        assert!(read == data, "read back otherwise than written");
+    }
+
+    /// An encrypted raw file stores no byte of what was written, and reads it back, at any offset and
+    /// length, whole sectors or not; refuses writes of parts of sectors.
     #[test]
     fn encrypted_raw_files_store_ciphertext_and_read_plaintext() {
         let dir = MemDir::new();
         let data: Vec<u8> = (0..3 * SECTOR as usize).map(|at| (at % 251) as u8).collect();
-        let raw = RawFile::new(dir.create("encrypted", true).unwrap(), Some(encryption()));
+        let raw = RawFile::new(dir.create("encrypted", true).unwrap(), encryption());
         raw.write_at(&data, SECTOR).unwrap();
         let mut stored = vec![0; 4 * SECTOR as usize];
         raw.file().read_at(&mut stored, 0).unwrap();
@@ -244,12 +266,5 @@ mod tests {
             refused.to_string(),
             "512 bytes at 4096: not whole sectors of an encrypted raw file"
         );
-
-        let clear = RawFile::new(dir.create("clear", true).unwrap(), None);
-        clear.write_at(&data[..512], 512).unwrap();
-        let mut stored = vec![0; 1024];
-        clear.file().read_at(&mut stored, 0).unwrap();
-        assert_eq!(&stored[512..], &data[..512]);
-        assert_eq!(clear.read_range(512, 512), 512..1024);
     }
 }

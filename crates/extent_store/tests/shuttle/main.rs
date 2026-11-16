@@ -273,15 +273,23 @@ fn run_with(Run { steps, follow }: Run) {
                         *taken.lock().unwrap() = epoch;
                     }
                     let holds = held(last);
-                    let data = extent_frame::data(&closed.bytes().unwrap(), &extent_frame::NoKeys)
-                        .unwrap();
+                    let data = extent_frame::data(
+                        &closed.bytes().unwrap(),
+                        &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                    )
+                    .unwrap();
                     let own: BTreeMap<_, _> = closed.own_bytes().unwrap().into_iter().collect();
                     bucket.put(bucket_key(&closed), data.to_vec());
                     bucket.acknowledge(closed.footer.clone());
                     for (key, bytes) in &own {
                         bucket.put(
                             key.clone(),
-                            extent_frame::data(bytes, &extent_frame::NoKeys).unwrap().to_vec(),
+                            extent_frame::data(
+                                bytes,
+                                &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                            )
+                            .unwrap()
+                            .to_vec(),
                         );
                     }
                     let in_segment =
@@ -289,8 +297,11 @@ fn run_with(Run { steps, follow }: Run) {
                             (extent, len, data[offset as usize..(offset + len) as usize].to_vec())
                         });
                     let on_their_own = closed.footer.own().map(|(extent, location)| {
-                        let data =
-                            extent_frame::data(&own[&location.key], &extent_frame::NoKeys).unwrap();
+                        let data = extent_frame::data(
+                            &own[&location.key],
+                            &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id),
+                        )
+                        .unwrap();
                         (extent, location.len, data)
                     });
                     // Each extent its footer names, as its last commit left it: in it, or in a
@@ -483,7 +494,7 @@ impl Bucket {
         let head =
             extent_bucket::layout::Head::default().holding(chain.epoch(), chain.next_segment());
         let taken = extent_bucket::TakenBranch::of(head, &state, chain);
-        let keys = extent_bucket::keys::Ring::clear();
+        let keys = extent_bucket::testing::ring([BRANCH]);
         let opening =
             Opening { state, layer: None, taken: Some(taken), cache: None, keys, held: None };
         Store::recover(dir).unwrap().open(OPTIONS, opening).unwrap()

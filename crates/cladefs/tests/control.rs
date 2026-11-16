@@ -465,3 +465,64 @@ fn encrypted_stores_served_and_shredded_through_the_control_api() {
     assert_eq!(failure(daemon.stat(&ours)), denied);
     assert_eq!(failure(daemon.stat(&sibling)), denied);
 }
+
+/// TASK-411.27: a daemon given a master key (`CLADEFS_MASTER_KEY`) and no `CLADEFS_KMS` encrypts its
+/// tenants' stores under the bucket KMS, each tenant's KEK made in its bucket on first use; what
+/// VMs wrote is in no file of the stores' directories in the clear. `ShredTenant` replaces the
+/// first tenant's KEK object by a tombstone and halts its store, its VM's reads failing with
+/// EACCES, the other tenant's reading on; called again, it finds the tenant shredded and halts
+/// nothing more. Closed, the store opens no more (PERMISSION_DENIED, EACCES).
+#[test]
+fn tenants_encrypted_under_the_bucket_kms_and_shredded_through_the_control_api() {
+    let master: String = (0..32).map(|byte| format!("{byte:02x}")).collect();
+    // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
+    // environment yet.
+    unsafe {
+        std::env::remove_var("CLADEFS_KMS");
+        std::env::set_var("CLADEFS_MASTER_KEY", &master);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let mut daemon = Daemon::new(dir.path());
+    let (ours, theirs) = (dir.path().join("ours"), dir.path().join("theirs"));
+    let of = |tenant| cladefs::Branch { cell: cladefs::Cell { tenant, id: 0 }, id: 0 };
+    daemon.create(&ours, of(1), None).unwrap();
+    daemon.create(&theirs, of(2), None).unwrap();
+    let vms = [daemon.open(&ours, CAPACITY), daemon.open(&theirs, CAPACITY)];
+    for (seed, vm) in (1..).zip(&vms) {
+        write(vm, &pattern(seed), b"encrypted");
+    }
+    let read = |vm: &cladefs::DaemonExtentStore, seed: u64| {
+        let mut data = vec![0; 64 << 10];
+        let extent = cladefs::ExtentId { branch: vm.branch(), sequence: 1 };
+        let done = vm.read(extent, 0, &mut [cladefs::VolatileSliceMut::from(&mut data[..])]);
+        done.map(|()| data == pattern(seed))
+    };
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Ok(true), Ok(true)));
+    daemon.sync(&ours).unwrap();
+    daemon.sync(&theirs).unwrap();
+    for (seed, path) in (1..).zip([&ours, &theirs]) {
+        let mut paths = vec![path.to_path_buf()];
+        while let Some(at) = paths.pop() {
+            if at.is_dir() {
+                paths.extend(std::fs::read_dir(&at).unwrap().map(|entry| entry.unwrap().path()));
+                continue;
+            }
+            let bytes = std::fs::read(&at).unwrap();
+            let held = bytes.windows(64).any(|window| window == &pattern(seed)[..64]);
+            assert!(!held, "{} holds what its VM wrote", at.display());
+        }
+    }
+
+    let shred = |daemon: &mut Daemon| {
+        let request = ShredTenantRequest { tenant: 1 };
+        let shredded = daemon.runtime.block_on(daemon.client.shred_tenant(request)).unwrap();
+        let ShredTenantResponse { shredded_now, forgotten } = shredded.into_inner();
+        (shredded_now, forgotten.unwrap().stores)
+    };
+    assert_eq!(shred(&mut daemon), (true, 1));
+    assert_eq!((read(&vms[0], 1), read(&vms[1], 2)), (Err(Errno::EACCES), Ok(true)));
+    assert_eq!(shred(&mut daemon), (false, 0));
+
+    drop(vms);
+    assert_eq!(failure(daemon.stat(&ours)), (Code::PermissionDenied, Errno::EACCES));
+}

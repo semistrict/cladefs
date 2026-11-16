@@ -48,18 +48,21 @@
 //!   stores share what holds the parts they pack as their segments fill, as a daemon's do
 //!   (TASK-400), which `CLADEFS_BENCH_EVICT` (0) has let go of every part before each closing, as a
 //!   governor short of memory would: what it held, took and let go of, the process's CPU time, and
-//!   how long the writes and commits took, which the looks ahead run behind. Encrypted stores hold
-//!   none (TASK-411.5).
+//!   how long the writes and commits took, which the looks ahead run behind; and the bytes the
+//!   stores wrote, raw and framed, and the segments framed in place. cladefs: encrypted stores look
+//!   ahead, hold and frame in place (TASK-411.23, TASK-421).
 //! - `writes`: N MiB (256) written to a store's open segments as extents of `CLADEFS_BENCH_EXTENT`
 //!   KiB (1024), in a directory of the host's (`CLADEFS_BENCH_DIR`, or a temporary one), read back
 //!   while open, then committed: MiB/s of the writes, of the reads, and how long the commit took
 //!   (TASK-411.5).
 //!
-//! cladefs: `CLADEFS_BENCH_ENCRYPTED` set to `1` has `framing` and `writes` open their stores as a
-//! host with a KMS opens an encrypted cell's, through their uploaders, to a bucket in memory: their
-//! raw files encrypted, AES-256-XTS by sector, their segments framed encrypted, AES-256-GCM; set to
-//! `0`, opened alike, in the clear, of a tenant with no KEK in the KMS, its twin; unset, as before,
-//! with no uploader (TASK-411.5).
+//! cladefs: every store is encrypted (TASK-411.28): their raw files encrypted, AES-256-XTS by sector,
+//! their segments framed in place their raw files' sectors, tagged, or in a copy AES-256-GCM
+//! (TASK-411.23). `CLADEFS_BENCH_ENCRYPTED` set to `1` has `framing` and `writes` open their stores as
+//! a host with a KMS opens a cell's, through their uploaders, to a bucket in memory; unset, with no
+//! uploader, kept in no bucket, encrypted under the tests' DEK (`extent_store::UNKEPT_DEK`,
+//! TASK-411.5). `0`, a clear twin through uploaders before TASK-411.28, is refused: measure the
+//! clear with an old pin's store-bench.
 //!
 //! The stores of all but `close-now`, `burst` and `durable` are in memory ([`MemDir`]), so that
 //! what is timed is the store's own work. On Linux, the stores' page cache is sized first as the
@@ -374,10 +377,9 @@ fn nice(nice: i32) {
 }
 
 /// cladefs: a host with a KMS, whose stores' uploaders keep their branches in a bucket in memory, a
-/// runtime of their own, to open stores encrypted or in the clear as `CLADEFS_BENCH_ENCRYPTED` says
-/// ([`Host::from_env`], TASK-411.5).
+/// runtime of their own, to open stores as `CLADEFS_BENCH_ENCRYPTED` says ([`Host::from_env`],
+/// TASK-411.5).
 struct Host {
-    encrypted: bool,
     runtime: tokio::runtime::Runtime,
     bucket: Arc<extent_bucket::object_bucket::ObjectBucket>,
     upload: extent_store::upload::Runtime,
@@ -385,33 +387,36 @@ struct Host {
 }
 
 impl Host {
-    /// The tenant whose KEK the host's KMS keeps: its cells are encrypted.
+    /// The tenant whose KEK the host's KMS keeps.
     const ENCRYPTED: u64 = 1;
-    /// A tenant with no KEK there: its cells are in the clear.
-    const CLEAR: u64 = 2;
 
-    /// A host if `CLADEFS_BENCH_ENCRYPTED` is set: its stores encrypted if it is `1`.
+    /// A host if `CLADEFS_BENCH_ENCRYPTED` is `1`; `0`, a clear twin, refused (TASK-411.28).
     fn from_env() -> Option<Self> {
         let encrypted = std::env::var("CLADEFS_BENCH_ENCRYPTED").ok()?;
+        assert_eq!(
+            encrypted, "1",
+            "CLADEFS_BENCH_ENCRYPTED: no store is in the clear since TASK-411.28; an old pin's \
+             store-bench measures one"
+        );
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let objects = Arc::new(object_store::memory::InMemory::new());
         let bucket = Arc::new(extent_bucket::object_bucket::ObjectBucket::new(objects, ""));
         let kms = tempfile::tempdir().unwrap();
         let local = extent_keys::kms::LocalKms::open(kms.path().join("kms")).unwrap();
         local.create(Self::ENCRYPTED).unwrap();
-        let keys = extent_bucket::keys::Host {
-            kms: Some(extent_bucket::keys::CachingKms::new(Arc::new(local))),
-            ring: extent_bucket::fetch::Memory::new().keys().clone(),
-        };
+        let keys = extent_bucket::keys::Host::new(
+            extent_bucket::keys::CachingKms::new(Arc::new(local)),
+            extent_bucket::fetch::Memory::new().keys().clone(),
+        );
         let uploads = extent_bucket::fetch::Budget::new(extent_bucket::fetch::Limits::UNBOUNDED);
         let upload =
             extent_store::upload::Runtime { handle: runtime.handle().clone(), uploads, keys };
-        Some(Self { encrypted: encrypted == "1", runtime, bucket, upload, _kms: kms })
+        Some(Self { runtime, bucket, upload, _kms: kms })
     }
 
-    /// The store in `dir`, made, of branch `id` of the host's cell, encrypted or not, opened
-    /// through its uploader, which closes no segment between commits, holding the parts it packs
-    /// ahead in `held` (TASK-400), none if encrypted.
+    /// The store in `dir`, made, of branch `id` of the host's cell, encrypted, opened through its
+    /// uploader, which closes no segment between commits, holding the parts it packs ahead in
+    /// `held` (TASK-400).
     fn open(
         &self,
         dir: HostDir,
@@ -419,7 +424,7 @@ impl Host {
         options: Options,
         held: Arc<HeldParts>,
     ) -> (Arc<Store<HostDir>>, extent_store::upload::Uploader<HostDir>) {
-        let tenant = if self.encrypted { Self::ENCRYPTED } else { Self::CLEAR };
+        let tenant = Self::ENCRYPTED;
         let branch = extent_store::Branch { cell: extent_store::Cell { tenant, id: 1 }, id };
         let description = Description { block_size: BLOCK as u32, capacity: 64 << 30, branch };
         let kind = extent_bucket::cell::Kind::Fxfs;
@@ -435,7 +440,7 @@ impl Host {
         let (store, uploader) =
             extent_store::upload::open(recovering, options, bucket, holding, &self.upload).unwrap();
         store.made().unwrap();
-        assert_eq!(store.keys().encrypting().is_some(), self.encrypted);
+        assert!(store.keys().encrypts());
         (store, uploader)
     }
 }
@@ -485,9 +490,8 @@ fn writes(mib: u64) {
     store.commit(None).unwrap();
     let committed = started.elapsed();
     let kind = match &host {
-        Some(host) if host.encrypted => "encrypted",
-        Some(_) => "clear, through an uploader",
-        None => "clear",
+        Some(_) => "encrypted, through an uploader",
+        None => "encrypted, kept nowhere",
     };
     let rate = |elapsed: Duration| (count * len as u64) as f64 / MIB as f64 / elapsed.as_secs_f64();
     println!(
@@ -531,6 +535,7 @@ fn framing(segments: u64) {
         other => panic!("CLADEFS_BENCH_DATA is {other:?}"),
     };
     let before = extent_store::timings();
+    let written = (extent_store::written(), extent_store::segments_framed_in_place());
     let started = Instant::now();
     std::thread::scope(|scope| {
         for store in 0..stores {
@@ -604,9 +609,8 @@ fn framing(segments: u64) {
     }
     sum.runnable_us -= before.framings.sum.runnable_us;
     let encrypted = match &host {
-        Some(host) if host.encrypted => ", encrypted",
-        Some(_) => ", in the clear through uploaders",
-        None => "",
+        Some(_) => ", encrypted, through uploaders",
+        None => ", encrypted, kept nowhere",
     };
     println!(
         "{count} framings of {SEGMENT} MiB{encrypted}, {stores} stores at once, {hogs} spinning \
@@ -628,6 +632,18 @@ fn framing(segments: u64) {
         mib(held.taken),
         mib(held.evicted),
         held.evicted_parts
+    );
+    let (after_written, in_place) =
+        (extent_store::written(), extent_store::segments_framed_in_place());
+    let (raw, framed) =
+        (after_written.raw - written.0.raw, after_written.framed - written.0.framed);
+    println!(
+        "  written: {:.1} MiB raw, {:.1} MiB framed, {:.2} times the data; {} of {count} framed in \
+         place",
+        mib(raw),
+        mib(framed),
+        (raw + framed) as f64 / raw.max(1) as f64,
+        in_place - written.1,
     );
     let writing = writing.into_inner().unwrap();
     println!(

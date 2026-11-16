@@ -112,6 +112,17 @@
 
 #![deny(missing_docs)]
 
+// cladefs: `tests-kms` has a host given no KMS encrypt under the tests' KMS, its KEKs known to all
+// (`bucket::testing`, TASK-411.28): this crate's tests' and sqlite_extents', which their
+// dev-dependencies turn on, never a host's. A release build is a host's, and tests are not (the dev
+// and sim profiles have debug assertions).
+#[cfg(all(feature = "tests-kms", not(debug_assertions)))]
+compile_error!(
+    "cladefs's `tests-kms` in a release build, whose hosts would encrypt under KEKs known to all: \
+     build a package alone (`-p PACKAGE`), not across the workspace, whose dev-dependencies turn \
+     it on (TASK-411.28)"
+);
+
 pub mod bucket;
 mod cache;
 mod dax;

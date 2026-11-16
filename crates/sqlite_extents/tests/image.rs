@@ -13,15 +13,16 @@ use sqlite_extents::{FileSet, Options, Registration, register};
 use std::path::Path;
 use std::sync::Arc;
 
+/// A database on an image survives closing; and, every store encrypted (TASK-411.28), under the
+/// tests' KMS here, no file of the image, its store's nor its bucket's, holds its data in the clear.
 #[test]
 fn a_database_on_an_image_survives_closing() {
-    let found = survives_closing("plain");
-    assert!(!found.is_empty(), "no file of the image holds its data in the clear");
+    assert_eq!(survives_closing("plain"), Vec::<String>::new());
 }
 
-/// TASK-411.7 (TASK-411's AC #3): a database on an image of an encrypted cell, its tenant's KEK in
-/// the host's KMS, survives closing as one in the clear does; and no file of the image, its
-/// store's nor its bucket's, holds its data in the clear.
+/// TASK-411.7 (TASK-411's AC #3): a database on an image of a cell whose tenant's KEK is in the
+/// KMS the host names survives closing, and no file of the image, its store's nor its bucket's,
+/// holds its data in the clear.
 #[test]
 fn an_encrypted_database_on_an_image_survives_closing() {
     let keys = tempfile::tempdir().unwrap();

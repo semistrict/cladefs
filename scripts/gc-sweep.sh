@@ -44,6 +44,10 @@
 #
 #   scripts/gc-sweep.sh [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]
 set -euo pipefail
+# cladefs: cladefs-gc-fill encrypts the cells it fills, which cladefs-gc compacts, under the bucket KMS of a
+# test master key, unless the environment names a KMS (TASK-411.28).
+source "$(dirname "${BASH_SOURCE[0]}")/lib/test-kms.sh"
+test_master_key
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 source "$repo/scripts/lib/measurement.sh"
 usage="Usage: $0 [--prepare | --prepared] WORK RESULTS [SIDE=TREE...]"

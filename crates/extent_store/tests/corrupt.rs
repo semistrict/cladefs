@@ -190,7 +190,11 @@ fn closed_segments_with_flipped_bytes_are_not_taken() {
         store.flush().unwrap();
         let [closed] = <[_; 1]>::try_from(store.closed(usize::MAX).unwrap()).ok().unwrap();
         let bytes = closed.bytes().unwrap();
-        assert_eq!(extent_frame::data(&bytes, &extent_frame::NoKeys).unwrap(), data);
+        assert_eq!(
+            extent_frame::data(&bytes, &extent_bucket::testing::ring([BRANCH]).of(BRANCH.id))
+                .unwrap(),
+            data
+        );
         // The framed file under its own name, which the thread making framings durable renames it
         // to once durable, after the flush returns (TASK-399): what `stored` opens.
         store.wait_idle().unwrap();

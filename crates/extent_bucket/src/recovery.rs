@@ -20,8 +20,8 @@
 //! head again: if it changed, a newer checkpoint may cover what went, and the reader starts again.
 //!
 //! cladefs: a recovery reads holding a ring ([`crate::keys::Ring`], TASK-411.3): its footers and
-//! checkpoints are checked against their MACs under the keys it holds, and those of a branch it
-//! holds encrypted refused in the clear. The collector's holds none, reading them as it did.
+//! checkpoints are checked against their MACs under the keys it holds, and one whose encrypt says the
+//! clear is corrupt (TASK-411.28). The collector's holds none, reading them as it did.
 
 use crate::bucket::{self, Bucket, Meta};
 use crate::keys::Ring;
@@ -349,7 +349,7 @@ impl Places for Layered {
 const RESTARTS: usize = 64;
 
 /// The ring of a recovery holding no key.
-static CLEAR: std::sync::LazyLock<Arc<Ring>> = std::sync::LazyLock::new(Ring::clear);
+static KEYLESS: std::sync::LazyLock<Arc<Ring>> = std::sync::LazyLock::new(Ring::keyless);
 
 /// How many segments' footers recovery reads at once, at most: their keys are known, the head
 /// naming them, so that a recovery reads none it needs not.
@@ -372,7 +372,7 @@ pub async fn recover(
     branch: Branch,
     origin: Option<Origin>,
 ) -> Result<Recovered, Error> {
-    recover_under(bucket, branch, origin, &Ring::clear()).await
+    recover_under(bucket, branch, origin, &Ring::keyless()).await
 }
 
 /// cladefs: the state of `branch`, forked from `origin`, read holding `ring` (TASK-411.3).
@@ -544,7 +544,7 @@ type Flight<'a> = Shared<BoxFuture<'a, Result<Option<Arc<State>>, Error>>>;
 impl<'a, B: Bucket> Checkpoints<'a, B> {
     /// Reads checkpoints from `bucket`, keeping the last `keep` read.
     pub(crate) fn new(bucket: &'a B, keep: usize) -> Self {
-        let keys = &**CLEAR;
+        let keys = &**KEYLESS;
         Self { bucket, keep, read: Mutex::default(), listed: None, served: Mutex::default(), keys }
     }
 
@@ -1029,10 +1029,10 @@ async fn moved(bucket: &impl Bucket, branch: Branch, head: Option<&Head>) -> Att
     }
 }
 
-/// The footer of segment `segment` of `branch` by the writer of `epoch`, if it is there: read by
-/// its object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
-/// segment whole. cladefs: checked against its MAC if `keys` hold its key, and refused in the clear
-/// if they hold its branch encrypted (TASK-411.3).
+/// The footer of segment `seq` of `branch` by the writer of `epoch`, if it is there: read by its
+/// object's tail, a ranged read of its last bytes, which hold it ([`object::tail`]), not by the
+/// segment whole. cladefs: checked against its MAC if `keys` hold its key (TASK-411.3); in the
+/// clear, corrupt (TASK-411.28).
 async fn segment_footer(
     (bucket, keys): (&impl Bucket, &Ring),
     branch: Branch,
@@ -1042,7 +1042,7 @@ async fn segment_footer(
     let key = layout::segment(branch, segment, epoch);
     let Some(tail) = object::tail(bucket, &key).await? else { return Ok(None) };
     if !keys.is_empty() {
-        tail.open(&keys.of(branch.id)).map_err(|err| err.reading(&key))?;
+        tail.open(&keys.of(branch.id))?;
     }
     Ok(Some(placed(&key, layout::decode(tail.footer())?, branch, segment, epoch)?))
 }
@@ -1068,8 +1068,7 @@ fn placed(
 /// The state checkpoint `key` of `branch`, whose object holds `bytes`, holds: cladefs: read holding
 /// `keys` (TASK-411.3).
 fn checkpoint(key: &str, bytes: &[u8], branch: Branch, keys: &Ring) -> Result<State, Error> {
-    let state = crate::checkpoint::decode_under(bytes, &keys.of(branch.id))
-        .map_err(|err| err.reading(key))?;
+    let state = crate::checkpoint::decode_under(bytes, &keys.of(branch.id))?;
     if state.branch != branch {
         return Err(Error::Corrupt(format!("{key} holds a checkpoint of {}", state.branch)));
     }
@@ -1265,12 +1264,12 @@ pub(crate) async fn checkpoint_at(
         return Ok(());
     }
     let keys = keys.ring(bucket, branch).await?;
-    debug_assert!(keys.encrypting().is_none_or(|(_, id)| id.branch == branch.id));
+    debug_assert_eq!(keys.encrypting().1.branch, branch.id);
     let checkpoints = Checkpoints::new(bucket, 0);
     for _ in 0..RESTARTS {
         match state_at(&checkpoints, branch, at, &mut BTreeSet::new(), branch.cell, false).await {
             Ok(state) => {
-                let checkpoint = crate::checkpoint::encode_under(&state, keys.encrypting());
+                let checkpoint = crate::checkpoint::encode(&state, keys.encrypting());
                 bucket::create(bucket, &key, checkpoint).await;
                 return Ok(());
             }
@@ -1315,7 +1314,7 @@ pub(crate) async fn holds_fork(
     let Some(epoch) = head::get(bucket, parent).await?.and_then(|head| head.epoch_of(at)) else {
         return Ok(false);
     };
-    let Some(footer) = segment_footer((bucket, &**CLEAR), parent, at, epoch).await? else {
+    let Some(footer) = segment_footer((bucket, &**KEYLESS), parent, at, epoch).await? else {
         return Ok(false);
     };
     let forked = |fork: &layout::Child| fork.branch == child && fork.owner == owner;
@@ -1424,7 +1423,7 @@ mod tests {
         for tag in tag..tag + count {
             let objects = SegmentBuilder::from(Commit { tag, ..Commit::default() })
                 .close(&mut writer.chain())
-                .frame();
+                .frame(writer.keys().encrypting());
             let segment = writer.add_segment(objects).unwrap();
             bucket.served(writer.upload(segment)).0.unwrap();
             bucket.served(writer.acknowledge()).0.unwrap();
@@ -1465,7 +1464,7 @@ mod tests {
         committed(&bucket, &writer, 6, 2);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
         let (on, rounds) =
-            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::keyless()));
         let on = on.unwrap();
         assert_eq!(rounds, [tails(5..7)]);
         let anew = bucket.served(recover(&*bucket, test_branch(1), None)).0.unwrap();
@@ -1488,7 +1487,7 @@ mod tests {
         committed(&bucket, &writer, 4, 1);
         let now = bucket.served(head::get(&*bucket, test_branch(1))).0.unwrap();
         let (on, rounds) =
-            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::clear()));
+            bucket.served_in_rounds(recover_on(&*bucket, None, recovered, now, &Ring::keyless()));
         let on = on.unwrap();
         assert_eq!(
             (on.checkpoint(), on.end(), on.state.last_commit),
@@ -1517,7 +1516,9 @@ mod tests {
             let landed = async |writer: &Writer<ObjectBucket>, contents: Contents| {
                 let footer = writer.chain().close(contents);
                 let data = vec![7; 8192];
-                let framed = Segment { data, footer: footer.clone() }.encode().into();
+                let framed = Segment { data, footer: footer.clone() }
+                    .encode(writer.keys().encrypting())
+                    .into();
                 let segment = writer
                     .add_segment(Objects { footer, segment: framed, own: Vec::new() })
                     .unwrap();
@@ -1593,13 +1594,20 @@ mod tests {
                 writer.acknowledge().await.unwrap();
                 segment
             };
-            let forked =
-                resize(1, 1 << 20).fork(child(test_branch(2)), &mut parent.chain()).frame();
+            let forked = resize(1, 1 << 20)
+                .fork(child(test_branch(2)), &mut parent.chain())
+                .frame(parent.keys().encrypting());
             let forked = Origin { parent: test_branch(1), at: landed(&parent, forked).await };
             let point = Child { branch: test_branch(3), owner: 0, point: true };
-            let pointed = SegmentBuilder::default().fork(point, &mut parent.chain()).frame();
+            let pointed = SegmentBuilder::default()
+                .fork(point, &mut parent.chain())
+                .frame(parent.keys().encrypting());
             let pointed = Origin { parent: test_branch(1), at: landed(&parent, pointed).await };
-            landed(&parent, resize(2, 2 << 20).close(&mut parent.chain()).frame()).await;
+            landed(
+                &parent,
+                resize(2, 2 << 20).close(&mut parent.chain()).frame(parent.keys().encrypting()),
+            )
+            .await;
             let capacity = async |branch, origin| {
                 let recovered = recover(&*bucket, branch, origin).await.unwrap();
                 (recovered.checkpoint().is_some(), recovered.state.capacity)
@@ -1613,7 +1621,11 @@ mod tests {
 
             let child = Writer::open(bucket.clone(), test_branch(2), 11, 0).await.unwrap();
             assert_eq!(child.state().capacity, Some(1 << 20));
-            landed(&child, resize(3, 4 << 20).close(&mut child.chain()).frame()).await;
+            landed(
+                &child,
+                resize(3, 4 << 20).close(&mut child.chain()).frame(child.keys().encrypting()),
+            )
+            .await;
             child.checkpoint().await.unwrap();
             assert_eq!(capacity(test_branch(2), Some(forked)).await, (true, Some(4 << 20)));
             assert_eq!(capacity(test_branch(1), None).await, (true, Some(2 << 20)));
@@ -1634,7 +1646,11 @@ mod tests {
             let extents = vec![(extent, b"one".to_vec())];
             let batch = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
             let at = parent
-                .add_segment(batch.fork(child(test_branch(2)), &mut parent.chain()).frame())
+                .add_segment(
+                    batch
+                        .fork(child(test_branch(2)), &mut parent.chain())
+                        .frame(parent.keys().encrypting()),
+                )
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
@@ -1649,7 +1665,9 @@ mod tests {
             let child = Writer::open(bucket.clone(), test_branch(2), 11, 0).await.unwrap();
             assert_eq!(child.checkpoint().await, Ok(None));
             let commit = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-            let segment = child.add_segment(commit.close(&mut child.chain()).frame()).unwrap();
+            let segment = child
+                .add_segment(commit.close(&mut child.chain()).frame(child.keys().encrypting()))
+                .unwrap();
             child.upload(segment).await.unwrap();
             child.acknowledge().await.unwrap();
             assert_eq!(child.checkpoint().await, Ok(Some(segment)));

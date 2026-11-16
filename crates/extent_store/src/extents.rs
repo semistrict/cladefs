@@ -7,7 +7,7 @@
 //! branch, a persistent map (`extent_bucket::recovery::Extents`) shared, never changed here, with the
 //! branch's writer and with every other store open on the host that started from the same decoded
 //! state, as a base's forks do (`extent_bucket::recovery::Decoded`). Over it, the store's own:
-//! what it wrote, sealed, acknowledged or followed where the collector moved it since, and the
+//! what it wrote, encrypted, acknowledged or followed where the collector moved it since, and the
 //! extents of the bucket's layer it holds no more there, freed or overlaid. A lookup reads its own
 //! layer, then the bucket's. So a store's memory grows with what it does, not with what it
 //! inherited: each fork's copy of its base's map in a store's own was 220-470 bytes an extent of

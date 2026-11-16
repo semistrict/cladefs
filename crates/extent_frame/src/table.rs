@@ -54,12 +54,12 @@ pub struct Block {
 }
 
 /// The table of `entries`, which are in their IDs' order ([`ExtentId`]'s: by sequence number, then
-/// branch, the order [`TableFooter::block`] finds them by), and `rest`: cladefs: authenticated, if
-/// `key` gives a DEK and which it is ([`crate::Packer::keyed`], TASK-411.3).
+/// branch, the order [`TableFooter::block`] finds them by), and `rest`: cladefs: authenticated under
+/// the DEK `key` gives, and which it is ([`crate::Packer::keyed`], TASK-411.3).
 pub fn encode<'a>(
     entries: impl IntoIterator<Item = (ExtentId, &'a str, u64, u64)>,
     rest: Vec<u8>,
-    key: Option<(&Secret, KeyId)>,
+    (dek, id): (&Secret, KeyId),
 ) -> Vec<u8> {
     let mut keys = Vec::new();
     let mut indexes = std::collections::HashMap::new();
@@ -92,7 +92,7 @@ pub fn encode<'a>(
     flush(&mut block, &mut first, &mut data);
     let footer =
         bincode::serialize(&TableFooter { rest, keys, blocks }).expect("footers serialize");
-    crate::framed_keyed(&data, &footer, key.map(|(dek, id)| (dek, id, Keyed::Authenticated)))
+    crate::framed_keyed(&data, &footer, (dek, id, Keyed::Authenticated))
 }
 
 /// cladefs: keys stored front-coded: each as the length of what it shares with the one before it, and
@@ -204,12 +204,19 @@ mod tests {
             .collect()
     }
 
-    fn encoded(entries: &[Entry]) -> Vec<u8> {
-        keyed(entries, None)
+    /// The DEK of the tests' tables, and which it is.
+    const ID: KeyId = KeyId { branch: 3, generation: 0 };
+
+    fn dek() -> Secret {
+        Secret::from_bytes(&[1; 32])
     }
 
-    /// The table of `entries`, authenticated under `key` if given.
-    fn keyed(entries: &[Entry], key: Option<(&Secret, KeyId)>) -> Vec<u8> {
+    fn encoded(entries: &[Entry]) -> Vec<u8> {
+        encrypted(entries, (&dek(), ID))
+    }
+
+    /// The table of `entries`, authenticated under `key`.
+    fn encrypted(entries: &[Entry], key: (&Secret, KeyId)) -> Vec<u8> {
         let rows =
             entries.iter().map(|entry| (entry.id, entry.key.as_str(), entry.offset, entry.len));
         encode(rows, b"rest".to_vec(), key)
@@ -228,33 +235,32 @@ mod tests {
         }
     }
 
-    /// Tables hold their entries in blocks as full as `TABLE_BLOCK` allows: 1,820 entries each;
-    /// cladefs: in the clear, and under a key, authenticated, read alike by readers holding it or
-    /// none, and refused, changed, by one holding it; one in the clear refused by a reader holding
-    /// its objects encrypted (TASK-411.3).
+    /// Tables hold their entries in blocks as full as `BLOCK` allows: 1,820 entries each; cladefs:
+    /// authenticated under a key, read alike by readers holding it or none, and refused, changed,
+    /// by one holding it; a reader holding its objects encrypted reads it under the key, and refuses
+    /// it without (TASK-411.3).
     #[test]
     fn tables_hold_their_entries() {
-        let id = KeyId { branch: 3, generation: 0 };
-        let keys = std::collections::HashMap::from([(id, Secret::from_bytes(&[1; 32]))]);
-        for key in [None, Some((&keys[&id], id))] {
-            for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
-                let entries = entries(count);
-                let bytes = keyed(&entries, key);
-                let (footer, decoded) = decode(&bytes, &keys).unwrap();
-                assert_eq!((footer.rest.as_slice(), &decoded), (&b"rest"[..], &entries), "{count}");
-                assert_eq!(decode(&bytes, &crate::NoKeys), Ok((footer.clone(), entries)));
-                let firsts: Vec<ExtentId> = footer.blocks.iter().map(|block| block.first).collect();
-                let expected: Vec<ExtentId> =
-                    (0..blocks).map(|block| ExtentId::new(3, block * 1820)).collect();
-                assert_eq!(firsts, expected, "{count}");
-            }
-            let mut bytes = keyed(&entries(3000), key);
-            bytes[100] ^= 1;
-            assert!(decode(&bytes, &keys).is_err());
+        let id = ID;
+        let keys = std::collections::HashMap::from([(id, dek())]);
+        let key = (&keys[&id], id);
+        for (count, blocks) in [(0, 0), (1, 1), (1819, 1), (1820, 1), (1821, 2), (10_000, 6)] {
+            let entries = entries(count);
+            let bytes = encrypted(&entries, key);
+            let (footer, decoded) = decode(&bytes, &keys).unwrap();
+            assert_eq!((footer.rest.as_slice(), &decoded), (&b"rest"[..], &entries), "{count}");
+            assert_eq!(decode(&bytes, &crate::NoKeys), Ok((footer.clone(), entries)));
+            let firsts: Vec<ExtentId> = footer.blocks.iter().map(|block| block.first).collect();
+            let expected: Vec<ExtentId> =
+                (0..blocks).map(|block| ExtentId::new(3, block * 1820)).collect();
+            assert_eq!(firsts, expected, "{count}");
         }
-        // Authenticated: its entries in the clear, as stored; a part's tag changed, its table's
-        // CRC made to match, read by a reader holding no key, refused by one holding it.
-        let bytes = keyed(&entries(10), Some((&keys[&id], id)));
+        let mut bytes = encrypted(&entries(3000), key);
+        bytes[100] ^= 1;
+        assert!(decode(&bytes, &keys).is_err());
+        // Authenticated: its entries unencrypted, as stored; a part's tag changed, its table's CRC
+        // made to match, read by a reader holding no key, refused by one holding it.
+        let bytes = encrypted(&entries(10), key);
         let frame = crate::Frame::of(&bytes).unwrap();
         assert!(
             matches!(frame.encryption, crate::Encryption::Authenticated { key, .. } if key == id)
@@ -269,10 +275,10 @@ mod tests {
             decode(&tampered, &keys).map(|_| ()),
             Err(Corrupt("an object's table, by its MAC".into()).into())
         );
-        // In the clear, refused by a reader holding its objects encrypted.
-        let clear = keyed(&entries(10), None);
-        assert_eq!(decode(&clear, &Holding(&keys)).map(|_| ()), Err(Error::Unencrypted));
+        // A reader holding its objects encrypted reads it under the key, and refuses it without.
         assert_eq!(decode(&bytes, &Holding(&keys)).map(|(_, entries)| entries), Ok(entries(10)));
+        let none = std::collections::HashMap::new();
+        assert_eq!(decode(&bytes, &Holding(&none)).map(|_| ()), Err(Error::NoKey(id)));
     }
 
     /// cladefs: a footer's keys read back as they were, whatever they share, a character split or

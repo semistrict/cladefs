@@ -1574,7 +1574,13 @@ pub(crate) mod tests {
 
     /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
     fn add<B: Bucket>(writer: &Writer<B>, commit: Commit) -> u64 {
-        writer.add_segment(SegmentBuilder::from(commit).close(&mut writer.chain()).frame()).unwrap()
+        writer
+            .add_segment(
+                SegmentBuilder::from(commit)
+                    .close(&mut writer.chain())
+                    .frame(writer.keys().encrypting()),
+            )
+            .unwrap()
     }
 
     /// A branch's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
@@ -1596,7 +1602,7 @@ pub(crate) mod tests {
         assert_eq!(first.acknowledge().await, Ok(Some(segment)));
         let forking = SegmentBuilder::default()
             .fork(crate::layout::child(test_branch(child)), &mut first.chain())
-            .frame();
+            .frame(first.keys().encrypting());
         let fork = first.add_segment(forking).unwrap();
         first.upload(fork).await.unwrap();
         first.acknowledge().await.unwrap();
@@ -1640,9 +1646,9 @@ pub(crate) mod tests {
         let options = collector::Options { compact_below: 0.5, grace: 0 };
         collector::collect(&*bucket, 20, &options).await.unwrap();
         let location = &inherited.extents[&small];
-        assert_eq!(crate::read(&bucket, small, location).await.unwrap(), b"small");
+        assert_eq!(crate::testing::read(&bucket, small, location).await.unwrap(), b"small");
         let location = &inherited.extents[&large];
-        assert_eq!(crate::read(&bucket, large, location).await.unwrap(), vec![7; 4096]);
+        assert_eq!(crate::testing::read(&bucket, large, location).await.unwrap(), vec![7; 4096]);
 
         // Freed by the parent's writer, and by the child, which inherited them, nothing reaches
         // them: the collector reclaims their objects.

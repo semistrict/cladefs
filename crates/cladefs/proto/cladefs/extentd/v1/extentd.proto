@@ -223,6 +223,16 @@ service Extentd {
   // for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
   // their VM processes close them.
   rpc ForgetTenantKeys(ForgetTenantKeysRequest) returns (ForgetTenantKeysResponse);
+  // Shreds a tenant under the bucket KMS (TASK-411.27, doc-16 The bucket KMS): replaces its KEK
+  // object in the daemon's bucket (tenants/<tenant>/kek) by a tombstone, so that no key its KEK
+  // wrapped unwraps on any host and none is made it again; then forgets what this host holds of its
+  // keys, as ForgetTenantKeys does. Call it on every host: the first call shreds it, the others
+  // find it shredded and forget; hosts not told refuse the tenant once they read its KEK object
+  // again, within a minute. Only as strong as the bucket keeps no older version of the KEK object:
+  // with versioning on, a lifecycle rule must expire non-current versions. A daemon whose KMS is
+  // not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
+  // the tenant's KEK in that KMS, then ForgetTenantKeys.
+  rpc ShredTenant(ShredTenantRequest) returns (ShredTenantResponse);
 }
 
 // Makes an empty store.
@@ -784,6 +794,20 @@ message ForgetTenantKeysRequest {
 message ForgetTenantKeysResponse {
   // What it forgot.
   Forgotten forgotten = 1;
+}
+
+// Shreds a tenant.
+message ShredTenantRequest {
+  // The tenant's ID in the bucket, as StatStore names it.
+  uint64 tenant = 1;
+}
+
+// The tenant is shredded, and this host forgot its keys.
+message ShredTenantResponse {
+  // Whether this call put the tombstone there: false if it was shredded already.
+  bool shredded_now = 1;
+  // What this host forgot.
+  Forgotten forgotten = 2;
 }
 
 // What a host forgot of a tenant's or a cell's keys.

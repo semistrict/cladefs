@@ -51,6 +51,7 @@ compile_error!(
 pub mod batch;
 pub mod branch;
 pub mod bucket;
+pub mod bucket_kms;
 pub mod cache;
 pub mod cell;
 pub mod checkpoint;
@@ -132,19 +133,13 @@ pub enum Error {
     /// of objects encrypted, its compaction reading them under their keys (TASK-411.6).
     #[error("{}", extent_frame::Error::NoKey(*.0))]
     NoKey(extent_frame::KeyId),
-    /// cladefs: an object in the clear, of a branch whose record has a DEK, its objects encrypted:
-    /// a downgrade, its encryption, MACs and tags zeroed by one who can write the bucket, or
-    /// another's object put there (TASK-411.3). It names the object.
-    #[error("{0}: unencrypted, of a branch whose objects are encrypted")]
-    Downgrade(String),
     /// cladefs: what a KMS refused, naming the tenant whose KEK was asked for (TASK-411.3): its KEK
     /// revoked or destroyed, none there, or the KMS failed.
     #[error("{0}")]
     Kms(String),
-    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are encrypted, and
-    /// its record holds not `from`'s keys (TASK-411.4): it was given its own without them, or its
-    /// cell is in the clear, which keeps no key, as no encrypted data goes into the clear. A fork
-    /// so is refused before anything of it is made (`keys::inheriting`).
+    /// cladefs: `branch` inherits from `from`, of another cell, whose objects are encrypted, and its
+    /// record holds not `from`'s keys (TASK-411.4): it was given its own without them. A fork so
+    /// is refused before anything of it is made (`keys::inheriting`).
     #[error(
         "branch {branch} inherits from branch {from}, of another cell, whose objects are \
          encrypted, and its record holds not their keys"
@@ -215,17 +210,6 @@ impl From<extent_frame::Error> for Error {
         match error {
             extent_frame::Error::Corrupt(corrupt) => corrupt.into(),
             extent_frame::Error::NoKey(key) => Self::NoKey(key),
-            extent_frame::Error::Unencrypted => Self::Downgrade("an object".into()),
-        }
-    }
-}
-
-impl Error {
-    /// cladefs: the error, of reading the object at `key`: a downgrade named by it (TASK-411.3).
-    pub fn reading(self, key: &str) -> Self {
-        match self {
-            Self::Downgrade(_) => Self::Downgrade(key.to_owned()),
-            error => error,
         }
     }
 }

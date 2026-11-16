@@ -70,19 +70,18 @@
 //! checkpoints, after which the moves go too, unless a state's way to its extents still goes through
 //! them.
 //!
-//! cladefs: marking reads metadata alone, which is in the clear in an encrypted cell too, holding
-//! no key; compacting copies extents out of objects' data, encrypted there, so a pass compacting
-//! one unwraps its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass,
-//! and its branches' DEKs from their records; and encrypts each one's moves under the key it was
-//! encrypted under, with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass
-//! compacting nothing encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had,
-//! the tenant's KEK revoked or destroyed, or the collector having no KMS, the pass marks and
-//! deletes as ever, compacts what is in the clear, and leaves what is encrypted, saying so
-//! ([`Report::locked`]): a revoked tenant's compaction stops, its garbage still goes. It records
-//! its listing's digest as any pass does, and what it left ([`Passed::uncompacted`]): a pass after
-//! it, the cell unchanged, skips the cell while the tenant's KEK is still not to be had, which the
-//! KMS is asked once a sweep, for all of the tenant's cells ([`Heard`], TASK-411.13), and goes
-//! over it in full once it is.
+//! cladefs: marking reads metadata alone, which is authenticated, not encrypted, holding no key;
+//! compacting copies extents out of objects' data, encrypted there, so a pass compacting one unwraps
+//! its cell's KEK through the collector's KMS ([`Collector::kms`]), once for the pass, and its
+//! branches' DEKs from their records; and encrypts each one's moves under the key it was encrypted under,
+//! with a salt of their own (doc-16, Who holds which key; TASK-411.6). A pass compacting nothing
+//! encrypted asks the KMS nothing, nor does a dry run. The KEK not to be had, the tenant's KEK revoked
+//! or destroyed, or the collector having no KMS, the pass marks and deletes as ever, and leaves
+//! the cell uncompacted, every object encrypted (TASK-411.28), saying so ([`Report::locked`]): a revoked tenant's
+//! compaction stops, its garbage still goes. It records its listing's digest as any pass does, and
+//! what it left ([`Passed::uncompacted`]): a pass after it, the cell unchanged, skips the cell while
+//! the tenant's KEK is still not to be had, which the KMS is asked once a sweep, for all of the
+//! tenant's cells ([`Heard`], TASK-411.13), and goes over it in full once it is.
 //!
 //! A branch's writer names its extents where the checkpoint it recovered from, or its own since,
 //! said, which the state a pass reads may name further along their moves: a checkpoint another
@@ -125,7 +124,7 @@ use crate::passed::{self, CollectorLease, Decided, Deferred, LeaseTaking, Listed
 use crate::record::{self, Forked, Record};
 use crate::recovery::{self, Checkpoints, Layered, Layers, Recovered, State};
 use crate::{Error, branch, rules};
-use extent_frame::{Encryption, Keys as _};
+use extent_frame::Keys as _;
 use extent_keys::{Secret, kms};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, FutureExt as _, Shared};
@@ -193,11 +192,10 @@ pub struct Report {
     /// cladefs: the passes that skipped their cells, each unchanged since its last pass, deleting
     /// only what that pass deferred (TASK-395.6).
     pub skipped: usize,
-    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had:
-    /// the KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the
-    /// collector having no KMS (TASK-411.6). Each still marked, compacted what is in the clear, and
-    /// deleted what no live branch needs, warning of the cell and why. And those that skipped a
-    /// cell a pass before left so, its tenant's KEK still not to be had (TASK-411.13).
+    /// cladefs: the passes that left objects encrypted uncompacted, their cell's KEK not to be had: the
+    /// KMS refusing it (its tenant's KEK revoked or destroyed, the KMS failing), or the collector
+    /// having no KMS (TASK-411.6). Each still marked and deleted what no live branch needs, warning of the cell and why. And those that skipped a cell a
+    /// pass before left so, its tenant's KEK still not to be had (TASK-411.13).
     pub locked: usize,
     /// cladefs: the objects encrypted that those passes would have compacted, or the pass before a
     /// skipping one would have.
@@ -250,24 +248,30 @@ pub struct DryRun {
 
 /// One pass of the collector over every cell, one after another, as `holder`, which must differ
 /// from every other pass's: of a collector of its own, which remembers nothing of it
-/// ([`Collector`]).
+/// ([`Collector`]). cladefs: tests', compacting under the tests' KMS (`keys::testing`), which every
+/// test's writer encrypts under (TASK-411.28).
+#[cfg(any(test, feature = "testing"))]
 pub async fn collect(
     bucket: &impl Bucket,
     holder: u64,
     options: &Options,
 ) -> Result<Report, Error> {
-    Collector::new(*options).collect(bucket, holder).await
+    let kms = Some(crate::keys::testing::kms());
+    Collector::new(*options).kms(kms).collect(bucket, holder).await
 }
 
 /// cladefs: one pass of the collector over `cell`, as `holder`, which must differ from every other
-/// pass's over the cell: of a collector of its own, which remembers nothing of it.
+/// pass's over the cell: of a collector of its own, which remembers nothing of it; tests', as
+/// [`collect`] is.
+#[cfg(any(test, feature = "testing"))]
 pub async fn collect_cell(
     bucket: &impl Bucket,
     cell: Cell,
     holder: u64,
     options: &Options,
 ) -> Result<Report, Error> {
-    Collector::new(*options).collect_cell(bucket, cell, holder).await
+    let kms = Some(crate::keys::testing::kms());
+    Collector::new(*options).kms(kms).collect_cell(bucket, cell, holder).await
 }
 
 /// The collector. cladefs: it remembers nothing from one pass to the next (TASK-395.4): what a pass
@@ -1174,12 +1178,26 @@ async fn keep_points(
     for (origin, recovered) in recoveries {
         match recovered {
             Ok((state, touched)) => live.keep_point(&state, touched),
-            Err(Error::Lost(lost)) if by == Points::Referred => {
-                if let Some(child) = needing(bucket, origin).await? {
-                    return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+            Err(Error::Lost(_)) if by == Points::Referred => {
+                let Some(child) = needing(bucket, origin).await? else {
+                    // Decided by its children's records, in other cells.
+                    live.unsettled = true;
+                    continue;
+                };
+                // Recovered again, after the child's record was read: its fork checkpointed the
+                // state at its point before it wrote its reference and the record
+                // (`branch::record_fork`), so this finds it, listing anew. What the first found
+                // lost may be another fork at the same segment number, a writer's that a
+                // takeover's dropped, the takeover's writer forking the child there since, after
+                // the first read the head (TASK-462): references name a fork point by its segment
+                // number alone.
+                match recovery::recover_at(checkpoints, origin.parent, origin.at).await {
+                    Ok((state, touched)) => live.keep_point(&state, touched),
+                    Err(Error::Lost(lost)) => {
+                        return Err(Error::Lost(format!("{lost}, which {child} lives on")));
+                    }
+                    Err(error) => return Err(error),
                 }
-                // Decided by its children's records, in other cells.
-                live.unsettled = true;
             }
             Err(error) => return Err(error),
         }
@@ -1532,8 +1550,7 @@ fn below(extents: &BTreeMap<ExtentId, Location>, options: &Options, len: u64) ->
 /// were listed at: read once each, as they never change, and forgotten once they are gone. The live
 /// extents of an object are measured against its data, as its trailer says, which its listed size,
 /// compressed (TASK-29), may be far below: before, a mostly dead segment whose data compressed was
-/// never compacted (TASK-293). cladefs: and its trailer's encryption says whether compacting it
-/// needs its key, read keyless (TASK-411.6).
+/// never compacted (TASK-293).
 #[derive(Default)]
 struct Trailers(BTreeMap<String, (Version, u64, Frame)>);
 
@@ -1595,22 +1612,19 @@ async fn trailer(bucket: &impl Bucket, meta: &Meta) -> Result<Option<Frame>, Err
     Ok(Some(frame))
 }
 
-/// An object a pass compacts ([`Pass::compactable`]): as listed, its live extents, and how it is
-/// encrypted, as its trailer says.
+/// An object a pass compacts ([`Pass::compactable`]): as listed, and its live extents.
 struct Compactable<'a> {
     meta: &'a Meta,
     extents: &'a BTreeMap<ExtentId, Location>,
-    encryption: Encryption,
 }
 
 /// Compacts the object at `key`, of which `extents` are live: copies them to its moves by the pass
 /// of epoch `pass`, at a key of the pass's (TASK-407.1), unless it is gone. The moves' key and
-/// size, if it did: those there first, if the pass created them before. cladefs:
-/// it reads the object under `ring`'s keys of its branch, refusing one in the clear of a branch
-/// encrypted, and encrypts its moves under the key the object was encrypted under, the DEK of the
-/// same generation, with a salt of their own (TASK-411.6): every reader following the moves read
-/// the object under that key, where a store opened before a newer generation was added holds none
-/// of it. An object in the clear's moves are in the clear.
+/// size, if it did: those there first, if the pass created them before. cladefs: it reads the object
+/// under `ring`'s keys of its branch, and encrypts its moves under the key the object was encrypted
+/// under, the DEK of the same generation, with a salt of their own (TASK-411.6): every reader
+/// following the moves read the object under that key, where a store opened before a newer
+/// generation was added holds none of it.
 async fn compact_object(
     bucket: &impl Bucket,
     key: &str,
@@ -1621,11 +1635,9 @@ async fn compact_object(
     let Some(object) = bucket::get(bucket, key).await else { return Ok(None) };
     let keys = keys::of_key(ring, key);
     // Its data, checked: compacting copies none that is corrupt under new CRCs.
-    let object_data = layout::data_under(&object.bytes, &keys).map_err(|err| err.reading(key))?;
-    let encryption = match Frame::of(&object.bytes)?.encryption.keyed() {
-        Some((id, _)) => Some((keys.dek(id).ok_or(Error::NoKey(id))?, id)),
-        None => None,
-    };
+    let object_data = layout::data_under(&object.bytes, &keys)?;
+    let (id, _) = Frame::of(&object.bytes)?.encryption.keyed();
+    let encrypting = (keys.dek(id).ok_or(Error::NoKey(id))?, id);
     let mut data = Vec::new();
     let mut entries = Vec::new();
     for (&extent, location) in extents {
@@ -1639,7 +1651,7 @@ async fn compact_object(
     }
     // Its own moves of it, created before, stand.
     let footer = Moves { of: key.to_owned(), extents: entries };
-    let bytes = layout::with_footer_under(&data, &footer, encryption);
+    let bytes = layout::with_footer(&data, &footer, encrypting);
     let size = match bucket::create(bucket, &moves, bytes.clone()).await {
         Created::Created(_) => bytes.len() as u64,
         Created::Exists(stood) => stood.meta.size,
@@ -1833,7 +1845,7 @@ impl Pass {
 
     /// The objects mostly freed, as the lengths of their data in their trailers say
     /// ([`Trailers`]): those [`Pass::compact`] compacts, each with its live extents, which take
-    /// less than `options`' fraction of it, and its encryption.
+    /// less than `options`' fraction of it.
     async fn compactable(
         &self,
         bucket: &impl Bucket,
@@ -1856,12 +1868,7 @@ impl Pass {
         Ok((ours.into_iter())
             .filter_map(|(meta, extents)| {
                 let frame = trailers.known(meta)?;
-                let encryption = frame.encryption;
-                below(extents, options, frame.data_len).then_some(Compactable {
-                    meta,
-                    extents,
-                    encryption,
-                })
+                below(extents, options, frame.data_len).then_some(Compactable { meta, extents })
             })
             .collect())
     }
@@ -1903,15 +1910,13 @@ impl Pass {
         Ok(compacted)
     }
 
-    /// cladefs: the keys `compactable`'s objects are compacted under ([`keys::compacting`],
-    /// TASK-411.6): which of their branches are encrypted, as the pass's records of them say, whose
-    /// objects in the clear are refused; and, if any of the objects is encrypted, those branches' DEKs,
-    /// unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`, each
+    /// cladefs: the keys `compactable`'s objects, all encrypted (TASK-411.28), are compacted under
+    /// ([`keys::compacting`], TASK-411.6): their branches' DEKs, as the pass's records of them
+    /// keep them, unwrapped under the cell's KEK by a [`keys::CachingKms`] of this pass's over `kms`, each
     /// generation of the KEK once: the pass's one call of the KMS, however many objects it
-    /// compacts. None of them encrypted, it asks nothing. The KEK not to be had, `kms` refusing it (a
-    /// tenant's KEK revoked or destroyed, the KMS failing) or none given, the objects encrypted are
-    /// left uncompacted, counted in `report` and warned of, and the pass goes on with those in the
-    /// clear.
+    /// compacts. Nothing to compact, it asks nothing. The KEK not to be had, `kms` refusing it (a
+    /// tenant's KEK revoked or destroyed, the KMS failing) or none given, the objects are left
+    /// uncompacted, counted in `report` and warned of, and the pass goes on marking and deleting.
     async fn compacting(
         &self,
         bucket: &impl Bucket,
@@ -1919,33 +1924,38 @@ impl Pass {
         compactable: &mut Vec<Compactable<'_>>,
         report: &mut Report,
     ) -> Result<Arc<Ring>, Error> {
+        if compactable.is_empty() {
+            return Ok(Ring::keyless());
+        }
         let branches: BTreeSet<u64> =
             compactable.iter().filter_map(|object| keys::branch_of(&object.meta.key)).collect();
         let records: Vec<(Branch, &Record)> = (self.records.iter())
             .filter(|(branch, _)| branches.contains(&branch.id))
             .map(|(&branch, record)| (branch, record))
             .collect();
-        let encrypted =
-            compactable.iter().filter(|object| object.encryption.keyed().is_some()).count();
-        if encrypted == 0 {
-            return keys::compacting(records, None).await;
-        }
         let cell = self.cell;
-        let kms = kms.map(|kms| keys::CachingKms::new(kms.clone()));
-        let cell_keys = match crate::cell::read(bucket, cell).await? {
-            Some(object) => CellKeys::of(cell, &object, kms),
-            None => CellKeys::none(cell, kms),
+        let ring = match kms {
+            None => Err(Error::Kms(format!("tenant {}: the collector has no KMS", cell.tenant))),
+            Some(kms) => {
+                let kms = keys::CachingKms::new(kms.clone());
+                let cell_keys = match crate::cell::read(bucket, cell).await? {
+                    Some(object) => CellKeys::of(cell, &object, kms),
+                    None => CellKeys::objectless(cell, kms),
+                };
+                keys::compacting(records, &cell_keys).await
+            }
         };
-        match keys::compacting(records.iter().copied(), Some(&cell_keys)).await {
+        match ring {
             Err(Error::Kms(why)) => {
+                let encrypted = compactable.len();
                 log::warn!(
                     cell:%, why:%;
                     "cladefs-gc: cell {cell}: {encrypted} objects encrypted left uncompacted: {why}"
                 );
                 report.locked += 1;
                 report.uncompacted += encrypted;
-                compactable.retain(|object| object.encryption.keyed().is_none());
-                keys::compacting(records, None).await
+                compactable.clear();
+                Ok(Ring::keyless())
             }
             ring => ring,
         }
@@ -2031,7 +2041,8 @@ impl Pass {
                 // deletes, and an operator removes (TASK-264); and references, which the passes of
                 // their children's cells retire (TASK-395.4), and their marks, kept for good
                 // (TASK-395.13). cladefs: a cell's object, which says who holds it, stays as its
-                // records do, and a block of object IDs taken for good (TASK-364).
+                // records do, and a block of object IDs taken for good (TASK-364); a tenant's KEK
+                // object, no cell's, which no pass lists, for good too (TASK-411.27).
                 Kind::CollectorLease { .. }
                 | Kind::Marks { .. }
                 | Kind::Marking
@@ -2039,6 +2050,7 @@ impl Pass {
                 | Kind::Retired { .. }
                 | Kind::Cell { .. }
                 | Kind::ObjectIds { .. }
+                | Kind::Kek { .. }
                 | Kind::Unknown => Fate::Stays,
             };
             match fate {
@@ -2222,6 +2234,7 @@ mod tests {
     use crate::object_bucket::{ObjectBucket, Request};
     use crate::testing::{Direct, SimBucket};
     use crate::writer::Writer;
+    use extent_frame::Encryption;
     use extent_frame::KeyId;
     use extent_keys::kms::LocalKms;
     use extent_keys::testing::Counted;
@@ -2241,7 +2254,9 @@ mod tests {
 
     /// `commit` in a segment of its own, uploaded and acknowledged.
     async fn commit<B: Bucket>(writer: &Writer<B>, commit: Commit) {
-        let objects = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+        let objects = SegmentBuilder::from(commit)
+            .close(&mut writer.chain())
+            .frame(writer.keys().encrypting());
         let segment = writer.add_segment(objects).unwrap();
         writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
@@ -2272,7 +2287,11 @@ mod tests {
             let (segment, next) = (writer.chain().next_segment(), writer.chain().next_sequence());
             let ahead =
                 layout::extent(layout::TEST_CELL, writer.epoch(), segment, ExtentId::new(1, next));
-            let bytes = layout::with_footer(b"ahead", &());
+            let bytes = layout::with_footer(
+                b"ahead",
+                &(),
+                crate::testing::encrypting(layout::test_branch(1)),
+            );
             assert!(matches!(bucket::create(&*bucket, &ahead, bytes).await, Created::Created(_)));
 
             let before = keys(&*bucket).await;
@@ -2337,7 +2356,7 @@ mod tests {
         let own = vec![(late.sequence, b"late".to_vec())];
         let objects = SegmentBuilder::from(Commit { tag: 2, own, ..Commit::default() })
             .close(&mut writer.chain())
-            .frame();
+            .frame(writer.keys().encrypting());
         let [(key, bytes)] = &objects.own[..] else { panic!("{} objects", objects.own.len()) };
         let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await;
         assert!(matches!(created, Created::Created(_)));
@@ -2348,7 +2367,7 @@ mod tests {
         writer.acknowledge().await.unwrap();
         let recovered = recovery::recover(&*bucket, test_branch(1), None).await.unwrap();
         let location = &recovered.state.extents[&late];
-        crate::read(&bucket, late, location).await
+        crate::testing::read(&bucket, late, location).await
     }
 
     /// An object compacted is compacted once: its moves stand while it waits out the grace
@@ -2378,7 +2397,7 @@ mod tests {
             assert_eq!(report, Report::default());
             assert_eq!(keys(&*bucket).await, after);
             let location = writer.location(small).unwrap();
-            assert_eq!(crate::read(&bucket, small, &location).await.unwrap(), b"small");
+            assert_eq!(crate::testing::read(&bucket, small, &location).await.unwrap(), b"small");
         });
     }
 
@@ -2408,7 +2427,10 @@ mod tests {
             let after = keys(&*bucket).await;
             assert!(after.contains(&segment) && moves_in(&after, &segment).is_some());
             let location = writer.location(kept).unwrap();
-            assert_eq!(crate::read(&bucket, kept, &location).await.unwrap(), vec![b'k'; 4096]);
+            assert_eq!(
+                crate::testing::read(&bucket, kept, &location).await.unwrap(),
+                vec![b'k'; 4096]
+            );
         });
     }
 
@@ -2464,7 +2486,7 @@ mod tests {
                 let after = keys(&*bucket).await;
                 assert!(after.contains(&segment) && moves_in(&after, &segment).is_none());
                 let location = writer.location(kept).unwrap();
-                let read = crate::read(&bucket, kept, &location).await;
+                let read = crate::testing::read(&bucket, kept, &location).await;
                 let corrupt = format!("part 0 of {segment}, by its CRC");
                 assert_eq!(read, Err(Error::Corrupt(corrupt)));
             });
@@ -2515,8 +2537,11 @@ mod tests {
         // The fork, freeing what makes the segment mostly freed.
         let forking =
             SegmentBuilder::from(Commit { tag: 2, frees: vec![freed], ..Commit::default() });
-        let at =
-            before.add_segment(forking.fork(child(fork), &mut before.chain()).frame()).unwrap();
+        let at = before
+            .add_segment(
+                forking.fork(child(fork), &mut before.chain()).frame(before.keys().encrypting()),
+            )
+            .unwrap();
         before.upload(at).await.unwrap();
         before.acknowledge().await.unwrap();
         // The fork's writer recovers its parent's state at the fork, from the checkpoint before.
@@ -2539,7 +2564,7 @@ mod tests {
                 }),
             "{left:#?}"
         );
-        crate::read(&bucket, kept, &writer.location(kept).unwrap()).await
+        crate::testing::read(&bucket, kept, &writer.location(kept).unwrap()).await
     }
 
     /// TASK-175: a writer names the extents its checkpoint moves where they went before the
@@ -2579,7 +2604,7 @@ mod tests {
         }));
         writer.checkpoint().await.unwrap();
         let location = named.lock().unwrap().clone().unwrap();
-        crate::read(&direct, kept, &location).await
+        crate::testing::read(&direct, kept, &location).await
     }
 
     /// What [`compacted`] made.
@@ -2649,11 +2674,15 @@ mod tests {
         let footer = parent
             .chain()
             .close(Contents { forks: vec![child(test_branch(2))], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(parent.keys().encrypting())
+            .into();
         let at = parent.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         parent.upload(at).await.unwrap();
         parent.acknowledge().await.unwrap();
-        branch::delete(&*bucket, test_branch(1), 11, u64::MAX).await.unwrap();
+        branch::delete(&*bucket, test_branch(1), 11, u64::MAX, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         let forked = Arc::new(Writer::open(bucket.clone(), test_branch(2), 12, 0).await.unwrap());
         let passing = direct.clone();
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
@@ -2694,7 +2723,9 @@ mod tests {
         let footer = parent
             .chain()
             .close(Contents { forks: vec![child(test_branch(2))], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(parent.keys().encrypting())
+            .into();
         let at = parent.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         parent.upload(at).await.unwrap();
         parent.acknowledge().await.unwrap();
@@ -2711,14 +2742,21 @@ mod tests {
             bucket: direct,
             branch: test_branch(2),
             meanwhile: std::sync::Mutex::new(Some(move || {
-                branch::delete(&*passing, test_branch(2), 13, u64::MAX)
-                    .now_or_never()
-                    .unwrap()
-                    .unwrap();
+                branch::delete(
+                    &*passing,
+                    test_branch(2),
+                    13,
+                    u64::MAX,
+                    &crate::keys::testing::host_kms(),
+                )
+                .now_or_never()
+                .unwrap()
+                .unwrap();
                 collect(&*passing, 1, &KEEP).now_or_never().unwrap().unwrap();
             })),
         };
-        branch::delete(&bucket, test_branch(2), 12, u64::MAX).await
+        branch::delete(&bucket, test_branch(2), 12, u64::MAX, &crate::keys::testing::host_kms())
+            .await
     }
 
     /// TASK-407: a writer taken over, whose head another taking swapped since, acknowledges
@@ -2751,7 +2789,7 @@ mod tests {
         let taken = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut taken.chain())
-            .frame();
+            .frame(taken.keys().encrypting());
         let segment = taken.add_segment(objects).unwrap();
         taken.upload(segment).await.unwrap();
         let successor = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
@@ -2790,7 +2828,7 @@ mod tests {
         let writer = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut writer.chain())
-            .frame();
+            .frame(writer.keys().encrypting());
         let segment = writer.add_segment(objects).unwrap();
         writer.upload(segment).await.unwrap();
         collect(&*bucket, 1, &KEEP).await.unwrap();
@@ -2829,13 +2867,13 @@ mod tests {
         let taken = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() })
             .close(&mut taken.chain())
-            .frame();
+            .frame(taken.keys().encrypting());
         let segment = taken.add_segment(objects).unwrap();
         taken.upload(segment).await.unwrap();
         let successor = Writer::open(bucket.clone(), test_branch(1), 11, 0).await.unwrap();
         let objects = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() })
             .close(&mut successor.chain())
-            .frame();
+            .frame(successor.keys().encrypting());
         let segment = successor.add_segment(objects).unwrap();
         let uploaded = successor.upload(segment).await;
         let _ = successor.acknowledge().await;
@@ -2908,7 +2946,9 @@ mod tests {
         commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
         let point = Child { branch: test_branch(3), owner: 0x33, point: true };
         let footer = writer.chain().close(Contents { forks: vec![point], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(writer.keys().encrypting())
+            .into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
@@ -2920,7 +2960,16 @@ mod tests {
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             let direct = raced_on;
             let origin = Origin { parent: test_branch(1), at };
-            branch::delete(&*direct, test_branch(3), 11, u64::MAX).now_or_never().unwrap().unwrap();
+            branch::delete(
+                &*direct,
+                test_branch(3),
+                11,
+                u64::MAX,
+                &crate::keys::testing::host_kms(),
+            )
+            .now_or_never()
+            .unwrap()
+            .unwrap();
             collect(&*direct, 2, &KEEP).now_or_never().unwrap().unwrap();
             let left = keys(&*direct).now_or_never().unwrap();
             assert!(
@@ -2996,7 +3045,9 @@ mod tests {
         async fn fork(writer: &Writer<Direct>, child: Child) -> u64 {
             let footer =
                 writer.chain().close(Contents { forks: vec![child], ..Contents::default() });
-            let framed = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+            let framed = Segment { data: Vec::new(), footer: footer.clone() }
+                .encode(writer.keys().encrypting())
+                .into();
             let segment =
                 writer.add_segment(Objects { footer, segment: framed, own: Vec::new() }).unwrap();
             writer.upload(segment).await.unwrap();
@@ -3030,7 +3081,15 @@ mod tests {
                 fork(&writer, Child { branch: test_branch(CHILD), owner: 0x34, point: false })
                     .await;
                 assert!(writer.refused(test_branch(CHILD)));
-                branch::delete(&*restoring, test_branch(POINT), 20, 0).await.unwrap();
+                branch::delete(
+                    &*restoring,
+                    test_branch(POINT),
+                    20,
+                    0,
+                    &crate::keys::testing::host_kms(),
+                )
+                .await
+                .unwrap();
                 writer.checkpoint().await.unwrap();
             };
             work.now_or_never().expect("a direct bucket answers at once");
@@ -3092,7 +3151,9 @@ mod tests {
                 keys.iter().filter(|key| matches!(layout::kind(key), Kind::Moves { .. })).count()
             };
             assert_eq!(moves(&moved), SEGMENTS as usize);
-            branch::delete(&*bucket, test_branch(1), 11, 0).await.unwrap();
+            branch::delete(&*bucket, test_branch(1), 11, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             let first = collect(&*bucket, 2, &compacting).await.unwrap();
             assert_eq!(moves(&keys(&*bucket).await), SEGMENTS as usize, "{first:?}");
             let second = collect(&*bucket, 3, &compacting).await.unwrap();
@@ -3146,7 +3207,9 @@ mod tests {
                 id: ids.next(&*bucket).await,
             };
             branch::fork_point(&*bucket, clone, point, origin, 0x40 + n).await.unwrap();
-            branch::delete(&*bucket, clone, 20, u64::MAX).await.unwrap();
+            branch::delete(&*bucket, clone, 20, u64::MAX, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             cells.push(clone.cell);
         }
         let options = Options { compact_below: 0.0, grace: 0 };
@@ -3188,16 +3251,22 @@ mod tests {
         branch::create(&*direct, test_branch(PARENT), 0).await.unwrap();
         let writer = Writer::open(slow, test_branch(PARENT), 10, 0).await.unwrap();
         branch::create(&*direct, test_branch(CHILD), 0x21).await.unwrap();
-        branch::delete(&*direct, test_branch(CHILD), 11, 0).await.unwrap();
+        branch::delete(&*direct, test_branch(CHILD), 11, 0, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         let forked = Child { branch: test_branch(CHILD), owner: 0x22, point: false };
         let footer = writer.chain().close(Contents { forks: vec![forked], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(writer.keys().encrypting())
+            .into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         writer.upload(at).await.unwrap();
         // The head read, the fork's child's record waits.
         let mut acknowledging = Box::pin(writer.acknowledge());
         assert!((&mut acknowledging).now_or_never().is_none());
-        branch::delete(&*direct, test_branch(PARENT), 12, 0).await.unwrap();
+        branch::delete(&*direct, test_branch(PARENT), 12, 0, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         let now = Options { compact_below: 0.0, grace: 0 };
         collect(&*direct, 1, &now).await.unwrap();
         open.send(()).unwrap();
@@ -3240,7 +3309,9 @@ mod tests {
         let writer = Writer::open(Arc::new(slow), parent, 10, 0).await.unwrap();
         let forked = Child { branch: child, owner: 0x22, point: false };
         let footer = writer.chain().close(Contents { forks: vec![forked], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(writer.keys().encrypting())
+            .into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         writer.upload(at).await.unwrap();
         // The fork acknowledged, the child's record waits.
@@ -3248,7 +3319,8 @@ mod tests {
         assert!((&mut acknowledging).now_or_never().is_none());
         let scenario = fail::FailScenario::setup();
         fail::cfg("branch::head_ended", "return").unwrap();
-        let deleting = branch::delete(&*direct, child, 20, 0).await;
+        let deleting =
+            branch::delete(&*direct, child, 20, 0, &crate::keys::testing::host_kms()).await;
         scenario.teardown();
         assert_eq!(deleting, Err(Error::Read("failpoint branch::head_ended".to_string())));
         let now = Options { compact_below: 0.0, grace: 0 };
@@ -3311,8 +3383,9 @@ mod tests {
         let (slow, open) = Gated::new(direct.clone(), Gate::Put(reference.clone()));
         let mut forking = Box::pin(branch::fork_point(&slow, clone, celled(2, 2), origin, 0x33));
         assert!((&mut forking).now_or_never().is_none());
-        branch::resume_point_fork(&*direct, clone, keys::Parents::Kms(None, None)).await.unwrap();
-        branch::delete(&*direct, clone, 20, u64::MAX).await.unwrap();
+        let kms = crate::keys::testing::host_kms();
+        branch::resume_point_fork(&*direct, clone, keys::Parents::Kms(&kms, None)).await.unwrap();
+        branch::delete(&*direct, clone, 20, u64::MAX, &kms).await.unwrap();
         let options = Options { compact_below: 0.0, grace: 0 };
         crate::testing::collect_until_quiet(&*direct, &options).await.unwrap();
         assert_eq!(bucket::list(&*direct, &clone.cell.prefix()).await, Vec::new());
@@ -3361,10 +3434,12 @@ mod tests {
         // The host dies there.
         drop(forking);
         drop(never);
-        branch::resume_point_fork(&*direct, clone, keys::Parents::Kms(None, None)).await.unwrap();
+        branch::resume_point_fork(&*direct, clone, keys::Parents::Unasked).await.unwrap();
         let referred = bucket::get(&*direct, &reference).await.is_some();
         // The point deleted, the base's checkpoint after drops its fork to it.
-        branch::delete(&*direct, celled(2, 2), 20, 0).await.unwrap();
+        branch::delete(&*direct, celled(2, 2), 20, 0, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         let options = Options { compact_below: 0.0, grace: 0 };
@@ -3414,22 +3489,34 @@ mod tests {
         let footer = writer
             .chain()
             .close(Contents { forks: vec![child(test_branch(CHILD))], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(writer.keys().encrypting())
+            .into();
         let at = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         // The first deletion, recovered, waits to mark the branch deleted.
         let (marking, mark) =
             Gated::new(direct.clone(), Gate::Put(layout::record(test_branch(PARENT))));
         let marking = Arc::new(marking);
-        let mut first =
-            Box::pin(async move { branch::delete(&*marking, test_branch(PARENT), 11, 0).await });
+        let mut first = Box::pin(async move {
+            branch::delete(&*marking, test_branch(PARENT), 11, 0, &crate::keys::testing::host_kms())
+                .await
+        });
         assert!((&mut first).now_or_never().is_none());
         let landed = writer.upload(at).await;
         // The second, recovered, waits to record the fork's child, if it found the fork.
         let (recording, record) =
             Gated::new(direct.clone(), Gate::Put(layout::record(test_branch(CHILD))));
         let recording = Arc::new(recording);
-        let mut second =
-            Box::pin(async move { branch::delete(&*recording, test_branch(PARENT), 12, 0).await });
+        let mut second = Box::pin(async move {
+            branch::delete(
+                &*recording,
+                test_branch(PARENT),
+                12,
+                0,
+                &crate::keys::testing::host_kms(),
+            )
+            .await
+        });
         let second_done = (&mut second).now_or_never();
         mark.send(()).unwrap();
         first.await.unwrap();
@@ -3479,7 +3566,9 @@ mod tests {
         let footer = writer
             .chain()
             .close(Contents { forks: vec![child(test_branch(KEPT))], ..Contents::default() });
-        let segment = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+        let segment = Segment { data: Vec::new(), footer: footer.clone() }
+            .encode(writer.keys().encrypting())
+            .into();
         let kept = writer.add_segment(Objects { footer, segment, own: Vec::new() }).unwrap();
         writer.upload(kept).await.unwrap();
         writer.acknowledge().await.unwrap();
@@ -3487,7 +3576,7 @@ mod tests {
         let own = vec![(writer.chain().next_sequence(), b"own".to_vec())];
         let forking = SegmentBuilder::from(Commit { tag: 1, own, ..Commit::default() })
             .fork(child(test_branch(CHILD)), &mut writer.chain())
-            .frame();
+            .frame(writer.keys().encrypting());
         assert_eq!(writer.add_segment(forking).unwrap(), at);
         let mut uploading = Box::pin(writer.upload(at));
         assert!((&mut uploading).now_or_never().is_none());
@@ -3495,10 +3584,14 @@ mod tests {
         let (gated, open) =
             Gated::new(direct.clone(), Gate::Put(layout::head(test_branch(PARENT))));
         let gated = Arc::new(gated);
-        let mut second =
-            Box::pin(async move { branch::delete(&*gated, test_branch(PARENT), 12, 0).await });
+        let mut second = Box::pin(async move {
+            branch::delete(&*gated, test_branch(PARENT), 12, 0, &crate::keys::testing::host_kms())
+                .await
+        });
         assert!((&mut second).now_or_never().is_none());
-        branch::delete(&*direct, test_branch(PARENT), 11, 0).await.unwrap();
+        branch::delete(&*direct, test_branch(PARENT), 11, 0, &crate::keys::testing::host_kms())
+            .await
+            .unwrap();
         let now = Options { compact_below: 0.0, grace: 0 };
         collect(&*direct, 1, &now).await.unwrap();
         landing.send(()).unwrap();
@@ -3809,6 +3902,8 @@ mod tests {
         // The stalled pass's epoch, 1, a pass's that compacted nothing.
         collect(&*direct, 1, &KEEP).await.unwrap();
         let segment = at.key.clone();
+        // cladefs: the writer's keys, which the late compaction reads under (TASK-411.28).
+        let ring = writer.keys().clone();
         let hooked = Hooked::new(direct.clone(), Hook::Got(segment.clone()));
         let written = Arc::new(Mutex::new(BTreeSet::new()));
         let (going, noted, rules) = (direct.clone(), written.clone(), crate::rules());
@@ -3840,7 +3935,7 @@ mod tests {
             went.join().unwrap();
         }));
         let found = BTreeMap::from([(small, at.clone())]);
-        let late = compact_object(&hooked, &at.key, &found, (&Ring::clear(), 1)).await;
+        let late = compact_object(&hooked, &at.key, &found, (&ring, 1)).await;
         let (late, _) = late.unwrap().unwrap();
         let written = written.lock().unwrap().clone();
         (late, written)
@@ -3904,6 +3999,7 @@ mod tests {
             Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap()
         });
         let first = writer.chain().next_sequence();
+        let keys = writer.keys().clone();
         let extents = (0..20).map(|n| (ExtentId::new(1, first + n), vec![n as u8; 8])).collect();
         let own: Vec<_> = (20..23).map(|n| (first + n, vec![n as u8; 16])).collect();
         let frees = own.iter().map(|(sequence, _)| ExtentId::new(1, *sequence)).collect();
@@ -3911,17 +4007,21 @@ mod tests {
         let segments: [Box<dyn FnOnce(&mut Chain) -> Objects>; 3] = [
             Box::new(|chain| {
                 let commit = Commit { tag: 1, extents, own, ..Commit::default() };
-                SegmentBuilder::from(commit).close(chain).frame()
+                SegmentBuilder::from(commit).close(chain).frame(keys.encrypting())
             }),
             Box::new(|chain| {
                 SegmentBuilder::from(Commit { tag: 2, frees, ..Commit::default() })
                     .close(chain)
-                    .frame()
+                    .frame(keys.encrypting())
             }),
             Box::new(|chain| {
                 let footer = chain.close(Contents { forks: children, ..Contents::default() });
                 let segment = Segment { data: Vec::new(), footer: footer.clone() };
-                Objects { footer, segment: segment.encode().into(), own: Vec::new() }
+                Objects {
+                    footer,
+                    segment: segment.encode(keys.encrypting()).into(),
+                    own: Vec::new(),
+                }
             }),
         ];
         for close in segments {
@@ -3931,7 +4031,16 @@ mod tests {
         }
         bucket.served(writer.checkpoint()).0.unwrap();
         for child in 2 + forks..2 + forks + deleted {
-            bucket.served(branch::delete(&**bucket, test_branch(child), 20, 0)).0.unwrap();
+            bucket
+                .served(branch::delete(
+                    &**bucket,
+                    test_branch(child),
+                    20,
+                    0,
+                    &crate::keys::testing::host_kms(),
+                ))
+                .0
+                .unwrap();
         }
     }
 
@@ -3940,14 +4049,15 @@ mod tests {
     /// deletes what goes many at once. TASK-395.4: a second pass of the same collector reads every
     /// record again, as the first: a collector keeps nothing of a cell from one pass to the next,
     /// so that a sweep over every cell holds no more than the cell it passes over. The first pass
-    /// reads one record first, its format, before taking the cell's lease; the passes after find
-    /// the lease (TASK-395.6), which a pass of this format took. None skips the cell, each finding
+    /// reads the cell's object first, its format, before taking the cell's lease (cladefs: every
+    /// writer's cell has one, keeping its KEK, TASK-411.28; one with none has a record read
+    /// instead); the passes after find the lease (TASK-395.6), which a pass of this format took. None skips the cell, each finding
     /// it changed by the one before: deleting, or a branch deleted.
     #[test]
     fn passes_read_records_and_checkpoints_once_and_delete_at_once() {
         let bucket = SimBucket::new();
         forked_base(&bucket, 6, 2);
-        let mut collector = Collector::new(KEEP);
+        let mut collector = Collector::new(KEEP).kms(Some(crate::keys::testing::kms()));
         let mut passes = Vec::new();
         for holder in 1..=2 {
             let (report, rounds) = bucket.served_in_rounds(collector.collect(&*bucket, holder));
@@ -3957,12 +4067,21 @@ mod tests {
         // Its record, its children's, the deleted ones' too; its checkpoint; the segments the
         // checkpoint covers that hold no extent its branches hold, and its extents freed. Heads
         // stay, the deleted children's too, and a deletion writes no segment (TASK-407).
-        let first = [vec![1, 9], vec![1], vec![5]];
+        let first = [vec![9], vec![1], vec![5]];
         assert_eq!(passes, [first, [vec![9], vec![1], vec![]]]);
 
         // The fork deleted: nothing of it goes that its parent's state needs not, and it held
         // nothing of its own.
-        bucket.served(branch::delete(&*bucket, test_branch(2), 20, 0)).0.unwrap();
+        bucket
+            .served(branch::delete(
+                &*bucket,
+                test_branch(2),
+                20,
+                0,
+                &crate::keys::testing::host_kms(),
+            ))
+            .0
+            .unwrap();
         let (report, rounds) = bucket.served_in_rounds(collector.collect(&*bucket, 3));
         report.unwrap();
         assert_eq!(asked(&rounds), [vec![9], vec![1], vec![]]);
@@ -4000,7 +4119,8 @@ mod tests {
     fn passes_compact_and_read_moves_at_once() {
         let bucket = SimBucket::new();
         let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
-        let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 });
+        let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 })
+            .kms(Some(crate::keys::testing::kms()));
         // How many of the requests `asking` each round asked, of the rounds asking any.
         let counted = |rounds: &[Vec<String>], asking: &dyn Fn(&str) -> bool| -> Vec<u64> {
             let counts = rounds.iter().map(|round| round.iter().filter(|r| asking(r)).count());
@@ -4045,7 +4165,8 @@ mod tests {
                 crate::object_bucket::object_store_with(&url, server.options(), client).unwrap();
             let bucket = Arc::new(ObjectBucket::new(objects, &prefix));
             let segments = mostly_freed(bucket.clone()).await;
-            let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 });
+            let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 })
+                .kms(Some(crate::keys::testing::kms()));
             let report = collector.collect(&*bucket, 1).await.unwrap();
             assert_eq!(report.compacted, SEGMENTS as usize);
 
@@ -4091,7 +4212,9 @@ mod tests {
                 ..Contents::default()
             };
             let footer = base.chain().close(forks);
-            let framed = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+            let framed = Segment { data: Vec::new(), footer: footer.clone() }
+                .encode(base.keys().encrypting())
+                .into();
             let segment =
                 base.add_segment(Objects { footer, segment: framed, own: Vec::new() }).unwrap();
             base.upload(segment).await.unwrap();
@@ -4144,7 +4267,9 @@ mod tests {
             commit(&base, Commit { tag: 1, own, ..Commit::default() }).await;
             let forks = Contents { forks: vec![child(test_branch(2))], ..Contents::default() };
             let footer = base.chain().close(forks);
-            let framed = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+            let framed = Segment { data: Vec::new(), footer: footer.clone() }
+                .encode(base.keys().encrypting())
+                .into();
             let segment =
                 base.add_segment(Objects { footer, segment: framed, own: Vec::new() }).unwrap();
             base.upload(segment).await.unwrap();
@@ -4169,7 +4294,14 @@ mod tests {
 
         let live = block_on(branch::live(&*bucket, layout::TEST_CELL)).unwrap();
         assert_eq!(live.keys().copied().collect::<Vec<_>>(), [test_branch(1), test_branch(2)]);
-        block_on(branch::delete(&*bucket, test_branch(2), 12, u64::MAX)).unwrap();
+        block_on(branch::delete(
+            &*bucket,
+            test_branch(2),
+            12,
+            u64::MAX,
+            &crate::keys::testing::host_kms(),
+        ))
+        .unwrap();
         block_on(collect(&*bucket, 2, &KEEP)).unwrap();
         assert!(!kept(), "what the fork inherited stayed once it was deleted");
         let live = block_on(branch::live(&*bucket, layout::TEST_CELL)).unwrap();
@@ -4192,7 +4324,9 @@ mod tests {
             let forked = Child { branch: test_branch(CHILD), owner, point: false };
             let forks = Contents { forks: vec![forked], ..Contents::default() };
             let footer = writer.chain().close(forks);
-            let framed = Segment { data: Vec::new(), footer: footer.clone() }.encode().into();
+            let framed = Segment { data: Vec::new(), footer: footer.clone() }
+                .encode(writer.keys().encrypting())
+                .into();
             let segment =
                 writer.add_segment(Objects { footer, segment: framed, own: Vec::new() }).unwrap();
             writer.upload(segment).await.unwrap();
@@ -4245,7 +4379,9 @@ mod tests {
             let extents =
                 (0..EXTENTS).map(|n| (ExtentId::new(1, first + n), n.to_le_bytes().to_vec()));
             let commit = Commit { tag: 1, extents: extents.collect(), ..Commit::default() };
-            let objects = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+            let objects = SegmentBuilder::from(commit)
+                .close(&mut writer.chain())
+                .frame(writer.keys().encrypting());
             let segment = writer.add_segment(objects).unwrap();
             writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -4254,7 +4390,11 @@ mod tests {
                 ..Contents::default()
             });
             let segment = Segment { data: Vec::new(), footer: footer.clone() };
-            let objects = Objects { footer, segment: segment.encode().into(), own: Vec::new() };
+            let objects = Objects {
+                footer,
+                segment: segment.encode(writer.keys().encrypting()).into(),
+                own: Vec::new(),
+            };
             let segment = writer.add_segment(objects).unwrap();
             writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
@@ -4453,7 +4593,9 @@ mod tests {
         let extents = vec![(extent, b"held".to_vec())];
         block_on(async {
             let batch = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
-            let segment = writer.add_segment(batch.close(&mut writer.chain()).frame()).unwrap();
+            let segment = writer
+                .add_segment(batch.close(&mut writer.chain()).frame(writer.keys().encrypting()))
+                .unwrap();
             writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
             writer.checkpoint().await.unwrap();
@@ -4470,7 +4612,7 @@ mod tests {
                                     Child { branch: test_branch(POINT), owner: 0, point: true },
                                     &mut writer.chain(),
                                 )
-                                .frame(),
+                                .frame(writer.keys().encrypting()),
                         )
                         .unwrap();
                     writer.upload(segment).await.unwrap();
@@ -4485,11 +4627,22 @@ mod tests {
                     )
                     .await
                     .unwrap();
-                    branch::delete(&*direct, test_branch(POINT), 20, 0).await.unwrap();
+                    branch::delete(
+                        &*direct,
+                        test_branch(POINT),
+                        20,
+                        0,
+                        &crate::keys::testing::host_kms(),
+                    )
+                    .await
+                    .unwrap();
                     let frees = vec![extent];
                     let batch = SegmentBuilder::from(Commit { tag: 3, frees, ..Commit::default() });
-                    let segment =
-                        writer.add_segment(batch.close(&mut writer.chain()).frame()).unwrap();
+                    let segment = writer
+                        .add_segment(
+                            batch.close(&mut writer.chain()).frame(writer.keys().encrypting()),
+                        )
+                        .unwrap();
                     writer.upload(segment).await.unwrap();
                     writer.acknowledge().await.unwrap();
                     writer.checkpoint().await.unwrap();
@@ -4509,18 +4662,17 @@ mod tests {
             let recovered =
                 recovery::recover(&*direct, test_branch(RESTORED), record.unwrap().origin())
                     .await?;
-            crate::read(&direct, extent, &recovered.state.extents[&extent]).await
+            crate::testing::read(&direct, extent, &recovered.state.extents[&extent]).await
         })
     }
 
-    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies
-    /// none of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
-    /// compacts under its cell's keys, TASK-411.6, or leaves it); its twin in the clear is
-    /// compacted, its live extent copied to its moves.
+    /// TASK-411.2: compacting an object encrypted under a key the ring given doesn't hold copies none
+    /// of it, its data unread, and fails naming the key, leaving the bucket as it was (a pass
+    /// compacts under its cell's keys, TASK-411.6, or leaves it); under a ring holding its key it
+    /// is compacted, its live extent copied to its moves, encrypted under that key.
     #[test]
     fn objects_encrypted_are_not_compacted_without_their_keys() {
-        let id = extent_frame::KeyId { branch: 1, generation: 0 };
-        let dek = extent_frame::Secret::from_bytes(&[3; 32]);
+        let (dek, id) = crate::testing::encrypting(test_branch(1));
         let key = layout::segment(test_branch(1), 0, 1);
         let data: Vec<u8> = (0..3 * 4096).map(|i| (i % 251) as u8).collect();
         let live = ExtentId::new(1, 2);
@@ -4528,22 +4680,23 @@ mod tests {
             BTreeMap::from([(live, Location { key: key.clone(), offset: 4096, len: 4096 })]);
         let footer = layout::encode(&());
         block_on(async {
-            let encrypted = Direct(SimBucket::new());
-            let object = extent_frame::framed(&data, &footer, Some((&dek, id)));
-            assert!(matches!(bucket::create(&encrypted, &key, object).await, Created::Created(_)));
-            let before = held(&encrypted).await;
-            let compacted = compact_object(&encrypted, &key, &extents, (&Ring::clear(), 1)).await;
+            let bucket = Direct(SimBucket::new());
+            let object = extent_frame::framed(&data, &footer, (dek, id));
+            assert!(matches!(bucket::create(&bucket, &key, object).await, Created::Created(_)));
+            let before = held(&bucket).await;
+            let compacted = compact_object(&bucket, &key, &extents, (&Ring::keyless(), 1)).await;
             assert_eq!(compacted, Err(Error::NoKey(id)));
-            assert_eq!(held(&encrypted).await, before);
+            assert_eq!(held(&bucket).await, before);
 
-            let clear = Direct(SimBucket::new());
-            let object = extent_frame::framed(&data, &footer, None);
-            assert!(matches!(bucket::create(&clear, &key, object).await, Created::Created(_)));
-            let compacted = compact_object(&clear, &key, &extents, (&Ring::clear(), 1)).await;
+            let ring = crate::testing::ring([test_branch(1)]);
+            let compacted = compact_object(&bucket, &key, &extents, (&ring, 1)).await;
             let moves = layout::moves(&key, 1).unwrap();
-            let bytes = bucket::get(&clear, &moves).await.unwrap().bytes;
+            let bytes = bucket::get(&bucket, &moves).await.unwrap().bytes;
             assert_eq!(compacted, Ok(Some((moves, bytes.len() as u64))));
-            assert_eq!(layout::data(&bytes).unwrap(), &data[4096..8192]);
+            assert!(
+                matches!(Frame::of(&bytes).unwrap().encryption, Encryption::Encrypted { key, .. } if key == id)
+            );
+            assert_eq!(layout::data_under(&bytes, &ring.of(1)).unwrap(), &data[4096..8192]);
         });
     }
 
@@ -4558,8 +4711,16 @@ mod tests {
         let sim = SimBucket::new();
         let direct = Direct(sim.clone());
         block_on(async {
-            branch::record_fork(&direct, child(test_branch(2)), origin).await.unwrap();
-            let bytes = layout::with_footer(b"", &());
+            branch::record_fork(
+                &direct,
+                child(test_branch(2)),
+                origin,
+                crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+            )
+            .await
+            .unwrap();
+            let bytes =
+                layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_branch(1)));
             assert!(matches!(bucket::create(&direct, &stray, bytes).await, Created::Created(_)));
         });
         let before = block_on(keys(&direct));
@@ -4631,8 +4792,11 @@ mod tests {
             garbage(&bucket).await;
             let before = held(&*bucket).await;
             let options = Options { compact_below: 0.5, grace: 0 };
-            let dry =
-                Collector::new(options).dry_run_cell(&*bucket, layout::TEST_CELL).await.unwrap();
+            let dry = Collector::new(options)
+                .kms(Some(crate::keys::testing::kms()))
+                .dry_run_cell(&*bucket, layout::TEST_CELL)
+                .await
+                .unwrap();
             assert_eq!(held(&*bucket).await, before);
             let doomed: Vec<String> = dry.doomed.iter().map(|meta| meta.key.clone()).collect();
             assert_eq!(doomed, garbage_doomed());
@@ -4669,7 +4833,11 @@ mod tests {
                 let pass = collect(&*passing, 9, &KEEP).now_or_never();
                 assert_eq!(pass, Some(Ok(Report::default())));
             }));
-            let dry = Collector::new(KEEP).dry_run_cell(&during, layout::TEST_CELL).await.unwrap();
+            let dry = Collector::new(KEEP)
+                .kms(Some(crate::keys::testing::kms()))
+                .dry_run_cell(&during, layout::TEST_CELL)
+                .await
+                .unwrap();
             assert_eq!(dry, DryRun { fenced: true, ..DryRun::default() });
         });
     }
@@ -4694,7 +4862,7 @@ mod tests {
             let bucket = store();
             garbage(&bucket).await;
             let before = held(&*bucket).await;
-            let mut collector = Collector::new(compacting);
+            let mut collector = Collector::new(compacting).kms(Some(crate::keys::testing::kms()));
             let marking = collector.mark_cell(&*bucket, layout::TEST_CELL, 2).await.unwrap();
             assert_eq!(
                 marking.report,
@@ -4773,14 +4941,17 @@ mod tests {
             let own = vec![(late.sequence, b"late".to_vec())];
             let objects = SegmentBuilder::from(Commit { tag: 2, own, ..Commit::default() })
                 .close(&mut writer.chain())
-                .frame();
+                .frame(writer.keys().encrypting());
             let [(key, bytes)] = &objects.own[..] else { panic!("{}", objects.own.len()) };
             let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await;
             assert!(matches!(created, Created::Created(_)));
 
             // A wrong pass, deleting what no head names yet (rule `collector_epochs`).
             crate::set_rules(crate::Rules { collector_epochs: false, ..crate::Rules::ALL });
-            let marking = Collector::new(KEEP).mark_cell(&*bucket, layout::TEST_CELL, 1).await;
+            let marking = Collector::new(KEEP)
+                .kms(Some(crate::keys::testing::kms()))
+                .mark_cell(&*bucket, layout::TEST_CELL, 1)
+                .await;
             crate::set_rules(crate::Rules::ALL);
             let marked: Vec<String> =
                 marking.unwrap().marks.unwrap().marked.into_iter().map(|m| m.key).collect();
@@ -4800,7 +4971,7 @@ mod tests {
         let reader = Arc::new(ObjectBucket::new(memory.clone(), ""));
         let read = block_on(async {
             let recovered = recovery::recover(&*reader, test_branch(1), None).await.unwrap();
-            crate::read(&reader, late, &recovered.state.extents[&late]).await
+            crate::testing::read(&reader, late, &recovered.state.extents[&late]).await
         });
         assert_eq!(read, Ok(b"late".to_vec()));
         let kind = layout::kind(&key);
@@ -4817,8 +4988,12 @@ mod tests {
         let read_twice = [reached("get-range"), reached("get-range")];
         assert_eq!(warnings(), read_twice);
 
-        let next =
-            block_on(Collector::new(KEEP).mark_cell(&*bucket, layout::TEST_CELL, 2)).unwrap();
+        let next = block_on(Collector::new(KEEP).kms(Some(crate::keys::testing::kms())).mark_cell(
+            &*bucket,
+            layout::TEST_CELL,
+            2,
+        ))
+        .unwrap();
         assert_eq!(next.resurrected, [key.as_str()]);
         assert_eq!(next.marks.unwrap().marked, Vec::<Marked>::new());
         let resurrected = format!(
@@ -4863,7 +5038,9 @@ mod tests {
     ) -> u64 {
         commit(writer, Commit { tag: 1, extents, ..Commit::default() }).await;
         let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let at = writer.add_segment(forking.fork(child, &mut writer.chain()).frame()).unwrap();
+        let at = writer
+            .add_segment(forking.fork(child, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
         at
@@ -4915,7 +5092,13 @@ mod tests {
 
         // The parent's deletion records the forks of its state again: recorded, their references
         // stand.
-        let (deleted, asked) = bucket.served(branch::delete(&*bucket, parent, 20, 0));
+        let (deleted, asked) = bucket.served(branch::delete(
+            &*bucket,
+            parent,
+            20,
+            0,
+            &crate::keys::testing::host_kms(),
+        ));
         deleted.unwrap();
         assert_eq!(refers(&asked), Vec::<String>::new());
         let references: Vec<String> =
@@ -4979,7 +5162,7 @@ mod tests {
         let recovered = recovery::recover(&**bucket, branch, record.origin()).await?;
         let location = recovered.state.extents.get(&extent).cloned();
         let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
-        crate::read(bucket, extent, &location).await
+        crate::testing::read(bucket, extent, &location).await
     }
 
     /// Sweeps over every cell, deleting what is free at once, until two in a row delete nothing:
@@ -5017,6 +5200,51 @@ mod tests {
         let read = block_on(read_forked_from_a_deleted_parent());
         crate::set_rules(crate::Rules::ALL);
         assert!(matches!(read, Err(Error::Lost(_))), "{read:?}");
+    }
+
+    /// TASK-462: a pass finds a fork point's state lost, the head it read naming no segment there:
+    /// a fork's reference at that segment number, the fork dropped, its writer taken over. Then,
+    /// before it lists the point's references, the branch's writer forks a child there, in another
+    /// cell: the pass finds the child living on the point, and recovering the state again, after
+    /// the child's record was read, finds it, the fork having checkpointed it before it referred;
+    /// so the pass keeps it, rather than stopping as though the child's state were lost.
+    #[test]
+    fn passes_finding_a_fork_point_lost_then_a_child_forked_there_recover_it_again() {
+        let sim = SimBucket::new();
+        let direct = Arc::new(Direct(sim.clone()));
+        let (parent, dropped, child) = (celled(1, 1), celled(3, 3), celled(2, 2));
+        let writer = block_on(async {
+            branch::create(&*direct, parent, 0).await.unwrap();
+            let writer = Writer::open(direct.clone(), parent, 10, 0).await.unwrap();
+            let extent = ExtentId::new(parent.id, writer.chain().next_sequence());
+            let extents = vec![(extent, b"held".to_vec())];
+            commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
+            let key = layout::reference(parent, 1, dropped);
+            let bytes = layout::encode(&layout::Reference::of(forked(dropped).owner));
+            direct.put(&key, bytes.into(), PutMode::Create).await.unwrap();
+            writer
+        });
+        let now = Options { compact_below: 0.0, grace: 0 };
+        let mut pass = std::pin::pin!(collect_cell(&*sim, parent.cell, 7, &now));
+        let mut context = std::task::Context::from_waker(futures::task::noop_waker_ref());
+        let listing = format!("list {}", layout::fork_point(parent, 1));
+        loop {
+            assert!(pass.as_mut().poll(&mut context).is_pending(), "the pass ended first");
+            if sim.describe(0) == listing {
+                break;
+            }
+            sim.complete(0, crate::testing::Fault::None);
+        }
+        block_on(async {
+            let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
+            let objects = forking.fork(forked(child), &mut writer.chain());
+            let at = writer.add_segment(objects.frame(writer.keys().encrypting())).unwrap();
+            assert_eq!(at, 1, "the fork's segment");
+            writer.upload(at).await.unwrap();
+            writer.acknowledge().await.unwrap();
+        });
+        let (passed, _) = sim.served(pass);
+        assert!(passed.is_ok(), "{passed:?}");
     }
 
     /// TASK-476: a version keeps its branch's state at it, which its branch freed since and
@@ -5062,7 +5290,9 @@ mod tests {
         .await;
         let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
         let cutting = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let at = writer.add_segment(cutting.cut(cut, &mut writer.chain()).frame()).unwrap();
+        let at = writer
+            .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
@@ -5076,7 +5306,7 @@ mod tests {
         let (state, _) = recovery::recover_at(&checkpoints, branch, at).await?;
         let location = state.extents.get(&extent).cloned();
         let location = location.ok_or_else(|| Error::Lost(format!("{extent:?} of {branch}")))?;
-        crate::read(&reader, extent, &location).await
+        crate::testing::read(&reader, extent, &location).await
     }
 
     /// TASK-476: a pass gives up on a restore of a version being made, its host dead, once the
@@ -5110,7 +5340,9 @@ mod tests {
         let writer = Writer::open(bucket.clone(), branch, 10, 0).await.unwrap();
         let cut = layout::VersionCut { id: 0xa, cell_cut: None, keep_last: None };
         let cutting = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
-        let at = writer.add_segment(cutting.cut(cut, &mut writer.chain()).frame()).unwrap();
+        let at = writer
+            .add_segment(cutting.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
         writer.upload(at).await.unwrap();
         writer.acknowledge().await.unwrap();
         let origin = Origin { parent: branch, at };
@@ -5139,7 +5371,7 @@ mod tests {
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
         drop(writer);
-        branch::delete(&*bucket, parent, 20, 0).await.unwrap();
+        branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
         sweep(&*bucket).await?;
         read_inherited(&Arc::new(ObjectBucket::new(objects, "")), child, extent).await
     }
@@ -5150,16 +5382,18 @@ mod tests {
     /// grandchild's; the root frees and checkpoints, and the grandchild, with no checkpoint, reads
     /// what it inherited through both. The grandchild deleted too, the passes retire the
     /// references down the chain, and the cells of the dead are reclaimed whole but their records,
-    /// heads
-    /// and the marks of the references retired (TASK-395.13): no reference is left, and the root's
-    /// cell holds its own alone.
+    /// heads and the marks of the references retired (TASK-395.13), and cladefs: their cells'
+    /// objects, which keep their KEKs (TASK-411.28): no reference is left, and the root's cell
+    /// holds its own alone.
     #[test]
     fn references_hold_while_their_childrens_cells_hold_references() {
         let (read, bucket) = block_on(read_through_a_deleted_child());
         assert_eq!(read, Ok(b"held".to_vec()));
         block_on(async {
             let grandchild = celled(3, 3);
-            branch::delete(&*bucket, grandchild, 22, 0).await.unwrap();
+            branch::delete(&*bucket, grandchild, 22, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             sweep(&*bucket).await.unwrap();
         });
         let left = block_on(keys(&*bucket));
@@ -5176,6 +5410,7 @@ mod tests {
                             | Kind::Head { .. }
                             | Kind::Marks { .. }
                             | Kind::Retired { .. }
+                            | Kind::Cell { .. }
                     )
                 })
                 .collect();
@@ -5206,7 +5441,7 @@ mod tests {
         let forking = Writer::open(bucket.clone(), child, 11, 0).await.unwrap();
         commit_and_fork(&forking, Vec::new(), forked(grandchild)).await;
         drop(forking);
-        branch::delete(&*bucket, child, 21, 0).await.unwrap();
+        branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms()).await.unwrap();
         sweep(&*bucket).await.unwrap();
         commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
         writer.checkpoint().await.unwrap();
@@ -5255,8 +5490,11 @@ mod tests {
         .await;
         // The fork's segment, acknowledged, its head naming it; its writer records nothing.
         let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let forked_at =
-            writer.add_segment(forking.fork(forked(child), &mut writer.chain()).frame()).unwrap();
+        let forked_at = writer
+            .add_segment(
+                forking.fork(forked(child), &mut writer.chain()).frame(writer.keys().encrypting()),
+            )
+            .unwrap();
         assert_eq!(forked_at, at);
         writer.upload(at).await.unwrap();
         let mut acknowledging = Box::pin(writer.acknowledge());
@@ -5270,7 +5508,7 @@ mod tests {
             let pass = collect_cell(&*sweeping, parent.cell, 1, &now);
             pass.now_or_never().unwrap().unwrap();
         }));
-        branch::delete(&bucket, parent, 20, 0).await.unwrap();
+        branch::delete(&bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
         assert!(bucket.then.lock().unwrap().is_none(), "the pass ran");
         sweep(&*direct).await?;
         read_inherited(&direct, child, extent).await
@@ -5315,8 +5553,12 @@ mod tests {
         *bucket.then.lock().unwrap() = Some(Box::new(move || {
             let now = Options { compact_below: 0.0, grace: 0 };
             let deleted = async {
-                branch::delete(&*sweeping, point, 20, 0).await.unwrap();
-                branch::delete(&*sweeping, origin_branch, 21, 0).await.unwrap();
+                branch::delete(&*sweeping, point, 20, 0, &crate::keys::testing::host_kms())
+                    .await
+                    .unwrap();
+                branch::delete(&*sweeping, origin_branch, 21, 0, &crate::keys::testing::host_kms())
+                    .await
+                    .unwrap();
                 collect_cell(&*sweeping, point.cell, 1, &now).await.unwrap();
                 collect_cell(&*sweeping, origin_branch.cell, 1, &now).await.unwrap();
             };
@@ -5364,7 +5606,9 @@ mod tests {
                 .await;
                 forking.checkpoint().await.unwrap();
                 drop(forking);
-                branch::delete(&*bucket, child, 21, 0).await.unwrap();
+                branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+                    .await
+                    .unwrap();
                 at
             })
             .0;
@@ -5576,11 +5820,13 @@ mod tests {
             branch::create(&*bucket, parent, 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
             let at = commit_and_fork(&writer, Vec::new(), forked(child)).await;
-            branch::delete(&*bucket, child, 21, 0).await.unwrap();
+            branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             at
         });
         let reference = layout::reference(parent, at, child);
-        let mut collector = Collector::new(KEEP);
+        let mut collector = Collector::new(KEEP).kms(Some(crate::keys::testing::kms()));
         let dry = block_on(collector.dry_run_cell(&*bucket, child.cell)).unwrap();
         assert_eq!(dry.retired, std::slice::from_ref(&reference));
         let marking = block_on(collector.mark_cell(&*bucket, child.cell, 1)).unwrap();
@@ -5728,14 +5974,35 @@ mod tests {
             assert!(!left.contains(&layout::segment(parent, at, 1)), "the fork's segment went");
             assert!(left.contains(&layout::checkpoint(parent, at, 1)), "the fork point kept");
             let origin = crate::layout::Origin { parent, at };
-            assert_eq!(branch::record_fork(&*bucket, forked(child), origin).await, Ok(()));
+            assert_eq!(
+                branch::record_fork(
+                    &*bucket,
+                    forked(child),
+                    origin,
+                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None)
+                )
+                .await,
+                Ok(())
+            );
             // Its checkpoint at the fork point gone too, as nothing keeps it for a record of the
             // fork's owner no reference keeps, a failed fork's claim landing late (seed 11's).
             let point = layout::checkpoint(parent, at, 1);
             bucket::delete_all(&*bucket, &[point.as_str()]).await;
-            assert_eq!(branch::record_fork(&*bucket, forked(child), origin).await, Ok(()));
+            assert_eq!(
+                branch::record_fork(
+                    &*bucket,
+                    forked(child),
+                    origin,
+                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None)
+                )
+                .await,
+                Ok(())
+            );
             drop(writer);
-            assert_eq!(branch::delete(&*bucket, parent, 20, 0).await, Ok(()));
+            assert_eq!(
+                branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+                Ok(())
+            );
         });
     }
 
@@ -5752,7 +6019,9 @@ mod tests {
             let at =
                 commit_and_fork(&writer, vec![(extent, b"held".to_vec())], forked(child)).await;
             commit(&writer, Commit { tag: 3, frees: vec![extent], ..Commit::default() }).await;
-            branch::delete(&*bucket, child, 30, u64::MAX).await.unwrap();
+            branch::delete(&*bucket, child, 30, u64::MAX, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             writer.checkpoint().await.unwrap();
             sweep(&*bucket).await.unwrap();
             let left = keys(&*bucket).await;
@@ -5760,19 +6029,17 @@ mod tests {
             assert!(!left.contains(&layout::checkpoint(parent, at, 1)), "the fork point let go of");
             let origin = crate::layout::Origin { parent, at };
             let owner = forked(failed).owner;
-            let deleted = branch::delete_fork(
-                &*bucket,
-                failed,
-                crate::record::Kind::Fork(origin),
-                owner,
-                30,
-                0,
-            );
+            let kms = crate::keys::testing::host_kms();
+            let forked = crate::record::Kind::Fork(origin);
+            let deleted = branch::delete_fork(&*bucket, failed, forked, owner, (30, 0), &kms);
             assert_eq!(deleted.await, Ok(true));
             let recorded = branch::record(&*bucket, failed).await.unwrap().unwrap();
             assert_eq!((recorded.deleted, recorded.origin()), (true, Some(origin)));
             drop(writer);
-            assert_eq!(branch::delete(&*bucket, parent, 20, 0).await, Ok(()));
+            assert_eq!(
+                branch::delete(&*bucket, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+                Ok(())
+            );
         });
     }
 
@@ -5797,14 +6064,26 @@ mod tests {
             commit(&writer, Commit { tag: 1, extents, ..Commit::default() }).await;
             let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
             let at = writer
-                .add_segment(forking.fork(forked(child), &mut writer.chain()).frame())
+                .add_segment(
+                    forking
+                        .fork(forked(child), &mut writer.chain())
+                        .frame(writer.keys().encrypting()),
+                )
                 .unwrap();
             writer.upload(at).await.unwrap();
             let going = direct.clone();
             *bucket.then.lock().unwrap() = Some(Box::new(move || {
                 let went = std::thread::spawn(move || {
                     block_on(async {
-                        branch::delete(&*going, child, 30, u64::MAX).await.unwrap();
+                        branch::delete(
+                            &*going,
+                            child,
+                            30,
+                            u64::MAX,
+                            &crate::keys::testing::host_kms(),
+                        )
+                        .await
+                        .unwrap();
                         let next = Writer::open(going.clone(), parent, 11, 0).await.unwrap();
                         let freeing = Commit { tag: 3, frees: vec![extent], ..Commit::default() };
                         commit(&next, freeing).await;
@@ -5867,8 +6146,11 @@ mod tests {
             Gated::new(direct.clone(), Gate::Put(layout::reference(parent, late_at, late)));
         let writer = Writer::open(Arc::new(dying), parent, 11, 0).await.unwrap();
         let forking = SegmentBuilder::from(Commit { tag: 4, ..Commit::default() });
-        let forked_at =
-            writer.add_segment(forking.fork(forked(late), &mut writer.chain()).frame()).unwrap();
+        let forked_at = writer
+            .add_segment(
+                forking.fork(forked(late), &mut writer.chain()).frame(writer.keys().encrypting()),
+            )
+            .unwrap();
         assert_eq!(forked_at, late_at);
         writer.upload(late_at).await.unwrap();
         let mut acknowledging = Box::pin(writer.acknowledge());
@@ -5879,7 +6161,10 @@ mod tests {
         let reference = layout::reference(parent, late_at, late);
         let bytes = layout::encode(&layout::Reference::of(forked(late).owner));
         bucket::create(&*direct, &reference, bytes).await;
-        assert_eq!(branch::delete(&*direct, parent, 20, 0).await, Ok(()));
+        assert_eq!(
+            branch::delete(&*direct, parent, 20, 0, &crate::keys::testing::host_kms()).await,
+            Ok(())
+        );
         sweep(&*direct).await.unwrap();
         let left = keys(&*direct).await;
         [layout::reference(parent, at, child), reference].map(|key| left.contains(&key))
@@ -5906,9 +6191,18 @@ mod tests {
             *bucket.then.lock().unwrap() = Some(Box::new(move || {
                 let went = std::thread::spawn(move || {
                     block_on(async {
-                        branch::delete(&*going, child, 30, u64::MAX).await.unwrap();
+                        branch::delete(
+                            &*going,
+                            child,
+                            30,
+                            u64::MAX,
+                            &crate::keys::testing::host_kms(),
+                        )
+                        .await
+                        .unwrap();
                         let mut collector =
-                            Collector::new(Options { compact_below: 0.0, grace: 0 });
+                            Collector::new(Options { compact_below: 0.0, grace: 0 })
+                                .kms(Some(crate::keys::testing::kms()));
                         let report = collector.collect_cell(&*going, child.cell, 1).await;
                         assert_eq!(report.unwrap().retired, 1);
                     })
@@ -5916,7 +6210,16 @@ mod tests {
                 went.join().unwrap();
             }));
             let origin = layout::Origin { parent, at };
-            assert_eq!(branch::record_fork(&bucket, forked(child), origin).await, Ok(()));
+            assert_eq!(
+                branch::record_fork(
+                    &bucket,
+                    forked(child),
+                    origin,
+                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None)
+                )
+                .await,
+                Ok(())
+            );
             assert!(bucket.then.lock().unwrap().is_none(), "the child went");
             assert!(!keys(&*direct).await.contains(&reference));
         });
@@ -5941,8 +6244,11 @@ mod tests {
         let writer = Writer::open(bucket.clone(), parent, 10, 0).await.unwrap();
         commit(&writer, Commit { tag: 1, ..Commit::default() }).await;
         let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
-        let at =
-            writer.add_segment(forking.fork(forked(child), &mut writer.chain()).frame()).unwrap();
+        let at = writer
+            .add_segment(
+                forking.fork(forked(child), &mut writer.chain()).frame(writer.keys().encrypting()),
+            )
+            .unwrap();
         writer.upload(at).await.unwrap();
         let origin = layout::Origin { parent, at };
         let reference = layout::reference(parent, at, child);
@@ -5955,12 +6261,27 @@ mod tests {
                 block_on(async {
                     if taken {
                         branch::create(&*other, child, 0x99).await.unwrap();
-                        let refused = branch::record_fork(&*other, forked(child), origin).await;
+                        let refused = branch::record_fork(
+                            &*other,
+                            forked(child),
+                            origin,
+                            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+                        )
+                        .await;
                         assert_eq!(refused, Err(Error::IdTaken(child)));
                         return;
                     }
-                    branch::record_fork(&*other, forked(child), origin).await.unwrap();
-                    branch::delete(&*other, child, 30, u64::MAX).await.unwrap();
+                    branch::record_fork(
+                        &*other,
+                        forked(child),
+                        origin,
+                        crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+                    )
+                    .await
+                    .unwrap();
+                    branch::delete(&*other, child, 30, u64::MAX, &crate::keys::testing::host_kms())
+                        .await
+                        .unwrap();
                     // Until the child's cell settles, its passes skipping it.
                     sweep(&*other).await.unwrap();
                     let reference = layout::reference(parent, at, child);
@@ -6053,8 +6374,10 @@ mod tests {
         assert!(died, "{step} {nth}: {asked:#?}");
         let direct = Direct(bucket.clone());
         block_on(async {
-            branch::delete(&direct, point, 20, 0).await.unwrap();
-            branch::delete(&direct, origin_branch, 21, 0).await.unwrap();
+            branch::delete(&direct, point, 20, 0, &crate::keys::testing::host_kms()).await.unwrap();
+            branch::delete(&direct, origin_branch, 21, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             sweep(&direct).await.unwrap();
             let left = crate::testing::uncollected(&direct, 0.0).await;
             let references =
@@ -6089,8 +6412,12 @@ mod tests {
                 assert!(reference.starts_with(&origin_branch.cell.prefix()), "{reference}");
                 assert!(keys(&*direct).await.contains(&reference), "{reference}");
             }
-            branch::delete(&*direct, point, 20, 0).await.unwrap();
-            branch::delete(&*direct, origin_branch, 21, 0).await.unwrap();
+            branch::delete(&*direct, point, 20, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
+            branch::delete(&*direct, origin_branch, 21, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             for _ in 0..2 {
                 sweep(&*direct).await.unwrap();
                 for clone in clones {
@@ -6099,7 +6426,9 @@ mod tests {
                 }
             }
             for clone in clones {
-                branch::delete(&*direct, clone, 30, u64::MAX).await.unwrap();
+                branch::delete(&*direct, clone, 30, u64::MAX, &crate::keys::testing::host_kms())
+                    .await
+                    .unwrap();
             }
             sweep(&*direct).await.unwrap();
             let left = keys(&*direct).await;
@@ -6155,7 +6484,7 @@ mod tests {
         bucket.served(crate::testing::collect_until_quiet(&*bucket, &options)).0.unwrap();
         let cells: Vec<Cell> = bucket.served(crate::cell::listed(&*bucket).collect()).0;
         assert_eq!(cells.len(), 6, "{cells:?}");
-        let mut collector = Collector::new(options);
+        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
         let mut holder = 0x10;
         let mut sweep = |collector: &mut Collector| {
             holder += 1;
@@ -6212,7 +6541,16 @@ mod tests {
                     bucket.served(crate::head::take(&*bucket, taken, 0x77, 0)).0.unwrap();
                 }
                 _ => {
-                    bucket.served(branch::delete(&*bucket, garbage(0x102), 20, 0)).0.unwrap();
+                    bucket
+                        .served(branch::delete(
+                            &*bucket,
+                            garbage(0x102),
+                            20,
+                            0,
+                            &crate::keys::testing::host_kms(),
+                        ))
+                        .0
+                        .unwrap();
                 }
             }
             let asked = sweep(&mut collector);
@@ -6246,7 +6584,7 @@ mod tests {
         let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
         let cell = test_branch(1).cell;
         let options = Options { compact_below: 0.5, grace: 1000 };
-        let mut collector = Collector::new(options);
+        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
         let mut holder = 0;
         let mut pass = |collector: &mut Collector| {
             holder += 1;
@@ -6317,7 +6655,7 @@ mod tests {
             bucket::create(&*bucket, &layout::record(clone), layout::encode(&forking)).await;
         });
         let options = Options { compact_below: 0.0, grace: 0 };
-        let mut collector = Collector::new(options);
+        let mut collector = Collector::new(options).kms(Some(crate::keys::testing::kms()));
         let pass = |collector: &mut Collector, holder| {
             let (report, asked) =
                 bucket.served(collector.collect_cell(&*bucket, clone.cell, holder));
@@ -6328,7 +6666,10 @@ mod tests {
             let read = format!("get {}", layout::record(point));
             assert!(asked.contains(&read), "{holder}: {asked:#?}");
         }
-        bucket.served(branch::delete(&*bucket, point, 20, 0)).0.unwrap();
+        bucket
+            .served(branch::delete(&*bucket, point, 20, 0, &crate::keys::testing::host_kms()))
+            .0
+            .unwrap();
         pass(&mut collector, 3);
         let record = bucket.served(branch::record(&*bucket, clone)).0.unwrap().unwrap();
         assert!(record.deleted, "{record:?}");
@@ -6356,7 +6697,8 @@ mod tests {
         assert_eq!(report.unwrap().retired, 1);
         assert!(!bucket.keys().contains(&reference));
         assert!(bucket.keys().contains(&mark));
-        let mut other = Collector::new(Options { compact_below: 0.5, grace: 0 });
+        let mut other = Collector::new(Options { compact_below: 0.5, grace: 0 })
+            .kms(Some(crate::keys::testing::kms()));
         let (report, asked) = bucket.served(other.collect_cell(&*bucket, clone.cell, 7));
         report.unwrap();
         assert!(asked.len() > idle(clone.cell).len() + 2, "{asked:#?}");
@@ -6435,7 +6777,9 @@ mod tests {
             // The bucket's clock past every measurement before.
             sim.advance(1);
             let before = bucket.now();
-            branch::delete(&*bucket, child, 21, 0).await.unwrap();
+            branch::delete(&*bucket, child, 21, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             // Retired by the pass over the dead cell in full; not by the ones after, which skip it
             // (TASK-395.14), as that one recorded what its deletes left (TASK-455).
             let report = crate::testing::collect_until_quiet(&*bucket, &options).await.unwrap();
@@ -6477,15 +6821,15 @@ mod tests {
             let kms: kms::Shared = counted.clone();
             let host = keys::CachingKms::new(kms.clone());
             let bucket = store();
-            let kek = keys::new_cell_kek(Some(&host), layout::TEST_CELL.tenant).await.unwrap();
-            let making = (true, kek.as_ref().map(|(_, kek)| kek));
+            let kek = keys::new_cell_kek(&host, layout::TEST_CELL.tenant).await.unwrap();
+            let making = Some(&kek.1);
             let vdisk = crate::cell::Vdisk { branch: 1, kind: crate::cell::Kind::Fxfs };
             let (_, object) =
                 crate::cell::hold(&*bucket, layout::TEST_CELL, (5, 5), making, Some(("a", vdisk)))
                     .await
                     .unwrap();
             assert_eq!(object.keks.len(), 1);
-            let cell = keys::held(Some(&host), layout::TEST_CELL, object, kek);
+            let cell = keys::held(&host, layout::TEST_CELL, object, Some(kek));
             let branch = test_branch(1);
             branch::create(&*bucket, branch, 0).await.unwrap();
             let record = branch::record(&*bucket, branch).await.unwrap().unwrap();
@@ -6511,8 +6855,7 @@ mod tests {
         /// acknowledged.
         async fn commit(&self, commit: Commit) {
             let objects = SegmentBuilder::from(commit).close(&mut self.writer.chain());
-            let segment =
-                self.writer.add_segment(objects.frame_under(self.ring.encrypting())).unwrap();
+            let segment = self.writer.add_segment(objects.frame(self.ring.encrypting())).unwrap();
             self.writer.upload(segment).await.unwrap();
             self.writer.acknowledge().await.unwrap();
         }
@@ -6649,7 +6992,7 @@ mod tests {
                 assert_eq!((at.key.as_str(), at.len), (segment.as_str(), 4096));
                 let read = read_holding(&encrypted.bucket, &encrypted.ring, *extent, &at).await;
                 assert_eq!(read, Ok(kept(n as u64)));
-                let keyless = read_holding(&encrypted.bucket, &Ring::clear(), *extent, &at).await;
+                let keyless = read_holding(&encrypted.bucket, &Ring::keyless(), *extent, &at).await;
                 assert_eq!(keyless, Err(Error::NoKey(dek)));
             }
             encrypted.checkpointed().await;
@@ -6693,27 +7036,6 @@ mod tests {
                 assert_eq!(read, Ok(kept(n as u64)));
             }
         });
-    }
-
-    /// TASK-411.6, AC #1's twin: a cell in the clear is compacted as before, its moves in the
-    /// clear, by a collector holding a KMS it asks nothing.
-    #[test]
-    fn cells_in_the_clear_are_compacted_asking_the_kms_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let counted = Arc::new(Counted::new(LocalKms::open(dir.path().join("kms")).unwrap()));
-        let kms: kms::Shared = counted.clone();
-        let bucket = SimBucket::new();
-        let (segments, _) = bucket.served(mostly_freed(bucket.clone()));
-        let mut collector = Collector::new(Options { compact_below: 0.5, grace: 0 }).kms(Some(kms));
-        let (report, _) = bucket.served(collector.collect(&*bucket, 1));
-        let report = report.unwrap();
-        assert_eq!((report.compacted, report.locked), (SEGMENTS as usize, 0));
-        assert_eq!((counted.wraps(), counted.unwraps()), (0, 0));
-        for segment in &segments {
-            let moves = bucket.served(moves_at(&*bucket, segment)).0.unwrap();
-            let (encryption, _) = bucket.served(encryption_at(&*bucket, &moves));
-            assert_eq!(encryption, Encryption::None, "{moves}");
-        }
     }
 
     /// TASK-411.6, AC #3: a pass over a cell whose tenant's KEK is revoked marks it and deletes
@@ -6835,11 +7157,12 @@ mod tests {
         assert_eq!(counted.wraps(), 3);
     }
 
-    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's
-    /// moves of its branch, are refused there, by readers holding the branch's keys and by those
-    /// holding none: their footer, which its MAC covers, names the object they are the moves of
-    /// (TASK-411.3). Their footer made to name the other, framed anew in the clear, which needs no
-    /// key, is a downgrade, refused by readers holding the keys.
+    /// TASK-411.6, AC #4: the moves of an encrypted object, copied whole to the key of another's moves
+    /// of its branch, are refused there, by readers holding the branch's keys and by those holding
+    /// none: their footer, which its MAC covers, names the object they are the moves of
+    /// (TASK-411.3). Their footer made to name the other, framed anew under a key not the
+    /// branch's, is refused by readers holding the keys, by its MAC (none can be framed in the
+    /// clear, TASK-411.28).
     #[test]
     fn encrypted_moves_copied_to_another_key_of_their_branch_are_refused() {
         block_on(async {
@@ -6861,12 +7184,12 @@ mod tests {
             let put = encrypted.bucket.put(&moves_other, copied.clone().into(), PutMode::Overwrite);
             put.await.unwrap();
             let refused = Error::Corrupt(format!("{moves_other} holds the moves of {of_one}"));
-            for ring in [encrypted.ring.clone(), Ring::clear()] {
+            for ring in [encrypted.ring.clone(), Ring::keyless()] {
                 let read = read_holding(&encrypted.bucket, &ring, *other, &at).await;
                 assert_eq!(read, Err(refused.clone()));
             }
 
-            // Made to name the other and its extent, framed in the clear.
+            // Made to name the other and its extent, framed under another key of its name.
             let view = keys::of_key(&encrypted.ring, &moves_one);
             let data = layout::data_under(&copied, &view).unwrap();
             let mut footer: Moves = layout::footer_under(&copied, &view).unwrap();
@@ -6875,10 +7198,11 @@ mod tests {
             for (extent, to) in &mut footer.extents {
                 (*extent, to.key) = (*other, moves_other.clone());
             }
-            let forged = layout::with_footer(&data, &footer);
+            let id = encrypted.ring.encrypting().1;
+            let forged = layout::with_footer(&data, &footer, (crate::testing::dek(), id));
             encrypted.bucket.put(&moves_other, forged.into(), PutMode::Overwrite).await.unwrap();
             let read = read_holding(&encrypted.bucket, &encrypted.ring, *other, &at).await;
-            assert_eq!(read, Err(Error::Downgrade(moves_other.clone())));
+            assert_eq!(read, Err(Error::Corrupt("an object's table, by its MAC".into())));
         });
     }
 }

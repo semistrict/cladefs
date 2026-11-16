@@ -56,5 +56,13 @@ workspace = true
 # requests take effect when the test says (`testing::SimBucket`), the collector's moves
 # (`testing::MovesMaps`), and the protocol's rules, which they may turn off (`set_rules`), as
 # extent_store's simulation does (TASK-88). cladefs: and the S3 server in memory (`s3_server`), whose
-# connections a restore's tests count (TASK-449).
-testing = ["dep:chrono", "dep:http-body-util", "dep:hyper-util", "hyper/server", "hyper/http1"]
+# connections a restore's tests count (TASK-449); and a KMS of the tests' (`keys::testing`,
+# TASK-411.28: every store encrypted, every test too).
+testing = [
+    "extent_keys/testing",
+    "dep:chrono",
+    "dep:http-body-util",
+    "dep:hyper-util",
+    "hyper/server",
+    "hyper/http1",
+]

@@ -420,9 +420,9 @@ pub(crate) fn unmade(path: &Path) -> bool {
 ///
 /// cladefs: a fork of an encrypted store into another cell, as every fork here is, gives its child
 /// the keys it inherits, rewrapped under its cell's KEK, from the pool, no KMS call made
-/// (`Uploader::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
-/// `ENOTSUP` if the child's tenant has no KEK, its cell in the clear, `EACCES` if the host heard a
-/// tenant whose keys it inherits, or the child's, revoked or destroyed.
+/// (`Remote::inheriting`, `keys::give_inherited`, TASK-411.4): refused before anything is made,
+/// `EACCES` if the child's tenant has no KEK in the KMS (TASK-411.28), or the host heard a tenant
+/// whose keys it inherits, or the child's, revoked or destroyed.
 pub(crate) fn fork<H>(
     store: &Store<HostDir>,
     uploader: &Uploader<HostDir>,
@@ -558,7 +558,7 @@ pub(crate) fn delete(
             let placed = extent_store::host_token(dir)?;
             let token = placed.map_or_else(&token, Ok)?;
             let kms = crate::bucket::kms()?;
-            extent_store::upload::delete_branch(bucket, branch, token, kms.as_ref())
+            extent_store::upload::delete_branch(bucket, branch, token, &kms)
         }
         None => Ok(()),
     })

@@ -59,8 +59,9 @@ cladefs splits the filesystem where each half is cheap:
   `docker export` tarball, for VMs to boot forks of.
 - **Many tenants on one host.** Each tenant has a socket, a memory arena, memory and disk limits
   and keys of its own. A VM process reaches only its own tenant's data.
-- **Encryption at rest**, with a key per tenant in a KMS (OpenBao, AWS KMS or Google Cloud KMS).
-  Destroying a tenant's key shreds its data wherever it is.
+- **Encryption at rest, always**, with a key per tenant in a KMS (OpenBao, AWS KMS or Google
+  Cloud KMS), or in the bucket under a master key (`CLADEFS_MASTER_KEY`). Destroying a tenant's key
+  shreds its data wherever it is. A host given neither refuses to start.
 - **Linux's file semantics**: `mmap`, `O_DIRECT`, reflinks, `fallocate`, ACLs, extended attributes,
   idmapped mounts, freezing, online resize. `docs/code.md` lists what the guest's Fxfs does not do.
 - **Access from the host.** `cladefs-mount` mounts a disk with FUSE, and the `cladefs` crate is a

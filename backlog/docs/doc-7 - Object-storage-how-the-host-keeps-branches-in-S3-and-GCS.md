@@ -179,10 +179,11 @@ Per bucket prefix, `<C>` a cell's prefix `tenants/<tenant>/cells/<cell>/`:
 | `<C>refs/<parent>/<at>/<tenant>.<cell>.<child>` | a reference of a fork of the cell's branch `parent` to a child of another cell, or a point's fork's (Garbage collection, References) | create-only, before the child's record; retired by the child's cell's pass, marked first; deleted by the cell's pass where listed marked |
 | `<C>retired/<parent>/<at>/<tenant>.<cell>.<child>` | the mark of that reference, retired or taken back, which no record will ever name again (References, Marked; TASK-395.13, TASK-395.14) | create-only, before the reference is deleted; kept for good, as is its cell; none for a point's fork's made by its host alone, of an ID an allocator gave (Dead cells removed whole) |
 | `objectid/<block>` | a block of object IDs taken by one allocator, which gives its IDs out, each once (Object IDs) | create-only; kept for good |
+| `tenants/<tenant>/kek` | cladefs: the tenant's KEK under the bucket KMS, wrapped by a master key (`fxkt`, format 1: the tenant, the KEK's ID, the master key's ID, the KEK under AES-KW), or, once the tenant is shredded, a tombstone, the header alone (doc-16, The bucket KMS; TASK-411.27) | create-only, by the first host to wrap a key for the tenant, hosts racing taking the one that landed; updated with a condition by a rotation of the master keys (`cladefs-gc --rotate-master-key`) and by shredding the tenant (`ShredTenant`, the tombstone); never deleted: no cell's, so no pass lists it, and the collector keeps it (`Kind::Kek`) if one did. With versioning on, a lifecycle rule must expire its non-current versions, which hold the KEK a shredding replaced |
 | `gc/marking` | there while mark-only passes mark the bucket: what readers read, a HEAD a minute, before watching any cell's marks (Garbage collection, Watching before deleting) | created by a mark-only pass; removed by an operator with the marks |
 
-*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease
-and `gc/marking` is **written once**: created once, never written again, nor created again once
+*Format 11 (TASK-407):* every key but a head's, a record's, a cell's object, the collector's lease,
+`gc/marking` and a tenant's KEK object (TASK-411.27) is **written once**: created once, never written again, nor created again once
 deleted, so that a key names one object for as long as anyone reads it, and readers and caches go by
 the key alone (specs/bucket's `KeysWrittenOnce`; Reading). Keys of a writer's objects name its
 epoch, first, so that a checkpoint's table front-codes them; moves', their pass's.
@@ -193,7 +194,11 @@ reach a parent or a child in another cell, or another tenant's. An extent's ID n
 the ID alone, as forks share their parents' extents by it and a host's extent cache keys them by
 it, so a branch's ID is unique in its bucket, whatever its cell (Object IDs). The collector lists
 a cell's `branches/` for the records it reads again, a cell at a time (Garbage collection). A checkpoint's table stores its keys front-coded (`extent_frame::table`), as
-a branch's keys share their cell's prefix and their kind's.
+a branch's keys share their cell's prefix and their kind's. A tenant's KEK object under the bucket
+KMS is under its prefix beside `cells/` (TASK-411.27; its sealed marker, there too, went with
+TASK-411.28): the delimiter
+listings of `tenants/` and of a tenant's `cells/` that find the cells for a sweep (Sweeps) list
+neither, nor does any pass, which lists a cell's prefix.
 
 ### Cells
 
@@ -308,9 +313,10 @@ its own, or raw where that does not shrink it, at offsets in the object that are
   segments (below);
 - then, as in every object that holds data (segments, extents of their own, compaction's moves,
   checkpoints), a table of each part's stored offset and length, the CRC32C of its stored bytes,
-  its encoding, and its AES-GCM tag (zeros unencrypted), and a trailer: the lengths of the data,
-  of the parts stored and of the footer, the footer's CRC, the object's encryption (none, or
-  under which branch's DEK of which generation, from which salt), the MACs of the footer
+  its encoding, and its AES-GCM tag, and a trailer: the lengths of the data, of the parts stored
+  and of the footer, the footer's CRC, the object's encryption (encrypted or authenticated under
+  which branch's DEK of which generation, from which salt, or framed in place under its raw file's
+  XTS key; an encryption saying unencrypted is corrupt, TASK-411.28), the MACs of the footer
   and of the table, the table's CRC, and a magic number (doc-16; FORMAT 2, TASK-411.2).
 
 A reader finds the footer and the table with one ranged GET of the object's end (two if they are
@@ -631,7 +637,7 @@ the host's part cache, fetching what it lacks.
 - **Keys** *(cladefs, TASK-411.4; doc-16, What TASK-411.4 made).* A fork of an encrypted branch into
   another cell, as every fork a host makes is, asks before anything is made for what its child
   inherits (`Uploader::inheriting`): the keys its parent's store holds and a KEK for the child's
-  cell from the host's pool, no KMS call; refused (`EACCES`, `ENOTSUP`) it makes nothing. Once
+  cell from the host's pool, no KMS call; refused (`EACCES`) it makes nothing. Once
   the child's record is made, its host makes the child's cell with that KEK, create-only, and
   gives the record the child's first DEK and the inherited ones rewrapped under the KEK, by a
   conditional update, before the child's directory is made; a failure there fails the fork, which
@@ -1314,8 +1320,9 @@ The rest of a pass, unchanged within the cell:
   generation its trailer names, with a salt of their own: a pass with something encrypted to compact
   unwraps the cell's KEK through `cladefs-gc`'s KMS (`CLADEFS_KMS`), once for the pass; marking, and
   passes compacting nothing encrypted, ask it nothing. The KEK not to be had (the tenant's KEK
-  revoked or destroyed, no KMS), the pass compacts what is unencrypted and leaves the rest, counted in its
-  report (`locked`, `uncompacted`), deleting as ever.
+  revoked or destroyed, no KMS), the pass compacts nothing of the cell, every object encrypted
+  (TASK-411.28), counted in its report (`locked`, `uncompacted`), deleting as ever; `cladefs-gc`
+  refuses to collect with no KMS.
 - **Deletion** of what is listed and not needed:
   - segments a checkpoint the head names covers that hold no live extent, or were compacted a grace
     period ago; and segments no head names nor may yet name *(rule `collector_epochs`, TASK-407,

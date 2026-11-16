@@ -304,9 +304,10 @@ fn punched_contents(len: usize, zeroed: usize) -> Vec<u8> {
     (0..len).map(|i| u8::from(!(1000..9000).contains(&i) && i < zeroed)).collect()
 }
 
-/// Content of the guest's mmapped file at `offset`.
+/// Content of the guest's mmapped file at `offset`. cladefs: the guest tests' known plaintext
+/// (`crate::canary`), which no file of an encrypted run's stores holds (TASK-411.15).
 fn pattern(offset: usize) -> u8 {
-    (offset % 251) as u8
+    crate::canary::at(offset)
 }
 
 #[cfg(feature = "host")]

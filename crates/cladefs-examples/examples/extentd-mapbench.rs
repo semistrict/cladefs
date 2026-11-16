@@ -135,6 +135,9 @@ mod bench {
                 unsafe { std::env::set_var(var, default) };
             }
         }
+        // cladefs: its stores encrypted, under the tests' KMS unless its environment names a KMS or
+        // gives a master key: a real host's KMS adds its calls (TASK-411.28).
+        cladefs::bucket::testing::encrypted();
         // This thread's stores to the window are the guest's own, as a vCPU's are: they copy
         // pages, which KVM's worker's writes mustn't.
         cladefs::guest_thread_started();

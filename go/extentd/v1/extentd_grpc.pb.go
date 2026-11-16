@@ -135,6 +135,7 @@ const (
 	Extentd_SetPeers_FullMethodName          = "/cladefs.extentd.v1.Extentd/SetPeers"
 	Extentd_ShredCell_FullMethodName         = "/cladefs.extentd.v1.Extentd/ShredCell"
 	Extentd_ForgetTenantKeys_FullMethodName  = "/cladefs.extentd.v1.Extentd/ForgetTenantKeys"
+	Extentd_ShredTenant_FullMethodName       = "/cladefs.extentd.v1.Extentd/ShredTenant"
 )
 
 // ExtentdClient is the client API for Extentd service.
@@ -269,6 +270,16 @@ type ExtentdClient interface {
 	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
 	// their VM processes close them.
 	ForgetTenantKeys(ctx context.Context, in *ForgetTenantKeysRequest, opts ...grpc.CallOption) (*ForgetTenantKeysResponse, error)
+	// Shreds a tenant under the bucket KMS (TASK-411.27, doc-16 The bucket KMS): replaces its KEK
+	// object in the daemon's bucket (tenants/<tenant>/kek) by a tombstone, so that no key its KEK
+	// wrapped unwraps on any host and none is made it again; then forgets what this host holds of its
+	// keys, as ForgetTenantKeys does. Call it on every host: the first call shreds it, the others
+	// find it shredded and forget; hosts not told refuse the tenant once they read its KEK object
+	// again, within a minute. Only as strong as the bucket keeps no older version of the KEK object:
+	// with versioning on, a lifecycle rule must expire non-current versions. A daemon whose KMS is
+	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
+	// the tenant's KEK in that KMS, then ForgetTenantKeys.
+	ShredTenant(ctx context.Context, in *ShredTenantRequest, opts ...grpc.CallOption) (*ShredTenantResponse, error)
 }
 
 type extentdClient struct {
@@ -539,6 +550,16 @@ func (c *extentdClient) ForgetTenantKeys(ctx context.Context, in *ForgetTenantKe
 	return out, nil
 }
 
+func (c *extentdClient) ShredTenant(ctx context.Context, in *ShredTenantRequest, opts ...grpc.CallOption) (*ShredTenantResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ShredTenantResponse)
+	err := c.cc.Invoke(ctx, Extentd_ShredTenant_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ExtentdServer is the server API for Extentd service.
 // All implementations must embed UnimplementedExtentdServer
 // for forward compatibility.
@@ -671,6 +692,16 @@ type ExtentdServer interface {
 	// for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
 	// their VM processes close them.
 	ForgetTenantKeys(context.Context, *ForgetTenantKeysRequest) (*ForgetTenantKeysResponse, error)
+	// Shreds a tenant under the bucket KMS (TASK-411.27, doc-16 The bucket KMS): replaces its KEK
+	// object in the daemon's bucket (tenants/<tenant>/kek) by a tombstone, so that no key its KEK
+	// wrapped unwraps on any host and none is made it again; then forgets what this host holds of its
+	// keys, as ForgetTenantKeys does. Call it on every host: the first call shreds it, the others
+	// find it shredded and forget; hosts not told refuse the tenant once they read its KEK object
+	// again, within a minute. Only as strong as the bucket keeps no older version of the KEK object:
+	// with versioning on, a lifecycle rule must expire non-current versions. A daemon whose KMS is
+	// not the bucket KMS (CLADEFS_KMS names one) shreds nothing: FAILED_PRECONDITION (ENOTSUP); destroy
+	// the tenant's KEK in that KMS, then ForgetTenantKeys.
+	ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error)
 	mustEmbedUnimplementedExtentdServer()
 }
 
@@ -758,6 +789,9 @@ func (UnimplementedExtentdServer) ShredCell(context.Context, *ShredCellRequest) 
 }
 func (UnimplementedExtentdServer) ForgetTenantKeys(context.Context, *ForgetTenantKeysRequest) (*ForgetTenantKeysResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ForgetTenantKeys not implemented")
+}
+func (UnimplementedExtentdServer) ShredTenant(context.Context, *ShredTenantRequest) (*ShredTenantResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ShredTenant not implemented")
 }
 func (UnimplementedExtentdServer) mustEmbedUnimplementedExtentdServer() {}
 func (UnimplementedExtentdServer) testEmbeddedByValue()                 {}
@@ -1248,6 +1282,24 @@ func _Extentd_ForgetTenantKeys_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Extentd_ShredTenant_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ShredTenantRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ExtentdServer).ShredTenant(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Extentd_ShredTenant_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ExtentdServer).ShredTenant(ctx, req.(*ShredTenantRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Extentd_ServiceDesc is the grpc.ServiceDesc for Extentd service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -1358,6 +1410,10 @@ var Extentd_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ForgetTenantKeys",
 			Handler:    _Extentd_ForgetTenantKeys_Handler,
+		},
+		{
+			MethodName: "ShredTenant",
+			Handler:    _Extentd_ShredTenant_Handler,
 		},
 	},
 	Streams:  []grpc.StreamDesc{},

@@ -325,15 +325,10 @@ async fn take_back(bucket: &impl Bucket, origin: Origin, child: Branch, found: &
 /// Without the rule that it comes first, as a test shows it needed, the record's writers write it
 /// after: the writer once it recorded the fork, the deletion once it marked the parent deleted, as
 /// specs/bucket's NoReferencesFirst has it.
-pub async fn record_fork(bucket: &impl Bucket, child: Child, origin: Origin) -> Result<(), Error> {
-    let clear = crate::keys::Ring::clear();
-    record_fork_under(bucket, child, origin, crate::keys::Parents::Held(&clear)).await
-}
-
-/// [`record_fork`], the parent's checkpoint at the fork point authenticated under the DEK `keys`
-/// give, the parent's, if its objects are encrypted: its writer's ring, or its deletion's
-/// ([`crate::keys::Parents`], TASK-411.4).
-pub async fn record_fork_under(
+///
+/// cladefs: the parent's checkpoint at the fork point authenticated under the DEK `keys` give, the
+/// parent's: its writer's ring, or its deletion's ([`crate::keys::Parents`], TASK-411.4).
+pub async fn record_fork(
     bucket: &impl Bucket,
     child: Child,
     origin: Origin,
@@ -442,7 +437,7 @@ pub async fn fork_point(
     owner: u64,
 ) -> Result<(), Error> {
     let nothing = std::future::ready(());
-    let keys = Parents::Kms(None, None);
+    let keys = Parents::Unasked;
     let of = Forked::Point(point);
     fork_with(bucket, child, of, origin, owner, keys, nothing).await.map(drop)
 }
@@ -459,7 +454,7 @@ pub async fn fork_point_with<T>(
     owner: u64,
     alongside: impl Future<Output = T>,
 ) -> Result<(Option<Record>, Option<T>), Error> {
-    let keys = Parents::Kms(None, None);
+    let keys = Parents::Unasked;
     fork_with(bucket, child, Forked::Point(point), origin, owner, keys, alongside).await
 }
 
@@ -622,7 +617,7 @@ pub async fn finish_point_fork(
         Some(Kind::Forking { origin, .. } | Kind::Clone(origin)) => origin,
         _ => return Err(Error::NoBranch),
     };
-    let keys = Parents::Kms(None, None);
+    let keys = Parents::Unasked;
     finish_fork_from(bucket, child, Forked::Point(point), origin, keys, Start::Read).await.map(drop)
 }
 
@@ -755,25 +750,16 @@ pub(crate) async fn abandon(bucket: &impl Bucket, child: Branch) -> Result<Recor
 /// that since. Fails for a branch a later placement took, whose token is higher ([`Error::Stale`]),
 /// leaving it as it was: a placement cut off deletes no branch from under the one after it
 /// (TASK-45.1).
+///
+/// cladefs: by a host whose KMS is `kms`: the branch's forks to other cells it records get its
+/// checkpoint at their fork points authenticated under its DEK, its cell's KEK unwrapped by `kms`
+/// ([`crate::keys::writing`], TASK-411.4), asked only then.
 pub async fn delete(
     bucket: &impl Bucket,
     branch: Branch,
     holder: u64,
     token: u64,
-) -> Result<(), Error> {
-    delete_under(bucket, branch, holder, token, None).await
-}
-
-/// [`delete`], by a host whose KMS is `kms`, if it has one: an encrypted branch's forks to other
-/// cells it records get its checkpoint at their fork points authenticated under its DEK, its cell's
-/// KEK unwrapped by `kms` ([`crate::keys::writing`], TASK-411.4); with no KMS, such a deletion
-/// fails ([`Error::Kms`]), rather than write one in the clear that its children refuse.
-pub async fn delete_under(
-    bucket: &impl Bucket,
-    branch: Branch,
-    holder: u64,
-    token: u64,
-    kms: Option<&std::sync::Arc<crate::keys::CachingKms>>,
+    kms: &std::sync::Arc<crate::keys::CachingKms>,
 ) -> Result<(), Error> {
     let ended = end_head(bucket, branch, holder, token).await?;
     failpoint!("branch::head_ended");
@@ -793,8 +779,9 @@ pub async fn delete_under(
     // neither a writer nor a child, if it does. Recovered from the head it ended, which nothing
     // swaps after: every deletion of it finds the same forks (TASK-183).
     if record.forking().is_none() {
-        let clear = crate::keys::Ring::clear();
-        let forks = match recover_from(bucket, branch, record.origin(), Some(ended), &clear).await {
+        let keyless = crate::keys::Ring::keyless();
+        let forks = match recover_from(bucket, branch, record.origin(), Some(ended), &keyless).await
+        {
             Ok(recovered) => recovered.state.forks,
             // Deleted meanwhile, by another deletion, which gave its children their records: what
             // recovering it needs, the collector may have reclaimed since (TASK-178).
@@ -806,13 +793,13 @@ pub async fn delete_under(
             Err(Error::Lost(_)) if lost_is_ok(bucket, branch, &record).await? => Vec::new(),
             Err(error) => return Err(error),
         };
-        // cladefs: under its keys, if it is encrypted, for its checkpoints at the fork points of
-        // its forks to other cells, as they are written (TASK-411.4).
+        // cladefs: under its keys, for its checkpoints at the fork points of its forks to other
+        // cells, as they are written (TASK-411.4).
         let keys = crate::keys::Parents::Kms(kms, Some(&record));
         for fork in &forks {
             let origin = Origin { parent: branch, at: fork.at };
             let child = Child { branch: fork.child, owner: fork.owner, point: fork.point };
-            match record_fork_under(bucket, child, origin, keys).await {
+            match record_fork(bucket, child, origin, keys).await {
                 Ok(()) | Err(Error::IdTaken(_)) => {}
                 Err(error) => return Err(error),
             }
@@ -912,40 +899,30 @@ async fn mark_deleted(bucket: &impl Bucket, branch: Branch) -> Result<(), Error>
 /// create of its record, a dead host's landing late, finding it so too; and a point with none: no
 /// placement refuses a deletion of what has no head, and a stale copy finds no live record naming
 /// a segment that may not be its fork's.
+///
+/// cladefs: by a host whose KMS is `kms`: a claim of another cell than its parent's gets the
+/// parent's checkpoint at the fork point authenticated under the parent's DEK, as
+/// [`record_fork`] writes it (TASK-411.4).
 pub async fn delete_fork(
     bucket: &impl Bucket,
     child: Branch,
     forked: Kind,
     owner: u64,
-    holder: u64,
-    token: u64,
-) -> Result<bool, Error> {
-    delete_fork_under(bucket, child, forked, owner, (holder, token), None).await
-}
-
-/// [`delete_fork`], by a host whose KMS is `kms`, if it has one: a claim of another cell than its
-/// parent's gets the parent's checkpoint at the fork point authenticated under the parent's DEK,
-/// if it is encrypted, as [`record_fork_under`] writes it (TASK-411.4).
-pub async fn delete_fork_under(
-    bucket: &impl Bucket,
-    child: Branch,
-    forked: Kind,
-    owner: u64,
     (holder, token): (u64, u64),
-    kms: Option<&std::sync::Arc<crate::keys::CachingKms>>,
+    kms: &std::sync::Arc<crate::keys::CachingKms>,
 ) -> Result<bool, Error> {
     let owner = self::owner(owner);
     // What deleting the child, whose record is `record`, gives.
     let delete_found = async |record: Record| match record {
         Record { deleted: true, .. } => Ok(true),
         record if !record.is_child_of(owner) => Ok(false),
-        _ => delete_under(bucket, child, holder, token, kms).await.map(|()| true),
+        _ => delete(bucket, child, holder, token, kms).await.map(|()| true),
     };
     if let Some(record) = record(bucket, child).await? {
         return delete_found(record).await;
     }
     if forked.origin().is_none() && !rules().fork_claims_ids {
-        return delete_under(bucket, child, holder, token, kms).await.map(|()| true);
+        return delete(bucket, child, holder, token, kms).await.map(|()| true);
     }
     // The record it gets, and whether live, a claim, as its parent's branch holds its segment.
     let (kind, live) = match forked {
@@ -959,14 +936,8 @@ pub async fn delete_fork_under(
             // was found holding the segment, as a pass takes it, reads as not held, as there.
             let held = match recovery::holds_fork(bucket, origin, child, owner).await? {
                 true if origin.parent.cell != child.cell => {
-                    // cladefs: under the parent's keys, if it is encrypted and the host has a KMS:
-                    // a host with none writes it in the clear, as before, knowing of no encrypted
-                    // branch (TASK-411.4).
-                    let clear = crate::keys::Ring::clear();
-                    let keys = match kms {
-                        Some(_) => crate::keys::Parents::Kms(kms, None),
-                        None => crate::keys::Parents::Held(&clear),
-                    };
+                    // cladefs: under the parent's keys (TASK-411.4).
+                    let keys = crate::keys::Parents::Kms(kms, None);
                     match recovery::checkpoint_at(bucket, origin.parent, origin.at, keys).await {
                         Ok(()) => true,
                         Err(Error::Lost(_)) => false,
@@ -1032,7 +1003,9 @@ mod tests {
             create(&*bucket, test_branch(1), 0x11).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
-            let objects = forking.fork(owned(test_branch(3), 0x33), &mut parent.chain()).frame();
+            let objects = forking
+                .fork(owned(test_branch(3), 0x33), &mut parent.chain())
+                .frame(parent.keys().encrypting());
             let at = parent.add_segment(objects).unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
@@ -1040,33 +1013,80 @@ mod tests {
         });
         assert_eq!(live(test_branch(3)), Some(true));
         assert_eq!(
-            block_on(delete_fork(&*bucket, test_branch(3), Kind::Fork(origin), 0x33, 9, 0)),
+            block_on(delete_fork(
+                &*bucket,
+                test_branch(3),
+                Kind::Fork(origin),
+                0x33,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(true)
         );
         assert_eq!(live(test_branch(3)), Some(false));
         assert_eq!(
-            block_on(delete_fork(&*bucket, test_branch(3), Kind::Own, 0x33, 9, 0)),
+            block_on(delete_fork(
+                &*bucket,
+                test_branch(3),
+                Kind::Own,
+                0x33,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(true)
         );
         // Forks whose children have no record yet, whose segments went or not.
         assert_eq!(
-            block_on(delete_fork(&*bucket, test_branch(2), Kind::Fork(origin), 0x22, 9, 0)),
+            block_on(delete_fork(
+                &*bucket,
+                test_branch(2),
+                Kind::Fork(origin),
+                0x22,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(true)
         );
         assert_eq!(
-            block_on(delete_fork(&*bucket, test_branch(4), Kind::Own, 0x44, 9, 0)),
+            block_on(delete_fork(
+                &*bucket,
+                test_branch(4),
+                Kind::Own,
+                0x44,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(true)
         );
         assert_eq!((live(test_branch(2)), live(test_branch(4))), (Some(false), Some(false)));
 
         block_on(create(&*bucket, test_branch(5), 0x55)).unwrap();
         let other = Origin { at: origin.at + 1, ..origin };
-        block_on(record_fork(&*bucket, owned(test_branch(6), 0x66), other)).unwrap();
-        block_on(record_fork(&*bucket, owned(test_branch(7), 0x77), origin)).unwrap();
+        block_on(record_fork(
+            &*bucket,
+            owned(test_branch(6), 0x66),
+            other,
+            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+        ))
+        .unwrap();
+        block_on(record_fork(
+            &*bucket,
+            owned(test_branch(7), 0x77),
+            origin,
+            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+        ))
+        .unwrap();
         for (child, origin, owner) in
             [(5, Kind::Fork(origin), 0x50), (6, Kind::Fork(origin), 0x60), (7, Kind::Own, 0x70)]
         {
-            let deleted = block_on(delete_fork(&*bucket, test_branch(child), origin, owner, 9, 0));
+            let deleted = block_on(delete_fork(
+                &*bucket,
+                test_branch(child),
+                origin,
+                owner,
+                (9, 0),
+                &crate::keys::testing::host_kms(),
+            ));
             assert_eq!(deleted, Ok(false), "{child}");
             assert_eq!(live(test_branch(child)), Some(true), "{child}");
             let taken = block_on(head::take(&*bucket, test_branch(child), 10 + child, 0));
@@ -1081,11 +1101,28 @@ mod tests {
         let bucket = Direct(SimBucket::new());
         let origin = Origin { parent: test_branch(1), at: 7 };
         let forked = Child { branch: test_branch(2), owner: 0x22, point: false };
-        block_on(record_fork(&bucket, forked, origin)).unwrap();
-        block_on(record_fork(&bucket, forked, origin)).unwrap();
+        block_on(record_fork(
+            &bucket,
+            forked,
+            origin,
+            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+        ))
+        .unwrap();
+        block_on(record_fork(
+            &bucket,
+            forked,
+            origin,
+            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+        ))
+        .unwrap();
         let other = Child { owner: 0x23, ..forked };
         assert_eq!(
-            block_on(record_fork(&bucket, other, origin)),
+            block_on(record_fork(
+                &bucket,
+                other,
+                origin,
+                crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None)
+            )),
             Err(Error::IdTaken(test_branch(2)))
         );
         let record = block_on(record(&bucket, test_branch(2))).unwrap();
@@ -1102,7 +1139,13 @@ mod tests {
         let origin = Origin { parent: test_branch(1), at: 7 };
         let point = test_branch(3);
         let made = Child { branch: point, owner: 0x33, point: true };
-        block_on(record_fork(&bucket, made, origin)).unwrap();
+        block_on(record_fork(
+            &bucket,
+            made,
+            origin,
+            crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+        ))
+        .unwrap();
         let theirs = |id| Branch { cell: layout::Cell { tenant: 2, id: 1 }, id };
         let fork = |child: Branch| block_on(fork_point(&bucket, child, point, origin, child.id));
         let record = |branch| block_on(record(&bucket, branch)).unwrap();
@@ -1145,14 +1188,16 @@ mod tests {
         });
         let cut = VersionCut { id: 0xa, cell_cut: None, keep_last: None };
         let batch = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
-        let at = writer.add_segment(batch.cut(cut, &mut writer.chain()).frame()).unwrap();
+        let at = writer
+            .add_segment(batch.cut(cut, &mut writer.chain()).frame(writer.keys().encrypting()))
+            .unwrap();
         block_on(writer.upload(at)).unwrap();
         block_on(writer.acknowledge()).unwrap();
         let origin = Origin { parent: branch, at };
         let celled = |tenant, cell, id| Branch { cell: Cell { tenant, id: cell }, id };
         let restore = |child: Branch, id| {
-            let keys = Parents::Kms(None, None);
-            block_on(fork_version(&*bucket, child, id, origin, child.id, keys))
+            let kms = crate::keys::testing::host_kms();
+            block_on(fork_version(&*bucket, child, id, origin, child.id, Parents::Kms(&kms, None)))
         };
         let record = |branch| block_on(record(&*bucket, branch)).unwrap();
         let checkpoint = layout::checkpoint(branch, at, writer.epoch());
@@ -1197,12 +1242,29 @@ mod tests {
             Err(Error::IdTaken(test_branch(2)))
         );
         assert_eq!(
-            block_on(delete_fork(&bucket, test_branch(2), Kind::Own, 0x22, 9, 0)),
+            block_on(delete_fork(
+                &bucket,
+                test_branch(2),
+                Kind::Own,
+                0x22,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(false)
         );
         let taken = Kind::Own.of(0x21);
         assert_eq!(block_on(record(&bucket, test_branch(2))), Ok(Some(taken.clone())));
-        assert_eq!(block_on(delete_fork(&bucket, test_branch(2), Kind::Own, 0x21, 9, 0)), Ok(true));
+        assert_eq!(
+            block_on(delete_fork(
+                &bucket,
+                test_branch(2),
+                Kind::Own,
+                0x21,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
+            Ok(true)
+        );
         assert_eq!(
             block_on(record(&bucket, test_branch(2))),
             Ok(Some(Record { deleted: true, ..taken }))
@@ -1224,8 +1286,21 @@ mod tests {
         let race = |direct_first: bool| {
             let bucket = Direct(SimBucket::new());
             let made = Child { branch: test_branch(point), owner: 0x33, point: true };
-            block_on(record_fork(&bucket, made, origin)).unwrap();
-            let fork = || block_on(record_fork(&bucket, direct, origin));
+            block_on(record_fork(
+                &bucket,
+                made,
+                origin,
+                crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+            ))
+            .unwrap();
+            let fork = || {
+                block_on(record_fork(
+                    &bucket,
+                    direct,
+                    origin,
+                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+                ))
+            };
             let restore = || {
                 block_on(fork_point(&bucket, test_branch(2), test_branch(point), origin, of_point))
             };
@@ -1242,7 +1317,14 @@ mod tests {
                 (fork(), restored, direct.owner, Kind::Fork(origin))
             };
             // The fork that lost is deleted, as its host's cleanup deletes it.
-            let deleted = block_on(delete_fork(&bucket, test_branch(2), at, lost, 9, 0));
+            let deleted = block_on(delete_fork(
+                &bucket,
+                test_branch(2),
+                at,
+                lost,
+                (9, 0),
+                &crate::keys::testing::host_kms(),
+            ));
             let owner =
                 block_on(record(&bucket, test_branch(2))).unwrap().map(|record| record.owner);
             (forked, restored, deleted, owner)
@@ -1273,7 +1355,14 @@ mod tests {
         let said = |result: &dyn std::fmt::Debug| format!("{result:?}");
         let fork = |owner, point| Child { branch: test_branch(child), owner, point };
         let unfork = |bucket: &Direct, at, owner| {
-            block_on(delete_fork(bucket, test_branch(child), at, owner, 9, 0))
+            block_on(delete_fork(
+                bucket,
+                test_branch(child),
+                at,
+                owner,
+                (9, 0),
+                &crate::keys::testing::host_kms(),
+            ))
         };
         // Each maker, of the owner it is given, and what it gives, in words, finding another's
         // record, live. The first five make live records; deleting a fork leaves none.
@@ -1291,12 +1380,26 @@ mod tests {
             ),
             (
                 "record_fork",
-                &|bucket, owner| said(&block_on(record_fork(bucket, fork(owner, false), origin))),
+                &|bucket, owner| {
+                    said(&block_on(record_fork(
+                        bucket,
+                        fork(owner, false),
+                        origin,
+                        crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+                    )))
+                },
                 "Err(IdTaken(Branch { cell: Cell { tenant: 1, id: 1 }, id: 2 }))",
             ),
             (
                 "record_fork of a point",
-                &|bucket, owner| said(&block_on(record_fork(bucket, fork(owner, true), origin))),
+                &|bucket, owner| {
+                    said(&block_on(record_fork(
+                        bucket,
+                        fork(owner, true),
+                        origin,
+                        crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
+                    )))
+                },
                 "Err(IdTaken(Branch { cell: Cell { tenant: 1, id: 1 }, id: 2 }))",
             ),
             (
@@ -1346,6 +1449,7 @@ mod tests {
                     &bucket,
                     Child { branch: test_branch(point), owner: 0x33, point: true },
                     origin,
+                    crate::keys::Parents::Kms(&crate::keys::testing::host_kms(), None),
                 ))
                 .unwrap();
                 assert_eq!(make(&bucket, 0x11), "Ok(())", "{first}");
@@ -1446,7 +1550,14 @@ mod tests {
         };
         let origin = Origin { parent: test_branch(1), at: 7 };
         assert_eq!(
-            block_on(delete_fork(&racing, test_branch(3), Kind::Fork(origin), 0, 9, 0)),
+            block_on(delete_fork(
+                &racing,
+                test_branch(3),
+                Kind::Fork(origin),
+                0,
+                (9, 0),
+                &crate::keys::testing::host_kms()
+            )),
             Ok(false)
         );
         let record = block_on(record(&racing.bucket, test_branch(3))).unwrap();
@@ -1469,12 +1580,19 @@ mod tests {
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
             let at = parent
-                .add_segment(forking.fork(child(test_branch(2)), &mut parent.chain()).frame())
+                .add_segment(
+                    forking
+                        .fork(child(test_branch(2)), &mut parent.chain())
+                        .frame(parent.keys().encrypting()),
+                )
                 .unwrap();
             parent.upload(at).await.unwrap();
             assert_eq!(parent.acknowledge().await, Ok(Some(at)));
             assert!(parent.refused(test_branch(2)));
-            assert_eq!(delete(&*bucket, test_branch(1), 20, 0).await, Ok(()));
+            assert_eq!(
+                delete(&*bucket, test_branch(1), 20, 0, &crate::keys::testing::host_kms()).await,
+                Ok(())
+            );
             assert_eq!(record(&*bucket, test_branch(2)).await, Ok(Some(Kind::Root.of(0))));
         });
     }
@@ -1496,8 +1614,11 @@ mod tests {
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             for tag in 1..=3 {
                 let commit = SegmentBuilder::from(Commit { tag, ..Commit::default() });
-                let segment =
-                    parent.add_segment(commit.close(&mut parent.chain()).frame()).unwrap();
+                let segment = parent
+                    .add_segment(
+                        commit.close(&mut parent.chain()).frame(parent.keys().encrypting()),
+                    )
+                    .unwrap();
                 parent.upload(segment).await.unwrap();
                 parent.acknowledge().await.unwrap();
             }
@@ -1522,7 +1643,15 @@ mod tests {
             let (key, bytes) = (layout::record(test_branch(4)), layout::encode(&claim));
             assert!(matches!(bucket::create(&*bucket, &key, bytes).await, Created::Created(_)));
             assert_eq!(
-                delete_fork(&*bucket, test_branch(4), Kind::Fork(origin), 0, 9, 0).await,
+                delete_fork(
+                    &*bucket,
+                    test_branch(4),
+                    Kind::Fork(origin),
+                    0,
+                    (9, 0),
+                    &crate::keys::testing::host_kms()
+                )
+                .await,
                 Ok(true)
             );
             assert_eq!(
@@ -1547,7 +1676,7 @@ mod tests {
         let bucket = Direct(SimBucket::new());
         let taken = block_on(head::take(&bucket, test_branch(3), 1, 0)).unwrap();
         assert_eq!(taken.head.epoch, 1);
-        block_on(delete(&bucket, test_branch(3), 2, 0)).unwrap();
+        block_on(delete(&bucket, test_branch(3), 2, 0, &crate::keys::testing::host_kms())).unwrap();
         let record = block_on(record(&bucket, test_branch(3))).unwrap();
         // Of the deletion's owner, its holder's, which no other's is.
         let deleted = Record { deleted: true, ..Kind::Own.of(2) };
@@ -1575,17 +1704,25 @@ mod tests {
             let extents = vec![(extent, b"inherited".to_vec())];
             let forking = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
             let at = parent
-                .add_segment(forking.fork(child(test_branch(2)), &mut parent.chain()).frame())
+                .add_segment(
+                    forking
+                        .fork(child(test_branch(2)), &mut parent.chain())
+                        .frame(parent.keys().encrypting()),
+                )
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
             let freeing =
                 SegmentBuilder::from(Commit { tag: 2, frees: vec![extent], ..Commit::default() });
-            let segment = parent.add_segment(freeing.close(&mut parent.chain()).frame()).unwrap();
+            let segment = parent
+                .add_segment(freeing.close(&mut parent.chain()).frame(parent.keys().encrypting()))
+                .unwrap();
             parent.upload(segment).await.unwrap();
             parent.acknowledge().await.unwrap();
             parent.checkpoint().await.unwrap();
-            delete(&*bucket, test_branch(2), 20, 0).await.unwrap();
+            delete(&*bucket, test_branch(2), 20, 0, &crate::keys::testing::host_kms())
+                .await
+                .unwrap();
             let now = crate::collector::Options { compact_below: 0.0, grace: 0 };
             crate::collector::collect(&*bucket, 1, &now).await.unwrap();
             // What recovering the fork reads went with the pass.
@@ -1596,7 +1733,10 @@ mod tests {
                 Err(Error::Lost(lost))
             );
 
-            assert_eq!(delete(&*bucket, test_branch(2), 21, 0).await, Ok(()));
+            assert_eq!(
+                delete(&*bucket, test_branch(2), 21, 0, &crate::keys::testing::host_kms()).await,
+                Ok(())
+            );
             let deleted = Record { deleted: true, ..Kind::Fork(origin).of(0) };
             assert_eq!(record(&*bucket, test_branch(2)).await, Ok(Some(deleted)));
         });

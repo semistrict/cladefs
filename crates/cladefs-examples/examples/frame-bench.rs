@@ -2,9 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs's own: what framing an object costs in the clear and encrypted (TASK-411.2, backlog
-//! doc-16): packing N MiB (256) of data into one object, part by part on one thread, as a store's
-//! framing thread packs each, and unpacking it again, each part checked, opened if encrypted, and
+//! cladefs's own: what framing an object costs, encrypted, as every object is (TASK-411.2, TASK-411.28,
+//! backlog doc-16): packing N MiB (256) of data into one object, part by part on one thread, as a
+//! store's framing thread packs each, and unpacking it again, each part checked, opened and
 //! decompressed. Say:
 //!
 //! ```sh
@@ -13,9 +13,9 @@
 //!
 //! For each of `text`, sixteen letters at random, which compresses about by half, as a build's
 //! files do, and `noise`, which doesn't compress, it prints the MiB/s of packing and of unpacking,
-//! in the clear and encrypted, the best of five rounds.
+//! encrypted, the best of five rounds. (Its numbers in the clear, before TASK-411.28: an old pin's.)
 
-use extent_frame::{Keys, NoKeys, PART, Packer, Parts};
+use extent_frame::{Keys, PART, Packer, Parts};
 use extent_keys::{KeyId, Secret};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -38,9 +38,8 @@ fn data(kind: &str, len: usize) -> Vec<u8> {
     }
 }
 
-/// `data` framed as one object, encrypted if `encryption` says: its bytes, and how long packing
-/// took.
-fn pack(data: &[u8], encryption: Option<(&Secret, KeyId)>) -> (Vec<u8>, Duration) {
+/// `data` framed as one object, encrypted as `encrypt` says: its bytes, and how long packing took.
+fn pack(data: &[u8], encryption: (&Secret, KeyId)) -> (Vec<u8>, Duration) {
     let began = Instant::now();
     let mut packer = Packer::new(encryption);
     let mut object = Vec::with_capacity(data.len() + (1 << 20));
@@ -80,9 +79,10 @@ fn main() {
     keys.insert(id, Secret::random());
     for kind in ["text", "noise"] {
         let data = data(kind, mib << 20);
-        for (mode, encrypted) in [("clear", false), ("encrypted", true)] {
-            let encryption = encrypted.then(|| (&keys[&id], id));
-            let keys: &dyn Keys = if encrypted { &keys } else { &NoKeys };
+        {
+            let mode = "encrypted";
+            let encryption = (&keys[&id], id);
+            let keys: &dyn Keys = &keys;
             let (mut packing, mut unpacking) = (Duration::MAX, Duration::MAX);
             let mut stored = 0;
             for _ in 0..ROUNDS {

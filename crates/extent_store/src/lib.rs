@@ -162,6 +162,7 @@ mod host;
 mod kept;
 mod layout;
 mod mem;
+mod on_disk;
 pub mod pages;
 mod raw;
 mod seals;
@@ -192,12 +193,15 @@ pub use host::{
 };
 pub use layout::{Description, Format, Place, Vdisk};
 pub use mem::{Io, MemDir, MemDisk, MemDiskFile, MemFile};
+pub use on_disk::{CLEAR_LOG_MAGIC, ClearFile, OnDisk, on_disk};
 pub use raw::{RawFile, SECTOR};
 pub use segments::{
     Unsectored, commits_spanning_segments, framing_reads, segment_closes, segments_framed_in_place,
 };
 #[cfg(feature = "audit")]
 pub use state::AUDIT_FAILED;
+#[cfg(any(test, feature = "unkept"))]
+pub use store::UNKEPT_DEK;
 pub use store::{
     BucketData, DirHold, ForkCommitted, Info, InheritedId, NoSpace, NotQuiescent, Opening, Options,
     Recovering, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unmade, Usage, Write,

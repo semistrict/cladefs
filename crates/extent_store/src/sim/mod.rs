@@ -242,6 +242,7 @@ fn one() {
         "wals" => wals(),
         "forked_wals" => forked_wals(),
         "late_checkpoints" => late_checkpoints(),
+        "versions" => versions(),
         other => panic!("no profile {other}"),
     };
     let count = std::env::var("SIM_SEEDS").map_or(1, |count| count.parse().unwrap());
@@ -680,8 +681,14 @@ test_leaks!(restores_need_clones_made_unmarked, clones_made_unmarked, restores()
 // cladefs: a clone a store resumed, its host having died after its record, made with no reference:
 // once its point goes, the base's passes reclaim what it recovers from (TASK-455's review). Its
 // direct test is extent_bucket's `clones_resumed_need_resumes_refer`; its model specs/bucket's
-// NoResumesRefer.
-test_needs!(restores_need_resumes_refer, resumes_refer, restores());
+// NoResumesRefer. cladefs: ignored until the simulation resumes a fork at all (TASK-497): its
+// restores profile resumes none in 20,000 seeds, and the seed that found the rule needed, 2655,
+// found TASK-462's lost fork point, fixed since, with every rule on.
+#[test]
+#[ignore = "TASK-497: the simulation resumes no fork; the direct test is clones_resumed_need_resumes_refer"]
+fn restores_need_resumes_refer() {
+    needed(Rules { resumes_refer: false, ..Rules::ALL }, restores(), 0..20_000);
+}
 
 /// Restores as [`restores`] makes them, fewer and among more forks, so that more take the IDs of
 /// forks' children whose segments are not yet acknowledged, as guests may name any: whichever's
