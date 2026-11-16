@@ -1,10 +1,11 @@
 ---
 id: TASK-474
 title: 'One name per concept, in code too: the renames CONTEXT.md decided'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-16 02:13'
-updated_date: '2026-11-16 02:48'
+updated_date: '2026-11-16 02:53'
 labels:
   - naming
 dependencies: []

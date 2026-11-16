@@ -1,10 +1,11 @@
 ---
 id: TASK-473
 title: Docs and doc comments that name what no longer exists
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-16 02:12'
-updated_date: '2026-11-16 02:48'
+updated_date: '2026-11-16 02:53'
 labels:
   - docs
 dependencies: []
