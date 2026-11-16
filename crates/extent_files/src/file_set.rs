@@ -36,7 +36,7 @@
 
 use crate::format::{self, Root};
 use crate::pages::{Failure, Pages, Plan};
-use crate::window::{FileSetWindow, Run};
+use crate::window::{Contents, FileSetWindow, Run};
 use anyhow::{Context as _, Error, bail};
 use futures::executor::block_on;
 use std::collections::BTreeMap;
@@ -443,6 +443,36 @@ impl FileSet {
         block_on(file.pages.write(&**self.device, offset, data))
     }
 
+    /// The bytes of a file one node of its tree names: what [`FileSet::runs`] of them reads one
+    /// node for, and the blocks around it maps, once the nodes above it are read.
+    pub fn node_bytes(&self) -> u64 {
+        let block_size = self.device.block_size() as usize;
+        (format::fanout(block_size) * block_size) as u64
+    }
+
+    /// What file `name` holds of the `len` bytes at `offset`, whole blocks, as of its last commit:
+    /// runs of the file's bytes, each blocks of one extent from an offset in it, zeros (holes), or
+    /// nothing (past the file's end), the file's tree read as far as they need. For what maps the
+    /// file into memory of its own, as a VM's memory window does (TASK-456.3), not through the
+    /// file set's window.
+    pub fn runs(
+        &self,
+        name: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<(Range<u64>, Option<Contents>)>, Error> {
+        let block_size = self.device.block_size() as u64;
+        if !offset.is_multiple_of(block_size) || !len.is_multiple_of(block_size) {
+            bail!("the runs of {len} bytes at {offset}, not whole blocks of {block_size}");
+        }
+        let mut inner = self.lock()?;
+        let file = Self::file(&mut inner, name);
+        let chunks = offset / block_size..(offset + len) / block_size;
+        let runs = block_on(file.pages.runs(&**self.device, chunks))?;
+        let bytes = |chunks: Range<u64>| chunks.start * block_size..chunks.end * block_size;
+        Ok(runs.into_iter().map(|(chunks, contents)| (bytes(chunks), contents)).collect())
+    }
+
     /// Makes the `len` bytes of file `name` at `offset`, whole blocks, holes: they read as zeros,
     /// and its next commit stores nothing for them (TASK-456.2).
     pub fn punch(&self, name: &str, offset: u64, len: u64) -> Result<(), Error> {
@@ -628,6 +658,45 @@ mod tests {
     use storage_device::fake_device::{FakeDevice, Op};
 
     const BLOCK: usize = 512;
+
+    /// The runs of a file as of its last commit: its blocks' extents, zeros where it was punched,
+    /// nothing past its end; what was written since is not among them (TASK-456.3).
+    #[test]
+    fn runs_say_what_the_last_commit_holds() {
+        let device = FakeDevice::new(1 << 20, BLOCK as u32).calm();
+        let files = FileSet::open(DeviceHolder::new(device), Options::default()).unwrap();
+        files.open_file("memory", true).unwrap();
+        files.write("memory", 0, &vec![1; BLOCK * 8]).unwrap();
+        files.punch("memory", 2 * BLOCK as u64, 2 * BLOCK as u64).unwrap();
+        files.sync("memory").unwrap();
+        files.write("memory", 0, &vec![2; BLOCK]).unwrap();
+        let block = BLOCK as u64;
+        let runs = files.runs("memory", 0, 10 * block).unwrap();
+        let shape: Vec<_> = (runs.iter())
+            .map(|(range, contents)| {
+                (range.clone(), contents.map(|c| matches!(c, Contents::Zeros)))
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (0..2 * block, Some(false)),
+                (2 * block..4 * block, Some(true)),
+                (4 * block..8 * block, Some(false)),
+                (8 * block..10 * block, None),
+            ]
+        );
+        // The committed bytes, not those written since.
+        let Some(Contents::Extent { extent, offset }) = runs[0].1 else { panic!("an extent") };
+        let device = files.device();
+        let mut buffer = block_on(device.allocate_buffer(BLOCK));
+        block_on(device.read(extent, offset, buffer.as_mut())).unwrap();
+        let mut bytes = vec![0; BLOCK];
+        buffer.as_ref().copy_to_slice(&mut bytes);
+        assert_eq!(bytes, vec![1; BLOCK]);
+        let unaligned = files.runs("memory", 1, block).unwrap_err().to_string();
+        assert_eq!(unaligned, "the runs of 512 bytes at 1, not whole blocks of 512");
+    }
 
     /// A file set's opening reads its root and none of its files' trees; a read of a page reads
     /// the nodes on its path and the page, and the file holds those nodes alone (TASK-440).

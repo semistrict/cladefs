@@ -82,7 +82,8 @@ mod test_fxfs_guest_docker;
 use test_fxfs_guest_docker::TestFxfsGuestDocker;
 mod test_fxfs_guest_snapshot;
 use test_fxfs_guest_snapshot::{
-    Mode as SnapshotMode, ReadOnly as SnapshotReadOnly, TestFxfsGuestSnapshot, VOLUMES,
+    Memory as SnapshotMemory, Mode as SnapshotMode, ReadOnly as SnapshotReadOnly,
+    TestFxfsGuestSnapshot, VOLUMES,
 };
 mod test_extent_guest;
 use test_extent_guest::{TestExtentGuest, TestExtentGuestOtherVersion};
@@ -593,6 +594,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Zygote,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -603,6 +605,18 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Zygote,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
+            }),
+        ),
+        TestCase::new(
+            "fxfs-guest-snapshot-memory-vdisk-dax",
+            &[Tag::Kernel, Tag::Nightly],
+            Box::new(TestFxfsGuestSnapshot {
+                dax: true,
+                mode: SnapshotMode::Zygote,
+                volumes: 0,
+                read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::Vdisk,
             }),
         ),
         TestCase::new(
@@ -613,6 +627,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Suspend,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -623,6 +638,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Suspend,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Volume,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -633,6 +649,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Suspend,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Remounted,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -643,6 +660,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Suspend,
                 volumes: VOLUMES,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -653,6 +671,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Suspend,
                 volumes: VOLUMES,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -663,6 +682,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::Migrate,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         TestCase::new(
@@ -673,6 +693,7 @@ pub fn test_cases() -> Vec<TestCase> {
                 mode: SnapshotMode::TenantMigrate,
                 volumes: 0,
                 read_only: SnapshotReadOnly::Nothing,
+                memory: SnapshotMemory::File,
             }),
         ),
         #[cfg(any(feature = "host", target_os = "linux"))]
