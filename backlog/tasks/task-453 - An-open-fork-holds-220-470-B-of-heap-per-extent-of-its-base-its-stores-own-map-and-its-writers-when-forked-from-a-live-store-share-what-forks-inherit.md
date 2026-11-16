@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-15 13:15'
-updated_date: '2026-11-16 04:03'
+updated_date: '2026-11-16 04:04'
 labels:
   - perf
   - review-2026-11-15
@@ -28,7 +28,7 @@ Measured by TASK-443.2 (docs/measurements/macos-fork-extent-memory-2026-11-15/no
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 bench_fork_extent_memory: an idle fork of a base of 32,768 and of 300,000 extents holds heap that does not grow with the base's extents (per fork, of a point and of a live store), the numbers recorded beside TASK-443.2's
-- [ ] #2 What the daemon still holds per extent, once per base, is counted by something the governor or the anon budget sees, or bounded
+- [x] #2 What the daemon still holds per extent, once per base, is counted by something the governor or the anon budget sees, or bounded
 - [ ] #3 extentd's serves_hundreds_of_forks_of_a_base runs at 32,768 extents on Linux and bounds resident memory per fork
 <!-- AC:END -->
 
@@ -75,4 +75,6 @@ doc-7 budget paragraph and docs/measurements/macos-fork-extent-memory-shared-202
 2026-11-15: Linux, ubu1 under fxjob, TASK-453 before its review fixes (t453-int on main 21f042594-era): scripts/test.sh clippy and workspace, 2819 passed, 83 skipped; process.rs's AnonBudget code compiled and ran there. The review fixes (164f4eed2) need their own Linux run.
 
 2026-11-15: Linux, ubu1 under fxjob, TASK-453 with its review fixes on main (t453-int2 996e1bac6): scripts/test.sh clippy and workspace, 2824 passed, 84 skipped; process.rs's AnonBudget extents part compiled and ran. Pushed to main.
+
+AC #2 checked: shared maps counted once and stores' own entries and hidden runs counted (Decoded::held, extent_store::own_held), bounded above what imbl copies by changes_bound_what_maps_made_of_others_copy and the bench's frees/reopen checks on macOS; their sum is the anon budget's extents part (process.rs), which compiled and ran in the Linux workspace run (2824 passed). AC #3 (serves_hundreds_of_forks_of_a_base at 32,768 extents on Linux) still open.
 <!-- SECTION:NOTES:END -->
