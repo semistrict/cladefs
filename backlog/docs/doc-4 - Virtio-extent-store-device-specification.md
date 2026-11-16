@@ -3,7 +3,7 @@ id: doc-4
 title: Virtio extent-store device specification
 type: specification
 created_date: '2026-10-13 22:18'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 04:22'
 ---
 # The virtio extent-store device
 
@@ -109,7 +109,7 @@ its probe on seeing so after `DRIVER_OK`.
 | 5 | `VIRTIO_EXTENT_F_READ_ONLY` | The device follows a store another VM writes, read-only (Followers): `ADVANCE`, `LET_GO`, `PIN` and `UNPIN` work, and the configuration holds `committed`, which changes while the device runs. Excludes `WRITE_COMMIT` and `RESIZE`. With `DAX`, its window copies nothing: a store to it is refused, `PRIVATE` and `MAP_ZEROS` fail with `EINVAL`, and `private_max` is 0. |
 | 6 | `VIRTIO_EXTENT_F_FREE_MANY` | `FREE` takes `FREE_MANY`: its data names more extents to free (TASK-41). Excludes `READ_ONLY`. |
 | 7 | `VIRTIO_EXTENT_F_MAP_MANY` | `MAP` takes `MAP_MANY`: its data holds more maps (TASK-91.4). Needs `DAX`. |
-| 8 | `VIRTIO_EXTENT_F_MAP_AHEAD` | `MAP`, and each of its further maps, takes `MAP_AHEAD`: the guest accesses the pages next (TASK-112.1). Needs `DAX`. |
+| 8 | `VIRTIO_EXTENT_F_MAP_PREFAULT` | `MAP`, and each of its further maps, takes `MAP_PREFAULT`: the guest accesses the pages next (TASK-112.1). Needs `DAX`. |
 | 11 | `VIRTIO_EXTENT_F_STATS` | The configuration holds `stats_asked`, which changes while the device runs: the host asks for the guest's stats, which it answers with `STATS` (Stats, TASK-111.4). A follower's too. |
 | 29 | `VIRTIO_RING_F_EVENT_IDX` | The ring's notification suppression: the device offers it, so that a guest's requests queued while it takes them, and its completions while the driver takes them, cost no exit each. |
 | 32 | `VIRTIO_F_VERSION_1` | Required. |
@@ -133,7 +133,7 @@ struct virtio_extent_config {
 	le64 max_extent;          /* the most bytes one extent holds: at least 64 MiB */
 	le64 capacity;            /* F_RESIZE: the store's capacity, as INFO's */
 	le64 asked;               /* F_RESIZE: the shrink the guest is asked to take, or 0 */
-	le64 committed;           /* F_READ_ONLY: the epoch of the writer's latest commit */
+	le64 committed;           /* F_READ_ONLY: the number of the writer's latest commit */
 	le64 private_max;         /* F_DAX: the most private pages the window holds at once, in
 	                             pages of map_alignment; 0 with F_READ_ONLY */
 	le64 stats_asked;         /* F_STATS: the host's latest ask for the guest's stats, or 0 */
@@ -158,8 +158,8 @@ open grows, and does not shrink.
 
 ### Stats
 
-*Added 2026-11-05 (TASK-111.4).* The host takes one snapshot of what its extent daemon, each VM's
-process and each guest counted (`cladefsctl stats --json`, the control API's `GetSnapshot`). With
+*Added 2026-11-05 (TASK-111.4).* The host reads, at once, what its extent daemon, each VM's
+process and each guest counted: its stats (`cladefsctl stats --json`, the control API's `GetStats`). With
 `F_STATS`, the device asks the guest for its part: it sets `stats_asked` to a new number and raises
 a configuration change; the guest answers with `STATS`, naming the ask, its data its stats as UTF-8
 text, `VIRTIO_EXTENT_MAX_STATS` (64 KiB) at most: lines of a name and a value, a number or a
@@ -195,7 +195,7 @@ maps moves, and no guest page table changes for a store. Only a `MAP` or `UNMAP`
 page, which the guest sends, ends it. The device holds at most `private_max` private pages: a store
 past them is refused, and the VM stops (cladefs's Firecracker: 159, `AccessRefused`). The guest keeps
 under the bound, and writes back what it stored: its dirty pages' bytes, read from the window, are
-`WRITE`s to new extents, then a commit; once a commit seals those, it maps the pages back to them,
+`WRITE`s to new extents, then a commit; once a commit seals those, it rebinds the pages to them,
 which frees the private pages. A commit changes nothing in any window.
 
 The host's VMM takes KVM's faults on the window through userfaultfd, so the host's kernel must be
@@ -235,8 +235,8 @@ struct virtio_extent_resp {
 | 8 | `INFO` | none | device writes `struct virtio_extent_info` |
 | 9 | `RESIZED` | `le64 capacity;` (the `asked` it answers); flag `RESIZED_TOOK` (bit 0): it took it | none |
 | 10 | `FREEZE` | none; flag `FREEZE_FROZEN` (bit 0): frozen, else thawed | none |
-| 11 | `ADVANCE` | none | device writes `struct virtio_extent_epoch` |
-| 12 | `LET_GO` | `struct virtio_extent_epoch` | none |
+| 11 | `ADVANCE` | none | device writes `struct virtio_extent_commit_number` |
+| 12 | `LET_GO` | `struct virtio_extent_commit_number` | none |
 | 13 | `PIN` | `struct virtio_extent_id id;` | none |
 | 14 | `UNPIN` | `struct virtio_extent_id id;` | none |
 | 16 | `PRIVATE` | `le64 window_offset; le64 len;` | none |
@@ -254,12 +254,12 @@ within `max_extent`.
 - An extent's length is the end of its furthest write. Blocks within it that were never written
   read as zeros.
 - The data is in the store, and visible to reads and mappings, when the request completes. It is
-  durable as part of its epoch (see Ordering).
+  local, or uploaded, with the commit after it (see Ordering and durability).
 - With `WRITE_BARRIER` (bit 0), the write follows a barrier, as if a `COMMIT` were submitted just
   before it: Fxfs's `PRE_BARRIER` writes.
 - With `WRITE_COMMIT` (bit 1, which needs `F_WRITE_COMMIT`), a barrier follows the write, as if a
-  `COMMIT` were submitted once it completes, durable with `WRITE_DURABLE` (bit 2), as with
-  `COMMIT_DURABLE`; the request completes once that commit does. It seals the extent written too:
+  `COMMIT` were submitted once it completes, uploaded with `WRITE_UPLOADED` (bit 2), as with
+  `COMMIT_UPLOADED`; the request completes once that commit does. It seals the extent written too:
   Fxfs's `POST_BARRIER` writes, the last of a journal flush that ends a sync, one request rather
   than a `WRITE` and a `COMMIT`, each a round trip to the host.
 - With `WRITE_ROOT` (bit 3, which needs `WRITE_COMMIT`), that commit also sets the branch's root,
@@ -294,7 +294,7 @@ frees them all again. A guest frees the extents a flush lets go of in one reques
 each: each request a round trip, which nested virtualization makes dear.
 
 - Afterwards, reading or mapping it fails.
-- The host deletes it once the `FREE`'s epoch is durable and no other branch has it.
+- The host deletes it once the commit after the `FREE` is uploaded and no other branch has it.
 - The guest must not free an extent while requests on it are in flight, and never mints the same ID
   twice.
 
@@ -317,14 +317,14 @@ multiples of `map_alignment`, and the range lies within the window.
 
 With `MAP_MANY` (bit 1, `F_MAP_MANY`), the data holds more maps, each a
 `struct virtio_extent_map_entry { struct virtio_extent_map map; le32 flags; le32 reserved; }`: the
-arguments of a `MAP` and its flags, `MAP_AHEAD` and `MAP_ZEROS` alone, each mapped as a `MAP` of its own would be,
+arguments of a `MAP` and its flags, `MAP_PREFAULT` and `MAP_ZEROS` alone, each mapped as a `MAP` of its own would be,
 in any order. The first that fails fails the request, whichever others mapped, and the guest maps
 them all again, one by one, to learn which failed. A guest maps the pieces of a file's chunk it
 reads, scattered across extents as rewrites move its blocks, in one request rather than one each:
 each request a round trip, which nested virtualization makes dear.
 
-With `MAP_AHEAD` (bit 2, `F_MAP_AHEAD`), the guest accesses the pages it maps next, as a read does:
-the device maps them for the guest ahead of its accesses, those its host holds in memory, rather
+With `MAP_PREFAULT` (bit 2, `F_MAP_PREFAULT`), the guest accesses the pages it maps next, as a read
+does: the device prefaults them, mapping them for the guest ahead of its accesses, those its host holds in memory, rather
 than the hypervisor one first access at a time, which nested virtualization makes dear
 (TASK-112.1). The flag changes nothing the guest sees but the time its first accesses take.
 
@@ -332,7 +332,7 @@ than the hypervisor one first access at a time, which nested virtualization make
 pages.
 
 `PRIVATE` makes `len` bytes of the window at `window_offset` private now, as stores would, all or
-none, and maps them for the guest ahead of its accesses, as `MAP_AHEAD` does: a guest about to
+none, and prefaults them, as `MAP_PREFAULT` does: a guest about to
 write many pages that aren't private yet, as a `write(2)` of them, makes them so in one round trip,
 rather than a fault of the host's each. Pages already private stay as they are. It fails with
 `ENOMEM` past `private_max`, and with `EINVAL` where nothing is mapped, or of a follower's window.
@@ -348,15 +348,15 @@ in any window.
 
 - **With `COMMIT_ROOT`** (bit 1), the commit also sets the branch's root to the `root_len` bytes it
   carries (at most `max_root`), ordered with everything before it.
-- **Without `COMMIT_DURABLE`,** the commit completes once its order is fixed. It does not wait for
-  durability: doc-2's requirement 2, under which fsync keeps its ordering but a crash may lose a
-  suffix.
-- **With `COMMIT_DURABLE`** (bit 0), it completes once everything before it is durable: on local
-  disk in milestone 1, uploaded once object storage arrives (milestone 3). Unmount and `sync` use
+- **Without `COMMIT_UPLOADED`,** the commit completes once ordered: its order is fixed. It waits
+  for no level past that: doc-2's requirement 2, under which fsync keeps its ordering but a crash
+  may lose a suffix.
+- **With `COMMIT_UPLOADED`** (bit 0), it completes once everything before it is uploaded, its
+  segments acknowledged by the bucket; local, if the store has no bucket. Unmount and `sync` use
   it.
 - cladefs: the extent daemon's wire has a third level, which no guest's device asks for:
   `COMMIT_LOCAL` (`WRITE_LOCAL` for a write's commit), which completes once everything before it is
-  durable on the host's disk, not waiting for object storage: what a database on the daemon
+  local, synced to the host's disk, not waiting for the bucket: what a database on the daemon
   commits with, as SQLite's own on a local filesystem does (crates/sqlite_extents, the user's
   decision of 2026-11-09, TASK-301).
 
@@ -401,7 +401,7 @@ orphans. After replay, the guest mints from the largest of its own next sequence
 that nothing refers to.
 
 `sequence_floor` is 0 unless the store keeps its branch in object storage, where it is its
-writer's range's start (doc-7, Fencing): IDs below it another writer may have minted. No extent
+writer's range's start (doc-7, The head): IDs below it another writer may have minted. No extent
 the store holds need reach it, so the guest looks for orphans below `next_sequence` only: between
 its own count and the floor there may be 2^40 numbers.
 
@@ -416,7 +416,7 @@ its own count and the floor there may be 2^40 numbers.
 | `EINVAL` (22) | An unknown type or flag, a misaligned or out-of-range offset, length or window offset, or a feature's flag the device does not offer. With `F_READ_ONLY`, a `PRIVATE`, or a `MAP_ZEROS`. |
 | `ENOMEM` (12) | A `PRIVATE` past `private_max`. |
 | `ENOSPC` (28) | The store cannot hold more for this branch. |
-| `EROFS` (30) | The store stopped taking writes for this branch: another host took its lease (milestone 4), or the host is shutting it down. Reads still work. With `F_READ_ONLY`, every `WRITE`, `FREE`, `COMMIT` and `RESIZED`. |
+| `EROFS` (30) | The store stopped taking writes for this branch: another host took its head (milestone 4), or the host is shutting it down. Reads still work. With `F_READ_ONLY`, every `WRITE`, `FREE`, `COMMIT` and `RESIZED`. |
 | `ESTALE` (116) | `F_READ_ONLY`: the follower was cut off (Followers). |
 
 With `F_READ_ONLY`, a `READ` or `MAP` of an extent the follower's view let go of (freed before
@@ -432,28 +432,28 @@ writes, read-only, with a device offering `F_READ_ONLY`: its guest mounts the fi
 commit of the writer's, and applies the writer's commits after it as they come, while the writer
 goes on and never waits for it. The host serves it the same extents, from the same memory.
 
-- **Its view.** The device reads the store as of a commit, its **epoch**: what that commit holds,
+- **Its view.** The device reads the store as of a commit, named by its **commit number**: what that commit holds,
   its sealed extents and root, and nothing the writer wrote after it. The writer's frees after it
   are kept while the view may read them. `ROOT` is the view's commit's root. A device starts as of
   the writer's latest commit, or the store's last, if no VM writes it.
-- **Commits.** Each commit of the writer's after the view's sets `committed` to its epoch and
+- **Commits.** Each commit of the writer's after the view's sets `committed` to its number and
   raises a configuration change (the latest of a run of commits, at least once).
-- **`ADVANCE`** moves the view to the writer's latest commit, and returns its epoch:
+- **`ADVANCE`** moves the view to the writer's latest commit, and returns its number:
 
   ```c
-  struct virtio_extent_epoch {
-  	le64 epoch;
+  struct virtio_extent_commit_number {
+  	le64 commit;
   	le64 reserved;
   };
   ```
 
   The view still holds what the commits between held, as the guest's follower reads them while
   it applies those commits, and its readers may be reading them still, until `LET_GO`.
-- **`LET_GO`** lets go of what the commits before the one its epoch names held, an `ADVANCE`'s:
-  the writer's frees up to that commit go, but for what the view pins. The device serves requests
-  in any order, so a `LET_GO` may be served after the next `ADVANCE`: naming its epoch, it lets go
-  of no more than it meant to, and one naming an earlier epoch than the view already let go of
-  changes nothing.
+- **`LET_GO`** lets go of what the commits before the one its commit number names held, an
+  `ADVANCE`'s: the writer's frees up to that commit go, but for what the view pins. The device
+  serves requests in any order, so a `LET_GO` may be served after the next `ADVANCE`: naming its
+  commit, it lets go of no more than it meant to, and one naming an earlier commit than the view
+  already let go of changes nothing.
 - **`PIN`** keeps extent `id`, which the view holds, whatever commit it advances to, until
   `UNPIN`: what the guest holds open that the writer deletes (doc-8's graveyard).
 - **Cut off.** A follower too far behind (a lag in time, or in bytes of frees it keeps), or whose
@@ -473,22 +473,22 @@ opens the store again until they are gone.
 ## Ordering and durability
 
 Requests on all queues are applied in any order, except across barriers. `COMMIT`s, and the
-barriers of `WRITE_BARRIER`s and `WRITE_COMMIT`s, divide the requests into **epochs**:
+barriers of `WRITE_BARRIER`s and `WRITE_COMMIT`s, divide the requests into **intervals**:
 
-- A request completed before a barrier was submitted belongs to an epoch before it.
-- A request submitted after a barrier completed belongs to an epoch after it.
+- A request completed before a barrier was submitted belongs to an interval before it.
+- A request submitted after a barrier completed belongs to an interval after it.
 - A request in flight while a barrier is may fall on either side.
-- Stores to the window belong to no epoch: they are in private pages, which no crash keeps, until
-  the guest `WRITE`s them.
+- Stores to the window belong to no interval: they are in private pages, which no crash keeps,
+  until the guest `WRITE`s them.
 
 After a crash of the guest, the VMM or the host, the store holds:
 
-- everything from the epochs before some barrier B, including the last root set before it;
-- any subset of epoch B's writes and frees, each block written whole or not at all;
+- everything from the intervals before some barrier B, including the last root set before it;
+- any subset of the writes and frees of B's interval, each block written whole or not at all;
 - nothing after it.
 
 That is how disks behave with barriers, and how Fxfs's journal recovers: checksums find where a torn
-journal ends. With `COMMIT_DURABLE`, B is at least that commit. How far B can lag the latest commit
+journal ends. With `COMMIT_UPLOADED`, B is at least that commit. How far B can lag the latest commit
 is the host's lag, bounded by its configuration (doc-2, requirement 11).
 
 ## When the host's daemon goes
@@ -502,10 +502,10 @@ each VM sees it as follows (TASK-50.2):
 - **The VM stops.** The VMM is told as the connection closes, and stops the VM, with an exit
   status of its own (cladefs's Firecracker: 158, `ExtentdLost`), rather than let the guest go on
   with a disk whose every request fails. Its host's VM manager sees the VMM exit, and why.
-- **What the guest committed** is what the daemon made durable: everything before some barrier
+- **What the guest committed** is what the daemon made local: everything before some barrier
   (see Ordering and durability), as after any crash. A store whose daemon went is opened again by
-  the next daemon, or another process, as of its last durable commit; its branch in object storage
-  is the writer's as of its last upload.
+  the next daemon, or another process, as of its last local commit; its branch in the bucket is the
+  writer's as of its last upload.
 - **Nothing reconnects.** A device does not connect to a daemon started again: its window's
   mappings, its private pages, the extents it had open and its requests in flight are not
   recovered. The VM is
@@ -519,7 +519,7 @@ Each VM's filesystem is a branch, with its own ID and root.
 
 - **Forking** a branch makes a child with a new ID, a copy of the parent's root, and every extent
   the parent had at the fork. It takes O(1): the host records the parent and the fork point, in
-  its bucket (crates/extent_remote/src/branch.rs); a store directory on the host holds one branch.
+  its bucket (crates/extent_bucket/src/branch.rs); a store directory on the host holds one branch.
 - **After a fork,** each branch mints extents under its own ID. A branch that frees an inherited
   extent drops only its own claim, and the host deletes the extent once every branch that has it has
   freed it.
@@ -539,12 +539,12 @@ The guest sees none of this except a different `branch` in its configuration aft
 A VMM snapshots a VM with the device, and restores the snapshot, as many times as it likes, each
 restored VM with a store of its own (cladefs's TASK-39.1): a zygote's children, suspend-to-RAM, a
 VM moved to another host. Extent IDs carry their branch, and the restored guest has the branch it
-had in its memory, so the snapshot is taken at a point nothing is open:
+had in its memory, so the snapshot is taken when nothing is open:
 
-- **Freezing.** The guest's filesystem freezes first (fsfreeze): it commits durably, sealing what
+- **Freezing.** The guest's filesystem freezes first (fsfreeze): it syncs, sealing what
   is open, holds its background work, and sends no `WRITE`, `FREE` or `COMMIT` until it thaws;
   `READ`, `MAP` of sealed extents and `UNMAP` go on. It tells the device with `FREEZE` and
-  `FREEZE_FROZEN`. Freezing writes back every dirty page and maps every private page back to the
+  `FREEZE_FROZEN`. Freezing writes back every dirty page and rebinds every private page to the
   extent that now holds it, so that the window maps extents and zeros alone. A VMM refuses to
   snapshot a device whose guest isn't frozen, and the host refuses the snapshot's point while the
   window holds a private page, whose bytes no extent holds (`EBUSY`; cladefs's extent store, saying
@@ -569,18 +569,19 @@ This section describes how the host stores extents. It is not part of the protoc
 
 - **Packing.** Sealed extents smaller than 4 MiB are packed, in commit order, into **segments** of
   about 16-64 MiB. Extents of 4 MiB and more are stored on their own, as objects of their own.
-- **The index.** An index maps each extent ID to its segment and offset, or to its own object. Each
-  upload adds to it, with periodic checkpoints.
-- **Cleaning.** The bucket's collector (`cladefs-gc`, crates/extent_remote/src/collector.rs), the
-  only cleaner, compacts objects that are mostly freed extents, copying the live small extents
-  into new objects. Large extents are deleted whole and never copied. The host cleans nothing
-  locally (TASK-165.8).
-- **Milestone 1** keeps segments, large extents and the index in files on local disk. Milestone 3
-  uploads them to object storage, in the layout doc-2 describes; a segment acknowledged there
-  leaves the store for the host's part cache.
-- **Caches.** The host's memory and NVMe cache extents by ID: pages in memory, which VMs map through
-  their DAX windows, and extents on NVMe, which misses in memory read from before object storage.
-  Every VM, fork and snapshot on the host that reads the same extent shares both.
+- **The table.** A branch's checkpoint maps each extent ID to its segment and offset, or to its own
+  object (doc-7, Checkpoints); the segments uploaded after it add to it.
+- **Collecting.** The bucket's collector (`cladefs-gc`, crates/extent_bucket/src/collector.rs),
+  the only thing that deletes, compacts objects that are mostly freed extents, copying the live
+  small extents into new objects. Large extents are deleted whole and never copied. The host
+  collects nothing locally (TASK-165.8).
+- **On the host's disk,** a store keeps its open segment, its write-ahead log and its own extents
+  (doc-14), and uploads them to the bucket, in the layout doc-7 describes; a segment acknowledged
+  there leaves the store for the host's part cache.
+- **Caches.** The extent cache holds sealed extents' pages in memory, which VMs map through their
+  DAX windows; the part cache holds parts of the bucket's objects on the host's disk, which misses
+  in memory read from before the bucket. Every VM, fork and point on the host that reads the same
+  extent shares both.
 
 ## What Fxfs becomes
 
@@ -599,7 +600,7 @@ local extent store, and in the guest.
 | `Device::flush` | `COMMIT` |
 | `PRE_BARRIER` writes | `WRITE_BARRIER` |
 | `POST_BARRIER` writes (cladefs: a sync's journal flush, whose barrier is its flush) | `WRITE_COMMIT` |
-| Closing | `COMMIT_DURABLE` |
+| Closing | `COMMIT_UPLOADED` |
 | cladefs's snapshots (frozen data owners) | References to the same extents |
 
 Fxfs runs with barriers enabled.

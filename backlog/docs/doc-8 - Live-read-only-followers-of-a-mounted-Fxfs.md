@@ -3,7 +3,7 @@ id: doc-8
 title: Live read-only followers of a mounted Fxfs
 type: specification
 created_date: '2026-10-17 22:17'
-updated_date: '2026-11-15 11:34'
+updated_date: '2026-11-16 04:15'
 ---
 # Live read-only followers of a mounted Fxfs
 
@@ -33,16 +33,16 @@ built around testing techniques that make them loud and reproducible.
 1. **Live follow, only.** No point-in-time-only stage ships. A follower mounts the store as of a
    commit, then applies each commit after it. (Point-in-time mounts fall out of it: a follower
    that never advances.)
-2. **Readers are VMs on the writer's host**, served by the same extentd, so a follower reads
+2. **Followers are VMs on the writer's host**, served by the same extentd, so a follower reads
    the writer's sealed extents, and its open extents' sealed parts, from the same memory and
    cache, with no copy.
 3. **The writer never waits** for a follower: no commit is forced, no free blocks on one. A
-   follower takes the latest commit the writer made, ordered or durable.
+   follower takes the latest commit the writer made, ordered, local or uploaded.
 4. **A follower sees a prefix of the writer's history**: at every moment, the state as of some
    commit, moving forward. It may see an ordered commit a crash of extentd would lose; followers
    are ephemeral, and die with that extentd anyway.
 5. **DAX from the start**: it is the primary path. Without DAX (the page cache) comes along, as
-   it shares everything but the invalidation of mappings.
+   it shares everything but the dropping of mappings.
 6. **A file the writer deletes while a follower has it open stays readable until the follower
    closes it** (POSIX), through a follower-side graveyard (below), rather than failing with
    ESTALE.
@@ -63,7 +63,7 @@ The store as of commit N is its extent table and root at N, all of it sealed, an
 to N's sealed lengths. So a follower needs no fork and no forced commit: it needs the writer's
 frees after N kept while it may still read what they freed. ExtentStore already keeps freed
 extents for one other party, the uploader (`State::kept`, crates/extent_store/src/kept.rs, until
-its epoch is uploaded); a view is a second kind of party.
+the commit that freed it is uploaded); a view is a second kind of party.
 
 Fxfs's journal replay ends at the first checksum mismatch (journal/reader.rs). A view returns
 nothing past commit N's sealed lengths, so a follower's replay ends exactly at commit N.
@@ -74,7 +74,7 @@ nothing past commit N's sealed lengths, so a follower's replay ends exactly at c
 
 Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view, locate_view}`.
 
-- `Store::view()`: the branch as of its latest commit, its epoch and root. `View::advance()` moves
+- `Store::view()`: the branch as of its latest commit, its commit number (`View::epoch`) and root. `View::advance()` moves
   it to the latest commit. Sealed extents never change and IDs are never reused, so a view copies
   no extent table: an extent its commit holds is held still, as it was, wherever its data is now,
   in the store or, acknowledged, in the bucket (TASK-165.8), or freed since and kept. A view
@@ -88,7 +88,7 @@ Built (TASK-42.2): `crates/extent_store/src/views.rs`, `Store::{view, read_view,
   Until its commit, a free is undecided, and its data stays.
 - Opening, advancing, pinning and dropping a view take the views' lock alone, never the store's
   state or commit lock: a follower never waits for the writer.
-- Pins of single extents beyond the view's epoch (`View::pin`, the follower's graveyard, below).
+- Pins of single extents beyond the view's commit (`View::pin`, the follower's graveyard, below).
 - Views live as long as their holder. A view stale for `Options::view_lag`, or keeping more than
   `view_kept_bytes` of frees as the oldest, is cut off (decision 7): it keeps nothing, and its
   reads, advances and pins fail with `CutOff`. The limits are to be chosen with measurements.
@@ -160,7 +160,7 @@ Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`
   next batch applies what it skipped, and unpins the extents.
 - Fxfs's cached per-object state is the tree's object cache, which applying mutations
   invalidates as the writer's commits do; what a reader caches of an object (an open handle's
-  size, the kernel's inode) is the change set's to invalidate.
+  size, the kernel's inode) is the change set's to drop.
 - Readers are kept out of a follower's filesystem while it applies a batch, by its caller, until
   the concurrency protocol below (TASK-42.5).
 
@@ -169,8 +169,8 @@ Built (TASK-42.4): `crates/fxfs/src/follower.rs`, `FxFilesystem::{follow, hold}`
 Built (TASK-42.6):
 
 - The driver offers `VIRTIO_EXTENT_F_READ_ONLY`, refuses what would write on such a device
-  (-EROFS), sends ADVANCE, LET_GO (naming the epoch an ADVANCE returned: the device serves
-  requests in any order, and a LET_GO of an earlier epoch lets go of no more), PIN and UNPIN, and
+  (-EROFS), sends ADVANCE, LET_GO (naming the commit number an ADVANCE returned: the device
+  serves requests in any order, and a LET_GO of an earlier one lets go of no more), PIN and UNPIN, and
   reads `committed`. Its DAX window maps sealed extents read-only for a follower.
 - fs/fxfs mounts read-only on `-o ro` or a follower's device (SB_RDONLY, which a remount keeps).
   On a follower's device, the device's configuration change schedules a batch (`fxfs_follow`):
@@ -186,7 +186,7 @@ Built (TASK-42.6):
   (`fxfs_vfs_follower_read`): a copy to a page of a mapping of a follower's file, which the fault
   would fill under the barrier, while a batch waits for it, would deadlock. One stopped short lets
   the barrier go, faults the reader's pages in, and goes on, as gfs2's reads do.
-- A batch holds it exclusively (`fxfs_vfs_follow_barrier_take`, its wait counted:
+- A batch holds it exclusively (`fxfs_vfs_fill_barrier_take`, its wait counted:
   `FXFS_IOC_FOLLOW_STATS`): it drops what the kernel caches of what it changes
   (`fxfs_vfs_drop_file`, `fxfs_vfs_drop_entries`): a file's changed data drops its DAX window's
   ranges there under its invalidate_lock (with no inode read in, the file's ranges directly), or
@@ -258,14 +258,14 @@ own with relaxed memory orderings: that is the one class of bug Shuttle can't fi
 
 Each layer below must exist, and find bugs, before the code it tests is trusted. Every technique
 gets a mutation check, as doc-7's simulation has (TASK-28.1: each protocol rule has a test that
-turns it off and expects a seed to find the violation): break the rule it guards (skip an
-invalidation, release a pin early, apply half a transaction, skip the fill barrier) and the
+turns it off and expects a seed to find the violation): break the rule it guards (skip a
+drop, release a pin early, apply half a transaction, skip the fill barrier) and the
 test must fail. A test that never fails proves nothing.
 
 Mutation testing covers the real code too, two ways:
 
 - **The protocol's rules, switched off by hand.** Each rule in the Rust code (as in the TLA+ spec,
-  and crates/extent_remote's `Rules`) can be turned off in tests, and each has a test that turns it
+  and crates/extent_bucket's `Rules`) can be turned off in tests, and each has a test that turns it
   off and expects the simulation, Shuttle or the history checker to fail.
 - **Automatic mutants, with cargo-mutants** (sourcefrog/cargo-mutants, MIT): it rewrites the Rust
   code a mutation at a time (an operator flipped, a condition negated, a function body replaced by
@@ -277,7 +277,7 @@ Mutation testing covers the real code too, two ways:
   followers' simulation; the protocol under Shuttle; the history checker with the simulation's).
   Of what its first run left (TASK-42), tests kill all but three, which are equivalent: kept frees'
   release ranging from the commit released rather than after it (no free of a released commit is
-  kept after its release), `Views::publish`'s `<` as `<=` (each commit's epoch is past every live
+  kept after its release), `Views::publish`'s `<` as `<=` (each commit's number is past every live
   view's), and a view's Debug (logs only).
   The kernel's C has no such tool: its rules are switched off by debug options in the torture
   test (6).
@@ -310,7 +310,7 @@ fetched once into ~/.cache.
   readers' operations end; and even a follower that hangs is cut off
   rather than keeping the writer's frees without bound (FollowerStalled, LagCutOff).
 - Mutation checks (specs/follower/mutations): each of the five rules removed (barrier,
-  invalidate, keepFrees, graveyard, cutOff) gives a counterexample to the exact property it
+  drop, keepFrees, graveyard, cutOff) gives a counterexample to the exact property it
   guards, within seconds; the barrier's, to each of three (NoGoingBack, NoTornReads,
   NoReleasedReads). Until TASK-42.10, the spec had the seqcount, its fallback and SRCU, and their
   rules (validate, fallback, grace, graceFirst), which the barrier replaced; with them, it had no
@@ -327,11 +327,11 @@ TLC trace validation, so the spec stays the implementation's, not a separate sto
 
 - extentd checks each READ and MAP of a read-only connection against its view and pins: anything
   else is EIO and an error logged, never a silent stale read.
-- The follower asserts it never advances past an epoch an operation in flight still uses.
+- The follower asserts it never advances past a commit an operation in flight still uses.
 - Code shape: reads return values; only validated values reach caches.
 - Guest builds: WARN_ON on each invariant: a write request on a follower's device (the driver
-  refuses it, -EROFS), a write fault through a follower's DAX window, a follower's epochs going
-  back or settling past what it applied, a batch's invalidation off the follower's mounts; lockdep
+  refuses it, -EROFS), a write fault through a follower's DAX window, a follower's commit numbers going
+  back or settling past what it applied, a batch's drop off the follower's mounts; lockdep
   asserts the fill barrier held where the trees are read and batches change the kernel's caches.
   extentd's checks always on.
 

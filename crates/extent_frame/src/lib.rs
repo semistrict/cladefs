@@ -12,15 +12,15 @@
 //! branch keeps in object storage: a reader reads and decompresses only the parts it needs, each
 //! checked against its CRC before it is decompressed.
 //!
-//! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). An object is encrypted or in the
-//! clear, as its trailer says. Encrypted, each of its parts is compressed first, as in the clear,
-//! then encrypted with AES-256-GCM under a subkey of the object's own: its branch's DEK's, of the
-//! generation its trailer names, derived with a salt drawn at random for the object and kept in its
-//! trailer ([`Secret::derive`]); the nonce is the part's index, and the associated data its index,
-//! encoding and lengths. The table's entry holds the part's tag; the CRC stays, over the bytes
+//! cladefs: FORMAT 2 (TASK-411.2, doc-16, What is encrypted). An object is encrypted or
+//! unencrypted, as its trailer says. Encrypted, each of its parts is compressed first, as
+//! unencrypted, then encrypted with AES-256-GCM under a subkey of the object's own: its branch's
+//! DEK's, of the generation its trailer names, derived with a salt drawn at random for the object
+//! and kept in its trailer ([`Secret::derive`]); the nonce is the part's index, and the associated
+//! data its index, encoding and lengths. The table's entry holds the part's tag; the CRC stays, over the bytes
 //! stored, encrypted, so that a reader holding no key, the collector, checks them as before, and a
-//! part corrupt is told from one under another key. The footer, the table and the trailer stay in
-//! the clear, authenticated by HMAC-SHA256 under a second subkey from the same salt, which a
+//! part corrupt is told from one under another key. The footer, the table and the trailer stay
+//! unencrypted, authenticated by HMAC-SHA256 under a second subkey from the same salt, which a
 //! reader holding the key checks ([`Keys`]), and one holding none does not.
 //!
 //! Parts are bound to their object by its salt, not by its key in object storage, as doc-16 first
@@ -39,7 +39,7 @@
 //! (doc-16, What is encrypted), each part's tag a GMAC of its stored bytes, which a reader holding
 //! the key checks.
 //!
-//! cladefs: a reader of a branch whose objects are encrypted refuses one in the clear
+//! cladefs: a reader of a branch whose objects are encrypted refuses one unencrypted
 //! ([`Keys::encrypted`], [`Error::Unencrypted`], TASK-411.3): its trailer's encryption is not
 //! authenticated, and one who can write the bucket could otherwise zero an object's encryption,
 //! MACs and tags, and have it read as its branch's.

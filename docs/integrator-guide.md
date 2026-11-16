@@ -42,7 +42,7 @@ says what a format change refuses.
 
 ## Restoring a snapshot, on any number of hosts at once
 
-A snapshot's point is immutable. Any number of hosts read it, and none writes it: it has no lease, a
+A VM snapshot's point is immutable. Any number of hosts read it, and none writes it: a
 restore on one host changes nothing another host sees, and no copy of it goes stale. Each restore
 is a fork of the point into a new branch of the VM's own.
 
@@ -189,5 +189,5 @@ whichever VM has it open (measured on macOS, TASK-443.2; TASK-453 is to share it
 how many a store holds, `own_extents` and `inherited_extents` (TASK-454); `cladefsctl stat DIR`
 prints them. Read a base's before choosing how many forks of it a host serves. Of a store a VM has
 open, StatStore reads the count kept as it changes, at no cost; of one none has, it opens the store
-as a VM's would (its state read, its branch's lease taken, the map of its extents built: time and,
+as a VM's would (its state read, its branch's head taken, the map of its extents built: time and,
 until it closes it again, memory as its extents), as for every other field.
