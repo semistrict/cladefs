@@ -567,6 +567,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "cladefs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-task",
+ "async-trait",
+ "bitflags 2.13.2",
+ "event-listener",
+ "extent_files",
+ "extent_frame",
+ "extent_keys",
+ "extent_remote",
+ "extent_store",
+ "fail",
+ "flate2",
+ "fuchsia-async",
+ "futures",
+ "fxfs",
+ "fxfs-posix",
+ "humantime",
+ "hyper-util",
+ "io-uring",
+ "libc",
+ "log",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "physmem",
+ "pin-project-lite",
+ "prost",
+ "protox",
+ "rand 0.10.3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "siphasher",
+ "storage_device",
+ "tar",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tower",
+ "url",
+ "zerocopy",
+]
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -964,6 +1015,17 @@ checksum = "13bdac971eb2efaceffca0976058ab80c715945cc565c8a4aa1ed3bb0dc8d0e4"
 dependencies = [
  "libc",
  "vmm-sys-util",
+]
+
+[[package]]
+name = "extent_files"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "futures",
+ "log",
+ "storage_device",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -1389,56 +1451,6 @@ dependencies = [
  "memchr",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "cladefs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-task",
- "async-trait",
- "bitflags 2.13.2",
- "event-listener",
- "extent_frame",
- "extent_keys",
- "extent_remote",
- "extent_store",
- "fail",
- "flate2",
- "fuchsia-async",
- "futures",
- "fxfs",
- "fxfs-posix",
- "humantime",
- "hyper-util",
- "io-uring",
- "libc",
- "log",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "physmem",
- "pin-project-lite",
- "prost",
- "protox",
- "rand 0.10.3",
- "serde",
- "serde_json",
- "sha2",
- "siphasher",
- "storage_device",
- "tar",
- "thiserror 2.0.21",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-health",
- "tonic-prost",
- "tonic-prost-build",
- "tower",
- "url",
- "zerocopy",
 ]
 
 [[package]]
@@ -4343,8 +4355,8 @@ dependencies = [
 name = "virtio_extent"
 version = "0.1.0"
 dependencies = [
- "futures",
  "cladefs",
+ "futures",
  "libc",
  "log",
  "serde",
@@ -4398,6 +4410,7 @@ dependencies = [
  "bitflags 2.13.2",
  "bitvec",
  "byteorder",
+ "cladefs",
  "crc64",
  "criterion",
  "derive_more",
@@ -4405,7 +4418,6 @@ dependencies = [
  "displaydoc",
  "event-manager",
  "futures",
- "cladefs",
  "gdbstub",
  "gdbstub_arch",
  "itertools 0.14.0",

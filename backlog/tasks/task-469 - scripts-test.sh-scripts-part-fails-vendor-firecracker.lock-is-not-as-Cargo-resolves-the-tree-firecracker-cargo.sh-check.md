@@ -3,9 +3,11 @@ id: TASK-469
 title: >-
   scripts/test.sh scripts part fails: vendor/firecracker.lock is not as Cargo
   resolves the tree (firecracker-cargo.sh --check)
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-15 23:37'
+updated_date: '2026-11-16 01:59'
 labels:
   - testing
   - bug

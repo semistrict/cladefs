@@ -456,9 +456,15 @@ class Install(unittest.TestCase):
 
     def test_what_the_nightly_needs_is_checked_first(self):
         ubu1 = Ubu1()
+        # A PATH of only what the script must find, git and hostname: /usr/bin holds flock on
+        # Linux, not on macOS (TASK-441.4).
+        path = ubu1.dir / "path"
+        path.mkdir()
+        for tool in ("git", "hostname"):
+            (path / tool).symlink_to(shutil.which(tool))
         done = subprocess.run(["/bin/bash", str(SCRIPTS / "nightly-install.sh"), str(ubu1.origin)],
                               capture_output=True, text=True,
-                              env={**ubu1.environment, "PATH": "/usr/bin:/bin"})
+                              env={**ubu1.environment, "PATH": str(path)})
         self.assertEqual((done.returncode, done.stderr),
                          (1, "The nightly can't run here: missing fxjob flock backlog cargo\n"))
 
