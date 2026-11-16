@@ -21,6 +21,16 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## The glossary's word choices (CONTEXT.md, 2026-11-15)
+
+Decided without you, where the repo used several words for one concept: **seal** is extents' alone
+(encryption says *encrypted*); **bucket**, never *remote* or *object store*; **collector**, not
+*gc* or *cleaner* (the binary and keys keep gc); **point**, not *snapshot*; **fork**, not *clone*
+or *restore*; **take** a branch, not *lease* it; **durable locally** and **uploaded**, never
+*durable* alone; **test host** for ubu1, **host** for the machine running VMs; **Fxfs volume** vs a
+cell's **volume**. Code renames these imply are TASK-474; stale docs found, TASK-473.
+*Undo:* edit CONTEXT.md.
+
 ## The nightly: what it measures, its bounds, and what counts as main moving (TASK-441.1, .2, 2026-11-15)
 
 Decided without you:
