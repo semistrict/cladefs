@@ -1,24 +1,25 @@
 # A fork takes its branch ID whatever has it in the bucket: neither the look that it is free nor
 # its child's record refuses another's: a fork to another branch's ID, which no ID the bucket gives
 # is (TASK-364) but a fork's named so is, wedges that branch's writer (TASK-79.82, TASK-165.7).
+# A writable fork's: a point's makes no look since TASK-449, its record's create refusing alike.
 # Kind: commits wedged
 # Killer: remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist
 --- a/crates/cladefs/src/host_store.rs
 +++ b/crates/cladefs/src/host_store.rs
-@@ -418,9 +418,7 @@
-         }
-         err => anyhow::anyhow!("forking to branch {branch}: {err}"),
+@@ -470,8 +470,8 @@
      };
--    if !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+     // A fork of a point needs no look first: its child's record's create refuses a record there
+     // alike (`Remote::child_free`, TASK-449).
+-    if !remote.is_point() && !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
 -        return Err(Error::new(taken(branch)));
--    }
-+    let _ = remote.child_free(branch).map_err(|err| Error::new(failed(err)))?;
++    if !remote.is_point() {
++        let _ = remote.child_free(branch).map_err(|err| Error::new(failed(err)))?;
+     }
      let made = match remote.is_point() {
          true => {
-             drop(held);
 --- a/crates/extent_remote/src/branch.rs
 +++ b/crates/extent_remote/src/branch.rs
-@@ -233,7 +233,7 @@
+@@ -364,7 +364,7 @@
          let read =
              found.as_ref().map(|found| Record::decode(child.branch, &found.bytes)).transpose()?;
          match read {
@@ -27,7 +28,7 @@
                  take_back(bucket, origin, child.branch, &found).await;
                  return match found.deleted {
                      true => Ok(()),
-@@ -260,7 +260,7 @@
+@@ -392,7 +392,7 @@
          failpoint!("branch::recorded_fork");
          return Ok(());
      };

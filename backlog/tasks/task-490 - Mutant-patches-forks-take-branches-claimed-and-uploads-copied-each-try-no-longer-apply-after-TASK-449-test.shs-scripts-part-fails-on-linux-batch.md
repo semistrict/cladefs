@@ -3,10 +3,11 @@ id: TASK-490
 title: >-
   Mutant patches forks-take-branches-claimed and uploads-copied-each-try no
   longer apply after TASK-449: test.sh's scripts part fails on linux-batch
-status: To Do
+status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-16 08:52'
+updated_date: '2026-11-16 09:05'
 labels:
   - bug
   - testing
@@ -23,9 +24,9 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Both patches re-anchored on the code TASK-449 left, the same mutation each
+- [x] #1 Both patches re-anchored on the code TASK-449 left, the same mutation each
 - [ ] #2 forks-take-branches-claimed is killed by its Killer remote::tests::forks_to_a_branch_the_bucket_has_fail_with_eexist (macOS) and uploads-copied-each-try by extentd::tests::soak::a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound (ubu1, fxjob)
-- [ ] #3 crates/cladefs/mutants.sh --check reports 0 broken; CLADEFS_TEST_PARTS=scripts scripts/test.sh passes
+- [x] #3 crates/cladefs/mutants.sh --check reports 0 broken; CLADEFS_TEST_PARTS=scripts scripts/test.sh passes
 <!-- AC:END -->
 
 ## Definition of Done
@@ -34,3 +35,17 @@ crates/cladefs/mutants.sh --check on linux-batch (1d4c9428d): 'mutants: 22 check
 - [ ] #2 scripts/upstream-changes.py --check passes
 - [ ] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Re-anchor each patch by making its mutation by hand on the code TASK-449 left and diffing it, header kept. 2. Run forks-take-branches-claimed with its killer (macOS) and the killer on the clean tree. 3. Compile uploads-copied-each-try (killer is extentd's, Linux-only). 4. mutants.sh --check; CLADEFS_TEST_PARTS=scripts scripts/test.sh.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+forks-take-branches-claimed: same mutation; host_store's look is now only a writable fork's (TASK-449: a point's fork makes none, fork_point's record create refusing another's), so the hunk keeps the is_point guard and drops only the look's refusal; record_fork_under's two hunks unchanged, re-offset. Header notes the writable-only scope. macOS: mutants.sh forks-take-branches-claimed -> killed (remote.rs:3826 left (Ok(()), true) right (Err(EEXIST), false)); killer alone on the clean tree passes.
+uploads-copied-each-try: same mutation (Bytes::copy_from_slice per try in bucket::create and update), context re-anchored on Created(version)/Updated(version). Compiles on macOS (cargo check -p extent_remote); killer extentd::tests::soak::... is Linux-only (extentd cfg(target_os=linux)): unrun, needs ubu1 under fxjob.
+mutants.sh --check: 22 checked, 0 broken. CLADEFS_TEST_PARTS=scripts scripts/test.sh passes on macOS (501 python tests OK, every mutants check 0 broken).
+<!-- SECTION:NOTES:END -->
