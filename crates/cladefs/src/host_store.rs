@@ -23,6 +23,7 @@
 use crate::error::{Errno, Error};
 use crate::faults::failpoint;
 use anyhow::Context as _;
+use extent_remote::known::Learned;
 use extent_remote::layout::{Branch, Cell, Child};
 use extent_remote::store::Store as Bucket;
 use extent_remote::{branch, cell};
@@ -301,9 +302,16 @@ pub(crate) fn create_unmade(
         let url = bucket.map_or_else(|| bucket_for(path), |bucket| Ok(bucket.to_owned()))?;
         let branch = match of {
             BranchOf::New(cell) => new_branch(&*self::bucket(&url)?, cell)?,
+            // Its record, read to see the bucket has it, is what the store's opening, next, would
+            // read first: learned for it, a read less (`extent_remote::known`, TASK-449).
             BranchOf::Taken(branch) => {
-                let found = upload::block_on(branch::record(&*self::bucket(&url)?, branch))??;
-                found.ok_or(extent_remote::Error::NoBranch)?;
+                let bucket = self::bucket(&url)?;
+                let found = upload::block_on(branch::record(&*bucket, branch))??;
+                let record = found.ok_or(extent_remote::Error::NoBranch)?;
+                if let Some(known) = extent_remote::Bucket::known(&*bucket) {
+                    let learned = Learned { record, cell: None, headless: false };
+                    known.learn(branch, learned);
+                }
                 branch
             }
             #[cfg(test)]
@@ -460,7 +468,9 @@ fn fork_in<H>(
         }
         err => anyhow::anyhow!("forking to branch {branch}: {err}"),
     };
-    if !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
+    // A fork of a point needs no look first: its child's record's create refuses a record there
+    // alike (`Remote::child_free`, TASK-449).
+    if !remote.is_point() && !remote.child_free(branch).map_err(|err| Error::new(failed(err)))? {
         return Err(Error::new(taken(branch)));
     }
     let made = match remote.is_point() {

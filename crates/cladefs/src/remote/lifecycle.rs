@@ -209,6 +209,10 @@ struct Asked {
     busy: Duration,
     /// The most in flight at once.
     at_once: usize,
+    /// The longest chain of its requests each begun once the one before it was answered: its
+    /// round trips one after another, counted, as the latency over its busy time estimates them
+    /// (TASK-449).
+    chain: usize,
     /// The keys it read (`get`, `get-range`, `head`) more than once, and how often.
     again: BTreeMap<String, u64>,
 }
@@ -226,6 +230,7 @@ impl Asked {
             }
         }
         asked.again = read.into_iter().filter(|(_, count)| *count > 1).collect();
+        asked.chain = chain(events);
         // The time a request was in flight, and the most at once, by their beginnings and ends.
         let mut edges: Vec<(Duration, i32)> =
             (events.iter()).flat_map(|event| [(event.began, 1), (event.ended, -1)]).collect();
@@ -248,6 +253,11 @@ impl Asked {
         self.kinds.values().sum()
     }
 
+    /// Its requests and its round trips one after another ([`Asked::chain`]).
+    fn cost(&self) -> (u64, usize) {
+        (self.requests(), self.chain)
+    }
+
     fn add(&mut self, other: &Self) {
         self.wall += other.wall;
         for (kind, count) in &other.kinds {
@@ -256,6 +266,7 @@ impl Asked {
         (self.up, self.down) = (self.up + other.up, self.down + other.down);
         self.busy += other.busy;
         self.at_once = self.at_once.max(other.at_once);
+        self.chain += other.chain;
     }
 
     /// Its line: `latency` is what each request waited, which its busy time over is the round
@@ -274,9 +285,10 @@ impl Asked {
             .map(|(key, count)| format!("{} x{count}", names.named(key)))
             .collect();
         format!(
-            "requests={} in-series={series} at-once={} wall-ms={:.0} bucket-ms={:.0} up={} down={} \
-             [{}] again=[{}]",
+            "requests={} chain={} in-series={series} at-once={} wall-ms={:.0} bucket-ms={:.0} \
+             up={} down={} [{}] again=[{}]",
             self.requests(),
+            self.chain,
             self.at_once,
             ms(self.wall),
             ms(self.busy),
@@ -286,6 +298,18 @@ impl Asked {
             again.join("; ")
         )
     }
+}
+
+/// The longest chain of `events` each begun once the one before it in the chain was answered.
+fn chain(events: &[Event]) -> usize {
+    let mut events: Vec<&Event> = events.iter().collect();
+    events.sort_by_key(|event| event.began);
+    let mut longest: Vec<usize> = Vec::with_capacity(events.len());
+    for (i, event) in events.iter().enumerate() {
+        let before = (0..i).filter(|&j| events[j].ended <= event.began).map(|j| longest[j]);
+        longest.push(1 + before.max().unwrap_or(0));
+    }
+    longest.into_iter().max().unwrap_or(0)
 }
 
 /// The names of the branches and cells a run made, by their IDs as keys have them.
@@ -390,25 +414,43 @@ fn open(path: &Path) -> ExtentStore {
     reopened(path, idle()).unwrap()
 }
 
-/// The phases on a base of `extents` extents, each request `latency` late.
-fn lifecycle(extents: u64, latency: Duration) {
-    let dir = tempfile::tempdir().unwrap();
-    let faults = Faults::new(Duration::ZERO, None);
-    let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    let log = Arc::new(Log { origin: Instant::now(), events: Mutex::default() });
-    let objects: Arc<dyn ObjectStore> = Arc::new(Recording {
-        objects: Arc::new(Faulty::new(memory, faults.clone())),
-        log: log.clone(),
-    });
-    let mut run =
-        Run { extents, latency, log, faults, names: Names::default(), phases: Vec::new() };
+/// A base of `extents` extents and a point of it, made on one host, kept in `objects`, and the
+/// directory of another, measured, which saw neither: what the phases run on.
+struct Made {
+    dir: tempfile::TempDir,
+    point: Branch,
+    capacity: u64,
+}
 
-    // The host the base is made on, and its point: another's than the one measured.
-    let elsewhere = Arc::new(Bucket::new(objects.clone(), ""));
-    let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
-    let made = dir.path().join("made");
-    std::fs::create_dir(&made).unwrap();
-    let base = kept_in(made.join("base"), (capacity, None), &elsewhere, idle()).unwrap();
+impl Made {
+    /// Makes them, their requests noted in `run`.
+    fn new(extents: u64, objects: &Arc<dyn ObjectStore>, run: &mut Run) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        // The host the base is made on, and its point: another's than the one measured.
+        let elsewhere = Arc::new(Bucket::new(objects.clone(), ""));
+        let capacity = (8 * extents * BLOCK as u64).max(1 << 30);
+        let made = dir.path().join("made");
+        std::fs::create_dir(&made).unwrap();
+        let point = based(extents, &made, (capacity, &elsewhere), run);
+        std::fs::create_dir(dir.path().join("host")).unwrap();
+        Self { dir, point, capacity }
+    }
+
+    /// The path of the store `name` on the host measured.
+    fn at(&self, name: &str) -> std::path::PathBuf {
+        self.dir.path().join("host").join(name)
+    }
+}
+
+/// Makes a base of `extents` extents, of `capacity` bytes, in `made` and kept in `bucket`, and a
+/// point of it, its requests noted in `run`, and returns the point.
+fn based(
+    extents: u64,
+    made: &Path,
+    (capacity, bucket): (u64, &Arc<Bucket>),
+    run: &mut Run,
+) -> Branch {
+    let base = kept_in(made.join("base"), (capacity, None), bucket, idle()).unwrap();
     run.names.name(base.branch(), "base");
     // Extents of one to four blocks, so that their lengths and places in their segments vary, as
     // an image's do: a checkpoint of extents all alike packs smaller than one of a real base.
@@ -429,20 +471,55 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.names.name(point, "point");
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} point of the base: {line}");
-    drop(base);
+    point
+}
 
-    // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
-    // directories of its own. What it does once, not for each restore, done first: its
-    // conditional writes probed, a block of object IDs taken.
-    let bucket = Arc::new(Bucket::new(objects, ""));
-    // The bucket the daemon's stores are made in, as a point taken from it is.
-    unsafe { std::env::set_var("CLADEFSD_REMOTE", url_of(&bucket)) };
+/// Has `bucket` be the measured host's, as the daemon's stores are made in it, and does what a
+/// host does once, not for each restore: its conditional writes probed, a block of object IDs
+/// taken.
+fn host(bucket: &Arc<Bucket>) {
+    unsafe { std::env::set_var("CLADEFSD_REMOTE", url_of(bucket)) };
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_store::new_branch(&bucket, new_cell(NO_TENANT)).unwrap();
-    let host = dir.path().join("host");
-    std::fs::create_dir(&host).unwrap();
-    let at = |name: &str| host.join(name);
-    let opening = || Opening { keeping: idle(), ..Opening::here().unwrap() };
+    host_store::new_branch(bucket, new_cell(NO_TENANT)).unwrap();
+}
+
+/// A bucket's objects in memory.
+fn memory() -> Arc<dyn ObjectStore> {
+    Arc::new(object_store::memory::InMemory::new())
+}
+
+/// How the host measured opens stores: uploading only as a commit waits.
+fn opening() -> Opening {
+    Opening { keeping: idle(), ..Opening::here().unwrap() }
+}
+
+/// `objects`, its requests noted, each as late as the run says, of a base of `extents` extents:
+/// and the run.
+fn recorded(
+    objects: Arc<dyn ObjectStore>,
+    extents: u64,
+    latency: Duration,
+) -> (Arc<dyn ObjectStore>, Run) {
+    let faults = Faults::new(Duration::ZERO, None);
+    let log = Arc::new(Log { origin: Instant::now(), events: Mutex::default() });
+    let objects: Arc<dyn ObjectStore> = Arc::new(Recording {
+        objects: Arc::new(Faulty::new(objects, faults.clone())),
+        log: log.clone(),
+    });
+    let run = Run { extents, latency, log, faults, names: Names::default(), phases: Vec::new() };
+    (objects, run)
+}
+
+/// The phases on a base of `extents` extents, each request `latency` late.
+fn lifecycle(extents: u64, latency: Duration) {
+    let (objects, mut run) = recorded(memory(), extents, latency);
+    let made = Made::new(extents, &objects, &mut run);
+    let (point, capacity) = (made.point, made.capacity);
+    // The host measured: a bucket of its own over the same objects, which decoded nothing yet, and
+    // directories of its own.
+    let bucket = Arc::new(Bucket::new(objects, ""));
+    host(&bucket);
+    let at = |name: &str| made.at(name);
     run.late(true);
 
     // A restore on a host that never saw the point: its store taken from the bucket, as the
@@ -545,4 +622,76 @@ fn bucket_lifecycle_by_phase() {
     for extents in sizes.split(',') {
         lifecycle(extents.trim().parse().expect("CLADEFS_LIFECYCLE_EXTENTS"), latency);
     }
+}
+
+/// TASK-449: a restore, a fork of a point and its child's first open, asks the bucket what the
+/// protocol needs, at once where it can: a fork, its child's record created, then its reference
+/// and its cell held at once, the point's record read, the record made from the version its create
+/// left (4 round trips, one after another); the child's open, its head taken from none and its
+/// record read again (2), all else known from the fork (`extent_remote::known`). 7 requests in 6
+/// round trips, where they were 14 in 13. On a host that never saw the point, its store taken
+/// first, opened once, its record read as the take finds it, at once with the collector's marking
+/// looked at, then the base's head and the checkpoint the point names (3): 11 in 9, where they were
+/// 25 in 21. Requests are counted as they reach the object store, round trips as the longest chain
+/// of them each begun once the one before it was answered.
+#[test]
+fn restores_ask_the_bucket_what_the_protocol_needs() {
+    let (objects, mut run) = recorded(memory(), 64, Duration::from_millis(5));
+    let made = Made::new(64, &objects, &mut run);
+    let bucket = Arc::new(Bucket::new(objects, ""));
+    host(&bucket);
+    let at = |name: &str| made.at(name);
+    run.late(true);
+    let taking = (made.capacity, made.point, None);
+    let taken = run.phase("cold point-open", || {
+        ExtentStore::take_with(at("point"), taking, opening()).unwrap()
+    });
+    run.phase("cold fork", || taken.fork(at("cold"), new_cell(NO_TENANT)).unwrap());
+    let cold = run.phase("cold fork-open", || open(&at("cold")));
+    run.phase("warm fork", || taken.fork(at("vm"), new_cell(NO_TENANT)).unwrap());
+    let vm = run.phase("warm fork-open", || open(&at("vm")));
+    let costs: Vec<_> =
+        (run.phases.iter()).map(|(phase, asked, _)| (*phase, asked.cost())).collect();
+    run.report();
+    assert_eq!(
+        costs,
+        [
+            ("cold point-open", (4, 3)),
+            ("cold fork", (5, 4)),
+            ("cold fork-open", (2, 2)),
+            ("warm fork", (5, 4)),
+            ("warm fork-open", (2, 2)),
+        ]
+    );
+    drop((vm, cold, taken));
+}
+
+/// TASK-449: a restore on a host that has the point open opens no connection to the bucket: those
+/// its requests went on before stay in the bucket's pool, the fork's too, on the runtime of the
+/// calls from no runtime's task, which lives on (`extent_store::upload::block_on`). On a runtime of
+/// each call's own, as before, every fork connected anew for what it asked at once beyond the
+/// connections the host's runtime had left idle in the pool (here one: its reference's write and
+/// its cell's holding), a TCP handshake, and on a bucket elsewhere a TLS one too, before the
+/// request, the connection closed as the fork returned. Against the S3 server in memory, which
+/// counts the connections it accepts, the host a client of its own, as another host is.
+#[test]
+fn restores_connect_to_the_bucket_no_more() {
+    let serving = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let server = serving.block_on(async { extent_remote::s3_server::S3Server::start(None) });
+    let (objects, mut run) = recorded(server.objects(), 16, Duration::ZERO);
+    let made = Made::new(16, &objects, &mut run);
+    // The host measured: a client of its own, its own pool of connections, as another host's.
+    let bucket = Arc::new(Bucket::new(server.objects(), ""));
+    host(&bucket);
+    let taking = (made.capacity, made.point, None);
+    let taken = ExtentStore::take_with(made.at("point"), taking, opening()).unwrap();
+    let restore = |name: &str| {
+        let before = server.connections();
+        taken.fork(made.at(name), new_cell(NO_TENANT)).unwrap();
+        let forked = server.connections();
+        drop(open(&made.at(name)));
+        (forked - before, server.connections() - forked)
+    };
+    let connected: Vec<_> = ["first", "second", "third"].map(restore).into();
+    assert_eq!(connected, [(0, 0); 3]);
 }

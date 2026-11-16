@@ -2028,6 +2028,16 @@ DeletedUntaken ==
         (ses[h][b] # None /\ ses[h][b].pc \in {"record", "ready"} /\ Taking(ses[h][b], b))
             => rec[b] # None /\ ~rec[b].deleted
 
+\* A segment a head names keeps its epoch while the head stands (TASK-449): an acknowledgement names
+\* more, a takeover goes on from the head's end, a deletion keeps what it names, and nothing
+\* renames one; only a removal deletes a head, with its cell (recordsKept). So a host keeps the
+\* epoch of a fork point's segment once it read it (extent_remote::known), and reads the
+\* checkpoint there by its key, with no read of its origin's head, whenever after.
+NamedEpochsStay ==
+    [][\A b \in Branches :
+          head'[b] # None => \A s \in 0..(End(b) - 1) : s < End(b)' /\ Chain(b)'[s + 1] = Chain(b)[s + 1]
+      ]_vars
+
 \* Every live branch forked from another cell, and every point's clone, has its reference under
 \* its origin's cell, naming its fork point (TASK-395): written before its record, retired only
 \* once it is deleted.

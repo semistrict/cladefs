@@ -3,7 +3,7 @@ id: doc-7
 title: 'Object storage: how the host keeps branches in S3 and GCS'
 type: specification
 created_date: '2026-10-17 01:31'
-updated_date: '2026-11-16 03:39'
+updated_date: '2026-11-16 06:43'
 ---
 # Object storage: how the host keeps branches in S3 and GCS
 
@@ -475,7 +475,9 @@ it (Bucket.tla, every model; `KeysWrittenOnce`, `HeadsCurrent`, `NoAckedLost`).
 - **What it costs.** A durable commit is two round trips one after the other, the segment's create
   and the head's swap; before, its create alone, the fencing (TASK-371, which had taken a third
   away). A take is the head's read and swap, then the recovery's reads, all of them at once, as
-  their keys are known. *Measured on ubu1 (TASK-407.5, 2026-11-15,
+  their keys are known; cladefs: the record, the head and the cell's object read at once, the
+  recovery from that head, and, of a branch the host just made, none of them (What a host knows,
+  TASK-449). *Measured on ubu1 (TASK-407.5, 2026-11-15,
   docs/measurements/durable-commits-under-the-head-2026-11-15.md):* a guest's sync-loop round
   through the daemon, at 25 ms a request, about 60 ms under the head against about 33 ms before:
   one round trip more, a sync loop of about 17 a second where it was 30.
@@ -658,13 +660,15 @@ immutable instead.
 
 The steps of a fork of point P to child C:
 
-1. C's record, created saying the fork is being made (`forking: P`). cladefs: then its reference
-   under the cell of the branch P names (Garbage collection, References; after the record since
-   TASK-395.10).
+1. C's record, created saying the fork is being made (`forking: P`): a record there refuses the
+   fork, another's as `IdTaken`, no look made first (TASK-449). cladefs: then its reference under
+   the cell of the branch P names (Garbage collection, References; after the record since
+   TASK-395.10), and at once C's cell held by its host (What a host knows, TASK-449).
 2. A read of P's record: deleted, the fork fails. cladefs: so does it if C is of another tenant's cell
    than P, and the record doesn't say P is shared (`Error::NotShared`, `EACCES`; TASK-395.7). The
    read is made then whatever the rule that checks for deletion says.
-3. C's record, updated with a condition: no longer being made. Only then does the fork succeed.
+3. C's record, updated with a condition, from the version its create left: no longer being made.
+   Only then does the fork succeed.
 4. cladefs (TASK-411.4): if what P names is sealed, C being of another cell, as every clone a host
    makes is: C's cell, made with a KEK of the host's pool, and C's record given its keys by a
    conditional update: its DEK and those it inherits, from the host's copy of P, rewrapped under
@@ -723,6 +727,79 @@ rewrapped under its own cell's KEK, so that the point's tenant shredding its KEK
 (no copy of the point opens) and breaks none made. No tenant is special: tenant 0's
 points are shared or not as any other's. Forks of branches with writers into another tenant's cell
 (a public base forked into a tenant's directory) are not checked yet (TASK-395.9).
+
+### What a host knows: a restore in 6 round trips (TASK-449)
+
+Measured by TASK-443.5 (docs/measurements/macos-bucket-lifecycle-2026-11-15): a restore, a fork of
+a point and its child's first open, asked the bucket 14 requests, 13 one after another (0.41 s at
+30 ms a request, 1.3 s at 100 ms) before the VM could boot; 25 in 21 on a host that never saw the
+point. The child's record was read 4 times and written twice, its head read twice, for a branch
+the host had made moments before, and a point taken from the bucket was opened twice. Now 7
+requests in 6 round trips, and 11 in 9 cold (docs/measurements/macos-restore-round-trips-2026-11-16):
+
+| | before | after |
+|---|---|---|
+| fork of a point | 6 in 6: the child's record read; created; the reference; the point's record; the child's record read; updated | 5 in 4: the child's record created; the reference and the child's cell held, at once; the point's record; the child's record updated from the version its create left |
+| the child's first open | 8 in 7: record and head at once; head; the base's head; the cell read; the cell created; the head created; the record | 2 in 2: the head created; the record |
+| a point taken, cold | 11 in 8, opened twice | 4 in 3: the point's record (with the collector's marking looked at); the base's head; the checkpoint at the fork point |
+
+Each read skipped is one no other actor can make wrong, or one whose being wrong costs requests and
+never safety:
+
+- **Facts that never change once seen** (`extent_remote::known`, `Known::epoch`): the epoch of the
+  writer of a segment a head names. A head's runs of epochs only grow: an acknowledgement names
+  more, a takeover goes on from the end, a deletion keeps what it names, and nothing renames a
+  segment named; only a removal deletes a head, with its cell (specs/bucket's action property
+  `NamedEpochsStay`, checked in the models with takeovers, deletions, removals, compaction and
+  restores). So a fork point's checkpoint, at the key of that epoch (`state_at`), is read with no
+  read of the origin's head once a host read it there: every restore after its first on a host,
+  and the point's own open before its forks'.
+- **A point has no head**, then or ever (rule `points_take_no_writer`; invariant
+  `PointsUnwritten`): its copy reads none (`head::Read::of_point`).
+- **What a host learned of a branch it is about to open** (`known::Learned`): its record as its own
+  fork or take left it, its cell's object as its fork held it, and that it has no head, taken by
+  the branch's store's first opening here (`upload.rs`'s `first_reads`) in place of its first
+  reads. Each is what a read at the moment of the write would have found, so using it is that
+  read made earlier, which every step after allows for: the cell's holding and the head's taking
+  are conditional on the version they start from, and go on from what is there if another's write
+  came between; and the record is read again once the head is taken (`Writer::take`), as after a
+  first read from before the branch's deletion, or its cell's removal (the model's `staleTake`
+  and `OpenGone`, in BucketRemovals and BucketForks). It lives in the host's memory alone, a few
+  thousand at most, the oldest going first, and only a store whose log goes on from nothing the
+  bucket acknowledged uses it.
+- **No look at a clone's ID first**: the record's create finds any record there, and refuses it
+  as the look did: another's, deleted or not, `IdTaken` (`EEXIST`); ours given up on, its point
+  deleted (`ENOENT`); ours being made, resumed (TASK-455's order kept: resumed with a condition,
+  then the reference, then the fork made).
+- **The clone's update from its create's version**: conditional on it as on one a read found
+  (`transition_leaving`, `Start::Found`), so its deletion, its giving up, or a resume since makes
+  it read the record anew, as before.
+- **The child's cell held by its fork**, made, for the host's placement, the volume the child's
+  store will be, at once with the reference, after the record (a cell of no record keeps its
+  object, Dead cells removed whole): what the child's store would hold first as it opens, done
+  earlier, as a holding before a crash and a reopening is. A fork that fails after leaves the
+  cell's object in a cell already kept, a clone never made. Only on a host with no KMS, for a fork
+  inheriting no keys: otherwise the child's store makes its cell, sealed or not, as it opens
+  (TASK-485).
+- **One open of a point taken from the bucket**: `ExtentStore::take_with` opens the store its
+  making opened, rather than closing and opening it again; the record its making read to see the
+  bucket has the branch is learned for that opening.
+- **Reads at once**: an opening with nothing learned reads the record, the head and the cell's
+  object at once; the recovery starts from the head read with the record (`recover_under_from`),
+  which the taking goes on from, rather than reading it again.
+
+**Connections.** The calls from no runtime's task (`extent_store::upload::block_on`, a fork's steps
+among them) each ran on a runtime of their own, dropped as they returned: a bucket's connections
+are tasks of the runtime that opened them (`reqwest`, as `object_store` uses it), so every
+connection such a call opened closed with it, and a fork asking more at once than the host's
+runtime had left idle in the pool connected anew each time, a TCP handshake, and a TLS one on a
+bucket elsewhere, before its request (`requests_on_runtimes_dropped_after_connect_anew`;
+cladefs's `restores_connect_to_the_bucket_no_more`: a connection a restore before). They run on one
+runtime for the process now, whose connections stay in the pool.
+
+`remote::lifecycle::restores_ask_the_bucket_what_the_protocol_needs` pins each phase's requests and
+round trips one after another (the longest chain of requests each begun once the one before it was
+answered); `bucket_lifecycle_by_phase` measures them at any base size and latency.
 
 ## Reading
 

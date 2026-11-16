@@ -48,6 +48,7 @@ use event_listener::{Event, Listener as _};
 use extent_remote::cache::Cache;
 use extent_remote::fetch::Budget;
 use extent_remote::keys::{self, CellKeys, Ring, RingHold};
+use extent_remote::known::Learned;
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
@@ -112,15 +113,34 @@ pub fn uploaders() -> tokio::sync::watch::Receiver<usize> {
     UPLOADERS.subscribe()
 }
 
-/// Runs `future` to its end on a runtime of its own, as what is called from no runtime's task
-/// does.
+/// Runs `future` to its end, on the calling thread, as what is called from no runtime's task does:
+/// on the process's runtime for it ([`BLOCKING`]), which lives on after it, with the connections
+/// to buckets it opened.
 pub fn block_on<F: std::future::Future>(future: F) -> Result<F::Output, Failure> {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|err| Failure::local(err, "a runtime"))?;
-    Ok(runtime.block_on(future))
+    let runtime = BLOCKING.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(BLOCKING_WORKERS)
+            .thread_name("cladefs-block-on")
+            .enable_all()
+            .build()
+            .map_err(|err| Failure::local(err, "the runtime of calls from no runtime's task"))
+    });
+    Ok(runtime.as_ref().map_err(Clone::clone)?.block_on(future))
 }
+
+/// cladefs: the runtime [`block_on`] runs its futures on, one for the process, made by its first
+/// call (TASK-449). A bucket's connections are tasks of the runtime they opened on (`reqwest`'s, as
+/// `object_store` uses it, spawns them there), which stay in the bucket's pool for the next
+/// request, whatever its runtime, for as long as theirs lives. A runtime of each call's own, as
+/// before, closed them as it returned: each call connected anew, a TCP handshake, and a TLS one on
+/// a bucket elsewhere, before its first request, every fork of a point among them
+/// (extent_remote's `requests_on_runtimes_dropped_after_connect_anew` counts them).
+static BLOCKING: std::sync::OnceLock<Result<tokio::runtime::Runtime, Failure>> =
+    std::sync::OnceLock::new();
+
+/// How many worker threads [`BLOCKING`] has: its futures run on their callers' threads, its workers
+/// what they spawn, connections mostly, which wait on the network.
+const BLOCKING_WORKERS: usize = 2;
 
 /// Deletes `branch` in `bucket` (`extent_remote::branch::delete`), as the placement whose fencing
 /// token is `token`: its writer stops at its next acknowledgement, no writer takes it again, and
@@ -549,6 +569,12 @@ impl<D: Dir> Remote<D> {
     /// child its keys, once its record is made: its cell made with the KEK from the host's pool, its
     /// record given its DEK and those it inherits, rewrapped under that KEK
     /// (`keys::give_inherited`, TASK-411.4). Failing, the fork fails, which its host deletes.
+    ///
+    /// cladefs: a fork of a point this host made says what it left of the child to the child's
+    /// store's first opening here ([`Learned`], TASK-449): its record; its cell, which the fork
+    /// holds, made, for this host's placement, at once with the reference's write, if the host has
+    /// no KMS and the child inherits no keys (with either, the child's store makes it, sealed or
+    /// not, as it opens); and that it has no head.
     pub fn forked(
         &self,
         epoch: u64,
@@ -556,24 +582,39 @@ impl<D: Dir> Remote<D> {
         inheriting: Option<keys::Inheriting>,
     ) -> Result<(), Failure> {
         failing!("remote::forked");
-        self.fork_made(epoch, child)?;
+        let holds = inheriting.is_none() && self.shared.keys.kms.is_none();
+        let Made { mut record, cell } = self.fork_made(epoch, child, holds)?;
         if let Some(inheriting) = inheriting {
             let holder = self.shared.holder();
-            block_on(keys::give_inherited(&*self.bucket, inheriting, holder))??;
+            let given = block_on(keys::give_inherited(&*self.bucket, inheriting, holder))??;
+            record = record.map(|_| given);
+        }
+        if let (Some(record), Some(known)) = (record, extent_remote::Bucket::known(&*self.bucket)) {
+            known.learn(child.branch, Learned { record, cell, headless: true });
         }
         Ok(())
     }
 
     /// Makes the fork the store made of its branch with its commit `epoch` a fork of the branch in
-    /// object storage, its child's record and checkpoint ([`Remote::forked`]).
-    fn fork_made(&self, epoch: u64, child: Child) -> Result<(), Failure> {
+    /// object storage, its child's record and checkpoint ([`Remote::forked`]). A fork of a point
+    /// holds the child's cell too, if `holds`, and says what it made.
+    fn fork_made(&self, epoch: u64, child: Child, holds: bool) -> Result<Made, Failure> {
         let shared = &self.shared;
         if let Some(point) = shared.point.get() {
             let (of, origin) = (point.branch, point.origin);
-            let forking = branch::fork_point(&*self.bucket, child.branch, of, origin, child.owner);
+            let holding = async {
+                match holds {
+                    true => self.hold_child_cell(child.branch).await,
+                    false => None,
+                }
+            };
+            let bucket = &*self.bucket;
+            let forking =
+                branch::fork_point_with(bucket, child.branch, of, origin, child.owner, holding);
             return match block_on(forking)? {
                 Err(extent_remote::Error::Deleted) => Err(Failure::PointDeleted),
-                forked => Ok(forked?),
+                Err(err) => Err(err.into()),
+                Ok((record, cell)) => Ok(Made { record, cell: cell.flatten() }),
             };
         }
         let child = child.branch;
@@ -587,7 +628,31 @@ impl<D: Dir> Remote<D> {
             Some(writer) if writer.refused(child) => {
                 Err(extent_remote::Error::IdTaken(child).into())
             }
-            _ => Ok(()),
+            _ => Ok(Made::default()),
+        }
+    }
+
+    /// cladefs: holds `child`'s cell, a fork's of the point the store holds, made, for this host's
+    /// placement, the volume of it the child's store will be, as that store's opening here would
+    /// hold it first (`Shared::start`, TASK-449): the cell's object as it left it, which that
+    /// opening starts from. Its cell new, drawn for it, it is created: one there is read, and gone
+    /// on from. After the child's record, which names the cell's branch (a cell of no record
+    /// keeps its object, doc-7), at once with the reference. Failing, it holds nothing: the
+    /// opening holds it then, as before.
+    async fn hold_child_cell(&self, child: Branch) -> Option<extent_remote::bucket::Object> {
+        let volume = self.store().volume()?;
+        let placement = self.shared.options.token;
+        let volume = (volume.name.as_str(), cell::Volume { branch: child.id, kind: volume.kind });
+        let start = branch::Start::Create;
+        let holding = (placement, placement);
+        let held =
+            cell::hold_from(&*self.bucket, child.cell, start, holding, (true, None), Some(volume));
+        match held.await {
+            Ok((_, _, left)) => left,
+            Err(err) => {
+                log::debug!("cladefs: holding the cell of branch {child}, a fork's: {err}");
+                None
+            }
         }
     }
 
@@ -649,7 +714,8 @@ impl<D: Dir> Remote<D> {
     /// Whether `child`'s ID is free in object storage for a fork the store is making of its
     /// branch, before the fork's commit: unless another branch has it, as a guest may give any,
     /// whose record its parent's writers, finding it another's, would fail on for ever. One GET of
-    /// the child's record.
+    /// the child's record. cladefs: a fork of a point needs none: its child's record's create finds
+    /// any there, and refuses it alike (`branch::fork_point`, TASK-449).
     pub fn child_free(&self, child: Branch) -> Result<bool, Failure> {
         let found = block_on(branch::record(&*self.bucket, child))??;
         failing!("remote::child_free");
@@ -1024,11 +1090,8 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let branch = recovering.branch();
         let (cache, parts) = (self.options.cache.clone(), self.options.held.clone());
         let placement = recovering.token().unwrap_or(self.options.token);
-        // The record, and the head the writer takes after recovering the branch, at once: the
-        // taking goes on from this read of it, a round trip less (TASK-165.11).
-        let (found, read) =
-            futures::join!(record(&**bucket, branch), extent_remote::head::read(&**bucket, branch));
-        let found = match found? {
+        let (found, read, cell) = first_reads(&**bucket, branch, &recovering).await?;
+        let found = match found {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
             None if recovering.base().is_some() => {
@@ -1038,7 +1101,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             None => None,
             Some(record) if record.is_point() => {
                 let (Recovered { state, layer, .. }, keys) =
-                    self.point(bucket, branch, record).await?;
+                    self.point(bucket, branch, record, read.head()?).await?;
                 let opening =
                     Opening { state, layer, taken: None, cache, keys: keys.clone(), held: parts };
                 let store = blocking(|| recovering.open(options, opening))?;
@@ -1059,10 +1122,12 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                         keys::ring(&**bucket, &keys, branch, &record, true).await?
                     }
                 };
-                let recovered = extent_remote::recovery::recover_under(
+                // From the head read with the record, which the taking goes on from.
+                let recovered = extent_remote::recovery::recover_under_from(
                     &**bucket,
                     branch,
                     record.origin(),
+                    read.head()?,
                     &before,
                 )
                 .await?;
@@ -1100,8 +1165,9 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             _ => keys::new_cell_kek(kms, branch.cell.tenant).await?,
         };
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
-        let holding = cell::hold(&**bucket, branch.cell, (placement, placement), making, volume);
-        let (held, object) = match holding.await {
+        let holding = (placement, placement);
+        let holding = cell::hold_from(&**bucket, branch.cell, cell, holding, making, volume);
+        let (held, object) = match holding.await.map(|(held, object, _)| (held, object)) {
             Ok(held) => held,
             Err(err) => {
                 if let (Some(kms), Some((secret, kek))) = (kms, kek) {
@@ -1211,11 +1277,14 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     /// store does goes to the bucket but its forks' records.
     /// cladefs: and its keys, its ancestors' DEKs, under its cell's KEK as read, taking it not
     /// (TASK-411.3).
+    /// cladefs: recovered from `head`, what a read of its head found, or what the host knows it
+    /// has, none (TASK-449).
     async fn point(
         &self,
         bucket: &Arc<B>,
         branch: Branch,
         record: Record,
+        head: Option<extent_remote::layout::Head>,
     ) -> Result<(Recovered, Arc<Ring>), Failure> {
         if record.deleted {
             return Err(Failure::PointDeleted);
@@ -1225,8 +1294,13 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         };
         let cell_keys = self.cell_keys(bucket, branch.cell, None).await?;
         let keys = keys::ring(&**bucket, &cell_keys, branch, &record, false).await?;
-        let recovering =
-            extent_remote::recovery::recover_under(&**bucket, branch, Some(origin), &keys);
+        let recovering = extent_remote::recovery::recover_under_from(
+            &**bucket,
+            branch,
+            Some(origin),
+            head,
+            &keys,
+        );
         let recovered = recovering.await?;
         let _ = self.point.set(Point { branch, origin });
         Ok((recovered, keys))
@@ -1333,15 +1407,67 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
     }
 }
 
-/// The record of `branch`, if it has one: a fork of a point its host crashed in the middle of, its
-/// record saying so, resumed first ([`branch::resume_point_fork`]: its reference written, the
-/// fork made), which fails if the point was deleted. So the store takes no state of a fork not
-/// made.
-async fn record<B: extent_remote::Bucket>(
+/// What an opening of the store of `branch`, which `recovering` recovered, reads first, at once
+/// (TASK-165.11, TASK-449): its record ([`resumed`]), its head, which the writer's taking goes on
+/// from and its recovery starts from, and its cell's object, which its holding goes on from,
+/// returning what the holding starts from. Of a branch this host has just made or taken, as the
+/// bucket's [`Known`](extent_remote::known::Known) says ([`Learned`]), what it learned stands for
+/// those reads: its record as it left it, its cell's object, if it held it, and its head, none, if
+/// it knows it has none, a clone made or a point. Each is as a read made then: the head's taking
+/// and the cell's are conditional on what they start from, and the record is read again once the
+/// head is taken (`Writer::take`). Only for a store whose log goes on from nothing the bucket
+/// acknowledged: one that has, learned nothing of here.
+async fn first_reads<B: extent_remote::Bucket, D: Dir>(
     bucket: &B,
     branch: Branch,
+    recovering: &Recovering<D>,
+) -> Result<(Option<Record>, extent_remote::head::Read, branch::Start), Failure> {
+    use extent_remote::head::{self, Read};
+    let key = extent_remote::layout::cell(branch.cell);
+    let cell_read = || extent_remote::bucket::get(bucket, &key);
+    let known = bucket.known().filter(|_| recovering.base().is_none());
+    let Some(Learned { record, cell, headless }) = known.and_then(|known| known.take(branch))
+    else {
+        let (found, read, cell) = futures::join!(
+            async { resumed(bucket, branch, branch::record(bucket, branch).await?).await },
+            head::read(bucket, branch),
+            cell_read(),
+        );
+        return Ok((found?, read, branch::Start::Found(cell)));
+    };
+    // A point, which no writer takes, holds no cell: its opening reads none.
+    let point = record.is_point();
+    let none = match headless {
+        true => Some(Read::absent()),
+        false => point.then(Read::of_point).flatten(),
+    };
+    let reading = async {
+        match none {
+            Some(none) => none,
+            None => head::read(bucket, branch).await,
+        }
+    };
+    let holding = async {
+        match cell {
+            Some(cell) => branch::Start::Found(Some(cell)),
+            None if point => branch::Start::Read,
+            None => branch::Start::Found(cell_read().await),
+        }
+    };
+    let (found, read, cell) =
+        futures::join!(resumed(bucket, branch, Some(record)), reading, holding);
+    Ok((found?, read, cell))
+}
+
+/// The record of `branch`, `found`, if it has one: a fork of a point its host crashed in the middle
+/// of, its record saying so, resumed first ([`branch::resume_point_fork`]: its reference written,
+/// the fork made), which fails if the point was deleted. So the store takes no state of a fork
+/// not made.
+async fn resumed<B: extent_remote::Bucket>(
+    bucket: &B,
+    branch: Branch,
+    found: Option<Record>,
 ) -> Result<Option<Record>, Failure> {
-    let found = branch::record(bucket, branch).await?;
     if !found.as_ref().is_some_and(|record| !record.deleted && record.forking().is_some()) {
         return Ok(found);
     }
@@ -1356,6 +1482,14 @@ fn stored<F: File>(file: &Arc<F>) -> Result<Body, Failure> {
     let size = file.size().map_err(|err| Failure::local(err, "a file to upload"))?;
     let file = file.clone();
     Ok(Body::new(size, move || blocking(|| read_object(&*file))))
+}
+
+/// cladefs: what a fork made ([`Remote::forked`]): of a point's, the child's record as it left
+/// it, a clone made, and its cell's object, if it held it.
+#[derive(Default)]
+struct Made {
+    record: Option<Record>,
+    cell: Option<extent_remote::bucket::Object>,
 }
 
 /// What a gather did ([`Shared::gather`]).

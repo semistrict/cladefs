@@ -2631,13 +2631,14 @@ mod tests {
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
         let cell = sizes[&layout::cell(branch.cell)];
         // The record, before the head and after; cladefs: its cell's object, held, read alone, its
-        // holder's as it was and naming the branch (TASK-364); the head, read, then swapped to
-        // take it. The segments' tails it names, all at once: no listing (TASK-407).
+        // holder's as it was and naming the branch (TASK-364); the head, read once, at once with
+        // the record and the cell, the recovery starting from it, then swapped to take it
+        // (TASK-449). The segments' tails it names, all at once: no listing (TASK-407).
         assert_eq!(
             (asked, after.downloaded - before.downloaded),
             (
                 vec![
-                    ("get", 5),
+                    ("get", 4),
                     ("get-range", 4),
                     ("head", 0),
                     ("list", 0),
@@ -2648,7 +2649,7 @@ mod tests {
                     ("list-delimited", 0),
                     ("delete-batch", 0),
                 ],
-                tails + 2 * record + 2 * head + cell
+                tails + 2 * record + head + cell
             )
         );
         let mut data = vec![0; 1 << 20];

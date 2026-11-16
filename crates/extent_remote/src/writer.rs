@@ -399,7 +399,7 @@ impl<B: Bucket> Writer<B> {
         let creates = futures::stream::iter(own).map(|(key, body)| async move {
             // One uploaded before, by this writer, whose key names its epoch, is created: its bytes.
             match self.create(&key, &body, |_| Ok(())).await? {
-                Created::Created => Ok(()),
+                Created::Created(_) => Ok(()),
                 Created::Exists(_) => Err(Error::Corrupt(format!("{key} holds another extent"))),
             }
         });
@@ -416,7 +416,7 @@ impl<B: Bucket> Writer<B> {
         failpoint!("writer::upload");
         match self.create(&key, &segment, taken).await {
             Err(error) => Err(self.stop(error)),
-            Ok(Created::Created) => {
+            Ok(Created::Created(_)) => {
                 failpoint!("writer::uploaded");
                 // Its objects, uploaded, go.
                 if let Some(pending) = self.inner().pending.get_mut(&seq) {

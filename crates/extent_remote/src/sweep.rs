@@ -391,6 +391,10 @@ impl<B: Bucket> Bucket for Counted<B> {
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
         self.bucket.decoded()
     }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        self.bucket.known()
+    }
 }
 
 #[cfg(test)]

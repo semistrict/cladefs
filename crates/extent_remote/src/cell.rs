@@ -26,7 +26,7 @@
 //! the cell again, nor writes a branch of it in the clear. Only as strong as the bucket keeps no
 //! older version of the cell's object, whose wrapped KEKs unwrap while its tenant's KEK lives.
 
-use crate::branch::{Start, Step, transition};
+use crate::branch::{Start, Step, transition, transition_leaving};
 use crate::bucket::Bucket;
 use crate::keys::Kek;
 use crate::layout::{self, Branch, Cell, FORMAT};
@@ -257,41 +257,61 @@ async fn change_held<R>(
 pub async fn hold(
     bucket: &impl Bucket,
     cell: Cell,
+    holding: (u64, u64),
+    making: (bool, Option<&Kek>),
+    volume: Option<(&str, Volume)>,
+) -> Result<(Held, Object), Error> {
+    let (held, object, _) = hold_from(bucket, cell, Start::Read, holding, making, volume).await?;
+    Ok((held, object))
+}
+
+/// cladefs: [`hold`], starting from `start`: what a read found, or what a holding before left, or
+/// nothing, for a cell just drawn, whose object its maker creates; its write conditional on what it
+/// starts from, as on what a read found, so that a write of another's since is read and gone on
+/// from (TASK-449). Returns too the cell's object as it left it, raw, what a later holding starts
+/// from: a fork's host holds its child's cell so, and the child's store, opening, from that.
+pub async fn hold_from(
+    bucket: &impl Bucket,
+    cell: Cell,
+    start: Start,
     (holder, token): (u64, u64),
     (make, kek): (bool, Option<&Kek>),
     volume: Option<(&str, Volume)>,
-) -> Result<(Held, Object), Error> {
+) -> Result<(Held, Object, Option<crate::bucket::Object>), Error> {
     if let Some((name, _)) = volume
         && !valid_name(name)
     {
         return Err(Error::VolumeName(name.into()));
     }
-    change(bucket, cell, Start::Read, |found| {
-        let (mut object, mut changed) = match found {
-            None if !make => return Err(Error::NoCell),
-            None => (Object::made(holder, token, kek.cloned()), true),
-            Some(found) if found.deleted => return Err(Error::Deleted),
-            Some(found) if found.shredded => return Err(shredded(cell)),
-            Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
-            Some(found) if found.holder == holder => (found, false),
-            Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
-        };
-        if let Some((name, volume)) = volume
-            && !object.volumes.values().any(|had| had.branch == volume.branch)
-        {
-            if object.volumes.contains_key(name) {
-                return Err(Error::VolumeExists(name.into()));
+    let decode = |bytes: &[u8]| Object::decode(cell, bytes);
+    let ((held, object), left) =
+        transition_leaving(bucket, &layout::cell(cell), start, decode, |found| {
+            let (mut object, mut changed) = match found {
+                None if !make => return Err(Error::NoCell),
+                None => (Object::made(holder, token, kek.cloned()), true),
+                Some(found) if found.deleted => return Err(Error::Deleted),
+                Some(found) if found.shredded => return Err(shredded(cell)),
+                Some(found) if rules().tokens && found.token > token => return Err(Error::Stale),
+                Some(found) if found.holder == holder => (found, false),
+                Some(found) => (Object { epoch: found.epoch + 1, holder, token, ..found }, true),
+            };
+            if let Some((name, volume)) = volume
+                && !object.volumes.values().any(|had| had.branch == volume.branch)
+            {
+                if object.volumes.contains_key(name) {
+                    return Err(Error::VolumeExists(name.into()));
+                }
+                object.volumes.insert(name.into(), volume);
+                changed = true;
             }
-            object.volumes.insert(name.into(), volume);
-            changed = true;
-        }
-        let held = Held { cell, epoch: object.epoch, holder };
-        Ok(match changed {
-            true => Step::Write(object.clone(), (held, object)),
-            false => Step::Stop((held, object)),
+            let held = Held { cell, epoch: object.epoch, holder };
+            Ok(match changed {
+                true => Step::Write(object.clone(), (held, object)),
+                false => Step::Stop((held, object)),
+            })
         })
-    })
-    .await
+        .await?;
+    Ok((held, object, left))
 }
 
 /// Adds to the cell `held` holds the volume `name`, `volume`: [`Error::VolumeExists`] if it has

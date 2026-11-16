@@ -21,6 +21,17 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## A restore in 6 round trips: what a host knows, cells held by forks, one runtime for calls from no task (TASK-449, 2026-11-16)
+
+Decided without you:
+- **What a host learned of a branch it is about to open is passed in its memory, on the bucket** (`extent_remote::known`, `Bucket::known`): the record its fork or take left, the cell's object its fork held, that the clone has no head; taken by the store's first opening. Not through the API (the daemon's fork and the VM's open are separate calls) nor on disk (stale after a crash for longer than any read). Its safety is that of a read made earlier, which the protocol allows for everywhere after (conditional writes; the record read again after the take; the model's `staleTake`, `OpenGone`). *Undo:* `Bucket::known` returning `None`: every opening reads as before.
+- **Segment epochs a head named are kept for good**, a map of at most 65,536, and a fork point's checkpoint is read by its key without the origin's head (spec property `NamedEpochsStay`). *Instead:* the epoch in every `Origin` (a format change of footers, records and references). *Undo:* `state_at` always reading the head.
+- **A fork of a point holds its child's cell, at once with the reference**, for its host's placement, on hosts with no KMS forking a point in the clear; elsewhere the child's opening holds it, as before (TASK-485 filed for sealed restores). A fork failing after it leaves the cell's object in a cell already kept (a clone never made keeps its record). *Undo:* `holds` false in `Remote::forked`.
+- **No look at a clone's ID before its record's create** (`child_free` is for writable forks alone), and a record found that is another's, deleted or not, refuses the fork as `IdTaken` (`EEXIST`), not `Deleted`, which mapped to "the point was deleted" (`ENOENT`): ours deleted still says that. `RESTORE_STEPS` lost `remote::child_free`.
+- **Every opening with nothing learned reads its cell's object at once with its record and head**: a GET more for a point's opening (which holds no cell), a round trip less for every other.
+- **`upload::block_on` runs on one multi-thread runtime of two workers for the process** rather than a runtime of each call's own: connections a call opened died with its runtime, and a fork asking two requests at once opened a connection a restore (`restores_connect_to_the_bucket_no_more`). *Undo:* the old body; the test goes red.
+- **The S3 server in memory is `extent_remote`'s `testing` feature's too** (optional deps `chrono`, `http-body-util`, `hyper-util`, MIT/Apache, all in the tree already as dev-dependencies), so cladefs's tests count a restore's connections.
+
 ## Rust rules from past bugs: a syntactic script, not dylint (TASK-444.6, 2026-11-15)
 
 TASK-444.6 asked for dylint lints. I wrote `scripts/rust-rules.py` instead, rules over the
