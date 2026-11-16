@@ -84,7 +84,7 @@ fn in_bucket(
         let record = branch::record(&**bucket, child).await.map_err(|err| err.to_string())?;
         let record = record.ok_or("no record")?;
         let origin = record.origin();
-        let kms = crate::bucket::kms();
+        let kms = crate::bucket::kms().map_err(|err| err.to_string())?;
         let keys = extent_bucket::keys::writing(&**bucket, &kms, child, &record).await;
         let keys = keys.map_err(|err| err.to_string())?;
         let recovering = extent_bucket::recovery::recover_under(&**bucket, child, origin, &keys);
@@ -110,7 +110,7 @@ async fn operator_delete(
     branch: crate::Branch,
     holder: u64,
 ) -> Result<(), extent_bucket::Error> {
-    let kms = crate::bucket::kms();
+    let kms = crate::bucket::kms().unwrap();
     branch::delete(&**bucket, branch, holder, u64::MAX, &kms).await
 }
 

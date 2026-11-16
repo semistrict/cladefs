@@ -905,6 +905,7 @@ impl World {
         let (started, start) = mpsc::channel();
         let (running, bucket) = (uploader.clone(), self.bucket.clone());
         let running = self.spawn_uploader(async move {
+            let recovering = (recovering, None);
             running.run(recovering, store_options(), bucket, holder, started).await;
         });
         let lineage = self.hosts[host].disks[&branch].lineage;

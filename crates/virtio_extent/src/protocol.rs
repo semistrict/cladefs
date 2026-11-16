@@ -156,6 +156,65 @@ pub const MAX_STATS: usize = 64 << 10;
 #[cfg(target_os = "linux")]
 const _: () = assert!(MAX_STATS == cladefs::DaemonExtentStore::MAX_STATS);
 
+/// cladefs TASK-470: the ranges a request's offsets and lengths keep to (doc-4), as the device's
+/// configuration and window say: a request out of them is refused, `EINVAL`, before its store sees
+/// it, whatever the store would make of it (a fake's arithmetic overflowed, a real store's checks
+/// are its own). An end past the end of a u64 is past every bound, an aligned one wrapping to 0
+/// too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Bounds {
+    /// `block_size`: what a `READ`'s or `WRITE`'s offset and length are multiples of.
+    pub block_size: u64,
+    /// `max_extent`: where a `READ`'s or `WRITE`'s range in its extent ends at most.
+    pub max_extent: u64,
+    /// `map_alignment`: what a `MAP`'s, `UNMAP`'s or `PRIVATE`'s offsets and length are multiples
+    /// of.
+    pub map_alignment: u64,
+    /// The DAX window's length: where a `MAP`'s, `UNMAP`'s or `PRIVATE`'s range in it ends at
+    /// most; 0 without one.
+    pub window: u64,
+}
+
+impl Bounds {
+    /// The bounds of a device whose configuration space is `config`, and whose DAX window is
+    /// `window` bytes long, 0 without one.
+    pub fn of(config: &ConfigSpace, window: u64) -> Self {
+        Self {
+            block_size: u64::from(u32::from_le(config.block_size)),
+            max_extent: u64::from_le(config.max_extent),
+            map_alignment: u64::from(u32::from_le(config.map_alignment)),
+            window,
+        }
+    }
+
+    /// A `READ`'s or `WRITE`'s `len` bytes at `offset` in its extent: multiples of `block_size`,
+    /// ending within `max_extent`.
+    pub fn io(&self, offset: u64, len: u64) -> Result<(), cladefs::Errno> {
+        within(offset, len, self.block_size, self.max_extent)
+    }
+
+    /// A `MAP`'s `len` bytes at `offset` in its extent: multiples of `map_alignment`, ending
+    /// within a u64. What lies past the extent, `max_extent` included, maps zeros.
+    pub fn mapped(&self, offset: u64, len: u64) -> Result<(), cladefs::Errno> {
+        within(offset, len, self.map_alignment, u64::MAX)
+    }
+
+    /// A `MAP`'s, `UNMAP`'s or `PRIVATE`'s `len` bytes of the window at `window_offset`: multiples
+    /// of `map_alignment`, ending within the window.
+    pub fn window(&self, window_offset: u64, len: u64) -> Result<(), cladefs::Errno> {
+        within(window_offset, len, self.map_alignment, self.window)
+    }
+}
+
+/// `Ok` if `offset` and `len` are multiples of `alignment`, and `offset + len` is `most` at most.
+fn within(offset: u64, len: u64, alignment: u64, most: u64) -> Result<(), cladefs::Errno> {
+    let aligned = offset.is_multiple_of(alignment) && len.is_multiple_of(alignment);
+    match offset.checked_add(len) {
+        Some(end) if aligned && end <= most => Ok(()),
+        _ => Err(cladefs::Errno::EINVAL),
+    }
+}
+
 /// cladefs: a request's `flags`, of type `type_`, as a device whose cache is `Unsafe` serves them
 /// (TASK-363): a `COMMIT` or a `WRITE`'s commit ordered, not uploaded.
 pub fn ordered_only(type_: u32, flags: u32) -> u32 {

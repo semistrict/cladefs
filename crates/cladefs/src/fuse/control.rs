@@ -243,8 +243,8 @@ impl proto::mount_server::Mount for Control {
                     };
                     // cladefs: a cell made gets a KEK its tenant's wrapped: every cell is encrypted
                     // (TASK-411.3, TASK-411.28).
+                    let kms = crate::bucket::kms()?;
                     let holding = async {
-                        let kms = crate::bucket::kms();
                         let kek = match make {
                             true => Some(keys::new_cell_kek(&kms, cell.tenant).await?),
                             false => None,

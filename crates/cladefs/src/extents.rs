@@ -683,7 +683,7 @@ impl ExtentStore {
         let Opening { arena, profiled, keeping } = opening;
         let arenas = Arenas { own: arena, public: Arc::new(public) };
         let forked_from = Arc::new(store_dir::ancestry(path)?);
-        let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), keeping.cache.clone());
+        let fetcher = crate::bucket::HostFetcher::new(bucket.clone(), keeping.cache.clone())?;
         let profiling = profiled.then(|| Self::profile(&store, &arenas, &forked_from, &fetcher));
         let branch = store.description().branch;
         Ok(Self {
@@ -1049,17 +1049,21 @@ impl ExtentStore {
         opening: Opening,
     ) -> Result<Self, Error> {
         let path = path.as_ref();
-        if !path.exists() {
+        // cladefs: a store made here is opened once, as made, not made, closed and opened again
+        // (TASK-449).
+        let opened = if !path.exists() {
             let kept = opening.keeping.clone();
             let of = BranchOf::Taken(branch);
-            Self::create_placed(path, (capacity, of, token), Kind::Fxfs, kept)?;
+            Self::made_placed(path, (capacity, of, token), Kind::Fxfs, kept)?
         } else if extent_store::host_branch(path).map_err(Error::new)? != branch {
             let refused = format!("{} holds another branch than {branch}", path.display());
             return Err(Error::new(anyhow::Error::new(Errno::EEXIST).context(refused)));
-        } else if let Some(token) = token {
-            Self::place(path, token)?;
-        }
-        let opened = host_store::take(path, opening.keeping.clone())?;
+        } else {
+            if let Some(token) = token {
+                Self::place(path, token)?;
+            }
+            host_store::take(path, opening.keeping.clone())?
+        };
         Self::new(path, opened, opening)
     }
 
@@ -1077,20 +1081,29 @@ impl ExtentStore {
         kind: Kind,
         keeping: extent_store::upload::Options,
     ) -> Result<Branch, Error> {
-        let path = path.as_ref();
+        let opened = Self::made_placed(path.as_ref(), (capacity, of, token), kind, keeping)?;
+        Ok(opened.store.description().branch)
+    }
+
+    /// cladefs: makes a new store at `path` as [`ExtentStore::create_placed`] does, and returns it
+    /// opened, as made: what [`ExtentStore::take_with`] opens.
+    fn made_placed(
+        path: &Path,
+        (capacity, of, token): (u64, BranchOf, Option<u64>),
+        kind: Kind,
+        keeping: extent_store::upload::Options,
+    ) -> Result<host_store::Opened, Error> {
         let keeping =
             extent_store::upload::Options { token: token.unwrap_or(keeping.token), ..keeping };
-        let branch = Self::creating(path, |span| {
+        let opened = Self::creating(path, |span| {
             let opened = host_store::create(path, capacity, of, kind, keeping)?;
-            let branch = opened.store.description().branch;
-            span.set_branch(branch);
-            drop(opened);
-            Ok(branch)
+            span.set_branch(opened.store.description().branch);
+            Ok(opened)
         })?;
         if let Some(token) = token {
             Self::place(path, token)?;
         }
-        Ok(branch)
+        Ok(opened)
     }
 
     /// cladefs: places the store at `path` at the placement

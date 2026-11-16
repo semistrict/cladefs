@@ -59,6 +59,8 @@ pub struct ObjectBucket {
     honoured: std::sync::atomic::AtomicBool,
     /// cladefs: the checkpoints' states its recoveries decoded ([`Bucket::decoded`]).
     decoded: crate::recovery::Decoded,
+    /// cladefs: what this host knows of the bucket without asking it again ([`Bucket::known`]).
+    known: crate::known::Known,
     /// cladefs: what the collector's newest mark-only pass marked, which its reads warn of reaching
     /// (TASK-264).
     marks: crate::marks::Watch,
@@ -536,9 +538,9 @@ impl ObjectBucket {
         prefix: &str,
     ) -> Self {
         let prefix = prefix.trim_matches('/').to_owned();
-        let (counts, honoured, decoded) = Default::default();
+        let (counts, honoured, decoded, known) = Default::default();
         let (marks, objectids) = (crate::marks::Watch::new(), crate::objectid::Allocator::new());
-        Self { store, pages, prefix, counts, honoured, decoded, marks, objectids }
+        Self { store, pages, prefix, counts, honoured, decoded, known, marks, objectids }
     }
 
     /// cladefs: a new object ID of the bucket's, which no other branch of it has, nor will
@@ -809,6 +811,10 @@ fn error(error: &object_store::Error) -> Error {
 impl Bucket for ObjectBucket {
     fn decoded(&self) -> Option<&crate::recovery::Decoded> {
         Some(&self.decoded)
+    }
+
+    fn known(&self) -> Option<&crate::known::Known> {
+        Some(&self.known)
     }
 
     fn get(&self, key: &str) -> impl Future<Output = Result<Object, Error>> + Send {
@@ -1110,7 +1116,7 @@ pub(crate) mod tests {
                 let (store, key) = (store.clone(), layout::segment(test_branch(1), segment, 1));
                 tokio::spawn(async move {
                     let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
-                    assert!(matches!(created, crate::bucket::Created::Created), "{key}");
+                    assert!(matches!(created, crate::bucket::Created::Created(_)), "{key}");
                     start.elapsed()
                 })
             })
@@ -1160,7 +1166,7 @@ pub(crate) mod tests {
         assert_eq!(store.get("other").await.map(|object| object.bytes), Err(Error::NotFound));
         tokio::time::sleep(std::time::Duration::from_secs(55)).await;
         faults.set(Fault::default());
-        assert!(matches!(creating.await.unwrap(), crate::bucket::Created::Created));
+        assert!(matches!(creating.await.unwrap(), crate::bucket::Created::Created(_)));
         assert_eq!(store.get(&key).await.unwrap().bytes, [1, 2, 3]);
 
         // Failed at 0 s, 50 ms, 150 ms, ... 3.15 s, 6.35 s, then every 5 s to 91.35 s; landed at
@@ -1722,6 +1728,34 @@ pub(crate) mod tests {
 
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// cladefs: a bucket's connections are tasks of the runtime that opened them (`reqwest`, as
+    /// `object_store` uses it, spawns each on the runtime it is asked on): requests each on a runtime
+    /// of their own, dropped after, as `extent_store::upload::block_on`'s were, connect anew each
+    /// time, the one before closed with its runtime, a handshake more a request (TCP's, and on a
+    /// bucket elsewhere TLS's too); on one runtime that lives on, they share one (TASK-449).
+    #[test]
+    fn requests_on_runtimes_dropped_after_connect_anew() {
+        let serving = runtime();
+        let server = serving.block_on(async { S3Server::start(None) });
+        let bucket = s3(&server, "connections", &Client::DEFAULT);
+        let get = || async { crate::bucket::get(&*bucket, "absent").await };
+        let own = || {
+            let own = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            assert!(own.block_on(get()).is_none());
+        };
+        // The first, which looks at the collector's marking too, at once.
+        own();
+        let connects = |request: &dyn Fn()| {
+            let before = server.connections();
+            request();
+            server.connections() - before
+        };
+        assert_eq!([(); 3].map(|()| connects(&own)), [1, 1, 1]);
+        let shared = runtime();
+        let on_shared = || assert!(shared.block_on(get()).is_none());
+        assert_eq!([(); 3].map(|()| connects(&on_shared)), [1, 0, 0]);
     }
 
     /// cladefs: S3 over HTTP, through cladefs's client, does what every bucket must, and branches live

@@ -21,6 +21,28 @@ the worktrees stay as they are, nothing in them is lost, and TASK-444.4–.11 wa
 
 # Decisions
 
+## A restore in 6 round trips: what a host knows, cells held by forks, one runtime for calls from no task (TASK-449, 2026-11-16)
+
+Decided without you:
+- **What a host learned of a branch it is about to open is passed in its memory, on the bucket** (`extent_bucket::known`, `Bucket::known`): the record its fork or take left, the cell's object its fork held, that the clone has no head; taken by the store's first opening. Not through the API (the daemon's fork and the VM's open are separate calls) nor on disk (stale after a crash for longer than any read). Its safety is that of a read made earlier, which the protocol allows for everywhere after (conditional writes; the record read again after the take; the model's `staleTake`, `OpenGone`). *Undo:* `Bucket::known` returning `None`: every opening reads as before.
+- **Segment epochs a head named are kept for good**, a map of at most 65,536, and a fork point's checkpoint is read by its key without the origin's head (spec property `NamedEpochsStay`). *Instead:* the epoch in every `Origin` (a format change of footers, records and references). *Undo:* `state_at` always reading the head.
+- **A fork of a point holds its child's cell, at once with the reference**, for its host's placement, on hosts with no KMS forking a point in the clear; elsewhere the child's opening holds it, as before (TASK-485 filed for sealed restores). A fork failing after it leaves the cell's object in a cell already kept (a clone never made keeps its record). *Undo:* `holds` false in `Remote::forked`.
+- **No look at a clone's ID before its record's create** (`child_free` is for writable forks alone), and a record found that is another's, deleted or not, refuses the fork as `IdTaken` (`EEXIST`), not `Deleted`, which mapped to "the point was deleted" (`ENOENT`): ours deleted still says that. `RESTORE_STEPS` lost `remote::child_free`.
+- **Every opening with nothing learned reads its cell's object at once with its record and head**: a GET more for a point's opening (which holds no cell), a round trip less for every other.
+- **`upload::block_on` runs in the context of the bucket runtime** (`extent_store::upload::bucket_runtime`, which cladefs's uploaders and fetches run on; it moved there from cladefs's `RUNTIME`) rather than a runtime of each call's own: connections a call opened died with its runtime, and a fork asking two requests at once opened a connection a restore (`restores_connect_to_the_bucket_no_more`). TASK-449's review: not a second runtime of its own either (TASK-449 first had one of two workers), which served from its two threads the connections it left in the pool, which the uploads then used: one runtime owns every connection (`calls_from_no_task_spawn_on_the_bucket_runtime`). Measured, 512 MiB after 8 restores: 186 MiB/s on one runtime of 8 workers, 235 with the second of 2 beside it, 241 on one of 10 (debug build): threads, not where they are; TASK-486 for its size. Its making, failed, is retried at the next call, not kept failed for the process's life; so `bucket::runtime`, `bucket::kms`, `HostFetcher::new` and `serving_peers` return `Result` (`calls_after_a_failed_making_of_the_runtime_make_it_anew`). *Undo:* a runtime of `block_on`'s own; the spawn test goes red.
+- **A cell's holding from what the host's fork left is confirmed by a read once the head is taken** (TASK-449's review), at once with the record's: a GET more a restore, no round trip (8 requests in 6, 12 in 9 cold). *Instead:* a read before the take (a round trip more), or a write of the unchanged object conditional on the remembered version (a PUT, a round trip more). Learned facts are taken as the opening begins, whatever comes of it. *Undo:* `Taker::remembered` none; `restores_refused_to_placements_superseded_since_their_forks` goes red.
+- **The S3 server in memory is `extent_bucket`'s `testing` feature's too** (optional deps `chrono`, `http-body-util`, `hyper-util`, MIT/Apache, all in the tree already as dev-dependencies), so cladefs's tests count a restore's connections.
+## A panic on the page cache's flusher aborts the daemon (TASK-493, 2026-11-16)
+
+The flusher is the process's (every store's files wait on it), so a panic on it is treated as one
+holding a lock shared beyond one store (TASK-149.24's rule): it holds `shared::Holding::work` for
+its life, and cladefsd's `abort_on_panics` hook aborts at the panic, naming it; systemd restarts the
+daemon. Without the hook (tests), its death is recorded (`PageCache::flusher_died`), logged as an
+error, and a writer held at the bound panics instead of waiting for good. Else: catch each pass's
+panic and go on, as extentd's pool does for a job (TASK-79.1); not chosen, as a bug in a pass
+repeats each pass with nothing failing. Undo: drop the `Holding` and wrap `flush_pass` in
+`catch_unwind`.
+
 ## Rust rules from past bugs: a syntactic script, not dylint (TASK-444.6, 2026-11-15)
 
 TASK-444.6 asked for dylint lints. I wrote `scripts/rust-rules.py` instead, rules over the

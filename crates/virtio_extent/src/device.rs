@@ -18,8 +18,8 @@ use crate::config::{Config, private_max};
 use crate::notices::{ConfigInterrupt, Following, Notices};
 use crate::persist::{ConfigState, MappingState, Snapshot, SnapshotError, State};
 use crate::protocol::{
-    ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER, QUEUE_SIZE,
-    VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
+    Bounds, ConfigSpace, DAX_WINDOW_SHM_ID, MAX_EXTENT, MAX_ROOT, MAX_TAG_LEN, MAX_TRANSFER,
+    QUEUE_SIZE, VIRTIO_EXTENT_F_STATS, VIRTIO_EXTENT_VERSION,
 };
 use crate::requests::Requests;
 use crate::window::{DaxWindowError, PrefaultGuestMemory, WindowMemory, WindowVm};
@@ -293,7 +293,9 @@ impl Device {
     /// The requests of one of its queues, served with its store, while the device is activated:
     /// for a worker taking them off the queue, as [`Device::start_workers`]'s do.
     pub fn requests(&self) -> Requests {
-        Requests::new(self.store().clone(), self.notices.clone(), self.config.cache_type)
+        let window = self.window.as_ref().map_or(0, WindowMemory::len);
+        let bounds = Bounds::of(&self.config_space, window);
+        Requests::new(self.store().clone(), self.notices.clone(), self.config.cache_type, bounds)
     }
 
     /// Starts the workers serving `queues`, those the driver set up, the device activated

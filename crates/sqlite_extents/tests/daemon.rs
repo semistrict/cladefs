@@ -241,7 +241,7 @@ fn a_database_is_fenced_with_its_cell() {
         let (held, _) = cell::hold(&*objects, ours.cell, (2, 2), None, None).await.unwrap();
         // Its writer fences the branch (TASK-371), unwrapping the cell's KEK through the host's
         // KMS, the daemon's (CLADEFS_KMS above), as the tests' own KMS has none of it.
-        let kms = cladefs::bucket::kms();
+        let kms = cladefs::bucket::kms().unwrap();
         let writer =
             extent_bucket::Writer::open_under(objects.clone(), ours, (0x22, held.epoch), &kms);
         drop(writer.await.unwrap());

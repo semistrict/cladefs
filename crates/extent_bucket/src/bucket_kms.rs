@@ -134,7 +134,7 @@ impl<B: Bucket> BucketKms<B> {
         let kek = TenantKek::random();
         let newest = self.keys.newest();
         match bucket::create(&*self.bucket, &key, KekObject::seal(newest, tenant, &kek)).await {
-            Created::Created => {
+            Created::Created(_) => {
                 log::info!(
                     "cladefs: tenant {tenant}: its KEK made, {key}, under master key {}",
                     newest.id()
@@ -197,7 +197,7 @@ pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Destroyed {
     loop {
         let Some(object) = bucket::get(bucket, &key).await else {
             match bucket::create(bucket, &key, KekObject::tombstone(tenant)).await {
-                Created::Created => return Destroyed::Now,
+                Created::Created(_) => return Destroyed::Now,
                 Created::Exists(_) => continue,
             }
         };
@@ -207,7 +207,7 @@ pub async fn destroy(bucket: &impl Bucket, tenant: u64) -> Destroyed {
         }
         let tombstone = KekObject::tombstone(tenant);
         match bucket::update(bucket, &key, tombstone, &object.meta.version).await {
-            Updated::Updated => return Destroyed::Now,
+            Updated::Updated(_) => return Destroyed::Now,
             Updated::Changed => {}
         }
     }
@@ -248,7 +248,7 @@ pub async fn rotate<B: Bucket>(bucket: &B, keys: &MasterKeys) -> Rotated {
                 Ok((None, KekObject::Kek { .. })) => rotated.newest += 1,
                 Ok((Some(bytes), _)) => {
                     match bucket::update(bucket, &key, bytes, &object.meta.version).await {
-                        Updated::Updated => rotated.rewrapped += 1,
+                        Updated::Updated(_) => rotated.rewrapped += 1,
                         Updated::Changed => continue,
                     }
                 }

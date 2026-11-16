@@ -1613,7 +1613,7 @@ async fn compact_object(
     let footer = Moves { of: key.to_owned(), extents: entries };
     let bytes = layout::with_footer(&data, &footer, encrypting);
     let size = match bucket::create(bucket, &moves, bytes.clone()).await {
-        Created::Created => bytes.len() as u64,
+        Created::Created(_) => bytes.len() as u64,
         Created::Exists(stood) => stood.meta.size,
     };
     Ok(Some((moves, size)))
@@ -2252,7 +2252,7 @@ mod tests {
                 &(),
                 crate::testing::encrypting(layout::test_branch(1)),
             );
-            assert!(matches!(bucket::create(&*bucket, &ahead, bytes).await, Created::Created));
+            assert!(matches!(bucket::create(&*bucket, &ahead, bytes).await, Created::Created(_)));
 
             let before = keys(&*bucket).await;
             let report = collect(&*bucket, 1, &KEEP).await.unwrap();
@@ -2278,7 +2278,7 @@ mod tests {
             let mut newer = (layout::FORMAT + 1).to_le_bytes().to_vec();
             newer.extend_from_slice(b"what a later format holds");
             let created = bucket::create(&*bucket, &layout::record(test_branch(2)), newer).await;
-            assert!(matches!(created, Created::Created));
+            assert!(matches!(created, Created::Created(_)));
 
             let before = keys(&*bucket).await;
             let refused = collect(&*bucket, 1, &KEEP).await;
@@ -2319,7 +2319,7 @@ mod tests {
             .frame(writer.keys().encrypting());
         let [(key, bytes)] = &objects.own[..] else { panic!("{} objects", objects.own.len()) };
         let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await;
-        assert!(matches!(created, Created::Created));
+        assert!(matches!(created, Created::Created(_)));
 
         collect(&*bucket, 1, &KEEP).await.unwrap();
         let segment = writer.add_segment(objects).unwrap();
@@ -2948,7 +2948,7 @@ mod tests {
                     let claim = crate::record::Kind::Claim(origin).of(0x44);
                     let key = layout::record(test_branch(4));
                     let created = bucket::create(&*direct, &key, layout::encode(&claim));
-                    assert!(matches!(created.now_or_never().unwrap(), Created::Created));
+                    assert!(matches!(created.now_or_never().unwrap(), Created::Created(_)));
                     let taking = crate::head::take(&*direct, test_branch(4), 12, 0);
                     taking.now_or_never().unwrap().unwrap();
                 }
@@ -4643,7 +4643,7 @@ mod tests {
         block_on(async {
             let bucket = Direct(SimBucket::new());
             let object = extent_frame::framed(&data, &footer, (dek, id));
-            assert!(matches!(bucket::create(&bucket, &key, object).await, Created::Created));
+            assert!(matches!(bucket::create(&bucket, &key, object).await, Created::Created(_)));
             let before = held(&bucket).await;
             let compacted = compact_object(&bucket, &key, &extents, (&Ring::keyless(), 1)).await;
             assert_eq!(compacted, Err(Error::NoKey(id)));
@@ -4682,7 +4682,7 @@ mod tests {
             .unwrap();
             let bytes =
                 layout::with_footer(b"", &(), crate::testing::encrypting(layout::test_branch(1)));
-            assert!(matches!(bucket::create(&direct, &stray, bytes).await, Created::Created));
+            assert!(matches!(bucket::create(&direct, &stray, bytes).await, Created::Created(_)));
         });
         let before = block_on(keys(&direct));
         let lost = Error::Lost("segment 0 of 1/1/1".to_owned());
@@ -4905,7 +4905,7 @@ mod tests {
                 .frame(writer.keys().encrypting());
             let [(key, bytes)] = &objects.own[..] else { panic!("{}", objects.own.len()) };
             let created = bucket::create(&*bucket, key, bytes.read().unwrap()).await;
-            assert!(matches!(created, Created::Created));
+            assert!(matches!(created, Created::Created(_)));
 
             // A wrong pass, deleting what no head names yet (rule `collector_epochs`).
             crate::set_rules(crate::Rules { collector_epochs: false, ..crate::Rules::ALL });
@@ -5729,7 +5729,8 @@ mod tests {
 
     /// TASK-395.10: a clone refused by a record of its child's ID there before, of another origin,
     /// deleted with none, or of its own origin, writes no reference, as it writes it after its own
-    /// record.
+    /// record. Each another's, its ID taken: a deleted one too, which is no point deleted
+    /// (TASK-449: no look at the record comes first any more, which refused it so).
     #[test]
     fn clones_refused_by_records_there_write_no_references() {
         assert_eq!(references_left_by_refused_clones(), [false, false, false]);
@@ -5762,7 +5763,7 @@ mod tests {
             (
                 celled(4, 4),
                 found(crate::record::Record { deleted: true, ..Made::Own.of(0x45) }),
-                Error::Deleted,
+                Error::IdTaken(celled(4, 4)),
             ),
             (celled(5, 5), found(Made::Fork(origin).of(0x46)), Error::IdTaken(celled(5, 5))),
         ];

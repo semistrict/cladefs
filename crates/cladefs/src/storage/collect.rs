@@ -54,9 +54,10 @@ fn pace() -> Pace {
 }
 
 /// A collector of `options`, which compacts the objects of images' cells, every one encrypted, under
-/// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, it would compact none.
+/// their KEKs, unwrapped through the host's KMS (TASK-411.28): with none, the bucket runtime its
+/// pools refill on not to be made (TASK-449's review), it compacts none, deleting as ever.
 fn new_collector(options: Options) -> Collector {
-    Collector::new(options).kms(Some(crate::bucket::kms().inner().clone()))
+    Collector::new(options).kms(crate::bucket::kms().ok().map(|kms| kms.inner().clone()))
 }
 
 /// The collectors of the buckets this process has images of open, by their URLs.

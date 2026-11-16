@@ -16,6 +16,10 @@ fail = "0.5.1"
 futures.workspace = true
 humantime = "2.4.0"
 hyper = { version = "1.12.0", default-features = false }
+# cladefs: the S3 server in memory, for other crates' tests too (`testing`, TASK-449).
+chrono = { version = "0.4.45", default-features = false, features = ["std", "alloc"], optional = true }
+http-body-util = { version = "0.1.5", optional = true }
+hyper-util = { version = "0.1.21", features = ["tokio"], optional = true }
 imbl = { version = "7.0.2", features = ["serde"] }
 libc.workspace = true
 log.workspace = true
@@ -51,6 +55,14 @@ workspace = true
 # cladefs: what tests of the protocol outside this crate need, as its own have it: a bucket whose
 # requests take effect when the test says (`testing::SimBucket`), the collector's moves
 # (`testing::MovesMaps`), and the protocol's rules, which they may turn off (`set_rules`), as
-# extent_store's simulation does (TASK-88). cladefs: and a KMS of the tests' (`keys::testing`,
+# extent_store's simulation does (TASK-88). cladefs: and the S3 server in memory (`s3_server`), whose
+# connections a restore's tests count (TASK-449); and a KMS of the tests' (`keys::testing`,
 # TASK-411.28: every store encrypted, every test too).
-testing = ["extent_keys/testing"]
+testing = [
+    "extent_keys/testing",
+    "dep:chrono",
+    "dep:http-body-util",
+    "dep:hyper-util",
+    "hyper/server",
+    "hyper/http1",
+]
