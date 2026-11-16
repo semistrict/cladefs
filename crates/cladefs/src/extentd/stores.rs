@@ -856,7 +856,7 @@ async fn point(from: &Path, capacity: u64) -> Result<(Arc<HeldStore>, Opened), E
 /// cell of `tenant`'s, if given: the granted tenant's whose directory `to` is in; or of `from`'s
 /// tenant's; its ID the bucket's to give (TASK-364). A point not shared forks to no cell of another
 /// tenant's than its own (`EACCES`, TASK-395.7); nor does a store with a writer, unless it is the
-/// common tenant's, as the daemon's own stores and public bases are (`EACCES`, TASK-395.9),
+/// default tenant's, as the daemon's own stores and public bases are (`EACCES`, TASK-395.9),
 /// refused before anything is made. Only a point is shared (`EINVAL`).
 pub(super) async fn fork(
     from: PathBuf,
@@ -1067,14 +1067,15 @@ pub(super) async fn place(path: PathBuf, token: u64) -> Result<(), Errno> {
 }
 
 /// Makes the store at `path` a public base, and the branches it inherited from
-/// ([`ExtentStore::make_public`]): `EBUSY` while a connection has it open, whose guest could
-/// write it still.
-pub(super) async fn make_public(path: PathBuf, generation: bool) -> Result<(), Errno> {
+/// ([`ExtentStore::make_public`]); or, if `attach_only`, its branch alone, to attach to stores, not
+/// to fork ([`ExtentStore::make_public_attach_only`]): `EBUSY` while a connection has it open,
+/// whose guest could write it still.
+pub(super) async fn make_public(path: PathBuf, attach_only: bool) -> Result<(), Errno> {
     let held = hold_alone(&path).await?;
     blocking(move || {
         let _held = held;
         let store = open_here(&path)?;
-        if generation { store.make_generation_public() } else { store.make_public() }
+        if attach_only { store.make_public_attach_only() } else { store.make_public() }
     })
     .await
 }

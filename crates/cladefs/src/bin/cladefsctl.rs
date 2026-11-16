@@ -22,7 +22,7 @@
 //! cladefsctl public DIR
 //! cladefsctl stat DIR
 //! cladefsctl stats [--json]
-//! cladefsctl grant TENANT ID DIR [UID [GID]]
+//! cladefsctl grant TENANT DIR [UID [GID]]
 //! cladefsctl revoke TENANT
 //! cladefsctl shred-cell TENANT/CELL
 //! cladefsctl forget-tenant-keys TENANT
@@ -41,14 +41,14 @@
 //! and refuse otherwise (`cladefs::remote::Host`, TASK-45).
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one volume of a
-//! new cell of no tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
+//! new cell of the default tenant's, its ID its bucket's to give (TASK-364), and prints the branch.
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in hex,
 //! a volume of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! extentd opens it,
 //! with `CLADEFS_EXTENTD_REMOTE` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
-//! snapshot's point it reads, taking no head, as any number of hosts do at once. `place`
-//! places the store at DIR at the placement whose fencing token,
+//! point, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
+//! `place` places the store at DIR at the placement whose fencing token,
 //! its boot ID, is TOKEN (TASK-39.7): its writer takes its branch in object storage with that token
 //! from then on, which a later placement's exceeds, so that a placement cut off takes no branch
 //! back from the one after it (`ESTALE`), and its commits fail once a later one takes it. `sync`
@@ -65,13 +65,13 @@
 //! uploaded, holding its extents without uploading them again; DST is a store of its own, which
 //! reads them there (TASK-165.7). `point` forks so, once nothing is open, to a point (TASK-158): a name of SRC's
 //! state as it is, written by none, which any number of hosts fork at once, each from a copy `take`
-//! makes of its branch, as a snapshot's restores do; for a base forked on several hosts; with
+//! makes of its branch, as a VM snapshot's restores do; for a base forked on several hosts; with
 //! `--shared`, shared once made, as `share` shares it. `share` shares the point the store at DIR
 //! is of (TASK-395.7): it forks into cells of other tenants' than its own, as a base image or a
-//! VM snapshot many tenants fork, which a point not shared refuses (`EACCES`); `unshare` stops such
-//! forks, those made living on. The point's record in its bucket says it, for every host. `delete`
-//! deletes a store, a fork or not: its branch in its bucket, its forks' living on, and its
-//! directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
+//! VM snapshot's point many tenants fork, which a point not shared refuses (`EACCES`); `unshare`
+//! stops such forks, those made living on. The point's record in its bucket says it, for every
+//! host. `delete` deletes a store, a fork or not: its branch in its bucket, its forks' living on,
+//! and its directory (TASK-39.4). `drop` deletes the store at DIR as `delete` does, this
 //! host's copy of it, its branch staying in the bucket (TASK-154): what `take` made, once this host
 //! is done with it. `resize` sets the store's capacity, the size of the disk
 //! its guest sees, to CAPACITY bytes: through the daemon, a store its VM has open grows at once,
@@ -93,7 +93,7 @@
 //!
 //! `stats`, through the daemon alone, prints what the daemon, its VM processes and their guests
 //! counted, as of one moment, each with the commit it was built of (the control API's
-//! `GetSnapshot`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `extentd`
+//! `GetStats`, TASK-111.4): with `--json`, as one JSON object, of `taken_unix_ns`, `extentd`
 //! (`build`, `counters`, `gauges`) and `vms`, each VM process's `connection`, `branch` (hex),
 //! `path`, `follower`, `vmm` (`build`, `counters`, `gauges`), `window`, `answered`, `answer_ns` and
 //! `guest` (`build`, `counters`, `histograms`), null where it has none; otherwise as lines of a
@@ -101,13 +101,13 @@
 //! measurement is the difference of two.
 //!
 //! `grant` and `revoke`, through the daemon alone, are the control API's `Grant` and `Revoke`
-//! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, of the ID ID in
-//! the bucket, in hexadecimal and not 0 (TASK-364), whose stores are in the directory DIR, a VM
-//! socket of its own, its VM processes naming stores in DIR alone, of its own cells, the socket
-//! given to the user UID and the group GID if named, the daemon's own otherwise, and prints its
-//! path; granting a tenant again, of the same directory and ID, prints it again. `revoke`
-//! takes the tenant's socket away: its VM processes connected keep their stores, and no more
-//! connect.
+//! (TASK-43.4), for tests and operators (TASK-71): `grant` gives the tenant TENANT, its ID in the
+//! bucket, in hexadecimal and not 0, the default tenant's (TASK-364), whose stores are in the
+//! directory DIR, a VM socket of its own, `TENANT.sock`, its VM processes naming stores in DIR
+//! alone, of its own cells, the socket given to the user UID and the group GID if named, the
+//! daemon's own otherwise, and prints its path; granting a tenant again, of the same directory,
+//! prints it again. `revoke` takes the tenant TENANT's socket away (hexadecimal): its VM processes
+//! connected keep their stores, and no more connect.
 //!
 //! `shred-cell` and `forget-tenant-keys`, through the daemon alone, are the control API's
 //! `ShredCell` and `ForgetTenantKeys` (TASK-411.7, backlog doc-16, Shredding). `shred-cell` shreds
@@ -140,8 +140,8 @@ fn usage() -> anyhow::Error {
          cladefsctl point SRC DST [--shared] | cladefsctl share DIR | cladefsctl unshare DIR | \
          cladefsctl delete DIR | cladefsctl drop DIR | \
          cladefsctl resize DIR CAPACITY | cladefsctl public DIR | \
-         cladefsctl public-generation DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
-         cladefsctl stats [--json] | cladefsctl grant TENANT ID DIR [UID [GID]] | \
+         cladefsctl public-attach-only DIR | cladefsctl attach DIR BASE | cladefsctl stat DIR | \
+         cladefsctl stats [--json] | cladefsctl grant TENANT DIR [UID [GID]] | \
          cladefsctl revoke TENANT | cladefsctl shred-cell TENANT/CELL | \
          cladefsctl forget-tenant-keys TENANT | cladefsctl shred-tenant TENANT | \
          cladefsctl --version"
@@ -210,7 +210,7 @@ enum Command {
     Public {
         dir: PathBuf,
     },
-    PublicGeneration {
+    PublicAttachOnly {
         dir: PathBuf,
     },
     Attach {
@@ -220,19 +220,18 @@ enum Command {
     Stat {
         dir: PathBuf,
     },
-    /// cladefs: a snapshot of the daemon's, its VM processes' and their guests' counters, as JSON if
-    /// `json` (TASK-111.4). Read by `through`, which is Linux's alone.
+    /// cladefs: the stats of the daemon, its VM processes and their guests, as JSON if `json`
+    /// (TASK-111.4). Read by `through`, which is Linux's alone.
     Stats {
         #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         json: bool,
     },
-    /// cladefs: a tenant, of the ID `id` in the bucket (TASK-364), granted a VM socket of its own,
-    /// for its stores in `dir`, given to `uid` and `gid` if named (TASK-71). Read by `through`,
-    /// which is Linux's alone.
+    /// cladefs: a tenant, of the ID `tenant` in the bucket (TASK-364), granted a VM socket of its
+    /// own, for its stores in `dir`, given to `uid` and `gid` if named (TASK-71). Read by
+    /// `through`, which is Linux's alone.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Grant {
-        tenant: String,
-        id: u64,
+        tenant: u64,
         dir: PathBuf,
         uid: Option<u32>,
         gid: Option<u32>,
@@ -240,7 +239,7 @@ enum Command {
     /// cladefs: a tenant's grant revoked (TASK-71).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Revoke {
-        tenant: String,
+        tenant: u64,
     },
     /// cladefs: a cell shredded (TASK-411.7).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
@@ -264,6 +263,8 @@ impl Command {
         let capacity = |capacity: &str| capacity.parse().context("CAPACITY must be a number");
         let token = |token: &str| token.parse().context("TOKEN must be a number");
         let id = |id: &str, what| id.parse().with_context(|| format!("{what} must be a number"));
+        let tenant =
+            |tenant: &str| u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal");
         Ok(match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
             ["take", dir, size, branch, ref rest @ ..] if rest.len() <= 1 => Self::Take {
                 dir: dir.into(),
@@ -295,30 +296,25 @@ impl Command {
             ["drop", dir] => Self::Drop { dir: dir.into() },
             ["resize", dir, size] => Self::Resize { dir: dir.into(), capacity: capacity(size)? },
             ["public", dir] => Self::Public { dir: dir.into() },
-            ["public-generation", dir] => Self::PublicGeneration { dir: dir.into() },
+            ["public-attach-only", dir] => Self::PublicAttachOnly { dir: dir.into() },
             ["attach", dir, base] => Self::Attach { dir: dir.into(), base: base.into() },
             ["stat", dir] => Self::Stat { dir: dir.into() },
             ["stats"] => Self::Stats { json: false },
             ["stats", "--json"] => Self::Stats { json: true },
-            ["grant", tenant, given, dir, ref ids @ ..] if ids.len() <= 2 => Self::Grant {
-                tenant: tenant.to_owned(),
-                id: u64::from_str_radix(given, 16).context("ID must be hexadecimal")?,
+            ["grant", given, dir, ref ids @ ..] if ids.len() <= 2 => Self::Grant {
+                tenant: tenant(given)?,
                 dir: dir.into(),
                 uid: ids.first().map(|uid| id(uid, "UID")).transpose()?,
                 gid: ids.get(1).map(|gid| id(gid, "GID")).transpose()?,
             },
-            ["revoke", tenant] => Self::Revoke { tenant: tenant.to_owned() },
+            ["revoke", given] => Self::Revoke { tenant: tenant(given)? },
             ["shred-cell", cell] => {
                 let (tenant, id) = cell.split_once('/').context("CELL must be TENANT/CELL")?;
                 let hex = |hex| u64::from_str_radix(hex, 16).context("TENANT/CELL must be hex");
                 Self::ShredCell { cell: cladefs::Cell { tenant: hex(tenant)?, id: hex(id)? } }
             }
-            ["forget-tenant-keys", tenant] => Self::ForgetTenantKeys {
-                tenant: u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal")?,
-            },
-            ["shred-tenant", tenant] => Self::ShredTenant {
-                tenant: u64::from_str_radix(tenant, 16).context("TENANT must be hexadecimal")?,
-            },
+            ["forget-tenant-keys", given] => Self::ForgetTenantKeys { tenant: tenant(given)? },
+            ["shred-tenant", given] => Self::ShredTenant { tenant: tenant(given)? },
             _ => bail!(usage()),
         })
     }
@@ -351,7 +347,7 @@ impl Command {
             Self::Drop { dir } => daemon.drop_store(&dir)?,
             Self::Resize { dir, capacity } => daemon.resize_store(&dir, capacity)?,
             Self::Public { dir } => daemon.make_public(&dir)?,
-            Self::PublicGeneration { dir } => daemon.make_generation_public(&dir)?,
+            Self::PublicAttachOnly { dir } => daemon.make_public_attach_only(&dir)?,
             Self::Attach { dir, base } => daemon.attach_base(&dir, &base)?,
             Self::Stat { dir } => {
                 let stat = daemon.stat_store(&dir)?;
@@ -374,16 +370,16 @@ impl Command {
                 );
             }
             Self::Stats { json } => {
-                let snapshot = snapshot_json(&daemon.snapshot(None)?);
+                let stats = stats_json(&daemon.stats(None)?);
                 match json {
-                    true => println!("{}", serde_json::to_string_pretty(&snapshot)?),
-                    false => print!("{}", flattened(&snapshot)),
+                    true => println!("{}", serde_json::to_string_pretty(&stats)?),
+                    false => print!("{}", flattened(&stats)),
                 }
             }
-            Self::Grant { tenant, id, dir, uid, gid } => {
-                println!("{}", daemon.grant((&tenant, id), &dir, uid, gid)?.display());
+            Self::Grant { tenant, dir, uid, gid } => {
+                println!("{}", daemon.grant(tenant, &dir, uid, gid)?.display());
             }
-            Self::Revoke { tenant } => daemon.revoke(&tenant)?,
+            Self::Revoke { tenant } => daemon.revoke(tenant)?,
             Self::ShredCell { cell } => {
                 let (removed, forgotten) = daemon.shred_cell(cell)?;
                 print!("keks_removed {removed}\n{}", forgotten_lines(&forgotten));
@@ -487,7 +483,7 @@ impl Command {
                 store.set_capacity(capacity)?;
             }
             Self::Public { dir } => ExtentStore::open(&dir)?.make_public()?,
-            Self::PublicGeneration { dir } => ExtentStore::open(&dir)?.make_generation_public()?,
+            Self::PublicAttachOnly { dir } => ExtentStore::open(&dir)?.make_public_attach_only()?,
             Self::Attach { dir, base } => {
                 let ancestry = ExtentStore::open(&base)?.ancestry();
                 ExtentStore::open(&dir)?.attach_base(&base.canonicalize()?, &ancestry)?;
@@ -546,18 +542,16 @@ impl std::fmt::Display for Stat {
     }
 }
 
-/// cladefs: `snapshot` as `stats --json` prints it (TASK-111.4): see the module docs. Maps' keys in
+/// cladefs: `stats` as `stats --json` prints it (TASK-111.4): see the module docs. Maps' keys in
 /// order.
 #[cfg(target_os = "linux")]
-fn snapshot_json(
-    snapshot: &cladefs::extentd::control::proto::GetSnapshotResponse,
-) -> serde_json::Value {
+fn stats_json(stats: &cladefs::extentd::control::proto::GetStatsResponse) -> serde_json::Value {
     use serde_json::{Value, json};
     let named = |map: &std::collections::HashMap<String, u64>| -> Value {
         map.iter().map(|(name, value)| (name.clone(), Value::from(*value))).collect()
     };
     let nonempty = |text: &str| (!text.is_empty()).then(|| text.to_owned());
-    let vms = snapshot.vms.iter().map(|vm| {
+    let vms = stats.vms.iter().map(|vm| {
         let guest = vm.guest.as_ref().map(|guest| {
             let histograms: serde_json::Map<String, Value> = (guest.histograms.iter())
                 .map(|(name, histogram)| (name.clone(), json!(histogram.buckets)))
@@ -585,11 +579,11 @@ fn snapshot_json(
         })
     });
     json!({
-        "taken_unix_ns": snapshot.taken_unix_ns,
+        "taken_unix_ns": stats.taken_unix_ns,
         "extentd": {
-            "build": snapshot.build,
-            "counters": named(&snapshot.counters),
-            "gauges": named(&snapshot.gauges),
+            "build": stats.build,
+            "counters": named(&stats.counters),
+            "gauges": named(&stats.gauges),
         },
         "vms": vms.collect::<Vec<_>>(),
     })

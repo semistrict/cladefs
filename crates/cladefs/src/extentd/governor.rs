@@ -153,18 +153,18 @@ pub fn allowance(held: u64, host: HostMemory, headroom: u64) -> u64 {
     ((held + host.available).saturating_sub(headroom) / chunk * chunk).max(chunk)
 }
 
-/// Each tenant's share of `target` bytes by its weight, of `tenants`' (name, weight): what it keeps
+/// Each tenant's share of `target` bytes by its weight, of `tenants`' (ID, weight): what it keeps
 /// under pressure while it uses it. A tenant of weight 0 has none.
-pub fn shares(target: u64, tenants: &[(String, u64)]) -> Vec<(String, u64)> {
+pub fn shares(target: u64, tenants: &[(u64, u64)]) -> Vec<(u64, u64)> {
     let total: u128 = tenants.iter().map(|(_, weight)| u128::from(*weight)).sum();
     tenants
         .iter()
-        .map(|(name, weight)| {
+        .map(|&(tenant, weight)| {
             let share = match total {
                 0 => 0,
-                total => (u128::from(target) * u128::from(*weight) / total) as u64,
+                total => (u128::from(target) * u128::from(weight) / total) as u64,
             };
-            (name.clone(), share)
+            (tenant, share)
         })
         .collect()
 }
@@ -245,11 +245,8 @@ mod tests {
 
     #[test]
     fn shares_go_by_weight() {
-        let tenants = [("a".to_owned(), 3), ("b".to_owned(), 1), ("c".to_owned(), 0)];
-        assert_eq!(
-            shares(400, &tenants),
-            [("a".to_owned(), 300), ("b".to_owned(), 100), ("c".to_owned(), 0)]
-        );
-        assert_eq!(shares(400, &[("z".to_owned(), 0)]), [("z".to_owned(), 0)]);
+        let tenants = [(0xa, 3), (0xb, 1), (0xc, 0)];
+        assert_eq!(shares(400, &tenants), [(0xa, 300), (0xb, 100), (0xc, 0)]);
+        assert_eq!(shares(400, &[(0xf, 0)]), [(0xf, 0)]);
     }
 }

@@ -21,7 +21,7 @@
 
 use super::tests::{idle, kept_in, pattern, reopened, url_of};
 use crate::extents::Opening;
-use crate::host_store::{self, NO_TENANT, new_cell};
+use crate::host_store::{self, DEFAULT_TENANT, new_cell};
 use crate::{Branch, ExtentId, ExtentStore, VolatileSlice};
 use extent_remote::faults::{Fault, Faults, Faulty};
 use extent_remote::store::Store as Bucket;
@@ -425,7 +425,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     drop(base);
     let base = open(&made.join("base"));
     let (point, asked, _) =
-        run.asked(|| base.point(made.join("point"), new_cell(NO_TENANT)).unwrap());
+        run.asked(|| base.point(made.join("point"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(point, "point");
     let line = asked.line(Duration::ZERO, &run.names);
     println!("SETUP extents={extents} point of the base: {line}");
@@ -438,7 +438,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     // The bucket the daemon's stores are made in, as a point taken from it is.
     unsafe { std::env::set_var("CLADEFS_EXTENTD_REMOTE", url_of(&bucket)) };
     extent_store::upload::block_on(bucket.probed(rand::random())).unwrap().unwrap();
-    host_store::new_branch(&bucket, new_cell(NO_TENANT)).unwrap();
+    host_store::new_branch(&bucket, new_cell(DEFAULT_TENANT)).unwrap();
     let host = dir.path().join("host");
     std::fs::create_dir(&host).unwrap();
     let at = |name: &str| host.join(name);
@@ -450,11 +450,12 @@ fn lifecycle(extents: u64, latency: Duration) {
     let taken = run.phase("cold point-open", || {
         ExtentStore::take_with(at("point"), (capacity, point, None), opening()).unwrap()
     });
-    let unwritten = run.phase("cold fork", || taken.fork(at("cold"), new_cell(NO_TENANT)).unwrap());
+    let unwritten =
+        run.phase("cold fork", || taken.fork(at("cold"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(unwritten, "cold-fork");
     let cold = run.phase("cold fork-open", || open(&at("cold")));
     // And on one that has it open, as the daemon keeps a point open for the restores after.
-    let fork = run.phase("warm fork", || taken.fork(at("vm"), new_cell(NO_TENANT)).unwrap());
+    let fork = run.phase("warm fork", || taken.fork(at("vm"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(fork, "fork");
     let vm = run.phase("warm fork-open", || open(&at("vm")));
 
@@ -462,14 +463,15 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.phase("close", || drop(vm));
     let vm = run.phase("reopen", || open(&at("vm")));
     run.phase("write-commit again", || write_and_commit(&vm));
-    let snapshot = run.phase("snapshot", || vm.point(at("snapshot"), new_cell(NO_TENANT)).unwrap());
+    let snapshot =
+        run.phase("snapshot", || vm.point(at("snapshot"), new_cell(DEFAULT_TENANT)).unwrap());
     run.names.name(snapshot, "snapshot");
     run.phase("close after snapshot", || drop(vm));
     let deleting = |name: &str| host_store::delete(&at(name), Some(&bucket), || Ok(1)).unwrap();
     run.phase("delete", || deleting("vm"));
     run.phase("delete snapshot", || deleting("snapshot"));
     // A sandbox that lived minutes: restored, written, closed, deleted. Its deletion.
-    let short = taken.fork(at("short"), new_cell(NO_TENANT)).unwrap();
+    let short = taken.fork(at("short"), new_cell(DEFAULT_TENANT)).unwrap();
     run.names.name(short, "short");
     let lived = open(&at("short"));
     write_and_commit(&lived);
@@ -503,7 +505,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     run.late(false);
     let restore = |run: &Run, name: &str| {
         let (_, asked, events) = run.asked(|| {
-            taken.fork(at(name), new_cell(NO_TENANT)).unwrap();
+            taken.fork(at(name), new_cell(DEFAULT_TENANT)).unwrap();
             drop(open(&at(name)));
         });
         let checkpoints = events.iter().filter(|event| {
@@ -522,7 +524,7 @@ fn lifecycle(extents: u64, latency: Duration) {
     said(0, restore(&run, "restore-0"));
     for resumes in 1..=RESUMES {
         let name = format!("resumed-{resumes}");
-        taken.fork(at(&name), new_cell(NO_TENANT)).unwrap();
+        taken.fork(at(&name), new_cell(DEFAULT_TENANT)).unwrap();
         let resumed = open(&at(&name));
         write_and_commit(&resumed);
         drop(resumed);

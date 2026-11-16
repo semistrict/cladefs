@@ -891,7 +891,7 @@ fn noise(len: usize) -> Vec<u8> {
 }
 
 /// TASK-411.7 (TASK-411's AC #3, FUSE mounts): the server a FUSE mount runs, serving a store of a
-/// encrypted cell, its tenant's KEK in the host's KMS (the common tenant's, whose cells `Storage`
+/// encrypted cell, its tenant's KEK in the host's KMS (the default tenant's, whose cells `Storage`
 /// makes): a file written through it reads back, before and after the store is closed and served
 /// again; no file of the store's directory, nor of its bucket's, holds the file's data in the
 /// clear. Its kernel mount is `fuse_mount.rs`'s, Linux's.

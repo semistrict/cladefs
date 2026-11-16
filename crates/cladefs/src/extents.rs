@@ -500,7 +500,7 @@ impl ExtentStore {
     /// file bucket of its own, which its description names (`host_store::create`, TASK-165.6),
     /// opened as this process opens stores ([`Opening::here`]).
     pub fn create(path: impl AsRef<Path>, capacity: u64) -> Result<Self, Error> {
-        Self::create_in(path, capacity, host_store::new_cell(host_store::NO_TENANT))
+        Self::create_in(path, capacity, host_store::new_cell(host_store::DEFAULT_TENANT))
     }
 
     /// cladefs: a new store at `path`, as [`ExtentStore::create`] makes, of a new branch of `cell`,
@@ -956,7 +956,7 @@ impl ExtentStore {
 
     /// cladefs: a fork's child, a new branch of `cell` of the store's bucket's. A follower's uploader
     /// is its writer's, which forks nothing of it (`EROFS`). A store with a writer forks to no cell
-    /// of another tenant's than its own unless it is the common tenant's (`EACCES`,
+    /// of another tenant's than its own unless it is the default tenant's (`EACCES`,
     /// `host_store::may_fork_into`, TASK-395.9): refused before the bucket gives an ID.
     fn new_child(&self, cell: Cell) -> Result<Branch, Error> {
         let remote = self.remote.as_ref().ok_or(Errno::EROFS)?;
@@ -1978,10 +1978,10 @@ impl ExtentStore {
     }
 
     /// cladefs: makes the store's branch public, but not those it inherited from: a fork pinning a
-    /// generation of a store that goes on being written, which attaches to tenants' stores rather
-    /// than being forked by them (backlog doc-10). Its pages are of the default arena through it
+    /// state of a store that goes on being written, which attaches to tenants' stores rather than
+    /// being forked by them (backlog doc-10). Its pages are of the default arena through it
     /// ([`ExtentStore::open_base`]).
-    pub fn make_generation_public(&self) -> Result<()> {
+    pub fn make_public_attach_only(&self) -> Result<()> {
         self.access().may_manage()?;
         self.mark_public(&[self.branch().id])
     }
@@ -2528,7 +2528,7 @@ mod tests {
         let keys = tempfile::tempdir().unwrap();
         let kms = extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap();
         kms.create(5).unwrap();
-        kms.create(host_store::NO_TENANT).unwrap();
+        kms.create(host_store::DEFAULT_TENANT).unwrap();
         crate::remote::set_kms(Arc::new(kms)).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("store");
@@ -2584,10 +2584,13 @@ mod tests {
         assert_eq!(refused.errno(), Some(Errno::EACCES), "{refused:#}");
         assert!(format!("{refused:#}").contains("tenant 6: no KEK in the KMS"), "{refused:#}");
 
-        // The common tenant's, encrypted, into a cell of a tenant with no KEK.
+        // The default tenant's, encrypted, into a cell of a tenant with no KEK.
         let common = dir.path().join("common");
-        let common =
-            ExtentStore::create_in(&common, 1 << 20, host_store::new_cell(host_store::NO_TENANT));
+        let common = ExtentStore::create_in(
+            &common,
+            1 << 20,
+            host_store::new_cell(host_store::DEFAULT_TENANT),
+        );
         let common = common.unwrap();
         assert!(!common.store.keys().is_empty());
         write(&common, id(&common, 1), 0, &pattern(2, BLOCK)).unwrap();
@@ -4212,7 +4215,7 @@ mod tests {
         publisher.commit(None).unwrap();
         publisher.fork_to(&base, crate::host_store::fork_child(publisher.branch())).unwrap();
         drop(publisher);
-        ExtentStore::open(&base).unwrap().make_generation_public().unwrap();
+        ExtentStore::open(&base).unwrap().make_public_attach_only().unwrap();
         let tenant = Arena::new();
         let publisher = ExtentStore::open_in(&publisher_path, Some(tenant.clone())).unwrap();
         // The publisher's VM maps its first page, from the tenant's copy.

@@ -383,9 +383,9 @@ COPY lua-5.4.7.tar.gz /opt/lua-5.4.7.tar.gz
                     _ => (extentd.clone(), None),
                 };
                 let daemon_stats = crate::common::control(&socket)?;
-                let before = daemon_stats.stats()?;
+                let before = daemon_stats.counters()?;
                 role(test_setup, "fork", &fork, &socket, None)?;
-                let counted = daemon_stats.stats()?.since(&before);
+                let counted = daemon_stats.counters()?.since(&before);
                 for (name, value) in counted.named() {
                     println!("OBSERVED extentd-{name} {value}");
                 }

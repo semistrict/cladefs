@@ -15,19 +15,20 @@
 // VM may as well be of one tenant, or of none, on the daemon's own VM socket. Grants are not kept
 // across restarts of the daemon: the caller grants again.
 //
-// A snapshot's point is immutable (TASK-158): any number of hosts read it, none writes it, it has
-// no lease, and a restore's fork is a new branch's record alone, so that a restore on one host
-// changes nothing another sees, and no host's copy goes stale.
+// A point is immutable (TASK-158): any number of hosts read it, none writes it, no writer takes it,
+// and a restore's fork is a new branch's record alone, so that a restore on one host changes
+// nothing another sees, and no host's copy goes stale.
 //
 // A tenant's restore on a host without the point (TASK-154). A VM process names no branch: what a
 // tenant's says in OPEN is ignored, as anyone's ID would take that branch's data. A tenant's stores
 // are what is in its directory, which only this API puts a branch of the bucket in, so that the
 // caller's CreateStore of a branch in a tenant's directory grants it, and DropStore ends that. A
-// snapshot of a tenant's VM restores so, on any number of hosts at once:
+// VM snapshot of a tenant's VM, which makes a point as it is taken, restores so, on any number of
+// hosts at once:
 //
-// - On the snapshot's host, once it is taken: StatStore's `branch` of its point, kept with the
-//   snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which a
-//   VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
+// - On the snapshot's host, once it is taken: StatStore's `branch` of the point it made, kept with
+//   the snapshot. The point is in the bucket by then. Not the snapshot file's `point_branch`, which
+//   a VM process wrote. The daemon's is sound: a fork to an ID another branch has fails
 //   (ALREADY_EXISTS).
 // - On each host to restore it, once, before the VMM's first `PUT /snapshot/load`: CreateStore at a
 //   path in the tenant's directory, of that branch, which that host's daemon reads as the first
@@ -38,24 +39,25 @@
 //   restore forks the point, on as many hosts at once as there are. Without the CreateStore, it
 //   fails with ENOENT, whatever the VMM names; so does one of a point deleted since.
 // - Once this host restores it no more: DropStore of the point, optional, which ends the grant here
-//   and frees the copy. DeleteStore deletes the point, which is the snapshot, on every host: VMs
-//   restored from it keep what they inherited.
+//   and frees the copy. DeleteStore deletes the point, which the snapshot restores from, on every
+//   host: VMs restored from it keep what they inherited.
 //
 // A branch so granted is the tenant's to read and restore: a VM process opening a point to write
-// it fails with EROFS. Grant one only to the tenant whose snapshot it is.
+// it fails with EROFS. Grant one only to the tenant whose VM snapshot made it.
 //
 // Shared points (TASK-395.7): a point forks only into cells of its own tenant's, unless it is
-// shared (SharePoint, or ForkStore's `shared`): a base image or a snapshot that many tenants clone.
+// shared (SharePoint, or ForkStore's `shared`): a base image or a VM snapshot's point that many
+// tenants fork.
 // A restore, or a ForkStore, of a point of another tenant's that isn't shared fails with
 // PERMISSION_DENIED (EACCES), making nothing; each fork reads whether the point is shared, in the
 // bucket, as it is made, so that unsharing it stops new forks on every host, and those made live
-// on. A store with a writer forks into cells of other tenants' only if it is tenant 0's, as the
-// daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's into
-// another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
+// on. A store with a writer forks into cells of other tenants' only if it is the default tenant's,
+// as the daemon's own stores and public bases are (TASK-395.9): a ForkStore of another tenant's
+// into another tenant's directory fails with PERMISSION_DENIED (EACCES), making nothing.
 //
 // A fork of anything but a point is a commit of its branch, which takes its branch's writer: a
 // store forks on one host at a time. A base, or any store, forked on several hosts is made a point
-// first, by ForkStore's `point`, and forked as a snapshot's is, from a copy on each host.
+// first, by ForkStore's `point`, and forked as a VM snapshot's point is, from a copy on each host.
 //
 // Stores are named by the paths of their directories on the daemon's host, UTF-8. A store a VM
 // process has open is its connection's: what would change it under the guest's feet fails with
@@ -79,10 +81,12 @@
 // beside v1 until callers move.
 //
 // Cells (TASK-364): every branch is a volume of a tenant's cell, kept under the cell's prefix in
-// the bucket, and a host takes a cell whole, its volumes' leases with it. A branch is named by its
-// tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another. Tenants and cells
-// are IDs alone, which the caller keeps the meaning of. A granted tenant's ID is its grant's
-// (Grant's `id`); the daemon's own socket's VM processes make stores of tenant 0.
+// the bucket, and a host takes a cell whole, the heads of its volumes' branches with it. A branch
+// is named by its tenant, its cell and its ID: `tenant`, `cell` and `branch` beside one another.
+// Tenants and cells are IDs alone, which the caller keeps the meaning of: every call names a
+// tenant by its ID in the bucket, `tenant`, and no tenant has a name. A granted tenant's ID is the
+// one Grant named; the daemon's own socket's VM processes make stores of the default tenant, whose
+// ID is 0.
 
 syntax = "proto3";
 
@@ -95,7 +99,7 @@ option go_package = "github.com/semistrict/cladefs/go/extentd/v1;extentdv1";
 service Extentd {
   // Makes an empty store: of a new branch; or of a branch kept in the daemon's bucket, which the
   // daemon takes once it opens the store (a VM on another host than the branch's), or reads, if it
-  // is a point, a snapshot's or ForkStore's, which any number of hosts hold at once.
+  // is a point, a VM snapshot's or ForkStore's, which any number of hosts hold at once.
   rpc CreateStore(CreateStoreRequest) returns (CreateStoreResponse);
   // Makes a store holding an Fxfs filesystem of a container image: a base for VMs to fork.
   rpc ImportImage(ImportImageRequest) returns (ImportImageResponse);
@@ -106,12 +110,12 @@ service Extentd {
   // number of hosts at once. So a base forked on many hosts is made a point first (`point`).
   rpc ForkStore(ForkStoreRequest) returns (ForkStoreResponse);
   // Deletes a store, or a fork, and its branch in the daemon's bucket: its data goes but for what
-  // other branches share of it, which stays until the last of them goes. A snapshot's point deleted
-  // restores no more, on any host (NOT_FOUND), and what was restored from it lives on.
+  // other branches share of it, which stays until the last of them goes. A point deleted restores
+  // no more, on any host (NOT_FOUND), and what was restored from it lives on.
   rpc DeleteStore(DeleteStoreRequest) returns (DeleteStoreResponse);
   // Deletes this host's copy of a store, or a fork, as DeleteStore does, but for its branch in the
   // daemon's bucket, which stays, with what else holds it: a point this host read for a tenant,
-  // which that tenant's VM processes restore no more here, its snapshot living on. A store whose
+  // which that tenant's VM processes restore no more here, the point living on. A store whose
   // forks live here keeps its directory, which no longer opens, and takes no CreateStore until the
   // last of them goes. What its commits hold that the bucket doesn't goes with it: SyncStore first,
   // to keep it. FAILED_PRECONDITION (EBUSY) while a VM process has it open.
@@ -129,8 +133,8 @@ service Extentd {
   // in memory every tenant's VM processes map read-only, and shared by every tenant's forks.
   rpc MakePublic(MakePublicRequest) returns (MakePublicResponse);
   // Shares a point, or no longer (TASK-395.7): while shared, it forks into cells of other tenants'
-  // than its own, as a base image or a snapshot many tenants clone; unshared, such forks fail
-  // (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
+  // than its own, as a base image or a VM snapshot's point many tenants fork; unshared, such forks
+  // fail (PERMISSION_DENIED, EACCES), and those made live on. A store of no point is refused
   // (INVALID_ARGUMENT, EINVAL); one of a point deleted, or none, NOT_FOUND (ENOENT). Nothing of the
   // store on this host changes: the point's record in the daemon's bucket says it, for every host.
   rpc SharePoint(SharePointRequest) returns (SharePointResponse);
@@ -146,21 +150,21 @@ service Extentd {
   rpc SyncStore(SyncStoreRequest) returns (SyncStoreResponse);
   // What a store is, and holds. Of a store a VM process has open, as it has it, at no cost however
   // many extents it holds; of one none has, the daemon opens it to say, as a VM's would, taking its
-  // branch's lease, and closes it again: time, and memory till then, as its extents (TASK-454).
+  // branch's head, and closes it again: time, and memory till then, as its extents (TASK-454).
   rpc StatStore(StatStoreRequest) returns (StatStoreResponse);
   // Lists the stores the daemon serves: those VM processes have open, as writers or followers,
   // with what StatStore says of each (TASK-50.5).
   rpc ListStores(ListStoresRequest) returns (ListStoresResponse);
   // What the daemon did since it started: counters, which only grow.
-  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  rpc GetCounters(GetCountersRequest) returns (GetCountersResponse);
   // What the daemon, its VM processes and their guests counted, as of one moment, each with the
   // commit it was built of (TASK-111.4): the daemon asks every VM process that opened a store, each
   // its guest, waits for their answers, a while at most, and reads its own counters then.
-  rpc GetSnapshot(GetSnapshotRequest) returns (GetSnapshotResponse);
-  // Grants a tenant a VM socket, making the tenant if it is new: the path of a socket for the
-  // caller to bind-mount into the tenant's jails, through which VM processes open stores in the
-  // tenant's directory alone. Granting a tenant again returns its socket, given to the uid and gid
-  // named; with another directory, ALREADY_EXISTS.
+  rpc GetStats(GetStatsRequest) returns (GetStatsResponse);
+  // Grants a tenant, by its ID, a VM socket, making the tenant if it is new: the path of a socket
+  // for the caller to bind-mount into the tenant's jails, through which VM processes open stores in
+  // the tenant's directory alone. Granting a tenant again returns its socket, given to the uid and
+  // gid named; with another directory, ALREADY_EXISTS.
   rpc Grant(GrantRequest) returns (GrantResponse);
   // Revokes a tenant's grant: its socket goes, and takes no more connections. Its VM processes
   // connected keep their stores until they go; then the tenant goes, and its cached pages.
@@ -177,11 +181,12 @@ service Extentd {
   // hold, a tenant within its share kept, then any, least recently used first. Every tenant weighs
   // 1 until set, such as to the memory its sandboxes are given.
   rpc SetMemoryWeight(SetMemoryWeightRequest) returns (SetMemoryWeightResponse);
-  // Sets the room a tenant's VM processes' connections share (TASK-149.35): what of their
-  // requests the daemon holds at once, their data in the stream and what it queued for them, which
-  // each connection's own room bounds too. A request past it waits for room. By default 8 GiB a
-  // tenant, which a tenant's VMs reach only writing large extents through the stream, back to back.
-  rpc SetTenantRoom(SetTenantRoomRequest) returns (SetTenantRoomResponse);
+  // Sets the bytes in flight a tenant's VM processes' connections share (TASK-149.35): what of
+  // their requests the daemon holds at once, their data in the stream and what it queued for them,
+  // which each connection's own credit bounds too. A request past it waits until enough leaves. By
+  // default 8 GiB a tenant, which a tenant's VMs reach only writing large extents through the
+  // stream, back to back.
+  rpc SetTenantInFlight(SetTenantInFlightRequest) returns (SetTenantInFlightResponse);
   // Evicts clean pages, of extents asked for longest ago first, until the memory a tenant, or the
   // daemon, holds is at most a target, or none is left to evict: as the host's memory runs low.
   rpc ShrinkMemory(ShrinkMemoryRequest) returns (ShrinkMemoryResponse);
@@ -211,11 +216,11 @@ service Extentd {
   rpc ShredCell(ShredCellRequest) returns (ShredCellResponse);
   // Has the daemon forget what it holds of a tenant's keys (TASK-411.7, doc-16 Shredding), once
   // the tenant's KEK is destroyed (the tenant shredded), or revoked, in the KMS: its stores open
-  // here are fenced, each request of their VM processes failing with EACCES, as their openings do;
-  // their extents' pages leave the cache, but those other stores hold too (a shared point's clone,
+  // here are halted, each request of their VM processes failing with EACCES, as their openings do;
+  // their extents' pages leave the cache, but those other stores hold too (a shared point's fork,
   // a public base); its fetchers forget their keys and what they kept of them; its KMS forgets the
   // tenant's cell KEKs it unwrapped and its pool of new ones, refusing them until the KMS answers
-  // for the tenant again. Call it on every host. Fenced stores keep their own keys in memory until
+  // for the tenant again. Call it on every host. Halted stores keep their own keys in memory until
   // their VM processes close them.
   rpc ForgetTenantKeys(ForgetTenantKeysRequest) returns (ForgetTenantKeysResponse);
   // Shreds a tenant under the bucket KMS (TASK-411.27, doc-16 The bucket KMS): replaces its KEK
@@ -245,7 +250,7 @@ message CreateStoreRequest {
   // has no writer, and needs none.
   optional uint64 token = 4;
   // The tenant whose cell the branch is a volume of. Of a new cell in a granted tenant's
-  // directory, that tenant's ID (Grant's `id`), or 0 for it; another is refused
+  // directory, that tenant's ID (Grant's `tenant`), or 0 for it; another is refused
   // (PERMISSION_DENIED, EPERM). A point of another tenant's there is the VM manager's to give: the
   // tenant's VM processes restore from it, each restore a cell of their tenant's, if the point is
   // shared (SharePoint); otherwise each restore fails (PERMISSION_DENIED, EACCES).
@@ -321,10 +326,10 @@ message ForkStoreRequest {
   // `from`'s tenant.
   reserved 3;
   // Whether the fork is a point (TASK-158): a name of `from`'s state as it is, which any number of
-  // hosts read and fork at once, and none writes, as a snapshot's is. Forks of it on another host:
-  // CreateStore of its branch there, then ForkStore from that copy, as many and on as many hosts
-  // at once as wanted. `from` must have nothing open (FAILED_PRECONDITION, EBUSY), as a fork of a
-  // store a VM has open does, and be no point itself (INVALID_ARGUMENT): fork that instead.
+  // hosts read and fork at once, and none writes, as a VM snapshot's is. Forks of it on another
+  // host: CreateStore of its branch there, then ForkStore from that copy, as many and on as many
+  // hosts at once as wanted. `from` must have nothing open (FAILED_PRECONDITION, EBUSY), as a fork
+  // of a store a VM has open does, and be no point itself (INVALID_ARGUMENT): fork that instead.
   bool point = 4;
   // Whether the point is shared once made, as SharePoint shares it (TASK-395.7): only with
   // `point` (INVALID_ARGUMENT otherwise). If sharing it fails, the point stands, not shared, and
@@ -397,9 +402,9 @@ message SharePointResponse {}
 message MakePublicRequest {
   // The store, which no VM may have open.
   string path = 1;
-  // Its branch alone, not those it inherited: a fork pinning a generation of a store that goes on
-  // being written, to attach to stores (AttachBase), not to fork.
-  bool generation = 2;
+  // Its branch alone, not those it inherited: a fork pinning a state of a store that goes on being
+  // written, to attach to stores (AttachBase), not to fork.
+  bool attach_only = 2;
 }
 
 // The store made public.
@@ -408,7 +413,7 @@ message MakePublicResponse {}
 // Attaches a fork to a store.
 message AttachBaseRequest {
   // The store to attach it to.
-  string store = 1;
+  string path = 1;
   // The fork.
   string base = 2;
 }
@@ -451,18 +456,18 @@ message StatStoreResponse {
   // Those of the extents it inherited from the branches it was forked from, which may still share
   // them. Views of followers may keep more, freed: used is at least own and inherited.
   uint64 inherited = 8;
-  // The epoch of its latest commit: what a follower of it advances to.
+  // The commit number of its latest commit: what a follower of it advances to.
   uint64 committed = 9;
   // Whether its commits upload to the daemon's bucket now: while a VM process has it open, as
   // writer. If not, the fields below are zero (TASK-50.5).
   bool uploading = 10;
-  // The fencing token of the placement whose writer took its branch's lease: this host's.
-  uint64 lease_token = 11;
-  // The lease's epoch, one more than its last taking's.
-  uint64 lease_epoch = 12;
-  // When the writer took the lease, in milliseconds since the Unix epoch.
-  uint64 lease_taken_unix_ms = 13;
-  // The epoch of its latest commit in the bucket.
+  // The fencing token of its writer's taking of its branch's head: this host's placement's.
+  uint64 taken_token = 11;
+  // The epoch of its writer's taking of its branch's head, one more than the taking before.
+  uint64 taken_epoch = 12;
+  // When its writer's taking of its branch's head was, in milliseconds since the Unix epoch.
+  uint64 taken_unix_ms = 13;
+  // The commit number of its latest commit in the bucket.
   uint64 uploaded = 14;
   // The bytes its commits not yet in the bucket wrote.
   uint64 pending_upload_bytes = 15;
@@ -499,11 +504,11 @@ message ListedStore {
 }
 
 // Asks what the daemon did.
-message GetStatsRequest {}
+message GetCountersRequest {}
 
 // What the daemon did since it started: counters, which only grow, so that a measurement is the
 // difference of two.
-message GetStatsResponse {
+message GetCountersResponse {
   // MAP requests of VMs' windows.
   uint64 maps = 1;
   // The nanoseconds they took.
@@ -550,16 +555,16 @@ message GetStatsResponse {
   uint64 segment_close_ns = 22;
 }
 
-// Asks for a snapshot.
-message GetSnapshotRequest {
+// Asks for the stats of the daemon, its VM processes and their guests.
+message GetStatsRequest {
   // How long to wait for the VM processes' answers, in milliseconds: 0 for 2,000; 60,000 at most.
   uint32 wait_ms = 1;
 }
 
 // What the daemon, its VM processes and their guests counted, by the names its metrics give them.
-// Counters only grow, so that a measurement is the difference of two snapshots; gauges are as of
-// the snapshot.
-message GetSnapshotResponse {
+// Counters only grow, so that a measurement is the difference of two; gauges are as of their
+// taking.
+message GetStatsResponse {
   // When the daemon read its own counters, its VM processes having answered or the wait being
   // over: nanoseconds since the Unix epoch.
   uint64 taken_unix_ns = 1;
@@ -570,11 +575,11 @@ message GetSnapshotResponse {
   // Its gauges: those its metrics name cladefs_extentd_NAME.
   map<string, uint64> gauges = 4;
   // Its VM processes that opened a store, in the order they connected.
-  repeated VmSnapshot vms = 5;
+  repeated VmStats vms = 5;
 }
 
 // A VM process, and its guest, as it answered, or as the daemon has it if it didn't.
-message VmSnapshot {
+message VmStats {
   // Its connection's number, the daemon's count of connections as it connected: what tells apart
   // a store's writer and its followers, of one branch.
   uint64 connection = 1;
@@ -601,11 +606,11 @@ message VmSnapshot {
   // How long after it was asked it answered, in nanoseconds: 0 if it didn't.
   uint64 answer_ns = 10;
   // Its guest's, if a guest answered.
-  optional GuestSnapshot guest = 11;
+  optional GuestStats guest = 11;
 }
 
 // What a guest's Fxfs counted, as its /proc/fs/fxfs/TAG says.
-message GuestSnapshot {
+message GuestStats {
   // The commit it was built of, empty if it didn't say.
   string build = 1;
   // Its counters and gauges.
@@ -637,8 +642,11 @@ message ObjectStorageStats {
 
 // Grants a tenant.
 message GrantRequest {
-  // Its name: letters, digits, `-`, `_` and `.`, not first, at most 64.
-  string tenant = 1;
+  // Its ID in the bucket (TASK-364), not the default tenant's, 0 (INVALID_ARGUMENT): the stores in
+  // its directory are volumes of its cells, under its prefix, and its VM processes open no store of
+  // another tenant's cells (PERMISSION_DENIED, EACCES). Its socket is named by it, in hexadecimal:
+  // `<tenant>.sock`.
+  uint64 tenant = 1;
   // The directory its stores are in, which must exist: its VM processes name stores in it
   // alone.
   string dir = 2;
@@ -647,10 +655,6 @@ message GrantRequest {
   optional uint32 uid = 3;
   // The group to give its socket to; the daemon's own, if not given.
   optional uint32 gid = 4;
-  // Its ID in the bucket, not 0 (TASK-364): the stores in its directory are volumes of its cells,
-  // under its prefix, and its VM processes open no store of another tenant's cells
-  // (PERMISSION_DENIED, EACCES). Granting it again with another ID is refused (ALREADY_EXISTS).
-  uint64 id = 5;
 }
 
 // The tenant's VM socket.
@@ -662,7 +666,7 @@ message GrantResponse {
 // Revokes a tenant's grant.
 message RevokeRequest {
   // The tenant, granted (NOT_FOUND otherwise).
-  string tenant = 1;
+  uint64 tenant = 1;
 }
 
 // The tenant's grant revoked.
@@ -670,10 +674,11 @@ message RevokeResponse {}
 
 // Limits the memory of a tenant, or of every tenant.
 message SetMemoryLimitRequest {
-  // The tenant whose memory to limit, alive now or granted later, until its limit is set again;
-  // empty for every tenant's together, the default tenant's with them. A tenant revoked and
-  // granted again while its earlier VMs run has the limit for each of its grants' VMs.
-  string tenant = 1;
+  // The tenant whose memory to limit, alive now or granted later, until its limit is set again
+  // (INVALID_ARGUMENT for the default tenant); absent for every tenant's together, the default
+  // tenant's with them. A tenant revoked and granted again while its earlier VMs run has the limit
+  // for each of its grants' VMs.
+  optional uint64 tenant = 1;
   // The limit, in bytes, rounded down to 2 MiB, and at least that (INVALID_ARGUMENT otherwise);
   // absent, none.
   optional uint64 bytes = 2;
@@ -684,9 +689,9 @@ message SetMemoryLimitResponse {}
 
 // Weighs a tenant's memory.
 message SetMemoryWeightRequest {
-  // The tenant, alive now or granted later, until its weight is set again (INVALID_ARGUMENT for a
-  // malformed name).
-  string tenant = 1;
+  // The tenant, alive now or granted later, until its weight is set again (INVALID_ARGUMENT for the
+  // default tenant).
+  uint64 tenant = 1;
   // Its weight: 0 for no share kept under pressure.
   uint64 weight = 2;
 }
@@ -694,23 +699,24 @@ message SetMemoryWeightRequest {
 // The weight is set.
 message SetMemoryWeightResponse {}
 
-// Sets the room of a tenant's connections.
-message SetTenantRoomRequest {
-  // The tenant whose room to set, alive now or granted later, until it is set again; empty for
-  // every tenant's whose own isn't set, the default tenant's with them.
-  string tenant = 1;
-  // The room, in bytes, a payload's most, 64 MiB, at least (INVALID_ARGUMENT otherwise); absent,
-  // every tenant's, or for every tenant the default.
+// Sets the bytes in flight of a tenant's connections.
+message SetTenantInFlightRequest {
+  // The tenant whose bytes in flight to set, alive now or granted later, until they are set again
+  // (INVALID_ARGUMENT for the default tenant); absent for every tenant's whose own aren't set, the
+  // default tenant's with them.
+  optional uint64 tenant = 1;
+  // The bytes, a payload's most, 64 MiB, at least (INVALID_ARGUMENT otherwise); absent, every
+  // tenant's, or for every tenant the default.
   optional uint64 bytes = 2;
 }
 
-// The room is set.
-message SetTenantRoomResponse {}
+// The bytes in flight are set.
+message SetTenantInFlightResponse {}
 
 // Evicts pages toward a target.
 message ShrinkMemoryRequest {
-  // The tenant whose memory to shrink, alive (NOT_FOUND otherwise); empty for every tenant's.
-  string tenant = 1;
+  // The tenant whose memory to shrink, alive (NOT_FOUND otherwise); absent for every tenant's.
+  optional uint64 tenant = 1;
   // The most bytes to hold.
   uint64 target_bytes = 2;
 }
@@ -723,10 +729,10 @@ message ShrinkMemoryResponse {
 
 // Limits the disk of a tenant, or of every tenant.
 message SetDiskLimitRequest {
-  // The tenant whose disk to limit, alive now or granted later, until its limit is set again;
-  // empty for every tenant's together. A tenant revoked and granted again while its earlier VMs
-  // run has the limit for each of its directories.
-  string tenant = 1;
+  // The tenant whose disk to limit, alive now or granted later, until its limit is set again
+  // (INVALID_ARGUMENT for the default tenant); absent for every tenant's together. A tenant revoked
+  // and granted again while its earlier VMs run has the limit for each of its directories.
+  optional uint64 tenant = 1;
   // The limit, in bytes; absent, none.
   optional uint64 bytes = 2;
 }
@@ -746,8 +752,8 @@ message SetPeersResponse {}
 
 // Asks what a tenant's disk takes.
 message GetTenantDiskRequest {
-  // The tenant, alive (NOT_FOUND otherwise); empty for every tenant together.
-  string tenant = 1;
+  // The tenant, alive (NOT_FOUND otherwise); absent for every tenant together.
+  optional uint64 tenant = 1;
 }
 
 // What a tenant's disk takes.
@@ -806,7 +812,7 @@ message ShredTenantResponse {
 
 // What a host forgot of a tenant's or a cell's keys.
 message Forgotten {
-  // The stores open of them it fenced.
+  // The stores open of them it halted.
   uint32 stores = 1;
   // The stores' keys its fetchers held.
   uint32 rings = 2;

@@ -80,7 +80,7 @@ measurable.
 
 | Site | Why `Relaxed` is enough |
 |---|---|
-| `cladefs::extentd::memory::InFlight::{held, room}`, `TENANT_ROOM`, `GOVERNED` | `held` is changed only by RMWs, so the room check is atomic on one location. Waiters use event-listener 5.4.2, whose `notify` always takes the list's lock and so serializes with a listener's insertion. A taker that registers and then checks again (`take`) misses no `sub`. |
+| `cladefs::extentd::memory::InFlight::{held, budget}`, `TENANT_IN_FLIGHT`, `GOVERNED` | `held` is changed only by RMWs, so the budget check is atomic on one location. Waiters use event-listener 5.4.2, whose `notify` always takes the list's lock and so serializes with a listener's insertion. A taker that registers and then checks again (`take`) misses no `sub`. |
 | `cladefs::extentd::disk::Disk::{used, limit, full, nudged}`, `TOTAL_LIMIT`, `USED` | quotas updated by RMWs on one location each. `nudged` is swapped to true, then signalled under `NUDGED`'s lock, and swapped back by the recounter before it counts: no nudge lost. |
 | `cladefs::cache::CachedExtent::{present, used}`, `CACHE_CLOCK`, `MOST_CACHED`, `TRIM_AT` | eviction hints: `present` changes under the pages' lock and is read as a hint before that lock is taken. The clock orders uses only roughly. |
 | `cladefs::dax::uffd::Busy::{doing, since, serving}` | a watchdog's diagnostic. The two loads may disagree with each other. |
@@ -99,7 +99,7 @@ These publish nothing. Each is an RMW or a load of a value that is read as a num
 - cladefs: `stats::COUNTS`; `heap::{HELD, PEAK, LIMIT}` (tests' global allocator); `extents::OPEN_MAPS_REFUSED`;
   `remote::peers::Counters`; `dax::Gauges` (window state's gauges); `dax::uffd::{Taken, REFUSED, CHANGED}`;
   `extentd::client`'s `Client::next`, `StageCosts` and `Transfer::used`; `extentd::metrics::Requests`;
-  `extentd::snapshot`'s `ASKS`, `IDS` and each VM's `costs`, `private` and `installed`; `extentd::peers::{SERVED,
+  `extentd::stats`'s `ASKS`, `IDS` and each VM's `costs`, `private` and `installed`; `extentd::peers::{SERVED,
   SERVED_MISSING}`; `extentd::server::REFUSED`; `extentd::stores::{STATS_WRITTEN,
   UPLOADS_WHEN_ASKED}`; `extentd::wire::AsyncSender::queued`.
 - physmem: `pmm::{free_count, alloc_failed_no_mem}`; `physmap::create_shared_memory`'s `NEXT`.

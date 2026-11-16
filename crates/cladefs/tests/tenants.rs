@@ -21,11 +21,11 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A tenant named `name`, of the ID `id` in the bucket (TASK-364), whose stores are in the
-/// directory `name` in `dir`.
+/// A tenant of the ID `id` in the bucket (TASK-364), whose stores are in the directory `name` in
+/// `dir`.
 fn tenant(dir: &Path, name: &str, id: u64) -> Arc<Tenant> {
     std::fs::create_dir(dir.join(name)).unwrap();
-    Tenant::new(name, id, dir.join(name)).unwrap()
+    Tenant::new(id, dir.join(name)).unwrap()
 }
 
 /// A daemon's listener at `name` in `dir`, serving `tenant`'s VM processes, or those of none.
@@ -133,10 +133,10 @@ fn public_bases_are_shared_read_only() {
     assert_eq!(std::io::Error::last_os_error().raw_os_error(), Some(libc::EACCES));
 }
 
-/// TASK-79.17: the VM processes of no tenant, the default tenant's, hold an arena of their own, as
-/// a tenant's do, not the default arena, whose pages are public bases', which every tenant's VM
-/// processes hold: no tenant's reaches the default tenant's pages; and they hold the default arena
-/// read-only, as a tenant's do.
+/// TASK-79.17: the default tenant's VM processes hold an arena of their own, as a tenant's do, not
+/// the default arena, whose pages are public bases', which every tenant's VM processes hold: no
+/// granted tenant's reaches the default tenant's pages; and they hold the default arena read-only,
+/// as a tenant's do.
 #[test]
 fn the_default_tenants_pages_are_its_own() {
     let dir = tempfile::tempdir().unwrap();

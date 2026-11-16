@@ -18,12 +18,12 @@ use std::path::{Path, PathBuf};
 use tonic::Code;
 
 fn attach(daemon: &mut Daemon, store: &Path, base: &Path) -> Result<(), tonic::Status> {
-    let request = AttachBaseRequest { store: name(store), base: name(base) };
+    let request = AttachBaseRequest { path: name(store), base: name(base) };
     daemon.runtime.block_on(daemon.client.attach_base(request)).map(drop)
 }
 
-fn make_generation_public(daemon: &mut Daemon, path: &Path) -> Result<(), tonic::Status> {
-    let request = MakePublicRequest { path: name(path), generation: true };
+fn make_public_attach_only(daemon: &mut Daemon, path: &Path) -> Result<(), tonic::Status> {
+    let request = MakePublicRequest { path: name(path), attach_only: true };
     daemon.runtime.block_on(daemon.client.make_public(request)).map(drop)
 }
 
@@ -106,8 +106,8 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     let (acme, globex) = (dir.path().join("acme"), dir.path().join("globex"));
     std::fs::create_dir(&acme).unwrap();
     std::fs::create_dir(&globex).unwrap();
-    let acme_socket = daemon.grant("acme", 1, &acme, None).unwrap();
-    let globex_socket = daemon.grant("globex", 2, &globex, None).unwrap();
+    let acme_socket = daemon.grant(1, &acme, None).unwrap();
+    let globex_socket = daemon.grant(2, &globex, None).unwrap();
     let open =
         |socket: &Path, path: PathBuf| RemoteExtentStore::connect(socket, path, CAPACITY).unwrap();
 
@@ -126,9 +126,9 @@ fn tenants_reach_their_own_bases_and_public_ones() {
     attach(&mut daemon, &acme.join("vm"), &generation).unwrap();
     assert!(read(&acme_vm, private).unwrap() == pattern(5), "acme reads other bytes");
 
-    // A public one, of a store of no tenant's that goes on being written.
+    // A public one, of a store of the default tenant's that goes on being written.
     let (public, base) = publish(&mut daemon, dir.path(), 6, "public");
-    make_generation_public(&mut daemon, &base).unwrap();
+    make_public_attach_only(&mut daemon, &base).unwrap();
     assert!(daemon.stat(&base).unwrap().public);
     for (store, vm) in [(acme.join("vm"), &acme_vm), (globex.join("vm"), &globex_vm)] {
         attach(&mut daemon, &store, &base).unwrap();

@@ -10,7 +10,7 @@ use super::codec::{
     Told, stream_bytes,
 };
 use super::pool::Pool;
-use super::snapshot;
+use super::stats;
 use super::stores::{self, open_store, store_key};
 use super::wire::*;
 use crate::store_requests::{self, Guest, Resizes, Shrinking};
@@ -186,9 +186,9 @@ pub(super) fn stop_accepting() {
 /// Its arena goes, and the extents cached in it, once it is gone, as its VM processes are, and the
 /// stores opened in its arena, and what reads into the extent cache for them (`pages::Arena`).
 pub struct Tenant {
-    name: String,
-    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are volumes of: a granted
-    /// tenant's, its grant's; the default tenant's, [`NO_TENANT`](crate::host_store::NO_TENANT).
+    /// cladefs: its ID in the bucket (TASK-364), whose cells its stores are volumes of, which names
+    /// it in every call of the control API: a granted tenant's, its grant's; the default tenant's,
+    /// [`DEFAULT_TENANT`](crate::host_store::DEFAULT_TENANT).
     id: u64,
     policy: Policy,
     memory: Memory,
@@ -243,7 +243,7 @@ struct Memory {
     /// cladefs: how many connections the tenant's VM processes have ([`MAX_CONNECTIONS`]).
     connections: Arc<std::sync::atomic::AtomicUsize>,
     /// cladefs: what its connections have the daemon hold of its VM processes' requests together,
-    /// within the room they share (TASK-149.35).
+    /// within the bytes in flight they share (TASK-149.35).
     in_flight: Arc<super::memory::InFlight>,
 }
 
@@ -294,8 +294,8 @@ pub(super) fn default_tenant_made() -> Option<Arc<Tenant>> {
 }
 
 /// cladefs: the default tenant, of the daemon's own socket, which its user's VM processes connect to
-/// (TASK-155), made as the first does, for as long as the daemon runs: nameless, as no granted
-/// tenant is, and limited by no name. Its policy is its own ([`Policy::default_tenant`]); its
+/// (TASK-155), made as the first does, for as long as the daemon runs: granted by no one, and
+/// limited by every tenant's limits alone. Its policy is its own ([`Policy::default_tenant`]); its
 /// memory is as a granted tenant's (TASK-79.17): an arena of its own, so that the default arena
 /// holds public bases' pages, which every VM process holds read-only, and nothing of a VM
 /// process's own. `EIO`, logged, if its memory can't be made.
@@ -307,40 +307,32 @@ pub(super) fn default_tenant() -> Result<Arc<Tenant>, Errno> {
         log::error!("extentd: the default tenant's memory: {err}");
         Errno::EIO
     })?;
-    let (name, policy, disk) = (String::new(), Policy::default_tenant(), None);
-    let id = crate::host_store::NO_TENANT;
-    let tenant = Tenant { name, id, policy, memory, disk };
+    let (policy, disk) = (Policy::default_tenant(), None);
+    let id = crate::host_store::DEFAULT_TENANT;
+    let tenant = Tenant { id, policy, memory, disk };
     Ok(DEFAULT.get_or_init(|| Arc::new(tenant)).clone())
 }
 
 impl Tenant {
-    /// A new tenant named `name`, granted, of the ID `id` in the bucket (TASK-364), whose stores
-    /// are in `dir`, with an arena of its own.
-    pub fn new(
-        name: impl Into<String>,
-        id: u64,
-        dir: impl AsRef<Path>,
-    ) -> std::io::Result<Arc<Self>> {
-        let (name, dir) = (name.into(), dir.as_ref().canonicalize()?);
-        let disk = Some(super::disk::Disk::new(&name, &dir));
+    /// A new tenant, granted, of the ID `id` in the bucket (TASK-364), whose stores are in `dir`,
+    /// with an arena of its own.
+    pub fn new(id: u64, dir: impl AsRef<Path>) -> std::io::Result<Arc<Self>> {
+        let dir = dir.as_ref().canonicalize()?;
+        let disk = Some(super::disk::Disk::new(id, &dir));
         let policy = Policy::granted(dir);
-        let tenant = Arc::new(Self { name, id, policy, memory: Memory::new()?, disk });
+        let tenant = Arc::new(Self { id, policy, memory: Memory::new()?, disk });
         super::memory::register(&tenant);
         Ok(tenant)
     }
 
-    /// Its name.
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// cladefs: its ID in the bucket (TASK-364).
+    /// cladefs: its ID in the bucket (TASK-364), which names it.
     pub fn id(&self) -> u64 {
         self.id
     }
 
     /// cladefs: its ID, if it is granted (TASK-364): the default tenant's VM processes are the
-    /// daemon's user's (TASK-155), which reach any tenant's stores, and make them of tenant 0.
+    /// daemon's user's (TASK-155), which reach any tenant's stores, and make them of the default
+    /// tenant's.
     fn granted(&self) -> Option<u64> {
         self.dir().map(|_| self.id)
     }
@@ -374,7 +366,7 @@ impl Tenant {
     }
 
     /// cladefs: what its connections have the daemon hold of its VM processes' requests, within the
-    /// room they share (TASK-149.35).
+    /// bytes in flight they share (TASK-149.35).
     pub(super) fn in_flight(&self) -> &Arc<super::memory::InFlight> {
         &self.memory.in_flight
     }
@@ -463,7 +455,7 @@ pub(super) fn connections() -> usize {
 async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
     let sender = match stream.try_clone().and_then(|clone| {
         clone.set_nonblocking(true)?;
-        // cladefs: what it queues held in its tenant's room too (TASK-149.35).
+        // cladefs: what it queues held in its tenant's bytes in flight too (TASK-149.35).
         AsyncSender::counting(clone, tenant.in_flight().clone())
     }) {
         Ok(sender) => Arc::new(sender),
@@ -494,7 +486,7 @@ async fn run_connection(stream: UnixStream, tenant: Arc<Tenant>) {
         closing: AtomicBool::new(false),
         requests: SharedLock::new("connection requests", Mutex::new(Requests::default())),
         drained: Arc::new(event_listener::Event::new()),
-        report: snapshot::Report::new(&peer.sender),
+        report: stats::Report::new(&peer.sender),
         page_ins: tokio::sync::Semaphore::new(PAGE_INS),
         named: OnceLock::new(),
         _alive: alive,
@@ -1010,7 +1002,7 @@ pub(super) struct Connection {
     drained: Arc<event_listener::Event>,
     /// cladefs: what the daemon reports of its VM process (TASK-111.4): its store, its build, what
     /// it says of its window's second stage, and its answers to asks for its stats.
-    report: Arc<snapshot::Report>,
+    report: Arc<stats::Report>,
     /// cladefs: its faults and `PRIVATE`s resolving, [`PAGE_INS`] at most (TASK-149.34).
     page_ins: tokio::sync::Semaphore,
     /// cladefs: its store's path, once open, which names the guest requests it serves calls for
@@ -1147,12 +1139,12 @@ impl Connection {
     /// cladefs: admits a message of `header`, before its payload is read, as the protocol's bounds
     /// allow what its VM process keeps in flight (TASK-79.16): its requests not answered
     /// ([`MAX_REQUESTS`]), and their stream data ([`MAX_STREAM_BYTES`]), with what the connection
-    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a
-    /// request's, until its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM
-    /// process broke the protocol, and is let go, rather than held without end in the daemon's
-    /// memory. cladefs: and its
-    /// stream data in the room its tenant's connections share, waiting, before its payload is read,
-    /// until what they hold leaves room for it (TASK-149.35, [`super::memory::InFlight`]).
+    /// has queued for the VM process, within its credit ([`Peer::credit`]). Counted in, a request's, until
+    /// its reply is queued ([`Answer`]). Past them, `QuotaExceeded`: the VM process broke the
+    /// protocol, and is let go, rather than held without end in the daemon's memory. cladefs: and its
+    /// stream data in the bytes in flight its tenant's connections share, waiting, before its
+    /// payload is read, until what they hold leaves enough for it (TASK-149.35,
+    /// [`super::memory::InFlight`]).
     async fn within_bounds(self: Arc<Self>, header: Header) -> std::io::Result<()> {
         // cladefs: nor what its stage operations cost, which it says unasked (TASK-91.16).
         if [ACK, STAGE_COUNTS, STAGE_PRIVATE_COUNTS].contains(&header.kind) {
@@ -1397,8 +1389,8 @@ impl Connection {
             Request::Fork { path, quiescent } => {
                 // cladefs: a store made, within its tenant's disk (TASK-94).
                 let _admitted = self.tenant.admit_to_disk(super::disk::STORE_MADE)?;
-                // cladefs: a snapshot's point, refused while the window holds private pages, whose
-                // bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
+                // cladefs: a VM snapshot's point, refused while the window holds private pages,
+                // whose bytes no extent holds (ExtentStore::point, TASK-203). Each refusal says why
                 // here, as the VMM's error can't (TASK-92.14).
                 // cladefs: the one volume of a new cell of the store's tenant, of an ID of the
                 // bucket's giving, which the reply says (TASK-364).
