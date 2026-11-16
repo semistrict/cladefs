@@ -98,7 +98,7 @@ fn spans_trace_requests_commits_and_uploads() {
     assert_eq!(attribute(read, "cladefs.request_id"), None, "a call for no guest request");
 
     let committed = the(&spans, "extentd.commit");
-    assert_eq!(attribute(committed, "cladefs.durable"), Some(Value::Bool(true)));
+    assert_eq!(attribute(committed, "cladefs.level"), Some(Value::from("uploaded")));
     assert_eq!(children(&spans, committed), BTreeSet::from(["store.commit".to_owned()]));
     let commit = the(&spans, "store.commit");
     assert_eq!(attribute(commit, "cladefs.branch"), Some(hex.clone()));

@@ -1354,8 +1354,8 @@ fn daemon_line() -> String {
     let quantile = |fraction| lags.quantile_ms(fraction).unwrap_or(0);
     let last = extent_store::LAG_BUCKETS - 1;
     let bucket = |(bucket, count): (usize, &u64)| match bucket == last {
-        false => format!("durable_lag_le_{}ms={count}", 1u64 << bucket),
-        true => format!("durable_lag_gt_{}ms={count}", 1u64 << (bucket - 1)),
+        false => format!("local_lag_le_{}ms={count}", 1u64 << bucket),
+        true => format!("local_lag_gt_{}ms={count}", 1u64 << (bucket - 1)),
     };
     let buckets: Vec<String> = lags.buckets.iter().enumerate().map(bucket).collect();
     // And where it went: how long its flushes and framings took, phase by phase.
@@ -1406,8 +1406,8 @@ fn daemon_line() -> String {
     ];
     let io = process_io().map(|(name, bytes)| format!("io_{name}={bytes}"));
     format!(
-        "daemon: {} durable_lag_count={} durable_lag_max_us={} durable_lag_p50_ms={} \
-         durable_lag_p99_ms={} durable_lag_within_50ms={} {} {} {} {} {} {}",
+        "daemon: {} local_lag_count={} local_lag_max_us={} local_lag_p50_ms={} \
+         local_lag_p99_ms={} local_lag_within_50ms={} {} {} {} {} {} {}",
         named.join(" "),
         lags.count,
         lags.max_us,

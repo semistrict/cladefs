@@ -410,7 +410,7 @@ A host's dropping the keys of a shredded tenant or cell, fencing its stores.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars are to say `TEST_HOST` (the scripts' `CLADEFS_HOST*` still).
+A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST` (`CLADEFS_TEST_HOST*`).
 _Avoid_: host alone
 
 **Driver**:
@@ -500,23 +500,21 @@ code does not have yet are said so.
 - **volume**: Fxfs's alone; a cell's named branch is a **vdisk**. Decided, but the code says volume
   (`cell::Volume`, `CreateVolume`) until TASK-475 lands; then `cell::Vdisk`, `CreateVdisk`.
 - **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
-- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol
-  and StatStore's `committed`; extent_store's `Store::epoch` and `View::epoch` and the trace's `epoch`
-  still say epoch for it.
+- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol,
+  StatStore's `committed`, `Store::last_commit`, `View::commit` and the trace's `cladefs.commit`.
 - **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; branches have none since TASK-407.
 - **durable**: names no level; say **local** or **uploaded**, in code too (`Commit::Local`,
-  `COMMIT_UPLOADED`). `Store::make_durable`, the `durable_lag` stats and the trace's `durable` still
-  say it.
+  `COMMIT_UPLOADED`, the `local_lag` stats, the trace's `cladefs.level`).
 - **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it.
 - **region**: the guest's; virtio's is a **shared memory region**.
 - **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag is `attach_only`).
 - **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
 - **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
 - **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
-- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`host_pin` in the scripts still).
-- **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too.
-  `CLADEFS_E2E_ROUNDS` and `CLADEFS_SOAK_ROUNDS` still say round for a case's repeats.
+- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version** (`pinned_version`).
+- **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too
+  (`CLADEFS_E2E_REPEATS`, `repeat-K.json`).
 - **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
 - **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
 - **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.

@@ -200,7 +200,7 @@ fn run_with(Run { steps, follow }: Run) {
                             _ => store.commit_ordered(None).unwrap(),
                         }
                         let mut history = history.lock().unwrap();
-                        assert_eq!(store.epoch().unwrap(), history.len() as u64);
+                        assert_eq!(store.last_commit().unwrap(), history.len() as u64);
                         history.push(holds.clone());
                     }
                 }
@@ -263,7 +263,7 @@ fn run_with(Run { steps, follow }: Run) {
                     for epoch in after + 1..=last {
                         for seed in [epoch, epoch + 100] {
                             let crashed = bucket.reopen(dir.crash(seed));
-                            let recovered = crashed.epoch().unwrap();
+                            let recovered = crashed.last_commit().unwrap();
                             assert!(
                                 recovered >= epoch,
                                 "uploaded commit {epoch} before durable: a crash recovered \
@@ -345,7 +345,8 @@ fn run_with(Run { steps, follow }: Run) {
                     let done = written.load(Ordering::SeqCst);
                     // A view opens as of a commit as it is made: its record may come later.
                     let holds = loop {
-                        if let Some(holds) = history.lock().unwrap().get(current.epoch() as usize) {
+                        if let Some(holds) = history.lock().unwrap().get(current.commit() as usize)
+                        {
                             break holds.clone();
                         }
                         thread::yield_now();
@@ -354,7 +355,10 @@ fn run_with(Run { steps, follow }: Run) {
                         let mut read = vec![0; data.len()];
                         let viewed = |read: &mut [u8]| store.read_view(current, *extent, 0, read);
                         bucket.read(&mut read, viewed).map_err(|error| {
-                            format!("a view's read of {extent:?} at {}: {error:#}", current.epoch())
+                            format!(
+                                "a view's read of {extent:?} at {}: {error:#}",
+                                current.commit()
+                            )
                         })?;
                         check(&read == data, || {
                             format!("a view's read of {extent:?} reads other data")
@@ -375,7 +379,7 @@ fn run_with(Run { steps, follow }: Run) {
                             || {
                                 format!(
                                     "a view at {} read {extent:?}, which its commit doesn't hold: {result:?}",
-                                    current.epoch()
+                                    current.commit()
                                 )
                             },
                         )?;
@@ -393,7 +397,7 @@ fn run_with(Run { steps, follow }: Run) {
                         bucket.read(&mut read, viewed).map_err(|error| {
                             format!(
                                 "a view's read of pinned {pinned:?} at {}: {error:#}",
-                                current.epoch()
+                                current.commit()
                             )
                         })?;
                         check(&read == data, || {
@@ -442,7 +446,7 @@ fn run_with(Run { steps, follow }: Run) {
     let taken = *taken.lock().unwrap();
     for seed in 0..4 {
         let crashed = bucket.reopen(dir.crash(seed));
-        let epoch = crashed.epoch().unwrap();
+        let epoch = crashed.last_commit().unwrap();
         assert!(epoch >= taken, "crash {seed}: recovered commit {epoch}, uploaded {taken}");
     }
 
@@ -714,7 +718,7 @@ fn uploading_during_flushes() {
             store.close_now().unwrap();
             for closed in store.closed(usize::MAX).unwrap() {
                 let crashed = Store::open(dir.crash(closed.last()), OPTIONS).unwrap();
-                let epoch = crashed.epoch().unwrap();
+                let epoch = crashed.last_commit().unwrap();
                 assert!(
                     epoch >= closed.last(),
                     "uploaded a segment of commit {} before durable: a crash recovered {epoch}",
@@ -854,7 +858,7 @@ fn closing_during_a_flush() {
         let store = store.clone();
         thread::spawn(move || {
             store.close().unwrap();
-            let epoch = Store::open(dir.crash(0), OPTIONS).unwrap().epoch().unwrap();
+            let epoch = Store::open(dir.crash(0), OPTIONS).unwrap().last_commit().unwrap();
             assert!(epoch == 2, "a crash after the branch closed recovered commit {epoch} of 2");
         })
     };
@@ -959,7 +963,11 @@ fn closing_after_a_failed_framing() {
     let reopened = Store::open(dir.clone(), OPTIONS);
     let reopened = reopened.unwrap_or_else(|error| panic!("{failure}: {error:#}"));
     // What was durable: the commits the flush took, extents 1 to 3's.
-    assert_eq!(reopened.epoch().unwrap(), 3, "{failure}: other commits than durable recovered");
+    assert_eq!(
+        reopened.last_commit().unwrap(),
+        3,
+        "{failure}: other commits than durable recovered"
+    );
     check_framed(&reopened, failure);
     // Writing on, it closes segments of its own, numbered past those it found, framed where no
     // framing of the store before frames them still, making files of their numbers.
@@ -1126,7 +1134,7 @@ fn serving_during_a_flush() {
     store.flush().unwrap();
     drop(store);
     let reopened = Store::open(dir, OPTIONS).unwrap();
-    assert_eq!(reopened.epoch().unwrap(), 2, "the commits made durable were not");
+    assert_eq!(reopened.last_commit().unwrap(), 2, "the commits made durable were not");
     check_flushed(&reopened, "the branch opened again");
 }
 
@@ -1171,7 +1179,11 @@ fn flushing_during_a_framing() {
     assert!(!store.flush_pending(), "a commit flushed during a framing is pending");
     for seed in 0..4 {
         let crashed = Store::open(dir.crash(seed), OPTIONS).unwrap();
-        assert_eq!(crashed.epoch().unwrap(), 2, "a crash during a framing lost a commit flushed");
+        assert_eq!(
+            crashed.last_commit().unwrap(),
+            2,
+            "a crash during a framing lost a commit flushed"
+        );
         check_flushed(&crashed, "a crash during a framing");
     }
     dir.let_go(Ok(()));

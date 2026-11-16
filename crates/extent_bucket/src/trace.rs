@@ -32,12 +32,12 @@ pub const BRANCH: &str = "cladefs.branch";
 pub const EXTENT: &str = "cladefs.extent";
 /// The attribute of the extents an operation took.
 pub const EXTENTS: &str = "cladefs.extents";
-/// The attribute of the commits an operation took, or the epoch of the one it made.
+/// The attribute of the commits an operation took, or the number of the one it made.
 pub const COMMITS: &str = "cladefs.commits";
-/// The attribute of the epoch of a commit.
-pub const EPOCH: &str = "cladefs.epoch";
-/// The attribute of whether a commit is durable, or ordered alone.
-pub const DURABLE: &str = "cladefs.durable";
+/// The attribute of a commit's number.
+pub const COMMIT: &str = "cladefs.commit";
+/// The attribute of the level a commit waits for: `ordered`, `local` or `uploaded` (doc-12).
+pub const LEVEL: &str = "cladefs.level";
 /// The attribute of the branch a fork makes.
 pub const CHILD: &str = "cladefs.child";
 /// The attribute of whether a fork makes a point (`doc-7`, Points).

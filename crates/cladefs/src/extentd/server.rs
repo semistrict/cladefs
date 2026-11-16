@@ -875,7 +875,7 @@ fn traced(span: &trace::Span, request: &Request<'_>) {
         Request::Free(_) => (None, Some(1)),
         Request::FreeMany { rest, .. } => (None, Some(1 + rest.len() as u64)),
         Request::Commit { commit, .. } => {
-            span.set(trace::DURABLE, *commit == Commit::Uploaded);
+            span.set(trace::LEVEL, commit.level());
             (None, None)
         }
         Request::Open { path, .. } | Request::Fork { path, .. } => {

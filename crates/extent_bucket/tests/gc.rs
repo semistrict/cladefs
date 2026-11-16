@@ -460,12 +460,12 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 /// again with one, it finishes.
 #[test]
 fn deletes_encrypted_branches_recording_their_forks_into_other_cells_under_the_kms() {
-    use extent_frame::{Encryption, Frame, KeyId};
-    use extent_keys::kms::LocalKms;
     use extent_bucket::batch::{Commit, SegmentBuilder};
     use extent_bucket::layout::{self, Branch, Cell, Child, Origin};
     use extent_bucket::object_bucket::ObjectBucket;
     use extent_bucket::{Bucket as _, Writer, branch, cell, keys};
+    use extent_frame::{Encryption, Frame, KeyId};
+    use extent_keys::kms::LocalKms;
     use futures::executor::block_on;
     use std::sync::Arc;
     use storage_device::ExtentId;

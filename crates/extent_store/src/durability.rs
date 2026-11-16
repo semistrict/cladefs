@@ -143,8 +143,8 @@ impl<T> Durability<T> {
         self.ordered > self.durable
     }
 
-    /// The epoch of the last commit durable.
-    pub fn durable(&self) -> u64 {
+    /// The number of the last commit local: synced to the host's disk.
+    pub fn local(&self) -> u64 {
         self.durable
     }
 
@@ -441,10 +441,10 @@ mod tests {
         durability.push(2, ());
         let batch = durability.take().unwrap();
         durability.push(3, ());
-        assert_eq!((durability.durable(), durability.taken()), (0, 2));
+        assert_eq!((durability.local(), durability.taken()), (0, 2));
         assert!(durability.queued());
         durability.finish(batch.last);
-        assert_eq!((durability.durable(), durability.taken()), (2, 2));
+        assert_eq!((durability.local(), durability.taken()), (2, 2));
         assert!(durability.queued());
         // Pending, taken or not, until durable.
         let batch = durability.take().unwrap();

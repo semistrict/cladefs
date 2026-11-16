@@ -6,11 +6,11 @@
 
 use crate::dir::Dir;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
+use extent_bucket::cell::Kind;
 use extent_frame::segment::Branch;
 #[cfg(test)]
 use extent_frame::segment::Contents;
 use extent_frame::segment::Location;
-use extent_bucket::cell::Kind;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use storage_device::ExtentId;

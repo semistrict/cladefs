@@ -415,6 +415,17 @@ pub enum Commit {
     Uploaded,
 }
 
+impl Commit {
+    /// Its level's name, as doc-12 and the traces say it.
+    pub fn level(self) -> &'static str {
+        match self {
+            Commit::Ordered => "ordered",
+            Commit::Local => "local",
+            Commit::Uploaded => "uploaded",
+        }
+    }
+}
+
 /// cladefs: the errno of the uploader's failure (`Failure::errno`): `EIO`, logged, for one the
 /// store failed to read or write.
 fn upload_errno(failure: extent_store::upload::Failure) -> Errno {
@@ -428,7 +439,7 @@ fn upload_errno(failure: extent_store::upload::Failure) -> Errno {
 /// as many of them as its lag allows (`extent_bucket::trace`, TASK-258).
 fn upload_wait(epoch: u64) -> trace::Span {
     let span = trace::Span::start("commit.upload_wait");
-    span.set_count(trace::EPOCH, epoch);
+    span.set_count(trace::COMMIT, epoch);
     span
 }
 
@@ -805,12 +816,12 @@ impl ExtentStore {
 
     /// The number of the store's latest commit: its writer's, if a follower's.
     pub fn committed(&self) -> Result<u64> {
-        self.store.epoch().map_err(errno)
+        self.store.last_commit().map_err(errno)
     }
 
     /// cladefs: the number of the commit a follower's view is as of.
     pub fn view_commit(&self) -> Result<u64> {
-        Ok(self.view()?.epoch())
+        Ok(self.view()?.commit())
     }
 
     /// cladefs: moves a follower's view to the writer's latest commit, holding what the commits
@@ -819,7 +830,7 @@ impl ExtentStore {
     pub fn advance(&self) -> Result<u64> {
         let mut view = self.view()?;
         view.advance_keeping().map_err(errno)?;
-        Ok(view.epoch())
+        Ok(view.commit())
     }
 
     /// cladefs: lets go of what a follower's view held of the commits before the one
@@ -1423,7 +1434,7 @@ impl ExtentStore {
     /// cladefs: makes every commit ordered so far local, and returns the commit number of the
     /// latest: what [`ExtentStore::uploaded`] waits for. It blocks on the store's I/O.
     pub fn make_local(&self) -> Result<u64> {
-        let epoch = self.store.epoch().map_err(errno)?;
+        let epoch = self.store.last_commit().map_err(errno)?;
         self.flush()?;
         Ok(epoch)
     }
@@ -1485,7 +1496,7 @@ impl ExtentStore {
     fn commit_with(&self, root: Option<&[u8]>, commit: Commit) -> Result<()> {
         let span = trace::Span::start("store.commit");
         span.set_branch(self.branch());
-        span.set(trace::DURABLE, commit != Commit::Ordered);
+        span.set(trace::LEVEL, commit.level());
         span.run(|| {
             // cladefs: nothing a panic went through is committed (`crate::halt`).
             self.halt.check()?;
@@ -1510,7 +1521,7 @@ impl ExtentStore {
             Commit::Ordered => match self.uploader.as_ref() {
                 // Within the lag the uploader allows.
                 Some(uploader) => {
-                    let epoch = self.store.epoch().map_err(errno)?;
+                    let epoch = self.store.last_commit().map_err(errno)?;
                     upload_wait(epoch).run(|| uploader.wait_lag(epoch).map_err(upload_errno))
                 }
                 None => Ok(()),

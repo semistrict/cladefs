@@ -251,7 +251,7 @@ impl<D: Dir + 'static> Device for ViewDevice<D> {
     async fn advance(&self) -> Result<Previous, Error> {
         let mut view = self.view.lock();
         view.advance_keeping()?;
-        Ok(Previous::new(LetGo(self.view.clone(), view.epoch())))
+        Ok(Previous::new(LetGo(self.view.clone(), view.commit())))
     }
 
     async fn pin(&self, extent: ExtentId) -> Result<(), Error> {

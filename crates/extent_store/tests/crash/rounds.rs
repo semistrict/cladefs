@@ -302,7 +302,7 @@ pub fn recovering(round: u64, dir: MemDir) -> (Left, bool) {
 
     let store = Store::open(crashed.clone(), OPTIONS)
         .unwrap_or_else(|e| panic!("round {round}: the store doesn't open: {e:?}"));
-    let epoch = store.epoch().unwrap() as usize;
+    let epoch = store.last_commit().unwrap() as usize;
     assert!(
         (durable..epochs.len()).contains(&epoch),
         "round {round}: recovered epoch {epoch}, of {durable}..{}",

@@ -35,12 +35,12 @@ use crate::wal::{
 };
 use crate::written;
 use anyhow::{Context as _, Error, anyhow, bail, ensure};
-use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
 use extent_bucket::cache::Cache;
 use extent_bucket::keys::Ring;
 use extent_bucket::recovery::{Places, Seal};
 use extent_bucket::trace;
 use extent_bucket::wal::{Rebased, Wal};
+use extent_frame::segment::{Branch, Chain, Child, Contents, Footer, Location, epoch_of};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::Arc;
@@ -1380,7 +1380,7 @@ impl<D: Dir> Store<D> {
             }
             // Their raw files, of commits durable, go as a flush's would.
             let raw = match state.standing.failed() {
-                false => state.segments.raw(self.durability.with(Mutex::lock).durable()),
+                false => state.segments.raw(self.durability.with(Mutex::lock).local()),
                 true => Vec::new(),
             };
             drop(state);
@@ -1980,7 +1980,7 @@ impl<D: Dir> Store<D> {
         let sealing = seal.run(|| self.seal_open(state, &seal))?;
         drop(seal);
         let write = trace::Span::start("commit.write");
-        write.set_count(trace::EPOCH, epoch);
+        write.set_count(trace::COMMIT, epoch);
         write.run(|| self.write_commit(state, epoch, root, &sealing))
     }
 
@@ -2531,7 +2531,7 @@ impl<D: Dir> Store<D> {
     /// commits its own (TASK-165.9). The uploader flushes before it takes them, but for commits
     /// made between.
     fn uploadable(&self) -> u64 {
-        self.durability.with(Mutex::lock).durable()
+        self.durability.with(Mutex::lock).local()
     }
 
     /// cladefs: waits, holding no lock, for the framings of segment `number` and those before it to
@@ -2713,7 +2713,7 @@ impl<D: Dir> Store<D> {
             leaving.extend(reaped.map(|(number, key)| (segment_path(number), key)));
             // cladefs: and the raw files and logs of the segments framed whose commits are durable,
             // as those acknowledged are, which no flush may come to remove (TASK-165.9).
-            let raw = state.segments.raw(self.durability.with(Mutex::lock).durable());
+            let raw = state.segments.raw(self.durability.with(Mutex::lock).local());
             (leaving, raw)
         };
         self.remove_raw(raw);
@@ -2755,7 +2755,7 @@ impl<D: Dir> Store<D> {
         let batch = self.durability.with(Mutex::lock).take();
         let appended = batch.is_some();
         let durable = match batch {
-            None => self.durability.with(Mutex::lock).durable(),
+            None => self.durability.with(Mutex::lock).local(),
             Some(Due { last, mut commits }) => {
                 if let Err(error) = self.make_durable(logs, &mut commits, timed) {
                     let error = error.context("committing the extent store");
@@ -3193,7 +3193,7 @@ impl<D: Dir> Store<D> {
 
     /// `view`'s reads of `extent`.
     fn view_reader(&self, view: &View, extent: ExtentId) -> Reader {
-        Reader::View { epoch: view.epoch(), since: view.since(), pinned: view.pins(extent) }
+        Reader::View { epoch: view.commit(), since: view.since(), pinned: view.pins(extent) }
     }
 
     /// `extent`'s length, and whether it is open (written since the last commit), if the store
@@ -3226,8 +3226,8 @@ impl<D: Dir> Store<D> {
         Ok(extents)
     }
 
-    /// The last epoch committed.
-    pub fn epoch(&self) -> Result<u64, Error> {
+    /// The number of the last commit.
+    pub fn last_commit(&self) -> Result<u64, Error> {
         Ok(self.state()?.epoch)
     }
 }
@@ -3447,7 +3447,7 @@ mod tests {
         assert!(!sealed_after(2, 1));
         let view = store.view();
         commit(3);
-        assert!(sealed_after(3, view.epoch()));
+        assert!(sealed_after(3, view.commit()));
         drop(view);
         commit(4);
         assert!(!sealed_after(3, 2));
@@ -3467,7 +3467,7 @@ mod tests {
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();
         store.state.with(Mutex::lock).space.grew(4096, true);
-        store.epoch().unwrap();
+        store.last_commit().unwrap();
     }
 
     /// cladefs: and here how many extents it holds: one counted that no map holds (TASK-454).
@@ -3482,7 +3482,7 @@ mod tests {
         let store = Store::create(crate::MemDir::new(), description, Options::default()).unwrap();
         store.write(ExtentId::new(1, 1), 0, &[1; 4096]).unwrap();
         store.state.with(Mutex::lock).space.entered(true);
-        store.epoch().unwrap();
+        store.last_commit().unwrap();
     }
 
     #[test]

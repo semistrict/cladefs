@@ -105,7 +105,7 @@ impl Follow for Follower {
 
     async fn fetch(&self) -> Result<((Batch, u64), Changes), Error> {
         let (batch, changes) = self.fs.fetch().await?;
-        let commit = self.view.lock().epoch();
+        let commit = self.view.lock().commit();
         Ok(((batch, commit), changes))
     }
 
@@ -301,7 +301,7 @@ async fn follow(follower: &Follower, store: &Arc<Store<MemDir>>, excluding_held:
         if excluding_held { follower.state.lock().held.clone() } else { BTreeSet::new() };
     let (commit, view) = {
         let view = follower.view.lock();
-        (view.epoch(), view.duplicate().expect("duplicating the follower's view failed"))
+        (view.commit(), view.duplicate().expect("duplicating the follower's view failed"))
     };
     let oracle = mount(store, view).await;
     let after = compare(fs, &oracle, commit, &excluded).await;
@@ -361,12 +361,12 @@ pub async fn simulate(profile: Profile) {
     let writer = Writer::new(store.clone()).await;
     writer.apply(Op::Sync).await;
     let history = Arc::new(Mutex::new(History::new()));
-    history.lock().synced(store.epoch().unwrap());
+    history.lock().synced(store.last_commit().unwrap());
 
     // The follower, mounted on the commit the writer made first, and the checker's mount of it.
     let follower = {
         let view = store.view();
-        let commit = view.epoch();
+        let commit = view.commit();
         let first = mount(&store, view.duplicate().unwrap()).await;
         let device = match profile.mutation {
             Mutation::ReadsPastItsView => ViewDevice::reading_past_its_view(store.clone(), view),
@@ -504,10 +504,10 @@ pub async fn simulate(profile: Profile) {
     let mut model = Model::new();
     for _ in 0..profile.operations {
         let op = Op::random(&model, &mut thread_rng());
-        let after = store.epoch().unwrap();
+        let after = store.last_commit().unwrap();
         let created = writer.apply(op).await;
         match op {
-            Op::Sync => history.lock().synced(store.epoch().unwrap()),
+            Op::Sync => history.lock().synced(store.last_commit().unwrap()),
             Op::Compact => {}
             _ => {
                 op.apply(&mut model, created);
@@ -516,7 +516,7 @@ pub async fn simulate(profile: Profile) {
         }
     }
     writer.apply(Op::Sync).await;
-    history.lock().synced(store.epoch().unwrap());
+    history.lock().synced(store.last_commit().unwrap());
     done.store(true, Ordering::SeqCst);
     following.await;
     for task in readers.into_iter().chain(holders) {
