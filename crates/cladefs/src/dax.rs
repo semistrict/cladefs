@@ -622,7 +622,7 @@ impl WindowState {
 pub(crate) struct Window {
     size: u64,
     translation: Translation,
-    /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what fences
+    /// cladefs: shared with its connection's [`DaxWindow`] and the guest's faults, beyond what halts
     /// its store: a panic holding it aborts the daemon (`extent_store::shared`, TASK-149.24).
     state: SharedLock<Mutex<WindowState>>,
     /// cladefs: how it copies on write, if it does (backlog doc-13): a store to a window that

@@ -161,7 +161,7 @@ static KMS: std::sync::OnceLock<Option<Arc<keys::Kms>>> = std::sync::OnceLock::n
 /// cladefs: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Forgotten {
-    /// The stores open of the scope's cells it fenced, which serve nothing more (`EACCES`).
+    /// The stores open of the scope's cells it halted, which serve nothing more (`EACCES`).
     pub stores: usize,
     /// The rings of the scope's stores its fetchers held.
     pub rings: usize,
@@ -177,20 +177,20 @@ pub struct Forgotten {
 /// it is told the tenant's KEK is revoked or destroyed in the KMS, or the cell shredded, `why`
 /// saying which: what the control API's `ForgetTenantKeys` and `ShredCell` do.
 ///
-/// Every store open of the scope's cells is fenced, each request failing with `EACCES`, as its
+/// Every store open of the scope's cells is halted, each request failing with `EACCES`, as its
 /// opening would fail; the extent cache lets go of them, and of every extent no other open store
 /// holds, its pages evicted, unmapped from the windows that map them; its fetchers forget the
 /// stores' rings and drop what they kept of the scope's objects; its KMS forgets the scope's cell
 /// KEKs it unwrapped, and a tenant's pool of new ones, refusing them from then on. What stays in
-/// memory: a fenced store's own ring, and its open segment's key, until whoever holds it closes it
+/// memory: a halted store's own ring, and its open segment's key, until whoever holds it closes it
 /// (a VM process whose guest met `EACCES`); the DEKs other stores hold, which they inherited; and
 /// the pages of extents other stores hold too (a shared point's clone, a public base). On disk,
 /// everything of the scope's is as its keys sealed it: open segments, write-ahead logs, the part
 /// cache.
 pub fn forget(scope: keys::Scope, why: &str) -> Forgotten {
-    let fenced = format!("as {scope}'s keys are forgotten: {why}");
+    let halted = format!("as {scope}'s keys are forgotten: {why}");
     let stores =
-        crate::fence::fence_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &fenced);
+        crate::halt::halt_stores(|branch| scope.covers(branch.cell), Errno::EACCES, &halted);
     let (bytes, extents) = crate::cache::forget(|branch| scope.covers(branch.cell));
     let kept = MEMORY.forget_kept(scope);
     let rings = runtime().keys.forget(scope, why);
@@ -2753,12 +2753,12 @@ mod tests {
     }
 
     /// TASK-411.7: a host told a cell is shredded, or a tenant's KEK destroyed, forgets their keys:
-    /// their stores open here are fenced, every request failing with `EACCES`, as their openings
+    /// their stores open here are halted, every request failing with `EACCES`, as their openings
     /// do; their extents leave the extent cache, pages and all; its fetchers forget their rings.
     /// The tenant's other cell's store, until its tenant goes, and another tenant's, read on, their
     /// extents cached still. No file of the stores' directories holds what they wrote.
     #[test]
-    fn stores_of_shredded_cells_and_tenants_are_fenced_and_leave_the_cache() {
+    fn stores_of_shredded_cells_and_tenants_are_halted_and_leave_the_cache() {
         let keys = tempfile::tempdir().unwrap();
         let kms = Arc::new(extent_keys::kms::LocalKms::open(keys.path().join("kms")).unwrap());
         for tenant in [1, 2] {

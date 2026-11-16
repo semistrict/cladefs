@@ -120,9 +120,9 @@ mod executor;
 pub mod extentd;
 mod extents;
 pub mod faults;
-mod fence;
 mod filesystem;
 pub mod fuse;
+mod halt;
 #[cfg(test)]
 mod heap;
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

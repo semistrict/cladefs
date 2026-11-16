@@ -658,9 +658,9 @@ impl Connection {
     /// cladefs: whether its VM process, should it live on, reaches pages still: those its window has
     /// mapped, or those of an operation taking access away it left unacknowledged (TASK-79.100).
     fn reaches_pages(&self) -> bool {
-        // cladefs: a fenced store's window, which a panic may have left half changed, isn't looked
+        // cladefs: a halted store's window, which a panic may have left half changed, isn't looked
         // at: it may, as far as anyone knows (TASK-153.16).
-        if self.store().is_some_and(|store| store.is_fenced()) {
+        if self.store().is_some_and(|store| store.is_halted()) {
             return true;
         }
         let window = self.window.with(Mutex::lock);
@@ -751,8 +751,8 @@ impl Drop for Turn {
 /// and not after, as its VM process's room counts it then ([`Peer::room`]), rather than both for
 /// a while, which held a VM process keeping to the protocol's bounds past them (TASK-79.16); and,
 /// its serving panicking, it answers `EIO` as it is dropped, rather than leave its VM process
-/// waiting for good, those bytes counted for good; and fences its store, which the panic went
-/// through: past the store's locks, which fence it themselves (`crate::fence`, TASK-153.16).
+/// waiting for good, those bytes counted for good; and halts its store, which the panic went
+/// through: past the store's locks, which halt it themselves (`crate::halt`, TASK-153.16).
 /// cladefs: and the request's span, which ends as it is answered (`super::otel`, TASK-258).
 struct Answer {
     connection: Arc<Connection>,
@@ -856,7 +856,7 @@ impl Drop for Answer {
             && let Some(store) = self.connection.store()
         {
             let kind = self.request.kind;
-            store.fence(|| format!("a panic serving request {kind}"));
+            store.halt(|| format!("a panic serving request {kind}"));
         }
         if !self.sent {
             let reply = self.reply_header();
@@ -992,7 +992,7 @@ pub(super) struct Connection {
     /// doc-8).
     store: OnceLock<Arc<ExtentStore>>,
     /// Where it is in its life: whether it has its store, and how (TASK-160.8). Its locks are
-    /// its requests', its teardown's and its window's, beyond what fences its store: a panic
+    /// its requests', its teardown's and its window's, beyond what halts its store: a panic
     /// holding one aborts the daemon (`extent_store::shared`, TASK-149.24).
     phase: SharedLock<Mutex<Phase>>,
     window: SharedLock<Mutex<Option<DaxWindow>>>,
@@ -1213,9 +1213,9 @@ impl Connection {
             answer.send(Err(errno), reply, Vec::new(), Vec::new())
         };
         // cladefs: a store a panic went through serves nothing more, of whatever the panic left half
-        // done (`crate::fence`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
+        // done (`crate::halt`, TASK-153.16): `EIO`; nor one whose tenant's or cell's keys the
         // daemon forgot, `EACCES` (TASK-411.7).
-        if let Some(errno) = self.store().and_then(|store| store.fenced()) {
+        if let Some(errno) = self.store().and_then(|store| store.halted()) {
             return refuse(answer, errno);
         }
         let request = Request::decode(&message).and_then(|request| {
@@ -1810,7 +1810,7 @@ async fn flush_behind(store: Arc<ExtentStore>, mut stopped: tokio::sync::oneshot
             }
             // Its panic logged, which went through the store (TASK-153.16).
             None => {
-                store.fence(|| "a panic making its commits durable".into());
+                store.halt(|| "a panic making its commits durable".into());
                 break;
             }
         }

@@ -6042,13 +6042,13 @@ fn whatever_a_vm_process_says_harms_no_other() {
     drop(other);
 }
 
-/// TASK-153.16: a panic holding a store's lock, serving a VM process's request, fences the store,
+/// TASK-153.16: a panic holding a store's lock, serving a VM process's request, halts the store,
 /// alone: the request fails with `EIO`, and so does each after it, which panics no more, as each
 /// did at the lock's poison in TASK-104, TASK-105 and TASK-150.20, those that take no lock of the
 /// store's too. Another VM process's store serves on. Its VM process gone, the store opens anew,
 /// as of its last commit, and serves.
 #[test]
-fn a_panic_holding_a_stores_lock_fences_it_alone() {
+fn a_panic_holding_a_stores_lock_halts_it_alone() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PANICS: AtomicU64 = AtomicU64::new(0);
@@ -6068,7 +6068,7 @@ fn a_panic_holding_a_stores_lock_fences_it_alone() {
     write(&store, kept, 0, &pattern(1, BLOCK)).unwrap();
     store.commit(None).unwrap();
 
-    crate::fence::tests::panic_holding("opening");
+    crate::halt::tests::panic_holding("opening");
     assert_eq!(write(&store, written, 0, &pattern(2, BLOCK)), Err(Errno::EIO));
     assert_eq!(PANICS.load(Ordering::Relaxed), 1);
     assert_eq!(read(&store, kept, 0, BLOCK), Err(Errno::EIO));
@@ -6147,7 +6147,7 @@ fn child_panics_holding() {
 }
 
 /// TASK-149.24: a panic holding a lock shared beyond one store stops the daemon at once, saying
-/// which: an abort, from its panic hook, before anything unwinds; not a fence, which contains only
+/// which: an abort, from its panic hook, before anything unwinds; not a halt, which contains only
 /// its store, while the lock's poison, or what it guards half changed, reaches every user after,
 /// nor an abort from a drop panicking as it unwinds.
 #[test]
@@ -6169,11 +6169,11 @@ fn a_panic_holding_a_shared_lock_stops_the_daemon() {
 }
 
 /// TASK-153.16: a panic serving a VM process's request past the store's locks, which poisons
-/// none of them, as one in `extent_store` beneath them may (TASK-79.1, TASK-79.80), fences the
+/// none of them, as one in `extent_store` beneath them may (TASK-79.1, TASK-79.80), halts the
 /// store as well: a read after it, which would find nothing amiss, fails with `EIO`. Its VM
 /// process gone, the store opens anew as of its last commit.
 #[test]
-fn a_panic_past_a_stores_locks_fences_it() {
+fn a_panic_past_a_stores_locks_halts_it() {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PANICS: AtomicU64 = AtomicU64::new(0);

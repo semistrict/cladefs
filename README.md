@@ -406,9 +406,9 @@ non-current versions: on S3, `NoncurrentVersionExpiration` (with
 object versioning off, or a lifecycle rule deleting non-current versions
 (`isLive: false`, or `daysSinceNoncurrentTime`). Until that rule has run, the
 old version's wrapped KEK unwraps while the tenant's KEK lives. A bucket with
-versioning off needs nothing. A host told either fences the stores of the
+versioning off needs nothing. A host told either halts the stores of the
 tenant or cell it has open (`EACCES`) and drops their keys and cached pages;
-a fenced store's own keys stay in memory until its VM process closes it.
+a halted store's own keys stay in memory until its VM process closes it.
 
 ### `vendor/firecracker`: the VMM
 

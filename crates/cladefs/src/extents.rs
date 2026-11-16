@@ -29,7 +29,7 @@ use crate::cache::{self, CachedExtent, Placement};
 use crate::dax::{Dax, DaxMapping, DaxWindow, SecondStage, Source};
 use crate::error::{Errno, Error, Result};
 use crate::faults::failpoint;
-use crate::fence::{Fence, Held, StoreMutex, StoreRwLock};
+use crate::halt::{Halt, StoreGuard, StoreMutex, StoreRwLock};
 use crate::host_store::{self, BranchOf};
 use crate::memory::{VolatileSlice, VolatileSliceMut, gather, scatter};
 use crate::pages::{Arena, ArenaId, page_size};
@@ -229,8 +229,8 @@ pub struct ExtentStore {
     /// load stretches, rather than in time (TASK-110).
     flush_turns: std::sync::atomic::AtomicU64,
     /// cladefs: what each of its locks is locked through: set by a panic holding one, after which it
-    /// serves nothing more (`crate::fence`, TASK-153.16).
-    fence: Fence,
+    /// serves nothing more (`crate::halt`, TASK-153.16).
+    halt: Halt,
     /// cladefs: what reads its extents whose data is in the bucket: of the bucket its uploader keeps
     /// the branch in, keeping what it fetches in the host's cache, if it has one.
     fetcher: Arc<crate::remote::Fetcher>,
@@ -705,7 +705,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(path, branch),
+            halt: Halt::new(path, branch),
             fetcher,
         })
     }
@@ -733,7 +733,7 @@ impl ExtentStore {
             committed: event_listener::Event::new(),
             changes: StoreMutex::new("changes", WindowChanges::default()),
             flush_turns: Default::default(),
-            fence: Fence::new(&self.path, self.branch()),
+            halt: Halt::new(&self.path, self.branch()),
             fetcher: self.fetcher.clone(),
         }
     }
@@ -750,28 +750,28 @@ impl ExtentStore {
         StoreAccess { role, public: self.is_public() }
     }
 
-    /// cladefs: fences the store, as `why` says, unless it is already: a panic went through it past
+    /// cladefs: halts the store, as `why` says, unless it is already: a panic went through it past
     /// its locks, as one serving a request of it, which a panic holding one of them does itself.
-    /// It serves nothing more ([`crate::fence`], TASK-153.16).
+    /// It serves nothing more ([`crate::halt`], TASK-153.16).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn fence(&self, why: impl FnOnce() -> String) {
-        self.fence.fence(why);
+    pub(crate) fn halt(&self, why: impl FnOnce() -> String) {
+        self.halt.halt(why);
     }
 
-    /// cladefs: whether the store is fenced ([`ExtentStore::fence`]): its requests fail with `EIO`,
+    /// cladefs: whether the store is halted ([`ExtentStore::halt`]): its requests fail with `EIO`,
     /// or `EACCES` once its host forgot its tenant's or cell's keys (`crate::remote::forget`).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn is_fenced(&self) -> bool {
-        self.fence.is_fenced()
+    pub(crate) fn is_halted(&self) -> bool {
+        self.halt.is_halted()
     }
 
-    /// cladefs: the errno the store's requests fail with, if it is fenced ([`ExtentStore::is_fenced`]).
+    /// cladefs: the errno the store's requests fail with, if it is halted ([`ExtentStore::is_halted`]).
     // The extent daemon's (Linux).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn fenced(&self) -> Option<Errno> {
-        self.fence.errno()
+    pub(crate) fn halted(&self) -> Option<Errno> {
+        self.halt.errno()
     }
 
     /// cladefs: makes the store a new writer's, which its followers go on following: one opened for
@@ -784,7 +784,7 @@ impl ExtentStore {
         if !self.is_quiescent()? {
             return Err(Errno::EBUSY);
         }
-        let window = self.dax.lock(&self.fence)?.take();
+        let window = self.dax.lock(&self.halt)?.take();
         drop(window);
         // cladefs: its uploader goes on, its going no writer's to wait for (TASK-216).
         if let Some(remote) = &self.remote {
@@ -809,9 +809,9 @@ impl ExtentStore {
     }
 
     /// cladefs: a follower's view, or `EINVAL` if it is a writer's store.
-    fn view(&self) -> Result<Held<'_, MutexGuard<'_, extent_store::View>>> {
+    fn view(&self) -> Result<StoreGuard<'_, MutexGuard<'_, extent_store::View>>> {
         let following = self.following.as_ref().ok_or(Errno::EINVAL)?;
-        following.view.lock(&self.fence)
+        following.view.lock(&self.halt)
     }
 
     /// The epoch of the store's latest commit: its writer's, if a follower's.
@@ -987,7 +987,7 @@ impl ExtentStore {
             self.make_durable()?;
             failpoint!("fork::durable");
             // None comes between the look and the fork's commit.
-            let opening = self.opening.write(&self.fence)?;
+            let opening = self.opening.write(&self.halt)?;
             self.fork_durable(path.as_ref(), branch, false, Some(opening))
         })
     }
@@ -1009,7 +1009,7 @@ impl ExtentStore {
         path: &Path,
         branch: Branch,
         point: bool,
-        opening: Option<Held<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
+        opening: Option<StoreGuard<'_, std::sync::RwLockWriteGuard<'_, ()>>>,
     ) -> Result<(), Error> {
         // cladefs: the child's owner, which every record of it in object storage names, whoever
         // writes it, so that another fork to its ID, whose owner differs, is told apart
@@ -1205,8 +1205,8 @@ impl ExtentStore {
         let len = buffers.iter().map(VolatileSliceMut::len).sum::<usize>();
         stats::add(Counter::Reads, 1);
         stats::add(Counter::ReadBytes, len as u64);
-        // cladefs: nothing a panic went through is read (`crate::fence`).
-        self.fence.check()?;
+        // cladefs: nothing a panic went through is read (`crate::halt`).
+        self.halt.check()?;
         let base = self.base_holding(extent)?;
         // cladefs: a piece at a time, as the extent daemon's memory holds no more of a request
         // (TASK-149.17); once at least, as a read of nothing finds whether the extent is there.
@@ -1272,7 +1272,7 @@ impl ExtentStore {
         stats::add(Counter::ReadStoredBytes, data.len() as u64);
         let read = match &self.following {
             Some(following) => {
-                let view = following.view.lock(&self.fence)?;
+                let view = following.view.lock(&self.halt)?;
                 self.store.read_view(&view, extent.into(), offset, data)
             }
             None => self.store.read(extent.into(), offset, data),
@@ -1336,7 +1336,7 @@ impl ExtentStore {
     pub fn write(&self, extent: ExtentId, offset: u64, buffers: &[VolatileSlice]) -> Result<()> {
         self.access().may_write()?;
         let len = buffers.iter().map(VolatileSlice::len).sum::<usize>();
-        let _opening = self.opening.read(&self.fence)?;
+        let _opening = self.opening.read(&self.halt)?;
         // cladefs: from `buffers` to the store's file, a piece at a time, as the extent daemon's
         // memory holds no more of a request (TASK-149.17).
         let fill = |at: u64, piece: &mut [u8]| {
@@ -1349,8 +1349,8 @@ impl ExtentStore {
     /// Frees `extent`, if the store holds it (`FREE`).
     pub fn free(&self, extent: ExtentId) -> Result<()> {
         self.access().may_write()?;
-        // cladefs: nothing a panic went through is changed (`crate::fence`).
-        self.fence.check()?;
+        // cladefs: nothing a panic went through is changed (`crate::halt`).
+        self.halt.check()?;
         self.store.free(extent.into()).map_err(errno)?;
         // cladefs: its pages, unless another store that asked for them holds it still, which reads
         // them through itself (TASK-79.7): one that holds it reads them anew.
@@ -1361,10 +1361,10 @@ impl ExtentStore {
         // rewriting the same blocks, sealing each version (a database's log, fsynced at each
         // transaction), filled the cache with pages only the window's mappings kept, which no
         // eviction could take (ENOMEM).
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let Some(dax) = dax.as_mut() else { return Ok(()) };
         let freed = dax.map_zeros_over(&cached);
-        let mut changes = self.changes.lock(&self.fence)?;
+        let mut changes = self.changes.lock(&self.halt)?;
         for range in freed {
             changes.record(range.start, range.end - range.start, Change::Freed);
         }
@@ -1497,8 +1497,8 @@ impl ExtentStore {
         span.set_branch(self.branch());
         span.set(trace::DURABLE, commit != Commit::Ordered);
         span.run(|| {
-            // cladefs: nothing a panic went through is committed (`crate::fence`).
-            self.fence.check()?;
+            // cladefs: nothing a panic went through is committed (`crate::halt`).
+            self.halt.check()?;
             let started = std::time::Instant::now();
             let committed = self.commit_and_wait(root, commit);
             stats::count_since(Counter::Commits, Counter::CommitNs, started);
@@ -1533,7 +1533,7 @@ impl ExtentStore {
     /// The root as of the last commit, empty if none set one (`ROOT`).
     pub fn root(&self) -> Result<Vec<u8>> {
         match &self.following {
-            Some(following) => Ok(following.view.lock(&self.fence)?.root().to_vec()),
+            Some(following) => Ok(following.view.lock(&self.halt)?.root().to_vec()),
             None => self.store.root().map_err(errno),
         }
     }
@@ -1573,7 +1573,7 @@ impl ExtentStore {
     /// cladefs: the private pages the DAX window holds (backlog doc-13): none without a window, or
     /// with one that doesn't copy on write.
     pub fn private_pages(&self) -> Result<u64> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         Ok(dax.as_ref().map_or(0, Dax::private_pages))
     }
 
@@ -1612,7 +1612,7 @@ impl ExtentStore {
         &self,
         create: impl FnOnce() -> Result<(Dax, DaxWindow), Error>,
     ) -> Result<DaxWindow, Error> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         if dax.is_some() {
             return Err(Errno::EEXIST.into());
         }
@@ -1634,7 +1634,7 @@ impl ExtentStore {
         stats::count_since(Counter::Maps, Counter::MapNs, start);
         let result = mapped.as_ref().map(|_| ()).map_err(|errno| *errno);
         let change = Change::Map { extent, offset, result };
-        self.changes.lock(&self.fence)?.record(window_offset, len, change);
+        self.changes.lock(&self.halt)?.record(window_offset, len, change);
         mapped
     }
 
@@ -1646,7 +1646,7 @@ impl ExtentStore {
         window_offset: u64,
     ) -> Result<()> {
         let (cached, within) = self.mapped_of(extent, offset, len, window_offset)?;
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         if within > 0 {
             dax.map(window_offset, &cached, offset, within);
@@ -1674,7 +1674,7 @@ impl ExtentStore {
             (Some((_, len)), _) => *len,
             // A follower's view holds sealed extents alone.
             (None, Some(following)) => {
-                let view = following.view.lock(&self.fence)?;
+                let view = following.view.lock(&self.halt)?;
                 self.store.view_extent(&view, extent.into()).map_err(errno)?
             }
             // cladefs: an open extent maps nowhere: a guest's bug, counted, as a tripwire
@@ -1731,10 +1731,10 @@ impl ExtentStore {
                 break;
             }
         }
-        self.dax.lock(&self.fence)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
+        self.dax.lock(&self.halt)?.as_mut().ok_or(Errno::ENOSYS)?.map_many(&pieces);
         // Each recorded as its own MAP would have it, the one that failed too, but zeros'.
         let tried = failed.map_or(mappings.len(), |(at, _)| at + 1);
-        let mut changes = self.changes.lock(&self.fence)?;
+        let mut changes = self.changes.lock(&self.halt)?;
         let mut maps = 0;
         for (at, mapping) in mappings[..tried].iter().enumerate() {
             let result = match failed {
@@ -1759,17 +1759,17 @@ impl ExtentStore {
     /// Checks the DAX window's range for a mapping of `len` bytes at `window_offset`: `ENOSYS`
     /// without a window.
     fn dax_range_checked(&self, window_offset: u64, len: u64) -> Result<()> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         dax.as_ref().ok_or(Errno::ENOSYS)?.check_range(window_offset, len)
     }
 
     /// Maps zeros, read-only, at `len` bytes of the DAX window at `window_offset`, as a mapping a
     /// snapshot recorded did ([`MappingContents::Zeros`]).
     pub fn map_zeros_at(&self, window_offset: u64, len: u64) -> Result<()> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         dax.check_range(window_offset, len)?;
-        self.changes.lock(&self.fence)?.record(window_offset, len, Change::Zeros);
+        self.changes.lock(&self.halt)?.record(window_offset, len, Change::Zeros);
         dax.map_zeros(window_offset, len);
         Ok(())
     }
@@ -1779,7 +1779,7 @@ impl ExtentStore {
     /// window, none. cladefs: `EBUSY` while the window holds private pages, which no mapping names
     /// the bytes of, as a snapshot's point is refused then (TASK-203).
     pub fn window_mappings(&self) -> Result<Vec<WindowMapping>> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         match dax.as_ref() {
             Some(dax) if dax.private_pages() > 0 => Err(Errno::EBUSY),
             dax => Ok(dax.map_or_else(Vec::new, Dax::mappings)),
@@ -1789,7 +1789,7 @@ impl ExtentStore {
     /// cladefs: the DAX window's mappings, as [`ExtentStore::window_mappings`] has them, its private
     /// pages or not: what a log says of a page.
     fn mapped(&self) -> Result<Vec<WindowMapping>> {
-        let dax = self.dax.lock(&self.fence)?;
+        let dax = self.dax.lock(&self.halt)?;
         Ok(dax.as_ref().map_or_else(Vec::new, Dax::mappings))
     }
 
@@ -1800,8 +1800,8 @@ impl ExtentStore {
     /// (TASK-44.12).
     pub fn refused(&self, window_offset: u64, what: &str) -> String {
         let mapped = self.describe_mapping(window_offset);
-        let Ok(mut changes) = self.changes.lock(&self.fence) else {
-            return format!("{mapped}; the store is fenced");
+        let Ok(mut changes) = self.changes.lock(&self.halt) else {
+            return format!("{mapped}; the store is halted");
         };
         let history = changes.of(window_offset);
         changes.refuse(window_offset, what, mapped.clone());
@@ -1812,7 +1812,7 @@ impl ExtentStore {
     /// store, said for a log.
     fn describe_mapping(&self, window_offset: u64) -> String {
         let Ok(mappings) = self.mapped() else {
-            return "the store is fenced".into();
+            return "the store is halted".into();
         };
         let mapping = mappings.into_iter().find(|mapping| {
             (mapping.window_offset..mapping.window_offset + mapping.len).contains(&window_offset)
@@ -1902,7 +1902,7 @@ impl ExtentStore {
             let refused = "a point names a state already: fork it rather than make a point of it";
             return Err(Error::new(anyhow::Error::new(Errno::EINVAL).context(refused)));
         }
-        let _opening = self.opening.write(&self.fence)?;
+        let _opening = self.opening.write(&self.halt)?;
         if !self.is_quiescent()? {
             let open = "an extent written since the last commit is open";
             return Err(Error::new(anyhow::Error::new(Errno::EBUSY).context(open)));
@@ -1926,17 +1926,17 @@ impl ExtentStore {
     /// store as of that commit would not hold; as with its guest's filesystem frozen, a point a
     /// snapshot of its VM is taken at.
     pub fn is_quiescent(&self) -> Result<bool> {
-        // cladefs: not, as far as anyone knows, once a panic went through it (`crate::fence`).
-        self.fence.check()?;
+        // cladefs: not, as far as anyone knows, once a panic went through it (`crate::halt`).
+        self.halt.check()?;
         self.store.has_open().map(|open| !open).map_err(errno)
     }
 
     /// Unmaps `len` bytes of the DAX window at `window_offset` (`UNMAP`).
     pub fn unmap(&self, window_offset: u64, len: u64) -> Result<()> {
-        let mut dax = self.dax.lock(&self.fence)?;
+        let mut dax = self.dax.lock(&self.halt)?;
         let dax = dax.as_mut().ok_or(Errno::ENOSYS)?;
         dax.check_range(window_offset, len)?;
-        self.changes.lock(&self.fence)?.record(window_offset, len, Change::Unmap);
+        self.changes.lock(&self.halt)?.record(window_offset, len, Change::Unmap);
         dax.unmap(window_offset, len);
         Ok(())
     }
@@ -2022,7 +2022,7 @@ impl ExtentStore {
     /// cladefs: how many of what is attached to it are open.
     #[cfg(test)]
     pub(crate) fn bases_opened(&self) -> usize {
-        self.bases.opened(&self.fence)
+        self.bases.opened(&self.halt)
     }
 
     /// cladefs: the base attached that holds `extent`, with its length, if one does.
@@ -2102,7 +2102,7 @@ impl Base {
 
     /// The fork, opened for `attached_to`, which is attached to it, once.
     fn store(&self, attached_to: &ExtentStore) -> Result<Arc<ExtentStore>> {
-        let mut store = self.store.lock(&attached_to.fence)?;
+        let mut store = self.store.lock(&attached_to.halt)?;
         if let Some(store) = &*store {
             return Ok(store.clone());
         }
@@ -2128,8 +2128,8 @@ impl Base {
 #[derive(Default)]
 struct Bases {
     open: OnceLock<OpenBase>,
-    /// Shared by a store and its followers; unlike their locks, not fenced
-    /// ([`crate::fence`]): nothing that may panic is called holding it.
+    /// Shared by a store and its followers; unlike their locks, not halted
+    /// ([`crate::halt`]): nothing that may panic is called holding it.
     by_branch: std::sync::RwLock<HashMap<u64, Vec<Arc<Base>>>>,
 }
 
@@ -2165,9 +2165,9 @@ impl Bases {
 
     /// How many of those attached are open.
     #[cfg(test)]
-    fn opened(&self, fence: &Fence) -> usize {
+    fn opened(&self, halt: &Halt) -> usize {
         let mut opened: Vec<_> = (self.by_branch.read().unwrap().values().flatten())
-            .filter(|base| base.store.lock(fence).unwrap().is_some())
+            .filter(|base| base.store.lock(halt).unwrap().is_some())
             .map(Arc::as_ptr)
             .collect();
         opened.sort();
@@ -2874,12 +2874,12 @@ mod tests {
     const ROUNDS: u64 = 2000;
 
     /// TASK-153.16: a panic holding a lock of the store's, as a lazily made resource's `expect`
-    /// was in TASK-104, TASK-105 and TASK-150.20, fences the store: what it was serving, and each
+    /// was in TASK-104, TASK-105 and TASK-150.20, halts the store: what it was serving, and each
     /// request after it, fails with `EIO`, rather than panicking at the lock's poison; those that
     /// take none of the locks the panic held too, so that nothing reads what it left half done.
     /// Closed, the store opens anew as of its last commit, and serves.
     #[test]
-    fn a_panic_holding_a_lock_fences_the_store() {
+    fn a_panic_holding_a_lock_halts_the_store() {
         let (store, dir) = store(1 << 26);
         let ps = page_size();
         let window = store.create_dax_window(2 * ps, None).unwrap();
@@ -2888,10 +2888,10 @@ mod tests {
         store.commit(None).unwrap();
         write(&store, open, 0, &pattern(2, BLOCK)).unwrap();
 
-        crate::fence::tests::panic_holding("opening");
+        crate::halt::tests::panic_holding("opening");
         let writing = std::panic::AssertUnwindSafe(|| write(&store, open, 0, &pattern(3, BLOCK)));
         assert!(std::panic::catch_unwind(writing).is_err(), "the write didn't panic");
-        assert!(store.is_fenced());
+        assert!(store.is_halted());
         assert_eq!(read(&store, open, 0, BLOCK), Err(Errno::EIO));
         assert_eq!(read(&store, sealed, 0, BLOCK), Err(Errno::EIO));
         assert_eq!(write(&store, next, 0, &pattern(4, BLOCK)), Err(Errno::EIO));
@@ -2907,7 +2907,7 @@ mod tests {
         drop((window, store));
 
         let store = ExtentStore::open(dir.path().join("store")).unwrap();
-        assert!(!store.is_fenced());
+        assert!(!store.is_halted());
         assert_eq!(read(&store, sealed, 0, BLOCK), Ok(pattern(1, BLOCK)));
         assert_eq!(read(&store, open, 0, BLOCK), Err(Errno::ENOENT));
         write(&store, next, 0, &pattern(5, BLOCK)).unwrap();
