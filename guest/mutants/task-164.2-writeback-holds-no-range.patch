@@ -25,7 +25,7 @@
  		batch[nr].range = range;
 -		/* Kept, mapped, while the writeback reads it: no reclaim, no drop. */
 -		atomic_inc(&range->users);
- 		pages += fxfs_dax_pages_swap(range->state, batch[nr].pages);
+ 		pages += fxfs_dax_range_swap(range, batch[nr].pages);
  		bitmap_zero(batch[nr].kept, FXFS_DAX_PAGES);
  		nr++;
 @@ -2396,8 +2394,6 @@

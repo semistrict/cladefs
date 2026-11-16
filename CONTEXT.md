@@ -39,7 +39,11 @@ _Avoid_: key, ref (a ref names blocks of an extent)
 
 **Sequence number**:
 The half of an extent ID the guest advances as it mints.
-_Avoid_: seq (a segment's number is its **segment number**)
+_Avoid_: seq
+
+**Segment number**:
+Which segment of a writer's epoch, in its key `<epoch>.<segment>`.
+_Avoid_: seq, sequence
 
 **Mint**:
 To make a new extent ID locally, with no request.
@@ -59,7 +63,7 @@ A request ordering every request completed before it ahead of every one submitte
 
 **Commit**:
 A barrier that also records the branch's new root; the unit the store recovers to.
-_Avoid_: flush, sync (a sync waits for a commit to be durable)
+_Avoid_: flush, sync (a sync waits for a commit's level)
 
 **Root**:
 The one mutable record of a branch: where its filesystem's metadata starts.
@@ -85,7 +89,7 @@ The first touch of a named page, which puts it into the VM process's memory.
 
 **Prefault**:
 Having KVM map installed pages ahead of the guest's accesses.
-_Avoid_: map ahead, pre-fault, pre-faulting
+_Avoid_: map ahead (`MAP_AHEAD` becomes `MAP_PREFAULT`), pre-fault, pre-faulting
 
 **Private page**:
 A window page the VM owns, copied on the guest's store or by `PRIVATE`, at the same address, named by no extent.
@@ -114,6 +118,13 @@ A unit of the guest's window, mapping one chunk of a file.
 **Slice**:
 A small file's chunk that is part of one sealed extent's region, shared with other files.
 
+**Region**:
+The guest's mapping of a whole sealed extent in its window, of which small files' slices are parts.
+_Avoid_: region for virtio's (say **shared memory region**)
+
+**Staging extent**:
+An extent the guest's allocator packs small files' blocks into at writeback.
+
 **Page-cache inode**:
 A file created in this mount, served from the guest's page cache until it is next read in.
 
@@ -121,15 +132,23 @@ A file created in this mount, served from the guest's page cache until it is nex
 
 **Extent daemon**:
 The one process on a host that owns the physical memory, the extent cache and the stores, and serves them to VM processes.
-_Avoid_: server, remote (remote is the bucket's); `extentd` is its name in code and on the command line
+_Avoid_: server, remote; `extentd` in code today, `cladefsd` once TASK-475 merges the host's daemons
+
+**Daemon client**:
+A VM process's connection to the extent daemon, through which its extent device has a store.
+_Avoid_: remote, remote store
 
 **Tenant**:
 An owner of cells, who is granted a VM socket, an arena, memory and disk limits, and keys of its own.
 _Avoid_: customer, account, user
 
+**Tenant ID**:
+A tenant's one identifier, a 64-bit number, in the bucket and every API alike.
+_Avoid_: tenant name
+
 **Default tenant**:
 The tenant whose ID is 0: the daemon's own socket's, and public bases'.
-_Avoid_: tenant 0, common tenant, no tenant
+_Avoid_: tenant 0, common tenant, no tenant (`NO_TENANT` becomes `DEFAULT_TENANT`)
 
 **Grant**:
 Giving a tenant its own VM socket, for the VM manager to put in the tenant's jails.
@@ -182,16 +201,17 @@ _Avoid_: volume, store (a store holds a branch)
 **Cell**:
 A tenant's unit of placement and of collection: the branches one host writes together.
 
-**Volume**:
-A named branch of a cell, of a kind (Fxfs, SQLite, memory).
-_Avoid_: volume for an Fxfs volume (say **Fxfs volume**)
+**Vdisk**:
+A named branch of a cell, of a kind (Fxfs, SQLite, memory): not quite a disk, a VM's virtual one.
+_Avoid_: volume, virtual disk, disk
 
-**Fxfs volume**:
-One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`.
+**Volume**:
+One of an Fxfs filesystem's object stores, mounted with `-o volume=NAME`, as upstream Fxfs says.
+_Avoid_: volume for a vdisk
 
 **Fork**:
 A new branch made from a parent's commit or a point, sharing its extents, in O(1).
-_Avoid_: clone, restore, copy
+_Avoid_: clone (git's alone), restore (a VM snapshot's alone), copy
 
 **Parent** / **Child**:
 The branch or point a fork came from, and the branch it made.
@@ -203,6 +223,10 @@ _Avoid_: point (a point is a state with a name)
 **Point**:
 An immutable, named state of a branch, with no writer, which any number of hosts fork.
 _Avoid_: snapshot (snapshots are VMs' and Fxfs's), generation, base
+
+**VM snapshot**:
+A VM's saved state, its store's state made a point as it is taken.
+_Avoid_: snapshot for the point itself
 
 **Shared point**:
 A point other tenants' cells may fork.
@@ -226,16 +250,24 @@ The one holder of a branch's head, which alone commits to it.
 _Avoid_: owner, leader, primary
 
 **Take**:
-To become a branch's writer by swapping its head to the next epoch.
+To become a branch's writer by swapping its head to the next epoch; that swap is the writer's **taking**.
 _Avoid_: lease, acquire
 
 **Epoch**:
-The number of a writer's taking of a branch.
-_Avoid_: epoch for a commit's number (say **commit**), generation
+The number of a taking: a writer's of a branch, a placement's of a cell, a pass's of its collector lease.
+_Avoid_: epoch for a commit's number, generation
+
+**Commit number**:
+Which commit of a branch, as a follower's view or a store's stats name it.
+_Avoid_: epoch
 
 **Placement**:
 A host's holding of a cell, under a fencing token.
-_Avoid_: copy, holder
+_Avoid_: copy, holder; placement for where an open extent goes or which arena pages are in
+
+**Halted**:
+Of a store: stopped for good after a panic went through it (`EIO`) or its tenant or cell was shredded (`EACCES`).
+_Avoid_: fenced
 
 **Fencing token**:
 The number a placement holds, greater than every earlier placement's, so a host cut off cannot take its cells back.
@@ -266,16 +298,18 @@ Putting a write-ahead log's segment into the bucket.
 
 **Acknowledged**:
 Of a segment: named by the head's swap, so the bucket has it and it may leave the store.
+_Avoid_: acknowledged for a VM process's taking in window changes (say **confirmed**)
 
 **Lag bound**:
 How far a store's uploads may fall behind its commits before commits stall.
 
 **Checkpoint**:
 A branch's state as of a segment, so recovery reads from it rather than from the beginning.
+_Avoid_: checkpoint for Fxfs's (say **journal checkpoint**)
 
 **Collector**:
-`cladefs-gc`, the only thing that deletes from the bucket.
-_Avoid_: gc (fine as the binary's and keys' name), cleaner
+The only thing that deletes from the bucket; **gc** is its short name, in its binary (`cladefs-gc`), keys and metrics.
+_Avoid_: cleaner
 
 **Pass**:
 One run of the collector over one cell, under its collector lease.
@@ -285,26 +319,28 @@ A pass over every cell of a bucket.
 
 **Collector lease**:
 What fences one cell's passes from each other.
-_Avoid_: lease alone (branches have no lease)
+_Avoid_: lease alone (branches have no lease), gc lease
 
 ### Durability
+
+A commit's **levels**, each including the one before:
 
 **Ordered**:
 A commit the daemon has, in order, not yet on disk.
 
-**Durable locally**:
+**Local**:
 A commit synced to the host's disk.
-_Avoid_: durable alone
+_Avoid_: durable, durable locally
 
 **Uploaded**:
 A commit whose segments the bucket has acknowledged.
-_Avoid_: durable alone
+_Avoid_: durable
 
 **Crash bound**:
 How much of what was ordered a crash may lose: at most a second's worth.
 
 **Drain**:
-What a daemon does on SIGTERM: every store closed, durable and uploaded, before it exits.
+What a daemon does on SIGTERM: every store closed and its commits uploaded before it exits.
 
 **Format**:
 The version an on-disk, bucket or wire format names; a reader refuses every other, and nothing migrates.
@@ -356,10 +392,10 @@ _Avoid_: graveyard alone (Fxfs has its own)
 A tenant's key in the KMS, which never leaves it and wraps its cells' KEKs.
 
 **Cell KEK**:
-A cell's key, wrapped by its tenant's KEK, wrapping its volumes' DEKs.
+A cell's key, wrapped by its tenant's KEK, wrapping its vdisks' DEKs.
 
-**Volume DEK**:
-A branch's data key, under whose subkeys its objects are encrypted.
+**Vdisk DEK**:
+A vdisk's data key, under whose subkeys its objects are encrypted.
 
 **Encrypted**:
 Of a cell, store or object: held under its tenant's keys.
@@ -374,7 +410,7 @@ A host's dropping the keys of a shredded tenant or cell, fencing its stores.
 ### Testing and measurement
 
 **Test host**:
-A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default.
+A Linux machine of one's own that runs cladefs's Linux tests over ssh; ubu1 by default. Its drivers keep the `-host.sh` suffix, short for "on the test host"; its env vars say `TEST_HOST`.
 _Avoid_: host alone
 
 **Driver**:
@@ -385,6 +421,7 @@ One fxjob cgroup on the test host: **work** (builds, tests) or a **measurement**
 
 **Run**:
 One driver's job on the test host, in a worktree of its own, numbered like `r1040`.
+_Avoid_: run for a case's repeats or a GitHub run, unqualified
 
 **Case**:
 One guest test, which boots VMs and checks what they did.
@@ -393,7 +430,7 @@ _Avoid_: test alone
 **Suite**:
 The cases a tag selects.
 
-**Pin**:
+**LangSmith's pin**:
 The commit LangSmith runs.
 _Avoid_: pin for a toolchain, Firecracker release or tool version (say **pinned version**)
 
@@ -407,7 +444,11 @@ A candidate measured against the pin on the test host: the sandboxes' long mode 
 Two commits measured in interleaved rounds, each a **side**.
 
 **Round**:
-Each side of an A/B once, interleaved; or one of a case's runs in a soak (`round-K.json`). Say **A/B round** or **case round** where both could be meant.
+Each side of an A/B once, interleaved.
+
+**Repeat**:
+One of a case's runs when a soak runs it many times (`repeat-K.json`).
+_Avoid_: round
 
 **Control**:
 A case with no cladefs in it, whose movement shows the test host drifted.
@@ -448,20 +489,28 @@ A dead end that was a diagnosis, not an approach.
 
 ## Ambiguities
 
-Words that mean several things today. Say the qualified form.
+Words that mean several things today. Say the qualified form. These choices bind code
+identifiers too (types, protos, env vars, binaries), not prose alone.
 
-- **seal**: an extent's (this glossary's), and encryption's in the code. Say **encrypted** for the latter.
-- **remote**: the bucket, and the extent daemon's client. Say **bucket**, or **daemon's client**.
-- **store**: an extent store, the bucket's client, an Fxfs object store, a CPU's store instruction. Say **store** for the first only.
-- **volume**: a cell's branch, and an Fxfs volume. Say **Fxfs volume** for the latter.
-- **snapshot**: a VM snapshot, an Fxfs volume snapshot, the daemon's stats. A branch's named state is a **point**.
-- **epoch**: a writer's taking, a cell's taking, the collector lease's, a commit's number. Say **commit** for the last.
-- **fence**: a placement's token, a writer taken over, a store fenced after a panic or a shred.
+- **seal**: extents' alone; encryption is **encrypted**, in code too.
+- **remote**: retired, in code too; say **bucket** or **daemon client**.
+- **store**: the extent store's alone, `Store` types included; the bucket's client and the device's request server get names of their own. Fxfs's are **object stores**; a CPU's is a **store instruction** where unclear.
+- **volume**: Fxfs's alone; a cell's named branch is a **vdisk**, in code too (`cell::Vdisk`, `CreateVdisk`).
+- **snapshot**: VMs' and Fxfs's alone. A branch's named state is a **point**; the daemon's counters are **stats** (no `GetSnapshot`).
+- **epoch**: a taking's number alone. A commit's number is a **commit number**, in the device protocol too.
+- **fence**: being cut off by a later taking alone (a writer, a placement, a collector pass). A store stopped after a panic or a shred is **halted** (`cladefs::halt`).
 - **lease**: only the collector's; branches have none since TASK-407.
-- **durable**: durable locally, and uploaded. Say which.
+- **durable**: names no stage; say **local** or **uploaded**, in code too.
 - **cache**: the extent cache, the part cache, the store page cache, the host's page cache. Name it.
-- **region**: a virtio shared memory region, and the guest's mapping of a whole extent.
-- **stage**: the second stage, a segment's life, a commit's durability. Use it for the second stage only.
-- **pin**: LangSmith's commit, a follower's extent, pinned versions.
-- **round**, **run**, **job**: as defined above, not interchangeably.
-- **nightly**: the test host's A/B, GitHub's nightly suite, Rust's toolchain.
+- **region**: the guest's; virtio's is a **shared memory region**.
+- **base**: a store VMs fork. The WAL's is its **start**; **generation** is keys' alone (MakePublic's flag becomes `attach_only`).
+- **super-block**: Fxfs's on-disk record; **superblock** is the kernel's.
+- **mutation**: Fxfs's journal mutation; testing's are **mutants** and **spec mutations**.
+- **stage**: the second stage alone. A segment's life is its **phase**; a commit's durability, its **level**.
+- **pin**: a follower's extent (`PIN`); LangSmith's commit is **LangSmith's pin**, never the candidate; a toolchain's or tool's is a **pinned version**.
+- **round**, **run**, **job**, **repeat**: as defined above, not interchangeably, in code too.
+- **room**: a segment's free space alone. A tenant's is its **in-flight** budget (`SetTenantInFlight`); a peer stream's, its **credit**.
+- **type names**: two types of one name are one concept; unrelated ones get names of their own (`KeptImage`, `RingView`, `TableFooter`, `TABLE_BLOCK`).
+- **follower spec**: Follower.tla says the code's words (`LetGo`, `Drop`); invalidate is retired.
+- **nightly**: the test host's A/B (**the nightly**); GitHub's is the **nightly suite**; Rust's, **Rust nightly**. Prose only: names stay.
+- **cache**: env vars name theirs: `CLADEFSD_PART_CACHE`, `CLADEFSD_PART_CACHE_BYTES`.

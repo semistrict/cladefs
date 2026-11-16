@@ -3,11 +3,11 @@ id: TASK-461
 title: >-
   Mutant patches walks-forget-writes-in-flight and written-back-twice no longer
   apply on main: CI test (clippy scripts) fails
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-15 14:26'
-updated_date: '2026-11-15 15:17'
+updated_date: '2026-11-16 02:39'
 labels: []
 dependencies: []
 priority: high
@@ -29,7 +29,7 @@ Main CI run 43722206629 (9d814644b) failed test (clippy scripts) on its mutant c
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
+- [x] #1 cargo nextest run --workspace passes on macOS and Linux (ubu1, under fxjob)
 - [x] #2 scripts/upstream-changes.py --check passes
 - [x] #3 Deviations from upstream documented where they occur
 <!-- DOD:END -->
@@ -49,3 +49,9 @@ Both patches regenerated from the current code with their headers kept (written-
 
 CI on main, run 43725423025 (9da162ff0), at 15:17 UTC: test (workspace, clippy scripts, sim, shuttle, guest, firecracker, go), guide, guest-sim, guest-sim-sweep, soak, object-stores, pjdfstest-fuse, sandboxes (short), firecracker-forward, firecracker-series, test-weakening and macos (shuttle) green; macos (workspace) still running, unread (the API's limit spent by every session till 15:51 UTC). Run 43724391112 (1cff819be) was cancelled by the next push, its clippy scripts failing only on TASK-461's two patches. DoD #1 waits on macos (workspace). test (clippy scripts) green: the patches apply.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Fixed earlier on main; the workspace passes on macOS and Linux in main's CI (cd8d9a286, run 43765433746, and 6710dd2d2, run 43790612196).
+<!-- SECTION:FINAL_SUMMARY:END -->
