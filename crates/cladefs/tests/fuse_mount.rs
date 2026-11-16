@@ -397,7 +397,7 @@ fn cladefsd(vm: &Path, bucket: &Path, token: u64) -> Command {
     command
         .arg(vm)
         .arg((256u64 << 20).to_string())
-        .env("CLADEFSD_REMOTE", url::Url::from_directory_path(bucket).unwrap().to_string())
+        .env("CLADEFSD_BUCKET", url::Url::from_directory_path(bucket).unwrap().to_string())
         .env("CLADEFSD_TOKEN", token.to_string())
         .stderr(Stdio::piped());
     command

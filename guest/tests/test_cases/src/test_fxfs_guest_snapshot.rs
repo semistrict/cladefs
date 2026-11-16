@@ -12,7 +12,7 @@
 //!   the guest, told of it by nothing, finds the store grew as it thaws (TASK-79.52).
 //! - **Migrate:** once, as on another host: its extent daemon keeps stores in a bucket, and the
 //!   restore names a point and a store it doesn't have here, so it takes the point's branch from
-//!   the bucket, and forks the store from it. The bucket is CLADEFSD_REMOTE's, if set, or one
+//!   the bucket, and forks the store from it. The bucket is CLADEFSD_BUCKET's, if set, or one
 //!   in the daemon's memory. With CLADEFS_MIGRATE_PHASE, it runs on two hosts (TASK-28.11,
 //!   scripts/migrate-host.sh): `source` snapshots the VM, its store's branch in the bucket, and
 //!   leaves the snapshot, its memory and the VM's root filesystem in CLADEFS_MIGRATE_BUNDLE; then
@@ -303,7 +303,7 @@ mod host {
                     // test's directory, a repeat's of a soak, may not be.
                     let socket = std::env::temp_dir()
                         .join(format!("cladefs-{}-extentd.sock", std::process::id()));
-                    let named = std::env::var_os("CLADEFSD_REMOTE")
+                    let named = std::env::var_os("CLADEFSD_BUCKET")
                         .is_some_and(|url| !url.is_empty());
                     let bucket = std::ffi::OsStr::new("memory:///migrate");
                     // Beside it, for its tenant's socket, in the jail if there is one.
@@ -311,7 +311,7 @@ mod host {
                         .join(format!("cladefs-{}-tenants", std::process::id()));
                     let mut env = vec![("CLADEFSD_TENANTS", tenants.as_os_str())];
                     if !named {
-                        env.push(("CLADEFSD_REMOTE", bucket));
+                        env.push(("CLADEFSD_BUCKET", bucket));
                     }
                     let daemon =
                         crate::common::spawn_daemon(test_setup, &socket, "extentd", &env, None)?;

@@ -29,7 +29,7 @@ service Peer {
 
 // A part asked for.
 message GetPartRequest {
-  // The URL of the bucket, as the asker names it (CLADEFSD_REMOTE): this host's.
+  // The URL of the bucket, as the asker names it (CLADEFSD_BUCKET): this host's.
   string bucket = 1;
   // The object's key.
   string key = 2;

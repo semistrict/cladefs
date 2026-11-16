@@ -359,23 +359,23 @@ sockets=$(mktemp -d /tmp/cladefs-e2e-sockets.XXXXXX)
 chmod 755 "$sockets"
 socket="$sockets/extentd.sock"
 control="$sockets/extentd.control"
-# A host keeps stores in a bucket, CLADEFSD_REMOTE's or a file bucket in memory, on tmpfs,
+# A host keeps stores in a bucket, CLADEFSD_BUCKET's or a file bucket in memory, on tmpfs,
 # as of placement 1 unless one is named; what it did with it scripts/bench-report.py reports. Not
 # one in the daemon's memory: the cases open the stores it made in processes of their own (cladefs's
 # Storage), which keep a store's branch in the bucket its description names (TASK-165.6). Its
 # memory is CLADEFSD_MEMORY bytes, if set; otherwise, as production's, a page cache of what
 # of the host's memory, and the run's cgroup's, is free (TASK-358).
 # cladefs: what its stores read from the bucket it keeps in a part cache of its own on disk, as
-# production's daemon does (CLADEFSD_CACHE, doc-7), unless CLADEFSD_CACHE says
+# production's daemon does (CLADEFSD_PART_CACHE, doc-7), unless CLADEFSD_PART_CACHE says
 # otherwise, empty for none; not this process's, which the cases' own daemons would share
 # (TASK-164.12). In the results' directory, where the cases make their stores: a store goes into
 # the cache by renames, which a store on another filesystem than the cache's refuses (TASK-359).
 bucket_dir=
-if [[ -z ${CLADEFSD_REMOTE:-} ]]; then
+if [[ -z ${CLADEFSD_BUCKET:-} ]]; then
     bucket_dir=$(mktemp -d /dev/shm/cladefs-e2e-bucket.XXXXXX)
 fi
 cache_dir=
-if [[ -z ${CLADEFSD_CACHE+set} ]]; then
+if [[ -z ${CLADEFSD_PART_CACHE+set} ]]; then
     cache_dir=$(mktemp -d "$results/.extentd-cache.XXXXXX")
 fi
 # cladefs: CLADEFSD_MEMORY_MAX runs the daemon in a systemd scope of its own, limited to that
@@ -402,8 +402,8 @@ extentd_stop() {
     systemctl stop "$extentd_scope" 2> /dev/null || true
 }
 ${extentd_run[@]+"${extentd_run[@]}"} \
-env CLADEFSD_REMOTE="${CLADEFSD_REMOTE:-file://$bucket_dir}" \
-    CLADEFSD_CACHE="${CLADEFSD_CACHE-$cache_dir}" \
+env CLADEFSD_BUCKET="${CLADEFSD_BUCKET:-file://$bucket_dir}" \
+    CLADEFSD_PART_CACHE="${CLADEFSD_PART_CACHE-$cache_dir}" \
     CLADEFSD_TOKEN="${CLADEFSD_TOKEN:-1}" \
     CLADEFSD_STATS="$results/extentd-stats.txt" CLADEFSD_GRPC="$control" \
     FAILPOINTS="${CLADEFS_FAILPOINTS:-}" ${extentd_wrap[@]+"${extentd_wrap[@]}"} "$extentd_bin" "$socket" ${CLADEFSD_MEMORY:+"$CLADEFSD_MEMORY"} \

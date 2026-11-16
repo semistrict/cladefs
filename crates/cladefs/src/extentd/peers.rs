@@ -58,7 +58,7 @@ pub fn start(
     let bucket = super::stores::daemon_bucket().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = super::stores::part_cache().map_err(|err| failed(&format!("{err:?}")))?;
     let cache = cache.ok_or_else(|| {
-        "CLADEFSD_PEER_ADDRESS is set, but CLADEFSD_CACHE names no directory for the \
+        "CLADEFSD_PEER_ADDRESS is set, but CLADEFSD_PART_CACHE names no directory for the \
          part cache, which keeps what the daemon serves its peers"
             .to_owned()
     })?;

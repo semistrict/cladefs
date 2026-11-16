@@ -167,10 +167,10 @@ mod host {
                 "CLADEFS_BUCKET_SOAK_SECS={secs}: {MIN_SECS} at least, the bucket out of service \
                  longer than its client retries a request"
             );
-            let bucket_url = std::env::var("CLADEFSD_REMOTE").unwrap_or_default();
+            let bucket_url = std::env::var("CLADEFSD_BUCKET").unwrap_or_default();
             ensure!(
                 bucket_url.starts_with("s3://"),
-                "CLADEFSD_REMOTE is {bucket_url:?}, not an S3 server's bucket: \
+                "CLADEFSD_BUCKET is {bucket_url:?}, not an S3 server's bucket: \
                  scripts/test-e2e-rustfs.sh starts one"
             );
             let server =

@@ -56,7 +56,7 @@
 //!   (`crate::bucket::upload_memory`, TASK-317).
 //! - cladefs: `cladefsd_part_cache_bytes` and `cladefsd_part_cache_capacity_bytes`: what
 //!   the host's part cache keeps, once a store opened it, and its budget,
-//!   `CLADEFSD_CACHE_BYTES` (TASK-406.1).
+//!   `CLADEFSD_PART_CACHE_BYTES` (TASK-406.1).
 //! - cladefs: `cladefsd_peer_parts_total{outcome}`: the parts the stores' fetchers asked the
 //!   peers that own them for, by what came of it (`given`, `missing`, `failed`), and
 //!   `cladefsd_peer_served_parts_total{outcome}`, those the daemon's peers asked it for

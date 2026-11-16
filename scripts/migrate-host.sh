@@ -76,7 +76,7 @@ migrate() {
     trap cleanup EXIT
     (( status == 0 )) || return "$status"
     host_ssh "mkdir -p $(printf %q "$held")" || return
-    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_REMOTE=$remote/branches" \
+    host_job CLADEFS_WORKSPACE_TESTS=0 "CLADEFSD_BUCKET=$remote/branches" \
         "CLADEFSD_TOKEN=$token" "CLADEFS_MIGRATE_PHASE=$phase" "CLADEFS_MIGRATE_BUNDLE=$held/bundle" \
         test-linux-host.sh fxfs-guest-migrate-dax > "$results/remote.log" 2>&1 || status=$?
     if [[ $host_state == ended ]]; then

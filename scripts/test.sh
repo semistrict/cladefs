@@ -158,14 +158,14 @@ fi
 # cladefs builds it (scripts/firecracker-cargo.sh), and those its feature gates: the extent
 # device's, its vCPUs' exits', its features pages' and its signal handlers'. Each extent test serves its store from a daemon in its process, a host's:
 # its stores' branches in a bucket in memory, as of placement 1, which without
-# CLADEFSD_REMOTE and CLADEFSD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
+# CLADEFSD_BUCKET and CLADEFSD_TOKEN fails EIO opening it (TASK-220). userfaultfd-sys's
 # bindgen needs libclang to build it.
 if part firecracker; then
     tests='test(/extent::/) | test(/vcpu::tests::(efaults_|test_exit_code_)/)'
     tests+=' | test(/device::tests::test_features_/)'
     tests+=' | test(/signal_handler::/)'
     tests+=' | test(/transport::pci::device::tests::test_(shm_bar|pci_device_ids)$/)'
-    CLADEFSD_REMOTE=memory:///vmm CLADEFSD_TOKEN=1 \
+    CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
         "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --lib --features cladefs -E "$tests"
     # Where KVM is, as on ubu1: the PCI transport's tests and the device managers'
     # persistence tests, which make VMs, the extent device's window a BAR of its device's over PCI
@@ -177,7 +177,7 @@ if part firecracker; then
     # so (TASK-307).
     if [[ -w /dev/kvm ]]; then
         if [[ ${CLADEFS_FIRECRACKER_TESTS:-} == all ]]; then
-            CLADEFSD_REMOTE=memory:///vmm CLADEFSD_TOKEN=1 \
+            CLADEFSD_BUCKET=memory:///vmm CLADEFSD_TOKEN=1 \
                 "$root/scripts/firecracker-cargo.sh" nextest run -p vmm --features cladefs \
                 --no-fail-fast --test-threads 1
         else

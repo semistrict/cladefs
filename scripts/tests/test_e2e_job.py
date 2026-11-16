@@ -23,7 +23,7 @@ from script import SCRIPTS
 # guest's root filesystem and image and the daemon's part cache, and ends with $FAKE_STATUS.
 CASES = """#!/bin/bash
 cd "$CLADEFS_E2E_RESULTS"
-printf '%s\\n' "$CLADEFS_E2E_RESULTS" "${CLADEFSD_REMOTE-no bucket named}" "$@" > given.txt
+printf '%s\\n' "$CLADEFS_E2E_RESULTS" "${CLADEFSD_BUCKET-no bucket named}" "$@" > given.txt
 mkdir -p case/extents case/rootfs/bin .extentd-cache.x1 case/store-1 case/vm.bucket
 echo log > case/log.txt
 for left in case/extents/segment case/rootfs/bin/sh case/rootfs.ext4 case/disk.img \\
@@ -139,7 +139,7 @@ class Job(unittest.TestCase):
         self.assertEqual(self.given()[2:], ["--tag", "bench"])
 
     def test_a_bucket_named_is_the_runs(self):
-        status, errors = self.job("case", env={"CLADEFSD_REMOTE": "s3://bucket/p"})
+        status, errors = self.job("case", env={"CLADEFSD_BUCKET": "s3://bucket/p"})
         self.assertEqual((status, errors), (0, self.moved()))
         self.assertEqual(self.given()[1], "s3://bucket/p")
 
@@ -284,7 +284,7 @@ class Rounds(unittest.TestCase):
                       '> "$out/run.log" 2>&1 || ran=$?', text)
         # Neither a bucket nor test-e2e.sh's results, the stores with them, in the results'
         # directory, on whatever filesystem that is (TASK-397).
-        self.assertNotIn("CLADEFSD_REMOTE=", text)
+        self.assertNotIn("CLADEFSD_BUCKET=", text)
         self.assertNotIn("CLADEFS_E2E_RESULTS=", text)
         self.assertNotIn("/scripts/test-e2e.sh\" \"$case\"", text)
         # Nor the round's record here, of the results' disk: the job's, of its stores' (TASK-375).

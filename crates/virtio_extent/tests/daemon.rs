@@ -31,7 +31,7 @@ const RESPONSE: usize = size_of::<Response>();
 /// why (cladefs TASK-220).
 fn host() {
     let _ = cladefs::extentd::logging::to_stderr();
-    for (name, value) in [("CLADEFSD_REMOTE", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
+    for (name, value) in [("CLADEFSD_BUCKET", "memory:///branches"), ("CLADEFSD_TOKEN", "1")] {
         if std::env::var_os(name).is_none() {
             // SAFETY: nextest runs each test in a process of its own, whose other threads don't
             // read the environment yet.

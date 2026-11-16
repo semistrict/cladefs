@@ -26,7 +26,7 @@ fn daemon(dir: &Path, name: &str) -> (PathBuf, KillOnDrop) {
     let socket = dir.join(format!("{name}.sock"));
     let child = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(&socket)
-        .env("CLADEFSD_REMOTE", "memory:///branches")
+        .env("CLADEFSD_BUCKET", "memory:///branches")
         .env("CLADEFSD_TOKEN", "1")
         .spawn()
         .unwrap();

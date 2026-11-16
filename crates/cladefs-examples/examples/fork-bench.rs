@@ -40,7 +40,7 @@ fn main() {
     }
     // SAFETY: before any thread of the process's reads the environment.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///fork-bench");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///fork-bench");
         std::env::set_var("CLADEFSD_TOKEN", "1");
         if kms {
             std::env::set_var("CLADEFS_KMS", format!("local://{}", kms_dir.display()));

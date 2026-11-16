@@ -794,7 +794,7 @@ fn refuses_other_users(test: &str, jailed: fn(Sockets) -> PathBuf) {
     let (vms, control) = (dir.path().join("extentd.sock"), dir.path().join("extentd.control"));
     let mut daemon = std::process::Command::new(env!("CARGO_BIN_EXE_cladefsd"));
     daemon.arg(&vms).env("CLADEFSD_GRPC", &control);
-    daemon.env("CLADEFSD_REMOTE", "memory:///branches").env("CLADEFSD_TOKEN", "1");
+    daemon.env("CLADEFSD_BUCKET", "memory:///branches").env("CLADEFSD_TOKEN", "1");
     // SAFETY: umask is async-signal-safe.
     unsafe {
         daemon.pre_exec(|| {

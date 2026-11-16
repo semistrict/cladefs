@@ -40,7 +40,7 @@
 //! serving them holds (it waits a while for it, then refuses). `create`, `take` and `import`, which
 //! make new stores, work so anywhere, as when building base images where no daemon runs. The others change
 //! existing stores' branches, which are in the bucket each store's description names: they need
-//! this host's (`CLADEFSD_REMOTE`) and its placement's fencing token (`CLADEFSD_TOKEN`),
+//! this host's (`CLADEFSD_BUCKET`) and its placement's fencing token (`CLADEFSD_TOKEN`),
 //! and refuse otherwise (`cladefs::bucket::Host`, TASK-45).
 //!
 //! `create` makes an empty store at DIR, of CAPACITY bytes, of a new branch, the one volume of a
@@ -48,7 +48,7 @@
 //! `take` makes an empty store at DIR, of CAPACITY bytes, of BRANCH (`TENANT/CELL/ID`, each in hex,
 //! a volume of its cell named as DIR is, TASK-364), which its bucket has (`ENOENT` otherwise): once
 //! extentd opens it,
-//! with `CLADEFSD_REMOTE` naming the branch's bucket, it takes what the branch holds there,
+//! with `CLADEFSD_BUCKET` naming the branch's bucket, it takes what the branch holds there,
 //! whose data it fetches as it is read; placed at TOKEN, if given, as `place` places it. A
 //! point, a VM snapshot's or another, it reads, taking no head, as any number of hosts do at once.
 //! `place` places the store at DIR at the placement whose fencing token,

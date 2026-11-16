@@ -80,8 +80,8 @@ for pair in "$@"; do
     out=$results/$label.tsv
     : > "$out"
     echo "== $label: timing" >&2
-    CLADEFSD_REMOTE="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
-        CLADEFSD_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/extentd.control" \
+    CLADEFSD_BUCKET="file://$dir/bucket/" CLADEFSD_TOKEN=1 \
+        CLADEFSD_PART_CACHE="$dir/cache" CLADEFSD_GRPC="$dir/extentd.control" \
         CLADEFSD_STATS="$results/$label-stats.txt" \
         "$bin/cladefsd" "$dir/extentd.sock" $(( 8 << 30 )) > "$results/$label-extentd.log" 2>&1 &
     daemon=$!

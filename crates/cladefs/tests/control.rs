@@ -26,7 +26,7 @@ fn stores_through_the_control_api() {
     // SAFETY: nextest runs each test in a process of its own, whose other threads don't read the
     // environment yet.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///branches");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
@@ -275,7 +275,7 @@ fn imports_that_fail_leave_no_store() {
 fn forks_of_branches_never_had_here() {
     // SAFETY: as in stores_through_the_control_api.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///elsewhere");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///elsewhere");
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();
@@ -365,7 +365,7 @@ fn health_follows_whether_the_daemon_serves() {
     use tonic_health::pb::health_client::HealthClient;
     // SAFETY: As above.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", "memory:///branches");
+        std::env::set_var("CLADEFSD_BUCKET", "memory:///branches");
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let dir = tempfile::tempdir().unwrap();

@@ -49,7 +49,7 @@ pub fn host_token() -> Result<u64, Failure> {
 /// them. Tests and development use an in-memory bucket (`memory:///NAME`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Host {
-    /// The bucket's URL, `CLADEFSD_REMOTE`.
+    /// The bucket's URL, `CLADEFSD_BUCKET`.
     pub bucket: String,
     /// The placement's fencing token, `CLADEFSD_TOKEN` ([`host_token`]).
     pub token: u64,
@@ -58,9 +58,9 @@ pub struct Host {
 impl Host {
     /// The host the environment names, or why it names none.
     pub fn from_env() -> Result<Self, String> {
-        let bucket = std::env::var("CLADEFSD_REMOTE").ok().filter(|url| !url.is_empty());
+        let bucket = std::env::var("CLADEFSD_BUCKET").ok().filter(|url| !url.is_empty());
         let bucket = bucket.ok_or_else(|| {
-            "CLADEFSD_REMOTE names no bucket: a host of cladefs's multi-node system keeps its \
+            "CLADEFSD_BUCKET names no bucket: a host of cladefs's multi-node system keeps its \
              stores' branches in one (tests and development: memory:///NAME)"
                 .to_owned()
         })?;

@@ -29,7 +29,7 @@ fn serve() -> (tempfile::TempDir, PathBuf) {
 fn serve_from(url: &str) -> (tempfile::TempDir, PathBuf) {
     // SAFETY: before this process starts any other thread.
     unsafe {
-        std::env::set_var("CLADEFSD_REMOTE", url);
+        std::env::set_var("CLADEFSD_BUCKET", url);
         std::env::set_var("CLADEFSD_TOKEN", "1");
     }
     let sockets = tempfile::tempdir().unwrap();

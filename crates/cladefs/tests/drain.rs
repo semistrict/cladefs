@@ -30,7 +30,7 @@ impl Drop for KillOnDrop {
 fn daemon(socket: &Path, bucket: &Path, token: u64) -> KillOnDrop {
     let daemon = Command::new(env!("CARGO_BIN_EXE_cladefsd"))
         .arg(socket)
-        .env("CLADEFSD_REMOTE", format!("file://{}", bucket.display()))
+        .env("CLADEFSD_BUCKET", format!("file://{}", bucket.display()))
         .env("CLADEFSD_TOKEN", token.to_string())
         .spawn()
         .unwrap();
@@ -90,7 +90,7 @@ fn sigterm_closes_every_store_durable_and_uploaded() {
     // and ID name, as a snapshot names it by its ID alone; taken from the bucket.
     let full = extent_store::host_branch(&path).unwrap();
     // SAFETY: The test's own process, whose other threads read no environment meanwhile.
-    unsafe { std::env::set_var("CLADEFSD_REMOTE", format!("file://{}", bucket.display())) };
+    unsafe { std::env::set_var("CLADEFSD_BUCKET", format!("file://{}", bucket.display())) };
     ExtentStore::take(&point, 1 << 28, full, Some(2)).unwrap();
     let restored = other.join("restored");
     let restored =

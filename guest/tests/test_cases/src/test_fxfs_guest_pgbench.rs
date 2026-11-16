@@ -583,7 +583,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
             let sockets = tempdir::TempDir::new("cladefs-pgbench")?;
             let socket = sockets.path().join("extentd.sock");
             let given = std::env::var_os("CLADEFS_BUCKET_LATENCY_MS");
-            let bucket = std::env::var_os("CLADEFSD_REMOTE");
+            let bucket = std::env::var_os("CLADEFSD_BUCKET");
             let latency = added_latency(given.as_deref(), bucket.as_deref());
             let stats = dir.join("extentd-stats.txt");
             // cladefs: its metrics, which say what its memory holds (`crate::measure`).
@@ -634,7 +634,7 @@ RUN apk add --no-cache postgresql postgresql-contrib perf e2fsprogs
                 let cache = dir.join("extentd-cold-cache");
                 std::fs::create_dir_all(&cache)?;
                 let mut env = env.to_vec();
-                env.push(("CLADEFSD_CACHE", cache.as_os_str()));
+                env.push(("CLADEFSD_PART_CACHE", cache.as_os_str()));
                 daemon = crate::common::spawn_daemon(
                     test_setup,
                     &socket,

@@ -23,7 +23,7 @@
 //! stop (TASK-50.3). A VMM's extent device
 //! connects to the socket its configuration names (cladefs's Firecracker's `extentd_socket`).
 //!
-//! It runs as a host of cladefs's multi-node system: `CLADEFSD_REMOTE` names the bucket its
+//! It runs as a host of cladefs's multi-node system: `CLADEFSD_BUCKET` names the bucket its
 //! stores' branches are kept in, and `CLADEFSD_TOKEN` its placement's fencing token, which
 //! the system's control plane gives it, and which fences earlier placements' writes and deletes;
 //! without them, it refuses to start (`cladefs::bucket::Host`, TASK-45). Tests and development use
@@ -73,17 +73,17 @@
 //! there, over HTTP, at `/metrics`, in Prometheus' text format (`cladefs::extentd::metrics`,
 //! TASK-47).
 //!
-//! `CLADEFSD_REMOTE` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
+//! `CLADEFSD_BUCKET` names the bucket (`s3://bucket/prefix`, `gs://bucket/prefix`,
 //! `az://container/prefix`) each store it opens keeps its branch in (backlog doc-7), with
 //! credentials from the environment's `AWS_*`, `GOOGLE_*` or `AZURE_*` variables: durable commits are uploaded behind them, within a second. With
-//! `CLADEFSD_CACHE` naming a directory too, what stores read from the bucket is kept there,
+//! `CLADEFSD_PART_CACHE` naming a directory too, what stores read from the bucket is kept there,
 //! sparse, leaving 4 GiB of its filesystem free, and kept across the daemon's restarts: one daemon
-//! at a time has the directory. `CLADEFSD_CACHE_BYTES` caps what it keeps there, in bytes, as
+//! at a time has the directory. `CLADEFSD_PART_CACHE_BYTES` caps what it keeps there, in bytes, as
 //! a host whose cache shares a disk with its stores needs (TASK-406.1): those read least recently
 //! go first.
 //!
 //! With `CLADEFSD_PEER_ADDRESS` naming this host's `HOST:PORT` among the hosts sharing its
-//! bucket, and `CLADEFSD_CACHE` a cache, the daemon serves them parts of the bucket's objects
+//! bucket, and `CLADEFSD_PART_CACHE` a cache, the daemon serves them parts of the bucket's objects
 //! there, over gRPC (`proto/cladefs/peer/v1/peer.proto`), and its stores' fetchers ask the host that
 //! owns a part, by rendezvous hashing over them, before the bucket (TASK-406.2): a part many hosts
 //! read comes from the bucket about once for them all. `CLADEFSD_PEERS` names them at start,

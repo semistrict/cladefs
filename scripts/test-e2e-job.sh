@@ -20,7 +20,7 @@
 #   scripts/test-e2e-job.sh RESULTS [ARG...]
 #
 # ARGs are test-e2e.sh's, and so is the environment, but for CLADEFS_E2E_RESULTS, which this sets:
-# the bucket is CLADEFSD_REMOTE's, or test-e2e.sh's own, a file bucket in memory, on tmpfs,
+# the bucket is CLADEFSD_BUCKET's, or test-e2e.sh's own, a file bucket in memory, on tmpfs,
 # whose distance CLADEFS_BUCKET_LATENCY_MS stands for. Its status is test-e2e.sh's, 1 if copying
 # the results failed.
 #

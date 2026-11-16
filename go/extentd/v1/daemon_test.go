@@ -40,7 +40,7 @@ func daemon(t *testing.T, dir string) *extentdv1.Client {
 	command := exec.Command(binary, filepath.Join(dir, "vms.sock"))
 	command.Env = append(os.Environ(),
 		"CLADEFSD_GRPC="+control,
-		"CLADEFSD_REMOTE=memory:///branches",
+		"CLADEFSD_BUCKET=memory:///branches",
 		"CLADEFSD_TOKEN=1",
 	)
 	command.Stderr = os.Stderr
