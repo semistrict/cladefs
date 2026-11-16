@@ -193,7 +193,7 @@ fn a_degraded_bucket_costs_the_daemon_nothing_it_does_not_bound() {
     // limit of open files raised.
     super::super::memory::return_large_allocations();
     super::super::raise_open_files_limit().unwrap();
-    // A panic holding what no store's fence contains, the page cache's flusher's work among it,
+    // A panic holding what no store's halt contains, the page cache's flusher's work among it,
     // aborting the process (TASK-149.24, TASK-493).
     extent_store::shared::abort_on_panics();
     let flusher_lives = || {
