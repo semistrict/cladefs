@@ -58,7 +58,7 @@ impl<C> Kernel for ShuttleKernel<C> {
     fn barrier_take(&self) {
         let mut barrier = self.barrier.lock().unwrap();
         barrier.waiting += 1;
-        shuttle_trace::event("WaitBarrier", String::new);
+        shuttle_trace::event("Wait", String::new);
         let mut barrier = self.changed.wait_while(barrier, |b| b.batch || b.readers > 0).unwrap();
         barrier.waiting -= 1;
         barrier.batch = true;

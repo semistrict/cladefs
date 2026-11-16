@@ -124,7 +124,7 @@ struct Previous {
 impl Drop for Previous {
     fn drop(&mut self) {
         let mut state = self.store.state.lock().unwrap();
-        shuttle_trace::event("Advance", String::new);
+        shuttle_trace::event("LetGo", String::new);
         for commit in state.view + 1..=self.applied {
             let freed = state.frees[commit - 1].clone();
             for extent in &freed {
@@ -191,11 +191,11 @@ impl Dax {
 
     /// Drops the mappings of the files `changes` names, holding each one's invalidate_lock
     /// exclusively.
-    fn invalidate(&self, changes: &BTreeSet<&'static str>) {
+    fn drop_mappings(&self, changes: &BTreeSet<&'static str>) {
         for file in changes.iter().filter(|key| FILES.contains(key)) {
-            let _invalidating = self.invalidate_locks[file].write().unwrap();
+            let _dropping = self.invalidate_locks[file].write().unwrap();
             self.mappings.lock().unwrap().retain(|mapping| mapping.file != *file);
-            shuttle_trace::event("Invalidate", || format!("f |-> \"{file}\""));
+            shuttle_trace::event("Drop", || format!("f |-> \"{file}\""));
         }
     }
 }
@@ -214,8 +214,8 @@ struct Readers {
 impl Readers {
     fn new(tree: Arc<Mutex<Tree>>, store: Arc<Store>) -> Self {
         let dax = Arc::new(Dax::new());
-        let invalidated = dax.clone();
-        let kernel = ShuttleKernel::new(move |changes| invalidated.invalidate(changes));
+        let dropping = dax.clone();
+        let kernel = ShuttleKernel::new(move |changes| dropping.drop_mappings(changes));
         Self { protocol: Protocol::new(kernel), tree, store, dax }
     }
 }
@@ -260,7 +260,7 @@ fn run(scenario: &Scenario) {
                 for mapping in reading.dax.mappings.lock().unwrap().iter() {
                     assert_eq!(
                         mapping.extent, tree[mapping.file],
-                        "a mapping of {} survived its invalidation",
+                        "a mapping of {} outlived the batch that changed it",
                         mapping.file
                     );
                 }
@@ -486,8 +486,8 @@ fn traces_follow_the_spec() {
     let scenario = mixed();
     let traces = traced(&scenario, TRACED_RUNS);
     // The mutant's runs, of the writer and the follower alone: with readers, a mapping its batches
-    // left would fail the run itself, as needs_invalidation shows.
-    set_rules(Rules { invalidate: false, ..Rules::ALL });
+    // left would fail the run itself, as needs_dropping shows.
+    set_rules(Rules { drop: false, ..Rules::ALL });
     let unread = Scenario { pairs: 0, faults: 0, copies: 0, ..scenario.clone() };
     let mutants = traced(&unread, MUTANT_RUNS);
     set_rules(Rules::ALL);
@@ -502,7 +502,7 @@ fn traces_follow_the_spec() {
         assert_eq!(count("ApplyOne"), mutations, "{trace:#?}");
         let batches = count("StartBatch");
         assert!(batches >= 1, "{trace:#?}");
-        for step in ["Fetch", "WaitBarrier", "Dropped", "EndBatch", "Advance"] {
+        for step in ["Fetch", "Wait", "Dropped", "EndBatch", "LetGo"] {
             assert_eq!(count(step), batches, "{step}s in {trace:#?}");
         }
         assert_eq!(count("StartPair"), scenario.pairs, "{trace:#?}");
@@ -585,11 +585,11 @@ fn needs_the_barrier() {
 /// Without the batches dropping what readers cached, a fault's mapping of a file outlives the
 /// batch that changed it.
 #[test]
-fn needs_invalidation() {
-    let rules = Rules { invalidate: false, ..Rules::ALL };
+fn needs_dropping() {
+    let rules = Rules { drop: false, ..Rules::ALL };
     fails_without(
         rules,
-        "survived its invalidation",
+        "outlived the batch that changed it",
         RandomScheduler::new(runs()),
         running(mixed()),
     );

@@ -14,7 +14,8 @@
 //! writer created. A flush's last transaction (EndFlush) swaps the store's sealed layers for those
 //! the flush wrote, as the writer's own commit of it does; the allocator's mutations are left, as a
 //! follower allocates nothing. A fetch tells what its batch changes ([`Changes`]), for the caller
-//! to invalidate what it cached, once applied (crates/follower, TASK-42.5).
+//! to drop what the kernel caches of it before the batch applies, and to settle its inodes after
+//! (crates/follower, TASK-42.5).
 //!
 //! The follower's graveyard: a reader that has an object open holds it ([`FxFilesystem::hold`]).
 //! When the writer deletes an object a reader holds (its graveyard entry, or its tombstone), the

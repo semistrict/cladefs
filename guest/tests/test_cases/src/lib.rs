@@ -553,20 +553,17 @@ pub fn test_cases() -> Vec<TestCase> {
         TestCase::new(
             "fxfs-guest-follow-torture-mutant",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: false, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Invalidation) }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::Drop) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-faults-dax",
             &[Tag::Kernel, Tag::Nightly],
-            Box::new(TestFxfsGuestFollowTorture {
-                dax: true,
-                mutant: Some(Mutant::InvalidationFaults),
-            }),
+            Box::new(TestFxfsGuestFollowTorture { dax: true, mutant: Some(Mutant::DropFaults) }),
         ),
         TestCase::new(
             "fxfs-guest-follow-torture-mutant-barrier-dax",

@@ -348,7 +348,7 @@ pub struct Rules {
     /// ([`branch::fork_point`]): one that read the
     /// point live then wrote it before the point's deletion, which a pass reading the point
     /// deleted, or finding its reference retired, read after.
-    /// TLA+: `specs/bucket/mutations/NoClonesReferFirst.cfg`.
+    /// TLA+: `specs/bucket/mutations/NoForksReferFirst.cfg`.
     pub clones_refer_first: bool,
     /// A reference is retired, by a pass over its child's cell, only once that cell holds no live
     /// branch and no reference of its own: the child's forks inherit what it inherited, kept by its
@@ -370,7 +370,7 @@ pub struct Rules {
     /// its child's cell's pass retires it, the clone's host dying or not; and a clone refused by a
     /// record there writes none. The other way round, a host dying between the two leaves a
     /// reference no record names, which no pass retires (TASK-395.10).
-    /// TLA+: `specs/bucket/mutations/NoClonesRecordFirst.cfg`.
+    /// TLA+: `specs/bucket/mutations/NoForksRecordFirst.cfg`.
     pub clones_record_first: bool,
     /// Whoever finds the record of a fork's child naming another origin than the fork's, or none,
     /// deletes the fork's reference: the fork made no branch, and no record will name it. Every

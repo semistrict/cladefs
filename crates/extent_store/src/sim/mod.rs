@@ -716,7 +716,7 @@ test_needs!(collection_needs_references_held, references_held, forks());
 // reads its point, have no search here: collector::tests' direct ones show them needed
 // (`deletions_referring_before_they_mark_parents_deleted_need_references_first`,
 // `clones_keeping_what_they_inherit_as_their_points_go_need_clones_refer_first`), as do
-// specs/bucket's NoReferencesFirst and NoClonesReferFirst; references listed after the states,
+// specs/bucket's NoReferencesFirst and NoForksReferFirst; references listed after the states,
 // NoReferencesRelisted alone.
 
 /// Restores as [`restores`] makes them, but no host dying, no collector stopped and no request
