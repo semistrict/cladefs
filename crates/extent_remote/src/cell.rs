@@ -47,7 +47,7 @@ pub enum Kind {
 }
 
 impl Kind {
-    /// Its name, as a store's description says it: `fxfs` or `sqlite`.
+    /// Its name, as a store's description says it: `fxfs`, `sqlite` or `memory`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Fxfs => "fxfs",
@@ -351,8 +351,8 @@ pub async fn add_kek(bucket: &impl Bucket, held: Held, kek: Kek) -> Result<Objec
 /// DEKs, wrapped by those KEKs, unwrap no more, and no one takes it again ([`take`], [`hold`]).
 /// Its holder, if any, goes on changing its volumes until told (the mark stays, as every change
 /// keeps the rest of the object); a host that unwrapped its KEK before keeps it until told too
-/// (`crate::keys::Kms::forget`). Shredded already, nothing changes. Returns how many generations
-/// of its KEK it took out: [`Error::NoCell`] if it has no object.
+/// (`crate::keys::CachingKms::forget`). Shredded already, nothing changes. Returns how many
+/// generations of its KEK it took out: [`Error::NoCell`] if it has no object.
 ///
 /// Only as strong as the bucket keeps no older version of the cell's object: with versioning on,
 /// a lifecycle rule must expire non-current versions, or theirs unwrap while the tenant's KEK

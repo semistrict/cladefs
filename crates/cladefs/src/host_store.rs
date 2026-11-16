@@ -615,7 +615,7 @@ mod tests {
         let first = made(&one, new());
         let second = made(&two, new());
         assert_eq!(second.id, first.id + 1);
-        let block = first.id / extent_remote::objectid::BLOCK;
+        let block = first.id / extent_remote::objectid::ID_BLOCK;
         let bucket = bucket(&url).unwrap();
         let taken = extent_remote::layout::objectid_block(block);
         assert!(upload::block_on(extent_remote::bucket::get(&*bucket, &taken)).unwrap().is_some());

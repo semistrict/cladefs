@@ -1101,8 +1101,8 @@ pub(crate) mod tests {
         faults.set(Fault { failing: Failing::NoSpace, ..Fault::default() });
         let start = tokio::time::Instant::now();
         let creates: Vec<_> = (0..48)
-            .map(|seq| {
-                let (store, key) = (store.clone(), layout::segment(test_branch(1), seq, 1));
+            .map(|segment| {
+                let (store, key) = (store.clone(), layout::segment(test_branch(1), segment, 1));
                 tokio::spawn(async move {
                     let created = crate::bucket::create(&*store, &key, vec![1, 2, 3]).await;
                     assert!(matches!(created, crate::bucket::Created::Created), "{key}");
@@ -1203,7 +1203,7 @@ pub(crate) mod tests {
             ]
         );
     }
-    use crate::batch::{Batch, Commit};
+    use crate::batch::{Commit, SegmentBuilder};
     use crate::bucket::Bucket;
     use crate::layout::Origin;
     use crate::s3_server::S3Server;
@@ -1340,9 +1340,9 @@ pub(crate) mod tests {
                  request={request} marks={epoch}"
             )
         };
-        let ours = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, seq: 4, epoch: 1 }";
+        let ours = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 1 }, id: 1 }, segment: 4, epoch: 1 }";
         let ours = |request| reached(request, &marked, layout::marks(TEST_CELL, 7), ours, 7);
-        let other = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, seq: 1, epoch: 1 }";
+        let other = "Checkpoint { branch: Branch { cell: Cell { tenant: 1, id: 2 }, id: 2 }, segment: 1, epoch: 1 }";
         let theirs = reached("get", &theirs, layout::marks(Cell { tenant: 1, id: 2 }, 3), other, 3);
         assert_eq!(warned(), [ours("head"), ours("get-range"), ours("get"), theirs]);
     }
@@ -1543,10 +1543,10 @@ pub(crate) mod tests {
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
             let extent = ExtentId::new(1, writer.chain().next_sequence());
             let commit = Commit { tag: 1, extents: vec![(extent, vec![1])], ..Commit::default() };
-            let seq = add(&writer, commit);
-            writer.upload(seq).await.unwrap();
+            let segment = add(&writer, commit);
+            writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
-            assert_eq!(writer.checkpoint().await, Ok(Some(seq)));
+            assert_eq!(writer.checkpoint().await, Ok(Some(segment)));
             let gets = || bucket.stats().requests(Request::Get);
             let mut read = Vec::new();
             let mut states = Vec::new();
@@ -1563,7 +1563,7 @@ pub(crate) mod tests {
 
     /// Adds a segment of `commit` alone to `writer`, closed on its chain: returns its number.
     fn add<B: Bucket>(writer: &Writer<B>, commit: Commit) -> u64 {
-        writer.add_segment(Batch::from(commit).close(&mut writer.chain()).frame()).unwrap()
+        writer.add_segment(SegmentBuilder::from(commit).close(&mut writer.chain()).frame()).unwrap()
     }
 
     /// A branch's life over `bucket`: written, forked, freed, checkpointed, taken over, collected;
@@ -1580,21 +1580,21 @@ pub(crate) mod tests {
             own: vec![(large.sequence, vec![7; 4096])],
             ..Commit::default()
         };
-        let seq = add(&first, commit);
-        first.upload(seq).await.unwrap();
-        assert_eq!(first.acknowledge().await, Ok(Some(seq)));
-        let forking = Batch::default()
+        let segment = add(&first, commit);
+        first.upload(segment).await.unwrap();
+        assert_eq!(first.acknowledge().await, Ok(Some(segment)));
+        let forking = SegmentBuilder::default()
             .fork(crate::layout::child(test_branch(child)), &mut first.chain())
             .frame();
         let fork = first.add_segment(forking).unwrap();
         first.upload(fork).await.unwrap();
         first.acknowledge().await.unwrap();
-        let seq = add(&first, Commit { tag: 2, frees: vec![small], ..Commit::default() });
-        first.upload(seq).await.unwrap();
+        let segment = add(&first, Commit { tag: 2, frees: vec![small], ..Commit::default() });
+        first.upload(segment).await.unwrap();
         first.acknowledge().await.unwrap();
-        assert_eq!(first.checkpoint().await, Ok(Some(seq)));
+        assert_eq!(first.checkpoint().await, Ok(Some(segment)));
         // Looked up a block at a time, by ranged reads, by a host's fetcher.
-        let checkpoint = crate::layout::checkpoint(test_branch(root), seq, 1);
+        let checkpoint = crate::layout::checkpoint(test_branch(root), segment, 1);
         let tail = crate::object::tail(&*bucket, &checkpoint).await.unwrap().unwrap();
         let table = crate::checkpoint::Table::decode(tail.footer()).unwrap();
         assert_eq!(table.state().last_commit, Some(2));
@@ -1606,8 +1606,8 @@ pub(crate) mod tests {
 
         // Another writer takes the branch; the first one's next segment is not the branch's.
         let second = Writer::open(bucket.clone(), test_branch(root), 11, 2).await.unwrap();
-        let seq = add(&first, Commit { tag: 3, frees: vec![large], ..Commit::default() });
-        let taken = match first.upload(seq).await {
+        let segment = add(&first, Commit { tag: 3, frees: vec![large], ..Commit::default() });
+        let taken = match first.upload(segment).await {
             Ok(()) => first.acknowledge().await.map(|_| ()),
             Err(error) => Err(error),
         };
@@ -1635,13 +1635,13 @@ pub(crate) mod tests {
 
         // Freed by the parent's writer, and by the child, which inherited them, nothing reaches
         // them: the collector reclaims their objects.
-        let seq = add(&second, Commit { tag: 4, frees: vec![large], ..Commit::default() });
-        second.upload(seq).await.unwrap();
+        let segment = add(&second, Commit { tag: 4, frees: vec![large], ..Commit::default() });
+        second.upload(segment).await.unwrap();
         second.acknowledge().await.unwrap();
         second.checkpoint().await.unwrap();
         let heir = Writer::open(bucket.clone(), test_branch(child), 12, 1).await.unwrap();
-        let seq = add(&heir, Commit { tag: 1, frees: vec![small, large], ..Commit::default() });
-        heir.upload(seq).await.unwrap();
+        let segment = add(&heir, Commit { tag: 1, frees: vec![small, large], ..Commit::default() });
+        heir.upload(segment).await.unwrap();
         heir.acknowledge().await.unwrap();
         heir.checkpoint().await.unwrap();
         collector::collect(&*bucket, 21, &options).await.unwrap();
@@ -1860,7 +1860,7 @@ pub(crate) mod tests {
             let bucket = s3(&server, "slow", &client);
             branch::create(&*bucket, test_branch(1), 0).await.unwrap();
             let writer = Writer::open(bucket.clone(), test_branch(1), 10, 1).await.unwrap();
-            let seqs: Vec<u64> = (1..=SEGMENTS)
+            let segments: Vec<u64> = (1..=SEGMENTS)
                 .map(|tag| {
                     let sequence = writer.chain().next_sequence();
                     let own = vec![(sequence, noise(EXTENT, tag))];
@@ -1868,11 +1868,12 @@ pub(crate) mod tests {
                 })
                 .collect();
             let creates = bucket.stats().requests(Request::Create);
-            let uploads = futures::future::join_all(seqs.iter().map(|seq| writer.upload(*seq)));
+            let uploads =
+                futures::future::join_all(segments.iter().map(|segment| writer.upload(*segment)));
             let wait = std::time::Duration::from_secs(30);
             let uploaded = tokio::time::timeout(wait, uploads).await.expect("uploads landed");
             assert_eq!(uploaded, vec![Ok(()); SEGMENTS as usize]);
-            assert_eq!(writer.acknowledge().await, Ok(seqs.last().copied()));
+            assert_eq!(writer.acknowledge().await, Ok(segments.last().copied()));
             // A segment and its extent each, each once.
             let created = bucket.stats().requests(Request::Create) - creates;
             assert_eq!(created, 2 * SEGMENTS);

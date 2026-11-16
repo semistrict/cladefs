@@ -94,7 +94,7 @@ fn lists_and_deletes_branches() {
 /// holding what it freed, the one freeing it), and lists the branch.
 #[test]
 fn collects_a_file_bucket() {
-    use extent_remote::batch::{Batch, Commit};
+    use extent_remote::batch::{Commit, SegmentBuilder};
     use extent_remote::store::Store;
     use extent_remote::{Writer, branch};
     use std::sync::Arc;
@@ -111,17 +111,17 @@ fn collects_a_file_bucket() {
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
-            let seq = writer.add_segment(segment).unwrap();
-            writer.upload(seq).await.unwrap();
+            let framed = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+            let segment = writer.add_segment(framed).unwrap();
+            writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
         }
         writer.checkpoint().await.unwrap();
     });
     // The two segments a pass deletes, and their bytes.
     let at = "tenants/0000000000000001/cells/0000000000000001";
-    let doomed =
-        [0, 1].map(|seq| format!("{at}/segments/0000000000000001/0000000000000001.{seq:016x}"));
+    let doomed = [0, 1]
+        .map(|segment| format!("{at}/segments/0000000000000001/0000000000000001.{segment:016x}"));
     let bytes: u64 = futures::executor::block_on(async {
         use extent_remote::Bucket as _;
         let listed = Store::from_url(&url).unwrap().list("").await.unwrap();
@@ -174,7 +174,7 @@ fn collects_a_file_bucket() {
 /// mark-only pass marks it, deleting nothing; a pass after deletes it, leaving the marks.
 #[test]
 fn dry_runs_and_mark_only_passes_delete_nothing() {
-    use extent_remote::batch::{Batch, Commit};
+    use extent_remote::batch::{Commit, SegmentBuilder};
     use extent_remote::store::Store;
     use extent_remote::{Writer, branch};
     use std::sync::Arc;
@@ -191,9 +191,9 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
-            let seq = writer.add_segment(segment).unwrap();
-            writer.upload(seq).await.unwrap();
+            let framed = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+            let segment = writer.add_segment(framed).unwrap();
+            writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
         }
         writer.checkpoint().await.unwrap();
@@ -212,8 +212,8 @@ fn dry_runs_and_mark_only_passes_delete_nothing() {
     let before = files();
     let out = gc(&[&url, "--dry-run", "--grace", "0"]);
     let branch = "0000000000000001";
-    let segment = |seq: u64| {
-        format!("tenants/{branch}/cells/{branch}/segments/{branch}/0000000000000001.{seq:016x}")
+    let segment = |number: u64| {
+        format!("tenants/{branch}/cells/{branch}/segments/{branch}/0000000000000001.{number:016x}")
     };
     let (holding, freeing) = (segment(0), segment(1));
     let listed = String::from_utf8_lossy(&out.stdout).into_owned();
@@ -304,7 +304,7 @@ fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
 #[test]
 fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
     use extent_remote::Bucket as _;
-    use extent_remote::batch::{Batch, Commit};
+    use extent_remote::batch::{Commit, SegmentBuilder};
     use extent_remote::layout::{self, Branch, Cell};
     use extent_remote::store::Store;
     use extent_remote::{Writer, branch};
@@ -331,9 +331,9 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
         let freed = Commit { tag: 2, frees: vec![extent], ..Commit::default() };
         for commit in [written, freed] {
-            let segment = Batch::from(commit).close(&mut writer.chain()).frame();
-            let seq = writer.add_segment(segment).unwrap();
-            writer.upload(seq).await.unwrap();
+            let framed = SegmentBuilder::from(commit).close(&mut writer.chain()).frame();
+            let segment = writer.add_segment(framed).unwrap();
+            writer.upload(segment).await.unwrap();
             writer.acknowledge().await.unwrap();
         }
         writer.checkpoint().await.unwrap();
@@ -462,7 +462,7 @@ fn usage_says_what_each_files_cell_and_tenant_takes_as_passes_found() {
 fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms() {
     use extent_frame::{Frame, KeyId, Seal};
     use extent_keys::kms::LocalKms;
-    use extent_remote::batch::{Batch, Commit};
+    use extent_remote::batch::{Commit, SegmentBuilder};
     use extent_remote::layout::{self, Branch, Cell, Child, Origin};
     use extent_remote::store::Store;
     use extent_remote::{Bucket as _, Writer, branch, cell, keys};
@@ -482,7 +482,7 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
     let at = block_on(async {
         let bucket = Arc::new(Store::from_url(&url).unwrap());
         let shared: extent_keys::kms::Shared = local.clone();
-        let host = keys::Kms::new(shared);
+        let host = keys::CachingKms::new(shared);
         let kek = keys::new_cell_kek(Some(&host), 1).await.unwrap();
         let making = (true, kek.as_ref().map(|(_, kek)| kek));
         let (_, object) = cell::hold(&*bucket, parent.cell, (5, 5), making, None).await.unwrap();
@@ -496,13 +496,13 @@ fn deletes_sealed_branches_recording_their_forks_into_other_cells_under_the_kms(
         let extent = ExtentId::new(1, writer.chain().next_sequence());
         let written =
             Commit { tag: 1, extents: vec![(extent, vec![7; 4096])], ..Commit::default() };
-        let written = Batch::from(written).close(&mut writer.chain());
-        let seq = writer.add_segment(written.frame_under(ring.sealing())).unwrap();
-        writer.upload(seq).await.unwrap();
+        let written = SegmentBuilder::from(written).close(&mut writer.chain());
+        let segment = writer.add_segment(written.frame_under(ring.sealing())).unwrap();
+        writer.upload(segment).await.unwrap();
         writer.acknowledge().await.unwrap();
         // The fork's segment uploaded, and the head swapped to name it, as its acknowledgement
         // swaps it (TASK-407); its writer dies before it records the child.
-        let forking = Batch::from(Commit { tag: 2, ..Commit::default() });
+        let forking = SegmentBuilder::from(Commit { tag: 2, ..Commit::default() });
         let forked = Child { branch: child, owner: 0x109, point: false };
         let forking = forking.fork(forked, &mut writer.chain());
         let at = writer.add_segment(forking.frame_under(ring.sealing())).unwrap();

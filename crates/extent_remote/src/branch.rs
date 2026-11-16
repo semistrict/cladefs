@@ -46,7 +46,8 @@ pub(crate) enum Start {
 /// nothing or what it writes lands. Every change of a branch's record, a cell's object or a
 /// collector lease is one, its rules in its `step`. A write of it that landed though its answer
 /// was lost is taken for its own ([`bucket::create`], [`bucket::update`]), so that what `step`
-/// writes must differ from every other writer's: a record names its owner, the others their holders.
+/// writes must differ from every other writer's: a record names its owner, the others their
+/// holders.
 pub(crate) async fn transition<T: Serialize, R>(
     bucket: &impl Bucket,
     key: &str,
@@ -128,7 +129,7 @@ pub async fn create_forked(bucket: &impl Bucket, child: Branch, owner: u64) -> R
 pub async fn give_deks(
     bucket: &impl Bucket,
     branch: Branch,
-    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
+    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::InheritedDek>)>,
 ) -> Result<Record, Error> {
     give_deks_from(bucket, branch, Start::Read, deks).await
 }
@@ -139,7 +140,7 @@ pub(crate) async fn give_deks_found(
     bucket: &impl Bucket,
     branch: Branch,
     found: Option<Object>,
-    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
+    deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::InheritedDek>)>,
 ) -> Result<Record, Error> {
     give_deks_from(bucket, branch, Start::Found(found), deks).await
 }
@@ -148,7 +149,7 @@ async fn give_deks_from(
     bucket: &impl Bucket,
     branch: Branch,
     start: Start,
-    mut deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::Inherited>)>,
+    mut deks: impl FnMut(&Record) -> Option<(Vec<crate::keys::Dek>, Vec<crate::keys::InheritedDek>)>,
 ) -> Result<Record, Error> {
     change(bucket, branch, start, |found| match found {
         None => Err(Error::NoBranch),
@@ -566,7 +567,7 @@ pub async fn delete_under(
     branch: Branch,
     holder: u64,
     token: u64,
-    kms: Option<&std::sync::Arc<crate::keys::Kms>>,
+    kms: Option<&std::sync::Arc<crate::keys::CachingKms>>,
 ) -> Result<(), Error> {
     let ended = end_head(bucket, branch, holder, token).await?;
     failpoint!("branch::head_ended");
@@ -725,7 +726,7 @@ pub async fn delete_fork_under(
     forked: Kind,
     owner: u64,
     (holder, token): (u64, u64),
-    kms: Option<&std::sync::Arc<crate::keys::Kms>>,
+    kms: Option<&std::sync::Arc<crate::keys::CachingKms>>,
 ) -> Result<bool, Error> {
     let owner = self::owner(owner);
     // What deleting the child, whose record is `record`, gives.
@@ -809,7 +810,7 @@ mod tests {
     /// went, is left as it is. One deleted is gone already.
     #[test]
     fn forks_delete_only_their_own_branches() {
-        use crate::batch::{Batch, Commit};
+        use crate::batch::{Commit, SegmentBuilder};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
         let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
@@ -822,7 +823,7 @@ mod tests {
         let origin = block_on(async {
             create(&*bucket, test_branch(1), 0x11).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
-            let forking = Batch::from(Commit { tag: 1, ..Commit::default() });
+            let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
             let objects = forking.fork(owned(test_branch(3), 0x33), &mut parent.chain()).frame();
             let at = parent.add_segment(objects).unwrap();
             parent.upload(at).await.unwrap();
@@ -1192,7 +1193,7 @@ mod tests {
     /// the same, the other branch left as it is.
     #[test]
     fn parents_are_deleted_though_another_branch_took_their_forks_id() {
-        use crate::batch::{Batch, Commit};
+        use crate::batch::{Commit, SegmentBuilder};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
         let bucket = std::sync::Arc::new(crate::store::Store::new(memory, ""));
@@ -1200,7 +1201,7 @@ mod tests {
             create(&*bucket, test_branch(1), 0).await.unwrap();
             create(&*bucket, test_branch(2), 0).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
-            let forking = Batch::from(Commit { tag: 1, ..Commit::default() });
+            let forking = SegmentBuilder::from(Commit { tag: 1, ..Commit::default() });
             let at = parent
                 .add_segment(forking.fork(child(test_branch(2)), &mut parent.chain()).frame())
                 .unwrap();
@@ -1218,7 +1219,7 @@ mod tests {
     /// by the simulation, seed 3184 of its `restores`.
     #[test]
     fn claims_landing_after_what_they_name_went_hold_up_nothing() {
-        use crate::batch::{Batch, Commit};
+        use crate::batch::{Commit, SegmentBuilder};
         use crate::collector::{Options, collect};
         use crate::writer::Writer;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
@@ -1228,9 +1229,10 @@ mod tests {
             create(&*bucket, test_branch(1), 0).await.unwrap();
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             for tag in 1..=3 {
-                let commit = Batch::from(Commit { tag, ..Commit::default() });
-                let seq = parent.add_segment(commit.close(&mut parent.chain()).frame()).unwrap();
-                parent.upload(seq).await.unwrap();
+                let commit = SegmentBuilder::from(Commit { tag, ..Commit::default() });
+                let segment =
+                    parent.add_segment(commit.close(&mut parent.chain()).frame()).unwrap();
+                parent.upload(segment).await.unwrap();
                 parent.acknowledge().await.unwrap();
             }
             parent.checkpoint().await.unwrap();
@@ -1295,7 +1297,7 @@ mod tests {
     /// frees what the fork inherited, and checkpoints past it.
     #[test]
     fn forks_deleted_are_deleted_again_once_what_they_inherited_went() {
-        use crate::batch::{Batch, Commit};
+        use crate::batch::{Commit, SegmentBuilder};
         use crate::writer::Writer;
         use storage_device::ExtentId;
         let memory = std::sync::Arc::new(object_store::memory::InMemory::new());
@@ -1305,15 +1307,16 @@ mod tests {
             let parent = Writer::open(bucket.clone(), test_branch(1), 10, 0).await.unwrap();
             let extent = ExtentId::new(1, parent.chain().next_sequence());
             let extents = vec![(extent, b"inherited".to_vec())];
-            let forking = Batch::from(Commit { tag: 1, extents, ..Commit::default() });
+            let forking = SegmentBuilder::from(Commit { tag: 1, extents, ..Commit::default() });
             let at = parent
                 .add_segment(forking.fork(child(test_branch(2)), &mut parent.chain()).frame())
                 .unwrap();
             parent.upload(at).await.unwrap();
             parent.acknowledge().await.unwrap();
-            let freeing = Batch::from(Commit { tag: 2, frees: vec![extent], ..Commit::default() });
-            let seq = parent.add_segment(freeing.close(&mut parent.chain()).frame()).unwrap();
-            parent.upload(seq).await.unwrap();
+            let freeing =
+                SegmentBuilder::from(Commit { tag: 2, frees: vec![extent], ..Commit::default() });
+            let segment = parent.add_segment(freeing.close(&mut parent.chain()).frame()).unwrap();
+            parent.upload(segment).await.unwrap();
             parent.acknowledge().await.unwrap();
             parent.checkpoint().await.unwrap();
             delete(&*bucket, test_branch(2), 20, 0).await.unwrap();

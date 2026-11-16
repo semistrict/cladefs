@@ -91,8 +91,8 @@ impl Storage {
     /// cladefs: the image at `path` of the branch `of` says, kept in the bucket at `bucket`
     /// (TASK-302), an Fxfs volume of its branch's cell named as its directory is (TASK-364). If no
     /// image is at `path`, or what an image's making left unmade, a new one of `capacity` bytes:
-    /// of a branch the bucket has, holding what it holds there, its head taken, as `cladefsctl take`
-    /// takes a branch; or of a new branch of a cell, its ID the bucket's to give, which holds
+    /// of a branch the bucket has, holding what it holds there, its head taken, as `cladefsctl
+    /// take` takes a branch; or of a new branch of a cell, its ID the bucket's to give, which holds
     /// nothing: a filesystem must be formatted on it. Its cell is held with `token`'s placement,
     /// which it is placed at, if given, as `Storage::open` takes heads otherwise. If an image is at
     /// `path`, it is opened as [`Storage::open`] opens it, and must be of the branch taken:

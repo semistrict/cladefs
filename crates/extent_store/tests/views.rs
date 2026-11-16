@@ -98,7 +98,7 @@ fn views_read_frees_acknowledged_in_the_bucket() {
         .map(|closed| {
             extent_remote::layout::segment(
                 closed.footer.branch,
-                closed.footer.seq,
+                closed.footer.segment,
                 closed.footer.epoch,
             )
         })

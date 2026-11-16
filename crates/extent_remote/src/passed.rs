@@ -2,17 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-//! cladefs: a cell's collector lease (`<C>gc/lease`, [`layout::collector_lease`]): which pass holds the
-//! cell, for how long, and what the last pass over it to end recorded for the passes after it, and
-//! what the cell takes in the bucket (doc-7, Garbage collection; TASK-395.5, TASK-395.6,
+//! cladefs: a cell's collector lease (`<C>gc/lease`, [`layout::collector_lease`]): which pass holds
+//! the cell, for how long, and what the last pass over it to end recorded for the passes after it,
+//! and what the cell takes in the bucket (doc-7, Garbage collection; TASK-395.5, TASK-395.6,
 //! TASK-395.8). One object, so that a pass learns all of it by the read that takes the lease.
 //!
 //! Every pass over the cell takes the lease before anything else ([`take`]): unless another pass
 //! holds it, unexpired, or ended since the taker's sweep began, when the taker leaves the cell to
 //! it ([`Error::Left`], [`Holding`]). A pass holding its cell for a time renews the lease between
 //! its steps and lets it go as it ends ([`change`]); a pass of a process gone holds it until it
-//! expires. A taking fences every pass before it, as a branch's taking of its head does: a pass fenced deletes
-//! nothing, and writes nothing to the lease.
+//! expires. A taking fences every pass before it, as a branch's taking of its head does: a pass
+//! fenced deletes nothing, and writes nothing to the lease.
 //!
 //! What it records goes with every taking to the next ([`Passed`]): a pass that ran to its end
 //! records, as it lets the lease go, the digest of its listing of the cell, but the collector's own
@@ -38,11 +38,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use std::collections::BTreeMap;
 
-/// A cell's collector lease ([`layout::collector_lease`]): the format of the bucket's objects, first, as a
-/// cell's object says it; the epoch of its last taking, and who took it, as a branch's head
-/// does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go through
-/// ended; and what the last pass over the cell that ran to its end recorded, carried from each
-/// taking to the next ([`Passed`]). Time is the store's clock as each pass read it
+/// A cell's collector lease ([`layout::collector_lease`]): the format of the bucket's objects,
+/// first, as a cell's object says it; the epoch of its last taking, and who took it, as a branch's
+/// head does ([`layout::Head`]); until when that pass holds the cell, and when the last pass to go
+/// through ended; and what the last pass over the cell that ran to its end recorded, carried from
+/// each taking to the next ([`Passed`]). Time is the store's clock as each pass read it
 /// ([`Bucket::now`]), in milliseconds: a pass's clock ahead takes a cell early, fencing the pass
 /// holding it, which then deletes nothing; never wrong, only late.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -266,7 +266,7 @@ fn digest_of(digest: &mut Sha256, meta: &Meta) {
 }
 
 /// A pass's taking of its cell's collector lease ([`take`]).
-pub(crate) struct Taken {
+pub(crate) struct LeaseTaking {
     /// The epoch it took.
     pub epoch: u64,
     /// Who took it.
@@ -292,7 +292,7 @@ pub(crate) async fn take(
     found: Option<bucket::Object>,
     holder: u64,
     holding: Holding,
-) -> Result<Taken, Error> {
+) -> Result<LeaseTaking, Error> {
     let start = branch::Start::Found(found);
     let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
     branch::transition(bucket, &layout::collector_lease(cell), start, decode, |found| {
@@ -315,8 +315,9 @@ pub(crate) async fn take(
             0 => 0,
             lease => now.saturating_add(lease),
         };
-        let lease = CollectorLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
-        Ok(branch::Step::Write(lease, Taken { epoch, holder, passed }))
+        let lease =
+            CollectorLease { format: FORMAT, epoch, holder, until, ended, passed: passed.clone() };
+        Ok(branch::Step::Write(lease, LeaseTaking { epoch, holder, passed }))
     })
     .await
 }
@@ -326,7 +327,7 @@ pub(crate) async fn take(
 pub(crate) async fn change(
     bucket: &impl Bucket,
     cell: Cell,
-    taken: &Taken,
+    taken: &LeaseTaking,
     change: impl Fn(CollectorLease) -> CollectorLease,
 ) -> Result<bool, Error> {
     let decode = |bytes: &[u8]| CollectorLease::decode(cell, bytes);
@@ -405,7 +406,8 @@ mod tests {
             uncompacted: 3,
         };
         let passed = Some(passed);
-        let lease = CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
+        let lease =
+            CollectorLease { format: FORMAT, epoch: 2, holder: 3, until: 4, ended: 5, passed };
         let lease = lease.counting_itself();
         let len = layout::encode(&lease).len() as u64;
         let usage = &lease.passed.as_ref().unwrap().usage;
@@ -418,7 +420,8 @@ mod tests {
     #[test]
     fn leases_of_other_formats_are_refused() {
         for format in [FORMAT + 1, 8] {
-            let lease = CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
+            let lease =
+                CollectorLease { format, epoch: 1, holder: 2, until: 0, ended: 0, passed: None };
             let refused = Error::Format { branch: Branch { cell: TEST_CELL, id: 0 }, format };
             assert_eq!(CollectorLease::decode(TEST_CELL, &layout::encode(&lease)), Err(refused));
         }

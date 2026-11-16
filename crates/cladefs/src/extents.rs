@@ -40,7 +40,7 @@ use extent_remote::cell::Kind;
 use extent_remote::layout::{Branch, Cell};
 use extent_remote::trace;
 use extent_store::{
-    HostDir, NoSpace, NotHeld, Spent, Store, TooLong, TooSmall, Unaligned, Unsectored,
+    HostDir, NoSpace, NotHeld, SpentExtent, Store, TooLong, TooSmall, Unaligned, Unsectored,
 };
 use std::collections::HashMap;
 use std::path::Path;
@@ -463,7 +463,7 @@ pub(crate) fn errno(error: anyhow::Error) -> Errno {
         // A follower's too, of one written after its view's commit: as Fxfs's journal replay
         // finds the end of the commit.
         Errno::ENOENT
-    } else if error.is::<SealedExtent>() || error.is::<Spent>() || error.is::<OtherBranch>() {
+    } else if error.is::<SealedExtent>() || error.is::<SpentExtent>() || error.is::<OtherBranch>() {
         Errno::EPERM
     } else if error.is::<NoSpace>() || error.is::<TooSmall>() {
         Errno::ENOSPC
@@ -1096,8 +1096,8 @@ impl ExtentStore {
     /// cladefs: places the store at `path` at the placement
     /// whose fencing token, its boot ID, is `token` (TASK-39.7): its host takes its branch's
     /// cell with that token from then on, and its writer the branch's head with that taking's
-    /// epoch; a later placement's token exceeds it, so a placement cut off takes no branch back from the one after it (`ESTALE`), and its commits
-    /// fail once a later one takes it (`EROFS`).
+    /// epoch; a later placement's token exceeds it, so a placement cut off takes no branch back
+    /// from the one after it (`ESTALE`), and its commits fail once a later one takes it (`EROFS`).
     pub fn place(path: impl AsRef<Path>, token: u64) -> Result<(), Error> {
         extent_store::place_host(path.as_ref(), token).map_err(Error::new)
     }
@@ -2243,7 +2243,7 @@ mod tests {
             (anyhow::Error::new(NoExtent(extent)).context(NotHeld(extent)), Errno::EIO),
             (NoExtent(extent).into(), Errno::ENOENT),
             (SealedExtent(extent).into(), Errno::EPERM),
-            (Spent(extent).into(), Errno::EPERM),
+            (SpentExtent(extent).into(), Errno::EPERM),
             (OtherBranch(extent).into(), Errno::EPERM),
             (NoSpace.into(), Errno::ENOSPC),
             (TooSmall { capacity: 1, held: 2 }.into(), Errno::ENOSPC),

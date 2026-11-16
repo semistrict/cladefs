@@ -51,7 +51,7 @@ use extent_remote::keys::{self, CellKeys, Ring, RingHold};
 use extent_remote::layout::{Branch, Chain, Child, Origin, epoch_of};
 use extent_remote::record::{Kind, Record};
 use extent_remote::store::Store as Bucket;
-use extent_remote::wal::Taken;
+use extent_remote::wal::TakenBranch;
 use extent_remote::{Body, Objects, Writer, branch, cell};
 use futures::StreamExt as _;
 use futures::future::{BoxFuture, Either, FutureExt as _};
@@ -137,7 +137,7 @@ pub fn delete_branch(
     bucket: &Bucket,
     branch: Branch,
     token: u64,
-    kms: Option<&Arc<keys::Kms>>,
+    kms: Option<&Arc<keys::CachingKms>>,
 ) -> Result<(), Failure> {
     Ok(block_on(async {
         branch::delete_under(bucket, branch, rand::random(), token, kms).await?;
@@ -1032,7 +1032,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
         let found = match found? {
             // A branch the bucket acknowledged commits of, which it no longer has: deleted, or
             // another bucket. Making it anew would lose them.
-            None if recovering.base().is_some() => {
+            None if recovering.start().is_some() => {
                 return Err(extent_remote::Error::NoBranch.into());
             }
             // cladefs: made once its cell is held, which gives it its DEK, if sealed (TASK-411.3).
@@ -1069,7 +1069,7 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
                 // Where the writer's chain would go: the log's restamping, not looked at here.
                 let chain = Chain::new(branch, 0, recovered.end(), 0);
                 let head = recovered.head.clone().unwrap_or_default();
-                let found = Taken::of(head, &recovered.state, chain);
+                let found = TakenBranch::of(head, &recovered.state, chain);
                 if !recovering.follows(&found) {
                     return Err(extent_remote::Error::Diverged.into());
                 }
@@ -1279,12 +1279,12 @@ impl<D: Dir, B: extent_remote::Bucket> Shared<D, B> {
             let footer = closed.footer.clone();
             let size = closed.file.size().map_err(|err| Failure::local(err, "a segment"))?;
             let closed = Arc::new(closed);
-            let segment = Body::new(size, move || blocking(|| closed.bytes()));
-            let seq = writer.add_segment(Objects { footer, segment, own })?;
+            let body = Body::new(size, move || blocking(|| closed.bytes()));
+            let segment = writer.add_segment(Objects { footer, segment: body, own })?;
             // Where each fork it ends is, which a fork failing deletes its child by.
-            let origin = Origin { parent: writer.branch(), at: seq };
+            let origin = Origin { parent: writer.branch(), at: segment };
             self.forks.lock().unwrap().extend(forks.iter().map(|&child| (child, origin)));
-            segments.push(Uploading { seq, number, tag, forks: !forks.is_empty() });
+            segments.push(Uploading { segment, number, tag, forks: !forks.is_empty() });
         }
         let took = !segments.is_empty();
         in_flight.upload(writer, segments);
@@ -1369,7 +1369,7 @@ struct Gathered {
 /// A segment uploading: its number in the branch, and in the store; the tag of the store's commit
 /// it ends with; and whether forks are made at its end.
 struct Uploading {
-    seq: u64,
+    segment: u64,
     number: u64,
     tag: u64,
     forks: bool,
@@ -1399,10 +1399,10 @@ impl InFlight {
         writer: &Arc<Writer<B>>,
         segments: Vec<Uploading>,
     ) {
-        for segment in segments {
-            let (writer, seq) = (writer.clone(), segment.seq);
-            self.uploads.push_back(async move { writer.upload(seq).await }.boxed());
-            self.segments.push_back(segment);
+        for uploading in segments {
+            let (writer, segment) = (writer.clone(), uploading.segment);
+            self.uploads.push_back(async move { writer.upload(segment).await }.boxed());
+            self.segments.push_back(uploading);
         }
     }
 
@@ -1415,7 +1415,8 @@ impl InFlight {
 
     /// The segments the writer acknowledged, `through` the last, which upload no more.
     fn acknowledged(&mut self, through: Option<u64>) -> Vec<Uploading> {
-        let taken = |segment: &&Uploading| through.is_some_and(|through| segment.seq <= through);
+        let taken =
+            |uploading: &&Uploading| through.is_some_and(|through| uploading.segment <= through);
         let count = self.segments.iter().take_while(taken).count();
         self.segments.drain(..count).collect()
     }

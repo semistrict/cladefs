@@ -42,7 +42,7 @@
 //! It prints `cells N objects N bytes N largest-objects N largest-bytes N`: what it wrote, and the
 //! largest cell's share, a base's with its point's.
 
-use extent_remote::batch::{Batch, Commit};
+use extent_remote::batch::{Commit, SegmentBuilder};
 use extent_remote::bucket::Bucket as _;
 use extent_remote::layout::{Branch, Cell, Child, Origin};
 use extent_remote::store::Store;
@@ -362,23 +362,25 @@ async fn write(cell: Cell, shape: Shape, of: Option<&Point>) -> Result<Written, 
                 let kept = usize::from(n % 2 == 0 && n > 0);
                 let frees = held.split_off(kept.min(held.len()));
                 held = extents.iter().map(|(extent, _)| *extent).collect();
-                Batch::from(Commit { tag: n + 1, extents, frees, ..Commit::default() })
+                SegmentBuilder::from(Commit { tag: n + 1, extents, frees, ..Commit::default() })
             }
-            Shape::Vm { .. } => Batch::from(Commit { tag: n + 1, extents, ..Commit::default() }),
+            Shape::Vm { .. } => {
+                SegmentBuilder::from(Commit { tag: n + 1, extents, ..Commit::default() })
+            }
         };
         let point = point_at(shape, cell.tenant, n);
-        let segment = match point {
+        let closed = match point {
             Some(point) => {
                 cell::create(&*bucket, point.cell, WRITER, None).await.map_err(failed)?;
                 batch.fork(Child { branch: point, owner: 1, point: true }, &mut writer.chain())
             }
             None => batch.close(&mut writer.chain()),
         };
-        let seq = writer.add_segment(segment.frame()).map_err(failed)?;
-        writer.upload(seq).await.map_err(failed)?;
+        let segment = writer.add_segment(closed.frame()).map_err(failed)?;
+        writer.upload(segment).await.map_err(failed)?;
         writer.acknowledge().await.map_err(failed)?;
         if let Some(point) = point {
-            forked = Some((point, Origin { parent: id, at: seq }));
+            forked = Some((point, Origin { parent: id, at: segment }));
         }
     }
     writer.checkpoint().await.map_err(failed)?;

@@ -130,7 +130,7 @@ pub fn runtime() -> Runtime {
 /// set it before (TASK-411.3): none if it names none. One it names that can't be had is a KMS
 /// refusing every call, naming why: the host then opens no sealed store and makes no cell, sealed
 /// or in the clear, rather than make in the clear what its tenants have it seal.
-pub fn kms() -> Option<Arc<keys::Kms>> {
+pub fn kms() -> Option<Arc<keys::CachingKms>> {
     KMS.get_or_init(|| match std::env::var("CLADEFS_KMS") {
         Ok(url) if !url.is_empty() => {
             let kms = extent_keys::kms::from_url(&url).unwrap_or_else(|why| {
@@ -146,8 +146,8 @@ pub fn kms() -> Option<Arc<keys::Kms>> {
 
 /// cladefs: the host's over `kms`: its pools of new cell KEKs refilled in batches on the uploaders'
 /// runtime, off the paths of forks, which take from them (TASK-411.4).
-fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::Kms> {
-    keys::Kms::pooled(kms, keys::Pooling::on(RUNTIME.handle().clone()))
+fn host_kms(kms: extent_keys::kms::Shared) -> Arc<keys::CachingKms> {
+    keys::CachingKms::pooled(kms, keys::Pooling::on(RUNTIME.handle().clone()))
 }
 
 /// cladefs: has the host use `kms` as its KMS, before any store opens: tests' (TASK-411.3). Once.
@@ -156,7 +156,7 @@ pub fn set_kms(kms: extent_keys::kms::Shared) -> Result<(), String> {
 }
 
 /// cladefs: the host's KMS ([`kms`]).
-static KMS: std::sync::OnceLock<Option<Arc<keys::Kms>>> = std::sync::OnceLock::new();
+static KMS: std::sync::OnceLock<Option<Arc<keys::CachingKms>>> = std::sync::OnceLock::new();
 
 /// cladefs: what a host forgot of a tenant's or a cell's keys, told to ([`forget`], TASK-411.7).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -610,7 +610,7 @@ mod tests {
     /// went, and the store took the branch again.
     #[test]
     fn takeovers_of_writers_still_uploading_keep_their_guests() {
-        use extent_remote::{Batch, Commit, Writer};
+        use extent_remote::{Commit, SegmentBuilder, Writer};
         let dir = tempfile::tempdir().unwrap();
         let bucket = Arc::new(Bucket::new(Arc::new(InMemory::new()), ""));
         let (branch, token) = (crate::host_store::new_alone(), crate::host_store::token().unwrap());
@@ -619,11 +619,11 @@ mod tests {
             branch::create(&*bucket, branch, 1).await.unwrap();
             Writer::open(bucket.clone(), branch, 10, token).await.unwrap()
         });
-        let mut seqs = Vec::new();
+        let mut segments = Vec::new();
         for tag in [1, 2] {
             let commit = Commit { tag, ..Commit::default() };
-            let objects = Batch::from(commit).close(&mut before.chain()).frame();
-            seqs.push(before.add_segment(objects).unwrap());
+            let objects = SegmentBuilder::from(commit).close(&mut before.chain()).frame();
+            segments.push(before.add_segment(objects).unwrap());
         }
         // A store takes the branch over, opening, its fence after the writer's.
         let path = dir.path().join("store");
@@ -631,8 +631,8 @@ mod tests {
         let store = reopened(&path, idle()).unwrap();
         // Both land, the second first, at keys of the writer's epoch; its head swap fails.
         futures::executor::block_on(async {
-            before.upload(seqs[1]).await.unwrap();
-            before.upload(seqs[0]).await.unwrap();
+            before.upload(segments[1]).await.unwrap();
+            before.upload(segments[0]).await.unwrap();
             assert_eq!(before.acknowledge().await, Err(extent_remote::Error::Fenced));
         });
         // The store's commit is the branch's, its head as it was.
@@ -665,7 +665,8 @@ mod tests {
     /// branch's newest checkpoint does, in the moves. Before (GCE r757, round 40, a soak's daemon
     /// killed and its cache lost), the store opened from its own index, which named the extent in
     /// the segment the collector had taken, and the checking VM's reads failed EIO (`lost: ... in
-    /// segments/<branch>/<seq>`); TASK-165.9 removed the index, and the opening recovers the branch.
+    /// segments/<branch>/<segment>`); TASK-165.9 removed the index, and the opening recovers the
+    /// branch.
     #[test]
     fn extents_compacted_read_once_their_host_died_and_its_cache_went() {
         const EXTENT: usize = 64 * BLOCK;
@@ -1538,7 +1539,7 @@ mod tests {
                     )
                 }
                 Hold::SegmentsFrom(from) => {
-                    matches!(kind(key), Kind::Segment { seq, .. } if seq >= *from)
+                    matches!(kind(key), Kind::Segment { segment, .. } if segment >= *from)
                 }
                 Hold::Key(held) | Hold::First(held) => held == key,
             }
@@ -2296,7 +2297,9 @@ mod tests {
                 .map(|meta| (meta.key, meta.size))
                 .collect();
         let tails: u64 = (0..4)
-            .map(|seq| sizes[&layout::segment(branch, seq, 1)].min(extent_remote::object::TAIL))
+            .map(|segment| {
+                sizes[&layout::segment(branch, segment, 1)].min(extent_remote::object::TAIL)
+            })
             .sum();
         let (record, head) = (sizes[&layout::record(branch)], sizes[&layout::head(branch)]);
         let cell = sizes[&layout::cell(branch.cell)];
@@ -2488,9 +2491,9 @@ mod tests {
         extent_store::made_host(path).unwrap();
     }
 
-    /// TASK-79.4: a store opening takes the branch as of its taking of the head, not as of what it found
-    /// before: the commit another writer made meanwhile, which frees the extent the branch held
-    /// before and writes another, is the branch's, and the store's.
+    /// TASK-79.4: a store opening takes the branch as of its taking of the head, not as of what it
+    /// found before: the commit another writer made meanwhile, which frees the extent the branch
+    /// held before and writes another, is the branch's, and the store's.
     #[test]
     fn takes_take_what_the_branch_holds_once_taken() {
         let dir = tempfile::tempdir().unwrap();
@@ -2991,7 +2994,7 @@ mod tests {
         write(&parent, 1, &pattern(1, BLOCK));
         parent.commit(Some(b"root")).unwrap();
         // The fork's segment, after the commit's, lands after the next.
-        let segment = |seq| extent_remote::layout::segment(branch, seq, 1);
+        let segment = |number| extent_remote::layout::segment(branch, number, 1);
         let (forking, next) = (segment(1), segment(2));
         gated.hold.send_replace(Hold::Key(forking));
         let child = crate::host_store::fork_child(branch);

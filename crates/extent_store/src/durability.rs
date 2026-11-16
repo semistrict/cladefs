@@ -91,8 +91,9 @@ pub fn durability_lags() -> Lags {
     *LAGS.lock().unwrap()
 }
 
-/// The commits a flush takes, oldest first, and the epoch of the last.
-pub(crate) struct Batch<T> {
+/// The commits due to be made durable, which a flush takes, oldest first, and the epoch of the
+/// last.
+pub(crate) struct Due<T> {
     pub last: u64,
     pub commits: Vec<T>,
 }
@@ -112,11 +113,11 @@ impl<T> Durability<T> {
     }
 
     /// Takes the commits ordered that no flush has taken, if any, for a flush to make durable.
-    pub fn take(&mut self) -> Option<Batch<T>> {
+    pub fn take(&mut self) -> Option<Due<T>> {
         if self.queue.is_empty() {
             return None;
         }
-        Some(Batch { last: self.ordered, commits: self.queue.drain(..).collect() })
+        Some(Due { last: self.ordered, commits: self.queue.drain(..).collect() })
     }
 
     /// The commits up to `last`, a flush's, are durable.

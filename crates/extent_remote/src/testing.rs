@@ -635,12 +635,14 @@ pub async fn uncollected(bucket: &impl Bucket, compact_below: f64) -> Vec<String
         needed.extend(
             keys.iter()
                 .filter(|key| match layout::kind(key) {
-                    layout::Kind::Segment { branch: of, seq, epoch: by }
-                    | layout::Kind::Extent { branch: of, seq, epoch: by, .. } => {
-                        of == branch && by >= epoch && seq >= end
+                    layout::Kind::Segment { branch: of, segment, epoch: by }
+                    | layout::Kind::Extent { branch: of, segment, epoch: by, .. } => {
+                        of == branch && by >= epoch && segment >= end
                     }
-                    layout::Kind::Checkpoint { branch: of, seq, epoch: by } => {
-                        of == branch && by >= epoch && checkpoint.is_none_or(|ck| (seq, by) > ck)
+                    layout::Kind::Checkpoint { branch: of, segment, epoch: by } => {
+                        of == branch
+                            && by >= epoch
+                            && checkpoint.is_none_or(|ck| (segment, by) > ck)
                     }
                     _ => false,
                 })

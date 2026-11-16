@@ -354,7 +354,7 @@ mod tests {
         let cell = "tenants/0000000000000001/cells/0000000000000002/";
         let lease = format!("{cell}gc/lease");
         assert_eq!(lock_of(&lease), ".cladefs-lock.21");
-        let segment = |seq: u64| format!("{cell}segments/0000000000000001/{seq:016x}");
+        let segment = |number: u64| format!("{cell}segments/0000000000000001/{number:016x}");
         assert_eq!(lock_of(&segment(1)), lock_of(&segment(2)));
         assert_eq!(lock_of("a"), lock_of("b"));
         let leases: std::collections::BTreeSet<String> = (1..=16u64)

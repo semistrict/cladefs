@@ -2092,14 +2092,14 @@ impl World {
         let branch = recovered.state.branch;
         let mut footers = self.footers.borrow_mut();
         let mut applied = Vec::new();
-        let from = recovered.checkpoint().map_or(0, |(seq, _)| seq + 1);
-        for (seq, epoch) in recovered.head.iter().flat_map(|head| head.segments(from)) {
-            let commits = match footers.entry((branch.id, seq, epoch)) {
+        let from = recovered.checkpoint().map_or(0, |(segment, _)| segment + 1);
+        for (segment, epoch) in recovered.head.iter().flat_map(|head| head.segments(from)) {
+            let commits = match footers.entry((branch.id, segment, epoch)) {
                 Entry::Occupied(known) => known.into_mut(),
                 Entry::Vacant(unknown) => {
-                    let key = layout::segment(branch, seq, epoch);
+                    let key = layout::segment(branch, segment, epoch);
                     let Some(object) = block_on(extent_remote::bucket::get(direct, &key)) else {
-                        return Err(format!("branch {:x}: segment {seq:x} gone", branch.id));
+                        return Err(format!("branch {:x}: segment {segment:x} gone", branch.id));
                     };
                     let footer = layout::Segment::footer(&object.bytes)
                         .map_err(|error| format!("{key}: {error}"))?;

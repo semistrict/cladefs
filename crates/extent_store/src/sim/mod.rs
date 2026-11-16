@@ -6,10 +6,10 @@
 //! hosts' stores, this crate's, and their uploaders (`upload`), writing, committing, forking,
 //! taken over and crashing, and by deletions and collectors, over a bucket that delays, reorders
 //! and fails requests (TASK-88: extent_remote's until then, whose writers made their segments
-//! with `Batch`, so that the store's choice of what a segment seals, frees and forks never met a
-//! takeover or a collector), checked after every step against what each branch's guests did and
-//! were told, every object a branch's acknowledged segments name there, and what its live writer
-//! and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
+//! with `SegmentBuilder`, so that the store's choice of what a segment seals, frees and forks never
+//! met a takeover or a collector), checked after every step against what each branch's guests did
+//! and were told, every object a branch's acknowledged segments name there, and what its live
+//! writer and its store name of its guest's read back (TASK-149.32, TASK-195); and, once everything
 //! stops, for garbage left behind, for tasks still waiting, a checkpoint, a deletion or anything
 //! else nothing will wake, and for uploaders that upload no more what they are asked to. A host's
 //! writers upload within one budget, a few PUTs at once, so that uploads wait for each other. `crates/extent_remote/mutants.sh` puts
