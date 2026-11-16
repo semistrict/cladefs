@@ -48,13 +48,13 @@ pub struct Extent {
 pub const OPEN: u32 = 1;
 
 unsafe extern "C-unwind" {
-    fn fxfs_sim_new() -> *mut Fs;
-    fn fxfs_sim_free(fs: *mut Fs);
+    fn cladefs_sim_new() -> *mut Fs;
+    fn cladefs_sim_free(fs: *mut Fs);
     fn sim_device_reset();
-    fn fxfs_sim_new_file(fs: *mut Fs) -> u64;
-    fn fxfs_sim_size(fs: *mut Fs, ino: u64) -> u64;
-    fn fxfs_sim_read(fs: *mut Fs, ino: u64, offset: u64, buf: *mut c_void, len: usize);
-    fn fxfs_sim_reserved(fs: *mut Fs, ino: u64) -> u64;
+    fn cladefs_sim_new_file(fs: *mut Fs) -> u64;
+    fn cladefs_sim_size(fs: *mut Fs, ino: u64) -> u64;
+    fn cladefs_sim_read(fs: *mut Fs, ino: u64, offset: u64, buf: *mut c_void, len: usize);
+    fn cladefs_sim_reserved(fs: *mut Fs, ino: u64) -> u64;
     fn cladefs_write_many(
         fs: *mut Fs,
         ino: u64,
@@ -138,7 +138,7 @@ impl Model {
         unsafe {
             sim_device_reset();
             cladefs_set_fail_commits(0);
-            Self { fs: fxfs_sim_new() }
+            Self { fs: cladefs_sim_new() }
         }
     }
 
@@ -150,12 +150,12 @@ impl Model {
 
     pub fn new_file(&self) -> u64 {
         // SAFETY: `fs` is the model's, on this thread, as every call's.
-        unsafe { fxfs_sim_new_file(self.fs) }
+        unsafe { cladefs_sim_new_file(self.fs) }
     }
 
     pub fn size(&self, ino: u64) -> u64 {
         // SAFETY: As `new_file`'s.
-        unsafe { fxfs_sim_size(self.fs, ino) }
+        unsafe { cladefs_sim_size(self.fs, ino) }
     }
 
     /// `len` bytes of `ino` at `offset`, from its blocks, whole: past its size too, as a DAX
@@ -163,14 +163,14 @@ impl Model {
     pub fn read(&self, ino: u64, offset: u64, len: usize) -> Vec<u8> {
         let mut buf = vec![0; len];
         // SAFETY: As `new_file`'s; `buf` holds `len` bytes.
-        unsafe { fxfs_sim_read(self.fs, ino, offset, buf.as_mut_ptr().cast(), len) };
+        unsafe { cladefs_sim_read(self.fs, ino, offset, buf.as_mut_ptr().cast(), len) };
         buf
     }
 
     /// The room for dirty pages `ino` holds.
     pub fn reserved(&self, ino: u64) -> u64 {
         // SAFETY: As `new_file`'s.
-        unsafe { fxfs_sim_reserved(self.fs, ino) }
+        unsafe { cladefs_sim_reserved(self.fs, ino) }
     }
 
     pub fn reserve_dirty(&self, ino: u64, bytes: u64) -> Result<(), Errno> {
@@ -263,7 +263,7 @@ impl Drop for Model {
         // A model a panic left mid-call is left as it is, its memory too: only its store goes.
         if !std::thread::panicking() {
             // SAFETY: `fs` is the model's, and nothing uses it again.
-            unsafe { fxfs_sim_free(self.fs) };
+            unsafe { cladefs_sim_free(self.fs) };
         }
         // SAFETY: The store is the model's, which nothing uses again.
         unsafe { sim_device_reset() };

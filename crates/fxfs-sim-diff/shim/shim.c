@@ -7,7 +7,7 @@
  * a seal if a write reached it, written never after, and gone once freed. A write to a sealed
  * extent fails the run, as the host refuses it (Fxfs's fake device, SealedExtent).
  *
- * A failure, a sim_panic, is the harness's panic (fxfs_sim_diff_panic), which unwinds through the
+ * A failure, a sim_panic, is the harness's panic (cladefs_sim_diff_panic), which unwinds through the
  * model to the case that ran it, which proptest then shrinks: the model is left as it was, and
  * never used again.
  */
@@ -20,8 +20,8 @@
 #include "../../../guest/linux/fs/cladefs/device.h"
 
 /* The harness's (src/model.rs). */
-__attribute__((noreturn)) void fxfs_sim_diff_panic(const char *message);
-void fxfs_sim_diff_point(const char *what);
+__attribute__((noreturn)) void cladefs_sim_diff_panic(const char *message);
+void cladefs_sim_diff_point(const char *what);
 
 struct task_struct sim_task = { .comm = "harness" };
 
@@ -33,7 +33,7 @@ void sim_panic(const char *fmt, ...)
 	va_start(args, fmt);
 	vsnprintf(message, sizeof(message), fmt, args);
 	va_end(args);
-	fxfs_sim_diff_panic(message);
+	cladefs_sim_diff_panic(message);
 }
 
 void sim_log(const char *fmt, ...)
@@ -132,7 +132,7 @@ void up_write(struct rw_semaphore *sem)
 
 void sim_point(const char *what)
 {
-	fxfs_sim_diff_point(what);
+	cladefs_sim_diff_point(what);
 }
 
 /* The model takes its own choices of the sim's scheduler: none that changes what it holds. */

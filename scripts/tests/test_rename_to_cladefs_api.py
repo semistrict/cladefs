@@ -7,6 +7,7 @@ which renames text as it renames the checkout's files; and by its --tree, of a t
 Firecracker fork's, whose configuration layer's files move and whose Rust rustfmt left as it was
 is formatted again."""
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -58,6 +59,29 @@ class Filter(unittest.TestCase):
             "request::cladefs::parse_put_cladefs test_parse_put_cladefs_request\n"
             "self.vm_resources\n    .cladefs\n    .insert(cfg)\n",
         )
+
+    def test_the_guest_kernels_module_is_cladefs_at_its_interface(self):
+        renamed = subprocess.run(
+            [SCRIPT, "--filter"], capture_output=True, text=True, check=True,
+            env={**os.environ, "GUEST_PARAMS": "dax_delay_us|follow_skip_drop",
+                 "GUEST_SYMBOLS": "fxfs_dax_map|fxfs_vfs_fs|FXFS_IOC_IMPORT"},
+            input="guest/linux/fs/fxfs/fxfs.h guest/sim/fxfs/fxfs.c guest/rust/fxfs-linux "
+                  "libfxfs_linux.a include/linux/fxfs_tls.h 0004-fxfs.patch\n"
+                  "fxfs.dax_delay_us=5 /sys/module/fxfs/parameters/follow_skip_drop "
+                  "/proc/fs/fxfs/build mount -t fxfs CONFIG_FXFS_FS=y FXFS_IOC_IMPORT\n"
+                  "tracepoint:fxfs:fxfs_dax_map events/fxfs fxfs:* fxfs_vfs_fs(dir)\n").stdout
+        self.assertEqual(
+            renamed,
+            "guest/linux/fs/cladefs/cladefs.h guest/sim/cladefs/cladefs.c guest/rust/cladefs-linux "
+            "libcladefs_linux.a include/linux/cladefs_tls.h 0004-cladefs.patch\n"
+            "cladefs.dax_delay_us=5 /sys/module/cladefs/parameters/follow_skip_drop "
+            "/proc/fs/cladefs/build mount -t cladefs CONFIG_CLADEFS_FS=y CLADEFS_IOC_IMPORT\n"
+            "tracepoint:cladefs:cladefs_dax_map events/cladefs cladefs:* cladefs_vfs_fs(dir)\n")
+
+    def test_fxfs_itself_keeps_its_name(self):
+        kept = ("use fxfs::object_store; fxfs_trace::duration!; crates/fxfs fxfs-guest-dax "
+                "test_fxfs_guest_checks fxfs-posix fxfs-sim-diff Fxfs's journal fxfs_dax_map\n")
+        self.assertEqual(filtered(kept), kept)
 
     def test_the_device_and_the_domain_keep_their_names(self):
         kept = ("devices::virtio::extent::Extent, ExtentState, the snapshot's extent_devices, "

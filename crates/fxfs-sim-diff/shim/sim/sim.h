@@ -123,24 +123,24 @@ void sim_device_free_extent(u64 sequence);
 u64 sim_device_store_offset(u64 sequence);
 
 /* The model's own interface, as guest/sim's sim.h declares it. */
-struct fxfs;
-void fxfs_sim_read(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len);
-u64 fxfs_sim_size(struct fxfs *fs, u64 ino);
-u64 fxfs_sim_new_file(struct fxfs *fs);
-struct fxfs *fxfs_sim_new(void);
-void fxfs_sim_free(struct fxfs *fs);
-void fxfs_sim_stats(u64 *written, u64 *frees, u64 *failed);
-void fxfs_sim_fail(unsigned int odds);
-void fxfs_sim_hold_commits(bool hold);
+struct cladefs;
+void cladefs_sim_read(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len);
+u64 cladefs_sim_size(struct cladefs *fs, u64 ino);
+u64 cladefs_sim_new_file(struct cladefs *fs);
+struct cladefs *cladefs_sim_new(void);
+void cladefs_sim_free(struct cladefs *fs);
+void cladefs_sim_stats(u64 *written, u64 *frees, u64 *failed);
+void cladefs_sim_fail(unsigned int odds);
+void cladefs_sim_hold_commits(bool hold);
 /* cladefs: the next `count` writebacks failing before their commits with `err` (TASK-207). */
-void fxfs_sim_fail_commits_with(u64 count, int err);
-bool fxfs_sim_commit_held(void);
-void fxfs_sim_hold_seals(bool hold);
-bool fxfs_sim_seal_held(void);
-void fxfs_sim_read_pending(struct fxfs *fs, u64 ino, u64 offset, void *buf, size_t len);
-u64 fxfs_sim_reserved(struct fxfs *fs, u64 ino);
-u64 fxfs_sim_seals(struct fxfs *fs);
-bool fxfs_sim_sealing(struct fxfs *fs);
-void fxfs_sim_watch(u64 ino, u64 page);
+void cladefs_sim_fail_commits_with(u64 count, int err);
+bool cladefs_sim_commit_held(void);
+void cladefs_sim_hold_seals(bool hold);
+bool cladefs_sim_seal_held(void);
+void cladefs_sim_read_pending(struct cladefs *fs, u64 ino, u64 offset, void *buf, size_t len);
+u64 cladefs_sim_reserved(struct cladefs *fs, u64 ino);
+u64 cladefs_sim_seals(struct cladefs *fs);
+bool cladefs_sim_sealing(struct cladefs *fs);
+void cladefs_sim_watch(u64 ino, u64 page);
 
 #endif

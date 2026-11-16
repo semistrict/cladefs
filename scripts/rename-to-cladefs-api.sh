@@ -129,7 +129,7 @@ if ($par) { s/\bfxfs\.($par)\b/cladefs.$1/g; }
 if ($sym) {
     s{(?<![A-Za-z0-9_])($sym)\b}{my $n = $1; $n =~ s/^fxfs/cladefs/; $n =~ s/^FXFS/CLADEFS/; $n}ge;
 }
-if ($ARGV =~ m{(^|/)(guest/linux|guest/sim|guest/mutants|scripts/cocci|scripts/bpftrace)/|(^|/)scripts/[^/]+\.bt$}) {
+if ($ARGV =~ m{(^|/)(guest/linux|guest/sim|guest/mutants|crates/fxfs-sim-diff/shim|scripts/cocci|scripts/bpftrace)/|(^|/)scripts/[^/]+\.bt$}) {
     s/%sfxfs:/%scladefs:/g;
     s/(?<![A-Za-z0-9_])(?<!crates\/)fxfs(?!-(?:guest|posix|sim-diff|automount)|::)/cladefs/g;
     s/(?<=_)fxfs(?=_)(?!_guest)/cladefs/g;
@@ -159,10 +159,11 @@ if [[ $mode == repo || $mode == backlog ]]; then
     export GUEST_PARAMS
 fi
 if [[ $mode == repo ]]; then
-    # The C symbols the guest module defines, as it names them before this renames them, but
-    # Fuchsia's crate fxfs_trace, whose name its trace header's shares.
-    GUEST_SYMBOLS=$({ git grep -hoP '(?<![A-Za-z0-9_])(?:fxfs|FXFS)_\w+' -- guest/linux ||
-        [[ $? == 1 ]]; } | grep -vx 'fxfs_trace' | sort -u | paste -sd'|' -)
+    # The C symbols the guest module and guest/sim's build of it define, as they name them before
+    # this renames them (crates/fxfs-sim-diff calls guest/sim's), but Fuchsia's crate fxfs_trace,
+    # whose name the module's trace header's shares.
+    GUEST_SYMBOLS=$({ git grep -hoP '(?<![A-Za-z0-9_])(?:fxfs|FXFS)_\w+' -- guest/linux guest/sim ||
+        [[ $? == 1 ]]; } | { grep -vx 'fxfs_trace' || true; } | sort -u | paste -sd'|' -)
     export GUEST_SYMBOLS
 fi
 
